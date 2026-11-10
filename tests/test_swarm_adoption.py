@@ -23,6 +23,18 @@ with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args)
 if alias == 'b' and (root / 'old-cli').exists() and args[1:2] in (['adoption-preview'], ['adopt']):
     print('unknown adoption command', file=sys.stderr); sys.exit(1)
 if alias == 'b' and args[1:2] == ['adopt']:
+    with (root / 'argv.jsonl').open('a') as file: file.write(json.dumps(sys.argv[1:]) + '\\n')
+    if (root / 'close-stdin-hold').exists() or (root / 'hold-child').exists():
+        import time
+        if (root / 'close-stdin-hold').exists():
+            os.close(0)
+        else:
+            sys.stdin.read()
+        (root / 'child-pid').write_text(str(os.getpid()))
+        deadline = time.monotonic() + 60
+        while not (root / 'release-child').exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        sys.exit(3)
     raw = sys.stdin.read()
     request = json.loads(raw)
     if (root / 'capture-request').exists():
@@ -93,7 +105,7 @@ if alias == 'b' and args[1:2] == ['adopt']:
     if (root / 'overflow-reply').exists():
         stdout += ' ' * (65537 - len(stdout.encode()))
     if (root / 'hold-pipes').exists():
-        subprocess.Popen(['/bin/sh', '-c', 'while [ ! -f "$1" ]; do sleep .02; done', 'sh', str(root / 'release-pipes')],
+        subprocess.Popen(['/bin/sh', '-c', 'i=0; while [ ! -f "$1" ] && [ $i -lt 4500 ]; do sleep .02; i=$((i+1)); done', 'sh', str(root / 'release-pipes')],
                          stdout=sys.stdout, stderr=sys.stderr,
                          env={'PATH': '/usr/bin:/bin', 'HOME': str(root)})
         (root / 'descendant-holding').touch()
@@ -312,6 +324,9 @@ class SwarmAdoption(unittest.TestCase):
         self.assertFalse(status['guard_present'])
         calls = (self.root / 'calls').read_text().splitlines() if (self.root / 'calls').exists() else []
         self.assertFalse(any(line.startswith('c ') and line.split()[1:3] == ['swarm', 'adopt'] for line in calls))
+        for argv in map(json.loads, (self.root / 'argv.jsonl').read_text().splitlines()):
+            control = next(i for i in range(len(argv) - 1) if argv[i:i + 2] == ['-o', 'ControlPath=none'])
+            self.assertLess(control, argv.index('b'), argv)
         return options
 
     def test_adopts_into_uninitialized_destination_with_all_history_and_only_source_membership(self):
@@ -654,19 +669,111 @@ class SwarmAdoption(unittest.TestCase):
                 self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
                 self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
 
-    def test_timeout_without_eof_remains_manual_and_never_replays(self):
+    def test_descendant_pipes_retain_the_original_call_past_its_deadline(self):
+        import time
         self.empty_destination(False)
         preview = self.call('a', 'adoption-preview', 'b', '--json')
         options = self.options(preview)
         (self.root / 'hold-pipes').touch()
+        started = time.monotonic()
         process = self.start_original(options)
+        # The owned ssh child has exited; its descendant still holds both
+        # pipes. Past the 25 s original deadline the call stays retained.
+        while time.monotonic() - started < 28:
+            self.assertIsNone(process.poll(), 'the original call returned while its pipes were held')
+            time.sleep(.1)
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+        error = self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+        self.assertIn('read-only', error)
+        (self.root / 'release-pipes').touch()
         stdout = process.stdout.read()
-        process.wait(timeout=40)
+        process.wait(timeout=20)
         self.assertNotEqual(process.returncode, 0, process.stderr.read())
         self.assertEqual(stdout, b'')
-        (self.root / 'release-pipes').touch()
+        journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
         self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
         self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+
+    def pad_primary(self, count):
+        """Enough independent primary history that the adopt request exceeds
+        a pipe buffer, so a closed request pipe fails the writer."""
+        path = self.root / 'a/swarm/session-id-memberships.json'
+        graph = json.loads(path.read_text())
+        node = json.loads((self.root / 'a/swarm/catalog.json').read_text())['node_id']
+        for _ in range(count):
+            identifier = str(uuid.uuid4())
+            graph['operations'][identifier] = dict(
+                id=identifier, actor=node, clock=1, parents=[],
+                key=dict(kind='session', machine=node, session=str(uuid.uuid4())), value='shared')
+        path.write_text(json.dumps(graph))
+
+    def child_pid(self, process):
+        import time
+        deadline = time.monotonic() + 15
+        path = self.root / 'child-pid'
+        while not path.exists() and time.monotonic() < deadline:
+            self.assertIsNone(process.poll())
+            time.sleep(.01)
+        return int(path.read_text())
+
+    def start_adopt(self, options):
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        process = subprocess.Popen([str(HGS), 'swarm', 'adopt', 'b', '--json'], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.stderr.close)
+        self.addCleanup(lambda: (self.root / 'release-child').touch())
+        process.stdin.write(enc(options))
+        process.stdin.close()
+        return process
+
+    @staticmethod
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def test_writer_failure_retains_the_live_original_child_until_it_exits(self):
+        import time
+        self.pad_primary(800)
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        (self.root / 'close-stdin-hold').touch()
+        process = self.start_adopt(options)
+        pid = self.child_pid(process)
+        time.sleep(1.5)
+        self.assertIsNone(process.poll(), 'the call returned while its original ssh child was alive')
+        self.assertTrue(self.alive(pid))
+        (self.root / 'release-child').touch()
+        stdout = process.stdout.read()
+        process.wait(timeout=20)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(stdout, b'')
+        self.assertFalse(self.alive(pid))
+        journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+
+    def test_live_original_child_at_the_deadline_is_stopped_and_reaped(self):
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        (self.root / 'hold-child').touch()
+        process = self.start_adopt(options)
+        pid = self.child_pid(process)
+        stdout = process.stdout.read()
+        process.wait(timeout=40)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(stdout, b'')
+        self.assertFalse(self.alive(pid), 'the original ssh child outlived the call')
+        self.assertFalse((self.root / 'release-child').exists())
+        journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
 
     def test_guard_cleared_crash_is_status_only_and_cannot_be_finalized(self):
         self.empty_destination(False)

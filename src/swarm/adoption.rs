@@ -2739,16 +2739,99 @@ enum ReadOutcome {
     Eof(Vec<u8>),
     Overflow,
     Io(std::io::Error),
+    /// The worker ended without a result (it panicked or never started).
+    Lost,
 }
 
+const ADMISSION_IDLE: u8 = 0;
+const ADMISSION_LIVE: u8 = 1;
+const ADMISSION_PINNED: u8 = 2;
+
+/// Admission for original adoption SSH cohorts: at most one is live, and one
+/// whose exit could not be confirmed keeps admission closed for good. The
+/// state is capacity only; it never authorizes an effect or a continuation.
+struct AdmissionGate(std::sync::atomic::AtomicU8);
+
+impl AdmissionGate {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(ADMISSION_IDLE))
+    }
+
+    fn acquire(&'static self) -> Result<Admission> {
+        use std::sync::atomic::Ordering;
+        match self.0.compare_exchange(
+            ADMISSION_IDLE,
+            ADMISSION_LIVE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(Admission(self)),
+            Err(ADMISSION_PINNED) => anyhow::bail!(
+                "an earlier original adoption call could not be confirmed as exited; no other call is admitted"
+            ),
+            Err(_) => anyhow::bail!("another original adoption call is still settling"),
+        }
+    }
+}
+
+static ORIGINAL_ADMISSION: AdmissionGate = AdmissionGate::new();
+
+const UNCONFIRMED_EXIT: &str =
+    "original ssh child exit could not be confirmed; the call stays Unknown and admission is closed";
+
+/// The live slot of one original cohort. Dropping it without `release`
+/// (an unwinding panic) leaves admission closed.
+struct Admission(&'static AdmissionGate);
+
+impl Admission {
+    fn release(self) {
+        (self.0)
+            .0
+            .store(ADMISSION_IDLE, std::sync::atomic::Ordering::Release);
+    }
+
+    fn pin(self) {
+        (self.0)
+            .0
+            .store(ADMISSION_PINNED, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The same original ssh child (and its Windows job), request writer and
+/// both pipe readers, owned from spawn until they physically settle. No
+/// failure, deadline or unknown reply drops or detaches them earlier: the
+/// caller (and the native accounting of this process) stays charged.
 struct OriginalResources {
-    ssh: platform::SshChild,
+    ssh: Option<platform::SshChild>,
+    admission: Option<Admission>,
     request_id: String,
     deadline: Instant,
     writer: std::sync::mpsc::Receiver<std::io::Result<()>>,
     stdout: std::sync::mpsc::Receiver<ReadOutcome>,
     stderr: std::sync::mpsc::Receiver<ReadOutcome>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    attach: Option<std::io::Error>,
+    written: Option<std::io::Result<()>>,
+    status: Option<std::process::ExitStatus>,
+    out: Option<ReadOutcome>,
+    err: Option<ReadOutcome>,
+    panicked: bool,
+    settled: bool,
+}
+
+impl Drop for OriginalResources {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // Not physically settled (unconfirmed exit or an unwinding panic):
+        // keep the child and its job unreleased and admission closed. A
+        // job close is not a confirmed wait, so it must not happen here.
+        std::mem::forget(self.ssh.take());
+        if let Some(admission) = self.admission.take() {
+            admission.pin();
+        }
+    }
 }
 
 impl OriginalResources {
@@ -2773,57 +2856,97 @@ impl OriginalResources {
             "original adoption deadline expired"
         );
         let remote = crate::remote_shell::hgs_within(config, alias, words, deadline)?;
-        let mut command = crate::ssh_bytes::command(&remote)?;
-        command
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=2",
-            ])
-            .args(crate::machines::ssh_options(config, alias))
-            .arg(alias)
-            .arg(remote);
-        let mut ssh = platform::spawn_ssh(&mut command, true, true, true)?;
+        let mut command = original_command(config, alias, &remote)?;
+        Self::start(
+            &mut command,
+            input,
+            request_id,
+            deadline,
+            &ORIGINAL_ADMISSION,
+        )
+    }
+
+    /// Admission precedes the spawn; once the child exists every outcome,
+    /// including a failed worker attachment, goes through `drain`.
+    fn start(
+        command: &mut std::process::Command,
+        input: &[u8],
+        request_id: String,
+        deadline: Instant,
+        gate: &'static AdmissionGate,
+    ) -> Result<Self> {
+        let admission = gate.acquire()?;
+        let mut ssh = match platform::spawn_ssh(command, true, true, true) {
+            Ok(ssh) => ssh,
+            Err(error) => {
+                admission.release();
+                return Err(error.into());
+            }
+        };
         let (writer_tx, writer) = std::sync::mpsc::channel();
         let (stdout_tx, stdout) = std::sync::mpsc::channel();
         let (stderr_tx, stderr) = std::sync::mpsc::channel();
-        let mut stdin = ssh.stdin.take().expect("ssh stdin");
-        let body = input.to_vec();
-        let mut workers = vec![std::thread::spawn(move || {
-            let result = stdin.write_all(&body).and_then(|_| stdin.flush());
-            drop(stdin);
-            let _ = writer_tx.send(result);
-        })];
-        for (reader, sender, cap) in [
-            (
-                ssh.stdout.take().expect("ssh stdout"),
-                stdout_tx,
-                SUMMARY_BYTES,
-            ),
-            (
-                ssh.stderr.take().expect("ssh stderr"),
-                stderr_tx,
-                SUMMARY_BYTES,
-            ),
-        ] {
-            workers.push(std::thread::spawn(move || {
-                let _ = sender.send(Self::read_limited(reader, cap));
-            }));
-        }
-        Ok(Self {
-            ssh,
+        let stdin = ssh.stdin.take();
+        let output = ssh.stdout.take();
+        let errors = ssh.stderr.take();
+        let mut resources = Self {
+            ssh: Some(ssh),
+            admission: Some(admission),
             request_id,
             deadline,
             writer,
             stdout,
             stderr,
-            workers,
-        })
+            workers: Vec::with_capacity(3),
+            attach: None,
+            written: None,
+            status: None,
+            out: None,
+            err: None,
+            panicked: false,
+            settled: false,
+        };
+        let body = input.to_vec();
+        resources.attach("request writer", stdin, move |mut stdin| {
+            let result = stdin.write_all(&body).and_then(|_| stdin.flush());
+            drop(stdin);
+            let _ = writer_tx.send(result);
+        });
+        for (name, pipe, sender) in [
+            ("stdout reader", output, stdout_tx),
+            ("stderr reader", errors, stderr_tx),
+        ] {
+            resources.attach(name, pipe, move |reader| {
+                let _ = sender.send(Self::read_limited(reader, SUMMARY_BYTES));
+            });
+        }
+        Ok(resources)
+    }
+
+    /// One worker per pipe. A missing pipe or failed thread start drops the
+    /// pipe end and its sender here (that side is then physically closed)
+    /// and is reported once the child itself has settled.
+    fn attach<P: Send + 'static>(
+        &mut self,
+        name: &str,
+        pipe: Option<P>,
+        work: impl FnOnce(P) + Send + 'static,
+    ) {
+        let started = pipe
+            .ok_or_else(|| std::io::Error::other(format!("original {name} pipe is missing")))
+            .and_then(|pipe| {
+                std::thread::Builder::new()
+                    .name("hgs-adoption-io".into())
+                    .spawn(move || work(pipe))
+            });
+        match started {
+            Ok(worker) => self.workers.push(worker),
+            Err(error) => {
+                if self.attach.is_none() {
+                    self.attach = Some(error);
+                }
+            }
+        }
     }
 
     fn read_limited(mut reader: Box<dyn std::io::Read + Send>, cap: usize) -> ReadOutcome {
@@ -2853,60 +2976,152 @@ impl OriginalResources {
             .map_err(|_| anyhow::anyhow!("original {what} did not finish before the 25s deadline"))
     }
 
-    fn drain(self) -> Result<RawReply> {
-        let Self {
-            mut ssh,
-            request_id,
-            deadline,
-            writer,
-            stdout,
-            stderr,
-            workers,
-        } = self;
-        Self::receive(&writer, deadline, "request writer")??;
-        let status = loop {
-            if let Some(status) = ssh.child.try_wait()? {
-                break status;
+    fn child(&mut self) -> &mut std::process::Child {
+        &mut self
+            .ssh
+            .as_mut()
+            .expect("original ssh child is owned")
+            .child
+    }
+
+    /// The bounded reply: writer, child exit and both EOFs by the deadline.
+    /// It records what arrived and never releases a resource.
+    fn collect(&mut self) -> Result<()> {
+        if let Some(error) = self.attach.take() {
+            return Err(error.into());
+        }
+        let written = Self::receive(&self.writer, self.deadline, "request writer")?;
+        let failed = written.as_ref().err().map(std::io::Error::to_string);
+        self.written = Some(written);
+        if let Some(error) = failed {
+            anyhow::bail!("original request writer failed: {error}");
+        }
+        loop {
+            if let Some(status) = self.child().try_wait()? {
+                self.status = Some(status);
+                break;
             }
             ensure!(
-                Instant::now() < deadline,
+                Instant::now() < self.deadline,
                 "original remote child did not exit before the 25s deadline"
             );
             std::thread::sleep(Duration::from_millis(5));
-        };
-        let stdout = Self::receive(&stdout, deadline, "stdout EOF")?;
-        let stderr = Self::receive(&stderr, deadline, "stderr EOF")?;
-        for worker in workers {
-            worker
-                .join()
-                .map_err(|_| anyhow::anyhow!("original I/O worker panicked"))?;
         }
+        self.out = Some(Self::receive(&self.stdout, self.deadline, "stdout EOF")?);
+        self.err = Some(Self::receive(&self.stderr, self.deadline, "stderr EOF")?);
+        Ok(())
+    }
+
+    /// Physical settlement of the same objects. The child gets until the
+    /// original deadline to exit by itself; after it only this owned child
+    /// is stopped (no process group, descendant or name-based kill) and its
+    /// exit is confirmed by wait. Then the writer and both readers are
+    /// awaited without a deadline: a descendant that still holds a pipe
+    /// keeps this call retained. Err means the exit could not be confirmed;
+    /// the resources stay pinned and admission stays closed.
+    fn settle(&mut self) -> Result<()> {
+        while self.status.is_none() {
+            match self.child().try_wait() {
+                Ok(Some(status)) => self.status = Some(status),
+                Ok(None) if Instant::now() < self.deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) => {
+                    // Still unreaped and ours, so its PID cannot be reused.
+                    let _ = self.child().kill();
+                    match self.child().wait() {
+                        Ok(status) => self.status = Some(status),
+                        Err(_) => anyhow::bail!(UNCONFIRMED_EXIT),
+                    }
+                }
+                // Without a confirmed status the PID is no longer trusted:
+                // never signal it.
+                Err(_) => anyhow::bail!(UNCONFIRMED_EXIT),
+            }
+        }
+        if self.written.is_none() {
+            self.written = Some(self.writer.recv().unwrap_or_else(|_| {
+                Err(std::io::Error::other(
+                    "original request writer ended without a result",
+                ))
+            }));
+        }
+        if self.out.is_none() {
+            self.out = Some(self.stdout.recv().unwrap_or(ReadOutcome::Lost));
+        }
+        if self.err.is_none() {
+            self.err = Some(self.stderr.recv().unwrap_or(ReadOutcome::Lost));
+        }
+        for worker in std::mem::take(&mut self.workers) {
+            self.panicked |= worker.join().is_err();
+        }
+        self.settled = true;
+        drop(self.ssh.take());
+        if let Some(admission) = self.admission.take() {
+            admission.release();
+        }
+        Ok(())
+    }
+
+    fn drain(mut self) -> Result<RawReply> {
+        let collected = self.collect();
+        self.settle()?;
+        collected?;
+        ensure!(!self.panicked, "original I/O worker panicked");
         ensure!(
-            Instant::now() <= deadline,
+            Instant::now() <= self.deadline,
             "original drain exceeded the 25s deadline"
         );
-        let bytes = match stdout {
-            ReadOutcome::Eof(bytes) => bytes,
-            ReadOutcome::Overflow => anyhow::bail!("original remote reply exceeds 64KiB"),
-            ReadOutcome::Io(error) => return Err(error.into()),
+        let bytes = match self.out.take() {
+            Some(ReadOutcome::Eof(bytes)) => bytes,
+            Some(ReadOutcome::Overflow) => anyhow::bail!("original remote reply exceeds 64KiB"),
+            Some(ReadOutcome::Io(error)) => return Err(error.into()),
+            Some(ReadOutcome::Lost) | None => anyhow::bail!("original stdout reader ended"),
         };
-        let stderr = match stderr {
-            ReadOutcome::Eof(bytes) => bytes,
-            ReadOutcome::Overflow => anyhow::bail!("original remote error exceeds 64KiB"),
-            ReadOutcome::Io(error) => return Err(error.into()),
+        let stderr = match self.err.take() {
+            Some(ReadOutcome::Eof(bytes)) => bytes,
+            Some(ReadOutcome::Overflow) => anyhow::bail!("original remote error exceeds 64KiB"),
+            Some(ReadOutcome::Io(error)) => return Err(error.into()),
+            Some(ReadOutcome::Lost) | None => anyhow::bail!("original stderr reader ended"),
         };
         Ok(RawReply {
             bytes,
             stderr,
             evidence: DrainEvidence {
-                request_id,
-                status,
+                request_id: self.request_id.clone(),
+                status: self.status.expect("settled child status"),
                 stdout_eof: true,
                 stderr_eof: true,
-                deadline,
+                deadline: self.deadline,
             },
         })
     }
+}
+
+/// The original adoption ssh client for `alias`, before it is started.
+fn original_command(config: &Config, alias: &str, remote: &str) -> Result<std::process::Command> {
+    let mut command = crate::ssh_bytes::command(remote)?;
+    command
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=2",
+            // A user's ControlMaster/ControlPersist setting would start a
+            // background mux master that inherits stderr and keeps this call
+            // retained. ssh takes the first value, so this precedes the
+            // configured connection options (as CALLBACK_FORWARD does).
+            "-o",
+            "ControlPath=none",
+        ])
+        .args(crate::machines::ssh_options(config, alias))
+        .arg(alias)
+        .arg(remote);
+    Ok(command)
 }
 
 fn original_request(
@@ -3019,4 +3234,270 @@ pub(crate) fn unique_bytes(bytes: &[u8], what: &str) -> Result<()> {
     parse_unique(bytes)
         .with_context(|| format!("parse {what} with unique object keys"))
         .map(|_| ())
+}
+
+#[cfg(all(test, unix))]
+mod original_resource_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn script(body: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", body]);
+        command
+    }
+
+    fn start(command: &mut Command, input: &[u8], deadline: Instant) -> Result<OriginalResources> {
+        let gate: &'static AdmissionGate = Box::leak(Box::new(AdmissionGate::new()));
+        OriginalResources::start(command, input, catalog::new_id(), deadline, gate)
+    }
+
+    /// The original child's PID, written by the fixture itself.
+    fn fixture_pid(path: &Path) -> libc::pid_t {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "fixture never wrote its PID");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// True until the PID is reaped: a live or zombie child still exists.
+    fn exists(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn writer_failure_keeps_the_live_child_until_its_actual_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let release = temp.path().join("release");
+        // Close the request pipe at once, then stay alive holding both
+        // output pipes until released: the writer fails while the child lives.
+        let mut command = script(&format!(
+            "exec 0<&-; echo $$ > '{}'; i=0; while [ ! -f '{}' ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done; exit 3",
+            pid_file.display(),
+            release.display()
+        ));
+        let resources = start(
+            &mut command,
+            &vec![b'x'; 1 << 20],
+            Instant::now() + Duration::from_secs(20),
+        )
+        .unwrap();
+        let pid = fixture_pid(&pid_file);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            let result = resources.drain().map(|_| ());
+            let _ = done_tx.send(());
+            result
+        });
+        assert!(
+            done.recv_timeout(Duration::from_millis(700)).is_err(),
+            "the call returned while its original child was still running"
+        );
+        assert!(exists(pid));
+        fs::write(&release, b"").unwrap();
+        done.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            drain.join().unwrap().is_err(),
+            "a failed writer is never a reply"
+        );
+        assert!(!exists(pid), "the original child was not reaped");
+    }
+
+    #[test]
+    fn a_child_alive_at_the_deadline_is_stopped_alone_and_reaped() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let mut command = script(&format!(
+            "echo $$ > '{}'; exec sleep 30",
+            pid_file.display()
+        ));
+        let started = Instant::now();
+        let resources = start(&mut command, b"{}", started + Duration::from_millis(400)).unwrap();
+        let pid = fixture_pid(&pid_file);
+        assert!(resources.drain().is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!exists(pid), "the original child was left running");
+    }
+
+    #[test]
+    fn a_descendant_holding_the_pipes_retains_the_call_until_actual_eof() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("release");
+        let holding = temp.path().join("holding");
+        // The owned child exits at once; its background descendant keeps
+        // stdout and stderr open past the original deadline.
+        let mut command = script(&format!(
+            "(i=0; while [ ! -f '{}' ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done) & echo > '{}'; exit 0",
+            release.display(),
+            holding.display()
+        ));
+        let resources = start(
+            &mut command,
+            b"{}",
+            Instant::now() + Duration::from_millis(300),
+        )
+        .unwrap();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            let result = resources.drain().map(|_| ());
+            let _ = done_tx.send(());
+            result
+        });
+        assert!(
+            done.recv_timeout(Duration::from_millis(1500)).is_err(),
+            "the call returned while a descendant still held its pipes"
+        );
+        assert!(holding.exists());
+        fs::write(&release, b"").unwrap();
+        done.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            drain.join().unwrap().is_err(),
+            "a reply past the deadline stays Unknown"
+        );
+    }
+
+    #[test]
+    fn admission_stays_closed_while_a_descendant_retains_the_cohort() {
+        let gate: &'static AdmissionGate = Box::leak(Box::new(AdmissionGate::new()));
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("release");
+        let mut command = script(&format!(
+            "(i=0; while [ ! -f '{}' ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done) & exit 0",
+            release.display()
+        ));
+        let resources = OriginalResources::start(
+            &mut command,
+            b"{}",
+            catalog::new_id(),
+            Instant::now() + Duration::from_millis(200),
+            gate,
+        )
+        .unwrap();
+        let drain = std::thread::spawn(move || resources.drain().is_err());
+        std::thread::sleep(Duration::from_millis(600));
+        let refused = OriginalResources::start(
+            &mut script("exit 0"),
+            b"{}",
+            catalog::new_id(),
+            Instant::now() + Duration::from_secs(5),
+            gate,
+        );
+        assert!(
+            refused.is_err_and(|error| error.to_string().contains("still settling")),
+            "a second cohort was admitted beside a retained original"
+        );
+        fs::write(&release, b"").unwrap();
+        assert!(drain.join().unwrap());
+        let next = OriginalResources::start(
+            &mut script("cat > /dev/null; printf '{}'"),
+            b"{}",
+            catalog::new_id(),
+            Instant::now() + Duration::from_secs(5),
+            gate,
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        assert_eq!(next.bytes, b"{}");
+    }
+
+    #[test]
+    fn an_unsettled_cohort_pins_admission_closed() {
+        let gate: &'static AdmissionGate = Box::leak(Box::new(AdmissionGate::new()));
+        let mut resources = OriginalResources::start(
+            &mut script("cat > /dev/null"),
+            b"{}",
+            catalog::new_id(),
+            Instant::now() + Duration::from_secs(5),
+            gate,
+        )
+        .unwrap();
+        // Model a lost wait: the child is reaped behind the owner's back, so
+        // its exit can no longer be confirmed through this Child.
+        let pid = resources.child().id() as libc::pid_t;
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        let error = resources.drain().map(|_| ()).unwrap_err();
+        assert!(
+            error.to_string().contains("could not be confirmed"),
+            "{error}"
+        );
+        let refused = OriginalResources::start(
+            &mut script("exit 0"),
+            b"{}",
+            catalog::new_id(),
+            Instant::now() + Duration::from_secs(5),
+            gate,
+        );
+        assert!(refused.is_err_and(|error| error.to_string().contains("no other call")));
+    }
+
+    #[test]
+    fn a_complete_reply_is_unchanged() {
+        let mut command = script("cat > /dev/null; printf '{\"ok\":true}'; printf 'note' >&2");
+        let reply = start(
+            &mut command,
+            &vec![b'x'; 256 * 1024],
+            Instant::now() + Duration::from_secs(20),
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        assert_eq!(reply.bytes, br#"{"ok":true}"#);
+        assert_eq!(reply.stderr, b"note");
+        assert!(reply.evidence.status.success());
+        assert!(reply.evidence.stdout_eof && reply.evidence.stderr_eof);
+    }
+
+    #[test]
+    fn the_original_ssh_never_joins_a_user_control_master() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            home: temp.path().to_str().unwrap().into(),
+            dir: temp.path().join("config"),
+            state: temp.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec!["example-peer".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        config.machines.insert(
+            "example-peer".into(),
+            crate::machines::Connection {
+                hostname: "peer.example.invalid".into(),
+                user: "example".into(),
+                ..Default::default()
+            },
+        );
+        let command = original_command(&config, "example-peer", "hgs swarm adopt").unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let control = args
+            .windows(2)
+            .position(|pair| pair[0] == "-o" && pair[1] == "ControlPath=none")
+            .expect("ControlPath=none is passed");
+        let configured = args
+            .iter()
+            .position(|arg| arg == "HostName=peer.example.invalid")
+            .unwrap();
+        let alias = args.iter().position(|arg| arg == "example-peer").unwrap();
+        assert!(
+            control < configured && control < alias,
+            "ssh takes the first value: {args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("hgs swarm adopt"));
+    }
 }

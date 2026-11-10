@@ -105,40 +105,6 @@ pub fn toggled(current: i64) -> i64 {
     }
 }
 
-/// Qt's value as the first-G3 family imports it: its compact JSON object,
-/// with only valid identities and hours 1 to [`MAX_HOURS`], at most
-/// [`MAX_SESSIONS`] of them. `Null` when nothing is on; `None` when the
-/// value is not a JSON object.
-pub fn from_qt(value: &crate::settings::qt::QtValue) -> Option<Value> {
-    use crate::settings::qt::QtValue;
-    let text = match value {
-        QtValue::Bytes(bytes) => std::str::from_utf8(bytes).ok()?.to_owned(),
-        QtValue::Text(text) => text.clone(),
-        _ => return None,
-    };
-    let Value::Object(object) = serde_json::from_str::<Value>(&text).ok()? else {
-        return None;
-    };
-    let mut kept = Map::new();
-    let mut keys: Vec<_> = object.keys().collect();
-    keys.sort();
-    for key in keys {
-        let valid = key.len() == 64
-            && key
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        let hours = qt_int(&object[key]).clamp(0, MAX_HOURS);
-        if valid && hours > 0 && kept.len() < MAX_SESSIONS {
-            kept.insert(key.clone(), Value::from(hours));
-        }
-    }
-    Some(if kept.is_empty() {
-        Value::Null
-    } else {
-        Value::String(stored(&kept))
-    })
-}
-
 /// `CacheKeepalive::ttl`: Claude's cache lifetime from its native usage.
 pub fn ttl(details: &Value) -> f64 {
     let seconds = qt_int(&details["session_usage"]["prompt_cache"]["ttl_seconds"]);

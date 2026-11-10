@@ -33,7 +33,6 @@
 
 pub mod clones;
 pub mod folders;
-mod legacy_projects;
 pub mod overview;
 pub mod swarm_dialog;
 
@@ -126,28 +125,11 @@ struct Hub {
     /// Renames included in the next pending-draft checkpoint. Never acknowledge
     /// tokens before that checkpoint is durable, even if sync.edit succeeded.
     run_acks: VecDeque<(String, String)>,
-    qt_recovery: Option<QtRecovery>,
-    recovery_seen: Option<(String, bool)>,
-    recovery_due: Option<String>,
-    presentation_due: bool,
     catalog: Option<swarm_dialog::Context>,
-    legacy: Option<legacy_projects::Context>,
-    legacy_report: Option<legacy_projects::Report>,
-    legacy_epochs: HashMap<String, u64>,
-    legacy_read_blocked: bool,
     source_generation: u64,
     /// Only an adopted current source observation can qualify local metadata.
     /// Kept out of Controller: it is never shared state or apply input.
     windows_read: Option<(u64, u64, String)>,
-    /// One startup attempt once both the local watch and catalog are current.
-    /// Failed/absent sources stay unhandled on disk for the next startup.
-    windows_import_attempted: bool,
-}
-
-#[derive(Clone)]
-struct QtRecovery {
-    source: zerus_client_core::settings::QtStore,
-    settings: zerus_client_core::settings::Settings,
 }
 
 impl Hub {
@@ -193,137 +175,6 @@ struct Shared {
 pub struct Organization(Arc<Shared>);
 
 impl Organization {
-    fn queue_recovery(hub: &mut Hub, value: &Value) {
-        if hub.qt_recovery.is_none() || hub.stopped {
-            return;
-        }
-        let (Some(node), Some(initialized)) =
-            (value["node_id"].as_str(), value["initialized"].as_bool())
-        else {
-            return;
-        };
-        let identity = (node.to_owned(), initialized);
-        if hub.recovery_seen.as_ref() != Some(&identity) {
-            hub.recovery_seen = Some(identity);
-            hub.recovery_due = Some(node.to_owned());
-        }
-    }
-
-    fn recover_presentation(&self, recovery: &QtRecovery) -> Result<(), String> {
-        if !self.0.layout_writable || self.0.pump.presentation_seeded()? {
-            return Ok(());
-        }
-        // The shared record builder uses the old switch time only to record
-        // a later Qt mtime. That observation never blocks this new family.
-        let seed_at = recovery
-            .settings
-            .seed_record()
-            .and_then(|record| record["at"].as_u64());
-        let seed = swarm::layout::qt_presentation(&recovery.source, &self.0.layout, seed_at)?;
-        let mut writer = self.writer();
-        self.0.pump.seed_presentation(seed)?;
-        writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
-        drop(writer);
-        let mut hub = self.lock();
-        hub.shown = None;
-        self.publish(&mut hub);
-        self.release(hub);
-        Ok(())
-    }
-
-    fn recover_windows_folders(&self) -> Result<(), String> {
-        let (node, generation, revision, catalog, source, recovery) = {
-            let mut hub = self.lock();
-            if hub.windows_import_attempted {
-                return Ok(());
-            }
-            let Some(node) = self.windows_read_node(&hub) else {
-                return Ok(());
-            };
-            let (Some(catalog), Some(source), Some(recovery)) = (
-                hub.sync.observed_value(),
-                hub.source.clone(),
-                hub.qt_recovery.clone(),
-            ) else {
-                return Ok(());
-            };
-            hub.windows_import_attempted = true;
-            (
-                node,
-                hub.source_generation,
-                hub.sync.revision(),
-                catalog,
-                source,
-                recovery,
-            )
-        };
-        let Some(layout) = self.0.pump.windows_folders_import_layout()? else {
-            return Ok(());
-        };
-        // The fixed local Qt source is supplied only by the switch identity.
-        // Its explicit folder machine IDs are checked against the independent
-        // current local watch and hgs catalog, never aliases or path spellings.
-        // No organization key means no call to the nonempty-source importer,
-        // and no durable empty/handled family is manufactured.
-        if recovery
-            .source
-            .snapshot()?
-            .is_none_or(|snapshot| !snapshot.values.contains_key(swarm::qt_import::KEY))
-        {
-            return Ok(());
-        }
-        let context = swarm::layout::WindowsFoldersContext {
-            source_node: &node,
-            current_node: &node,
-            catalog: &catalog,
-        };
-        let seed_at = recovery
-            .settings
-            .seed_record()
-            .and_then(|record| record["at"].as_u64());
-        let Some(seed) = swarm::layout::qt_windows_folders(
-            &layout,
-            &recovery.source,
-            &self.0.layout,
-            &context,
-            seed_at,
-        )?
-        else {
-            return Ok(());
-        };
-        // Source callbacks run outside our locks. A source change during the
-        // Qt read invalidates the attempt; commit rechecks the current catalog
-        // and live project IDs under the same writer as every Layout save.
-        let Some(snapshot) = source() else {
-            return Ok(());
-        };
-        let mut writer = self.writer();
-        let mut hub = self.lock();
-        if generation != hub.source_generation
-            || revision != hub.sync.revision()
-            || self.windows_read_node(&hub).as_deref() != Some(&node)
-            || snapshot.node_id != node
-            || snapshot.digest != catalog["digest"].as_str().unwrap_or_default()
-            || snapshot.swarm_id != catalog["swarm_id"].as_str().unwrap_or_default()
-            || snapshot.base != catalog["organization"]
-        {
-            return Ok(());
-        }
-        let Some(current) = hub.sync.observed_value() else {
-            return Ok(());
-        };
-        let context = swarm::layout::WindowsFoldersContext {
-            source_node: &node,
-            current_node: &node,
-            catalog: &current,
-        };
-        self.0.pump.seed_windows_folders(seed, &context)?;
-        hub.shown = None;
-        self.publish(&mut hub);
-        self.release(hub);
-        writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
-        Ok(())
-    }
     /// N6 (owner, 2026-11-08): whether this computer is Windows (its project
     /// folders then live in the device-local family, never the shared catalog).
     pub(super) fn local_windows(&self) -> bool {
@@ -494,7 +345,6 @@ impl Organization {
 
     /// This computer's organization changes, from the drain thread.
     pub fn observe(&self, change: &Change) {
-        self.legacy_observe(change);
         // This callback precedes Pump::push. Drop the proof before a new hello
         // or a disconnect can leave the previous card cached in the pump.
         let identity_changed = match change {
@@ -576,10 +426,6 @@ impl Organization {
                     hub.windows_read =
                         Some((hub.source_generation, hub.sync.revision(), snapshot.node_id));
                 }
-                // A held pre-operation observation is not a new recovery source.
-                if let Some(current) = hub.sync.observed_value() {
-                    Self::queue_recovery(&mut hub, &current);
-                }
                 hub
             }
             OrganizationUpdate::Failed { message, .. } => {
@@ -612,11 +458,6 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
-        if hub.legacy_read_blocked {
-            view.reason = Some(legacy_projects::READ_BLOCKED.into());
-            view.status = legacy_projects::READ_BLOCKED.into();
-            view.status_error = true;
-        }
         view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
@@ -687,8 +528,6 @@ impl Organization {
         if !self.0.allowed
             || !self.0.layout_writable
             || hub.stopped
-            || hub.presentation_due
-            || hub.recovery_due.is_some()
             || !hub.sync.ready()
             || hub.sync.busy()
             || hub.sync.pending()
@@ -963,67 +802,8 @@ impl Organization {
                 panic!("a test stops the organization worker");
             }
         }
-        let presentation = {
-            let mut hub = self.lock();
-            if hub.stopped || !std::mem::take(&mut hub.presentation_due) {
-                None
-            } else {
-                hub.qt_recovery.clone()
-            }
-        };
-        if let Some(recovery) = presentation {
-            if let Err(detail) = self.recover_presentation(&recovery) {
-                let mut hub = self.lock();
-                hub.sync.source_failed(&detail);
-                hub.windows_read = None;
-                self.publish(&mut hub);
-                self.release(hub);
-            }
-            return;
-        }
-        // No source or settings I/O and no CLI call holds the hub, pump or
-        // writer lock. A failed false-state attempt retries at the next
-        // startup; a later initialized state can reconcile a lost reply.
-        let recovery = {
-            let mut hub = self.lock();
-            if hub.stopped {
-                None
-            } else {
-                let recovery = hub.recovery_due.take().zip(hub.qt_recovery.clone());
-                if recovery.is_some() {
-                    hub.windows_read = None;
-                }
-                recovery
-            }
-        };
-        if let Some((node, recovery)) = recovery {
-            if let Err(detail) = swarm::qt_import::recover(
-                &self.0.hgs,
-                &[],
-                &recovery.source,
-                &recovery.settings,
-                &node,
-            ) {
-                let mut hub = self.lock();
-                hub.sync.source_failed(&detail);
-                hub.windows_read = None;
-                self.publish(&mut hub);
-                self.release(hub);
-            }
-            return;
-        }
         if self.catalog_pass() {
             return;
-        }
-        if self.legacy_projects_pass() {
-            return;
-        }
-        if let Err(detail) = self.recover_windows_folders() {
-            let mut hub = self.lock();
-            hub.notice = Some(detail);
-            hub.shown = None;
-            self.publish(&mut hub);
-            self.release(hub);
         }
         self.runs_writer().request(false);
         let mut writer = self.writer();
@@ -1087,13 +867,6 @@ impl Organization {
         let wait = hub
             .sync
             .next_due()
-            .into_iter()
-            .chain(
-                hub.legacy
-                    .as_ref()
-                    .and_then(legacy_projects::Context::next_due),
-            )
-            .min()
             .map_or(IDLE_MS, |at| at.saturating_sub(now))
             .clamp(1, IDLE_MS);
         drop(
@@ -1741,7 +1514,6 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
-    mod legacy_projects;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;
@@ -1925,26 +1697,6 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    #[test]
-    fn a_refused_layout_also_blocks_presentation_import_without_reading_qt() {
-        let fake = Fake::landing();
-        let original = b"{\"version\":99,\"unknown\":\"retained\"}";
-        std::fs::write(fake.layout(), original).unwrap();
-        let organization = fake.organization(&Pump::default(), true);
-        let settings =
-            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
-        let recovery = QtRecovery {
-            source: zerus_client_core::settings::QtStore::Ini(fake.dir.clone()),
-            settings,
-        };
-        // The source is a directory: reading it would fail. The refused target
-        // must short-circuit before opening any source or replacing the layout.
-        assert!(organization.recover_presentation(&recovery).is_ok());
-        organization.flush();
-        assert_eq!(std::fs::read(fake.layout()).unwrap(), original);
-        fake.finish(organization);
     }
 
     /// The passes the worker finished.

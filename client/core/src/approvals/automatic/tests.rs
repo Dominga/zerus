@@ -17,11 +17,10 @@ fn row() -> ViewRow {
     row
 }
 #[test]
-fn default_is_off_and_never_seeded_from_qt() {
+fn default_is_off() {
     let key = crate::settings::find(ENABLED).unwrap();
-    assert!(!key.seeded);
     assert_eq!(key.kind, crate::settings::Kind::Flag(false));
-    assert!(!crate::settings::find(ERROR).unwrap().seeded);
+    assert!(crate::settings::find(ERROR).is_some());
 }
 #[test]
 fn only_supported_live_candidates_with_both_identities_are_considered() {

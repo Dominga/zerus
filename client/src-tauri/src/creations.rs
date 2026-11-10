@@ -3826,7 +3826,7 @@ mod tests {
     fn remembered_choices_keep_other_computers_and_only_replace_invalid_text_on_a_choice() {
         let fake = Fake::new();
         let settings =
-            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"));
         settings
             .set("workspace/launchAccounts", json!("invalid JSON"))
             .unwrap();

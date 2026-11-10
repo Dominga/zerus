@@ -994,7 +994,7 @@ fn a_record_the_disk_refuses_is_cleared_and_the_change_not_sent() {
     let dir = &folder.0;
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
-    let settings = Settings::open(dir.join("settings.json"), None);
+    let settings = Settings::open(dir.join("settings.json"));
     let mut providers = page("", Defaults::default(), "");
     loaded(&mut providers, json!([russian()]));
     let effects = providers.test();

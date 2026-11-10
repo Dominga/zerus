@@ -8,11 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Read};
 use std::path::Path;
 
-mod presentation;
 pub mod windows_folders;
-mod windows_import;
-pub use presentation::{qt_presentation, PresentationSeed};
-pub use windows_import::{qt_windows_folders, WindowsFoldersContext, WindowsFoldersSeed};
 
 /// The space between neighbouring ranks; an insert takes the middle.
 pub const GAP: u64 = 1 << 20;
@@ -47,59 +43,6 @@ fn read_at_most(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
         ));
     }
     Ok(Some(bytes))
-}
-
-/// Seeds only Qt's run-to-project memory, never its session-name tokens or
-/// shared catalog (SessionOrganization.cpp:60,336). Call on a startup worker
-/// for the switch identity only. An unreadable store or malformed JSON leaves
-/// the seed pending; neither this function nor QtStore writes Qt's settings.
-pub fn seed_runs_from_qt(
-    layout: &mut Layout,
-    store: &crate::settings::QtStore,
-) -> Result<usize, String> {
-    if layout.runs_seeded() {
-        return Ok(0);
-    }
-    Ok(layout.seed_runs(&qt_run_groups(store)?))
-}
-
-/// Reads and parses Qt's run memory off the main thread and outside the
-/// grouping lock. Only the newest [`MAX_RUNS`] valid entries cross that lock.
-/// The order is Qt's object order (Qt stores no per-entry write timestamps).
-pub fn qt_run_groups(
-    store: &crate::settings::QtStore,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let values = store.read()?;
-    let organization = values.and_then(|(mut values, _)| values.remove("workspace/organization"));
-    let bytes = match organization {
-        Some(crate::settings::qt::QtValue::Bytes(bytes)) => Some(bytes),
-        Some(value) => Some(value.to_text().into_bytes()),
-        // Qt moved it out of its store into a file of its own (owner,
-        // 2026-10-30, tray/src/SettingsJson.cpp).
-        None => read_at_most(&store.json_file("organization"), MAX_BYTES).map_err(|error| error.to_string())?,
-    };
-    let mut organization: serde_json::Map<String, serde_json::Value> = match bytes {
-        Some(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
-        None => serde_json::Map::new(),
-    };
-    let groups = match organization.remove("run_groups") {
-        Some(serde_json::Value::Object(groups)) => groups,
-        _ => serde_json::Map::new(),
-    };
-    let mut newest: Vec<_> = groups
-        .into_iter()
-        .rev()
-        .filter(|(token, project)| {
-            let Some((machine, run)) = token.split_once('\n') else {
-                return false;
-            };
-            valid_part(machine) && valid_part(run) && project.as_str().is_some_and(valid_part)
-        })
-        .take(MAX_RUNS)
-        .collect();
-    // Preserve iteration order even when serde_json uses preserve_order.
-    newest.reverse();
-    Ok(newest.into_iter().collect())
 }
 
 fn valid_part(part: &str) -> bool {
@@ -313,40 +256,6 @@ impl Layout {
 
     pub fn runs_seeded(&self) -> bool {
         self.runs_seeded
-    }
-
-    /// Imports Qt's machine\nrun -> project object once, read-only (Qt 60,
-    /// 336). Qt has no write timestamps: later object entries are imported
-    /// last. Native writes already made by this client remain newer and win.
-    /// Returns the number of imported entries retained after the fixed cap.
-    pub fn seed_runs(
-        &mut self,
-        qt_run_groups: &serde_json::Map<String, serde_json::Value>,
-    ) -> usize {
-        if self.runs_seeded {
-            return 0;
-        }
-        let native = std::mem::take(&mut self.runs);
-        let order = std::mem::take(&mut self.run_order);
-        self.run_written = 0;
-        for (token, project) in qt_run_groups {
-            if let Some((machine, run)) = token.split_once('\n') {
-                if let Some(project) = project.as_str() {
-                    self.remember_run(machine, run, Some(project));
-                }
-            }
-        }
-        for token in order.into_values() {
-            let (project, _) = &native[&token];
-            let (machine, run) = token.split_once('\n').unwrap();
-            self.remember_run(machine, run, Some(project));
-        }
-        self.runs_seeded = true;
-        self.dirty = true;
-        self.runs
-            .keys()
-            .filter(|token| !native.contains_key(*token))
-            .count()
     }
 
     pub fn collapsed(&self, project: &str) -> bool {
@@ -565,23 +474,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Qt keeps its organization in a file of its own beside the INI once it
-    /// moved it out (tray/src/SettingsJson.cpp); the run memory is read there.
-    #[test]
-    fn run_groups_come_from_qts_own_organization_file() {
-        let dir = std::env::temp_dir().join(format!("zerus-layout-qt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let store = crate::settings::QtStore::Ini(dir.join("hgs-tray.ini"));
-        std::fs::write(store.path(), b"[workspace]\nskin=whitewh\n").unwrap();
-        assert!(qt_run_groups(&store).unwrap().is_empty(), "no organization anywhere");
-        assert_eq!(store.json_file("organization"), dir.join("hgs-tray.ini.organization.json"));
-        std::fs::write(store.json_file("organization"), br#"{"run_groups":{"arch\nr1":"web"}}"#).unwrap();
-        let groups = qt_run_groups(&store).unwrap();
-        assert_eq!(groups.get("arch\nr1").and_then(|project| project.as_str()), Some("web"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|m| (*m).to_owned()).collect()
     }
@@ -760,6 +652,41 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(bytes).unwrap()
         );
         assert!(loaded.take_dirty().is_none());
+    }
+
+    /// Task #55 (team ede724c4, 2026-11-10): the Qt seeds are gone, and a
+    /// Next layout file they wrote to still loads as before. Its folder order,
+    /// collapsed groups, default project and run groups come back, and the
+    /// records the removed seeds left are saved again unchanged.
+    #[test]
+    fn a_layout_with_records_of_the_removed_qt_seeds_loads_and_keeps_them() {
+        let original = serde_json::json!({
+            "version": 1,
+            "collapsed": ["alpha"],
+            "default_project": "beta",
+            "order": {"alpha": ["workstation\nclaude/sample-project/review"], "beta": ["studio\ncodex/sample-project/build"]},
+            "run_groups": [["workstation\nrun-one", "alpha"], ["studio\nrun-two", "beta"]],
+            "runs_seeded": true,
+            "g3_organization_presentation": {"family": "organization-presentation", "version": 1, "source": "qt-ini"},
+            "g3_local_windows_folders": {"family": "local-windows-folders", "version": 1, "source": "qt-ini"}
+        });
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let mut loaded = Layout::try_from_json(&bytes).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.collapsed("alpha") && !loaded.collapsed("beta"));
+        assert_eq!(loaded.default_project(), Some("beta"));
+        assert!(loaded.runs_seeded());
+        assert_eq!(loaded.run_project("workstation", "run-one"), Some("alpha"));
+        assert_eq!(loaded.run_project("studio", "run-two"), Some("beta"));
+        let saved: serde_json::Value = serde_json::from_slice(&loaded.to_json()).unwrap();
+        assert_eq!(saved, original);
+        assert!(loaded.take_dirty().is_none());
+        // A later change keeps the records too.
+        loaded.set_collapsed("beta", true);
+        let changed: serde_json::Value = serde_json::from_slice(&loaded.to_json()).unwrap();
+        assert_eq!(changed["g3_organization_presentation"], original["g3_organization_presentation"]);
+        assert_eq!(changed["g3_local_windows_folders"], original["g3_local_windows_folders"]);
+        assert_eq!(changed["run_groups"], original["run_groups"]);
     }
 
     #[test]

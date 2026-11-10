@@ -3,9 +3,7 @@
 //! (TrayAgent.cpp:62, :593). A key is `computer\npath\nreason`, the same
 //! in both clients, so Qt's set seeds this one once. One small private file
 //! of at most [`LIMIT`] keys; it never leaves the device.
-use crate::settings::qt::QtValue;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Keys kept.
@@ -70,18 +68,6 @@ pub fn save(path: &Path, keys: &[String]) -> Result<(), String> {
         let _ = std::fs::create_dir_all(parent);
     }
     crate::fsx::write_private_atomic(path, &bytes, true).map_err(|error| error.to_string())
-}
-
-/// Seeds `path` once from Qt's values (a snapshot of its store, read-only):
-/// only when the file does not exist yet, so the client's own set always
-/// wins. Returns how many keys it wrote, or None when it wrote nothing.
-pub fn seed_from_qt(path: &Path, values: &BTreeMap<String, QtValue>) -> Option<usize> {
-    if path.exists() {
-        return None;
-    }
-    let keys = bounded(values.get(QT_KEY)?.to_text_list());
-    save(path, &keys).ok()?;
-    Some(keys.len())
 }
 
 #[cfg(test)]

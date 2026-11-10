@@ -692,22 +692,6 @@ impl Grouping {
         self.reposition_archives();
     }
 
-    pub fn runs_seeded(&self) -> bool {
-        self.layout.runs_seeded()
-    }
-
-    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
-        self.layout.presentation_seeded()
-    }
-
-    pub fn windows_folders_import_layout(
-        &self,
-    ) -> Result<Option<super::layout::Layout>, &'static str> {
-        self.layout
-            .windows_folders_import_pending()
-            .map(|pending| pending.then(|| self.layout.clone()))
-    }
-
     /// N6 (owner, 2026-11-08): a project folder of this computer on Windows,
     /// edited in the device-local family and republished; never the shared
     /// catalog (a Windows path means nothing to a peer).
@@ -722,50 +706,6 @@ impl Grouping {
         next.edit_local_windows_folder(organization, current_node, project, Some(current_node), change)?;
         self.replace_layout(next);
         Ok(())
-    }
-
-    pub fn seed_windows_folders(
-        &mut self,
-        seed: super::layout::WindowsFoldersSeed,
-        context: &super::layout::WindowsFoldersContext<'_>,
-    ) -> Result<bool, &'static str> {
-        let changed = self.layout.seed_windows_folders(seed, context)?;
-        if changed {
-            let layout = std::mem::take(&mut self.layout);
-            self.replace_layout(layout);
-        }
-        Ok(changed)
-    }
-
-    pub fn seed_presentation(
-        &mut self,
-        seed: super::layout::PresentationSeed,
-    ) -> Result<(), &'static str> {
-        if self.layout.seed_presentation(seed)? {
-            if let Some(default) = self
-                .layout
-                .default_project()
-                .filter(|id| self.listed.contains(*id))
-            {
-                self.default = default.into();
-            }
-            let layout = std::mem::take(&mut self.layout);
-            self.replace_layout(layout);
-        }
-        Ok(())
-    }
-
-    /// Merge a seed read on a worker into the current layout, retaining newer
-    /// native assignments. Reobserve live rows: implicit assignments made
-    /// while the read was pending must remove their old Qt run memory again.
-    pub fn seed_runs(&mut self, groups: &serde_json::Map<String, Value>) -> usize {
-        if self.layout.runs_seeded() {
-            return 0;
-        }
-        let imported = self.layout.seed_runs(groups);
-        let layout = std::mem::take(&mut self.layout);
-        self.replace_layout(layout);
-        imported
     }
 
     pub fn set_sync(&mut self, sync: SyncView) {

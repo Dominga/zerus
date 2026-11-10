@@ -1,30 +1,11 @@
 //! Qt-compatible identities for device-local row density. Names are used only
 //! in Qt's explicit conversation-less fallback, never to identify another run.
-use crate::settings::qt::QtValue;
 use crate::ViewRow;
 use serde_json::{json, Value};
 use zerus_desktop_migration::sha256;
 
 pub const KEY: &str = "workspace/collapsedSessionRows";
 pub const MAX_ROWS: usize = 50_000;
-
-/// Qt's sorted packed 32-byte hashes, preserved without decoding or guessing
-/// which unloaded conversation they belong to.
-pub fn from_qt(value: &QtValue) -> Option<Value> {
-    let QtValue::Bytes(bytes) = value else {
-        return None;
-    };
-    if bytes.len() > MAX_ROWS * 32 || bytes.len() % 32 != 0 {
-        return None;
-    }
-    let keys = bytes
-        .as_chunks::<32>()
-        .0
-        .iter()
-        .map(|key| key.iter().map(|b| format!("{b:02x}")).collect::<String>())
-        .collect::<std::collections::BTreeSet<_>>();
-    Some(json!(keys))
-}
 
 pub fn valid(value: &Value) -> bool {
     value.as_array().is_some_and(|keys| {
@@ -93,14 +74,7 @@ mod tests {
         assert!(keys("", &ViewRow::default()).is_none());
     }
     #[test]
-    fn packed_keys_are_bounded_and_malformed_families_are_not_partially_decoded() {
-        assert_eq!(
-            from_qt(&QtValue::Bytes(vec![0xab; 32])).unwrap(),
-            json!(["ab".repeat(32)])
-        );
-        assert!(from_qt(&QtValue::Bytes(vec![1; 33])).is_none());
-        assert!(from_qt(&QtValue::Bytes(vec![1; MAX_ROWS * 32 + 32])).is_none());
-        assert!(from_qt(&QtValue::Text("unrecognized".into())).is_none());
+    fn malformed_keys_are_not_valid() {
         assert!(!valid(&json!(["../wrong"])));
         assert!(!valid(&json!(["A".repeat(64)])));
         assert!(valid(&json!(["a".repeat(64)])));

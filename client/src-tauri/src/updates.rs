@@ -1506,7 +1506,7 @@ mod tests {
                 SCRATCH.fetch_add(1, AtomicOrdering::Relaxed)
             ));
             std::fs::create_dir_all(&root).unwrap();
-            let settings = Settings::open(root.join("settings.json"), None);
+            let settings = Settings::open(root.join("settings.json"));
             configure(&settings);
             let notices = Arc::new(Mutex::new(Vec::new()));
             let views = Arc::new(Mutex::new(Vec::new()));

@@ -3,31 +3,20 @@
 //!
 //! They live in `<data_dir>/settings.json` under Qt's QSettings names, with
 //! Qt's defaults and ranges (tray/src/SettingsPage.h and the headers it
-//! reads). Under the switch identity the store is seeded once, read-only,
-//! from Qt's own store; Qt's store is never written, so a rollback finds Qt as
-//! it was. Loading, seeding and writing run on the store's own thread.
+//! reads). Loading and writing run on the store's own thread. Task #55 (team
+//! ede724c4, 2026-11-10): the store is no longer seeded from Qt's settings;
+//! an older file's `seed` record stays in the file as an extension field.
 
-mod capture;
 pub mod geometry;
-mod upgrade;
-pub use capture::{CapturedQt, CapturedSettings};
-mod imports;
-mod legacy_projects;
-pub use legacy_projects::Record as LegacyProjectImport;
-pub mod qt;
-mod qt_layout;
 pub mod repository;
-pub use imports::OrganizationImport;
-pub(crate) use imports::{family_metadata, valid_family_metadata};
 
-use qt::QtValue;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// How a setting's value is read, as Qt reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,31 +45,20 @@ pub enum Kind {
     RowKeys,
 }
 
-/// One setting: its QSettings name, how Qt reads it, and whether the
-/// switch seeds it from Qt.
+/// One setting: its QSettings name and how Qt reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Key {
     pub name: &'static str,
     pub kind: Kind,
-    pub seeded: bool,
 }
 
 const fn key(name: &'static str, kind: Kind) -> Key {
-    Key {
-        name,
-        kind,
-        seeded: true,
-    }
+    Key { name, kind }
 }
 
-/// A Next preference excluded from the original switch seed. Explicit new
-/// G3 families may import compatible Qt values through their own journal.
+/// The client's own preference (named as such in the table).
 const fn client(name: &'static str, kind: Kind) -> Key {
-    Key {
-        name,
-        kind,
-        seeded: false,
-    }
+    Key { name, kind }
 }
 
 /// The prefix of the client's own settings.
@@ -89,64 +67,49 @@ pub const CLIENT: &str = "client/";
 /// The group of shortcut overrides (`shortcuts/<command id>`, Shortcuts.h).
 pub const SHORTCUTS: &str = "shortcuts/";
 
-/// Qt's value of `automaticApprovals/enabled` at the switch, kept only so the
-/// page can say Qt had it on. The client never enables automatic approvals
-/// from it: the opt-in stays explicit (zerus-5wmh.54).
-pub const QT_AUTOMATIC_APPROVALS: &str = "automaticApprovals/qtEnabledAtSwitch";
-
 /// Every local setting the client has. Sources are in the plan's table.
 pub const KEYS: &[Key] = &[
     // Dangerous Next opt-in: never seed Qt's enabled value or transient error.
     Key {
         name: crate::approvals::automatic::ENABLED,
         kind: Kind::Flag(false),
-        seeded: false,
     },
     Key {
         name: crate::approvals::automatic::ERROR,
         kind: Kind::Text(""),
-        seeded: false,
     },
     // Its categories (zerus-sz42x): all except paid usage until changed.
     Key {
         name: "automaticApprovals/category/read",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/edit",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/shell",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/web",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/mcp",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/agents",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/other",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     Key {
         name: "automaticApprovals/category/paid",
         kind: Kind::Flag(false),
-        seeded: false,
     },
     // Appearance (SettingsPage.h:46-95, UiLanguage.h, ContentScale.h,
     // ActivityWidth.h, WindowLayer.cpp).
@@ -206,14 +169,12 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "workspace/removeWorktreeAfterTermination",
         kind: Kind::Flag(false),
-        seeded: false,
     },
     // TasksView's local scope switch.
     // A first-G3 family also covers clients whose original seed predates Tasks.
     Key {
         name: "tasks/onlySession",
         kind: Kind::Flag(false),
-        seeded: false,
     },
     // New session's remembered choices (NewSessionDialog.cpp:845-851,
     // SessionCreationController.cpp:244-249). launchAccounts is compact JSON
@@ -227,7 +188,6 @@ pub const KEYS: &[Key] = &[
     Key {
         name: NEW_SESSION_FOLDER_MODE,
         kind: Kind::Choice(&["auto", "none"]),
-        seeded: false,
     },
     // Task 74: Qt's SessionLeads JSON object, by session identity.
     key("workspace/sessionLeads", Kind::Text("")),
@@ -236,18 +196,15 @@ pub const KEYS: &[Key] = &[
     Key {
         name: crate::cache_keepalive::KEY,
         kind: Kind::Text(""),
-        seeded: false,
     },
     // A first-G3 family import handles this separately from the old seed.
     Key {
         name: "workspace/allSwarmProjects",
         kind: Kind::Flag(false),
-        seeded: false,
     },
     Key {
         name: crate::row_preferences::KEY,
         kind: Kind::RowKeys,
-        seeded: false,
     },
     // Processes (ProcessSettings.h), web client phase 4 Task 11.
     key("processes/enabled", Kind::Flag(false)),
@@ -299,14 +256,12 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "speech/microphone",
         kind: Kind::Text(""),
-        seeded: false,
     },
     // Task 102: Qt's microphone as its name, never its id: the Voice page
     // picks the device with this name when it lists them, then drops it.
     Key {
         name: MICROPHONE_HINT,
         kind: Kind::Text(""),
-        seeded: false,
     },
     // Task 102: the fork's Windows mobile services (WindowsMobileServices.h):
     // a relay for this computer on 127.0.0.1 and the connector started with
@@ -314,7 +269,6 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "mobile/localRelay",
         kind: Kind::Flag(false),
-        seeded: false,
     },
     Key {
         name: "mobile/localRelayPort",
@@ -323,12 +277,10 @@ pub const KEYS: &[Key] = &[
             min: 1,
             max: 65535,
         },
-        seeded: false,
     },
     Key {
         name: "mobile/runConnector",
         kind: Kind::Flag(true),
-        seeded: false,
     },
     // Automatic recovery: the newest shared policy known (recovery_settings).
     key(crate::recovery_settings::SHARED_POLICY_KEY, Kind::Text("")),
@@ -337,8 +289,6 @@ pub const KEYS: &[Key] = &[
     key("downloads/cacheBytes", Kind::Long { default: 0, min: 0 }),
     key("updates/channel", Kind::Text("stable")),
     key("updates/automatic", Kind::Flag(true)),
-    // Automatic approvals: Qt's choice, for the notice only.
-    key(QT_AUTOMATIC_APPROVALS, Kind::Flag(false)),
     // The client's own: the skin for each appearance (the theme picks one)
     // and the Overview column (design round 7).
     client("client/darkSkin", Kind::Text("zerus-dark")),
@@ -355,11 +305,10 @@ pub const KEYS: &[Key] = &[
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
     client("client/overviewSubSessions", Kind::Flag(false)),
-    Key { name: "workspace/inspectorOpen", kind: Kind::AutoFlag, seeded: true },
+    Key { name: "workspace/inspectorOpen", kind: Kind::AutoFlag },
     Key {
         name: "workspace/inspectorTab",
         kind: Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
-        seeded: true,
     },
     Key {
         name: "workspace/inspectorWidth",
@@ -368,9 +317,8 @@ pub const KEYS: &[Key] = &[
             min: 240,
             max: 900,
         },
-        seeded: true,
     },
-    Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
+    Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]") },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
     // Task 243: the sessions list hidden (Qt's SessionPanelDock Collapsed, the same key).
@@ -428,7 +376,6 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "teams/leadNoticeSessions",
         kind: Kind::Text("{}"),
-        seeded: false,
     },
     key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
     // Task 200 (Qt TeamTemplateList, F6): New team's favourite templates by
@@ -437,12 +384,10 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "teams/heatModes",
         kind: Kind::Text("{}"),
-        seeded: false,
     },
     Key {
         name: "teams/planModes",
         kind: Kind::Text("{}"),
-        seeded: false,
     },
     // W2 (Qt's `teams/attentionNotified`): the team-waiting notices already
     // shown, as a JSON object of item id -> notice token, so a restart or a
@@ -450,7 +395,6 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "teams/attentionNotified",
         kind: Kind::Text("{}"),
-        seeded: false,
     },
 ];
 
@@ -470,7 +414,6 @@ pub fn find(name: &str) -> Option<Key> {
             (!id.is_empty() && !id.contains('/')).then_some(Key {
                 name: SHORTCUTS,
                 kind: Kind::Chords,
-                seeded: true,
             })
         })
         .or_else(|| update_family(name))
@@ -505,7 +448,6 @@ fn account_family(name: &str) -> Option<Key> {
     .then_some(Key {
         name: "accounts/",
         kind,
-        seeded: false,
     })
 }
 
@@ -515,7 +457,6 @@ fn project_family(name: &str) -> Option<Key> {
     (!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)).then_some(Key {
         name: "projects/vivid/",
         kind: Kind::Flag(false),
-        seeded: false,
     })
 }
 
@@ -536,7 +477,6 @@ fn machine_family(name: &str) -> Option<Key> {
     .then_some(Key {
         name: "machines/",
         kind,
-        seeded: false,
     })
 }
 
@@ -560,7 +500,6 @@ fn update_family(name: &str) -> Option<Key> {
     Some(Key {
         name: "updates/",
         kind,
-        seeded: true,
     })
 }
 
@@ -626,255 +565,7 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
     }
 }
 
-/// Qt's stored value converted the way Qt's reader converts it.
-pub fn from_qt(kind: Kind, value: &QtValue) -> Value {
-    let stored = match kind {
-        Kind::Flag(_) | Kind::AutoFlag => Value::Bool(value.to_bool()),
-        Kind::Choice(_) | Kind::Text(_) | Kind::Bytes => Value::from(value.to_text()),
-        Kind::Real { .. } => {
-            let (number, _) = value.to_double();
-            json!(if number.is_nan() { 0.0 } else { number })
-        }
-        // toInt(&ok) converts through a long long and keeps its low 32 bits.
-        Kind::Whole { default, .. } => match value.to_long() {
-            (number, true) => Value::from(i64::from(number as i32)),
-            _ => Value::from(default),
-        },
-        Kind::Long { .. } => Value::from(value.to_long().0),
-        Kind::Chords => Value::Array(value.to_text_list().into_iter().map(Value::from).collect()),
-        Kind::RowKeys => {
-            crate::row_preferences::from_qt(value).unwrap_or_else(|| default_value(kind))
-        }
-    };
-    effective(kind, Some(&stored))
-}
-
-/// Where Qt keeps its settings: the format, read-only.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QtStore {
-    /// macOS: Qt's preference domain, read through cfprefsd (`defaults
-    /// export`), which may hold values its plist file does not have yet;
-    /// the file only when that fails.
-    Plist {
-        domain: Option<String>,
-        path: PathBuf,
-    },
-    /// Linux `hgs-tray.conf` and Windows `hgs-tray.ini`.
-    Ini(PathBuf),
-}
-
-/// macOS's preference tool, by its full path.
-const DEFAULTS: &str = "/usr/bin/defaults";
-
-/// What a read of Qt's store found, and from where: `qt-defaults`
-/// (cfprefsd), `qt-plist` (the plist file) or `qt-ini`.
-pub type QtValues = (BTreeMap<String, QtValue>, &'static str);
-
-/// One bounded read, including the hash of exactly the bytes parsed. The
-/// import report stores metadata only, never source payloads or credentials.
-pub struct QtSnapshot {
-    pub values: BTreeMap<String, QtValue>,
-    pub source: &'static str,
-    pub sha256: String,
-    pub modified_at: Option<u64>,
-}
-
-/// Qt's platform-specific settings location. Kept explicit so migration
-/// tests can resolve all three platforms without changing process globals.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QtPlatform {
-    Linux,
-    Mac,
-    Windows,
-}
-
-impl QtStore {
-    /// Qt's store on this computer (tray/src/main.cpp:178, :276-277).
-    pub fn here() -> Option<QtStore> {
-        let home = || {
-            std::env::var_os("HOME")
-                .filter(|home| !home.is_empty())
-                .map(PathBuf::from)
-        };
-        let (platform, config) = if cfg!(windows) {
-            (QtPlatform::Windows, std::env::var_os("APPDATA"))
-        } else if cfg!(target_os = "macos") {
-            (QtPlatform::Mac, None)
-        } else {
-            (QtPlatform::Linux, std::env::var_os("XDG_CONFIG_HOME"))
-        };
-        Self::locate(
-            platform,
-            home().as_deref(),
-            config.as_deref().map(Path::new),
-        )
-    }
-
-    /// Resolve Qt's source without opening it. `config` is XDG_CONFIG_HOME
-    /// on Linux and APPDATA on Windows; macOS uses its existing domain.
-    pub fn locate(
-        platform: QtPlatform,
-        home: Option<&Path>,
-        config: Option<&Path>,
-    ) -> Option<Self> {
-        let config = config.filter(|path| !path.as_os_str().is_empty());
-        match platform {
-            QtPlatform::Linux => config
-                .filter(|path| path.as_os_str().as_encoded_bytes().starts_with(b"/"))
-                .map(Path::to_path_buf)
-                .or_else(|| home.map(|home| home.join(".config")))
-                .map(|root| Self::Ini(root.join("hgdev/hgs-tray.conf"))),
-            QtPlatform::Windows => config.map(|root| Self::Ini(root.join("hgdev/hgs-tray.ini"))),
-            QtPlatform::Mac => home.map(|home| Self::Plist {
-                domain: Some("com.hgdev.hgs-tray".into()),
-                path: home.join("Library/Preferences/com.hgdev.hgs-tray.plist"),
-            }),
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        match self {
-            QtStore::Plist { path, .. } | QtStore::Ini(path) => path,
-        }
-    }
-
-    /// A value Qt keeps in a JSON file of its own beside the store
-    /// (tray/src/SettingsJson.cpp): `<store>.<name>.json`.
-    pub fn json_file(&self, name: &str) -> PathBuf {
-        let mut path = self.path().as_os_str().to_owned();
-        path.push(format!(".{name}.json"));
-        PathBuf::from(path)
-    }
-
-    /// Every value of the store by Qt name and where it was read;
-    /// `Ok(None)` when the store does not exist.
-    pub fn read(&self) -> Result<Option<QtValues>, String> {
-        self.snapshot()
-            .map(|snapshot| snapshot.map(|s| (s.values, s.source)))
-    }
-
-    pub fn snapshot(&self) -> Result<Option<QtSnapshot>, String> {
-        if let QtStore::Plist {
-            domain: Some(domain),
-            ..
-        } = self
-        {
-            if let Some((values, bytes)) = export_domain(domain) {
-                return Ok(Some(QtSnapshot {
-                    values,
-                    source: "qt-defaults",
-                    sha256: zerus_desktop_migration::sha256(&bytes),
-                    modified_at: fs::metadata(self.path())
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(seconds),
-                }));
-            }
-        }
-        let file = match File::open(self.path()) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
-        let modified_at = file
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(seconds);
-        let mut bytes = Vec::new();
-        file.take(MAX_QT_STORE + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_QT_STORE {
-            return Err("Qt store exceeds its byte limit".into());
-        }
-        let (values, source) = match self {
-            QtStore::Plist { .. } => (qt::read_plist(&bytes)?, "qt-plist"),
-            QtStore::Ini(_) => (qt::read_ini(&bytes), "qt-ini"),
-        };
-        Ok(Some(QtSnapshot {
-            values,
-            source,
-            sha256: zerus_desktop_migration::sha256(&bytes),
-            modified_at,
-        }))
-    }
-
-    /// Native report capture. The fixed Mac export child and every original
-    /// pipe retain the supplied source resources; failure never substitutes a
-    /// potentially stale plist for an uncertain current defaults export.
-    pub fn snapshot_retained(
-        &self,
-        resources: Arc<dyn Send + Sync>,
-        cancel: &std::sync::atomic::AtomicBool,
-    ) -> Result<Option<QtSnapshot>, String> {
-        if cancel.load(std::sync::atomic::Ordering::Acquire) {
-            return Err("Qt source capture stopped".into());
-        }
-        if let QtStore::Plist {
-            domain: Some(domain),
-            ..
-        } = self
-        {
-            let invocation = crate::actions::Invocation {
-                args: vec!["export".into(), domain.into(), "-".into()],
-                stdin: None,
-                timeout: Duration::from_secs(10),
-                request_id: None,
-            };
-            let result = crate::run::run_streamed_retained(
-                Path::new(DEFAULTS),
-                &invocation,
-                &[],
-                MAX_QT_STORE as usize,
-                cancel,
-                resources,
-                |_| true,
-            );
-            let bytes = match result {
-                Ok(crate::actions::Exit::Code {
-                    code: 0, stdout, ..
-                }) => stdout,
-                _ => return Err("Qt source export is unconfirmed".into()),
-            };
-            let values = qt::read_plist(&bytes)?;
-            return Ok(Some(QtSnapshot {
-                values,
-                source: "qt-defaults",
-                sha256: zerus_desktop_migration::sha256(&bytes),
-                modified_at: fs::metadata(self.path())
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(seconds),
-            }));
-        }
-        self.snapshot()
-    }
-}
-
-fn seconds(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-}
-
-/// `defaults export DOMAIN -`: the domain as cfprefsd holds it, read-only,
-/// or `None` when the tool is missing, fails or prints no dictionary.
-fn export_domain(domain: &str) -> Option<(BTreeMap<String, QtValue>, Vec<u8>)> {
-    let invocation = crate::actions::Invocation {
-        args: vec!["export".into(), domain.into(), "-".into()],
-        stdin: None,
-        timeout: Duration::from_secs(10),
-        request_id: None,
-    };
-    match crate::run::run_limited(Path::new(DEFAULTS), &invocation, &[], MAX_QT_STORE as usize) {
-        Ok(crate::actions::Exit::Code {
-            code: 0, stdout, ..
-        }) => qt::read_plist(&stdout).ok().map(|values| (values, stdout)),
-        _ => None,
-    }
-}
-
 const MAX_STORE: u64 = 4 * 1024 * 1024;
-const MAX_QT_STORE: u64 = 16 * 1024 * 1024;
 
 fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -885,52 +576,12 @@ fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The values to seed from Qt's `values` for the settings named in `names`:
-/// only those Qt has stored. `speech/manage_host` falls back to Qt's older
-/// `speech/host` (SpeechSettings.cpp:233), and Qt's automatic approvals
-/// choice goes to [`QT_AUTOMATIC_APPROVALS`].
-pub fn seed_values(values: &BTreeMap<String, QtValue>, names: &[&str]) -> BTreeMap<String, Value> {
-    let mut seeded = BTreeMap::new();
-    for name in names {
-        let Some(key) = find(name).filter(|key| key.seeded) else {
-            continue;
-        };
-        let source = match *name {
-            "speech/manage_host" => values
-                .get("speech/manage_host")
-                .or_else(|| values.get("speech/host")),
-            QT_AUTOMATIC_APPROVALS => values.get("automaticApprovals/enabled"),
-            other => values.get(other),
-        };
-        if let Some(value) = source {
-            seeded.insert((*name).to_owned(), from_qt(key.kind, value));
-        }
-    }
-    seeded
-}
-
-/// The names a seed considers: every seeded key plus Qt's shortcut overrides
-/// and update records under their recognized channel/token names.
-fn seed_names(values: &BTreeMap<String, QtValue>) -> Vec<String> {
-    KEYS.iter()
-        .filter(|key| key.seeded)
-        .map(|key| key.name.to_owned())
-        .chain(
-            values
-                .keys()
-                .filter(|name| find(name).is_some_and(|key| key.seeded))
-                .cloned(),
-        )
-        .collect()
-}
-
 /// What `settings.json` holds.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Contents {
     values: Map<String, Value>,
-    /// `{"source", "path", "at", "keys"}` once seeded from Qt.
-    seed: Option<Value>,
-    /// Versioned family records and unknown extension fields stay intact.
+    /// Versioned family records and unknown extension fields (an older
+    /// file's Qt `seed` record among them) stay intact.
     extra: Map<String, Value>,
 }
 
@@ -948,14 +599,8 @@ impl Contents {
             None => Map::new(),
             _ => return None,
         };
-        let seed = match object.remove("seed") {
-            None => None,
-            Some(value @ Value::Object(_)) => Some(value),
-            _ => return None,
-        };
         Some(Contents {
             values,
-            seed,
             extra: object,
         })
     }
@@ -963,27 +608,9 @@ impl Contents {
     fn to_bytes(&self) -> Vec<u8> {
         let mut object = self.extra.clone();
         object.insert("version".into(), Value::from(1));
-        if let Some(seed) = &self.seed {
-            object.insert("seed".into(), seed.clone());
-        }
         object.insert("values".into(), Value::Object(self.values.clone()));
         serde_json::to_vec_pretty(&Value::Object(object)).unwrap_or_default()
     }
-}
-
-/// Reject damaged/unsupported flag values before the existing Qt conversion.
-/// Migration never turns an unreadable policy into an assumed false choice.
-pub(crate) fn checked_qt_flag(value: &QtValue) -> Option<bool> {
-    let valid = match value {
-        QtValue::Bool(_) | QtValue::Int(_) => true,
-        QtValue::Double(n) => n.is_finite(),
-        QtValue::Text(s) => {
-            s.len() <= 5
-                && ["", "0", "1", "true", "false"].contains(&s.to_ascii_lowercase().as_str())
-        }
-        _ => false,
-    };
-    valid.then(|| value.to_bool())
 }
 
 /// A change other code reacts to: the setting's name, its new value and the
@@ -1001,13 +628,8 @@ struct State {
     dirty: bool,
     writing: bool,
     closed: bool,
-    seed: Option<QtStore>,
-    /// The Qt store's path, kept after the loader takes `seed`: the upgrade
-    /// notice's lstat fallback when no seed was recorded (zerus-dzmdx).
-    qt_path: Option<PathBuf>,
     error: Option<String>,
     revision: u64,
-    capturing: bool,
 }
 
 struct Shared {
@@ -1031,10 +653,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Opens `<data_dir>/settings.json`. With `seed`, a store never seeded
-    /// before takes Qt's values first (the switch identity only).
-    pub fn open(path: PathBuf, seed: Option<QtStore>) -> Settings {
-        let qt_path = seed.as_ref().map(|store| store.path().to_path_buf());
+    /// Opens `<data_dir>/settings.json`.
+    pub fn open(path: PathBuf) -> Settings {
         let shared = Arc::new(Shared {
             path,
             state: Mutex::new(State {
@@ -1044,11 +664,8 @@ impl Settings {
                 dirty: false,
                 writing: false,
                 closed: false,
-                seed,
-                qt_path,
                 error: None,
                 revision: 0,
-                capturing: false,
             }),
             signal: Condvar::new(),
             listeners: Mutex::new(Vec::new()),
@@ -1066,7 +683,7 @@ impl Settings {
         Settings { shared }
     }
 
-    /// Waits until the store is loaded (and seeded, when asked).
+    /// Waits until the store is loaded.
     fn loaded(&self) -> std::sync::MutexGuard<'_, State> {
         let state = self.shared.lock();
         self.shared
@@ -1143,9 +760,6 @@ impl Settings {
     /// [`Settings::set`] with the store's revision after the change.
     pub fn set_tracked(&self, name: &str, value: Value) -> Result<(Value, u64), String> {
         let key = find(name).ok_or_else(|| format!("Unknown setting: {name}"))?;
-        if name == QT_AUTOMATIC_APPROVALS {
-            return Err("This setting only records Qt's choice.".into());
-        }
         let stored = match (&key.kind, &value) {
             (Kind::Chords, Value::Null) => None,
             (Kind::Text(""), Value::Null)
@@ -1171,9 +785,6 @@ impl Settings {
         };
         let (now, revision) = {
             let mut state = self.loaded();
-            if state.capturing {
-                return Err("Settings are temporarily paused for the migration snapshot.".into());
-            }
             if let Some(error) = &state.unreadable {
                 return Err(error.clone());
             }
@@ -1221,133 +832,6 @@ impl Settings {
             .push(listener);
     }
 
-    /// The seed record (`source`, `path`, `at`, `keys`), once seeded.
-    pub fn seed_record(&self) -> Option<Value> {
-        self.loaded().contents.seed.clone()
-    }
-
-    /// The Qt preference import by key name only (no values): handled
-    /// families, families waiting to retry, and Qt keys with no Next use.
-    pub fn preference_report(&self) -> Value {
-        imports::report(&self.loaded().contents)
-    }
-
-    /// A distinct one-time family, never part of Qt organization recovery.
-    /// Pending records are observation-only even after a process restart.
-    pub fn legacy_project_import(
-        &self,
-        machine: &str,
-    ) -> Result<Option<LegacyProjectImport>, String> {
-        let state = self.loaded();
-        if state.unreadable.is_some() {
-            return Err(crate::swarm::legacy_projects::Code::Invalid.as_str().into());
-        }
-        legacy_projects::read(&state.contents.extra, machine).map_err(|e| e.as_str().into())
-    }
-
-    /// True only for the first durable reservation. A repeat never admits an
-    /// apply, whether the previous attempt is pending, incomplete or complete.
-    pub fn prepare_legacy_project_import(
-        &self,
-        plan: &crate::swarm::legacy_projects::Plan,
-    ) -> Result<bool, String> {
-        self.update_organization_record(|contents| {
-            legacy_projects::prepare(&mut contents.extra, plan).map_err(|e| e.as_str())
-        })
-    }
-
-    /// Finish only from newly verified original-scope observation. This
-    /// records evidence and never recreates or returns an apply request.
-    pub fn observe_legacy_project_import(
-        &self,
-        binding: &crate::swarm::legacy_projects::Binding,
-        snapshot: &Value,
-    ) -> Result<bool, String> {
-        self.update_organization_record(|contents| {
-            legacy_projects::observe(&mut contents.extra, binding, snapshot).map_err(|e| e.as_str())
-        })
-    }
-
-    /// Fixed codes and key names only; no machine, project or folder values.
-    pub fn legacy_project_report(&self) -> Value {
-        let state = self.loaded();
-        if state.unreadable.is_some() {
-            return legacy_projects::unavailable(crate::swarm::legacy_projects::Code::Invalid);
-        }
-        legacy_projects::report(&state.contents.extra)
-    }
-
-    /// Background organization recovery shares this writer and its existing
-    /// G3 journal. Unsupported settings/metadata never admit an import.
-    pub fn organization_import(&self) -> Result<OrganizationImport, String> {
-        let state = self.loaded();
-        if state.unreadable.is_some() {
-            return Err("Settings cannot record a project import.".into());
-        }
-        imports::organization_state(&state.contents).map_err(str::to_owned)
-    }
-
-    /// Durably reserve metadata before the idempotent missing-field import.
-    /// No Qt values or pending operation bodies enter this record.
-    pub fn prepare_organization_import(
-        &self,
-        node_id: &str,
-        source: &QtStore,
-        snapshot: Option<&QtSnapshot>,
-    ) -> Result<bool, String> {
-        match (
-            zerus_desktop_migration::canonical(&self.shared.path),
-            zerus_desktop_migration::canonical(source.path()),
-        ) {
-            (Ok(target), Ok(source)) if target != source => (),
-            _ => {
-                return Err(
-                    "Project import cannot overwrite an overlapping or unverified Qt source."
-                        .into(),
-                )
-            }
-        }
-        self.update_organization_record(|contents| {
-            imports::prepare_organization(contents, node_id, source, snapshot)
-        })
-    }
-
-    /// Same-node initialized catalog evidence completes the pending record.
-    pub fn complete_organization_import(&self, node_id: &str) -> Result<(), String> {
-        self.update_organization_record(|contents| {
-            imports::complete_organization(contents, node_id)?;
-            Ok(true)
-        })
-        .map(|_| ())
-    }
-
-    fn update_organization_record(
-        &self,
-        update: impl FnOnce(&mut Contents) -> Result<bool, &'static str>,
-    ) -> Result<bool, String> {
-        let changed = {
-            let mut state = self.loaded();
-            if state.unreadable.is_some() || state.closed || state.capturing {
-                return Err("Settings cannot record a project import.".into());
-            }
-            let mut candidate = state.contents.clone();
-            let changed = update(&mut candidate).map_err(str::to_owned)?;
-            if candidate.to_bytes().len() as u64 > MAX_STORE {
-                return Err("Project import metadata exceeds the settings limit.".into());
-            }
-            if changed {
-                state.contents = candidate;
-                state.dirty = true;
-                self.shared.signal.notify_all();
-            }
-            changed
-        };
-        if !self.flush_within(Duration::from_secs(10)) {
-            return Err("Project import metadata could not be saved; import stays pending.".into());
-        }
-        Ok(changed)
-    }
-
     /// Why the store could not be read or written, if it could not.
     pub fn error(&self) -> Option<String> {
         let state = self.loaded();
@@ -1387,10 +871,10 @@ impl Drop for Settings {
     }
 }
 
-/// The store's thread: load, seed once when asked, then write the latest
-/// values whenever they change.
+/// The store's thread: load, then write the latest values whenever they
+/// change.
 fn run(shared: &Shared) {
-    let (contents, mut unreadable) = match read_bounded(&shared.path, MAX_STORE) {
+    let (contents, unreadable) = match read_bounded(&shared.path, MAX_STORE) {
         Ok(bytes) => match Contents::parse(&bytes) {
             Some(contents) => (contents, None),
             None => (
@@ -1406,52 +890,11 @@ fn run(shared: &Shared) {
             Some(format!("Settings could not be read: {error}")),
         ),
     };
-    let seed = shared.lock().seed.take();
-    if let Some(source) = &seed {
-        match (
-            zerus_desktop_migration::canonical(&shared.path),
-            zerus_desktop_migration::canonical(source.path()),
-        ) {
-            (Ok(target), Ok(source)) if target != source => (),
-            _ => {
-                unreadable =
-                    Some("Settings cannot overwrite an overlapping or unverified Qt source.".into())
-            }
-        }
-    }
-    let mut contents = contents;
-    let mut dirty = false;
-    if let (Some(store), None) = (seed, &unreadable) {
-        let families = imports::pending(&contents);
-        if families.is_ok() && (contents.seed.is_none() || families.as_ref().is_ok_and(|p| *p)) {
-            match store.snapshot() {
-                Ok(snapshot) => {
-                    if contents.seed.is_none() {
-                        let (values, record) = seed_from(&store, snapshot.as_ref());
-                        for (name, value) in values {
-                            contents.values.entry(name).or_insert(value);
-                        }
-                        contents.seed = Some(record);
-                        dirty = true;
-                    }
-                    if families.as_ref().is_ok_and(|p| *p) {
-                        dirty |= imports::apply(&mut contents, &store, snapshot.as_ref());
-                    }
-                }
-                Err(error) => eprintln!(
-                    "zerus-client-core: settings seed: {error}; retried at the next start"
-                ),
-            }
-        }
-        if let Err(error) = families {
-            eprintln!("zerus-client-core: family import: {error}; existing records preserved");
-        }
-    }
     {
         let mut state = shared.lock();
         state.contents = contents;
         state.unreadable = unreadable;
-        state.dirty = dirty;
+        state.dirty = false;
         state.loaded = true;
         shared.signal.notify_all();
     }
@@ -1478,35 +921,6 @@ fn run(shared: &Shared) {
             return;
         }
     }
-}
-
-/// Qt's values for the old settings seed, and its record. The caller has
-/// already obtained one bounded snapshot shared with the new family imports.
-fn seed_from(store: &QtStore, snapshot: Option<&QtSnapshot>) -> (BTreeMap<String, Value>, Value) {
-    let at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    let (values, source) = match snapshot {
-        Some(snapshot) => {
-            let names = seed_names(&snapshot.values);
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            (seed_values(&snapshot.values, &names), snapshot.source)
-        }
-        None => (BTreeMap::new(), "none"),
-    };
-    let domain = match store {
-        QtStore::Plist { domain, .. } => domain.clone(),
-        QtStore::Ini(_) => None,
-    };
-    let record = json!({
-        "source": source,
-        "domain": domain,
-        "path": store.path().to_string_lossy(),
-        "sha256": snapshot.map(|s| &s.sha256),
-        "at": at,
-        "keys": values.keys().collect::<Vec<_>>(),
-    });
-    (values, record)
 }
 
 /// Writes the store through a synced private temporary file and a rename,

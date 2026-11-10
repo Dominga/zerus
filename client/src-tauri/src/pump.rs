@@ -763,14 +763,6 @@ impl Pump {
         self.wake(inner);
     }
 
-    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
-        self.lock().grouping.presentation_seeded()
-    }
-
-    pub fn windows_folders_import_layout(&self) -> Result<Option<Layout>, &'static str> {
-        self.lock().grouping.windows_folders_import_layout()
-    }
-
     /// N6 (owner, 2026-11-08): a project folder of this computer on Windows,
     /// edited in the device-local family; the organization republishes and
     /// saves the layout, never the shared catalog.
@@ -783,31 +775,6 @@ impl Pump {
     ) -> Result<(), String> {
         let mut inner = self.lock();
         inner.grouping.edit_local_windows_folder(organization, node, project, change)?;
-        self.wake(inner);
-        Ok(())
-    }
-
-    pub fn seed_windows_folders(
-        &self,
-        seed: zerus_client_core::swarm::layout::WindowsFoldersSeed,
-        context: &zerus_client_core::swarm::layout::WindowsFoldersContext<'_>,
-    ) -> Result<bool, &'static str> {
-        let mut inner = self.lock();
-        let changed = inner.grouping.seed_windows_folders(seed, context)?;
-        if changed {
-            self.wake(inner);
-        }
-        Ok(changed)
-    }
-
-    /// Only the worker reads Qt; merge against the current Next values under
-    /// the pump lock and let the existing layout writer checkpoint the result.
-    pub fn seed_presentation(
-        &self,
-        seed: zerus_client_core::swarm::layout::PresentationSeed,
-    ) -> Result<(), &'static str> {
-        let mut inner = self.lock();
-        inner.grouping.seed_presentation(seed)?;
         self.wake(inner);
         Ok(())
     }

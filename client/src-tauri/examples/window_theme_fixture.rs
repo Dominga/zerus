@@ -56,8 +56,7 @@ fn main() {
             eprintln!("fixture setup started");
             if route == "window-layer" {
                 app.manage(zerus_client_lib::settings::Store(zerus_client_core::settings::Settings::open(
-                    output.join("fixture-settings.json"), None,
-                )));
+                    output.join("fixture-settings.json"))));
                 zerus_client_lib::window_layer::init(app.handle(), None);
             }
             let generation = window_theme::register(app.handle());

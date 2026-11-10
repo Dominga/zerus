@@ -209,7 +209,7 @@ fn provider_step(
 }
 
 fn provider(config: &Value, root: &Path, hgs: &Path, calls: &mut Vec<Value>) -> Value {
-    let settings = Settings::open(root.join("settings.json"), None);
+    let settings = Settings::open(root.join("settings.json"));
     let original = settings.text(PENDING_KEY);
     let platform = if cfg!(target_os = "macos") {
         Platform::Macos

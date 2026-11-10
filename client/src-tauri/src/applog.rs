@@ -57,10 +57,8 @@ fn write_to(path: &Path, level: &str, message: &str) -> std::io::Result<()> {
 fn message_of(line: &str) -> Option<String> {
     let mut fields = line.trim().splitn(3, ' ');
     let first = fields.next().unwrap_or("");
-    if first.chars().all(|c| c.is_ascii_digit()) && !first.is_empty() {
-        if fields.next().is_some() {
-            return fields.next().map(str::trim).filter(|message| !message.is_empty()).map(str::to_owned);
-        }
+    if first.chars().all(|c| c.is_ascii_digit()) && !first.is_empty() && fields.next().is_some() {
+        return fields.next().map(str::trim).filter(|message| !message.is_empty()).map(str::to_owned);
     }
     Some(line.trim().to_owned()).filter(|message| !message.is_empty())
 }

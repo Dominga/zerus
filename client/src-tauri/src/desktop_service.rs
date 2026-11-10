@@ -1075,12 +1075,8 @@ impl Service {
             .clone()
     }
     pub fn retry(&self) {
-        if !self.shared.read_checks_only()
-            && !startup_recovery()
-            && !self.shared.mode_transition.blocks_resume()
-            && self.shared.mode_transition.startup_permitted()
-        {
-        }
+        // Task #54 removed the retained import that ran here; Retry only
+        // reconnects.
         self.retry_connection();
     }
     /// A check belongs to the displayed original service and starts no source.

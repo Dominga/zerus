@@ -101,7 +101,7 @@ addEventListener('resize',()=>{report('dom_resize');requestAnimationFrame(()=>re
             ])
             .setup(move |app| {
                 app.manage(zerus_client_lib::settings::Store(
-                    zerus_client_core::settings::Settings::open(output.join("settings.json"), None),
+                    zerus_client_core::settings::Settings::open(output.join("settings.json")),
                 ));
                 let window = zerus_client_lib::create_main_window(app.handle())?;
                 window.set_title("Zerus isolated resize fixture")?;

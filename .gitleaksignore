@@ -14,3 +14,42 @@ ba4192badbff37d33faf8462aa189e82625f332d:tray/tests/test_sessionswindow.cpp:gene
 # policy tests (#633). Its token is a fixture, not a credential; later commits
 # use a low-entropy fixture that the scan does not flag.
 907468c65d867742cca2ce8342cf3d5107ac4823:client/src-tauri/src/native_ui.rs:generic-api-key:138
+
+# Reviewed false positives (2026-11-10, team ede724c4's lead): synthetic tokens in the
+# tests of Zerus's and CodeLore's own secret detectors (team secrets, playbook (i),
+# messages, the shared secret-scan vectors, lore's secret guard and working tier) and
+# in the removed Qt Teams UI fixtures. Each value exists only so a detector proves it
+# finds and redacts that format. These are not credentials. Keep every branch, tag and
+# default rule scanned; never replace these with path or rule ignores.
+5162f50c7994ad1e65b29186cd1f5cf464b58c64:tray/tests/test_teamsui.cpp:generic-api-key:838
+78a14b0f6e0e3c65abb21735ef208b7aa67e2603:tray/tests/support/TeamsUiFixture.h:generic-api-key:870
+7d1cdf22a2c0fbdaed80cfee157cbc25afa893b1:tray/tests/test_teamsui.cpp:generic-api-key:820
+8e2cda3048dbd907ca468c5f5fa90e31ed245ceb:src/state/teams/tests/playbook.rs:generic-api-key:178
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:aws-access-token:274
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:aws-access-token:311
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:aws-access-token:314
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:aws-access-token:318
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:aws-access-token:329
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:gcp-api-key:280
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:github-pat:275
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/secrets.rs:github-pat:334
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/src/working_tests.rs:github-pat:144
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/tests/working_tier.rs:aws-access-token:139
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/tests/working_tier.rs:aws-access-token:141
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/tests/working_tier.rs:github-pat:110
+ddbf6d4a60cbdf7746e9ffd969d5bf0807f3d1dc:crates/lore/tests/working_tier.rs:github-pat:111
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/commands_other.rs:aws-access-token:2043
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/commands_other.rs:aws-access-token:2047
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:aws-access-token:82
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:aws-access-token:90
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:curl-auth-header:33
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:curl-auth-header:59
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:github-pat:108
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:github-pat:33
+e23dea342b67045e701e7c417d9924443b2cf08f:src/state/teams/tests/secrets.rs:github-pat:59
+e23dea342b67045e701e7c417d9924443b2cf08f:tests/fixtures/secret-scan-vectors.json:aws-access-token:8
+e23dea342b67045e701e7c417d9924443b2cf08f:tests/fixtures/secret-scan-vectors.json:gcp-api-key:32
+e23dea342b67045e701e7c417d9924443b2cf08f:tests/fixtures/secret-scan-vectors.json:github-pat:12
+# The same playbook (i) vector in the working tree (gitleaks dir): the test must hold
+# a real-format sk- key to prove the check still flags one.
+src/state/teams/tests/playbook.rs:generic-api-key:178

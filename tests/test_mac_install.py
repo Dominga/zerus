@@ -47,7 +47,7 @@ with open(os.environ['TRANSPORT_LOG'], 'a') as log:
     log.write('ssh\\n')
 command = sys.argv[-1]
 # Native builds, the desktop installer and the live tmux server stay out of scope.
-if command.endswith('bash -s') or 'tray/install.sh' in command or 'tmux source-file' in command:
+if command.endswith('bash -s') or 'packaging/desktop/install.sh' in command or 'tmux source-file' in command:
     with open(os.environ['TRANSPORT_LOG'], 'a') as log:
         log.write('remote ' + command + '\\n')
     sys.exit(0)
@@ -107,10 +107,10 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         result = self.run_install('fixture-mac', HGS_MACOS_SIGN_IDENTITY=selector)
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = [line[len('remote '):] for line in (self.root / 'transport.log').read_text().splitlines()
-                    if 'tray/install.sh' in line]
+                    if 'packaging/desktop/install.sh' in line]
         self.assertEqual(len(commands), 1)
         self.assertEqual(shlex.split(commands[0]), ['HGS_MAC_CLI_BUILD=~/.local/src/hgs/.rust-build/target/release/hgs', 'HGS_MACOS_SIGN_IDENTITY=' + selector, 'HGS_MAC_GUI=client',
-                                                  'bash', '~/.local/src/hgs/tray/install.sh'])
+                                                  'bash', '~/.local/src/hgs/packaging/desktop/install.sh'])
         self.assertFalse((self.root / 'unexpected').exists())
 
     def test_next_is_forwarded_by_default_and_qt_requires_an_explicit_choice(self):
@@ -121,11 +121,11 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
                 result = self.run_install('fixture-mac', **settings)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 commands = [line[len('remote '):] for line in (self.root / 'transport.log').read_text().splitlines()
-                            if 'tray/install.sh' in line]
+                            if 'packaging/desktop/install.sh' in line]
                 self.assertEqual(len(commands), 1)
                 self.assertEqual(shlex.split(commands[0]), ['HGS_MAC_CLI_BUILD=~/.local/src/hgs/.rust-build/target/release/hgs', 'HGS_MACOS_SIGN_IDENTITY=',
                                                           'HGS_MAC_GUI=' + (choice or 'client'),
-                                                          'bash', '~/.local/src/hgs/tray/install.sh'])
+                                                          'bash', '~/.local/src/hgs/packaging/desktop/install.sh'])
 
     def test_the_client_sources_travel_and_the_gui_choice_is_forwarded(self):
         # Source folders are replaced, so a file deleted upstream is not built in.
@@ -148,7 +148,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         self.assertTrue(cache.exists())
         self.assertTrue(native_cache.exists())
         tray = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()
-                if 'tray' in line.split()]
+                if 'packaging/desktop' in line.split()]
         self.assertEqual(len(tray), 1)
         for expected in ('client', 'VERSION', 'DEV_VERSION', '--exclude=client/node_modules',
                          '--exclude=client/*/target', '--exclude=client/dist',
@@ -156,7 +156,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
                          'crates/watch-protocol/Cargo.toml', 'crates/watch-protocol/src',
                          'crates/freedesktop-notify/Cargo.toml', 'crates/freedesktop-notify/src'):
             self.assertIn(expected, tray[0])
-        commands = [line for line in (self.root / 'transport.log').read_text().splitlines() if 'tray/install.sh' in line]
+        commands = [line for line in (self.root / 'transport.log').read_text().splitlines() if 'packaging/desktop/install.sh' in line]
         self.assertIn("HGS_MAC_GUI='client'", commands[0])
 
     def test_every_crate_taken_by_path_travels(self):
@@ -186,7 +186,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         self.assertEqual(result.returncode, 0, result.stderr)
         sent = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()]
         cli_tar = next(line for line in sent if 'hgs_state.py' in line)
-        tray_tar = next(line for line in sent if 'tray' in line)
+        tray_tar = next(line for line in sent if 'packaging/desktop' in line)
         for crates, tar in ((cli, cli_tar), (client, tray_tar)):
             for crate in sorted(crates):
                 with self.subTest(crate=str(crate), tray=tar is tray_tar):
@@ -287,7 +287,7 @@ class TrayInstallGui(unittest.TestCase):
         # stages the helpers it names from scripts/ (zerus-04xyx).
         payload = ('scripts/macos_service_payload.py',
                    *(f'scripts/{name}' for name in SERVICE_SCRIPTS))
-        for name in ('tray/install.sh', 'tray/update-installed.py', 'tray/prepare-local-macos.py', 'tray/sign-local-macos.py', 'client/scripts/switch-config.py',
+        for name in ('packaging/desktop/install.sh', 'packaging/desktop/update-installed.py', 'packaging/desktop/prepare-local-macos.py', 'packaging/desktop/sign-local-macos.py', 'client/scripts/switch-config.py',
                      'client/src-tauri/tauri.switch.conf.json', 'client/src-tauri/Info.switch.plist',
                      'VERSION', 'DEV_VERSION', *payload):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -318,7 +318,7 @@ class TrayInstallGui(unittest.TestCase):
         stable = tools / 'hgs'; stable.write_bytes(raw_cli.read_bytes()); stable.chmod(0o755)
 
     def install(self, **settings):
-        return subprocess.run(['bash', str(self.root / 'tray/install.sh')], env=dict(self.env, **settings),
+        return subprocess.run(['bash', str(self.root / 'packaging/desktop/install.sh')], env=dict(self.env, **settings),
                               text=True, capture_output=True, timeout=30)
 
     def test_the_client_is_built_with_the_switch_configuration(self):
@@ -406,7 +406,7 @@ class TrayInstallGui(unittest.TestCase):
         stable = tools / 'hgs'; stable_bytes = stable.read_bytes()
         (tools / 'npm').write_text('#!/bin/sh\nexit 0\n')
         calls = self.root / 'install-order.log'
-        updater = self.root / 'tray/update-installed.py'
+        updater = self.root / 'packaging/desktop/update-installed.py'
         updater.write_text('''import sys, shutil, subprocess
 from pathlib import Path
 if '--check' not in sys.argv:
@@ -452,9 +452,9 @@ if '-d' in args:
             'launchctl': '#!/bin/sh\nexit 0\n',
         }.items():
             path = tools / name; path.write_text(body); path.chmod(0o755)
-        template = self.root / 'tray/packaging/com.hgdev.hgs-tray.plist'
+        template = self.root / 'packaging/desktop/com.hgdev.hgs-tray.plist'
         template.parent.mkdir()
-        template.write_bytes((REPO / 'tray/packaging/com.hgdev.hgs-tray.plist').read_bytes())
+        template.write_bytes((REPO / 'packaging/desktop/com.hgdev.hgs-tray.plist').read_bytes())
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls.read_text().splitlines(), ['swap', 'desktop'])

@@ -693,6 +693,68 @@ fn the_leads_answer_reaches_the_members_subagent_card() {
     });
 }
 
+/// Task #37 (team ede724c4): 2026-11-10, the lead rejected dsh1's permission
+/// (a probe write to the project store) with a reason on the answer and got
+/// "Choose an approval outcome": a DeepSeek approval takes Allow once or Reject
+/// only. The Reject now goes out without the text, and the reason reaches the
+/// member as one note after it, from the same call; an Allow's reason too.
+#[test]
+fn a_reject_with_a_reason_reaches_the_deepseek_member_with_the_reason() {
+    use crate::state::teams::model::SessionRef;
+    let (mut team, _, _) = review_team();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+        Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+    // dsh::question_cards' shape for an approval: Allow once / Reject, no free text.
+    let card = json!({"question_id":"a1","question_hash":"ha","approval":true,"can_answer":true,"source":"dsh_native",
+        "answer_transport":"native_dsh","tool":"write_file","questions":[{"id":"decision","header":"Approval required",
+        "question":"Allow write_file?","allow_other":false,"required":true,
+        "options":[{"id":"allow","label":"Allow once"},{"id":"deny","label":"Reject"}]}]});
+    with_review_team(&team, || {
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(Vec<String>, Value)>::new()));
+        let record = calls.clone();
+        let inspected = json!({"pending_questions":[card.clone()]}).to_string();
+        super::super::dispatcher::set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            record.borrow_mut().push((args.iter().map(|arg| arg.to_string()).collect(), input.cloned().unwrap_or_default()));
+            Ok(match args.first().copied() {
+                Some("inspect") => super::super::dispatcher::fake_output(0, &inspected, ""),
+                Some("send") => super::super::dispatcher::fake_output(0, r#"{"status":"submitted"}"#, ""),
+                _ => super::super::dispatcher::fake_output(0, r#"{"status":"answered"}"#, ""),
+            })
+        })));
+        let reason = "Probe writes to the project store are not allowed; read it instead";
+        let result = as_lead(|| {
+            call("answer", json!({"member":"dev","question_id":"a1","expected_question_hash":"ha",
+                "answers":[{"question_id":"decision","selected_option_ids":["deny"],"text":reason}]}))
+        });
+        result.unwrap();
+        {
+            let calls = calls.borrow();
+            let answer = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("answer")).expect("hgs answer was called");
+            assert_eq!(answer.1["answers"], json!([{"question_id":"decision","selected_option_ids":["deny"]}]), "the outcome only");
+            let note = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("send")).expect("the reason was sent");
+            assert_eq!(note.0, vec!["send".to_owned(), "dsh/x/dev".to_owned(), "--json".to_owned()]);
+            let text = note.1["text"].as_str().unwrap();
+            assert!(text.contains("permission denied") && text.contains("Lead: denied write_file") && text.contains(reason), "{text}");
+        }
+        // The answer is recorded with its reason.
+        let saved = Store::open(false).unwrap().load(&team.id).unwrap().unwrap();
+        let answered = saved.member("dev").unwrap().permission_answers.last().unwrap().clone();
+        assert_eq!((answered["decision"].as_str(), answered["reason"].as_str()), (Some("deny"), Some(reason)));
+        // An Allow with a top-level reason: the outcome, then the note.
+        calls.borrow_mut().clear();
+        as_lead(|| {
+            call("answer", json!({"member":"dev","question_id":"a1","expected_question_hash":"ha","text":"Once, for the migration only",
+                "answers":[{"question_id":"decision","selected_option_ids":["allow"]}]}))
+        })
+        .unwrap();
+        super::super::dispatcher::set_fake_hgs(None);
+        let calls = calls.borrow();
+        let note = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("send")).expect("the Allow's reason was sent");
+        let text = note.1["text"].as_str().unwrap();
+        assert!(text.contains("permission allowed") && text.contains("Lead: allowed write_file: Once, for the migration only"), "{text}");
+    });
+}
+
 /// The owner, 2026-11-05: Kimi refused the lead's answer ("Another Kimi
 /// request is waiting. Answer in Terminal.") and the request stayed in the
 /// lead's inbox, which could never answer it. It moves to the owner.

@@ -321,7 +321,7 @@ python3 "$ZERUS/client/scripts/test-wayland-maximize.py" \
 ```
 
 The result has `lib/`, `libexec/webkit2gtk-4.1/` and the `gtk/` override that
-`tray/linux-launcher.py` requires. It is selected as described in
+`packaging/desktop/linux-launcher.py` requires. It is selected as described in
 [installation](../../installation.md). A WebKit-only prefix without `gtk/` uses
 system GTK and stays at 60 Hz.
 
@@ -355,7 +355,7 @@ Qualify a new prefix before selecting it:
 
 - No library in `$PREFIX/lib` or `$PREFIX/gtk/lib` has an `RPATH` or `RUNPATH`
   (`readelf -d`). With `LD_LIBRARY_PATH` and `WEBKIT_EXEC_PATH` set as
-  `tray/linux-launcher.py` sets them, a private-Xvfb `menu-smoke.py` window run
+  `packaging/desktop/linux-launcher.py` sets them, a private-Xvfb `menu-smoke.py` window run
   under `strace -f -e trace=execve,openat` execs and opens private files only
   under `$PREFIX`. The `/proc/<pid>/exe` of its `WebKitWebProcess` and
   `WebKitNetworkProcess`, and the injected bundle in the web process's maps,

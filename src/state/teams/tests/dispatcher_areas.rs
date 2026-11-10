@@ -24,6 +24,9 @@ mod dispatcher_handoff_brief;
 #[path = "dispatcher_worktrees.rs"]
 mod dispatcher_worktrees;
 
+#[path = "deepseek_folder.rs"]
+mod deepseek_folder;
+
 #[path = "dispatcher_worker.rs"]
 mod dispatcher_worker;
 

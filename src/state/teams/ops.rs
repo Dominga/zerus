@@ -428,6 +428,19 @@ fn fill_folder(team: &Team, member: &mut Member, no_folder_given: bool) {
             super::dispatcher::default_folder(&member.agent)
         };
     }
+    deepseek_own_folder(team.settings.folder_policy, team.settings.worktrees_forbidden, member, !no_folder_given);
+}
+
+/// Task #35 (team ede724c4): a DeepSeek member may work only in its own
+/// folder, so one the plan gives no folder takes its own clone under every
+/// folder policy (the default `lead` policy left it shared, which its start
+/// now refuses). A project that leaves no own folder (the shared policy, or
+/// worktrees and clones forbidden) keeps it shared: the preflight then names
+/// the refusal and its action.
+fn deepseek_own_folder(policy: FolderPolicy, worktrees_forbidden: bool, member: &mut Member, folder_given: bool) {
+    if member.agent == "dsh" && !folder_given && member.directory.is_empty() && member.session.is_none() && policy != FolderPolicy::Shared && !worktrees_forbidden {
+        member.folder = MemberFolder::Clone;
+    }
 }
 
 /// U49: a role's own words as a member id: "Backend" gives "backend", "QA
@@ -875,6 +888,9 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
                 };
             }
         }
+    }
+    for (member, value) in members.iter_mut().skip(1).zip(input["members"].as_array().into_iter().flatten()) {
+        deepseek_own_folder(policy, team.settings.worktrees_forbidden, member, value.get("folder").is_some());
     }
     // The roadmap (spec section 10): phases 2..N in order, all Draft. The owner
     // approves each one strictly after the phase before it ended.
@@ -4569,6 +4585,11 @@ pub(crate) fn delta_base(team: &Team, folder: &str) -> String {
 /// transaction, for `dispatcher::with_git_answers` to serve inside it: a
 /// report's folder HEAD, branch and test delta (`report_git`).
 pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
+    // Task #41 (team ede724c4): an operation that runs the phase checks reads
+    // their Git prerequisites now, not under the store's write lock.
+    if checks_phases(op) {
+        plan::prefetch_prerequisites(team, input);
+    }
     if !matches!(op, "report" | "use-last-reply") || input["interim"].as_bool() == Some(true) {
         return;
     }
@@ -5892,6 +5913,9 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                                     };
                                 }
                             }
+                        }
+                        for (member, value) in members.iter_mut().zip(value.as_array().into_iter().flatten()).filter(|(member, _)| member.id != team.lead) {
+                            deepseek_own_folder(team.settings.folder_policy, team.settings.worktrees_forbidden, member, value.get("folder").is_some());
                         }
                         if let Some(lead) = lead {
                             members.retain(|member| member.id != lead.id);
@@ -8219,7 +8243,7 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             team.idle = Notice::None;
         }
     }
-    if run_checks && matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
+    if run_checks && checks_phases(op) && op != "approve-phase" {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
         let deadline = std::time::Instant::now() + plan::phase_check_timeout();
         let checks: Vec<_> = team.phases.iter().map(|phase| {
@@ -8230,6 +8254,16 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
         }
     }
     Ok(result)
+}
+
+/// The operations whose change runs the phase checks: every one recomputes
+/// the draft phases' checks, and approve-phase checks the phase it approves.
+pub(crate) fn checks_phases(op: &str) -> bool {
+    matches!(
+        op,
+        "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task"
+            | "settings" | "approve" | "accept" | "cancel" | "discard-phase" | "approve-phase"
+    )
 }
 
 #[cfg(test)]

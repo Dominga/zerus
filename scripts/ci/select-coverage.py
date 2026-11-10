@@ -15,7 +15,7 @@ def platforms(paths):
             return True, True
         if path.startswith('mobile/ios/'):
             ios = True
-        elif path.startswith(('tray/', 'packaging/windows/')) or path.startswith('scripts/windows'):
+        elif path.startswith(('packaging/desktop/', 'packaging/windows/')) or path.startswith('scripts/windows'):
             windows = True
         elif path.startswith(('mobile/android/', 'packaging/macos/', 'docs/', 'design/')):
             continue

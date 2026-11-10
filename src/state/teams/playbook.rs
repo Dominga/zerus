@@ -85,21 +85,47 @@ pub(crate) fn leaks_token(text: &str) -> Option<&'static str> {
         ("eyJhbGciOi", "a JWT"),
     ];
     for (format, what) in FORMATS {
-        let Some(at) = text.find(format) else { continue };
-        let rest: String = text[at + format.len()..].chars().take(120).collect();
-        let token: String = rest
-            .split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ')' || c == ']' || c == '}')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        let placeholder = ["placeholder", "example", "dummy", "fake", "redacted", "xxxx", "test-", "<", "...", "your"]
-            .iter()
-            .any(|word| token.to_lowercase().contains(word));
-        if !placeholder && token.len() >= 8 {
-            return Some(what);
+        // Task #42 (team ede724c4): every occurrence, each only where a token
+        // starts. "task-tracker-phase3a-desktop" holds "sk-" inside a word and
+        // was reported as an API key; a prefix inside a word or an identifier
+        // (after a letter, digit, `_` or `-`) is no token.
+        for (at, _) in text.match_indices(format) {
+            let starts = text[..at].chars().next_back().is_none_or(|before| !(before.is_alphanumeric() || before == '_' || before == '-'));
+            if !starts {
+                continue;
+            }
+            let rest: String = text[at + format.len()..].chars().take(120).collect();
+            let token: String = rest
+                .split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ')' || c == ']' || c == '}')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let placeholder = ["placeholder", "example", "dummy", "fake", "redacted", "xxxx", "test-", "<", "...", "your"]
+                .iter()
+                .any(|word| token.to_lowercase().contains(word));
+            if !placeholder && token.len() >= 8 && real_format(format, &token) {
+                return Some(what);
+            }
         }
     }
     None
+}
+
+/// Task #42: the shape a real token of `format` has after its prefix. An API
+/// key (`sk-`, `sk-ant-...`, `sk-proj-...`) is at least 16 characters of
+/// letters, digits, `_` and `-` with a digit among them; an AWS access key id
+/// is `AKIA` and 16 upper-case letters or digits. Other formats keep the
+/// length the caller checks.
+fn real_format(format: &str, token: &str) -> bool {
+    match format {
+        "sk-" => {
+            token.len() >= 16
+                && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && token.chars().any(|c| c.is_ascii_digit())
+        }
+        "AKIA" => token.len() >= 16 && token.chars().take(16).all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+        _ => true,
+    }
 }
 
 /// A base other than the integration line named in a task text: the (h) rule.

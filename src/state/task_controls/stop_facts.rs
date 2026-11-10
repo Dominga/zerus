@@ -271,6 +271,11 @@ impl<'a> Publisher<'a> {
         if platform::FileIdentity::of(&current).map_err(err)? != identity {
             return Err("Stop facts changed before publication; review required".into());
         }
+        // Task #23 (team ede724c4): Windows refuses to rename a file over one
+        // this process still has open ("Access is denied", after persist's
+        // retries), so the check's handle closes before the replacement. Unix
+        // renames over an open file; the identity was checked either way.
+        drop(current);
         storage::cut_write()?;
         self.directory.replace_file(&self.name, &bytes)?;
         self.verify()?;

@@ -34,7 +34,7 @@ def module(name, path):
 
 
 safety = module('resize_display_safety', Path(__file__).with_name('window-theme-smoke.py'))
-launcher = module('resize_linux_launcher', ROOT / 'tray/linux-launcher.py')
+launcher = module('resize_linux_launcher', ROOT / 'packaging/desktop/linux-launcher.py')
 
 
 def resize(child, command, output, burst):

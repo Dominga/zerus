@@ -85,7 +85,7 @@ mod tests {
     use std::fs;
     use std::fs::OpenOptions;
     fn fixture() -> tempfile::TempDir {
-        let dir = tempfile::tempdir_in(platform::canonical(std::env::temp_dir()).unwrap()).unwrap();
+        let dir = crate::host::staging::private_tempdir_in(&platform::canonical(std::env::temp_dir()).unwrap());
         platform::restrict_dir(dir.path()).unwrap();
         platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(dir.path().join(".lock"))
@@ -97,7 +97,7 @@ mod tests {
     }
     #[test]
     fn off_is_no_access_and_an_active_lookup_never_creates_a_missing_writer() {
-        let dir = tempfile::tempdir_in(platform::canonical(std::env::temp_dir()).unwrap()).unwrap();
+        let dir = crate::host::staging::private_tempdir_in(&platform::canonical(std::env::temp_dir()).unwrap());
         let missing = dir.path().join("absent");
         assert!(open(&missing, Instant::now()).unwrap().is_none());
         assert!(!missing.exists());

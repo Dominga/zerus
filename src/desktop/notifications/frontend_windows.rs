@@ -660,7 +660,11 @@ mod tests {
     }
     fn folder() -> Folder {
         let path = std::env::temp_dir().join(format!("zerus-frontend-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&path).unwrap();
+        // Task #23 (team ede724c4): owner-only, so this user has full control
+        // of the fixture even where TEMP inherits only Authenticated Users
+        // Modify (a worktree on a data drive): marking a folder case-sensitive
+        // needs more than Modify and failed there with "Access is denied".
+        crate::platform::owner_only_dir(&path).unwrap();
         Folder(path)
     }
     fn system(name: &str) -> PathBuf {

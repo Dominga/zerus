@@ -85,7 +85,7 @@ print(result.stdout, end="")
         shutil.copy2(ROOT / "hgs_state.py", setup / "hgs_state.py")
         for name in SETUP_SCRIPTS:
             shutil.copy2(ROOT / "scripts" / name, setup / name)
-        shutil.copy2(ROOT / "tray/packaging/com.hgdev.hgs-tray.plist", setup / "com.hgdev.hgs-tray.plist")
+        shutil.copy2(ROOT / "packaging/desktop/com.hgdev.hgs-tray.plist", setup / "com.hgdev.hgs-tray.plist")
         shutil.copy2(SCRIPT, self.app / "Contents/Resources/bin/zerus-setup")
         self.tools = self.root / "tools"
         self.tools.mkdir()
@@ -123,7 +123,7 @@ print(result.stdout, end="")
     def test_tray_agent_template_runs_as_an_interactive_job(self):
         # Without ProcessType launchd starts the GUI as a daemon and clamps all its
         # threads below ordinary CPU load; the whole window then stops responding.
-        template = re.sub(r"<!--.*?-->", "", (ROOT / "tray/packaging/com.hgdev.hgs-tray.plist").read_text(), flags=re.S)
+        template = re.sub(r"<!--.*?-->", "", (ROOT / "packaging/desktop/com.hgdev.hgs-tray.plist").read_text(), flags=re.S)
         self.assertEqual(plistlib.loads(template.encode()).get("ProcessType"), "Interactive")
 
     def test_default_setup_creates_links_into_the_bundle(self):

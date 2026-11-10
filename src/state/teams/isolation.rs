@@ -265,6 +265,14 @@ fn build(config: Config, note: Option<String>, template: &str, program: &str, fo
         run_folder = runs.join(format!("{template}-{stamp}-{next}"));
         next += 1;
     }
+    // Task #23 (team ede724c4): the run folder is owner-only, and everything a
+    // test makes below it inherits that, as in the person's own profile. A
+    // member's folder on a second drive inherits Authenticated Users Modify,
+    // so every store that checks it is private (the task index, stop facts,
+    // account caches) refused the run's own files: about 65 of 91 failures in
+    // a full run. The folders the run makes inside keep inheriting it.
+    let _ = fs::create_dir_all(&runs);
+    let _ = crate::platform::owner_only_dir(&run_folder);
     let mut env = Vec::new();
     for (name, relative) in &config.env {
         let path = if relative == "." { run_folder.clone() } else { run_folder.join(relative) };

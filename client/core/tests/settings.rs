@@ -772,8 +772,13 @@ fn the_web_client_defaults_equal_the_table() {
     if std::env::var_os("ZERUS_UPDATE_SETTINGS_DEFAULTS").is_some() {
         fs::write(&path, &expected).unwrap();
     }
+    // Task #33: compared as text. A Windows checkout with Git's autocrlf
+    // holds the fixture with CRLF, and the bytes then differed although the
+    // contents are equal.
     assert_eq!(
-        fs::read_to_string(&path).unwrap_or_default(),
+        fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n"),
         expected,
         "regenerate with ZERUS_UPDATE_SETTINGS_DEFAULTS=1 cargo test --test settings"
     );

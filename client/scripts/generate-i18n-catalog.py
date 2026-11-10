@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Generate Next's source-keyed Russian catalog from the reviewed Qt catalog
-and the reviewed Next-only supplement."""
+"""Generate Next's source-keyed Russian catalog from the reviewed shared
+catalog and the reviewed Next-only supplement.
+
+Task #28 (team ede724c4): the shared catalog is plain JSON
+(client/i18n/shared/zerus_ru.json), source -> translation, a plural as its
+three forms and a disambiguated source keyed "disambiguation\u0004source"; it
+was cut from the retired Qt catalog (zerus_ru.ts) exactly as this generator
+read it."""
 import argparse
-import importlib.util
 import json
 from pathlib import Path
 import re
-import tempfile
-import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "client/i18n/shared/zerus_ru.ts"
+SOURCE = ROOT / "client/i18n/shared/zerus_ru.json"
 SUPPLEMENT = ROOT / "client/src/i18n.next-ru.json"
 DESTINATION = ROOT / "client/src/i18n.ru.json"
 PLACEHOLDERS = re.compile(r"%L?\d+|%n")
 
 
 def supplement(catalog: dict, entries: dict) -> dict:
-    """Adds Next-only translations under the .ts catalog's own rules: a source the
+    """Adds Next-only translations under the shared catalog's own rules: a source the
     Qt catalog already translates stays there, placeholders stay exact, plurals
     need %n and three Russian forms, and no value carries a separator dot."""
     merged = dict(catalog)
@@ -25,7 +28,7 @@ def supplement(catalog: dict, entries: dict) -> dict:
         if not isinstance(source, str) or not source or "\u0004" in source:
             raise ValueError(f"Invalid supplement source: {source!r}")
         if source in catalog:
-            raise ValueError(f"Translate {source!r} in zerus_ru.ts, not in the supplement")
+            raise ValueError(f"Translate {source!r} in zerus_ru.json, not in the supplement")
         values = value if isinstance(value, list) else [value]
         if isinstance(value, list) and (len(value) != 3 or "%n" not in source):
             raise ValueError(f"Russian plurals need %n and three forms: {source!r}")
@@ -41,44 +44,9 @@ def supplement(catalog: dict, entries: dict) -> dict:
 
 
 def generate() -> str:
-    spec = importlib.util.spec_from_file_location("zerus_prepare_catalog", ROOT / "client/i18n/shared/prepare_catalog.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    with tempfile.TemporaryDirectory(prefix="zerus-next-i18n-") as scratch:
-        prepared = Path(scratch) / "zerus_ru.ts"
-        module.prepare(SOURCE, prepared)
-        root = module.read_catalog(prepared)
-    shared = next((context for context in root.findall("context") if context.findtext("name") == "Zerus"), None)
-    if shared is None:
-        raise ValueError("The prepared catalog has no unambiguous Zerus context")
-    catalog = {}
-    for message in shared.findall("message"):
-        source = message.findtext("source", "")
-        translation = message.find("translation")
-        if not source or translation is None:
-            continue
-        forms = translation.findall("numerusform")
-        value = [form.text or "" for form in forms] if forms else translation.text or ""
-        values = value if isinstance(value, list) else [value]
-        if "·" in source or any("·" in item for item in values):
-            continue
-        if source in catalog and catalog[source] != value:
-            raise ValueError(f"Conflicting shared translation: {source!r}")
-        catalog[source] = value
-    # Qt's tr(source, disambiguation) reaches Next as trc(disambiguation, source),
-    # keyed "disambiguation\u0004source" as in gettext's message contexts.
-    for message in root.findall(".//message"):
-        source, comment = message.findtext("source", ""), message.findtext("comment", "")
-        translation = message.find("translation")
-        if not source or not comment or translation is None or translation.get("type"):
-            continue
-        forms = translation.findall("numerusform")
-        value = [form.text or "" for form in forms] if forms else translation.text or ""
-        key = f"{comment}\u0004{source}"
-        if key in catalog and catalog[key] != value:
-            raise ValueError(f"Conflicting disambiguated translation: {source!r} ({comment!r})")
-        catalog[key] = value
+    catalog = json.loads(SOURCE.read_text(encoding="utf-8"))
+    if not isinstance(catalog, dict):
+        raise ValueError(f"{SOURCE.relative_to(ROOT)} is not a JSON object")
     catalog = supplement(catalog, json.loads(SUPPLEMENT.read_text(encoding="utf-8")))
     return json.dumps(catalog, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 

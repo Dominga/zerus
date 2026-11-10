@@ -277,3 +277,32 @@ fn a_fresh_run_folder_is_never_pruned() {
     assert!(!prunable(now - Duration::from_secs(60), now));
     assert!(prunable(now - Duration::from_secs(KEEP_FRESH_SECS + 1), now));
 }
+/// Task #23 (team ede724c4): a run folder is owner-only even inside a member
+/// folder that every user may change (a folder on a second drive inherits
+/// Authenticated Users Modify), and what a test creates in its TEMP inherits
+/// that, so the stores that check their files are private accept them.
+#[test]
+fn the_run_folder_is_private_inside_a_shared_member_folder() {
+    let fixture = fixture("[isolation]\ntemplates = [\"cargo-test\"]\n");
+    #[cfg(windows)]
+    {
+        // Authenticated Users (S-1-5-11) may change the member's folder.
+        let granted = std::process::Command::new("icacls")
+            .arg(&fixture.folder)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{}", String::from_utf8_lossy(&granted.stderr));
+        let shared = fixture.folder.join("shared.txt");
+        fs::write(&shared, b"x").unwrap();
+        assert!(!crate::platform::verify_private(&shared, crate::platform::Private::File).unwrap(), "the member folder is shared");
+    }
+    let run = prepare("cargo-test", "cargo", &fixture.folder, &fixture.person).expect("a test template");
+    let temp = run.env.iter().find(|(name, _)| name == "TEMP").map(|(_, value)| PathBuf::from(value)).unwrap();
+    assert!(crate::platform::verify_private(&run.folder, crate::platform::Private::Directory).unwrap());
+    assert!(crate::platform::verify_private(&temp, crate::platform::Private::Directory).unwrap());
+    let file = temp.join("store.sqlite3");
+    fs::write(&file, b"x").unwrap();
+    assert!(crate::platform::verify_private(&file, crate::platform::Private::File).unwrap(), "a test's file inherits the run folder's privacy");
+}

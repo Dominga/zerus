@@ -201,7 +201,7 @@ fn setup(executable: &Path) -> Option<PathBuf> {
 
 pub fn fix(executable: &Path) -> Result<(), String> {
     let setup = setup(executable).ok_or_else(|| {
-        "This Zerus cannot update its login item itself. For a source installation, run tray/install.sh again; the change applies at your next login.".to_owned()
+        "This Zerus cannot update its login item itself. For a source installation, run packaging/desktop/install.sh again; the change applies at your next login.".to_owned()
     })?;
     let invocation = Invocation {
         args: vec!["--autostart".into()],

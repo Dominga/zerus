@@ -19,7 +19,7 @@ EMAIL = re.compile(r'(?<![\w.+-])[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,}')
 PUBLIC_CONTACTS = {'ufna@ufna.dev'}
 # Vendored third-party code and verbatim license texts keep their authors'
 # contact addresses, as do the notices Google libraries embed, copied verbatim.
-THIRD_PARTY = ('tray/vendor/', 'packaging/windows/licenses/')
+THIRD_PARTY = ('packaging/windows/licenses/',)
 THIRD_PARTY_FILES = {'mobile/android/app/src/main/assets/licenses/google-notices.txt'}
 # Notices of Rust crates that publish none, copied unchanged into one folder per
 # crate; the README beside those folders is ours.

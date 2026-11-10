@@ -154,7 +154,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   `Cargo.toml` never names it: Cargo unifies features across one build, and
   linking the crate would switch serde_json's `preserve_order` on for hgs (see
   "hgs runs the binary"). Packaging (`scripts/package-*.py`, `install.sh`,
-  `tray/install.sh`, `mac-install.sh`, the AUR recipes, the CI workflows) builds
+  `packaging/desktop/install.sh`, `mac-install.sh`, the AUR recipes, the CI workflows) builds
   `crates/lore-bin/Cargo.toml` and reads the shipped version from its lock
   (`scripts/lore_dependency.py`).
 - **Changing lore.** Commit the change in the CodeLore repository, with its tests

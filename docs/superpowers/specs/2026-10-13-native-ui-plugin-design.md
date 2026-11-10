@@ -125,7 +125,7 @@ plugin is written to `<build>/plugins/` and installed by CMake to
 - namcap must report the plugin's WebEngine dependency only as optional; CI fails
   on errors.
 
-### Local installation (`tray/install.sh`, Linux)
+### Local installation (`packaging/desktop/install.sh`, Linux)
 
 The build uses `AUTO`. When it produced the plugin, the installer copies it to
 `~/.local/lib/hgs-tray/plugins/` through a temporary name and an atomic rename
@@ -165,7 +165,7 @@ before the first signed macOS release.
 - Packaging suites: release and nightly validation (current and legacy library
   sets), Windows required/forbidden files, CI Qt modules and cache key, macOS Qt
   pin, bundle notices, signing and the bundle check that rejects any Qt WebEngine
-  file, and `tray/install.sh` placing, replacing and removing the local plugin.
+  file, and `packaging/desktop/install.sh` placing, replacing and removing the local plugin.
 - Local verification: Linux builds with and without the plugin and the Arch package
   with namcap; on a Mac, an isolated build and suites with Homebrew Qt and the
   unsigned bundle with the pinned Qt and `check-macos-bundle.py --selftest`.

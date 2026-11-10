@@ -12,7 +12,7 @@
 //   python3 scripts/menu-smoke.py --title "Zerus entrance survey" --paint-column 100 \
 //     --url http://127.0.0.1:<port>/scripts/entrance-survey-smoke.html
 // in its own private Xvfb by default; for a local WebKit prefix, with
-// LD_LIBRARY_PATH and WEBKIT_EXEC_PATH set as tray/linux-launcher.py sets them.
+// LD_LIBRARY_PATH and WEBKIT_EXEC_PATH set as packaging/desktop/linux-launcher.py sets them.
 import { applySkin, skins } from "../skin/runtime";
 import "../ui/styles/base.css";
 import "../ui/styles/app.css";

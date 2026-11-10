@@ -162,6 +162,24 @@ fn i_a_real_format_token_raises_an_owner_item() {
     assert!(rule(&breaches(&team), "i").is_none(), "{:?}", breaches(&team));
 }
 
+/// Task #42 (team ede724c4): dsh2's task 27 report named the folder
+/// task-tracker-phase3a-desktop, and (i) read "sk-tracker-phase3a-desktop" as an
+/// API key. A prefix inside a word is no token; a key after `=`, a quote or a
+/// space still is, even after an earlier false hit in the same text.
+#[test]
+fn i_a_prefix_inside_a_word_is_no_token() {
+    for text in [
+        "built in task-tracker-phase3a-desktop as planned",
+        "the mask-tracker_phase3a and desk-sk-0123456789abcdef",
+        "AKIA appears in KAKIAWIDGET1234567890 only",
+    ] {
+        assert_eq!(leaks_token(text), None, "{text}");
+    }
+    assert_eq!(leaks_token("task-tracker-phase3a-desktop then KEY=sk-abc123def456ghi789xyz"), Some("an API key"));
+    assert_eq!(leaks_token("\"sk-ant-abc123def456ghi789\""), Some("an API key"));
+    assert_eq!(leaks_token("sk-onlylettersnodigits"), None, "a real key carries digits");
+}
+
 #[test]
 fn the_brief_carries_the_preset_the_decisions_the_breaches_and_the_landing() {
     let mut team = team();

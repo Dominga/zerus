@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desktop GUI live updates (tray/update-installed.py, tray/install.sh) with a fake GUI.
+"""Desktop GUI live updates (packaging/desktop/update-installed.py, packaging/desktop/install.sh) with a fake GUI.
 
 The fake GUI runs from the installed path inside an isolated home, so the
 updater never matches the developer's own Zerus. systemctl, D-Bus tools and
@@ -19,7 +19,7 @@ from tray_update_fixture import OwnedChildren, StartControl, cleanup
 from desktop_revoke_fixture import REVOCATION_CLI
 
 REPO = Path(__file__).resolve().parents[1]
-UPDATER = REPO / 'tray/update-installed.py'
+UPDATER = REPO / 'packaging/desktop/update-installed.py'
 
 # A GUI build: answers --build-info, holds the single-instance socket, records
 # activations, and (unless 'old') saves its queued draft when SIGTERM quits it.
@@ -220,9 +220,9 @@ class TrayUpdate(unittest.TestCase):
         # refuses install must never receive a mutating verb.
         self.env['REVOCATION_LIFECYCLE'] = 'unavailable'
         source = self.root / 'updater-source'
-        (source / 'tray').mkdir(parents=True)
+        (source / 'packaging/desktop').mkdir(parents=True)
         (source / 'scripts').mkdir()
-        updater = source / 'tray/update-installed.py'
+        updater = source / 'packaging/desktop/update-installed.py'
         shutil.copy2(UPDATER, updater)
         helper = source / 'scripts/install-linux-desktop-service.py'
         self.script(helper, f'#!{sys.executable}\n'
@@ -360,13 +360,14 @@ class TrayUpdate(unittest.TestCase):
 
     def base_installer(self, build):
         """A copy of the maintained installer with private service tools."""
-        tray = self.root / 'tray'
+        # Task #28: the installer lives in packaging/desktop/ with its unit, its
+        # .desktop file and its icons beside it; the fixture root is the repo.
+        tray = self.root / 'packaging/desktop'
         if not tray.exists():
-            for name in ('install.sh', 'update-installed.py', 'linux-source-update.sh', 'linux-launcher.py',
-                         'packaging/hgs-tray.service', 'packaging/hgs-tray.desktop'):
+            for name in ('install.sh', 'update-installed.py', 'linux-launcher.py', 'hgs-tray.service', 'hgs-tray.desktop'):
                 (tray / name).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(REPO / 'tray' / name, tray / name)
-            shutil.copytree(REPO / 'tray/resources/icons', tray / 'resources/icons')
+                shutil.copy2(REPO / 'packaging/desktop' / name, tray / name)
+            shutil.copytree(REPO / 'packaging/desktop/icons', tray / 'icons')
             helper = self.root / 'scripts/install-linux-desktop-service.py'
             helper.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / 'scripts/desktop-revoke-hold.py', helper.with_name('desktop-revoke-hold.py'))
@@ -523,7 +524,7 @@ class TrayUpdate(unittest.TestCase):
                                 capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(setting.exists())
-        self.assertEqual(unit.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
+        self.assertEqual(unit.read_bytes(), (REPO / 'packaging/desktop/hgs-tray.service').read_bytes())
         self.assertIn(f'Exec={self.installed} --sessions', desktop.read_text())
 
 
@@ -533,7 +534,7 @@ class TrayUpdate(unittest.TestCase):
                                 capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         installed = self.home / '.config/systemd/user/hgs-tray.service'
-        self.assertEqual(installed.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
+        self.assertEqual(installed.read_bytes(), (REPO / 'packaging/desktop/hgs-tray.service').read_bytes())
         desktop = self.home / '.local/share/applications/hgs-tray.desktop'
         before = desktop.read_bytes()
         result = subprocess.run(['bash', str(install)], env=self.env,
@@ -725,7 +726,7 @@ class TrayUpdate(unittest.TestCase):
 
 class InstallerOrder(unittest.TestCase):
     def test_the_guard_runs_before_the_first_change_on_macos_too(self):
-        script = (REPO / 'tray/install.sh').read_text()
+        script = (REPO / 'packaging/desktop/install.sh').read_text()
         mac = script[:script.index('# --- 3. LaunchAgent')]
         check = mac.index('update-installed.py" --check')
         self.assertLess(check, mac.index('mkdir -p "${HOME}/Applications"'))

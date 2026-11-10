@@ -118,8 +118,11 @@ fn the_new_session_wire_fixture_is_current() {
     if std::env::var_os("ZERUS_UPDATE_FIXTURES").is_some() {
         std::fs::write(&path, &current).unwrap();
     }
+    // Task #33: compared as text. A Windows checkout with Git's autocrlf
+    // holds the fixture with CRLF, and the bytes then differed although the
+    // contents are equal.
     assert_eq!(
-        std::fs::read_to_string(&path).unwrap_or_default(),
+        std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n"),
         current,
         "the Shown wire shape changed: rerun with ZERUS_UPDATE_FIXTURES=1 and update LaunchShown in client/src/types.ts"
     );

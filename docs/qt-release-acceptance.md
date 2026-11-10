@@ -225,7 +225,7 @@ reseed an import or start a legacy GUI alongside service-owned background duties
 The 2026-11-05 owner assignment authorizes unattended installed checks under
 the idle/display guard above, with the owner-only rows in one scheduled session.
 Use the owner's main account and maintained canonical AUR/package or
-`tray/install.sh` route. Staging prefixes are file checks only, not installed
+`packaging/desktop/install.sh` route. Staging prefixes are file checks only, not installed
 acceptance. Do not install a test binary by hand.
 
 | Pending check | How to verify | Coverage / owner |
@@ -239,7 +239,7 @@ acceptance. Do not install a test binary by hand.
 | [x] Terminal — exercised owner cases | PASS: existing-session upgrade survival and the short-window space/non-ASCII folder, actual shell argv/cwd, prompt, paste and PTY resize 52×103 → 45×71. The cancelled test-shell reattach-after-client-exit case remains automated; no worktree was created. | inventory “Terminal and process lifetime”; G7 `.66.2`, native terminal contracts |
 | [x] Voice/video — capture, preview and discard | Microphone: PASS for capture, stopped preview, audible playback and owner-confirmed discard. Camera: capture/control/discard PASS, with P2 playback-quality observation `zerus-6ioin`. Both on `8e74aa884`; see the [Arch media record](#recorded-arch-notification-media-and-unattended-results--2026-11-05). Transcription and recording recovery across exit stay open automated subcases (coordinator, 2026-11-05). | G2 `.66.4.5`, inventory “Voice, video and speech providers” |
 | WAIVED — owner 2026-11-05 | UI/durable parity: waived by owner 2026-11-05 (no recorded evidence). | G1–G4/G7; [#884](https://github.com/ufna/zerus/pull/884), `.66.3.32`, `.66.3.35`, `.66.3.38` |
-| WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05 ("откат на Qt не нужен совсем"): no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `tray/update-installed.py`; desktop-u |
+| WAIVED — owner 2026-11-05 | Qt rollback is waived by owner 2026-11-05 ("откат на Qt не нужен совсем"): no Qt rollback or Qt round trip is prepared or run on any platform. | `.66.3.31`, `packaging/desktop/update-installed.py`; desktop-u |
 
 Linux notification acceptance also requires the root service attachment
 (`.66.3.30.11.2`, desktop-u) and activation/click handoff to the service-mode UI
@@ -275,7 +275,7 @@ observations. None of these subchecks checks a complete platform row.
 
 **PASS, scoped installed Next-to-Next upgrade:** the owner-authorized baseline
 was clean `7a60dceeb61423853766cd7072357c0a8e5b03c7`; the maintained
-`arch-cli-preview.sh full` route (`install.sh`, `tray/install.sh`, then
+`arch-cli-preview.sh full` route (`install.sh`, `packaging/desktop/install.sh`, then
 `update-installed.py`) returned 0 at 11:35 MSK and installed clean
 `8e74aa88460d9b166542a98b57c8344606b1d5f8`,
 `0.47.1-preview.design-polish.8e74aa8`. The CLI remains `hgs 1.56.0`.
@@ -811,14 +811,14 @@ the owner's main-account evaluation. **Run Mac first after the source admission
 gates merge; GUI/native acceptance may run at any time without a separate owner
 window.** Close every opened window, never restart agents, tmux or DeepSeek hosts,
 and avoid notification spam. Fresh and upgrade source installs default to Next via
-`mac-install.sh`/`tray/install.sh` ([#904](https://github.com/ufna/zerus/pull/904));
+`mac-install.sh`/`packaging/desktop/install.sh` ([#904](https://github.com/ufna/zerus/pull/904));
 `HGS_MAC_GUI=client` remains an explicit selection before retirement. Keep the
 existing privacy identity, signature, installed path and one verified rollback copy.
 
 | Pending check | How to verify | Coverage / owner |
 |---|---|---|
 | EXCEPTION — owner accepted 2026-11-03 | Combine the exact candidate's CI install/package checks (bundle/CLI identity, signature/notary and no Qt frameworks/plugins) with the maintained owner-account upgrade. Cask installation must not quit apps or start services. Link both results; do not clear state or claim an empty-account install. | G5 `.66.7.2`, [#871](https://github.com/ufna/zerus/pull/871); macbundle-u |
-| [x] Upgrade with agents running — coordinator re-plan | COVERED (coordinator, 2026-11-05) by the maintained owner-account Next→Next queue rollouts `7ae0c2bf6` → `7a60dceeb` → `0f6017973`, with native processes untouched and drafts kept; see the [gate matrix](#deletion-gate-matrix--2026-11-04). Existing Qt users' Qt→Next path is covered by the CI install/package checks and `test_macos_switch_updater`; an owner-account Qt→Next run is waived with the Qt rollback. | `.12.6`, [#871](https://github.com/ufna/zerus/pull/871), `tray/update-installed.py` |
+| [x] Upgrade with agents running — coordinator re-plan | COVERED (coordinator, 2026-11-05) by the maintained owner-account Next→Next queue rollouts `7ae0c2bf6` → `7a60dceeb` → `0f6017973`, with native processes untouched and drafts kept; see the [gate matrix](#deletion-gate-matrix--2026-11-04). Existing Qt users' Qt→Next path is covered by the CI install/package checks and `test_macos_switch_updater`; an owner-account Qt→Next run is waived with the Qt rollback. | `.12.6`, [#871](https://github.com/ufna/zerus/pull/871), `packaging/desktop/update-installed.py` |
 | [x] Terminate and Remove worktree (`.66.3.40.4`) | PASS — the installed-pair Terminate-and-Removed positive on the maintained signed pair `a9d5b41f8` (#1504): one original confirmation, Terminate completed, archive retained, folder removed, branch kept, original processes gone; verified by macbundle-u. See the [Mac Terminate-and-Removed record](#recorded-mac-installed-terminate-and-removed-positive--source-a9d5b41f). | `.66.3.40.4`, [#1504](https://github.com/ufna/zerus/pull/1504); macbundle-u |
 | [x] One-time import — approved shared coverage | Covered by the coordinator-approved Windows fixture/CI plus INI/plist/Core/CLI evidence above; no owner-GUI swap or Mac-native import claim. Preserve the explicit Windows legacy-list and later-repair limits. | G3 `.66.5.2.1`, `.66.5.3`, [#870](https://github.com/ufna/zerus/pull/870) |
 | WAIVED — owner 2026-11-05 | Service registration/readiness: waived by owner 2026-11-05 (no recorded evidence). | `.66.3.27.2`, [#882](https://github.com/ufna/zerus/pull/882); macbundle-u/desktop-u |
@@ -1040,8 +1040,8 @@ maintained preview identity when using the preview route.
 
 | Platform | Maintained route on the owner's main account | Interpretation |
 |---|---|---|
-| Linux | Exact AUR/package route for the package row; source evaluation uses `bash ./install.sh`, then `HGS_LINUX_GUI=client bash ./tray/install.sh`. | The installer/updater owns replacement, drafts, rollback and service refresh. Root install can update connector/recovery/swarm/voice workers too; it is not a sandbox. |
-| macOS | Native checkout: `bash ./install.sh`, then `HGS_MAC_GUI=client bash ./tray/install.sh`; the existing remote route is `HGS_MAC_GUI=client ./mac-install.sh "$MAC_ALIAS"`. | The alias must select the owner's main login. The SSH wrapper copies `tmux.conf` over `~/.config/tmux/tmux.conf` and runs `tmux source-file` to reload configuration; it does not restart tmux. Preserve the installed signed pair, existing signing identity and independent runner. |
+| Linux | Exact AUR/package route for the package row; source evaluation uses `bash ./install.sh`, then `HGS_LINUX_GUI=client bash ./packaging/desktop/install.sh`. | The installer/updater owns replacement, drafts, rollback and service refresh. Root install can update connector/recovery/swarm/voice workers too; it is not a sandbox. |
+| macOS | Native checkout: `bash ./install.sh`, then `HGS_MAC_GUI=client bash ./packaging/desktop/install.sh`; the existing remote route is `HGS_MAC_GUI=client ./mac-install.sh "$MAC_ALIAS"`. | The alias must select the owner's main login. The SSH wrapper copies `tmux.conf` over `~/.config/tmux/tmux.conf` and runs `tmux source-file` to reload configuration; it does not restart tmux. Preserve the installed signed pair, existing signing identity and independent runner. |
 
 Let the Mac installer perform `prepare-local-macos.py`, `sign-local-macos.py`
 and `update-installed.py` in their maintained order. Register the **installed**

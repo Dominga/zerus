@@ -135,7 +135,7 @@ REMOTE
 # Каталог назначения постоянный (~/.local/src/hgs, как в README для линукса), а не /tmp:
 # там переживает build/, поэтому повторный прогон собирается инкрементально, а install.sh
 # по cdhash бандла видит, что ничего не изменилось, и не дёргает живой LaunchAgent.
-# The Tauri client's sources travel too, so tray/install.sh can build it
+# The Tauri client's sources travel too, so packaging/desktop/install.sh can build it
 # (HGS_MAC_GUI=client), with
 # VERSION, crates/watch-protocol and the desktop read-policy and migration crates,
 # which client/core and client/src-tauri take by path. Source folders are replaced;
@@ -143,16 +143,15 @@ REMOTE
 # Mac instead (docs/macos-distribution.md).
 # Cargo resolves target-specific dependency manifests on the Mac too, including
 # the Linux notification adapter.
-tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' \
-  --exclude='tray/src' --exclude='tray/tests' --exclude='tray/vendor' --exclude='tray/CMakeLists.txt' \
+tar czf - -C "$here" \
   --exclude='client/node_modules' --exclude='client/dist' --exclude='client/*/target' \
   --exclude='client/src-tauri/gen' \
-  tray client crates/watch-protocol/Cargo.toml crates/watch-protocol/src \
+  packaging/desktop client crates/watch-protocol/Cargo.toml crates/watch-protocol/src \
   crates/desktop-read-policy/Cargo.toml crates/desktop-read-policy/src \
   crates/desktop-migration/Cargo.toml crates/desktop-migration/src \
   crates/freedesktop-notify/Cargo.toml crates/freedesktop-notify/src DEV_VERSION VERSION \
   | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src crates/desktop-read-policy/src crates/desktop-migration/src crates/freedesktop-notify/src && tar xzf -'
-# PATH неинтерактивного ssh на маке — без Homebrew; npm tray/install.sh ищет сам
+# PATH неинтерактивного ssh на маке — без Homebrew; npm packaging/desktop/install.sh ищет сам
 # (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
 # an optional exact identity selector travels as one literal environment value.
-ssh -o BatchMode=yes "$host" "HGS_MAC_CLI_BUILD=~/.local/src/hgs/.rust-build/target/release/hgs HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") HGS_MAC_GUI=$(shq "${HGS_MAC_GUI:-client}") bash ~/.local/src/hgs/tray/install.sh"
+ssh -o BatchMode=yes "$host" "HGS_MAC_CLI_BUILD=~/.local/src/hgs/.rust-build/target/release/hgs HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") HGS_MAC_GUI=$(shq "${HGS_MAC_GUI:-client}") bash ~/.local/src/hgs/packaging/desktop/install.sh"

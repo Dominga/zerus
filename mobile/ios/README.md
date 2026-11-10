@@ -205,5 +205,5 @@ build number and shows `X.Y.Z-dev.N` in About.
 ## App icon
 
 `scripts/render-app-icon.swift` renders `Zerus/Assets.xcassets/AppIcon.appiconset/AppIcon.png`
-from the Swarm blades of `tray/resources/icons/hgs-zerus-symbolic.svg`, with the
+from the Swarm blades of `packaging/desktop/icons/hgs-zerus-symbolic.svg`, with the
 Android adaptive-icon transforms: a mint `#67E8CB` mark on ink `#101517`.

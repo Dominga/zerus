@@ -34,6 +34,13 @@ describe("DeepSeek account launch defaults (zerus-fw3g5)", () => {
     expect(notice.detail).toBe("Native request delivery uncertain: timed out");
     expect(accountDefaultsNotice({ status: "uncertain", detail: "x".repeat(900) })!.detail).toHaveLength(600);
   });
+  it("keeps the reason and the choice on one line without reordering (zerus-knlxe)", () => {
+    const notice = accountDefaultsNotice({ status: "failed", model: "route/\u202Emodel", effort: "max",
+      detail: "first\u2028second\u2029third\u202Eevil\u2066isolated\u2069\u200Fend\u061C!" })!;
+    expect(notice.detail).toBe("first second third evil isolated end !");
+    expect(notice.choice).toBe("Account default: route/ model (max)");
+    expect(notice.detail).not.toMatch(/[\u2028\u2029\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/u);
+  });
   it("shows nothing when applied, still pending, absent or malformed", () => {
     for (const value of [{ status: "applied", model: "a/b" }, { status: "pending" }, undefined, null, "failed", ["failed"], { status: 1 }])
       expect(accountDefaultsNotice(value)).toBeUndefined();

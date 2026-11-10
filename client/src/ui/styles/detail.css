@@ -629,6 +629,8 @@ dialog.session-file { width: min(520px, calc(100vw - 32px)); max-width: calc(100
   .cmp-settings-models .ocm-list { height: 240px; max-height: 320px; flex: none; }
   .cmp-settings-hint { white-space: pre-line; margin: 12px 0; }
   .cmp-settings-notice { margin-top: 10px; }
+  /* hgs's reason may be one long word or path: wrap it inside the notice. */
+  .cmp-settings-defaults-text { min-width: 0; overflow-wrap: anywhere; }
 }
 
 /* .9.38: Qt-only recording preview, between the mockup toolbar and editor. */

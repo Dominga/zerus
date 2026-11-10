@@ -53,5 +53,6 @@ it("marks a DeepSeek session whose account defaults were not applied, beside its
   button.click(); await flush();
   const notice = host.querySelector<HTMLElement>("dialog.cmp-settings-dialog .cmp-settings-defaults")!;
   expect(notice.textContent).toBe("Account defaults were not appliedPrivate fixture textAccount default: route/model (max)Private fixture reason");
+  expect(notice.querySelector(".cmp-settings-defaults-text")?.textContent).toContain("Private fixture reason");
   expect(port.apply).not.toHaveBeenCalled();
 });

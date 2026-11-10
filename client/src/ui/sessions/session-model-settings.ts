@@ -30,6 +30,11 @@ export function modelChoices(value: unknown): ModelChoice[] {
   });
 }
 
+/** Untrusted text on one line: control, line/paragraph separator and bidi
+ * control characters become spaces, so a reason cannot add lines or reorder. */
+const oneLine = (value: string) =>
+  value.replace(/[\p{Cc}\p{Zl}\p{Zp}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]+/gu, " ").trim();
+
 /** A new DeepSeek session whose account launch defaults were not applied
  * (`account_defaults` from `hgs inspect`, zerus-fw3g5). Applied, pending and
  * absent outcomes show nothing, and nothing here retries the application. */
@@ -37,7 +42,7 @@ export function accountDefaultsNotice(value: unknown) {
   const o: Record<string, unknown> = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const status = text(o.status);
   if (status !== "failed" && status !== "uncertain") return undefined;
-  const model = short(o.model, 256), effort = short(o.effort, 40);
+  const model = oneLine(short(o.model, 256)), effort = oneLine(short(o.effort, 40));
   const choice = model ? effort ? `${model} (${effort})` : model : "";
   return {
     status,
@@ -47,7 +52,7 @@ export function accountDefaultsNotice(value: unknown) {
       : tr("DeepSeek may not have applied the account's model and effort when this session started. Check the model and effort above."),
     choice: choice ? tr("Account default: %1", choice) : "",
     // hgs's own refusal text, bounded and on one line.
-    detail: text(o.detail).replace(/\p{Cc}+/gu, " ").trim().slice(0, 600),
+    detail: oneLine(text(o.detail)).slice(0, 600),
   };
 }
 

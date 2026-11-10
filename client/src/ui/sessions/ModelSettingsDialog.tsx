@@ -57,7 +57,7 @@ export default function SettingsDialog(props: { anchor: () => HTMLButtonElement 
         <p class="cmp-settings-hint hint" role="status">{v().hint}<Show when={models.catalogError()}>{`\n${models.catalogError()}`}</Show></p>
         <Show when={v().changeNotice}><div class="notice warn cmp-settings-notice"><Icon name="info" size={14} /><div>{v().changeNotice}</div></div></Show>
         <Show when={v().defaults}>{(notice) => <div class="notice warn cmp-settings-notice cmp-settings-defaults" role="status"><Icon name="triangle-alert" size={14} />
-          <div><strong>{notice().title}</strong><div>{notice().text}</div><Show when={notice().choice}><div>{notice().choice}</div></Show>
+          <div class="cmp-settings-defaults-text"><strong>{notice().title}</strong><div>{notice().text}</div><Show when={notice().choice}><div>{notice().choice}</div></Show>
             <Show when={notice().detail}><div class="dim">{notice().detail}</div></Show></div></div>}</Show>
       </div>
       <div class="dlg-foot">

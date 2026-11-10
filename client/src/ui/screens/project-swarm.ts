@@ -128,8 +128,9 @@ export function createAdoption(call: Call = invoke) {
     catch (e) { if (!gone) setError(String(e)); return false; }
     finally { setWorking(false); dirty = true; void pull(); }
   };
+  // Hiding a running original never cancels it; only an in-flight request waits.
   const close = async () => {
-    if (frame()?.changing || working()) return false;
+    if (working()) return false;
     try { if (frame()) await call("project_adoption_close", { id: frame()!.id }); return true; }
     catch (e) { if (!gone) setError(String(e)); return false; }
   };

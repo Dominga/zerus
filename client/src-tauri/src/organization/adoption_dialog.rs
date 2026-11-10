@@ -12,6 +12,13 @@ use zerus_client_core::{
 
 const BUSY: &str = "An adoption request is already running.";
 const EXPIRED: &str = "This adoption dialog expired. Open it again.";
+const SETTLING: &str = "The original adoption call is still settling. Its result stays unknown until its connection closes; no new adoption will start.";
+/// Past the CLI's own 25 s original-call deadline, a still running mutation
+/// is only settling its original resources.
+#[cfg(not(test))]
+const SETTLING_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const SETTLING_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Serialize)]
 pub struct View {
@@ -46,25 +53,79 @@ impl Drop for Resources {
     }
 }
 
+/// Independently observed native card data, never a preview-derived witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeCardBinding {
+    computer: ComputerId,
+    host: String,
+    machine_id: String,
+}
+
+impl NativeCardBinding {
+    fn capture(pump: &Pump, computer: ComputerId, expected_node: &str) -> Result<Self, String> {
+        let card = pump.live_machine(&computer).ok_or(EXTERNAL_CHANGED)?;
+        let machine_id = card.machine_id.ok_or(EXTERNAL_CHANGED)?;
+        let host = card.host.ok_or(EXTERNAL_CHANGED)?;
+        if card.ok != Some(true)
+            || host.is_empty()
+            || !zerus_client_core::creation::canonical_uuid(&machine_id)
+            || machine_id != expected_node
+        {
+            return Err(EXTERNAL_CHANGED.into());
+        }
+        Ok(Self {
+            computer,
+            host,
+            machine_id,
+        })
+    }
+
+    fn current(&self, pump: &Pump) -> Result<(), String> {
+        let actual = Self::capture(pump, self.computer.clone(), &self.machine_id)?;
+        if &actual != self {
+            return Err(EXTERNAL_CHANGED.into());
+        }
+        Ok(())
+    }
+}
+
 struct NativeContext {
     generation: u64,
     digest: String,
     configuration: String,
     source_card: (String, String),
     destination_card: (String, String),
+    source_machine: NativeCardBinding,
+    destination_machine: NativeCardBinding,
     ticket: usize,
     request_id: String,
     drained: bool,
     resources: Weak<Resources>,
+    /// Sticky: once any currentness check refused this original, a later
+    /// restored card, generation or configuration never revives it. Only
+    /// read-only Status and Fresh remain; the ticket stays held.
+    revoked: std::cell::Cell<bool>,
 }
 
 impl NativeContext {
-    fn current(&self, hub: &Hub, context: &Context) -> Result<(), String> {
+    fn current(&self, hub: &Hub, context: &Context, pump: &Pump) -> Result<(), String> {
+        if self.revoked.get() {
+            return Err(EXTERNAL_CHANGED.into());
+        }
+        let checked = self.check(hub, context, pump);
+        if checked.is_err() {
+            self.revoked.set(true);
+        }
+        checked
+    }
+
+    fn check(&self, hub: &Hub, context: &Context, pump: &Pump) -> Result<(), String> {
         let preview = context.preview.as_ref().ok_or(EXTERNAL_CHANGED)?;
         let ticket = context.ticket.as_deref().ok_or(EXTERNAL_CHANGED)?;
         let adoption = context.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?;
         let local = hub.sync.observed_value().ok_or(EXTERNAL_CHANGED)?;
-        if !preview.eligible()
+        if hub.stopped
+            || !preview.eligible()
             || hub.source_generation != self.generation
             || self.configuration != context.configuration
             || self.source_card != preview.source_card()
@@ -79,6 +140,8 @@ impl NativeContext {
         {
             return Err(EXTERNAL_CHANGED.into());
         }
+        self.source_machine.current(pump)?;
+        self.destination_machine.current(pump)?;
         Ok(())
     }
 }
@@ -137,6 +200,8 @@ pub(super) struct Context {
     expected: Option<Observation>,
     outcome: Option<Result<String, String>>,
     receipt: Option<Value>,
+    /// When the running call is the original mutation, since when.
+    mutation_since: Option<std::time::Instant>,
 }
 
 impl Context {
@@ -158,6 +223,7 @@ impl Context {
             expected: None,
             outcome: None,
             receipt: None,
+            mutation_since: None,
         }
     }
 
@@ -201,7 +267,7 @@ impl Context {
         })
     }
 
-    fn queue(&mut self, hub: &mut Hub, action: Action) -> Result<(), String> {
+    fn queue(&mut self, hub: &mut Hub, pump: &Pump, action: Action) -> Result<(), String> {
         if self.active() {
             return Err(BUSY.into());
         }
@@ -235,6 +301,16 @@ impl Context {
                 if !preview.matches_source(&local) {
                     return Err(EXTERNAL_CHANGED.into());
                 }
+                let source_machine = NativeCardBinding::capture(
+                    pump,
+                    ComputerId::local(),
+                    &preview.source_card().0,
+                )?;
+                let destination_machine = NativeCardBinding::capture(
+                    pump,
+                    ComputerId(preview.alias().to_owned()),
+                    &preview.destination_card().0,
+                )?;
                 let generation = hub.source_generation.checked_add(1).ok_or(STOPPED)?;
                 let ticket = Box::new(hub.sync.begin_external(hub.sync.revision())?);
                 hub.source_generation = generation;
@@ -245,10 +321,13 @@ impl Context {
                     configuration: self.configuration.clone(),
                     source_card: preview.source_card(),
                     destination_card: preview.destination_card(),
+                    source_machine,
+                    destination_machine,
                     ticket: std::ptr::from_ref(ticket.as_ref()) as usize,
                     request_id: adoption.request_id().into(),
                     drained: false,
                     resources: Weak::new(),
+                    revoked: std::cell::Cell::new(false),
                 });
                 self.ticket = Some(ticket);
                 self.adoption = Some(adoption);
@@ -277,6 +356,12 @@ impl Context {
         self.configuration = "changed".into();
     }
 
+    /// No queued, running or draining call remains for this dialog.
+    #[cfg(all(test, unix))]
+    pub(super) fn idle_for_tests(&self) -> bool {
+        !self.active()
+    }
+
     fn failed(&mut self, error: String) {
         self.status = error;
         self.error = true;
@@ -289,6 +374,7 @@ impl Context {
         step: Step,
         result: Result<Exit, String>,
         hub: &Hub,
+        pump: &Pump,
     ) -> Result<(), String> {
         let exit = result?;
         match step {
@@ -323,7 +409,7 @@ impl Context {
                 self.native
                     .as_ref()
                     .ok_or(EXTERNAL_CHANGED)?
-                    .current(hub, self)?;
+                    .current(hub, self, pump)?;
                 let preview = self.preview.as_ref().ok_or(EXTERNAL_CHANGED)?;
                 if adoption::revision(&config, preview.alias())? != self.configuration
                     || preview.configuration_revision() != self.configuration
@@ -350,7 +436,7 @@ impl Context {
                 self.native
                     .as_ref()
                     .ok_or(EXTERNAL_CHANGED)?
-                    .current(hub, self)?;
+                    .current(hub, self, pump)?;
                 self.stage = Stage::Queued(Work {
                     step: Step::Mutation,
                     invocation,
@@ -360,7 +446,7 @@ impl Context {
                 self.native
                     .as_ref()
                     .ok_or(EXTERNAL_CHANGED)?
-                    .current(hub, self)?;
+                    .current(hub, self, pump)?;
                 let reply = self
                     .adoption
                     .as_ref()
@@ -387,9 +473,14 @@ impl Context {
                 if phase == "remote_committed" {
                     adoption.receipt(&reply["journal"]["receipts"]["remote"])?;
                 }
-                self.outcome = Some(Err(format!(
+                let status = format!(
                     "Original adoption status: {phase}. Review manually; this status is read-only."
-                )));
+                );
+                // Status is retained data even when a stale native binding
+                // forbids finish_external. It cannot grant another mutation.
+                self.status = status.clone();
+                self.error = true;
+                self.outcome = Some(Err(status));
                 self.receipt = Some(reply);
                 self.stage = Stage::Queued(read_work(Step::Fresh, Read::Swarm)?);
             }
@@ -456,7 +547,7 @@ impl Organization {
         if id.is_none() && hub.adoption.is_none() {
             let mut context = Context::new(!self.0.allowed);
             if self.0.allowed {
-                context.queue(&mut hub, Action::Config)?;
+                context.queue(&mut hub, &self.0.pump, Action::Config)?;
             } else {
                 context.status = REPLAY_NEEDS_HGS.into();
                 context.error = true;
@@ -473,9 +564,8 @@ impl Organization {
         let mut context = hub.adoption.take().ok_or(EXPIRED)?;
         let result = (|| {
             if close {
-                if context.changing && matches!(context.stage, Stage::Queued(_) | Stage::Running) {
-                    return Err(BUSY.into());
-                }
+                // Hiding never cancels or forgets a queued or running original:
+                // the worker keeps it, and reopening attaches to the same one.
                 context.visible = false;
             } else {
                 if id.is_none() {
@@ -488,7 +578,7 @@ impl Organization {
                     if !self.0.allowed {
                         return Err(REPLAY_NEEDS_HGS.into());
                     }
-                    context.queue(&mut hub, action)?;
+                    context.queue(&mut hub, &self.0.pump, action)?;
                 }
             }
             context.view(&hub)
@@ -507,6 +597,34 @@ impl Organization {
         }
         let work = {
             let mut hub = self.lock();
+            // Recheck the original independent card/generation binding at the
+            // actual queued invocation barrier. Read-only original Status and
+            // Fresh remain available after drift; no ticket is discarded.
+            let refused = hub.adoption.as_ref().and_then(|context| {
+                if matches!(
+                    &context.stage,
+                    Stage::Queued(Work {
+                        step: Step::AdoptConfig | Step::AdoptLocal | Step::Mutation,
+                        ..
+                    })
+                ) {
+                    context
+                        .native
+                        .as_ref()
+                        .ok_or_else(|| EXTERNAL_CHANGED.to_owned())
+                        .and_then(|native| native.current(&hub, context, &self.0.pump))
+                        .err()
+                } else {
+                    None
+                }
+            });
+            if let Some(error) = refused {
+                hub.adoption.as_mut().unwrap().failed(error);
+                hub.shown = None;
+                self.publish(&mut hub);
+                self.release(hub);
+                return true;
+            }
             let Some(context) = hub.adoption.as_mut() else {
                 return false;
             };
@@ -516,6 +634,8 @@ impl Organization {
             match std::mem::replace(&mut context.stage, Stage::Idle) {
                 Stage::Queued(work) => {
                     context.stage = Stage::Running;
+                    context.mutation_since =
+                        matches!(work.step, Step::Mutation).then(std::time::Instant::now);
                     Some(work)
                 }
                 Stage::Draining {
@@ -537,14 +657,17 @@ impl Organization {
                             .native
                             .as_ref()
                             .map_or(Err(EXTERNAL_CHANGED.into()), |native| {
-                                native.current(&hub, &context)
+                                native.current(&hub, &context, &self.0.pump)
                             })
                     } else {
                         Ok(())
                     };
-                    let result = checked.and_then(|()| context.result(work.step, result, &hub));
+                    let result = checked
+                        .and_then(|()| context.result(work.step, result, &hub, &self.0.pump));
                     if let Err(error) = result {
                         if needs_fresh {
+                            context.status = error.clone();
+                            context.error = true;
                             context.outcome = Some(Err(error));
                             context.stage = read_work(Step::Fresh, Read::Swarm)
                                 .map(Stage::Queued)
@@ -561,7 +684,19 @@ impl Organization {
                     return true;
                 }
                 other => {
+                    let settling = matches!(other, Stage::Running)
+                        && context
+                            .mutation_since
+                            .is_some_and(|since| since.elapsed() >= SETTLING_AFTER)
+                        && context.status != SETTLING;
                     context.stage = other;
+                    if settling {
+                        // Still unknown: the card says so, nothing else changes.
+                        context.status = SETTLING.into();
+                        hub.shown = None;
+                        self.publish(&mut hub);
+                        self.release(hub);
+                    }
                     None
                 }
             }
@@ -569,6 +704,28 @@ impl Organization {
         let Some(work) = work else {
             return false;
         };
+        // The call runs beside the organization worker, which keeps serving
+        // every other pass while an original is retained. Only this dialog's
+        // admission stays closed (Running) until the result is recorded.
+        let organization = self.clone();
+        let started = std::thread::Builder::new()
+            .name("zerus-adoption-call".into())
+            .spawn(move || organization.adoption_call(work));
+        if let Err(error) = started {
+            // The closure, and the work in it, never ran: no call started.
+            let mut hub = self.lock();
+            if let Some(context) = hub.adoption.as_mut() {
+                context.mutation_since = None;
+                context.failed(format!("The adoption request could not start: {error}"));
+            }
+            hub.shown = None;
+            self.publish(&mut hub);
+            self.release(hub);
+        }
+        true
+    }
+
+    fn adoption_call(&self, work: Work) {
         let resources = Arc::new(Resources(Arc::downgrade(&self.0)));
         let weak = Arc::downgrade(&resources);
         let result = zerus_client_core::run::run_accounted(
@@ -588,6 +745,10 @@ impl Organization {
         drop(resources);
         let mut hub = self.lock();
         if let Some(context) = hub.adoption.as_mut() {
+            // Only this call leaves Running; nothing else can change the
+            // stage meanwhile, so the work and its resources are retained.
+            debug_assert!(matches!(context.stage, Stage::Running));
+            context.mutation_since = None;
             context.stage = Stage::Draining {
                 work,
                 result,
@@ -597,7 +758,13 @@ impl Organization {
         hub.shown = None;
         self.publish(&mut hub);
         self.release(hub);
-        true
+        self.0.wake.notify_all();
+    }
+
+    /// A later settlement attempt, as any future trigger would make it.
+    #[cfg(all(test, unix))]
+    pub(super) fn adoption_settle_for_tests(&self) {
+        self.adoption_settle_source();
     }
 
     fn adoption_settle_source(&self) {
@@ -619,7 +786,7 @@ impl Organization {
             return;
         };
         let mut hub = self.lock();
-        if adoption_settle(&mut hub, &source, self.now()) {
+        if adoption_settle(&mut hub, &source, self.now(), &self.0.pump) {
             hub.shown = None;
             self.publish(&mut hub);
             self.release(hub);
@@ -628,7 +795,7 @@ impl Organization {
     }
 }
 
-fn adoption_settle(hub: &mut Hub, source: &OrganizationSnapshot, now: u64) -> bool {
+fn adoption_settle(hub: &mut Hub, source: &OrganizationSnapshot, now: u64, pump: &Pump) -> bool {
     let Some(mut context) = hub.adoption.take() else {
         return false;
     };
@@ -636,7 +803,7 @@ fn adoption_settle(hub: &mut Hub, source: &OrganizationSnapshot, now: u64) -> bo
         && context.native.as_ref().is_some_and(|native| {
             native.drained
                 && native.resources.upgrade().is_none()
-                && native.current(hub, &context).is_ok()
+                && native.current(hub, &context, pump).is_ok()
         })
         && context.expected.as_ref().is_some_and(|expected| {
             source.node_id == expected.value["node_id"].as_str().unwrap_or_default()

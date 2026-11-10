@@ -29,7 +29,8 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
   const [keep, setKeep] = createSignal(true);
   const busy = () => state.working() || !!view()?.busy;
   const adoptionBusy = () => adoption.working() || !!adoptionView()?.busy;
-  const changing = () => state.working() || !!view()?.changing || adoptionBusy() || !!adoptionView()?.changing;
+  // A running adoption never holds the dialog open: closing only hides it, and reopening shows the same original.
+  const changing = () => state.working() || !!view()?.changing;
   const preview = () => { const p = view()?.preview; return p?.id === validPreview() && p?.alias === alias() ? p : undefined; };
   const differs = () => !!preview()?.initialized && !preview()?.same_swarm;
   const loading = () => !!requested() && busy() && view()?.mode === "preview";

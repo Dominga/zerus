@@ -152,6 +152,22 @@ describe("Project adoption controller", () => {
     state.dispose();
   });
 
+  it("closes while an original adoption is running without another request", async () => {
+    const calls: string[] = [];
+    const running = { ...adoptionFrame(), busy: true, changing: true, can_preview: false, status: "The original adoption call is still settling." };
+    const state = createAdoption(port(async (command) => {
+      calls.push(command);
+      if (command === "project_adoption_open" || command === "project_adoption_view") return running;
+      if (command === "project_adoption_close") return running;
+      throw Error(`unexpected ${command}`);
+    }));
+    await state.open();
+    expect(await state.adopt()).toBe(false);
+    expect(await state.close()).toBe(true);
+    expect(calls).toEqual(["project_adoption_open", "project_adoption_view", "project_adoption_close"]);
+    state.dispose();
+  });
+
   it("allows explicit read-only status but never a resume mutation", async () => {
     const calls: string[] = [];
     const state = createAdoption(port(async (command) => {

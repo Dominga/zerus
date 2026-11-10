@@ -70,7 +70,26 @@ fn fixture(config: Value, allowed: bool) -> (Fake, Organization, Arc<Mutex<Value
         serde_json::to_vec(&config).unwrap(),
     )
     .unwrap();
-    let org = fake.organization(&Pump::default(), allowed);
+    let pump = Pump::default();
+    for (computer, node, host) in [
+        ("", NODE, "workstation"),
+        ("empty-peer", PEER_NODE, "peer-observed-host"),
+    ] {
+        pump.push(Change::Computer {
+            computer: ComputerId(computer.into()),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(Change::Machine {
+            computer: ComputerId(computer.into()),
+            machine: zerus_client_core::MachineMeta {
+                machine_id: Some(node.into()),
+                host: Some(host.into()),
+                ok: Some(true),
+                ..Default::default()
+            },
+        });
+    }
+    let org = fake.organization(&pump, allowed);
     let cache = Arc::new(Mutex::new(local()));
     let source = cache.clone();
     org.set_source(Arc::new(move || {
@@ -273,5 +292,221 @@ fn actual_output_pipe_drain_precedes_native_settlement() {
     });
     assert_eq!(calls(&fake, "adopt").len(), 1);
     assert_eq!(view(&org, &id)["error"], false);
+    fake.finish(org);
+}
+
+/// Change one independently observed native card, or stop the hub, through
+/// the production Pump path (the change lands in the mirror first).
+fn drift_original_card(org: &Organization, computer: &str, change: &str) {
+    let pump = &org.0.pump;
+    let id = ComputerId(computer.into());
+    match change {
+        "offline" => pump.push(Change::Computer {
+            computer: id,
+            status: zerus_client_core::ComputerStatus::Reconnecting { attempt: 1 },
+        }),
+        "live" => pump.push(Change::Computer {
+            computer: id,
+            status: zerus_client_core::ComputerStatus::Live,
+        }),
+        "host" | "machine" => {
+            let mut card = pump.machine(&id).unwrap();
+            if change == "host" {
+                card.host = Some("changed-native-host".into());
+            } else {
+                card.machine_id = Some("00000000-0000-4000-8000-000000000099".into());
+            }
+            pump.push(Change::Machine {
+                computer: id,
+                machine: card,
+            });
+        }
+        "stopped" => org.lock().stopped = true,
+        _ => panic!("unknown drift fixture"),
+    }
+}
+
+const DRIFTS: [(&str, &str); 7] = [
+    ("", "offline"),
+    ("", "host"),
+    ("", "machine"),
+    ("empty-peer", "offline"),
+    ("empty-peer", "host"),
+    ("empty-peer", "machine"),
+    ("", "stopped"),
+];
+
+/// The dialog consumed its last call: nothing queued, running or draining.
+fn idle(org: &Organization) -> bool {
+    org.lock().adoption.as_ref().unwrap().idle_for_tests()
+}
+
+#[test]
+fn current_native_cards_refuse_held_preflight_drift_before_mutation() {
+    for (computer, change) in DRIFTS {
+        let mut settings = config();
+        settings["machines"] = json!([
+            {"stdout": machines()}, {"stdout": machines()}, {"stdout": machines(), "gate": "hold-current"},
+        ]);
+        let (fake, org, _) = fixture(settings, true);
+        let id = open(&org);
+        preview(&org, &id);
+        org.adoption_request(Some(&id), Some(Action::Adopt), false)
+            .unwrap();
+        wait_until("the held original preflight", || {
+            calls(&fake, "machine").len() >= 3
+        });
+        drift_original_card(&org, computer, change);
+        std::fs::write(fake.dir.join("hold-current"), b"release").unwrap();
+        wait_until("the consumed preflight disposition", || idle(&org));
+        assert!(calls(&fake, "adopt").is_empty(), "{computer}/{change}");
+        assert!(
+            org.lock().sync.busy(),
+            "the original ticket stays held: {computer}/{change}"
+        );
+        if change != "stopped" {
+            assert_eq!(view(&org, &id)["can_resume"], true, "{computer}/{change}");
+        }
+        fake.finish(org);
+    }
+}
+
+#[test]
+fn current_native_cards_keep_late_drift_status_only() {
+    for (computer, change) in DRIFTS {
+        let mut settings = config();
+        settings["adopt"] =
+            json!([{"complete_adoption_receipt": "settled", "gate": "hold-current"}]);
+        settings["adoption-status"] =
+            json!([{"stdout": {"journal": {"phase": "unknown"}}, "echo": ["request_id"]}]);
+        let (fake, org, _) = fixture(settings, true);
+        let id = open(&org);
+        preview(&org, &id);
+        org.adoption_request(Some(&id), Some(Action::Adopt), false)
+            .unwrap();
+        wait_until("the held terminal reply", || {
+            calls(&fake, "adopt").len() == 1
+        });
+        drift_original_card(&org, computer, change);
+        std::fs::write(fake.dir.join("hold-current"), b"release").unwrap();
+        wait_until("the consumed terminal disposition", || idle(&org));
+        assert!(
+            org.lock().sync.busy(),
+            "late drift cannot finish the original: {computer}/{change}"
+        );
+        assert_eq!(calls(&fake, "adopt").len(), 1);
+        if change != "stopped" {
+            org.adoption_request(Some(&id), Some(Action::Status), false)
+                .unwrap();
+            wait_until("the read-only original status", || {
+                view(&org, &id)["busy"] == false
+                    && view(&org, &id)["status"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Original adoption status: unknown"))
+            });
+            assert!(org.lock().sync.busy());
+            assert_eq!(calls(&fake, "adopt").len(), 1, "status never replays");
+        }
+        fake.finish(org);
+    }
+}
+
+#[test]
+fn observed_drift_stays_refused_after_the_card_returns() {
+    let mut settings = config();
+    settings["get"] = json!([{"stdout": local()}, {"stdout": local(), "gate": "hold-fresh"}]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    // The terminal reply settled; its fresh read is held while the selected
+    // destination card goes offline, so settlement observes the drift.
+    wait_until("the held fresh read", || calls(&fake, "get").len() >= 2);
+    drift_original_card(&org, "empty-peer", "offline");
+    std::fs::write(fake.dir.join("hold-fresh"), b"release").unwrap();
+    wait_until("the refused settlement", || idle(&org));
+    assert!(org.lock().sync.busy());
+    drift_original_card(&org, "empty-peer", "live");
+    org.adoption_settle_for_tests();
+    assert!(
+        org.lock().sync.busy(),
+        "a restored card revived the original after observed drift"
+    );
+    assert_eq!(calls(&fake, "adopt").len(), 1);
+    fake.finish(org);
+}
+
+#[test]
+fn unchanged_live_cards_still_settle_the_original() {
+    let (fake, org, _) = fixture(config(), true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    wait_until("the settled original", || !org.lock().sync.busy());
+    assert_eq!(calls(&fake, "adopt").len(), 1);
+    assert_eq!(view(&org, &id)["error"], false);
+    fake.finish(org);
+}
+
+#[test]
+fn a_retained_adoption_call_keeps_the_desktop_responsive_and_status_only() {
+    let mut settings = config();
+    settings["adopt"] = json!([{
+        "gate": "release-original", "exit": 1,
+        "stderr": "original adoption call is Unknown; its child and pipes settled",
+    }]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    wait_until("the retained original call", || {
+        calls(&fake, "adopt").len() == 1
+    });
+    // The organization worker keeps running its other passes.
+    let before = passes(&org);
+    wait_until("organization passes beside the retained call", || {
+        passes(&org) >= before + 2
+    });
+    // The card reports a settling, unknown original.
+    wait_until("the settling status", || {
+        let current = view(&org, &id);
+        current["busy"] == true
+            && current["status"]
+                .as_str()
+                .is_some_and(|text| text.contains("still settling"))
+    });
+    // Only new adoption admission is closed.
+    for action in [
+        Action::Preview("empty-peer".into()),
+        Action::Adopt,
+        Action::Status,
+    ] {
+        assert!(org
+            .adoption_request(Some(&id), Some(action), false)
+            .is_err());
+    }
+    // The dialog can be closed and reopened onto the same original.
+    org.adoption_request(Some(&id), None, true).unwrap();
+    let reopened = json(org.adoption_request(None, None, false).unwrap());
+    assert_eq!(reopened["id"], id);
+    assert_eq!(reopened["busy"], true);
+    std::fs::write(fake.dir.join("release-original"), b"release").unwrap();
+    wait_until("the unknown disposition", || {
+        let current = view(&org, &id);
+        current["busy"] == false && current["can_resume"] == true
+    });
+    assert!(org.lock().sync.busy(), "an unknown result never settles");
+    assert_eq!(view(&org, &id)["error"], true);
+    org.adoption_request(Some(&id), Some(Action::Status), false)
+        .unwrap();
+    wait_until("the read-only original status", || {
+        view(&org, &id)["busy"] == false
+    });
+    assert!(org.lock().sync.busy());
+    assert_eq!(calls(&fake, "adopt").len(), 1, "no replay");
+    assert_eq!(calls(&fake, "adoption-status").len(), 1);
     fake.finish(org);
 }

@@ -274,9 +274,13 @@ pub fn run(started: Started) -> u8 {
             connector.stopping.set();
             code
         };
-        let (code, ()) =
-            futures_util::future::join(work, session_labels::serve(&connector, labels.as_ref()))
-                .await;
+        // Keep the large request future off the stack before join copies its
+        // inputs. Debug Windows executables reserve only 1 MiB for this thread.
+        let (code, ()) = futures_util::future::join(
+            Box::pin(work),
+            session_labels::serve(&connector, labels.as_ref()),
+        )
+        .await;
         code
     });
     // Usage refreshes still running are dropped, which kills their children.

@@ -36,7 +36,7 @@ fn a_low_shared_folder_is_named_at_team_start_and_in_status_with_the_owners_step
     set_test_low(Some(vec![checkout.clone(), line.clone(), own.clone()]));
     let found = low_shared_folders(&team);
     assert_eq!(found.iter().map(|low| low.what.as_str()).collect::<Vec<_>>(), vec!["the team folder", "the integration folder"], "{found:?}");
-    let step = format!("icacls \"{}\" /setintegritylevel (OI)(CI)M /T /C /Q", checkout.display());
+    let step = format!("icacls \"{}\" /setintegritylevel \"(OI)(CI)M\" /T /C /Q", checkout.display());
     assert!(found[0].text().starts_with("The team folder ") && found[0].text().contains(&step), "{}", found[0].text());
     // At team start: the preflight names each one (a warning: the owner's
     // step, never a block of the team).

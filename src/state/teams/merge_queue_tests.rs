@@ -1894,7 +1894,7 @@ fn a_pipeline_returned_attempt_does_not_block_its_rework() {
 #[test]
 fn a_low_integrity_refusal_is_an_environment_failure() {
     let text = format!(
-        "test a ... FAILED\n{} D:\\Tools\\Zerus carries Windows' Low integrity label ...\n  icacls \"D:\\Tools\\Zerus\" /setintegritylevel (OI)(CI)M /T /C /Q\nand start DeepSeek sessions in their own worktree",
+        "test a ... FAILED\n{} D:\\Tools\\Zerus carries Windows' Low integrity label ...\n  icacls \"D:\\Tools\\Zerus\" /setintegritylevel \"(OI)(CI)M\" /T /C /Q\nand start DeepSeek sessions in their own worktree",
         crate::state::teams::environment::MARKER
     );
     assert!(environment_excerpt(&text));

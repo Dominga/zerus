@@ -1775,7 +1775,7 @@ The merge queue checks a suite's folder, its `target` and a named target
 folder before it runs: a Low build folder with an ordinary TEMP is one result
 with status `failed`, flag `environment` and an excerpt starting
 `Environment failure:`, which names the folder that carries the label and the
-owner's step (`icacls "<folder>" /setintegritylevel (OI)(CI)M /T /C /Q`, no
+owner's step (`icacls "<folder>" /setintegritylevel "(OI)(CI)M" /T /C /Q`, no
 administrator needed, and DeepSeek sessions in their own worktree); nothing
 runs, nothing is retried, and the landing stays queued without reopening the
 task. A failed `hgs run`, member template or queued suite whose output was
@@ -9142,7 +9142,7 @@ A folder Zerus did not
 create (a direct, existing or custom folder) is checked first: when a right is
 missing the session does not start, and the member's error — shown in the Lead's
 inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
-one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
+one-line fix `icacls "<folder>" /grant "*<SID>:(OI)(CI)F"`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
 
 **DeepSeek members whose host is starting.** One DeepSeek host serves every

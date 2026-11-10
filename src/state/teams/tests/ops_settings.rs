@@ -609,7 +609,7 @@ fn only_the_owner_overrides_the_test_configuration() {
     let mut team = running_team();
     let none = BTreeSet::new();
     let mut events = Vec::new();
-    let tests = json!({"full":{"policy":"standing"},"provider":[{"name":"tray","disabled":true}]});
+    let tests = json!({"full":{"policy":"standing"},"provider":[{"name":"replica","disabled":true}]});
     let error = apply(&mut team, "settings", &json!({"settings":{"tests":tests}}), &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();

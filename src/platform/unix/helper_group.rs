@@ -99,9 +99,31 @@ impl<'a> Group<'a> {
             .ok()
             .filter(|&id| id > 0)
             .ok_or_else(|| io::Error::other("invalid helper PID"))?;
+        #[cfg(target_os = "macos")]
+        let mut exited = exited;
         // The unreaped original leader reserves precisely this owned PGID.
         if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
+            // The leader may have exited after the caller saw it live, or be
+            // exiting: XNU refuses the signal before waitid reports it. Its
+            // unreaped exit, seen within a short bound, is the same proof,
+            // and the PID is then never signalled below.
+            #[cfg(target_os = "macos")]
+            if !exited && error.raw_os_error() == Some(libc::EPERM) {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    match self.exited() {
+                        Ok(Some(_)) => {
+                            exited = true;
+                            break;
+                        }
+                        Ok(None) if std::time::Instant::now() < until => {
+                            std::thread::sleep(std::time::Duration::from_millis(2))
+                        }
+                        _ => break,
+                    }
+                }
+            }
             #[cfg(target_os = "macos")]
             let zombie_only =
                 exited && error.raw_os_error() == Some(libc::EPERM) && sole_member(pid);

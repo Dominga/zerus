@@ -14,7 +14,9 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = '''#!/usr/bin/env python3
 import json, os, pathlib, shlex, subprocess, sys
-if sys.argv[-1].startswith('echo "hgs-remote-v2|'): print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
+if sys.argv[-1].startswith('echo "hgs-remote-v2|'):
+    with (pathlib.Path(os.environ['SWARM_TEST_ROOT']) / 'probe-argv.jsonl').open('a') as file: file.write(json.dumps(sys.argv[1:]) + '\\n')
+    print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 root = pathlib.Path(os.environ['SWARM_TEST_ROOT'])
 alias = sys.argv[-2]
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
@@ -331,6 +333,35 @@ class SwarmAdoption(unittest.TestCase):
 
     def test_adopts_into_uninitialized_destination_with_all_history_and_only_source_membership(self):
         self.adopt(False)
+
+    def probes(self):
+        path = self.root / 'probe-argv.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_only_adoption_discovery_probes_skip_connection_sharing(self):
+        # setUp's ordinary remote operations (preview/join/sync with c) keep
+        # the configured connection sharing exactly.
+        ordinary = self.probes()
+        self.assertTrue(ordinary)
+        self.assertTrue(all('ControlPath=none' not in argv for argv in ordinary), ordinary)
+        self.empty_destination(False)
+        for command in (['adoption-preview', 'b', '--json'], ['adopt', 'b', '--json']):
+            (self.root / 'probe-argv.jsonl').unlink(missing_ok=True)
+            if command[0] == 'adopt':
+                self.call('a', *command, data=self.options(self.call('a', 'adoption-preview', 'b', '--json')))
+                # The preview above probed too; keep only the adopt call's own.
+                probes = self.probes()[1:]
+            else:
+                self.call('a', *command)
+                probes = self.probes()
+            self.assertTrue(probes, command)
+            for argv in probes:
+                control = next((i for i in range(len(argv) - 1) if argv[i:i + 2] == ['-o', 'ControlPath=none']), None)
+                self.assertIsNotNone(control, (command, argv))
+                self.assertLess(control, argv.index('b'), argv)
+        (self.root / 'probe-argv.jsonl').unlink(missing_ok=True)
+        self.call('a', 'sync')
+        self.assertTrue(all('ControlPath=none' not in argv for argv in self.probes()), self.probes())
 
     def test_adopts_bootstrapped_pending_and_preserves_the_marker(self):
         self.adopt(True)

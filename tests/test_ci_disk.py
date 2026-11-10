@@ -210,7 +210,14 @@ if report:
     assert sys.argv[1] == 'report'
 with pathlib.Path(os.environ['CI_FIXTURE_LOG']).open('a') as stream:
     stream.write(json.dumps({'kind': 'report' if report else 'command', 'name': name, 'args': sys.argv[1:]}) + '\\n')
-sys.exit(13 if name == os.environ.get('CI_FIXTURE_FAIL') else 0)
+if name == os.environ.get('CI_FIXTURE_FAIL'):
+    sys.exit(13)
+if name == 'cargo' and sys.argv[2:3] == ['build'] and '--bin' in sys.argv:
+    # Like Cargo, leave the built candidate CLI where the Tauri tests expect it.
+    cli = pathlib.Path(os.environ['CARGO_TARGET_DIR'], 'debug', 'hgs')
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text('#!/bin/sh\\n')
+    cli.chmod(0o700)
 '''
             (scripts / "ubuntu-disk.py").write_text(recorder)
             binaries = workspace / "bin"

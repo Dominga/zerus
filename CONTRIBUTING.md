@@ -57,7 +57,11 @@ tests run as several jobs unless they share a class fixture, slowest first by
 the previous local run, or else by `scripts/ci/python-durations.json`.
 `ZERUS_PYTHON_JOBS` bounds Python test parallelism; logs live under ignored
 `artifacts/test-results/`. Zerus Next's Rust core and Tauri host have their own
-manifests/locks and maintained `client-native-*` CI jobs. The Qt build/test tree
+manifests/locks and maintained `client-native-*` CI jobs. The Tauri host's
+drive-folder integration tests run the actual CLI from the same source: build it
+with `cargo +1.99.1 build --locked --bin hgs` and set `HGS_TEST_BIN` to that
+binary's absolute path; `scripts/ci/client-native.sh` does both in its own
+target directory. The Qt build/test tree
 is retired; historical migration fixtures remain read-only compatibility data.
 Zerus tracks the newest
 stable Rust: `rust-version` and the toolchain pinned in CI follow the latest

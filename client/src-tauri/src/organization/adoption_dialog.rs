@@ -164,6 +164,13 @@ enum Step {
     Mutation,
     Status,
     Fresh,
+    /// After a restart: this computer's journal for the disclosed request.
+    DisclosedLocal(String),
+    /// Then, for a source original, the destination's read-only status.
+    DisclosedRemote {
+        request_id: String,
+        local_phase: String,
+    },
 }
 
 struct Work {
@@ -231,8 +238,19 @@ impl Context {
         !matches!(self.stage, Stage::Idle | Stage::Source)
     }
 
-    fn view(&self, _hub: &Hub) -> Result<View, String> {
-        let can_resume = self.ticket.is_some() && self.adoption.is_some() && !self.active();
+    /// After a restart this dialog holds no original; the organization read
+    /// may still disclose one. That is data for a read-only status lookup,
+    /// never a ticket, a continuation or a mutation.
+    fn disclosed_review(&self, hub: &Hub) -> Option<(String, String)> {
+        if self.disabled || self.ticket.is_some() || self.adoption.is_some() || self.active() {
+            return None;
+        }
+        disclosed(hub)
+    }
+
+    fn view(&self, hub: &Hub) -> Result<View, String> {
+        let can_resume = (self.ticket.is_some() && self.adoption.is_some() && !self.active())
+            || self.disclosed_review(hub).is_some();
         Ok(View {
             id: self.id.clone(),
             aliases: self.aliases.clone(),
@@ -334,6 +352,16 @@ impl Context {
                 self.changing = true;
                 self.status = "Copying the complete project catalog…".into();
                 self.stage = Stage::Queued(read_work(Step::AdoptConfig, Read::Machines)?);
+            }
+            Action::Resume | Action::Status if self.adoption.is_none() => {
+                let (request_id, _) = self.disclosed_review(hub).ok_or(EXTERNAL_CHANGED)?;
+                self.status =
+                    "Reviewing the disclosed original adoption status. No new mutation will be sent."
+                        .into();
+                self.stage = Stage::Queued(Work {
+                    invocation: adoption::local_status_invocation(&request_id)?,
+                    step: Step::DisclosedLocal(request_id),
+                });
             }
             Action::Resume | Action::Status => {
                 let adoption = self.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?;
@@ -484,6 +512,56 @@ impl Context {
                 self.receipt = Some(reply);
                 self.stage = Stage::Queued(read_work(Step::Fresh, Read::Swarm)?);
             }
+            Step::DisclosedLocal(request_id) => {
+                let reply = object(exit)?;
+                let journal = &reply["journal"];
+                if reply["schema"] != 1
+                    || reply["request_id"] != request_id.as_str()
+                    || journal["original"]["request_id"] != request_id.as_str()
+                {
+                    return Err(adoption::INVALID.into());
+                }
+                let phase = disclosed_phase(&journal["phase"])?;
+                match journal["role"].as_str() {
+                    Some("source") => {
+                        let alias = journal["original"]["source_alias"]
+                            .as_str()
+                            .filter(|alias| self.aliases.iter().any(|known| known == alias))
+                            .ok_or("The disclosed original names a computer that is not configured here.")?
+                            .to_owned();
+                        self.stage = Stage::Queued(Work {
+                            invocation: adoption::status_invocation(&alias, &request_id)?,
+                            step: Step::DisclosedRemote {
+                                request_id,
+                                local_phase: phase,
+                            },
+                        });
+                    }
+                    Some("destination") => {
+                        self.status = format!(
+                            "Disclosed original adoption: this computer {phase}. Review manually; this status is read-only."
+                        );
+                        self.error = true;
+                        self.stage = Stage::Idle;
+                    }
+                    _ => return Err(adoption::INVALID.into()),
+                }
+            }
+            Step::DisclosedRemote {
+                request_id,
+                local_phase,
+            } => {
+                let reply = object(exit)?;
+                if reply["request_id"] != request_id.as_str() {
+                    return Err(adoption::INVALID.into());
+                }
+                let remote = disclosed_phase(&reply["journal"]["phase"])?;
+                self.status = format!(
+                    "Disclosed original adoption: this computer {local_phase}, destination {remote}. Review manually; this status is read-only."
+                );
+                self.error = true;
+                self.stage = Stage::Idle;
+            }
             Step::Fresh => {
                 let value = reads::decode(&Read::Swarm, exit).map_err(|e| e.to_string())?;
                 self.expected = Some(Observation::from_reply(value).ok_or(adoption::INVALID)?);
@@ -495,9 +573,39 @@ impl Context {
     }
 }
 
-/// Only the three fixed adoption calls run as a private helper group.
+/// Only the three fixed adoption calls run as a private helper group
+/// (the disclosed remote status is adoption-status too).
 fn group_custody(step: &Step) -> bool {
-    matches!(step, Step::Preview(_) | Step::Mutation | Step::Status)
+    matches!(
+        step,
+        Step::Preview(_) | Step::Mutation | Step::Status | Step::DisclosedRemote { .. }
+    )
+}
+
+/// The request and role the organization read discloses (`adoption`), if any.
+fn disclosed(hub: &Hub) -> Option<(String, String)> {
+    let local = hub.sync.observed_value()?;
+    let adoption = local.get("adoption")?;
+    let request_id = adoption["request_id"].as_str()?;
+    let role = adoption["role"].as_str()?;
+    (uuid::Uuid::parse_str(request_id).is_ok()
+        && request_id == request_id.to_ascii_lowercase()
+        && matches!(role, "source" | "destination"))
+    .then(|| (request_id.to_owned(), role.to_owned()))
+}
+
+/// A recorded phase name, shown only as bounded snake_case text.
+fn disclosed_phase(value: &Value) -> Result<String, String> {
+    value
+        .as_str()
+        .filter(|phase| {
+            (1..=40).contains(&phase.len())
+                && phase
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| adoption::INVALID.into())
 }
 
 #[cfg(all(test, unix))]
@@ -511,6 +619,14 @@ pub(super) fn group_custody_for_tests() -> Vec<(&'static str, bool)> {
         ("mutation", Step::Mutation),
         ("status", Step::Status),
         ("fresh", Step::Fresh),
+        ("disclosed-local", Step::DisclosedLocal(String::new())),
+        (
+            "disclosed-remote",
+            Step::DisclosedRemote {
+                request_id: String::new(),
+                local_phase: String::new(),
+            },
+        ),
     ]
     .into_iter()
     .map(|(name, step)| (name, group_custody(&step)))

@@ -83,6 +83,8 @@ elif len(args) == 3 and args[0] == "swarm" and args[1] in ("preview", "join"):
     action = args[1]
 elif len(args) == 4 and args[0] == "swarm" and args[1] in ("adoption-preview", "adopt", "adoption-status") and args[3] == "--json":
     action = args[1]
+elif args == ["swarm", "adoption-status", "--json"]:
+    action = "adoption-status-local"
 elif len(args) == 2 and args[0] == "swarm" and args[1] in ("get", "apply", "sync", "resolve"):
     action = args[1]
 else:

@@ -659,6 +659,108 @@ fn only_the_three_fixed_adoption_calls_run_as_a_private_group() {
             ("mutation", true),
             ("status", true),
             ("fresh", false),
+            ("disclosed-local", false),
+            ("disclosed-remote", true),
         ]
     );
+}
+
+const DISCLOSED: &str = "00000000-0000-4000-8000-0000000000d1";
+
+/// A desktop restarted after an unknown original: no ticket or original in
+/// memory, only the organization projection's disclosure (zerus-qfnw6.8).
+fn restarted(role: &str, alias: &str, local_request: &str) -> (Fake, Organization) {
+    let mut settings = config();
+    settings["adoption-status-local"] = json!([{"stdout": {
+        "schema": 1, "request_id": local_request, "guard_present": false,
+        "journal": {"schema": 1, "role": role, "phase": if role == "source" { "source_pending" } else { "main_committed" },
+            "original": {"request_id": local_request, "source_alias": alias}},
+    }}]);
+    settings["adoption-status"] = json!([{"stdout": {"schema": 1, "guard_present": false,
+        "journal": {"phase": "remote_committed"}}, "echo": ["request_id"]}]);
+    let (fake, org, cache) = fixture(settings, true);
+    let mut disclosed = local();
+    disclosed["adoption"] = json!({"state": "pending", "ordinary_writes": true,
+        "request_id": DISCLOSED, "role": role, "phase": "source_pending"});
+    *cache.lock().unwrap() = disclosed.clone();
+    org.observe(&state_of(&disclosed));
+    (fake, org)
+}
+
+#[test]
+fn a_disclosed_source_original_offers_read_only_status_after_restart() {
+    let (fake, org) = restarted("source", "empty-peer", DISCLOSED);
+    let id = open(&org);
+    let before = view(&org, &id);
+    assert_eq!(before["can_resume"], true, "{before}");
+    assert_eq!(before["can_adopt"], false);
+    org.adoption_request(Some(&id), Some(Action::Status), false)
+        .unwrap();
+    wait_until("the disclosed original status", || idle(&org));
+    let done = view(&org, &id);
+    let status = done["status"].as_str().unwrap();
+    assert!(status.contains("this computer source_pending"), "{status}");
+    assert!(status.contains("destination remote_committed"), "{status}");
+    assert!(status.contains("read-only"), "{status}");
+    assert_eq!(calls(&fake, "adoption-status").len(), 2);
+    let remote: Value = serde_json::from_str(
+        calls(&fake, "adoption-status")[1]["stdin"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remote, json!({"request_id": DISCLOSED}));
+    assert!(calls(&fake, "adopt").is_empty(), "never a mutation");
+    assert!(!org.lock().sync.busy(), "no ticket is created");
+    assert_eq!(done["can_adopt"], false);
+    fake.finish(org);
+}
+
+#[test]
+fn a_disclosed_destination_original_reads_only_this_computer() {
+    let (fake, org) = restarted("destination", "", DISCLOSED);
+    let id = open(&org);
+    org.adoption_request(Some(&id), Some(Action::Status), false)
+        .unwrap();
+    wait_until("the disclosed local status", || idle(&org));
+    let status = view(&org, &id)["status"].as_str().unwrap().to_owned();
+    assert!(status.contains("this computer main_committed"), "{status}");
+    assert_eq!(calls(&fake, "adoption-status").len(), 1, "no remote call");
+    assert!(!org.lock().sync.busy());
+    fake.finish(org);
+}
+
+#[test]
+fn a_disclosed_original_with_another_peer_or_request_never_calls_out() {
+    for (alias, request) in [
+        ("unconfigured-peer", DISCLOSED),
+        ("empty-peer", "00000000-0000-4000-8000-0000000000d2"),
+    ] {
+        let (fake, org) = restarted("source", alias, request);
+        let id = open(&org);
+        org.adoption_request(Some(&id), Some(Action::Status), false)
+            .unwrap();
+        wait_until("the refused disclosed status", || idle(&org));
+        let done = view(&org, &id);
+        assert_eq!(done["error"], true, "{alias}/{request}");
+        assert_eq!(
+            calls(&fake, "adoption-status").len(),
+            1,
+            "{alias}/{request}"
+        );
+        assert!(calls(&fake, "adopt").is_empty());
+        fake.finish(org);
+    }
+}
+
+#[test]
+fn without_a_disclosure_there_is_no_status_action() {
+    let (fake, org, _) = fixture(config(), true);
+    let id = open(&org);
+    assert_eq!(view(&org, &id)["can_resume"], false);
+    assert!(org
+        .adoption_request(Some(&id), Some(Action::Status), false)
+        .is_err());
+    assert!(calls(&fake, "adoption-status").is_empty());
+    fake.finish(org);
 }

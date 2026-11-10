@@ -258,14 +258,16 @@ impl Worker {
             if !crate::window_theme::can_show(&window) {
                 return;
             }
+            // Regular before the window appears, or Mission Control keeps it
+            // out of Spaces moves (zerus-ywz55).
             #[cfg(not(windows))]
-            {
+            crate::lifecycle::regular_first(&app, || {
                 let _ = window.unminimize();
                 let _ = window.show();
                 // Not Windows: no synthetic Alt here (clippy.toml).
                 #[allow(clippy::disallowed_methods)]
                 let _ = window.set_focus();
-            }
+            });
             // Never Tao's set_focus here: it falls back to a synthetic Alt.
             #[cfg(windows)]
             {

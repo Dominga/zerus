@@ -90,6 +90,21 @@ class SwitchBundle(unittest.TestCase):
         self.assertEqual(json.loads((ROOT / "client/src-tauri/tauri.conf.json").read_text())["identifier"], "dev.zerus.next",
                          "the dev app keeps its own identity")
 
+    def test_the_window_appears_only_after_the_app_turns_regular(self):
+        # zerus-ywz55: the LaunchAgent starts the app hidden, so it is Accessory
+        # until the window opens. A window that appears first stays out of
+        # Mission Control's Spaces moves even after the app turns regular.
+        src = ROOT / "client/src-tauri/src"
+        lifecycle = (src / "lifecycle.rs").read_text()
+        show_main = lifecycle[lifecycle.index("pub fn show_main("):lifecycle.index("pub fn request_main(")]
+        self.assertIn("None => regular_first(app, || crate::create_main_window(app))?", show_main)
+        unix = show_main[show_main.index("#[cfg(not(windows))]"):]
+        self.assertLess(unix.index("regular_first(app, ||"), unix.index("window.show()"))
+        layer = (src / "window_layer.rs").read_text()
+        present = layer[layer.index("    fn present(&self"):layer.index("    fn run(mut self")]
+        unix = present[present.index("#[cfg(not(windows))]"):present.index("#[cfg(windows)]")]
+        self.assertLess(unix.index("crate::lifecycle::regular_first(&app, ||"), unix.index("window.show()"))
+
     def test_native_entry_precedes_renderer_and_is_not_tied_to_gui_live_data(self):
         main = (ROOT / "client/src-tauri/src/main.rs").read_text()
         # The authenticated callback is now passed to the entry dispatcher;

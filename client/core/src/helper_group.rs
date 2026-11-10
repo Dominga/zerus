@@ -98,8 +98,13 @@ fn signal_and_reap(child: &mut Child, exited: bool) -> io::Result<ExitStatus> {
         // the group contains only our unreaped leader. Do not ignore arbitrary
         // EPERM: a fixed two-PID kernel query must prove that exact sole member.
         // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c
+        // The leader may also have exited after the caller saw it live, or be
+        // exiting: XNU refuses the signal before waitid reports it. Its
+        // unreaped exit, seen within a short bound, is the same proof.
         #[cfg(target_os = "macos")]
-        let zombie_only = exited && error.raw_os_error() == Some(libc::EPERM) && sole_member(pid);
+        let zombie_only = error.raw_os_error() == Some(libc::EPERM)
+            && (exited || exit_visible(child))
+            && sole_member(pid);
         #[cfg(not(target_os = "macos"))]
         let zombie_only = false;
         if error.raw_os_error() != Some(libc::ESRCH) && !zombie_only {
@@ -107,6 +112,22 @@ fn signal_and_reap(child: &mut Child, exited: bool) -> io::Result<ExitStatus> {
         }
     }
     child.wait()
+}
+
+/// Waits up to two seconds for an exiting leader's exit to be reported.
+/// Unsupported inspection or a leader still live after that stays refused.
+#[cfg(target_os = "macos")]
+fn exit_visible(child: &Child) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match exited_unreaped(child) {
+            Ok(true) => return true,
+            Ok(false) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(2))
+            }
+            _ => return false,
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -120,4 +141,38 @@ fn sole_member(pid: libc::pid_t) -> bool {
         )
     };
     found == 1 && members[0] == pid
+}
+
+#[cfg(all(test, unix))]
+mod late_exit_tests {
+    use super::*;
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+
+    /// zerus-c7yqf: terminate() saw the leader live, then it exited before
+    /// killpg. XNU reports EPERM for that zombie-only group; the exit is still
+    /// verified, so the leader is reaped instead of its admission pinned.
+    #[test]
+    fn a_leader_that_exits_after_the_live_check_is_reaped_not_pinned() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 0"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        prepare(&mut command);
+        let mut child = command.spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !exited_unreaped(&child).unwrap() {
+            assert!(Instant::now() < until, "fixture leader did not exit");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let status = signal_and_reap(&mut child, false)
+            .expect("a verified exited sole leader is reaped, not pinned");
+        assert!(status.success());
+    }
 }

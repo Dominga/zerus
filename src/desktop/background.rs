@@ -441,6 +441,20 @@ impl Runtime {
     pub fn details_open(&mut self, queue: &Arc<Queue>) -> Option<Value> {
         self.details.open(queue)
     }
+    /// `fleet_reconnect` and `fleet_retry_delays_reload`; see [`fleet::request`].
+    pub fn fleet_request(&mut self, request: &Value) -> Value {
+        fleet::request(&mut self.fleet, request)
+    }
+
+    pub fn fleet_connections_revision(&self) -> u64 {
+        self.fleet.connections_revision()
+    }
+
+    /// The bounded connection presentation of an early `fleet_connections` frame.
+    pub fn fleet_connections(&self) -> Value {
+        self.fleet.connections()
+    }
+
     pub fn details_request(&mut self, store: &Store, request: &Value, seq: &mut u64) -> Value {
         let fleet = &self.fleet;
         self.details.request(

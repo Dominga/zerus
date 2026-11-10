@@ -86,6 +86,10 @@ pub struct Snapshot {
     /// This contains no source generations or writer authority.
     #[serde(default)]
     pub fleet_computers: Option<Vec<FleetComputer>>,
+    /// The restart delays the service's supervisors use; None from an older
+    /// service.
+    #[serde(default)]
+    pub fleet_retry_delays: Option<FleetRetryDelays>,
     /// Shared host presentation only. Null and incomplete counts stay unknown.
     pub attention_counts: Option<Value>,
     pub automatic_approvals: Option<bool>,
@@ -106,6 +110,99 @@ pub struct FleetComputer {
     pub id: String,
     pub status: String,
     pub attempt: u32,
+    /// The source a reconnect request names; None from an older service or
+    /// before the computer has a supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
+    /// The supervisor's restart schedule; None from an older service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<FleetRetry>,
+}
+
+/// A service supervisor's restart schedule, as [`crate::RetryOut`] without
+/// its computer: `remaining_ms` was measured from the supervisor's monotonic
+/// deadline when the service built the frame.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FleetRetry {
+    pub phase: String,
+    #[serde(default)]
+    pub serial: u64,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_ms: Option<u64>,
+}
+
+/// The restart delays a service uses, with their source: `default`, `file`,
+/// or `kept` when its saved timings file could not be used (`diagnostic`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FleetRetryDelays {
+    pub delays_seconds: [u64; 4],
+    pub source: String,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
+}
+
+/// The longest restart delay a frame may report, in milliseconds.
+const RETRY_MS: u64 = crate::stream::RESTART_MAX_SECS * 1000;
+
+fn checked_retry(value: &Value) -> Option<FleetRetry> {
+    let phase = value["phase"].as_str()?;
+    let serial = value["serial"].as_u64().unwrap_or(0);
+    let attempt = u32::try_from(value["attempt"].as_u64().unwrap_or(0)).ok()?;
+    match phase {
+        "idle" => Some(FleetRetry {
+            phase: phase.into(),
+            serial: 0,
+            attempt: 0,
+            delay_ms: None,
+            remaining_ms: None,
+        }),
+        "attempting" => Some(FleetRetry {
+            phase: phase.into(),
+            serial,
+            attempt,
+            delay_ms: None,
+            remaining_ms: None,
+        }),
+        "waiting" => {
+            let delay = value["delay_ms"].as_u64().filter(|ms| *ms <= RETRY_MS)?;
+            let remaining = value["remaining_ms"].as_u64().filter(|ms| *ms <= delay)?;
+            Some(FleetRetry {
+                phase: phase.into(),
+                serial,
+                attempt,
+                delay_ms: Some(delay),
+                remaining_ms: Some(remaining),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn checked_retry_delays(value: &Value) -> Option<FleetRetryDelays> {
+    let seconds: Vec<u64> = value["delays_seconds"]
+        .as_array()?
+        .iter()
+        .map(Value::as_u64)
+        .collect::<Option<_>>()?;
+    crate::stream::checked_restart_delays(&seconds).ok()?;
+    let source = value["source"]
+        .as_str()
+        .filter(|source| matches!(*source, "default" | "file" | "kept"))?;
+    let diagnostic = match &value["diagnostic"] {
+        Value::Null => None,
+        // Bounded presentation of the service's own report about the file.
+        Value::String(text) => Some(text.chars().take(512).collect()),
+        _ => return None,
+    };
+    Some(FleetRetryDelays {
+        delays_seconds: <[u64; 4]>::try_from(seconds).ok()?,
+        source: source.into(),
+        diagnostic,
+    })
 }
 
 /// The service's held task message copies awaiting review.
@@ -139,6 +236,7 @@ impl Default for Snapshot {
             generation: None,
             background: BTreeMap::new(),
             fleet_computers: None,
+            fleet_retry_delays: None,
             attention_counts: None,
             automatic_approvals: None,
             automatic_approval_categories: None,
@@ -279,6 +377,7 @@ impl State {
             generation: Some(generation),
             background,
             fleet_computers: checked_connections(&value["background_runtime"], epoch),
+            fleet_retry_delays: checked_retry_delays(&value["background_runtime"]["retry_delays"]),
             attention_counts: counts,
             automatic_approvals: value["automatic_approvals"].as_bool(),
             automatic_approval_categories: value["automatic_approval_categories"]
@@ -372,6 +471,19 @@ impl State {
                 })
             }
             "error" | "gap" => Err("service_resnapshot_required"),
+            // An early connection presentation between heartbeats. Display
+            // only: one that does not check is ignored, never a disconnect.
+            "fleet_connections" => {
+                let epoch = self.snapshot.epoch.as_deref().unwrap_or_default();
+                let Some(rows) = checked_connections(&value["value"], epoch) else {
+                    return Ok(Update::Other);
+                };
+                self.snapshot.fleet_computers = Some(rows);
+                if let Some(delays) = checked_retry_delays(&value["value"]["retry_delays"]) {
+                    self.snapshot.fleet_retry_delays = Some(delays);
+                }
+                Ok(Update::Status)
+            }
             _ => Ok(Update::Other),
         }
     }
@@ -405,6 +517,11 @@ fn checked_connections(value: &Value, epoch: &str) -> Option<Vec<FleetComputer>>
                 id: id.into(),
                 status: status.into(),
                 attempt: u32::try_from(row["attempt"].as_u64()?).ok()?,
+                incarnation: row["incarnation"]
+                    .as_u64()
+                    .filter(|n| *n > 0 && *n <= i64::MAX as u64),
+                // A schedule that does not check is unknown, not a bad row.
+                retry: checked_retry(&row["retry"]),
             })
         })
         .collect()

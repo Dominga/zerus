@@ -157,6 +157,19 @@ export interface KeyOut { computer: ComputerId; key: string; reason?: string | n
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
 export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "reconnecting" | "ended";
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
+/**
+ * A connection supervisor's restart schedule (core `RetryOut`): `waiting`
+ * carries the delay and the time left, measured from the supervisor's own
+ * monotonic deadline when the report was built; `serial` names the wait.
+ */
+export interface RetryReport { phase: "idle" | "waiting" | "attempting" | string; serial?: number; attempt?: number; delay_ms?: number | null; remaining_ms?: number | null }
+export interface RetryOut extends RetryReport { computer: ComputerId }
+/** One service connection row; `incarnation` and `retry` are absent from an older service. */
+export interface FleetComputer { id: string; status: string; attempt: number; incarnation?: number | null; retry?: RetryReport | null }
+/** The restart delays the background service uses: `default`, `file`, or `kept` when its saved file is not used. */
+export interface FleetRetryDelays { delays_seconds: [number, number, number, number]; source: string; diagnostic?: string | null }
+/** This computer's saved reconnect timings (`hgs machine retry-delays`); `invalid` keeps a file that is not used. */
+export interface RetryDelays { delays_seconds: [number, number, number, number]; defaults: [number, number, number, number]; source: "default" | "file" | "invalid" | string; diagnostic: string | null }
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
 /** The existing watch tasks topic; a list replaces the open project's board. */
@@ -259,7 +272,9 @@ export interface DesktopService {
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
   /** Configured connection presentation only, never source or action authority. */
-  fleet_computers?: null | { id: string; status: string; attempt: number }[];
+  fleet_computers?: null | FleetComputer[];
+  /** The restart delays the service's supervisors use; absent from an older service. */
+  fleet_retry_delays?: null | FleetRetryDelays;
   attention_counts: null | {
     epoch: string; scope: "shared_host_state"; display_only: true; authority: false; local_marks_included: false;
     aggregate: { complete: boolean; total: number | null; attention: number | null; known_total: number; known_attention: number };
@@ -286,6 +301,8 @@ export interface Batch {
   removes: KeyOut[];
   replaces: ReplaceOut[];
   computers: ComputerOut[];
+  /** Restart schedules of this app's own connection supervisors, after `computers`. */
+  retries?: RetryOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
   tasks?: TasksOut[];
@@ -588,6 +605,8 @@ export interface MachinesView {
   /** Exact configuration revision, separate from the hub computation order. */
   connection_revision?: string;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
+  /** This computer's saved reconnect timings; null from an older hgs. */
+  retry_delays?: RetryDelays | null;
 }
 export interface Folder {
   /** The catalog's id, "" when it has none. */

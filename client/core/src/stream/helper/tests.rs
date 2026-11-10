@@ -137,7 +137,7 @@ fn watch_stop_kills_only_its_group_and_next_probe_needs_no_orphan_timeout() {
         Timing {
             silence: Duration::from_secs(2),
             stop_grace: Duration::from_millis(25),
-            restart: [Duration::from_secs(30); 4],
+            restart: [Duration::from_secs(30); 4].into(),
             ..Timing::default()
         },
         tx,

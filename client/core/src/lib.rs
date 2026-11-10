@@ -118,7 +118,7 @@ pub use batch::MachineOut;
 pub use batch::OrganizationOut;
 pub use batch::ProcessesOut;
 pub use batch::TasksOut;
-pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
+pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RetryOut, RowOut};
 pub use fleet::{Fleet, FollowError};
 pub use git::{GitState, GitStatus, GitUpdate};
 pub use machine::{LocalHost, MachineMeta};
@@ -127,7 +127,7 @@ pub use processes::{ProcessesState, ProcessesUpdate};
 pub use reads::{Read, ReadError};
 pub use run::{run, run_cancellable, run_limited, run_with_env, Stopped, TooLarge};
 pub use state::{ActivityState, CatalogState};
-pub use stream::{StreamEvent, StreamHandle, Timing};
+pub use stream::{RestartDelays, StreamEvent, StreamHandle, Timing};
 pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
 pub use view::ViewRow;
@@ -177,8 +177,9 @@ pub enum ComputerStatus {
     /// A stream delivered its catalog snapshot.
     Live,
     /// The stream ended, failed or stayed silent; `attempt` counts the failures
-    /// that set the restart delay (5 s, 15 s, 60 s, then 5 min). Its rows stay
-    /// as last known.
+    /// that set the restart delay (by default 1 s, 2 s, 5 s, then every 10 s;
+    /// see [`stream::RestartDelays`]). Its rows stay as last known. The
+    /// scheduled restart itself is reported by [`Change::Retry`].
     Reconnecting { attempt: u32 },
     /// The computer left the fleet or the fleet stopped.
     Ended,
@@ -201,6 +202,52 @@ impl ComputerStatus {
         match self {
             Self::Reconnecting { attempt } => *attempt,
             _ => 0,
+        }
+    }
+}
+
+/// One restart wait that a computer's supervisor scheduled after a failure.
+/// `deadline` is the very deadline that ends the supervisor's wait, on this
+/// process's monotonic clock, so it is the actual time of the next automatic
+/// attempt, never a client estimate, and wall-clock jumps cannot move it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NextAttempt {
+    /// Distinct for every wait one supervisor schedules.
+    pub serial: u64,
+    /// The failures that chose this delay.
+    pub attempt: u32,
+    pub delay_ms: u64,
+    pub deadline: std::time::Instant,
+}
+
+impl NextAttempt {
+    /// The milliseconds left at `now`; zero once the deadline passed.
+    pub fn remaining_ms(&self, now: std::time::Instant) -> u64 {
+        u64::try_from(self.deadline.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Where a computer's supervisor stands between connection attempts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Retry {
+    /// No restart is waiting or running: connected, first probe, polled,
+    /// unsupported or stopped.
+    #[default]
+    Idle,
+    /// The supervisor waits for this attempt.
+    Waiting(NextAttempt),
+    /// The attempt that wait `serial` scheduled is running now, ahead of its
+    /// time after a manual reconnect or at its deadline.
+    Attempting { serial: u64, attempt: u32 },
+}
+
+impl Retry {
+    /// The snake_case phase name a [`Batch`] and the service carry.
+    pub fn phase(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Waiting(_) => "waiting",
+            Self::Attempting { .. } => "attempting",
         }
     }
 }
@@ -262,6 +309,10 @@ pub enum Change {
         computer: ComputerId,
         status: ComputerStatus,
     },
+    /// The computer's restart schedule; see [`Retry`]. Sent before the
+    /// `Reconnecting` status it belongs to, when the wait ends and when the
+    /// computer leaves `Reconnecting`.
+    Retry { computer: ComputerId, retry: Retry },
     Activity {
         computer: ComputerId,
         key: String,
@@ -299,6 +350,7 @@ impl Change {
             | Self::Remove { computer, .. }
             | Self::Replace { computer, .. }
             | Self::Computer { computer, .. }
+            | Self::Retry { computer, .. }
             | Self::Activity { computer, .. }
             | Self::Processes { computer, .. }
             | Self::Tasks { computer, .. }

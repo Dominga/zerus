@@ -49,6 +49,50 @@ pub struct ComputerOut {
     pub attempt: u32,
 }
 
+/// A computer's restart schedule (see [`crate::Retry`]): `phase` is `idle`,
+/// `waiting` (with `delay_ms` and `remaining_ms`, measured from the
+/// supervisor's own monotonic deadline when this batch was taken) or
+/// `attempting`. `serial` names the wait: a view anchors one countdown per
+/// serial on its own monotonic clock and never restarts it for a resent one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetryOut {
+    pub computer: ComputerId,
+    pub phase: String,
+    #[serde(default)]
+    pub serial: u64,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_ms: Option<u64>,
+}
+
+impl RetryOut {
+    /// `now` is when the view receives it, for the remaining time.
+    pub fn new(computer: ComputerId, retry: crate::Retry, now: std::time::Instant) -> Self {
+        let mut out = Self {
+            computer,
+            phase: retry.phase().to_owned(),
+            ..Self::default()
+        };
+        match retry {
+            crate::Retry::Idle => {}
+            crate::Retry::Waiting(next) => {
+                out.serial = next.serial;
+                out.attempt = next.attempt;
+                out.delay_ms = Some(next.delay_ms);
+                out.remaining_ms = Some(next.remaining_ms(now));
+            }
+            crate::Retry::Attempting { serial, attempt } => {
+                out.serial = serial;
+                out.attempt = attempt;
+            }
+        }
+        out
+    }
+}
+
 /// One Activity update of a followed session. `kind` and `payload`:
 /// `events` and `replace` carry `{events, cursor}`, `event` `{id, rev, event}`,
 /// `state` `{value, rev}` and `ended` null.
@@ -114,7 +158,7 @@ pub struct MachineOut {
 }
 
 /// Everything that changed since the previous batch. The view applies, in
-/// order: `computers`, `machines`, `replaces`, `removes`, `upserts`,
+/// order: `computers`, `retries`, `machines`, `replaces`, `removes`, `upserts`,
 /// `activity`, `processes`, `tasks`, `organizations`, then `groups` and `grouping`. A `replaces`
 /// entry keeps the groups of the keys it keeps: grouping does not resend
 /// unchanged rows after a Replace, so the view must not clear them. `machines` holds
@@ -131,6 +175,9 @@ pub struct Batch {
     pub removes: Vec<KeyOut>,
     pub replaces: Vec<ReplaceOut>,
     pub computers: Vec<ComputerOut>,
+    /// Restart schedules, after `computers`; at most one per computer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retries: Vec<RetryOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<MachineOut>,
     pub activity: Vec<ActivityOut>,
@@ -160,6 +207,7 @@ impl Batch {
             && self.removes.is_empty()
             && self.replaces.is_empty()
             && self.computers.is_empty()
+            && self.retries.is_empty()
             && self.machines.is_empty()
             && self.activity.is_empty()
             && self.processes.is_empty()
@@ -204,6 +252,7 @@ pub struct Coalescer {
     git: BTreeMap<SessionKey, crate::GitUpdate>,
     posters: crate::video_posters::Posters,
     computers: BTreeMap<ComputerId, ComputerStatus>,
+    retries: BTreeMap<ComputerId, crate::Retry>,
     machines: BTreeMap<ComputerId, MachineMeta>,
     replaces: BTreeMap<ComputerId, BTreeMap<String, ViewRow>>,
     rows: BTreeMap<SessionKey, RowChange>,
@@ -291,9 +340,13 @@ impl Coalescer {
             Change::Computer { computer, status } => {
                 if status == ComputerStatus::Ended {
                     self.machines.remove(&computer);
+                    self.retries.remove(&computer);
                     self.posters.forget(&computer, None);
                 }
                 self.computers.insert(computer, status);
+            }
+            Change::Retry { computer, retry } => {
+                self.retries.insert(computer, retry);
             }
             Change::Machine { computer, machine } => {
                 self.machines.insert(computer, machine);
@@ -372,6 +425,10 @@ impl Coalescer {
                 status: status.name().to_owned(),
                 attempt: status.attempt(),
             });
+        }
+        let now = std::time::Instant::now();
+        for (computer, retry) in std::mem::take(&mut self.retries) {
+            batch.retries.push(RetryOut::new(computer, retry, now));
         }
         for (computer, machine) in std::mem::take(&mut self.machines) {
             batch.machines.push(MachineOut { computer, machine });
@@ -506,6 +563,7 @@ impl Coalescer {
                 })
                 .sum();
         self.computers.len()
+            + self.retries.len()
             + self.git.len()
             + self.machines.len()
             + replaced
@@ -518,6 +576,7 @@ impl Coalescer {
 
     pub fn is_empty(&self) -> bool {
         self.computers.is_empty()
+            && self.retries.is_empty()
             && self.git.is_empty()
             && self.machines.is_empty()
             && self.replaces.is_empty()
@@ -880,6 +939,75 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_latest_retry_wins_reports_time_left_and_an_end_drops_it() {
+        let peer = ComputerId::from("studio");
+        let now = std::time::Instant::now();
+        let waiting = |serial: u64| {
+            crate::Retry::Waiting(crate::NextAttempt {
+                serial,
+                attempt: 2,
+                delay_ms: 2000,
+                deadline: now + std::time::Duration::from_secs(2),
+            })
+        };
+        let mut coalescer = Coalescer::new();
+        coalescer.push(Change::Retry {
+            computer: peer.clone(),
+            retry: waiting(1),
+        });
+        coalescer.push(Change::Retry {
+            computer: peer.clone(),
+            retry: waiting(2),
+        });
+        coalescer.push(Change::Retry {
+            computer: local(),
+            retry: crate::Retry::Attempting {
+                serial: 4,
+                attempt: 3,
+            },
+        });
+        assert_eq!(coalescer.pending(), 2);
+        let batch = coalescer.take();
+        assert_eq!(batch.retries.len(), 2);
+        assert_eq!(
+            batch.retries[0],
+            RetryOut {
+                computer: local(),
+                phase: "attempting".into(),
+                serial: 4,
+                attempt: 3,
+                delay_ms: None,
+                remaining_ms: None,
+            }
+        );
+        let wait = &batch.retries[1];
+        assert_eq!((wait.phase.as_str(), wait.serial), ("waiting", 2));
+        assert_eq!(wait.delay_ms, Some(2000));
+        // Measured from the deadline at take time: never more than the delay.
+        assert!(wait
+            .remaining_ms
+            .is_some_and(|left| left <= 2000 && left > 0));
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["retries"][1]["phase"], "waiting");
+        assert!(value["retries"][0].get("remaining_ms").is_none());
+
+        // A computer that ended keeps no schedule behind it.
+        coalescer.push(Change::Retry {
+            computer: peer.clone(),
+            retry: waiting(3),
+        });
+        coalescer.push(Change::Computer {
+            computer: peer,
+            status: ComputerStatus::Ended,
+        });
+        assert!(coalescer.take().retries.is_empty());
+        assert!(serde_json::to_value(Batch::default())
+            .unwrap()
+            .get("retries")
+            .is_none());
     }
 
     fn kinds(batch: &Batch) -> Vec<(&str, &str)> {

@@ -386,12 +386,51 @@ fn contains_word(text: &str, term: &str) -> bool {
 }
 
 /// The lead's text that hands down a decision as a message, which `hgs team
-/// decide` records instead.
+/// decide` records instead. Task #36 (team ede724c4, 2026-11-10): only a
+/// sentence where the owner decides - the owner followed closely by a decision
+/// verb ("the owner decided", "owner says no", "владелец решил") or the owner's
+/// decision named as such ("the owner's decision", "decision of the owner",
+/// "решение владельца"). The word "owner" and a decision word anywhere in the
+/// text are not one: a task hand-out quotes "Owner, 2026-11-10." and its
+/// "Decisions that bind this task (the owner's; ...)" as context, and was
+/// refused.
 pub(crate) fn decision_like(text: &str) -> bool {
+    const VERBS: [&str; 12] = ["decided", "decides", "forbids", "forbade", "forbidden", "решил", "решила", "решили", "решает", "запретил", "запретила", "запрещает"];
+    const NO: [&str; 3] = ["says", "said", "wants"];
     let lower = text.to_lowercase();
-    let owner = ["owner", "владел"].iter().any(|word| lower.contains(word));
-    let decided = ["decided", "decides", "decision", "says no", "said no", "wants no", "forbids", "решил", "решение", "запрет"].iter().any(|word| lower.contains(word));
-    owner && decided
+    for sentence in lower.split(['.', '!', '?', '\n', ';']) {
+        let words: Vec<&str> = sentence
+            .split(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '’'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let owner = |word: &str| word.starts_with("owner") || word.starts_with("владел");
+        for (at, word) in words.iter().enumerate() {
+            if !owner(word) {
+                continue;
+            }
+            // The owner, then a decision verb within five words.
+            let after = &words[at + 1..words.len().min(at + 6)];
+            if after.iter().any(|next| VERBS.contains(next)) {
+                return true;
+            }
+            if after.windows(2).any(|pair| NO.contains(&pair[0]) && pair[1] == "no") {
+                return true;
+            }
+            // "the owner's decision", "решение владельца".
+            if words.get(at + 1).is_some_and(|next| next.starts_with("decision")) {
+                return true;
+            }
+            if at > 0 && words[at - 1].starts_with("решени") {
+                return true;
+            }
+            // "a decision of the owner".
+            let before = &words[at.saturating_sub(3)..at];
+            if before.first().is_some_and(|first| first.starts_with("decision")) && before.contains(&"of") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The generated Decisions section of a spec: every decision that amends it,

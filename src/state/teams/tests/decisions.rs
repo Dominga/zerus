@@ -114,5 +114,14 @@ fn a_card_answer_and_a_message_that_hands_down_a_decision() {
     assert!(decision_like("владелец решил: без Ollama"));
     assert!(!decision_like("Please rebase on the lead branch"));
     assert!(!decision_like("The owner is away tonight"));
+    // Task #36 (team ede724c4): a real decision is still one ...
+    assert!(decision_like("Owner says no to Ollama"));
+    assert!(decision_like("This is the owner's decision: Postgres only"));
+    assert!(decision_like("A decision of the owner: no Ollama"));
+    assert!(decision_like("Решение владельца: без Ollama"));
+    // ... while a hand-out that quotes the owner and its decisions as context is not.
+    assert!(!decision_like("Owner, 2026-11-10. Slice docs/reference.md into CodeLore records, one per heading."));
+    assert!(!decision_like("Task #3: index the guides.\nDecisions that bind this task (the owner's; follow them, and hgs team ask if one seems wrong):\n- d17 (owner, 2026-11-10): extend: Add a phase of 7 tasks -> allowed"));
+    assert!(!decision_like("Ask the owner before you decide on the schema"));
     assert!(refusal("t").contains("hgs team decide --json"));
 }

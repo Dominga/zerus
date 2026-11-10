@@ -211,6 +211,12 @@ pub fn menu_event(app: &AppHandle, id: &str) {
             // Each computer's stream reconnects now (`TrayAgent::refresh`).
             app.state::<crate::commands::AppState>().refresh();
         }
+        // Task #50: the menu's "Open log" (eefaaeadf) on macOS too, as on Windows.
+        Some(MenuAction::OpenLog) => {
+            if let Err(error) = crate::startup_log::open(app) {
+                eprintln!("zerus-client: open log: {error}");
+            }
+        }
         None => {}
     }
 }

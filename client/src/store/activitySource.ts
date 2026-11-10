@@ -24,8 +24,8 @@ export interface ActivitySource {
   olderDone(): boolean;
   /** The session left the list and its Activity stopped. */
   ended(): boolean;
-  /** Reads the page before the oldest event. */
-  loadOlder(): void;
+  /** Reads before the oldest event, optionally from a saved reading window's cursor. */
+  loadOlder(after?: number): void;
   /** Why the last read failed; a read-only source shows it as a notice while set. */
   error(): string | undefined;
   /** The first answer did not come in time (the live follow only); `retry` asks again. */

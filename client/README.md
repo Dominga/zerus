@@ -1606,6 +1606,21 @@ unchanged rows keep their identity and DOM. Only the selected session's Activity
 is followed (newest 100 events); scrolling to the top reads earlier events with
 `after`.
 
+Switching sessions or returning to the Activity tab restores the visible message
+and its viewport offset. A view left at the end continues following new events;
+Latest and Enter on a session row explicitly return to the end. Reading metadata
+is kept for 64 recently visited Activity targets in this window, including child
+targets separately. It contains at most eight row anchors and bounded visible
+disclosure state per target, never transcripts or DOM. If a saved row has left
+the initial tail, Activity requests a window around that message once by its
+saved journal cursor. Missing or expired rows fall back to the saved scroll
+offset without repeatedly reading older pages.
+
+The synthetic `scripts/activity-position-smoke.html` fixture exercises this with
+the real virtualizer and Markdown; serve it with Vite and run it through
+`scripts/menu-smoke.py --title "Zerus Activity reading position regression" --url
+http://127.0.0.1:<port>/scripts/activity-position-smoke.html` on its private Xvfb.
+
 While the window is hidden or minimised the pump asks for nothing and schedules
 no frame; a batch that arrives meanwhile waits, the Rust side keeps folding
 changes into the next one, and the first frame after the window returns applies

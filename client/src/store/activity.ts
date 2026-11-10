@@ -95,6 +95,7 @@ export function createActivity(port: ActivityPort) {
   const revs = new Map<string, number>();
   let span = OLDER_SPAN;
   let olderFrom: number | undefined;
+  let olderAfter = 0;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
   let subscribed: FollowTarget | undefined;
   /** Each follow and Retry is one read attempt: a retired one's late timers, failures and steps are ignored. */
@@ -243,7 +244,7 @@ export function createActivity(port: ActivityPort) {
     if (olderFrom === undefined) return;
     clearTimeout(olderTimer);
     const oldest = oldestSeq();
-    const asked = Math.max(0, olderFrom - span);
+    const asked = olderAfter;
     if (oldest === undefined || oldest >= olderFrom) {
       if (asked === 0) setOlderDone(true);
       span *= 2;
@@ -252,15 +253,17 @@ export function createActivity(port: ActivityPort) {
     setLoadingOlder(false);
   };
 
-  /** Reads events before the oldest one shown, resuming the subscription from further back. */
-  function loadOlder() {
+  /** Reads events before the oldest one shown, optionally restoring a visited window. */
+  function loadOlder(savedAfter?: number) {
     const t = target();
     const oldest = oldestSeq();
     if (!t || subscribed !== t || loadingOlder() || olderDone() || oldest === undefined) return;
     if (oldest <= 1) { setOlderDone(true); return; }
     olderFrom = oldest;
     setLoadingOlder(true);
-    const after = Math.max(0, oldest - span);
+    const after = savedAfter !== undefined && Number.isSafeInteger(savedAfter)
+      ? Math.max(0, Math.min(oldest - 1, savedAfter)) : Math.max(0, oldest - span);
+    olderAfter = after;
     olderTimer = setTimeout(settleOlder, OLDER_TIMEOUT_MS);
     void port.follow(request(t, after)).catch(settleOlder);
   }

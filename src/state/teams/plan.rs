@@ -1522,7 +1522,7 @@ pub(crate) fn prefetch_prerequisites(team: &Team, input: &Value) {
             bases.push(base.to_owned());
         }
     }
-    let deadline = std::time::Instant::now() + PHASE_CHECK_TIMEOUT;
+    let deadline = std::time::Instant::now() + phase_check_timeout();
     let folder = std::path::Path::new(&team.folder);
     for (branch, name) in wanted {
         let reference = if branch {

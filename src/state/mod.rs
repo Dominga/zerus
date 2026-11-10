@@ -162,6 +162,10 @@ mod worktree_maintenance;
 pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {
     effort::account_models(provider, home)
 }
+/// The DeepSeek account's model catalog from its resident host, read only.
+pub(crate) fn dsh_account_models(home: &std::path::Path) -> serde_json::Value {
+    dsh::account_models(home)
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn remember_picker_caller_machine(config:&crate::config::Config,expected:&str) {

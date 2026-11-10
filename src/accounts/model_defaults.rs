@@ -11,7 +11,29 @@ pub(super) struct Defaults {
     effort: String,
 }
 fn supported(provider: &str) -> bool {
-    ["codex", "claude", "kimi"].contains(&provider)
+    ["codex", "claude", "kimi", "dsh"].contains(&provider)
+}
+/// DeepSeek's native reasoning efforts. Saving narrows them to the chosen
+/// model's catalog entry; an unknown stored value fails closed.
+const DSH_EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
+fn valid_effort(provider: &str, effort: &str) -> bool {
+    effort.is_empty()
+        || match provider {
+            "codex" | "claude" => [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ]
+            .contains(&effort),
+            "dsh" => DSH_EFFORTS.contains(&effort),
+            _ => false,
+        }
+}
+/// DeepSeek selects a native route as `provider/model`, with exactly one slash.
+fn valid_model(provider: &str, model: &str) -> bool {
+    safe(model)
+        && (provider != "dsh"
+            || model.split_once('/').is_some_and(|(route, id)| {
+                !route.is_empty() && !id.is_empty() && !id.contains('/')
+            }))
 }
 fn safe(value: &str) -> bool {
     !value.is_empty()
@@ -30,13 +52,8 @@ pub(super) fn validate_catalog(catalog: &Catalog) -> Result<()> {
     for (id, value) in &catalog.model_defaults {
         let provider = provider_for(catalog, id).unwrap_or("");
         if !supported(provider)
-            || !safe(&value.model)
-            || (!value.effort.is_empty()
-                && (!["codex", "claude"].contains(&provider)
-                    || ![
-                        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-                    ]
-                    .contains(&value.effort.as_str())))
+            || !valid_model(provider, &value.model)
+            || !valid_effort(provider, &value.effort)
         {
             return Err(Error::new(1, "Invalid account model defaults."));
         }
@@ -115,13 +132,19 @@ pub(super) fn inspect(config: &Config, id: &str) -> Result<Value> {
             "This agent manages model defaults in its native settings.",
         ));
     }
-    let mut result = crate::state::account_models(&profile.provider, &home);
+    let mut result = models(&profile.provider, &home);
+    // DeepSeek reports its native default (agent-default-model) with its catalog.
+    let provider_defaults = if profile.provider == "dsh" {
+        result["provider_defaults"].take()
+    } else {
+        json!(native(&profile.provider, &home))
+    };
     result["account_id"] = json!(id);
     result["provider"] = json!(profile.provider);
     result["revision"] = json!(revision(&bytes));
     result["defaults"] = json!(catalog.model_defaults.get(id).cloned().unwrap_or_default());
-    result["provider_defaults"] = json!(native(&profile.provider, &home));
-    result["effort_supported"] = json!(["codex", "claude"].contains(&profile.provider.as_str()));
+    result["provider_defaults"] = provider_defaults;
+    result["effort_supported"] = json!(effort_supported(&profile.provider));
     Ok(result)
 }
 pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> {
@@ -141,7 +164,7 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
     if !supported(&profile.provider) || catalog.hidden_profiles.contains(id) {
         return Err(Error::new(
             1,
-            "Choose an available Codex, Claude or Kimi account.",
+            "Choose an available Codex, Claude, Kimi or DeepSeek account.",
         ));
     }
     if model.is_empty() {
@@ -150,9 +173,13 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
         }
         catalog.model_defaults.remove(id);
     } else {
-        let models = crate::state::account_models(&profile.provider, &home);
+        let models = models(&profile.provider, &home);
         let selected=models["models"].as_array().into_iter().flatten().find(|entry|entry["id"]==model)
-            .ok_or_else(||Error::new(1,"The model is unavailable in this account's native catalog. Open the agent once and refresh."))?;
+            .ok_or_else(||Error::new(1,if profile.provider=="dsh" {
+                "The model is unavailable in the running DeepSeek host's catalog. Start or resume a DeepSeek session and refresh."
+            } else {
+                "The model is unavailable in this account's native catalog. Open the agent once and refresh."
+            }))?;
         if !effort.is_empty()
             && (!effort_supported(&profile.provider)
                 || !selected["effort_options"]
@@ -179,7 +206,28 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
     list(config)
 }
 fn effort_supported(provider: &str) -> bool {
-    ["codex", "claude"].contains(&provider)
+    ["codex", "claude", "dsh"].contains(&provider)
+}
+/// The account's model catalog. DeepSeek's comes from the resident host's
+/// read-only catalog method; reading Accounts never starts a host.
+fn models(provider: &str, home: &Path) -> Value {
+    if provider == "dsh" {
+        crate::state::dsh_account_models(home)
+    } else {
+        crate::state::account_models(provider, home)
+    }
+}
+/// The saved DeepSeek launch selection as (provider/model, effort). The launch
+/// applies it to a new session through the host's scoped settings method.
+pub(super) fn launch_selection(config: &Config, provider: &str) -> Result<Option<(String, String)>> {
+    if provider != "dsh" {
+        return Ok(None);
+    }
+    let catalog = decode(&read(config)?)?;
+    Ok(catalog
+        .model_defaults
+        .get("native-dsh")
+        .map(|d| (d.model.clone(), d.effort.clone())))
 }
 pub(super) fn apply(
     config: &Config,
@@ -250,6 +298,37 @@ fn apply_argv(provider: &str, defaults: &Defaults, argv: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deepseek_defaults_are_one_native_route_and_a_native_effort() {
+        let accepted = |id: &str, model: &str, effort: &str| {
+            let mut catalog = Catalog::default();
+            catalog.model_defaults.insert(
+                id.into(),
+                Defaults {
+                    model: model.into(),
+                    effort: effort.into(),
+                },
+            );
+            validate_catalog(&catalog).is_ok()
+        };
+        let route = "deepseek-official/deepseek-flash";
+        assert!(accepted("native-dsh", route, ""));
+        for effort in DSH_EFFORTS {
+            assert!(accepted("native-dsh", route, effort));
+        }
+        for model in ["deepseek-flash", "/deepseek-flash", "deepseek-official/", "a/b/c", "-a/b", ""] {
+            assert!(!accepted("native-dsh", model, "max"), "{model}");
+        }
+        for effort in ["medium", "xhigh", "ultra", "none", "MAX", " max"] {
+            assert!(!accepted("native-dsh", route, effort), "{effort}");
+        }
+        // Other providers keep their own effort vocabularies.
+        assert!(accepted("native-codex", "fixture-model", "high"));
+        assert!(!accepted("native-codex", "fixture-model", "off"));
+        assert!(!accepted("native-kimi", "fixture-model", "high"));
+        assert!(!accepted("native-opencode", route, ""));
+        assert!(effort_supported("dsh") && supported("dsh"));
+    }
     #[test]
     fn native_choices_and_prompt_text_keep_their_meaning() {
         let defaults = Defaults {

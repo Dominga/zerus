@@ -1170,6 +1170,10 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
 pub fn apply_model_defaults(config: &Config, account: &str, provider: &str, argv: &mut Vec<String>) -> Result<()> {
     model_defaults::apply(config, account, provider, argv)
 }
+/// The DeepSeek account's saved launch selection as (provider/model, effort).
+pub fn launch_selection(config: &Config, provider: &str) -> Result<Option<(String, String)>> {
+    model_defaults::launch_selection(config, provider)
+}
 
 #[cfg(test)]
 mod permission_tests {

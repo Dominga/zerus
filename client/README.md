@@ -308,6 +308,30 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
+### Smokes and the single-instance guard
+
+A switch-identity build (`com.hgdev.hgs-tray`) keeps its single-instance guard at
+`/tmp/com.hgdev.hgs-tray-<uid>` (`src-tauri/src/instance_guard.rs`), whatever
+`HOME`, `TMPDIR` or XDG say, so that a changed environment cannot start a second
+GUI. A private test start outside isolation therefore reaches the running GUI.
+Two rules keep tests away from it (zerus-5a99f):
+
+- A measurement or test start (`ZERUS_CLIENT_PERF` non-empty) never forwards to
+  a GUI it did not start. If the guard is held, or another GUI answers at its
+  profile socket, it exits with code 3 and a message; nothing is sent. It never
+  waits for the service socket. Ordinary starts keep the single-instance rule
+  and forward as before.
+- Such a start may name a private guard root, `ZERUS_CLIENT_GUARD_ROOT=<absolute
+  0700 directory owned by the user>`, with the same ownership checks. Without
+  `ZERUS_CLIENT_PERF` the variable is ignored. On Windows a measurement start
+  fails while the canonical GUI runs; there is no private root.
+
+Every app-starting smoke in `client/scripts` starts through
+`scripts/gui_sandbox.py`: bwrap with a private `/tmp`, `/run/user/<uid>`,
+network and IPC, plus a refusal to start the app while a canonical guard is
+reachable. There is no unsandboxed mode. `scripts/test_gui_sandbox.py` requires
+every script that starts a display to use it or to state why not.
+
 ## New session
 
 The New session dialog (`src/store/newSession.ts`, `src/ui/sessions/NewSessionDialog.tsx`)

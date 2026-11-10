@@ -142,7 +142,7 @@ impl Settings {
         }
         {
             let mut state = self.loaded();
-            if state.unreadable.is_some() || state.closed || state.capturing {
+            if state.unreadable.is_some() || state.closed {
                 return Err(REFUSED.into());
             }
             let mut records = records(&state.contents)?;

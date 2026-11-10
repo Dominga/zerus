@@ -20,7 +20,7 @@ fn clone_checkpoint_is_private_durable_and_exactly_replaced() {
         std::env::temp_dir().join(format!("zerus-repository-settings-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
-    let settings = Settings::open(path.clone(), None);
+    let settings = Settings::open(path.clone());
     let initial = settings.repository_checkpoint(KEY).unwrap();
     let mut next = initial.clone();
     next.apply(&Store::Pending(pending()));
@@ -40,7 +40,7 @@ fn clone_checkpoint_is_private_durable_and_exactly_replaced() {
         .is_err());
     assert_eq!(fs::read(&path).unwrap(), bytes);
     drop(settings);
-    let settings = Settings::open(path.clone(), None);
+    let settings = Settings::open(path.clone());
     assert_eq!(settings.repository_checkpoint(KEY).unwrap(), next);
     let mut retired = next.clone();
     retired.apply(&Store::Retired);
@@ -61,7 +61,7 @@ fn future_clone_checkpoint_is_refused_without_rewriting_it() {
     let bytes =
         json!({"version":1,"values":{},"repository_clones":{"version":2,"entries":{}}}).to_string();
     fs::write(&path, &bytes).unwrap();
-    let s = Settings::open(path.clone(), None);
+    let s = Settings::open(path.clone());
     assert!(s.repository_checkpoint(KEY).is_err());
     assert!(s
         .replace_repository_checkpoint(KEY, &Checkpoint::default(), Checkpoint::default())
@@ -109,7 +109,7 @@ fn unknown_pending_fields_are_retained_and_refuse_execution_checkpoint_updates()
     record["future_guard"] = json!(true);
     let bytes=json!({"version":1,"values":{},"repository_clones":{"version":1,"entries":{KEY:{"parent":null,"pending":record,"previous":null}}}}).to_string();
     fs::write(&path, &bytes).unwrap();
-    let settings = Settings::open(path.clone(), None);
+    let settings = Settings::open(path.clone());
     assert!(settings.repository_checkpoint(KEY).is_err());
     assert_eq!(fs::read_to_string(path).unwrap(), bytes);
     drop(settings);

@@ -2001,7 +2001,7 @@ mod tests {
             std::env::temp_dir().join(format!("zerus-processes-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let store = zerus_client_core::settings::Settings::open(dir.join("settings.json"), None);
+        let store = zerus_client_core::settings::Settings::open(dir.join("settings.json"));
         assert_eq!(stored(&store), Settings::default());
         store.set("processes/enabled", json!(true)).unwrap();
         store.set("processes/activeSeconds", json!(0.2)).unwrap();

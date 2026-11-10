@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use zerus_client_core::attachments::{Attachment, Draft};
 use zerus_client_core::drafts::{
-    import_at_start, import_once, import_sources, qt_root, read_draft, read_index, Cursor,
+    import_at_start, import_once, import_sources, read_draft, read_index, Cursor,
     DraftStore, ImportConflict, ImportReport, ImportSource, IndexPage, Loaded, Page, StoredDraft,
     Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED, UNCONFIRMED,
 };
@@ -729,14 +729,13 @@ fn the_import_never_reads_the_stores_own_folder() {
 }
 
 #[test]
-fn startup_import_keeps_next_interim_drafts_but_ignores_qt() {
+fn startup_import_keeps_next_interim_drafts() {
     const CHILD: &str = "ZERUS_TEST_IMPORT_AT_START";
-    const NAME: &str = "startup_import_keeps_next_interim_drafts_but_ignores_qt";
+    const NAME: &str = "startup_import_keeps_next_interim_drafts";
     let other = "studio\nclaude/sample-project/other";
     if let Some(scratch) = std::env::var_os(CHILD).map(PathBuf::from) {
-        // In the child, Qt's and the dev app's stores are under the scratch
-        // folder, wherever this platform keeps them.
-        seed(&qt_root().unwrap(), &[(KEY, draft("from Qt", &[]))]);
+        // In the child, the dev app's store is under the scratch folder,
+        // wherever this platform keeps it.
         let data = if cfg!(windows) {
             scratch.join("appdata")
         } else if cfg!(target_os = "macos") {
@@ -746,11 +745,8 @@ fn startup_import_keeps_next_interim_drafts_but_ignores_qt() {
         };
         let dev = data.join("dev.zerus.next/drafts");
         seed(&dev, &[(other, draft("from the dev app", &[]))]);
-        let before_qt = snapshot(&qt_root().unwrap());
         let store = DraftStore::open(scratch.join("here"));
         import_at_start(&store);
-        assert!(load(&store, KEY).draft.draft.text.is_empty());
-        assert_eq!(snapshot(&qt_root().unwrap()), before_qt);
         assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
         return;
     }

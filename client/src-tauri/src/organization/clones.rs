@@ -476,7 +476,7 @@ mod tests {
                 dir.join("draft"),
                 false,
             );
-            let settings = Settings::open(dir.join("settings.json"), None);
+            let settings = Settings::open(dir.join("settings.json"));
             Self {
                 org,
                 settings,

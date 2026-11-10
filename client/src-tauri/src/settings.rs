@@ -38,7 +38,7 @@ pub const ALWAYS_ON_TOP: &str = "workspace/alwaysOnTop";
 /// `settings-changed` with its key and new value, and Keep Zerus above other
 /// windows applies to the main window at once.
 pub fn open(app: &AppHandle, dir: &Path, replay: bool) -> Store {
-    let settings = Settings::open(dir.join(file(replay)), None);
+    let settings = Settings::open(dir.join(file(replay)));
     // Natively drawn text (tray, menu bar) follows the language saved at startup.
     crate::native_text::configure(&settings.text("workspace/language"));
     let handle = app.clone();
@@ -135,19 +135,6 @@ pub async fn hgs_setting(
     })
     .await
     .map_err(|error| error.to_string())
-}
-
-/// Read-only, key-only migration summary. Journal decoding stays off main.
-#[tauri::command]
-pub async fn settings_legacy_projects(app: AppHandle) -> Result<Value, String> {
-    use tauri::Manager;
-    let organization = app
-        .state::<crate::organization::Organization>()
-        .inner()
-        .clone();
-    tauri::async_runtime::spawn_blocking(move || organization.legacy_project_report())
-        .await
-        .map_err(|_| "Could not read the legacy project import report.".to_owned())
 }
 
 /// Stores one setting and answers with the value now in effect (clamped as

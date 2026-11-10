@@ -14,12 +14,11 @@
 use crate::attachments::{
     Attachment, Draft, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
 };
-use crate::settings::qt::QtValue;
 use crate::operation_recovery::deferred_input::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -271,32 +270,6 @@ pub fn owner(key: &str) -> Owner {
         }
     }
     result
-}
-
-/// Qt's draft store: its settings file's path with `.drafts` appended.
-pub fn qt_root() -> Option<PathBuf> {
-    let home = || {
-        std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)
-    };
-    if cfg!(windows) {
-        std::env::var_os("APPDATA")
-            .filter(|path| !path.is_empty())
-            .map(|path| {
-                PathBuf::from(path)
-                    .join("hgdev")
-                    .join("hgs-tray.ini.drafts")
-            })
-    } else if cfg!(target_os = "macos") {
-        home().map(|home| home.join("Library/Preferences/com.hgdev.hgs-tray.plist.drafts"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| home().map(|home| home.join(".config")))
-            .map(|config| config.join("hgdev").join("hgs-tray.conf.drafts"))
-    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1213,97 +1186,6 @@ pub fn import_at_start(store: &DraftStore) {
     store.import(sources, |_| {});
 }
 
-/// The marker of [`import_qt_forms`], separate from [`IMPORT_MARKER`] so the
-/// two one-time imports retry independently.
-pub const QT_FORMS_MARKER: &str = ".qt-task-forms-v1.json";
-const QT_FORM_KEYS: usize = 512;
-const QT_FORM_TEXT: usize = 64 * 1024;
-const QT_FORM_TOTAL: usize = 4 * 1024 * 1024;
-
-fn qt_form_part(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= 256
-        && !text
-            .chars()
-            .any(|c| c.is_control() || c == '/' || c == '\\')
-}
-
-/// Task 103: the store key of one Qt task-board form, or None for anything
-/// this importer does not write. Qt keeps the task title and the new card's
-/// title under the store's own keys; its legacy note draft was a comment
-/// draft, which this store names by its owner. A pending new-card *request*
-/// is not text and is never replayed.
-fn qt_form_key(key: &str) -> Option<String> {
-    for (prefix, note) in [("tasks/titleDraft/", false), ("tasks/noteDraft/", true)] {
-        if let Some(rest) = key.strip_prefix(prefix) {
-            let (project, task) = rest.split_once('/')?;
-            if !qt_form_part(project) || !crate::creation::canonical_uuid(task) {
-                return None;
-            }
-            return Some(if note {
-                format!("task-comment\n{project}\n{task}")
-            } else {
-                key.to_owned()
-            });
-        }
-    }
-    let rest = key.strip_prefix("tasks/newCard/")?;
-    let (project, leaf) = rest.split_once('/')?;
-    (qt_form_part(project) && leaf == "title").then(|| key.to_owned())
-}
-
-/// Imports Qt's task-board forms (`tasks/titleDraft/*`, `tasks/newCard/*/title`
-/// and the legacy `tasks/noteDraft/*`) once, so no unsent text is lost. A key
-/// this store already holds, empty text and an unreadable existing draft are
-/// left alone; Qt's INI is only read. The marker is written after every
-/// candidate was handled, so a failed save retries at the next start. Bounded
-/// by 512 keys, 64 KiB of text each and 4 MiB in total.
-pub fn import_qt_forms(root: &Path, values: &BTreeMap<String, QtValue>) -> Option<usize> {
-    let marker = root.join(QT_FORMS_MARKER);
-    if marker.exists() {
-        return None;
-    }
-    let _ = fs::create_dir_all(root);
-    let mut imported = 0;
-    let mut failed = false;
-    let mut total = 0;
-    let candidates = values
-        .iter()
-        .filter_map(|(key, value)| Some((qt_form_key(key)?, value)))
-        .take(QT_FORM_KEYS + 1);
-    for (destination, value) in candidates {
-        let QtValue::Text(text) = value else {
-            continue;
-        };
-        if text.is_empty()
-            || text.len() > QT_FORM_TEXT
-            || total + text.len() > QT_FORM_TOTAL
-            || imported >= QT_FORM_KEYS
-        {
-            continue;
-        }
-        let (existing, valid) = load_once(root, &destination);
-        if !valid || !existing.draft.text.is_empty() {
-            continue;
-        }
-        let mut stored = StoredDraft::default();
-        stored.draft.text = text.clone();
-        match save_direct(root, &destination, &stored) {
-            Ok(()) => {
-                imported += 1;
-                total += text.len();
-            }
-            Err(_) => failed = true,
-        }
-    }
-    if !failed {
-        let _ = fs::write(
-            &marker,
-            json!({"version":1,"imported":imported}).to_string(),
-        );
-    }
-    Some(imported)
-}
 
 /// What makes two copies of a draft the same: the text, label, form state
 /// and attachments, not the cursor or delivery flags.

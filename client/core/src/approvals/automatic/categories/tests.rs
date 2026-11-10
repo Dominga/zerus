@@ -283,10 +283,9 @@ fn a_set_permits_only_when_every_required_category_is_on() {
 }
 
 #[test]
-fn category_settings_are_per_computer_flags_never_seeded_from_qt() {
+fn category_settings_are_per_computer_flags() {
     for category in Category::ALL {
         let key = crate::settings::find(category.setting()).unwrap();
-        assert!(!key.seeded, "{}", category.id());
         assert_eq!(key.kind, crate::settings::Kind::Flag(category.default_on()));
     }
 }

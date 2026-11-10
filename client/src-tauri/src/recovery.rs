@@ -338,10 +338,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("zerus-recovery-settle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let store = Store(zerus_client_core::settings::Settings::open(
-            dir.join("settings.json"),
-            None,
-        ));
+        let store = Store(zerus_client_core::settings::Settings::open(dir.join("settings.json")));
         let newest = json!({"order": [9, "w"], "policy": {"revision": 9}});
         let inner = Inner {
             sync: Mutex::new(RecoverySync::new(&newest.to_string())),

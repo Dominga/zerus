@@ -1,5 +1,4 @@
 use super::*;
-use crate::settings::qt::QtValue;
 use serde_json::json;
 
 const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -112,25 +111,6 @@ fn setting_hours_removes_off_clamps_and_keeps_its_bound() {
     assert_eq!(parse(&stored(&small)), small);
     assert_eq!(toggled(0), DEFAULT_HOURS);
     assert_eq!(toggled(6), 0);
-}
-
-#[test]
-fn a_qt_value_imports_only_valid_sessions_that_are_on() {
-    let text = json!({HEX_A: 3, HEX_B: 0, HEX_C: 99, "short": 2}).to_string();
-    let imported = from_qt(&QtValue::Bytes(text.clone().into_bytes())).unwrap();
-    assert_eq!(
-        parse(imported.as_str().unwrap()),
-        parse(&json!({HEX_A: 3, HEX_C: 24}).to_string())
-    );
-    assert_eq!(from_qt(&QtValue::Text(text)).unwrap(), imported);
-    assert_eq!(
-        from_qt(&QtValue::Text(format!(r#"{{"{HEX_B}":0}}"#))),
-        Some(Value::Null)
-    );
-    assert_eq!(from_qt(&QtValue::Text("{}".into())), Some(Value::Null));
-    assert!(from_qt(&QtValue::Text("[1]".into())).is_none());
-    assert!(from_qt(&QtValue::Bytes(vec![0xff, 0xfe])).is_none());
-    assert!(from_qt(&QtValue::Int(3)).is_none());
 }
 
 #[test]

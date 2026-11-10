@@ -1886,7 +1886,6 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         applog::log_latest,
         applog::log_open,
         settings::settings_get,
-        settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,
@@ -2680,13 +2679,6 @@ mod tests {
             data.join("drafts-replay"),
             "a replay never touches the real drafts"
         );
-        if let Some(qt) = zerus_client_core::drafts::qt_root() {
-            let root = drafts_root(data, false);
-            assert!(
-                !root.starts_with(&qt) && !qt.starts_with(&root),
-                "Qt's store is only read"
-            );
-        }
     }
 
     /// Every `text!`/`source!` literal in the app is a catalog source, so the

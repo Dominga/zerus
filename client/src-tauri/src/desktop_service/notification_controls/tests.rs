@@ -69,7 +69,7 @@ impl Fixture {
     fn setup(&self) -> Setup {
         Setup {
             source: Source::default(),
-            settings: Settings::open(self.0.join("settings.json"), None),
+            settings: Settings::open(self.0.join("settings.json")),
         }
     }
     async fn connect(&self, owner: &Arc<Controller>, responder: Arc<Responder>) -> Arc<Session> {

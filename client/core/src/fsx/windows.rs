@@ -1,6 +1,5 @@
 //! Shared Windows managed-file primitives extracted from the read-marks checkpoint.
 //! Local no-reparse parent pins, private ACL, single-link exclusive original handles.
-pub(crate) mod qt;
 
 use std::{
     fs::{File, OpenOptions},
@@ -568,29 +567,4 @@ impl Opened {
         }
         Ok(data)
     }
-}
-
-/// Retry only a pre-open sharing violation, at most 200 ms and never beyond
-/// the original capture deadline. No write or publication is retried here.
-pub(crate) fn capture_with_deadline(
-    path: &Path,
-    limit: usize,
-    deadline: std::time::Instant,
-) -> io::Result<Option<Opened>> {
-    for attempt in 0..=20 {
-        if std::time::Instant::now() >= deadline {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        match capture(path, limit) {
-            Err(e) if e.raw_os_error() == Some(32) && attempt < 20 => {
-                std::thread::sleep(
-                    deadline
-                        .saturating_duration_since(std::time::Instant::now())
-                        .min(std::time::Duration::from_millis(10)),
-                );
-            }
-            result => return result,
-        }
-    }
-    unreachable!()
 }

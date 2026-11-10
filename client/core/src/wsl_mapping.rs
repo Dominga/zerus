@@ -593,56 +593,6 @@ impl Presets {
             mapping_id: string(saved, "mapping_id").to_owned(),
         }
     }
-    /// Task 102: Qt's presets (`pathMappings/<key>`, TrayAgent.cpp:430,
-    /// WslPathMapping.h), read from a snapshot of its store (read-only) and
-    /// written once, only when this device has no presets file yet. The key
-    /// is the same hash of the same identity in both clients; each value is
-    /// the mapping object, at most 16 KiB; at most 64 presets. Returns how
-    /// many it wrote, or None when it wrote nothing.
-    pub fn seed_from_qt(
-        &self,
-        values: &BTreeMap<String, crate::settings::qt::QtValue>,
-    ) -> Option<usize> {
-        if self.path.exists() {
-            return None;
-        }
-        let mut all: BTreeMap<String, Value> = BTreeMap::new();
-        for (key, value) in values {
-            let Some(hash) = key.strip_prefix("pathMappings/") else {
-                continue;
-            };
-            if hash.len() != 64
-                || !hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                continue;
-            }
-            let text = value.to_text();
-            if text.len() > PRESET_LIMIT {
-                continue;
-            }
-            let Some(mapping) = serde_json::from_str::<Value>(&text)
-                .ok()
-                .filter(Value::is_object)
-            else {
-                continue;
-            };
-            all.insert(hash.to_owned(), mapping);
-            if all.len() == PRESETS {
-                break;
-            }
-        }
-        if all.is_empty() {
-            return None;
-        }
-        let bytes = serde_json::to_vec(&all).ok()?;
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        crate::fsx::write_private_atomic(&self.path, &bytes, true).ok()?;
-        Some(all.len())
-    }
     pub fn store(&self, key: &str, mapping: &Value) -> Result<(), Text> {
         if mapping.to_string().len() > PRESET_LIMIT {
             return Err(crate::text!("The mapping is too large to remember."));

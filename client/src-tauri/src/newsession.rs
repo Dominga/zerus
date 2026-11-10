@@ -914,7 +914,7 @@ mod tests {
     fn reading_malformed_remembered_accounts_does_not_rewrite_the_store() {
         let dir =
             std::env::temp_dir().join(format!("zerus-launch-settings-{}", uuid::Uuid::new_v4()));
-        let settings = zerus_client_core::settings::Settings::open(dir.join("settings.json"), None);
+        let settings = zerus_client_core::settings::Settings::open(dir.join("settings.json"));
         settings
             .set("workspace/launchAgent", json!("claude"))
             .unwrap();

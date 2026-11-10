@@ -622,6 +622,7 @@ dialog.session-file { width: min(520px, calc(100vw - 32px)); max-width: calc(100
   .cmp-model { min-width: 0; flex: 0 1 auto; }
   .cmp-model-name { min-width: 0; }
   .cmp-model-suffix, .cmp-model > svg { flex: none; white-space: pre; }
+  .cmp-model > .cmp-model-warn { color: var(--z-color-warn); }
   dialog.cmp-settings-dialog { width: min(420px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
   .cmp-settings-dialog .field { width: 100%; }
   .cmp-settings-models { border: 0; padding: 0; margin: 0; min-width: 0; }

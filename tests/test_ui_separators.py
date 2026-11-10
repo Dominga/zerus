@@ -20,7 +20,6 @@ class UISeparators(unittest.TestCase):
         self.scanner = self.root / "scripts/check-ui-separators.py"
         self.scanner.parent.mkdir()
         shutil.copyfile(ROOT / "scripts/check-ui-separators.py", self.scanner)
-        self.write("client/i18n/shared/zerus_ru.ts", '<TS><source>Old value · other value</source></TS>')
 
     def write(self, relative, value):
         path = self.root / relative
@@ -33,10 +32,13 @@ class UISeparators(unittest.TestCase):
                               stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, encoding="utf-8", timeout=10)
 
-    def test_shared_linguist_input_is_data_not_rendered_ui(self):
+    def test_the_shared_catalog_is_scanned_like_every_ui_source(self):
+        # Task #28 (team ede724c4): the retired Qt XML catalog had its own
+        # exemption; the shared JSON catalog has none.
+        self.write("client/i18n/shared/zerus_ru.json", json.dumps({"Example": "left · right"}, ensure_ascii=False))
         result = self.check()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("No separator dots", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("client/i18n/shared/zerus_ru.json", result.stdout.replace("\\", "/"))
 
     def test_generated_runtime_catalog_rejects_every_forbidden_character(self):
         for char in FORBIDDEN:

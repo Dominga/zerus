@@ -45,7 +45,7 @@ commands and channels.
   - `deliverMessage`, `finishMessage`, `reconcileMessages`, about 4855-4990.
 - `tray/src/CacheStatus.h`: `expired`, `warning`, `chipState`, `details`.
 - `tray/src/ComposerDraftStore.cpp`, `MessageComposer.cpp` (Saved drafts, about
-  1232) and `tray/update-installed.py` (`drafts_dir`, `snapshot`, `changed_drafts`).
+  1232) and `packaging/desktop/update-installed.py` (`drafts_dir`, `snapshot`, `changed_drafts`).
 - `tray/src/speech/`: `SpeechRecorder`, `SpeechClient`, `SpeechComposer`, `RoundVideo`;
   `services/mobile/relay/src/voice_video.rs` (the video payload's limits).
 
@@ -407,7 +407,7 @@ actions they return on `Lane::Write`.
     de-duplicated by key and content hash.
   - `zerus-5wmh.12` (packaging and updates): the client's updater quits the
     client gracefully, flushes, snapshots and verifies its drafts root, as
-    `tray/update-installed.py` does for Qt's.
+    `packaging/desktop/update-installed.py` does for Qt's.
 - [ ] Tests:
   - ordering under coalescing;
   - a crash between the blob and manifest writes;

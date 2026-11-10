@@ -66,7 +66,7 @@ function proposal(over: Partial<TeamProposalView> & { id: string; kind: string }
   return { by: "Lead", at: 2000, reason: "", hash: `h${over.id.slice(1)}`, summary: over.kind, lines: [], change: null, member: null, ...over };
 }
 
-/** The permission question of tray/tests/fixtures/hgs-team-member-question.json. */
+/** The permission question of tests/fixtures/desktop/hgs-team-member-question.json. */
 const QUESTION = {
   answer: { allow: "1", deny: "2", question_id: "approval" }, asked_at: 1792990000, command: "cargo test --locked",
   command_source: "tool_input", question_hash: "6f2b0e3a", question_id: "claude-approval:6f2b0e3a", reason: "cargo test --locked", tool: "Bash",

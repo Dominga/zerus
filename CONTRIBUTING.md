@@ -63,23 +63,10 @@ tests and terminal smoke tests, then runs the Python integration test classes in
 parallel fresh processes and builds a release binary. Classes larger than twelve
 tests run as several jobs unless they share a class fixture, slowest first by
 the previous local run, or else by `scripts/ci/python-durations.json`. The
-desktop script builds with `BUILD_TESTING=ON` and runs the complete Qt suite
-headlessly in parallel (`build` or `test` runs only that half). Each suite
-registered with `zerus_add_test` also writes per-function JUnit results to
-`artifacts/test-results/qt-functions/`. The sessions window's tests run as
-area suites, `test_sessionswindow_<area>` (list, inspector, composer,
-questions, push, shortcuts, launch, lifecycle, projects, machines, files,
-OpenCode, teams and settings, the larger areas in numbered parts), each a few
-minutes, sharing the fixture in `tray/tests/support/SessionsWindowFixture.*`.
-`tray/tests/RunQtShard.cmake` can still split a long suite into shards of its
-functions and data rows, balanced by `tray/tests/qt-shard-durations.txt`;
-`scripts/ci/qt-shard-seed.py` rebuilds that file from the `qt-functions`
-results of the CI desktop jobs. Tray
-sources compile once, into the `hgs-tray-*` static libraries that the
-application and the suites link: a new suite links the lowest library that
-covers its code instead of listing `tray/src` files, which fails configuration.
-`ZERUS_TEST_JOBS` sets both test parallelisms (defaults: at most 16 Python and
-8 Qt jobs, never more than the CPU count; `1` runs them one after another);
+desktop is the Tauri client (`client/`); task #28 removed the Qt desktop, its
+CMake build and its QtTest suites.
+`ZERUS_TEST_JOBS` sets the test parallelism (default: at most 16 Python jobs,
+never more than the CPU count; `1` runs them one after another);
 `ZERUS_PYTHON_JOBS` overrides it for the Python classes. Test logs and Python
 job durations live in ignored `artifacts/test-results/`. Set
 `ZERUS_BUILD_JOBS` to limit desktop build parallelism. Zerus tracks the newest
@@ -425,7 +412,7 @@ rewrites arguments that look like POSIX paths when it starts a Windows program: 
 `MSYS_NO_PATHCONV=1` before passing remote paths such as `/workspace/orbit` to
 `hgs.exe`. A check against a real peer is described in
 [the real-peer smoke](docs/ci-and-aur.md#real-peer-smoke-on-a-windows-pc).
-`tray/tools/export-windows-icon.py` (Pillow) regenerates the checked-in Windows icon
+`packaging/desktop/export-windows-icon.py` (Pillow) regenerates the checked-in Windows icon
 after artwork changes.
 
 `test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and

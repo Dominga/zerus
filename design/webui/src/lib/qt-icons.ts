@@ -7,7 +7,7 @@
 // y down, so a positive Qt span is sweep-flag 0), drawPoint -> a zero-length round-cap
 // line, translate/rotate -> transform. Consecutive lines that share an end point are
 // merged into one polyline; with round caps and joins the painted region is identical.
-// `github` and `zerus` reuse tray/resources/icons/github-mark.svg and
+// `github` and `zerus` reuse packaging/desktop/icons/github-mark.svg and
 // hgs-zerus-symbolic.svg, filled with the icon colour like the Qt SourceIn fill.
 //
 // A few small glyphs painted outside WorkspaceIcons.h are ported as named entries on

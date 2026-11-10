@@ -3,7 +3,7 @@
   "name": "Z Carapace",
   "version": "0.5.7",
   "concept": "assets/z-carapace-v5-1024.png",
-  "app_master": "../../tray/resources/icons/zerus-carapace-master.png",
+  "app_master": "../../packaging/desktop/icons/zerus-carapace-master.png",
   "tray": "Vector Swarm blades with count badge, rendered by tray/src/IconFactory.cpp",
   "selection": "User selected Swarm monochrome for tray, window and small app icons; large artwork remains Z Carapace",
   "symbolic": "swarm-symbolic-v6",

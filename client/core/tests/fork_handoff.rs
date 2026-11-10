@@ -215,18 +215,16 @@ fn run_helper(program: &Path, args: &[String], root: &Path) -> std::process::Out
     output
 }
 
-/// The Qt updater's helper text, as `ForkUpdater::startInstall` writes it.
+/// The Qt updater's helper text, as `ForkUpdater::startInstall` wrote it.
+/// Task #28 (team ede724c4): the Qt sources are gone; an installed Qt build
+/// still hands over with this text, kept as fixtures cut from the last
+/// tray/src/ForkUpdater.cpp (its versionedHead/installHead, bannerScript and
+/// versionedBody/installBody raw strings).
 fn qt_helper(versioned: bool) -> String {
-    let source = include_str!("../../../tray/src/ForkUpdater.cpp").replace("\r\n", "\n");
-    let script = |name: &str| {
-        let start = format!("const char *{name} = R\"PS(");
-        let at = source.find(&start).unwrap() + start.len();
-        source[at..at + source[at..].find(")PS\";").unwrap()].to_owned()
-    };
     if versioned {
-        format!("{}{}{}", script("versionedHead"), script("bannerScript"), script("versionedBody"))
+        include_str!("fixtures/qt-fork-helper/versioned.ps1").to_owned()
     } else {
-        format!("{}{}{}", script("installHead"), script("bannerScript"), script("installBody"))
+        include_str!("fixtures/qt-fork-helper/plain.ps1").to_owned()
     }
 }
 

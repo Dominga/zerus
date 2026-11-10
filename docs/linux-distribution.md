@@ -7,7 +7,7 @@ installations and private sessions.
 
 ## What the installer preserves
 
-`tray/install.sh` keeps the executable name `hgs-tray`, the application desktop
+`packaging/desktop/install.sh` keeps the executable name `hgs-tray`, the application desktop
 entry, and the `hgs-tray.service` user unit. The service starts the selected
 binary. The desktop entry runs `hgs-tray --sessions`,
 which opens Sessions through the existing single-instance socket. A second
@@ -43,7 +43,7 @@ imports GUI-specific library paths into the user manager. Custom units,
 drop-ins, symlinks and registrations for another configuration are kept for
 manual review. Pacman never writes user homes or starts services.
 Because the live Next source installer preflights this registration, a user
-drop-in on `hgs-desktop.service` also blocks `tray/install.sh` GUI updates until
+drop-in on `hgs-desktop.service` also blocks `packaging/desktop/install.sh` GUI updates until
 the customization is deliberately reviewed and removed.
 
 For a separate configuration, pass absolute `--config-dir` and `--state-dir`
@@ -167,7 +167,7 @@ owner's installed GUI or real `~/.local` for these checks.
 ```sh
 export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
 export HGS_INSTALL_PREFIX="$PWD/target/linux-switch-check"
-HGS_LINUX_GUI=client bash tray/install.sh
+HGS_LINUX_GUI=client bash packaging/desktop/install.sh
 ```
 
 A nonempty `HGS_INSTALL_PREFIX` has these boundaries:
@@ -186,7 +186,7 @@ Verify the installed identity and launch files:
 grep -E 'ExecStart|Exec=' \
   "${HGS_INSTALL_PREFIX}/lib/systemd/user/hgs-tray.service" \
   "${HGS_INSTALL_PREFIX}/share/applications/hgs-tray.desktop"
-python3 tray/update-installed.py \
+python3 packaging/desktop/update-installed.py \
   --installed-gui "${HGS_INSTALL_PREFIX}/bin/hgs-tray"
 ```
 
@@ -210,7 +210,7 @@ python3 -m unittest discover -s tests -p 'test_tray_update*.py' -v
 cargo +1.99.1 clippy --locked --manifest-path client/media/Cargo.toml \
   --all-targets -- -D warnings
 cargo +1.99.1 test --locked --manifest-path client/media/Cargo.toml --features video
-bash -n tray/install.sh
+bash -n packaging/desktop/install.sh
 ```
 
 The matrix covers Qt to client, client to newer client, rollback to Qt, both
@@ -230,7 +230,7 @@ backend; an unchanged running backend stays alive.
 ```sh
 cd CLEAN_MAIN_CHECKOUT
 export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
-HGS_LINUX_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-linux-switch.log
+HGS_LINUX_GUI=client bash packaging/desktop/install.sh 2>&1 | tee ~/zerus-linux-switch.log
 ```
 
 The updater quits Qt through its normal draft-saving path, swaps the binary,
@@ -245,7 +245,7 @@ Verify without using the display:
 systemctl --user status hgs-tray.service
 cat ~/.local/share/hgs/build-provenance.json
 ls -l ~/.local/share/hgs/desktop-previous/hgs-tray
-python3 tray/update-installed.py --installed-gui ~/.local/bin/hgs-tray
+python3 packaging/desktop/update-installed.py --installed-gui ~/.local/bin/hgs-tray
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -274,7 +274,7 @@ The coordinator and owner then check on the real display:
 
 ## Previous Next build and retained Qt image
 
-Use `python3 tray/update-installed.py --rollback ~/.local/bin/hgs-tray` to
+Use `python3 packaging/desktop/update-installed.py --rollback ~/.local/bin/hgs-tray` to
 restore a verified previous Next build through the same draft/process checks.
 Each successful update keeps its verified replaced Next build in
 `desktop-previous`. A displaced Qt or unclassified rollback image gets a unique

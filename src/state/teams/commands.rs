@@ -2153,8 +2153,10 @@ fn owner_change(store: &mut Store, op: &str, value: &Value) -> anyhow::Result<Va
     let team = store.load(&team_id)?.context("Unknown team")?;
     let tree = tree_around(&team, &mut |id| store.load(id))?;
     ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
-    store.mutate(Some((&request, value)), &team_id, None, |team, events| {
-        ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
+    super::plan::with_prerequisites_read(&team, op, &filled, || {
+        store.mutate(Some((&request, value)), &team_id, None, |team, events| {
+            ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
+        })
     })
 }
 
@@ -2377,11 +2379,14 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         }
         "cancel-tasks" => {
             let mut cancelled = 0;
+            let current = store.load(&team_id)?.context("Unknown team")?;
             for id in change["tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
                 let request = uuid::Uuid::new_v4().to_string();
                 let value = json!({"team":team_id,"request_id":request,"by":"human","task":id});
-                store.mutate(Some((&request, &value)), &team_id, None, |team, events| {
-                    super::ops::apply(team, "cancel", &value, &Actor::Human, &BTreeSet::new(), events)
+                super::plan::with_prerequisites_read(&current, "cancel", &value, || {
+                    store.mutate(Some((&request, &value)), &team_id, None, |team, events| {
+                        super::ops::apply(team, "cancel", &value, &Actor::Human, &BTreeSet::new(), events)
+                    })
                 })?;
                 cancelled += 1;
             }
@@ -2390,8 +2395,11 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "discard-phase" => {
             let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
             let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase});
-            store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
-                super::ops::apply(team, "discard-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+            let current = store.load(&team_id)?.context("Unknown team")?;
+            super::plan::with_prerequisites_read(&current, "discard-phase", &value, || {
+                store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                    super::ops::apply(team, "discard-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+                })
             })?
         }
         "next-goal" => {
@@ -3093,8 +3101,10 @@ pub(crate) fn apply_team_outbox(store: &mut Store, parent: &Team, member: &Membe
         .context("The queued team call is outside the member's own scratch scope")?;
     let request_id = request["request_id"].as_str().unwrap_or_default();
     let actor = Actor::Member(member.id.clone());
-    let value = store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
-        ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+    let value = super::plan::with_prerequisites_read(&child, op, input, || {
+        store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
+            ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+        })
     })?;
     Ok(value)
 }
@@ -6434,10 +6444,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Task 287: a report's git reads run before the store's lock and are
             // served inside it; task #362: a lead's use-last-reply reads the
             // member's folder the same way.
-            let reporting = if matches!(op, "report" | "use-last-reply") && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            // Task #41 (team ede724c4): an operation that runs the phase checks
+            // reads their Git prerequisites the same way.
+            let reporting = if (matches!(op, "report" | "use-last-reply") && !parent_lead) || ops::checks_phases(op) {
+                store.load(team_id).ok().flatten()
+            } else {
+                None
+            };
             let prefetch = || {
                 if let Some(team) = reporting.as_ref() {
-                    if let Ok(caller) = actor(team, op, &filled) {
+                    let caller = if parent_lead { Ok(Actor::ParentLead) } else { actor(team, op, &filled) };
+                    if let Ok(caller) = caller {
                         ops::prefetch_git(team, op, &filled, &caller);
                     }
                 }

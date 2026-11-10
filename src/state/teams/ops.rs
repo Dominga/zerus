@@ -4585,6 +4585,11 @@ pub(crate) fn delta_base(team: &Team, folder: &str) -> String {
 /// transaction, for `dispatcher::with_git_answers` to serve inside it: a
 /// report's folder HEAD, branch and test delta (`report_git`).
 pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
+    // Task #41 (team ede724c4): an operation that runs the phase checks reads
+    // their Git prerequisites now, not under the store's write lock.
+    if checks_phases(op) {
+        plan::prefetch_prerequisites(team, input);
+    }
     if !matches!(op, "report" | "use-last-reply") || input["interim"].as_bool() == Some(true) {
         return;
     }
@@ -8238,7 +8243,7 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             team.idle = Notice::None;
         }
     }
-    if run_checks && matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
+    if run_checks && checks_phases(op) && op != "approve-phase" {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
         let deadline = std::time::Instant::now() + plan::phase_check_timeout();
         let checks: Vec<_> = team.phases.iter().map(|phase| {
@@ -8249,6 +8254,16 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
         }
     }
     Ok(result)
+}
+
+/// The operations whose change runs the phase checks: every one recomputes
+/// the draft phases' checks, and approve-phase checks the phase it approves.
+pub(crate) fn checks_phases(op: &str) -> bool {
+    matches!(
+        op,
+        "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task"
+            | "settings" | "approve" | "accept" | "cancel" | "discard-phase" | "approve-phase"
+    )
 }
 
 #[cfg(test)]

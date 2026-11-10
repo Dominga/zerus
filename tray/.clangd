@@ -1,4 +1,0 @@
-# compile_commands.json пишет GCC, а редактор читает его clangd: флаги, которых у clang
-# нет, надо убирать, иначе он отказывается разбирать файл целиком и краснеет на #include.
-CompileFlags:
-  Remove: [-mno-direct-extern-access, -fno-*]

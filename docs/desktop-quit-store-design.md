@@ -96,7 +96,7 @@ Linux launcher passing it. Do not describe those launches as production-admitted
 Coordinator-approved child `zerus-5wmh.66.2.34.3.5` must qualify exact selected CLI
 and configuration origin before durable quit is enabled **anywhere**. It must
 bind the verified executable identity, configuration and fleet, rather than flag
-presence, and qualify both the Mac LaunchAgent and arch `tray/install.sh` launch
+presence, and qualify both the Mac LaunchAgent and arch `packaging/desktop/install.sh` launch
 shapes with private real launches. Fake, old, changed or mismatched executables/
 configuration refuse. This proposal supplies no exception or current caller for
 those shapes; that child requires its own concrete G3/native/security agreement.
@@ -443,8 +443,8 @@ explicit native integration test/review of the new shared freeze gate.
 ### Installer and updater survival
 
 The existing prohibition on killing native agents extends to every admitted
-quit helper and its children. `tray/update-installed.py`, `install.sh`,
-`tray/install.sh`, `mac-install.sh` and the cask/AUR flows must never signal them,
+quit helper and its children. `packaging/desktop/update-installed.py`, `install.sh`,
+`packaging/desktop/install.sh`, `mac-install.sh` and the cask/AUR flows must never signal them,
 including through a process group, executable-name sweep or service teardown.
 They must also finish or report a bounded refusal rather than wait indefinitely
 for a detached helper. Existing cask rules prohibiting GUI quits and LaunchAgent
@@ -454,7 +454,7 @@ reinitializes an unknown generation.
 An executable replacement or GUI relaunch while an old helper drains observes
 the same charged global generation and refuses a second helper. Binary/config
 changes cannot make a fresh admission namespace. Qualification must exercise
-the real-exit route **through `tray/update-installed.py` itself**, with pending
+the real-exit route **through `packaging/desktop/update-installed.py` itself**, with pending
 actions and a draining admitted fixture helper, then start the replacement GUI
 and verify preserved charges, no second helper and actual eventual drain. An
 in-app restart alone does not cover the updater's exit bypass. Exercise maintained
@@ -822,7 +822,7 @@ private controls include:
   real-exit/replacement while draining, bounded installer completion without signals;
 - every export/diagnostics/Private analytics and operator recovery privacy path;
 - exact CLI/configuration-origin child .34.3.5 qualifying BOTH maintained Mac
-  LaunchAgent and arch tray/install.sh private launch shapes before any enabling;
+  LaunchAgent and arch packaging/desktop/install.sh private launch shapes before any enabling;
 - Linux and macOS kernel/private built-app proofs. Windows remains fenced.
 
 Open review decisions are the exact fd-relative VFS/locking mechanism, first-use

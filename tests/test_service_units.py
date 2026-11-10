@@ -28,7 +28,7 @@ def service(text):
 
 class PackagedUnits(unittest.TestCase):
     def test_packaged_and_source_gui_units_kill_only_their_main_process(self):
-        units = sorted((ROOT / "packaging/linux").glob("*.service")) + [ROOT / "tray/packaging/hgs-tray.service"]
+        units = sorted((ROOT / "packaging/linux").glob("*.service")) + [ROOT / "packaging/desktop/hgs-tray.service"]
         self.assertIn(ROOT / "packaging/linux/hgs-recovery.service", units)
         self.assertIn(ROOT / "packaging/linux/hgs-swarm.service", units)
         for unit in units:

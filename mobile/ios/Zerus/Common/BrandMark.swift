@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Swarm mark from tray/resources/icons/hgs-zerus-symbolic.svg, drawn as three
+/// The Swarm mark from packaging/desktop/icons/hgs-zerus-symbolic.svg, drawn as three
 /// rotated blades with the same transforms as the app icon.
 struct BrandMark: Shape {
     func path(in rect: CGRect) -> Path {

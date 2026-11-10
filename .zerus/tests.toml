@@ -19,8 +19,6 @@ ignore = [
     ".gitleaksignore", "packaging/rust-licenses/**", "**/licenses/**",
     # The configuration and its map: `hgs test map --check` answers for them.
     ".zerus/**",
-    # Owner, 2026-11-08: the Qt desktop is out of the supported set; its provider is disabled.
-    "tray/**",
 ]
 
 # The release full run is the fork CI's run of the candidate, on the owner's word.
@@ -56,7 +54,7 @@ max_age_days = 7
 enabled = true
 # The templates that are tests: each runs in .zerus-team/runs/<run> with its
 # own home, data, temporary and XDG folders (the defaults per platform).
-templates = ["cargo-test", "qt-test", "android-test"]
+templates = ["cargo-test", "android-test"]
 # The test programs' and their temporary files' name prefixes: a new entry
 # with one in a watched folder fails the run. In the person's %TEMP%, which
 # other agent sessions share (their hgs-*.json inputs), a new directory with
@@ -200,40 +198,6 @@ root = "crates/lore-bin"
 sources = ["crates/lore-bin/**", "tests/fixtures/secret-scan-vectors.json"]
 command = "cargo test --locked --target-dir ../../target/lore {targets}"
 
-# The Qt desktop: CMake's link lists and the include graph name the files each
-# test binary uses. The build folder is this checkout's; the owner may move it.
-[[provider]]
-name = "tray"
-# Owner, 2026-11-08: only the Tauri client is supported; no Qt builds or tests, so
-# the queue and the affected plans never select this provider. Remove the line to
-# bring the Qt suites back.
-disabled = true
-budget_lines = 86000
-kind = "ctest"
-build_dir = ".ci-build/gui"
-# Task 174: the merge queue builds the merged commit before its suites run
-# (the folder is configured once with qt-configure); members use qt-build and
-# qt-test. The whole Qt set takes about 45 minutes on this computer.
-command = "cmake --build .ci-build/gui && ctest --test-dir .ci-build/gui --output-on-failure {targets}"
-budget_minutes = 60
-sources = ["tray/**"]
-tests = ["tray/tests/test_*.cpp", "tray/tests/test_*.mm"]
-manual = ["tray/tests/test_guiprofile.cpp"]
-elsewhere = [
-    "tray/tests/test_linux*.cpp", "tray/tests/test_kwinwindowlayer.cpp",
-    "tray/tests/test_snitrayicon.cpp", "tray/tests/test_macpresence.cpp",
-    "tray/tests/test_macapplicationbadge.cpp", "tray/tests/test_macappvisibility.cpp",
-    "tray/tests/test_macbackend.cpp", "tray/tests/*.mm",
-    "tray/tests/test_terminationsignals.cpp",
-    # Built only with the embedded native UI plugin.
-    "tray/tests/test_nativeuiplugin.cpp",
-]
-resources = "gui"
-# The installed queue runs ctest on a prebuilt folder without building the
-# merged commit, so on Windows the suite is recorded as not run here; the
-# fork's Windows CI runs only cargo tests. Remove once the queue builds it.
-platforms = ["linux", "macos"]
-
 # The Python suites: a test runs when a file it names or imports changes; the
 # integration tests that start target/debug/hgs run for every CLI change.
 [[provider]]
@@ -244,7 +208,7 @@ root = "tests"
 sources = [
     "tests/**", "scripts/**", "packaging/**", ".github/**", "hgs", "hgs_state.py",
     "install.sh", "mac-install.sh", "tmux.conf", "VERSION", "DEV_VERSION",
-    "tray/update-installed.py", "tray/sign-local-macos.py",
+    "packaging/desktop/update-installed.py", "packaging/desktop/sign-local-macos.py",
 ]
 tests = ["tests/test_*.py"]
 # Real agents and hosts on this computer: never chosen automatically.

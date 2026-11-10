@@ -11,7 +11,7 @@ action, args = sys.argv[3], sys.argv[4:]
 sys.path.insert(0, str(repo / 'tests'))
 from test_macos_desktop_service import Commands, installer
 
-spec = importlib.util.spec_from_file_location('step4_updater', repo / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('step4_updater', repo / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 home = root / 'home'

@@ -13,7 +13,6 @@ import sys
 CHARS = "\u00b7\u2022\u2219\u22c5\u2027\u2981\u30fb"
 PATTERN = re.compile("[" + CHARS + "]")
 TEXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".css", ".html", ".json", ".md", ".svg", ".rs", ".toml"}
-SOURCE_CATALOG = pathlib.Path(__file__).resolve().parents[1] / "client/i18n/shared/zerus_ru.ts"
 SKIP = {"node_modules", "licenses", "dist", "target", "icons", ".git"}
 
 
@@ -26,8 +25,6 @@ def scan(roots):
         for path in sorted(base.rglob("*")):
             if not path.is_file() or path.suffix not in TEXT or SKIP & set(path.parts):
                 continue
-            if path.absolute() == SOURCE_CATALOG:
-                continue  # Qt XML generator input, not rendered UI.
             text = path.read_text(encoding="utf-8", errors="replace")
             for number, line in enumerate(text.splitlines(), 1):
                 for match in PATTERN.finditer(line):

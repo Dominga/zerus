@@ -91,9 +91,9 @@ nothing.
 A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` as
 `ZERUS_FORK_BUILD`, together with the feed address `ZERUS_FORK_FEED_URL`
 (`client/src-tauri/build.rs`; the app accepts only release assets of
-`WhiteWh/zerus` for the latter, as CMake does for a Qt build). Until task #63 the
-fork shipped the Qt desktop (`scripts/package-windows-qt.py`, kept for hand
-builds); every build since is the Tauri app.
+`WhiteWh/zerus` for the latter). Until task #63 the fork shipped the Qt
+desktop; every build since is the Tauri app, and task #28 removed the Qt
+sources and their packager.
 
 ## Feed
 
@@ -178,11 +178,11 @@ upstream releases, have no fork build number and never update this way.
 ### Linux source installation
 
 The Linux updater deliberately supports only the per-user layout installed by
-`install.sh` and `tray/install.sh`: `~/.local/bin/hgs-tray` beside an executable
+`install.sh` and `packaging/desktop/install.sh`: `~/.local/bin/hgs-tray` beside an executable
 `~/.local/bin/hgs`. It does not replace package-managed, system-wide or unknown
 installations.
 
-A newer feed starts `tray/linux-source-update.sh`, installed under
+A newer feed starts `packaging/desktop/linux-source-update.sh`, installed under
 `~/.local/lib/hgs-tray/`. In `~/.cache/hgs/fork-source-update` it creates a clean
 clone of `WhiteWh/zerus`, checks out the feed's exact commit and verifies both
 `HEAD` and a clean tracked tree. It builds the release CLI and GUI there, with
@@ -190,7 +190,7 @@ the feed's build number and update URL. No checkout, build product or installer
 from the developer's working tree is used.
 
 **Restart to install fork build N** verifies that source identity again, then
-runs the maintained `install.sh` and `tray/install.sh`. The old GUI remains
+runs the maintained `install.sh` and `packaging/desktop/install.sh`. The old GUI remains
 usable during any remaining build work. Only the ordinary GUI replacement quits
 it, saves drafts, keeps one rollback copy and starts the verified build; native
 agents and tmux sessions are not stopped. Preparation and installation logs stay

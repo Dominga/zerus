@@ -14,7 +14,7 @@
 //   python3 scripts/menu-smoke.py --title "Zerus Task View flicker regression" --paint-column 100 \
 //     --url http://127.0.0.1:<port>/scripts/task-view-flicker-smoke.html
 // in its own private Xvfb by default; for the arch WebKit, with LD_LIBRARY_PATH
-// and WEBKIT_EXEC_PATH set from that prefix as tray/linux-launcher.py sets them.
+// and WEBKIT_EXEC_PATH set from that prefix as packaging/desktop/linux-launcher.py sets them.
 // `?entrance` restores the mockup's entrance: the detector, which blinks there.
 import { Suspense, lazy } from "solid-js";
 import { render } from "solid-js/web";

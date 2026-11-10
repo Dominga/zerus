@@ -915,7 +915,7 @@ excluded from Android backup.
 ## App icons
 
 Launcher icons reuse the selected Swarm blades from
-[the canonical symbolic SVG](../../tray/resources/icons/hgs-zerus-symbolic.svg),
+[the canonical symbolic SVG](../../packaging/desktop/icons/hgs-zerus-symbolic.svg),
 with the original curves and three rotations. The adaptive foreground is mint
 `#67E8CB` on a full-bleed ink `#101517` background. Both layers use 108 dp; the
 mark is centered at (54, 54), has an outer radius below 33 dp and bounds about

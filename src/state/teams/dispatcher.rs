@@ -2661,7 +2661,10 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     if team.status == TeamStatus::Running {
         let landed = super::merge_queue::landed_by_ancestry(&team, now);
         if !landed.is_empty() {
-            change(store, team_id, |team, events| super::merge_queue::record_landed(team, &landed, now, events).map(|_| ()))?;
+            // Task #41: the accept's phase checks read Git before the lock.
+            super::plan::with_prerequisites_read(&team, "accept", &json!({}), || {
+                change(store, team_id, |team, events| super::merge_queue::record_landed(team, &landed, now, events).map(|_| ()))
+            })?;
             changed = true;
         }
     }
@@ -4883,9 +4886,12 @@ pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -
     impl Drop for Reset {
         fn drop(&mut self) {
             GIT_MEMO.with(|memo| *memo.borrow_mut() = None);
+            super::plan::prerequisite_memo(false);
         }
     }
     GIT_MEMO.with(|memo| *memo.borrow_mut() = Some(std::collections::HashMap::new()));
+    // Task #41: the phase checks' prerequisite reads are served the same way.
+    super::plan::prerequisite_memo(true);
     let _reset = Reset;
     prefetch();
     then()

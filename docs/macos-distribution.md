@@ -235,7 +235,7 @@ Qt. The Mac Qt pin/installer and Qt deployment/notices assembly are retired.
 Historical signed Qt artifacts remain immutable. The public feed's `qt_version`
 and previously sealed cask/candidate validation remain compatible with older
 clients; those fields do not select a new Qt build. Original Qt settings/drafts
-stay read-only migration sources. The Windows Qt source tools remain separate
+are no longer read and stay on disk untouched. The Windows Qt source tools remain separate
 until Windows PC acceptance.
 
 ## Candidates

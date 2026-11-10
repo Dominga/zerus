@@ -204,8 +204,8 @@ pub fn seed(own: Option<&[u8]>, qt: Option<&[u8]>) -> Map<String, Value> {
     }
 }
 
-/// The original seed parser, shared with read-only migration. This only
-/// decodes the saved object; it establishes no live notification identity.
+/// The saved object's decoder. This only decodes the saved object; it
+/// establishes no live notification identity.
 pub(crate) fn decode_observed(bytes: &[u8]) -> Option<Map<String, Value>> {
     match serde_json::from_slice(bytes) {
         Ok(Value::Object(map)) => Some(map),

@@ -15,7 +15,7 @@ start forwards `show` or `sessions`; it does not create another GUI.
 
 Fresh installs and upgrades default to Zerus Next. `HGS_LINUX_GUI=client`
 selects it explicitly. Qt source builds and the Qt installer selection are
-retired; existing Qt settings remain read-only migration input.
+retired; existing Qt settings are no longer read and stay on disk untouched.
 
 The client uses Qt's `com.hgdev.hgs-tray` identity and data root. Its first
 start imports Qt and development-client drafts read-only and seeds its settings

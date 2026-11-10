@@ -3,9 +3,10 @@
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
 agent sessions. The CLI lives in `src/`; the released GUI lives in `client/`. Zerus has
 no Qt code: the desktop installers, the guarded updater, the service units and
-the packaged icons live in `packaging/desktop/`. Read-only migration decoders for
-an installation's old Qt data remain in the Rust client until the owner retires
-them. Replicated documents (Loro) live in `crates/replica/`, the only code that
+the packaged icons live in `packaging/desktop/`. The Rust client reads no Qt
+data: an installation with unmigrated Qt data starts with Zerus's own defaults
+and leaves Qt's files untouched (`docs/reference.md`, First start without Qt
+data). Replicated documents (Loro) live in `crates/replica/`, the only code that
 imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in

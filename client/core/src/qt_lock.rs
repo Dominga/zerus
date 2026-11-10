@@ -1,7 +1,9 @@
 //! Qt's QLockFile (qtbase 6.12 src/corelib/io/qlockfile.cpp and
-//! qlockfile_unix.cpp, qlockfile_win.cpp), for a folder the Qt client and
-//! this client share: either can hold the lock, and each judges the
-//! other's leftover lock stale by Qt's rule.
+//! qlockfile_unix.cpp, qlockfile_win.cpp), for a folder several processes
+//! change: the downloads folder's `.zerus-files.lock`, held by the workspace
+//! and by the desktop service's cache maintenance (task #56: kept for them;
+//! the format stays Qt's, so a Qt client still installed honours it too).
+//! Any holder judges another's leftover lock stale by Qt's rule.
 //!
 //! A lock file holds five lines: the PID, the process name Qt derives for
 //! it, the host name, QSysInfo::machineUniqueId() and bootUniqueId(). The

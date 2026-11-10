@@ -1656,7 +1656,13 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     // Task 270 (owner, 2026-11-08): New team shows the working mode Zeros
     // proposes for the project, with its reasons, and the preset the owner
     // accepted so far (empty: the proposal).
-    let proposal = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    let profiled = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    // Task #32 (team ede724c4): a project Git was too slow to read says so.
+    let slow = match &profiled {
+        Err(error @ super::working_mode::ProfileError::Slow { .. }) => Some(error.to_string()),
+        _ => None,
+    };
+    let proposal = profiled.ok();
     // Owner, 2026-11-09: create applies the working mode before it validates
     // the plan (ops.rs, draft create), so the preflight checks the plan the
     // same way: a member folder the applied mode forbids showed only at create.
@@ -1681,6 +1687,10 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
         (None, Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":Value::Null}),
         (None, None) => json!({"accepted":"auto","preset":Value::Null,"proposal":Value::Null}),
     };
+    let mut working = working;
+    if let Some(slow) = slow {
+        working["slow"] = json!(slow);
+    }
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,
@@ -4253,13 +4263,26 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
             bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str()), &phrase));
         }
     }
-    // Task 173: a lead message naming a task goes only to that task's holder
-    // and is bound to its attempt; otherwise it is refused with the hand-out.
+    // Task 173: a lead message is bound to the attempt of each task it names
+    // that its recipient holds. Task #30 (team ede724c4): a task its text only
+    // mentions is a reference; only its "task" naming a task the recipient
+    // does not hold is refused, with the hand-out.
+    let task = match &input["task"] {
+        Value::Null => None,
+        value => Some(value.as_u64().and_then(|id| u32::try_from(id).ok()).context("A message's task is a task number")?),
+    };
     let mut bindings = Vec::new();
+    let mut references: Vec<u32> = Vec::new();
     if by == team.lead {
         for recipient in recipients.iter().filter(|recipient| **recipient != team.lead) {
             let member = team.member(recipient).context("unknown member")?;
-            bindings.extend(super::shadow::check_lead_message(&team, member, &body)?);
+            let check = super::shadow::check_lead_message(&team, member, &body, task)?;
+            bindings.extend(check.bindings);
+            for id in check.references {
+                if !references.contains(&id) {
+                    references.push(id);
+                }
+            }
         }
     }
     let now = super::super::now();
@@ -4301,6 +4324,11 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
     // Task 184: a text that held a secret was stored redacted (11.9).
     if !redacted.is_empty() {
         answer["redacted"] = json!(redacted);
+    }
+    // Task #30: the tasks the text mentioned for reference only.
+    if let Some(note) = super::shadow::reference_note(&references) {
+        answer["references"] = json!(references);
+        answer["reference_note"] = json!(note);
     }
     Ok(answer)
 }

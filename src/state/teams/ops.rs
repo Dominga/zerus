@@ -668,7 +668,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         let folder = std::path::PathBuf::from(text(input, "folder"));
         match super::working_mode::propose(&folder) {
-            Some(proposal) => {
+            Ok(proposal) => {
                 let preset = if mode == "auto" { proposal.preset.clone() } else { mode.clone() };
                 ensure!(
                     super::working_mode::PRESETS.contains(&preset.as_str()),
@@ -683,8 +683,17 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
                 cached["checked_at"] = json!(now());
                 Some(cached)
             }
-            None if mode == "auto" => Some(json!({"preset":""})),
-            None => bail!("The working mode needs a Git repository to profile: {}", folder.display()),
+            // Task #32 (team ede724c4): Git too slow to read the project never
+            // blocks the team: auto profiles it again soon; a mode named
+            // explicitly asks to try again.
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) if mode == "auto" => {
+                Some(super::working_mode::slow_cache(&error, now()))
+            }
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                bail!("The working mode {mode} needs the project's profile: {error}. Try again in a moment, or choose auto.")
+            }
+            Err(_) if mode == "auto" => Some(json!({"preset":""})),
+            Err(error) => bail!("The working mode needs a Git repository to profile: {} ({error})", folder.display()),
         }
     };
     validate_settings(&settings)?;
@@ -2551,7 +2560,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     if approve {
         accept_blockers(team, at, offline)?;
         if run_checks {
-            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT);
+            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::phase_check_timeout());
             ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
                 "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
             if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
@@ -5941,7 +5950,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             // at Create team.
             let folder = std::path::PathBuf::from(team.folder.trim());
             match super::working_mode::propose(&folder) {
-                Some(proposal) => {
+                Ok(proposal) => {
                     let mut cached = proposal.value();
                     cached["checked_at"] = json!(now());
                     team.mode_proposal = Some(cached);
@@ -5965,7 +5974,13 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.working_mode.clear();
                     }
                 }
-                None => team.mode_proposal = Some(json!({"preset":""})),
+                // Task #32: Git too slow to read the project never blocks Create
+                // team; the dispatcher profiles it again soon.
+                Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                    team.mode_proposal = Some(super::working_mode::slow_cache(&error, now()));
+                    events.push(Event::new("working_mode_slow", json!({"reason":error.to_string()})));
+                }
+                Err(_) => team.mode_proposal = Some(json!({"preset":""})),
             }
             // Task 271: the playbook is stored with a team that has a mode.
             if !team.working_mode.is_empty() {
@@ -6231,7 +6246,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             );
             let folder = std::path::PathBuf::from(team.folder.trim());
             let proposal = super::working_mode::propose(&folder)
-                .context("The project cannot be profiled: its folder is not a Git repository")?;
+                .map_err(|error| anyhow::anyhow!("The project cannot be profiled: {error}"))?;
             let preset = if requested.is_empty() || requested == "auto" { proposal.preset.clone() } else { requested };
             // #451: a stale lead step (a preset the project no longer profiles
             // to) is refused with the mode the project selects now, not turned
@@ -8150,7 +8165,7 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
     }
     if run_checks && matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
-        let deadline = std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT;
+        let deadline = std::time::Instant::now() + plan::phase_check_timeout();
         let checks: Vec<_> = team.phases.iter().map(|phase| {
             (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
         }).collect();

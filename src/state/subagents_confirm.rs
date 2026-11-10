@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn confirmation_defaults_on_and_can_be_turned_off() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn a_team_member_is_known_and_the_owner_is_not() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn the_turn_group_drops_answered_calls_and_resets() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());

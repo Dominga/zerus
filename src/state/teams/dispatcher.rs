@@ -3332,20 +3332,26 @@ fn git_continuation(folder: &str, since: f64) -> String {
     // C13: the bounded Git path - a deadline, bounded output, no optional
     // locks, no fsmonitor and no hooks - so a member's repository can neither
     // run code here nor hold the dispatcher.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Task #32 (team ede724c4): each read has its own window (they shared one
+    // 20 s deadline, which a busy computer ran out of).
     let run = |args: &[&str]| -> Option<String> {
         let mut hardened = vec!["-c", "core.hooksPath="];
         hardened.extend_from_slice(args);
+        let deadline = Instant::now() + super::super::worktrees::read_window(20);
         super::super::worktrees::git(Path::new(folder), &hardened, deadline)
             .ok()
             .map(|out| String::from_utf8_lossy(&out).into_owned())
     };
     // A filter, include, hook path or fsmonitor of the repository's own config
-    // could still run code: such a folder is not read (as `commit_in`).
-    if let Some(listing) = run(&["config", "--list", "--show-scope"]) {
-        if let Some(reason) = refused_repository_config(&listing) {
-            return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
+    // could still run code: such a folder is not read (as `commit_in`). Task
+    // #32: a config that could not be read is not read past either.
+    match run(&["config", "--list", "--show-scope"]) {
+        Some(listing) => {
+            if let Some(reason) = refused_repository_config(&listing) {
+                return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
+            }
         }
+        None => return "\nCommits and working tree: not read here, Git could not read its config (not a repository, or Git did not answer in time).\n".to_owned(),
     }
     // A missing or zero start time is no date filter: git 2.55 reads
     // `--since @0` as "now" and would hide every commit.
@@ -4334,11 +4340,18 @@ fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
 /// working-mode proposal on the team, so later ticks only compare settings.
 fn check_working_mode(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     let folder = std::path::PathBuf::from(team.folder.trim());
-    let mut proposal = super::working_mode::propose(&folder)
-        .map(|proposal| proposal.value())
-        .unwrap_or_else(|| json!({"preset":""}));
-    // Task #451: when the profile was read, so a stale block is refreshed.
-    proposal["checked_at"] = json!(crate::state::now());
+    // Task #32 (team ede724c4): Git too slow to read the project is cached as
+    // such and read again in two minutes, never as "not a repository".
+    let proposal = match super::working_mode::propose(&folder) {
+        Ok(proposal) => {
+            let mut value = proposal.value();
+            // Task #451: when the profile was read, so a stale block is refreshed.
+            value["checked_at"] = json!(crate::state::now());
+            value
+        }
+        Err(error @ super::working_mode::ProfileError::Slow { .. }) => super::working_mode::slow_cache(&error, crate::state::now()),
+        Err(_) => json!({"preset":"","checked_at":crate::state::now()}),
+    };
     change(store, &team.id, |team, _events| {
         team.mode_proposal = Some(proposal);
         Ok(())
@@ -4357,8 +4370,11 @@ fn propose_working_mode(store: &mut Store, team: &Team, preset: &str, title: &st
     // Task #451: the card follows the project as it is now. When the profile
     // moved since the step was computed, nothing is proposed here: the tick
     // re-reads the cache (ModeCheck) and offers the new mode on a later tick.
-    if super::working_mode::propose(&std::path::PathBuf::from(team.folder.trim())).is_some_and(|proposal| proposal.preset != preset) {
-        return Ok(());
+    // Task #32: a project Git was too slow to read proposes nothing now either.
+    match super::working_mode::propose(&std::path::PathBuf::from(team.folder.trim())) {
+        Ok(proposal) if proposal.preset != preset => return Ok(()),
+        Err(super::working_mode::ProfileError::Slow { .. }) => return Ok(()),
+        _ => {}
     }
     let reason = format!(
         "The project's profile selects {title}: {}. Switch the team to it at this safe point (no attempt is open).",

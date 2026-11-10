@@ -819,6 +819,12 @@ impl Store {
     fn remember(&self, id: &str, team: Team, saved: rows::Saved) {
         let mut cache = self.cache.borrow_mut();
         let base = cache.remove(id);
+        // Task #5 (team ede724c4): a write that accepted a task records it in
+        // the estimate history (after the commit, outside the lock); a status
+        // read no longer does.
+        if super::estimates::newly_accepted(base.as_ref().map(|base| &base.team), &team) {
+            let _ = super::estimates::record_accepted(&team, now());
+        }
         if cache.len() >= CACHED_TEAMS {
             cache.clear();
         }

@@ -4975,7 +4975,13 @@ pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -
 /// commit.
 fn clone_of(folder: &str, source: &str) -> bool {
     let canonical = |path: &str| crate::platform::canonical(Path::new(path)).ok();
-    if let Some(origin) = git_at(folder, &["config", "--get", "remote.origin.url"]) {
+    // Task #5 (team ede724c4): the origin from the clone's config file when it
+    // names it plainly, without a git process.
+    #[cfg(test)]
+    let from_files = if old_status() { None } else { origin_url_from_files(folder) };
+    #[cfg(not(test))]
+    let from_files = origin_url_from_files(folder);
+    if let Some(origin) = from_files.or_else(|| git_at(folder, &["config", "--get", "remote.origin.url"])) {
         let origin = origin.strip_prefix("file://").unwrap_or(&origin);
         if canonical(origin).is_some_and(|origin| Some(origin) == canonical(source)) {
             return true;
@@ -5033,6 +5039,16 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     if folder.is_empty() {
         return (String::new(), String::new());
     }
+    // Task #5 (team ede724c4): the repository's own files answer without a
+    // git process (one cost 100-400 ms on Windows, once per member folder of
+    // every status poll); git answers what they do not.
+    #[cfg(test)]
+    let fast = !old_status();
+    #[cfg(not(test))]
+    let fast = true;
+    if let Some(facts) = fast.then(|| folder_facts_from_files(folder)).flatten() {
+        return facts;
+    }
     // N37: one `rev-parse` prints the common dir and the branch together, so a
     // status call with several members in one folder spawns one git, not 2-4
     // per member.
@@ -5056,9 +5072,159 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     (project, branch)
 }
 
+/// Task #5 (team ede724c4): what `git rev-parse --path-format=absolute
+/// --git-common-dir --abbrev-ref HEAD` prints for `folder`, read from the
+/// repository's files: the folder of the common git dir (forward slashes, as
+/// git prints it) and the branch, or `HEAD` when detached. None for anything
+/// this reader does not know for certain (a git environment override, a
+/// reftable store, an unborn or ambiguous branch, a ref outside refs/heads,
+/// an unusual `.git`), which git then answers as before.
+pub(crate) fn folder_facts_from_files(folder: &str) -> Option<(String, String)> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let branch = if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let name = reference.strip_prefix("refs/heads/")?;
+        let packed = std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default();
+        let exists = |full: &str| common.join(full).is_file() || packed.lines().any(|line| line.split_once(' ').is_some_and(|(_, at)| at == full));
+        // An unborn branch has no commit to abbreviate; a tag or remote of
+        // the same name makes git print a longer name.
+        if name.is_empty() || !exists(reference) || exists(&format!("refs/tags/{name}")) || exists(&format!("refs/remotes/{name}")) || exists(&format!("refs/{name}")) || exists(name) {
+            return None;
+        }
+        name.to_owned()
+    } else if head.len() >= 40 && head.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        "HEAD".to_owned()
+    } else {
+        return None;
+    };
+    let project = common.parent()?.to_str()?;
+    #[cfg(windows)]
+    let project = {
+        // A verbatim path (\\?\D:\x) as git prints it (D:/x); a share is
+        // left to git.
+        let plain = project.strip_prefix(r"\\?\").unwrap_or(project);
+        if plain.starts_with(r"\\") || plain.starts_with("UNC") {
+            return None;
+        }
+        plain.replace('\\', "/")
+    };
+    #[cfg(not(windows))]
+    let project = project.to_owned();
+    Some((project, branch))
+}
+
+/// Task #5 (team ede724c4): `git config --get remote.origin.url` in `folder`,
+/// read from the repository's own config file when it names the origin
+/// plainly; None for anything else (an include, a worktree config, quoting or
+/// escapes beyond a doubled backslash, no origin there), which git answers.
+pub(crate) fn origin_url_from_files(folder: &str) -> Option<String> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    if git_dir.join("config.worktree").exists() || common.join("config.worktree").exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(common.join("config")).ok()?;
+    let mut in_origin = false;
+    let mut url = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let header = line.to_ascii_lowercase();
+            if header.starts_with("[include") {
+                return None;
+            }
+            in_origin = header.starts_with(r#"[remote "origin""#);
+            if in_origin && line != r#"[remote "origin"]"# {
+                return None;
+            }
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let value = value.trim();
+        if value.contains(['"', ';', '#']) || value.replace(r"\\", "").contains('\\') {
+            return None;
+        }
+        url = Some(value.replace(r"\\", "\\"));
+    }
+    url.filter(|url| !url.is_empty())
+}
+
+/// The git dir and the common git dir of the repository `folder` is in, as
+/// git would find them, from the files alone; None for anything unusual.
+fn git_dirs_from_files(folder: &str) -> Option<(PathBuf, PathBuf)> {
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return None;
+    }
+    let start = std::fs::canonicalize(folder).ok()?;
+    // A test's git ceiling, as its git reads get it: never looked at or above.
+    #[cfg(test)]
+    let ceiling = GIT_CEILING.with(|ceiling| ceiling.borrow().clone()).and_then(|ceiling| std::fs::canonicalize(ceiling).ok());
+    #[cfg(not(test))]
+    let ceiling: Option<PathBuf> = None;
+    let mut dir = start.as_path();
+    let dot_git = loop {
+        if ceiling.as_deref() == Some(dir) {
+            return None;
+        }
+        let candidate = dir.join(".git");
+        if candidate.symlink_metadata().is_ok() {
+            break candidate;
+        }
+        dir = dir.parent()?;
+    };
+    let meta = dot_git.symlink_metadata().ok()?;
+    let (git_dir, common) = if meta.is_dir() {
+        if dot_git.join("commondir").exists() {
+            return None;
+        }
+        (dot_git.clone(), dot_git.clone())
+    } else if meta.is_file() {
+        // A linked worktree: `gitdir: <its git dir>`, whose `commondir` names
+        // the repository's own git dir.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        let git_dir = std::fs::canonicalize(dir.join(target)).ok()?;
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(text) => std::fs::canonicalize(git_dir.join(text.lines().next()?.trim())).ok()?,
+            Err(_) => git_dir.clone(),
+        };
+        (git_dir, common)
+    } else {
+        return None;
+    };
+    if !common.join("objects").is_dir() || !common.join("refs").is_dir() || common.join("reftable").exists() {
+        return None;
+    }
+    Some((git_dir, common))
+}
+
 #[cfg(test)]
 thread_local! {
     static FOLDER_FACTS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Task #5 (team ede724c4): this test thread's status reads as before
+    /// (git for every folder fact, an estimate per task over the whole
+    /// history), to compare the old and the new view.
+    static OLD_STATUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_old_status(on: bool) {
+    OLD_STATUS.with(|old| old.set(on));
+}
+
+#[cfg(test)]
+pub(crate) fn old_status() -> bool {
+    OLD_STATUS.with(std::cell::Cell::get)
 }
 
 /// N37: how many folder-fact reads this test thread made, so a status call's

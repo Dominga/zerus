@@ -46,8 +46,8 @@ struct Catalog {
     permission_modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     defaults: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    model_defaults: BTreeMap<String, model_defaults::Defaults>,
+    #[serde(default, skip_serializing_if = "model_defaults::Stored::is_empty")]
+    model_defaults: model_defaults::Stored,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -93,7 +93,6 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
-    model_defaults::validate_catalog(&catalog)?;
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {

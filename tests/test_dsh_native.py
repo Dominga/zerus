@@ -932,6 +932,20 @@ class NativeHarness(unittest.TestCase):
             self.assertIn('account defaults were not applied', warning)
             seen = self.cli('inspect', refused)
             self.assertEqual((seen['model'], seen['account_defaults']['status']), ('test-a', 'failed'))
+            # An effort this build cannot validate is preserved, but never
+            # passed to the host's scoped settings call in the first place.
+            catalog['model_defaults']['native-dsh'] = {'model': 'hgs-test/test-b', 'effort': 'future-effort'}
+            path.write_text(json.dumps(catalog))
+            untouched = path.read_bytes()
+            settings = json.loads(run('account', 'model-settings', 'native-dsh', '--json').stdout)
+            self.assertEqual(settings['model_defaults_status'], 'ignored')
+            self.assertTrue(settings['model_defaults_reason'])
+            ignored, warning = launch('ignored-default', '--new')
+            self.assertEqual(warning, '')
+            seen = self.cli('inspect', ignored)
+            self.assertEqual(seen['model'], 'test-a')
+            self.assertIsNone(seen.get('account_defaults'))
+            self.assertEqual(path.read_bytes(), untouched)
         finally:
             run('account', 'model-defaults', 'native-dsh', '--model', '')
 

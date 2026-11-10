@@ -407,7 +407,10 @@ fn output(state: &Value, provider: &str, partial: bool) -> Value {
 /// The cache claim an observation still supports (H7): a warm cache whose
 /// deadline passed, or one observed before the session's last prompt, is
 /// unknown - never a warm deadline in the past, which the desktop reads as a
-/// cold cache.
+/// cold cache. An estimate that ran out with nothing newer observed still
+/// says which lifetime lapsed and when (`ttl_seconds`, `lapsed_at`): without
+/// them keep-warm could not tell a cache that went cold from a lifetime the
+/// agent never reported, and waited for a report instead of saying so.
 fn settled_cache(state: &Value) -> Value {
     let cache = &state["prompt_cache"];
     if cache["status"] != "warm" {
@@ -416,8 +419,16 @@ fn settled_cache(state: &Value) -> Value {
     let observed = cache["observed_at"].as_f64().unwrap_or(0.0);
     let expires = cache["expires_at"].as_f64().unwrap_or(0.0);
     let prompt = state["last_prompt_at"].as_f64().unwrap_or(0.0);
-    if observed <= 0.0 || expires <= now() || prompt > observed {
+    if observed <= 0.0 || prompt > observed {
         return json!({"status":"unknown","source":"native_usage","observed_at":observed});
+    }
+    if expires <= now() {
+        let mut lapsed = json!({"status":"unknown","source":"native_usage","observed_at":observed});
+        if expires > 0.0 && cache["ttl_seconds"].as_u64().is_some_and(|ttl| ttl > 0) {
+            lapsed["ttl_seconds"] = cache["ttl_seconds"].clone();
+            lapsed["lapsed_at"] = json!(expires);
+        }
+        return lapsed;
     }
     cache.clone()
 }
@@ -767,12 +778,19 @@ mod tests {
         let mut expired = json!({"totals":{},"context":{}});
         observe(&mut expired, &reply, "claude", "one");
         assert_eq!(expired["prompt_cache"]["status"], "warm");
-        assert_eq!(settled_cache(&expired)["status"], "unknown");
+        let lapsed = settled_cache(&expired);
+        assert_eq!(lapsed["status"], "unknown");
+        assert!(lapsed["expires_at"].is_null());
+        // It still names the lifetime that ran out and when: keep-warm reads
+        // a cache that went cold, not a lifetime never reported.
+        assert_eq!(lapsed["ttl_seconds"], 3600);
+        assert_eq!(lapsed["lapsed_at"], expired["prompt_cache"]["expires_at"]);
         // A prompt after the observation makes its deadline untrustworthy.
         let mut later = json!({"totals":{},"context":{}});
         observe(&mut later, &reply, "claude", "one");
         observe(&mut later, &json!({"type":"user","sessionId":"one","timestamp":"2026-10-11T05:30:00Z"}), "claude", "one");
         assert_eq!(settled_cache(&later)["status"], "unknown");
+        assert!(settled_cache(&later)["lapsed_at"].is_null());
         // The observation the session's last turn left, with its deadline
         // ahead, stays warm.
         let mut fresh = json!({"totals":{},"context":{}});

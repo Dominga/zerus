@@ -387,7 +387,10 @@ pub(super) fn eligibility(record: &Value, usage: &Value, last_turn_at: Option<f6
                 None => Eligibility::waiting("Waiting for Claude to report its cache lifetime with its next reply."),
                 Some(ttl) if ttl < MIN_TTL => Eligibility::refused("claude_short_ttl",
                     "Claude uses a 5-minute cache on this account. Keeping it warm would cost about as much as rebuilding it."),
-                Some(ttl) => Eligibility::known(ttl, "native_usage", cache["expires_at"].as_f64()),
+                // An estimate that ran out names when (`lapsed_at`): a deadline
+                // in the past, which the round holds as a cold cache.
+                Some(ttl) => Eligibility::known(ttl, "native_usage",
+                    cache["expires_at"].as_f64().or(cache["lapsed_at"].as_f64())),
             }
         }
         "codex" => match input::codex_footer_model(record) {
@@ -762,6 +765,16 @@ fn save_runtime(owner: &str, value: &Value, verify: &impl Fn() -> Result<()>) ->
     atomic(&runtime_path(owner).ok_or("invalid keep-warm owner")?, &value.to_string())
 }
 
+/// One line in `<state>/logs/keep-warm.log` for each change of what the round
+/// does for a session. The worker state file holds only the latest decision,
+/// so nothing said afterwards why a cache was not kept warm. The log is
+/// bounded as the slow-calls log is; a failed write never fails the round.
+fn log_decision(entry: &Entry, runtime: &Value) {
+    let line = json!({"at":now(),"session":entry.name.chars().take(200).collect::<String>(),"revision":entry.revision,
+        "state":runtime["state"],"reason":runtime["reason"],"next_at":runtime["next_at"],"pings":runtime["pings"]});
+    let _ = super::slow_calls::append(&root().join("logs").join("keep-warm.log"), &line.to_string());
+}
+
 /// Turn an expired or orphaned setting off, unless it changed meanwhile.
 fn turn_off(owner: &str, entry: &Entry, verify: &impl Fn() -> Result<()>) -> Result<()> {
     let _guard = lock(Some(&lock_path()))?;
@@ -808,6 +821,7 @@ fn send(owner: &str, entry: &Entry, record: &Value, mut runtime: Value, now: f64
             runtime["reason"] = json!(format!("The last keep-warm delivery is unknown: {}. {RESUMES}", journal::clipped(&json!(error), 300)));
         }
     }
+    log_decision(entry, &runtime);
     save_runtime(owner, &runtime, verify)
 }
 
@@ -835,7 +849,9 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64,
     match step {
         Step::Off(state, reason) => {
             turn_off(owner, entry, verify)?;
-            save_runtime(owner, &off_runtime(&runtime, state, reason, now), verify)
+            let off = off_runtime(&runtime, state, reason, now);
+            log_decision(entry, &off);
+            save_runtime(owner, &off, verify)
         }
         Step::Hold { state, reason, next_at, since } => {
             let mut next = runtime.clone();
@@ -845,7 +861,14 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64,
             for (key, value) in [("state", json!(state)), ("reason", json!(reason)), ("next_at", json!(next_at)), ("since", json!(since))] {
                 next[key] = value;
             }
-            if next != runtime { save_runtime(owner, &next, verify) } else { Ok(()) }
+            if next == runtime {
+                return Ok(());
+            }
+            // A new due time alone is the same decision.
+            if next["state"] != runtime["state"] || next["reason"] != runtime["reason"] {
+                log_decision(entry, &next);
+            }
+            save_runtime(owner, &next, verify)
         }
         Step::Send => send(owner, entry, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now, verify),
     }
@@ -911,7 +934,18 @@ pub(super) fn describe(output: &mut Value, record: &Value, usage: &Value) {
     let warm = &mut output["keep_warm"];
     warm["supported"] = json!(rule.supported);
     warm["reason_code"] = json!(rule.reason_code);
-    warm["reason"] = json!(if rule.reason.is_empty() { string(warm, "reason") } else { rule.reason });
+    // Turned on over a cache that is already cold: say so at once, before the
+    // worker's next round records it.
+    let cold = warm["enabled"] == true && string(warm, "reason").is_empty() && warm["turn_active"] != true
+        && ["waiting", "cold"].contains(&string(warm, "state"))
+        && rule.expires_at.is_some_and(|expires| expires - now() < COLD_MARGIN);
+    warm["reason"] = if !rule.reason.is_empty() {
+        json!(rule.reason)
+    } else if cold {
+        json!(format!("The cache went cold. {RESUMES}"))
+    } else {
+        json!(string(warm, "reason"))
+    };
     warm["ttl_seconds"] = json!(rule.ttl);
     warm["ttl_source"] = json!(rule.source);
     warm["interval_seconds"] = json!(rule.interval());
@@ -1229,6 +1263,26 @@ mod tests {
         // Before the first reply reports a cache, keep-warm can be on but waits.
         let waiting = eligibility(&json!({"agent":"claude"}), &json!({}), None);
         assert_eq!((waiting.supported, waiting.reason_code, waiting.due_at()), (true, "no_cache_report", None));
+    }
+
+    /// A Claude estimate that ran out is a cold cache: the round says so and
+    /// waits for the next real turn, instead of waiting for a lifetime report
+    /// that only the next reply could bring.
+    #[test]
+    fn a_lapsed_claude_estimate_is_a_cold_cache_not_a_missing_report() {
+        let mut record = idle();
+        record["agent"] = json!("claude");
+        record["model"] = json!("claude-opus-5-5");
+        let lapsed = json!({"prompt_cache":{"status":"unknown","ttl_seconds":3600,"lapsed_at":NOW - 2400.0}});
+        let rule = eligibility(&record, &lapsed, None);
+        assert_eq!((rule.supported, rule.reason_code, rule.ttl, rule.expires_at), (true, "", Some(3600), Some(NOW - 2400.0)));
+        let observed = Observed { record: &record, live: true, usage: lapsed };
+        let cold = decide(&enabled(), &Value::Null, Some(&observed), quiet, NOW);
+        assert!(matches!(&cold, Step::Hold { state: "cold", reason, since: Some(_), .. } if reason.starts_with("The cache went cold.")), "{cold:?}");
+        // A lifetime the agent never reported still waits for its next reply.
+        let unreported = Observed { record: &record, live: true, usage: json!({"prompt_cache":{"status":"unknown"}}) };
+        let waiting = decide(&enabled(), &Value::Null, Some(&unreported), quiet, NOW);
+        assert!(matches!(&waiting, Step::Hold { state: "waiting", reason, .. } if reason.contains("report its cache lifetime")), "{waiting:?}");
     }
 
     #[test]

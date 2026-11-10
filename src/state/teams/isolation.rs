@@ -283,7 +283,10 @@ fn build(config: Config, note: Option<String>, template: &str, program: &str, fo
     let mut env = Vec::new();
     for (name, relative) in &config.env {
         let path = if relative == "." { run_folder.clone() } else { run_folder.join(relative) };
-        let _ = fs::create_dir_all(&path);
+        // Task #61: owner-only on every system. Windows' folders inherit the
+        // run folder's protected ACL; a Unix folder takes the umask's mode
+        // (0755), which no store that checks its privacy accepts.
+        let _ = crate::platform::owner_only_dir(&path);
         env.push((name.clone(), path.display().to_string()));
     }
     for (name, relative) in &config.keep {

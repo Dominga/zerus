@@ -287,8 +287,11 @@ fn exec_to_another_same_name_sealed_image_is_refused_at_the_real_after_begin_che
     std::fs::copy(std::env::current_exe().unwrap(), &helper).unwrap();
     // Hosted debug test binaries exceed256MiB. Strip only this private copy;
     // BOTH the actual service reference and relay use that SAME native image.
+    // Task #61 (team ede724c4): CI #22's copy stayed over the 256 MiB image
+    // bound (IMAGE_BYTES) without its debug info; the symbol tables go too,
+    // which nothing the helper runs needs.
     let stripped = Command::new("strip")
-        .arg("--strip-debug")
+        .arg("--strip-all")
         .arg(&helper)
         .output()
         .unwrap();

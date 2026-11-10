@@ -530,7 +530,17 @@ mod tests {
     /// use `storage::BINDING_DIRS`), unless listed here with its reason.
     #[test]
     fn binding_dirs_cover_the_id_layout() {
-        const ALLOWED: [(&str, &str); 3] = [
+        // Task #61 (team ede724c4): this module runs only on Unix, so the
+        // first Linux CI that ran it named two files added since.
+        const ALLOWED: [(&str, &str); 5] = [
+            (
+                "src/state/builds.rs",
+                "only its test writes a DeepSeek binding fixture; it lists its own builds folder",
+            ),
+            (
+                "src/state/opencode/existing.rs",
+                "OpenCode's own bindings (split out of opencode.rs); its ID layout comes with P3e",
+            ),
             (
                 "src/state/dsh.rs",
                 "DeepSeek's own bindings; its ID layout comes with P3e",

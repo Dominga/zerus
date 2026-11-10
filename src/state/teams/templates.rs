@@ -2635,10 +2635,13 @@ mod tests {
     fn a_build_stopped_by_scanning_runs_once_more_and_names_the_folder() {
         let dir = temp();
         // Fails with the scanner's signature on the first run only.
+        // Task #61: printf, not echo: dash's echo reads the message's backslashes
+        // as escapes (\c in C:\VC\c1.dll ends its output), so the scanner's
+        // signature never reached the tail on Linux.
         let flaky = |template: &str, line: &str| {
             let (windows, unix) = (
                 format!("if exist ran.txt (echo built & exit 0) else (echo ran> ran.txt & echo {line} & exit 2)"),
-                format!("if [ -f ran.txt ]; then echo built; exit 0; else echo ran > ran.txt; echo \"{line}\"; exit 2; fi"),
+                format!("if [ -f ran.txt ]; then echo built; exit 0; else echo ran > ran.txt; printf '%s\\n' \"{line}\"; exit 2; fi"),
             );
             let mut plan = shell_plan(&windows, &unix);
             plan.template = template.into();
@@ -2657,7 +2660,7 @@ mod tests {
         let cargo = {
             let (windows, unix) = (
                 format!("if exist ran.txt (echo test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out& echo      Running unittests src\\main.rs ^(target\\debug\\deps\\hgs-1.exe^) 1>&2 & exit 0) else (echo ran> ran.txt & echo {d8050} & exit 2)"),
-                format!("if [ -f ran.txt ]; then echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'; echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2; exit 0; else echo ran > ran.txt; echo \"{d8050}\"; exit 2; fi"),
+                format!("if [ -f ran.txt ]; then echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'; echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2; exit 0; else echo ran > ran.txt; printf '%s\\n' \"{d8050}\"; exit 2; fi"),
             );
             let mut plan = shell_plan(&windows, &unix);
             plan.template = "cargo-test".into();
@@ -2926,7 +2929,9 @@ process.exit(1);
         assert_eq!(install.more.len(), 1, "{install:?}");
         assert!(install.more[0].1.iter().any(|arg| arg == "--reporter=junit"), "{install:?}");
         assert!(install.argv.contains(&"ci".to_owned()), "{install:?}");
-        assert!(install.argv.iter().any(|arg| arg == "npm"), "{install:?}");
+        // Task #61: Windows runs npm through cmd (cmd /C npm ci), other systems
+        // run npm itself (npm ci).
+        assert!(install.program == "npm" || install.argv.iter().any(|arg| arg == "npm"), "{install:?}");
         // A project that leads outside the member's folder is refused.
         let outside = temp();
         let error = plan("web-test", &json!({"project": outside.path().display().to_string()}), dir.path()).unwrap_err().to_string();

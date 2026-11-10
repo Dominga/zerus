@@ -308,7 +308,9 @@ fn isolated_host_probe() {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(before_start(&dir).is_ok());
         let retry = ensure_host(&record).unwrap_err();
-        assert!(retry.contains("installed version differs"), "{retry}");
+        // Task #61: since the owner's rule of 2026-11-04 a harness that
+        // reports no version is refused with harness_version_refusal.
+        assert!(retry.contains("did not report its version"), "{retry}");
         assert_eq!(
             fs::read_to_string(home().join("launch-calls")).unwrap(),
             "calledcalled"
@@ -319,8 +321,9 @@ fn isolated_host_probe() {
             case.as_str(),
             "dead" | "reused" | "legacy-dead" | "old-boot"
         ) {
-            // Reached the real startup call site and its installed-version check.
-            assert!(error.contains("installed version differs"), "{error}");
+            // Reached the real startup call site and its installed-version
+            // check (task #61: harness_version_refusal's words since 2026-11-04).
+            assert!(error.contains("did not report its version"), "{error}");
             assert_eq!(
                 fs::read_to_string(home().join("launch-calls")).unwrap(),
                 "called"

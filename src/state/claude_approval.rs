@@ -180,7 +180,10 @@ fn matches(request:&Value,panel:&Panel)->bool {
     let mut targets=Vec::new();
     for key in ["file_path","notebook_path","path"] {
         if let Some(path)=input[key].as_str().filter(|p|!p.is_empty()) {
-            targets.push(Path::new(path).file_name().and_then(|n|n.to_str()).unwrap_or(path).to_owned());
+            // Task #61 (team ede724c4): the file's name after either separator.
+            // A Windows agent's path keeps its backslashes on every host, and on
+            // Unix Path::file_name took the whole path, which the panel wraps.
+            targets.push(path.rsplit(['/','\\']).next().filter(|n|!n.is_empty()).unwrap_or(path).to_owned());
         }
     }
     if let Some(url)=input["url"].as_str().filter(|u|!u.is_empty()) {

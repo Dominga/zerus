@@ -22,7 +22,10 @@ mod host_identity;
 
 // Resident bridge identity is independent of the installed harness release.
 const ADAPTER_VERSION: &str = "0.2.1-rc.2";
-const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5"];
+// Task #61 (team ede724c4): 0.2.2-rc.1 was reviewed upstream on 2026-11-05
+// (a27dd5141, with the bridge's native interfaces that are in this tree, and
+// scripts/ci/agent-compatibility.json); a fork merge kept the older list.
+const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5", "0.2.2-rc.1"];
 /// The harness release recommended to install: the newest reviewed one.
 const VERSION: &str = "0.2.1-rc.5";
 fn reviewed_harness_version(version: &str) -> bool {
@@ -4428,9 +4431,10 @@ mod harness_refusal_tests {
         for output in ["", "usage: dsh", "latest", "0.2"] {
             assert_eq!(harness_release(output), None, "{output:?}");
         }
-        let note = harness_unreviewed_note("0.2.2-rc.1");
-        assert!(note.contains("0.2.2-rc.1 is not a release Zerus reviewed") && note.contains("started anyway"), "{note}");
-        assert!(reviewed_harness_version("0.2.1-rc.5") && !reviewed_harness_version("0.2.2-rc.1"));
+        // Task #61: 0.2.2-rc.1 is reviewed since 2026-11-05; 0.2.2-rc.2 is not.
+        let note = harness_unreviewed_note("0.2.2-rc.2");
+        assert!(note.contains("0.2.2-rc.2 is not a release Zerus reviewed") && note.contains("started anyway"), "{note}");
+        assert!(reviewed_harness_version("0.2.1-rc.5") && !reviewed_harness_version("0.2.2-rc.2"));
     }
 }
 

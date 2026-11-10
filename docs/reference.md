@@ -5436,7 +5436,12 @@ cache lifetime after the last turn ended: 48 minutes for a 1-hour cache and
 own idle compaction at 90% of the TTL. A ping only extends a warm cache: when a
 window was missed (the computer slept, the agent stayed busy until expiry) or
 the cache is within 30 seconds of its estimated expiry, nothing is sent and
-keep-warm resumes after the next real turn. The cache clock belongs to the
+keep-warm resumes after the next real turn. Turning it on over a cache whose
+estimate already ran out is the same case: it says the cache went cold at once
+and starts after the next real turn. Claude Code's estimate that ran out keeps
+its lifetime and the moment it lapsed (`session_usage.prompt_cache.ttl_seconds`
+and `lapsed_at`, with `status` still `unknown`), which tells a cold cache from a
+lifetime Claude has not reported yet. The cache clock belongs to the
 current conversation: after **Clear** the setting stays on, and the first ping
 waits for a finished turn of the new conversation. The deadline is on the agent
 computer's clock; at the deadline the worker turns the setting off. A rename,
@@ -5538,7 +5543,12 @@ reason, turn_active}`; `until` is null for Always and `state` is `off`,
 `waiting`, `warming`, `cold`, `uncertain`, `stopped`, `paused` or
 `unsupported`. `inspect` and the command response add `supported`,
 `reason_code`, `ttl_seconds`, `ttl_source` (`native_usage`, `provider_default`,
-`kimi_config`, `kimi_table`), `interval_seconds` and `cache_expires_at`.
+`kimi_config`, `kimi_table`), `interval_seconds` and `cache_expires_at` (in the
+past for a cache that went cold).
+Each change of what the worker does for a session (its state or reason, a ping
+sent, the setting turned off) leaves one line in `logs/keep-warm.log` in the
+state directory, bounded as `slow-calls.log` is: the worker state holds only the
+latest decision, and the log says afterwards why a cache was not kept warm.
 The setting is `keep-warm.json` in the state directory, keyed only by session
 IDs or label keys; the worker's state of each session is under
 `recovery/keep-warm/`. Both are read as bounded regular files: a special file is

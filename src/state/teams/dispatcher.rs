@@ -6246,18 +6246,124 @@ pub(crate) fn crash_held(team: &Team, task: &Task, member: &Member) -> Option<&'
     None
 }
 
+/// Task #3 (team ede724c4): the context reads in flight, (team, member), and
+/// the finished ones waiting for the next sampling to record them. Each read
+/// is one `hgs inspect` (up to 10 s), so the tick starts them on threads of
+/// their own and never waits for one.
+static CONTEXT_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+type FinishedRead = (String, String, f64, Option<MemberContext>, Instant);
+static CONTEXT_DONE: std::sync::Mutex<Vec<FinishedRead>> = std::sync::Mutex::new(Vec::new());
+
+/// A test's thread-safe stand-in for a member's context read, by team id: the
+/// read then runs on a thread as in the worker. Without one a test reads
+/// inline through its thread's fake `hgs`.
+#[cfg(test)]
+pub(crate) type ContextReader = std::sync::Arc<dyn Fn(&Member, f64) -> Option<MemberContext> + Send + Sync>;
+#[cfg(test)]
+static TEST_CONTEXT_READERS: std::sync::Mutex<std::collections::BTreeMap<String, ContextReader>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+#[cfg(test)]
+pub(crate) fn set_context_reader(team: &str, reader: Option<ContextReader>) {
+    let mut readers = TEST_CONTEXT_READERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match reader {
+        Some(reader) => readers.insert(team.to_owned(), reader),
+        None => readers.remove(team),
+    };
+}
+
+fn finish_context_read(team: String, member: String, at: f64, context: Option<MemberContext>) {
+    CONTEXT_DONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((team.clone(), member.clone(), at, context, Instant::now()));
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(team, member));
+}
+
+/// Starts one member's context read; false when none could start (one is in
+/// flight already, or no thread could be made).
+fn start_context_read(team: &str, member: &Member, at: f64) -> bool {
+    let key = (team.to_owned(), member.id.clone());
+    if !CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+        return false;
+    }
+    let (team_id, member_id, found) = (key.0.clone(), key.1.clone(), member.clone());
+    #[cfg(test)]
+    {
+        let reader = TEST_CONTEXT_READERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(team).cloned();
+        let Some(reader) = reader else {
+            // Inline, through this thread's fake hgs.
+            finish_context_read(team_id, member_id, at, read_context(&found, at));
+            return true;
+        };
+        let spawned = std::thread::Builder::new().name("hgs-team-context".into()).spawn(move || {
+            let context = reader(&found, at);
+            finish_context_read(team_id, member_id, at, context);
+        });
+        if spawned.is_err() {
+            CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            return false;
+        }
+        true
+    }
+    #[cfg(not(test))]
+    {
+        let spawned = std::thread::Builder::new().name("hgs-team-context".into()).spawn(move || {
+            let context = read_context(&found, at);
+            finish_context_read(team_id, member_id, at, context);
+        });
+        if spawned.is_err() {
+            CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            return false;
+        }
+        true
+    }
+}
+
+fn context_in_flight(team: &str, member: &str) -> bool {
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&(team.to_owned(), member.to_owned()))
+}
+
+/// The reads in flight for these teams' members (the worker's tick samples
+/// every team it runs, so this is the worker's whole count).
+fn contexts_in_flight(teams: &[Team]) -> usize {
+    let ids: std::collections::BTreeSet<&str> = teams.iter().map(|team| team.id.as_str()).collect();
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|(team, _)| ids.contains(team.as_str())).count()
+}
+
+/// Records the finished reads of `teams`' members against each team as
+/// stored now; a failed read records nothing and is tried again next tick. A
+/// reading for a team no longer ticked is dropped ten minutes after it
+/// finished, so the list stays bounded.
+fn apply_context_reads(store: &mut Store, teams: &[Team]) {
+    let ids: std::collections::BTreeSet<&str> = teams.iter().map(|team| team.id.as_str()).collect();
+    let finished: Vec<FinishedRead> = {
+        let mut done = CONTEXT_DONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, mut others): (Vec<_>, Vec<_>) = done.drain(..).partition(|(team, ..)| ids.contains(team.as_str()));
+        others.retain(|(.., finished)| finished.elapsed() < Duration::from_secs(600));
+        *done = others;
+        mine
+    };
+    for (team_id, member_id, at, context, _) in finished {
+        let Some(context) = context else { continue };
+        note_context_read(&team_id, &member_id, at);
+        let Ok(Some(team)) = store.load(&team_id) else { continue };
+        if let Err(error) = record_context(store, &team, &member_id, context) {
+            eprintln!("hgs team worker: {}: context: {error}", team.name);
+        }
+    }
+}
+
 /// Task 209: reads how many tokens a member's session holds and updates the
 /// member's reading. Called by the tick only; a hand-out or a report uses the
-/// reading already collected, never a second inspect.
+/// reading already collected, never a second inspect. Task #3 (team
+/// ede724c4): the reads run on threads of their own, at most
+/// CONTEXT_READS_PER_TICK at a time; the readings finished since the last
+/// sampling are recorded first, so the tick never waits for an inspect.
 fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
-    let mut reads = 0;
-    for team in teams {
+    apply_context_reads(store, teams);
+    'teams: for team in teams {
         for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
-            if reads >= CONTEXT_READS_PER_TICK {
-                return;
+            if contexts_in_flight(teams) >= CONTEXT_READS_PER_TICK {
+                break 'teams;
             }
             let Some(session) = member.session.as_ref() else { continue };
-            if member.context_compact.is_some() {
+            if member.context_compact.is_some() || context_in_flight(&team.id, &member.id) {
                 continue;
             }
             let open = open_attempt_task(team, &member.id).is_some();
@@ -6271,14 +6377,11 @@ fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
             if !seen.iter().any(|found| found.host == session.host && found.name == session.name) {
                 continue;
             }
-            let Some(context) = read_context(member, at) else { continue };
-            reads += 1;
-            note_context_read(&team.id, &member.id, at);
-            if let Err(error) = record_context(store, team, &member.id, context) {
-                eprintln!("hgs team worker: {}: context: {error}", team.name);
-            }
+            start_context_read(&team.id, member, at);
         }
     }
+    // A read that finished at once (a test's inline read) is recorded now.
+    apply_context_reads(store, teams);
 }
 
 /// Task 209: starts the context action for an idle member whose meter reached
@@ -11196,7 +11299,7 @@ fn tick_teams(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     if teams.is_empty() && super::owner_queue::watched().is_empty() {
         return Ok(false);
     }
-    let output = match super::tick_clock::phase("listing", || listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT))) {
+    let output = match super::tick_clock::phase("listing", tick_listing) {
         Some(result) => result?,
         // The previous session listing may still run: skip this tick, never
         // overlap two `hgs ls` children (U2).
@@ -12275,6 +12378,59 @@ impl WorkerFiles {
 
 /// Runs the worker's session listing unless one may still run: a tick is
 /// skipped rather than overlap two `hgs ls` children (U2).
+/// Task #3 (team ede724c4): how old a session listing the tick may use. A
+/// listing takes 1.4 to 3 s; the tick takes the newest one up to this old and
+/// starts the next on a thread of its own, so hand-outs never wait for `hgs
+/// ls`. Without a fresh one the tick lists itself, as before.
+#[cfg_attr(test, allow(dead_code))]
+const LISTING_MAX_AGE: Duration = Duration::from_secs(5);
+
+/// Task #3: the newest listing the worker read, and when it finished.
+#[cfg_attr(test, allow(dead_code))]
+static LAST_LISTING: std::sync::Mutex<Option<(Instant, Output)>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(test, allow(dead_code))]
+fn run_listing() -> anyhow::Result<Output> {
+    let output = hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)?;
+    if output.status.success() {
+        *LAST_LISTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), output.clone()));
+    }
+    Ok(output)
+}
+
+/// Task #3: the session listing of this tick: a fresh cached one (and the
+/// next started in the background), else one read now. None while a listing
+/// still runs and none is fresh: the tick is skipped, never two `hgs ls`
+/// children at once (U2). A test lists on its own thread, through its fake.
+fn tick_listing() -> Option<anyhow::Result<Output>> {
+    #[cfg(test)]
+    {
+        listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT))
+    }
+    #[cfg(not(test))]
+    {
+        let cached = LAST_LISTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() <= LISTING_MAX_AGE)
+            .map(|(_, output)| output.clone());
+        match cached {
+            Some(output) => {
+                // The next listing runs while this tick works; it is skipped
+                // when one still runs.
+                let _ = std::thread::Builder::new().name("hgs-team-listing".into()).spawn(|| {
+                    if let Some(Err(error)) = listing(run_listing) {
+                        eprintln!("hgs team worker: listing: {error}");
+                    }
+                });
+                Some(Ok(output))
+            }
+            None => listing(run_listing),
+        }
+    }
+}
+
 fn listing<T>(run: impl FnOnce() -> T) -> Option<T> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static RUNNING: AtomicBool = AtomicBool::new(false);

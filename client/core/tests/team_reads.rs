@@ -44,7 +44,7 @@ fn every_followed_view_arrives_from_an_hgs_answering_like_this_computer() {
         let Ok(change) = receiver.recv_timeout(left) else {
             panic!("only {seen:?} arrived; log: {:?}", fake.log());
         };
-        if let Change::Teams { computer, key, update } = change {
+        if let Change::Teams { computer, key, update, .. } = change {
             assert!(computer.is_local());
             assert!(!matches!(update, TeamsUpdate::Failed { .. }), "{key}: {update:?}");
             seen.push(key);

@@ -430,5 +430,7 @@
 :is(.team-bar, .team-tab) .menu-item[aria-disabled="true"]:hover { background: none; color: var(--z-color-text-2); }
 :is(.team-bar, .team-tab) .menu-item > svg { flex: none; }
 /* Owner, 2026-11-09: the lead pill beside the session title (LeadTitleBadge). Unlayered: a button. */
-.lead-title-pill { flex: none; align-self: center; margin-left: 8px; height: 20px; padding: 0 8px; cursor: pointer; line-height: 18px; }
+.lead-title-pill { flex: none; align-self: center; margin-left: 8px; height: 20px; padding: 0 8px; cursor: pointer; line-height: 18px;
+  display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
+.lead-title-pill > span { min-width: 0; }
 .lead-title-pill:hover { filter: brightness(1.15); }

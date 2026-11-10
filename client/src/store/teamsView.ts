@@ -1,5 +1,5 @@
 import { batch } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 import type { ComputerId, TeamList, TeamSessionView, TeamSummary, TeamView, TeamWaitingView, TeamsOut } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -57,6 +57,20 @@ export function sessionIs(session: TeamSessionView | null | undefined, teamCompu
   return session.host === "" ? row.computer === teamComputer : session.host === row.computer;
 }
 
+/**
+ * Task #9: the views a new read reconciles into the one shown, so unchanged
+ * rows keep their objects and every <For> keeps their DOM; the key each
+ * view's rows are matched by (rows without it merge by position). A team
+ * update of one member's field then leaves every task card, phase row and
+ * memo that does not read that field alone. The New team draft, the catalog
+ * and the on-request views are replaced: their followers apply a new object.
+ */
+export const RECONCILED: Readonly<Record<string, string>> = {
+  team: "id", graph: "id", list: "id", inbox: "id", waiting: "id", feed: "seq",
+};
+
+const isObject = (value: unknown): value is object => typeof value === "object" && value !== null && !Array.isArray(value);
+
 export function createTeams(port: TeamsPort) {
   const [views, setViews] = createStore<Record<string, TeamsEntry | undefined>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
@@ -69,8 +83,16 @@ export function createTeams(port: TeamsPort) {
         if (out.kind === "ended") { setViews(id, undefined); continue; }
         if (out.kind === "failed") {
           const message = typeof (out.payload as { message?: unknown } | null)?.message === "string" ? (out.payload as { message: string }).message : "";
-          const shown = views[id];
-          setViews(id, { kind: shown?.kind ?? "", payload: shown?.payload, failed: message || out.kind });
+          // The shown view stays the same object; only its failure changes.
+          if (views[id]) setViews(id, "failed", message || out.kind);
+          else setViews(id, { kind: "", payload: undefined, failed: message || out.kind });
+          continue;
+        }
+        const key = RECONCILED[out.kind];
+        const shown = views[id];
+        if (key && shown && shown.kind === out.kind && isObject(shown.payload) && isObject(out.payload)) {
+          setViews(id, "payload", reconcile(out.payload, { key }));
+          if (shown.failed !== undefined) setViews(id, "failed", undefined);
           continue;
         }
         setViews(id, { kind: out.kind, payload: out.payload, failed: undefined });

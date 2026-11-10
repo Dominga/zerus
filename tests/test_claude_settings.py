@@ -238,13 +238,13 @@ class ClaudeSettings(unittest.TestCase):
         record = json.loads(self.record_path.read_text())
         self.assertIn('settings_unconfirmed_at', record)
         self.assertFalse(record.get('input_pending_at'))
-        self.assertIn('did not react', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
+        self.assertIn('has not shown the last model', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
         message = dict(request_id=str(uuid.uuid4()), text='hello', attachments=[], expected_run_id=self.run_id,
                        expected_conversation_id=self.conversation_id)
         result = subprocess.run([str(test_input.HGS), 'send', self.name, '--json'], env=self.env,
                                 input=json.dumps(message), text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn('did not react', result.stderr)
+        self.assertIn('has not shown the last model', result.stderr)
         self.assertEqual(self.received(), b'/model')
 
     def test_native_event_releases_the_guard_but_never_replays_the_failed_request(self):
@@ -263,7 +263,7 @@ class ClaudeSettings(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.received(), before)
             if run == 'old-run':
-                self.assertIn('did not react', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
+                self.assertIn('has not shown the last model', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
         record = json.loads(self.record_path.read_text())
         self.assertGreater(record['last_event_at'], record['settings_unconfirmed_at'])
         self.assertFalse(record.get('input_pending_at'))
@@ -292,6 +292,120 @@ class ClaudeSettings(unittest.TestCase):
         self.assertEqual(self.received(), b'')
         info = self.inspect()
         self.assertEqual((info['pending_model'], info['pending_effort']), ('claude-haiku-5-5', 'xhigh'))
+
+    # Task #7: the owner's stuck lead (2026-11-10). A change the agent did not
+    # visibly take leaves `settings_unconfirmed_at`; it now clears from the
+    # agent's own evidence, and an unknown state offers an action instead of
+    # sending the owner to Terminal.
+
+    def message(self, text='hello'):
+        payload = dict(request_id=str(uuid.uuid4()), text=text, attachments=[], expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id)
+        return subprocess.run([str(test_input.HGS), 'send', self.name, '--json'], env=self.env,
+                              input=json.dumps(payload), text=True, capture_output=True, timeout=10)
+
+    def check(self, *flags, success=True):
+        result = subprocess.run([str(test_input.HGS), 'settings', self.name, '--check', *flags, '--json'], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        if not success:
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            return result.stderr
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def redraw(self, screen, shown):
+        (self.root / 'screen').write_text(screen)
+        os.kill(self.record['pid'], signal.SIGUSR1)
+        self.wait_for(lambda: shown in self.tmux('capture-pane', '-p', '-t', self.pane))
+
+    def prompt_screen(self, effort):
+        glyphs = dict(low='○', medium='◐', high='●', xhigh='◉', max='◈')
+        indicator = glyphs[effort] + ' ' + effort + ' · /effort'
+        rule = '─' * 100
+        return ('\x1b[2J\x1b[1;1H● Hi!\x1b[22;1H\r\n' + ' ' * (99 - len(indicator)) + indicator + '\r\n' + rule
+                + '\r\n❯ \r\n' + rule + '\r\n  ⏸ manual mode on\x1b[25;3H')
+
+    def stuck(self):
+        (self.root / 'freeze').touch()
+        self.assertIn('not confirmed', self.settings(self.payload('claude-sonnet-5-5', 'high'), success=False))
+        record = json.loads(self.record_path.read_text())
+        self.assertEqual((record['settings_unconfirmed_model'], record['settings_unconfirmed_effort']),
+                         ('claude-sonnet-5-5', 'high'))
+        result = self.message()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('has not shown the last model', result.stderr)
+        self.assertIn('Check again', result.stderr)
+        self.assertEqual(self.received(), b'/model')
+        (self.root / 'freeze').unlink()
+
+    def test_unconfirmed_change_clears_when_the_agent_shows_the_requested_settings(self):
+        self.stuck()
+        # The agent took the change: its transcript has Claude's receipt and its
+        # prompt is back, empty, with the new effort in the status line.
+        with self.transcript.open('a') as f:
+            f.write(json.dumps(dict(type='user', sessionId=self.conversation_id, isSidechain=False, message=dict(
+                role='user', content='<local-command-stdout>Set model to `Sonnet 5.5` for this session only with `high` effort'
+                                     '</local-command-stdout>'))) + '\n')
+        self.redraw(self.prompt_screen('high'), '● high · /effort')
+        shown = self.inspect()['settings_confirmation']
+        self.assertEqual((shown['state'], shown['shown_model'], shown['shown_effort'], shown['at_prompt']),
+                         ('confirmed', 'claude-sonnet-5-5', 'high', True))
+        # Check again settles it in the record; an ordinary message goes through.
+        self.assertEqual(self.check()['state'], 'confirmed')
+        record = json.loads(self.record_path.read_text())
+        self.assertNotIn('settings_unconfirmed_at', record)
+        self.assertEqual((record['model'], record['effort']), ('claude-sonnet-5-5', 'high'))
+        self.assertIsNone(self.inspect()['settings_confirmation'])
+        self.assertEqual(self.check()['state'], 'none')
+        result = self.message()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.wait_for(lambda: self.received().endswith(b'hello\r'))
+
+    def test_a_send_checks_the_evidence_again_without_check(self):
+        self.stuck()
+        with self.transcript.open('a') as f:
+            f.write(json.dumps(dict(type='user', sessionId=self.conversation_id, isSidechain=False, message=dict(
+                role='user', content='<local-command-stdout>Set model to `Sonnet 5.5` for this session only with `high` effort'
+                                     '</local-command-stdout>'))) + '\n')
+        self.redraw(self.prompt_screen('high'), '● high · /effort')
+        result = self.message()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.wait_for(lambda: self.received().endswith(b'hello\r'))
+
+    def test_unknown_state_explains_and_continues_only_after_confirmation_at_an_empty_prompt(self):
+        self.stuck()
+        # The keys were lost: the prompt is back, empty, with the old settings.
+        self.redraw(self.prompt_screen('medium'), '◐ medium · /effort')
+        shown = self.inspect()['settings_confirmation']
+        self.assertEqual((shown['state'], shown['requested_model'], shown['requested_effort'], shown['at_prompt']),
+                         ('unknown', 'claude-sonnet-5-5', 'high', True))
+        self.assertIn('not the requested claude-sonnet-5-5', shown['reason'])
+        self.assertEqual(self.check()['state'], 'unknown')
+        self.assertIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
+        self.assertNotEqual(self.message().returncode, 0)
+        self.assertEqual(self.received(), b'/model')
+        # Continue anyway: the person accepts what the agent shows at its empty prompt.
+        self.assertEqual(self.check('--accept')['state'], 'accepted')
+        record = json.loads(self.record_path.read_text())
+        self.assertNotIn('settings_unconfirmed_at', record)
+        self.assertEqual((record['model'], record['effort']), ('claude-opus-5-5', 'medium'))
+        self.assertEqual(self.received(), b'/model')
+        result = self.message()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.wait_for(lambda: self.received().endswith(b'hello\r'))
+
+    def test_a_confirmed_send_never_types_into_a_visible_dialog(self):
+        self.stuck()
+        self.redraw('\x1b[2J\x1b[12;1H' + '▔' * 100 + '\r\n   Switch model?\r\n   Your next response will be slower and use more tokens'
+                    '\r\n   This conversation is cached for the current model.\r\n   ❯ 1. Yes, switch to Sonnet 5.5\r\n     2. No, go back',
+                    'Switch model?')
+        shown = self.inspect()['settings_confirmation']
+        self.assertEqual((shown['state'], shown['at_prompt']), ('unknown', False))
+        self.assertEqual(self.check()['state'], 'unknown')
+        self.assertIn('Nothing was changed', self.check('--accept', success=False))
+        self.assertIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
+        self.assertNotEqual(self.message().returncode, 0)
+        self.assertEqual(self.received(), b'/model')
 
 
 if __name__ == '__main__':

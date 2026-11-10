@@ -5015,6 +5015,40 @@ If a message or another client already consumed or replaced it, Zerus refreshes
 the current settings without retrying the stale request or showing a failure.
 `hgs [@host] settings SESSION --json` exposes the same scoped operation.
 
+A change whose keys reached the agent but that it did not visibly take (it never
+returned to its empty prompt in time) leaves the change **unconfirmed**: the
+session record keeps `settings_unconfirmed_at` with the requested
+`settings_unconfirmed_model` and `settings_unconfirmed_effort`, and nothing is
+typed into the agent while it stands, because the keys may still be on their way
+to a picker or dialog. It is confirmed, without Terminal, by any of:
+
+- a native event after it, as before;
+- the agent's own evidence: its terminal at an empty prompt with no dialog, and
+  the model and effort it shows (its status line, Claude's `/model` receipt in the
+  transcript, or its history) are the requested ones. Every `hgs send` checks
+  this again before it refuses, so Start planning's brief and an ordinary message
+  reach an idle lead once the switch shows; each `hgs inspect` reports it as
+  `settings_confirmation` (`null` when nothing is unconfirmed, otherwise `state`
+  `confirmed` or `unknown`, with `requested_model`, `requested_effort`,
+  `shown_model`, `shown_effort`, `at_prompt` and `reason`);
+- `hgs [@host] settings SESSION --check --json`, which reads that evidence again
+  and settles a confirmed change in the record (it prints the state; `none` when
+  nothing is unconfirmed);
+- `hgs [@host] settings SESSION --check --accept --json`, the person's explicit
+  confirmation to continue with what the agent shows. It settles the change only
+  while the terminal shows an empty prompt with no dialog, and refuses with the
+  reason (changing nothing) otherwise, so nothing that follows types into a dialog.
+
+Settling makes the shown model and effort the session's (and its resume's) and
+drops a pending change that would otherwise be typed again, or refused as unsafe
+to retry, before the next message. A refused send names these actions instead of
+sending the person to Terminal. Every desktop composer (the session view,
+Activity, the Team tab and New team's lead conversation) shows the unknown state
+above its editor: what was asked and what the agent shows, **Check again**
+(which also runs by itself every 20 seconds while it shows) and **Continue
+anyway…**, which asks first and is offered only while Terminal shows its empty
+prompt. A host from before `settings_confirmation` keeps its refusal.
+
 Native clear/compact operations are capability-gated and require exact identity.
 When they are unavailable, `hgs inspect` reports why in `clear_context_reason` and
 `compact_context_reason`, empty while the action is available. A busy session names

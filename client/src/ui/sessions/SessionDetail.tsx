@@ -18,6 +18,7 @@ import { ActivityView, columnStyle } from "./Activity";
 import { KeepWarmChip } from "./KeepWarmChip";
 import { AgentBadge, MachineBadge, StatusBadge, captionText, headerState, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
+import { fallbackTab } from "./fallbackTab";
 import { activity, subagentActivity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
@@ -322,8 +323,10 @@ function stepFocusArea(direction: 1 | -1) {
   if (next >= 0) areas[next].focus();
 }
 
-// A tab that disappears returns to Activity (SessionsWindow.cpp:4019-4020).
-createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
+createRoot(() => createEffect(() => {
+  const next = fallbackTab(tabs(), detailTab());
+  if (next) setDetailTab(next);
+}));
 
 export function SessionDetail() {
   followProjectTasks();

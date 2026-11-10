@@ -1481,6 +1481,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
       - name: Root unit tests and pinned lints
+        id: root-tests
         run: |
           mkdir -p artifacts/test-results
           cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
@@ -1494,6 +1495,13 @@ jobs:
             2>&1 | tee artifacts/test-results/windows-gateway-config.log
           cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
             2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
+      - name: Windows encrypted runtime contracts
+        # Keep an unrelated root failure visible without hiding this independent
+        # qualification, only after the root step passed setup and was admitted.
+        if: ${{ !cancelled() && (steps.root-tests.outcome == 'success' || steps.root-tests.outcome == 'failure') }}
+        run: |
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib encrypted_runtime </dev/null \
+            2>&1 | tee artifacts/test-results/windows-encrypted-runtime.log
       - name: Retain Windows unit and connector logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

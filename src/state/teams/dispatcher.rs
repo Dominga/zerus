@@ -2979,6 +2979,24 @@ pub(crate) fn hand_off_text_with(
     hand_off_text_rules(team, task, attempt, report_host, member_host, extra, &rules)
 }
 
+/// Task #25: whether `folder` has CodeLore's code map: a lore.toml whose
+/// `[atlas]` table turns it on. A folder on another computer reads as none.
+pub(crate) fn code_map_in(folder: &str) -> bool {
+    if folder.is_empty() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(Path::new(folder).join("lore.toml")) else { return false };
+    let mut in_atlas = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_atlas = line == "[atlas]";
+        } else if in_atlas && line.replace(' ', "").starts_with("enabled=true") {
+            return true;
+        }
+    }
+    false
+}
+
 fn hand_off_text_rules(
     team: &Team,
     task: &Task,
@@ -3147,6 +3165,16 @@ fn hand_off_text_rules(
             ids.join(", "),
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
         );
+    }
+    // Task #25: a member whose folder has CodeLore's code map is told to search
+    // the code and the docs through it, and the team's memory through Zerus.
+    let folder = team
+        .member(&attempt.member)
+        .map(|member| if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() })
+        .unwrap_or_default();
+    if code_map_in(&folder) {
+        text += "\nSearch the code and the docs with lore atlas search \"what it does\" in your folder, and the team's \
+                 memory with hgs team lore find, before opening files by guesswork (hgs guide code).\n";
     }
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \

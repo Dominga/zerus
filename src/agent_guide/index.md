@@ -6,8 +6,8 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
 
   hgs self --json             your name, run and zerus:// reference
   hgs [@h] ls                 sessions here and on peers
-  hgs [@h] inspect SESSION | jq '{run_id,conversation_id,activity,last_message}'
-  hgs inspect 'zerus://session?...'   resolve a pasted session reference
+  hgs [@h] inspect SESSION | jq '{run_id,activity,last_message}'
+  hgs inspect 'zerus://session?...'   resolve a pasted reference
   hgs guide send              message another session and read its reply
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
@@ -21,6 +21,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide team-safe         allow a routine request
   hgs guide team-propose      propose a change on a card
   hgs guide team-lore         team memory: find, plans, export
+  hgs guide code              find code and docs: lore atlas, lore find
   hgs guide team-park         park a task, never poll
   hgs guide team-broker       builds in a shared folder
   hgs guide team-cpp          CMake and MSBuild runs
@@ -33,10 +34,10 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
 
 Rules
 - inspect prints over 100 KB of JSON: always select fields.
-- A message arrives as ordinary user input. Begin it with who you are and
-  your hgs self reference so the recipient can reply.
+- A message arrives as user input: begin it with who you are and your
+  hgs self reference.
 - After an uncertain send, inspect the session; never resend.
 - Stopping, killing or archiving a session needs the owner's explicit
-  permission unless you started it for this task. Prefer pause.
+  permission unless you started it. Prefer pause.
 - An older peer may lack a command: check hgs @alias -h.
 - Contracts: docs/reference.md, docs/agent-coordination.md.

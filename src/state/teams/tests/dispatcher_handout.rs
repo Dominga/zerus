@@ -618,3 +618,27 @@ fn repeated_refusals_stay_one_attempt_with_a_count() {
     assert_eq!(task.attempts[0].refusal_count, 2);
     assert_eq!(task.attempts[0].refusal_reason, "terminal is busy");
 }
+
+/// Task #25: a member whose folder holds CodeLore's code map (a lore.toml with
+/// `[atlas] enabled = true`) is told how to search the code, the docs and the
+/// team's memory; any other folder's hand-out is as before.
+#[test]
+fn a_folder_with_the_code_map_gets_the_search_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().to_string_lossy().into_owned();
+    assert!(!super::code_map_in(&folder), "no lore.toml");
+    assert!(!super::code_map_in(""));
+    std::fs::write(dir.path().join("lore.toml"), "version = 1\nareas = []\n\n[atlas]\nenabled = false\n").unwrap();
+    assert!(!super::code_map_in(&folder), "a map that is off");
+    std::fs::write(dir.path().join("lore.toml"), "version = 1\nenabled = true\n\n[embed]\nprovider = \"none\"\n").unwrap();
+    assert!(!super::code_map_in(&folder), "enabled outside [atlas]");
+    let mut team = team();
+    let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().directory = folder.clone();
+    let before = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+    assert!(!before.contains("lore atlas search"), "{before}");
+    std::fs::write(dir.path().join("lore.toml"), "version = 1\nareas = [\"use-the-project-store\"]\n\n[atlas]\nenabled = true\nsemantic = false\n").unwrap();
+    assert!(super::code_map_in(&folder));
+    let text = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+    assert!(text.contains("lore atlas search") && text.contains("hgs team lore find") && text.contains("hgs guide code"), "{text}");
+}

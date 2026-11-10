@@ -77,7 +77,7 @@ impl Default for Config {
         Config {
             enabled: true,
             // Task 85: the CMake and MSBuild templates of any project too.
-            templates: ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
+            templates: ["cargo-build", "cargo-test", "cargo-clippy", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
                 .map(str::to_owned)
                 .to_vec(),
             assets: Vec::new(),
@@ -573,7 +573,7 @@ pub(crate) fn request_key(hash: &str, template: &str, args: &Value, toolchain: &
 /// result for the same key serves it. A build template's result is its
 /// outputs in one member's tree, so it serves only that member.
 fn verdict(template: &str) -> bool {
-    matches!(template, "cargo-test" | "cargo-clippy" | "qt-test" | "ctest" | "vstest")
+    matches!(template, "cargo-test" | "cargo-clippy" | "ctest" | "vstest")
 }
 
 /// The tools a template builds with, as their version lines; an unknown tool
@@ -1026,7 +1026,7 @@ const BUILD_GROUPS: [&str; 3] = ["target", ".ci-build/gui", "."];
 
 /// Whether a running or waiting build belongs to the build folder `name`.
 fn in_group(entry: &Value, name: &str) -> bool {
-    (if entry["snapshot"] == false { "." } else { build_folder(entry["template"].as_str().unwrap_or("qt-build")) }) == name
+    (if entry["snapshot"] == false { "." } else { build_folder(entry["template"].as_str().unwrap_or("cmake-build")) }) == name
 }
 
 /// Each member's build state in the build folder `name`: building, else

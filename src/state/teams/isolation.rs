@@ -93,7 +93,7 @@ impl Default for Config {
         }
         Config {
             enabled: true,
-            templates: list(&["cargo-test", "qt-test", "android-test", "web-test"]),
+            templates: list(&["cargo-test", "ctest", "android-test", "web-test"]),
             env,
             keep: map(&[("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")]),
             remove: list(&["HGS_STATE_DIR", "HGS_CONFIG_DIR", "HGS_TRAY_HOME", "HGS_TRAY_LOCK_DIR"]),
@@ -155,7 +155,14 @@ fn apply_table(config: &mut Config, table: &dyn toml_edit::TableLike) -> Result<
     for (key, item) in table.iter() {
         match key {
             "enabled" => config.enabled = item.as_bool().ok_or("enabled is true or false")?,
-            "templates" => config.templates = strings(item, key)?,
+            "templates" => {
+                config.templates = strings(item, key)?;
+                // Task #58: a project that still names a Qt template is told
+                // its replacement, never left with a list that matches nothing.
+                if let Some(refusal) = config.templates.iter().find_map(|id| super::templates::removed(id)) {
+                    return Err(format!("[isolation] templates: {refusal}"));
+                }
+            }
             "env" => pairs(item, key, &mut config.env)?,
             "keep" => pairs(item, key, &mut config.keep)?,
             "remove" => config.remove.extend(strings(item, key)?),

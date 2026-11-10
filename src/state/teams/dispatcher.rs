@@ -12400,14 +12400,7 @@ fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> 
             Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
         });
     }
-    let mut env: Vec<(&str, String)> = Vec::new();
-    if template == "qt-test" && args["shots"].as_str() == Some("true") {
-        // U21: the shots go into the member's own folder, never the team's.
-        let shots = folder.join(".ci-build").join("shots");
-        let _ = fs::create_dir_all(&shots);
-        env.push(("ZERUS_TEAM_SHOTS", shots.display().to_string()));
-    }
-    Ok(super::templates::execute(&plan, folder, timeout, &env))
+    Ok(super::templates::execute(&plan, folder, timeout, &[]))
 }
 
 /// U21/C1: records one run on its attempt - even when the attempt ended while

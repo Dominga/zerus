@@ -95,7 +95,10 @@ fn an_older_cli_listing_spools_and_replays_through_the_existing_runner() {
     let staged = run_decoded(
         &fake.path(),
         &invocation(
-            vec!["@studio".into(), "ls".into(), "--json".into()],
+            // Task #58: the listing an older peer is asked for, as the product
+            // sends it (task 235 added --local --no-archives to the assertion
+            // below but not to this call).
+            std::iter::once("@studio".to_owned()).chain(zerus_client_core::legacy::Read::Listing.args()).collect(),
             Duration::from_secs(5),
         ),
         &[],

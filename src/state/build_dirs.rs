@@ -430,8 +430,6 @@ pub(crate) fn template_folders(template: &str, args: &Value, folder: &Path) -> V
             .iter()
             .filter_map(|manifest| Path::new(manifest).parent().map(|parent| (folder.join(parent).join("target"), "cargo_target")))
             .collect()
-    } else if template.starts_with("qt-") {
-        vec![(folder.join(".ci-build").join("gui"), "cmake_build")]
     } else if matches!(template, "cmake-configure" | "cmake-build" | "ctest") {
         // Task 85: the build folder a CMake template names (default build).
         let named = args["build_dir"].as_str().filter(|dir| !dir.is_empty()).unwrap_or(crate::state::teams::templates::CMAKE_BUILD_DIR);

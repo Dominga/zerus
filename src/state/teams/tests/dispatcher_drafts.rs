@@ -235,11 +235,13 @@ fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
     ops::apply(&mut edited, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"After Auto"}]}), &lead, &BTreeSet::new(), &mut later).unwrap();
     assert_eq!(edited.task(4).unwrap().title, "After Auto");
     assert_eq!(edited.lead_changes.len(), 1, "{:?}", edited.lead_changes);
-    // Once its work started, the edit is refused.
+    // Once its work started, the edit is refused. Task #58: since task #36 a
+    // started phase still takes updates of its unstarted tasks, so the refusal
+    // is the started task's own (no race: the hand-out has happened here).
     let mut started = saved.clone();
     started.task_mut(4).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
     let error = ops::apply(&mut started, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("has started"), "{error}");
+    assert_eq!(error, "Task #4 is not a draft or waiting in an unstarted phase");
 }

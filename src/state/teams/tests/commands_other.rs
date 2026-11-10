@@ -2019,7 +2019,7 @@ fn a_full_test_run_needs_the_teams_policy_or_the_owners_grant() {
     assert!(super::full_test_run("cargo-test", &json!({"skips":["teams::"],"manifest":["client/core/Cargo.toml"]})));
     assert!(super::full_test_run("cargo-test", &json!({"filters":[],"manifest":["client/core/Cargo.toml"]})));
     assert!(super::full_test_run("cargo-test", &json!({"filters":[" "]})));
-    assert!(!super::full_test_run("qt-test", &json!({"suite":"test_teams"})));
+    assert!(!super::full_test_run("ctest", &json!({"tests":["test_teams"]})));
     assert!(super::full_test_run("android-test", &json!({})));
     assert!(!super::full_test_run("cargo-build", &json!({})));
     let mut team = running_team();

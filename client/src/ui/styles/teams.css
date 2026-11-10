@@ -46,6 +46,7 @@
   .team-progress .submitted { background: color-mix(in srgb, var(--z-color-accent-muted) 55%, transparent); }
   .team-progress .active { background: var(--z-color-accent); }
   .team-progress .problem { background: var(--z-color-warn); }
+  .team-progress .rest { background: transparent; }
   .team-count { color: var(--z-color-text-2); white-space: nowrap; }
   .team-age { white-space: nowrap; flex: none; }
   .team-bar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; position: relative; }
@@ -434,3 +435,7 @@
   display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
 .lead-title-pill > span { min-width: 0; }
 .lead-title-pill:hover { filter: brightness(1.15); }
+/* Owner, 2026-11-09: Approve the plan above the first phase. Unlayered: packaged order. */
+.plan-approve-bar { display: flex; align-items: center; gap: 10px; margin: 8px 12px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--z-color-accent) 55%, transparent); background: color-mix(in srgb, var(--z-color-accent) 10%, transparent); }
+.plan-approve-bar .btn.primary { height: 32px; padding: 0 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }

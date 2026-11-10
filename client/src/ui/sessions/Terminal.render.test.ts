@@ -11,7 +11,9 @@ const fixture = vi.hoisted(() => ({
   generation: (): number => 7,
 }));
 vi.mock("../../bridge", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../bridge")>()), copyVerbatim: fixture.copy, pasteText: fixture.clipboard }));
-vi.mock("../../store/composer", () => ({ composer: { canAttach: fixture.canAttach, pasteImage: fixture.image, send: fixture.send } }));
+vi.mock("../../store/composer", () => ({ composer: { canAttach: fixture.canAttach, pasteImage: fixture.image, send: fixture.send,
+  // store/session opens the selected session's composer and reads its view.
+  open: () => undefined, view: () => undefined, receive: () => {} } }));
 vi.mock("../../store/terminal", () => ({
   screenShowsLatest: () => true,
   terminal: { paste: fixture.paste, input: fixture.input, show: fixture.show, hide: fixture.hide, generation: () => fixture.generation(),
@@ -23,6 +25,10 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   constructor(options: Record<string, unknown>) { this.options = options; }
   data?: (text: string) => void;
   loadAddon() {} onData(fn: (text: string) => void) { this.data = fn; } onBinary() {} onResize() {} write(_bytes: unknown, done?: () => void) { done?.(); }
+  // The team-notice folder (terminal-notices.ts, fa2fd9a01) reads these.
+  buffer = { active: { baseY: 0, cursorY: 0, length: 0, getLine: () => undefined } };
+  onWriteParsed() { return { dispose() {} }; } onRender() { return { dispose() {} }; } onScroll() { return { dispose() {} }; }
+  registerMarker() { return undefined; } registerDecoration() { return undefined; }
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) { fixture.keys = handler; }
   getSelection() { return fixture.selection; } hasSelection() { return !!fixture.selection; }
   get modes() { return { mouseTrackingMode: fixture.mouse }; }

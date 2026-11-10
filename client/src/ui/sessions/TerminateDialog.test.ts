@@ -13,7 +13,7 @@ vi.mock("../../store/actions", () => ({
   targetOf: (row: ActionRow) => ({ computer: row.computer, name: row.name, run_id: row.runId ?? "", conversation_id: row.conversationId ?? "" }),
 }));
 vi.mock("../../store/batch", () => ({ bindBatchConfirm: vi.fn(), running: () => false }));
-vi.mock("../../store/settings", () => ({ setSetting: vi.fn() }));
+vi.mock("../../store/settings", () => ({ setSetting: vi.fn(), settings: {} }));
 vi.mock("../../store/sessionForks", () => ({ sessionForks: {} }));
 vi.mock("../../store/restores", () => ({ cancelRestoreFollow: vi.fn(), forgetArchived: vi.fn(), refreshArchiveWhenDone: vi.fn(), restoreSession: vi.fn() }));
 vi.mock("../../i18n", () => ({ trNoop: (s: string) => s, tr: (s: string, ...args: unknown[]) => s.replace(/%(\d+)/g, (_, n) => String(args[Number(n) - 1])) }));

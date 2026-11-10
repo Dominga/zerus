@@ -69,8 +69,38 @@ fn release_conflicts(team: &mut Team) -> bool {
     !decided.is_empty()
 }
 
-/// Task #267: whether a commit is on the integration line.
+/// Task #19 (owner, 2026-11-10): the lead lands accepted work by hand on a
+/// named line (`manual_line`).
+pub(crate) fn manual(team: &Team) -> bool {
+    !team.settings.manual_line.trim().is_empty()
+}
+
+/// Task #19: the line a landing names, for messages.
+pub(crate) fn line_name(team: &Team) -> String {
+    if manual(team) {
+        format!("the line {}", team.settings.manual_line.trim())
+    } else {
+        "the integration line".into()
+    }
+}
+
+/// Task #19: a lead who lands by hand, or a team created with working mode
+/// "none": the queue's and the working mode's playbook rules (a), (b) and (h)
+/// say nothing.
+pub(crate) fn hand_landing(team: &Team) -> bool {
+    manual(team)
+        || team.working_mode.trim() == "none"
+        || team.mode_kept.as_ref().is_some_and(|kept| kept["by"] == "New team")
+}
+
+/// Task #267: whether a commit is on the integration line. Task #19: on the
+/// manual line's branch when the lead lands by hand, whatever the team
+/// folder has checked out (it may be on another team's detached line).
 pub(crate) fn landed(team: &Team, commit: &str) -> bool {
+    if manual(team) {
+        let line = format!("refs/heads/{}", team.settings.manual_line.trim());
+        return !commit.is_empty() && ancestry_at(team.integration_folder(), commit, &line) == Ancestry::Yes;
+    }
     !commit.is_empty() && ancestry(team.integration_folder(), commit) == Ancestry::Yes
 }
 
@@ -95,11 +125,16 @@ fn cherry_landed(team: &Team, commit: &str) -> bool {
 
 /// Task #370: the commits of rejected attempts of every task in the team: a
 /// merge whose range carries one would land rejected code.
+///
+/// Owner's team, 2026-11-10: an attempt the pipeline returned (its review or
+/// test round) is not the lead's rejection. Its member fixes it with commits
+/// on top, so it is the base of the accepted work; a cherry-pick of the last
+/// fix alone would drop it.
 fn rejected_commits(team: &Team) -> Vec<String> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())
-        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.folder_head.is_empty())
+        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.pipeline_return && !attempt.folder_head.is_empty())
         .map(|attempt| attempt.folder_head.clone())
         .collect()
 }
@@ -109,6 +144,9 @@ fn rejected_commits(team: &Team) -> Vec<String> {
 /// (no `integration_folder`, the owner's p92: a hand landing in the team's own
 /// folder).
 fn line_revision(team: &Team) -> String {
+    if manual(team) {
+        return format!("refs/heads/{}", team.settings.manual_line.trim());
+    }
     if team.settings.integration_folder.trim().is_empty() {
         return "HEAD".to_owned();
     }
@@ -496,11 +534,24 @@ const MERGE_RANGES: usize = 500;
 
 /// The project turned the queue on (the owner may override it in the team).
 pub(crate) fn enabled(team: &Team) -> bool {
-    if team.integration_folder().is_empty() {
+    // Task #19: a team whose lead lands by hand runs no queue.
+    if team.integration_folder().is_empty() || manual(team) {
         return false;
     }
-    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
-        .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
+    let root = Path::new(team.integration_folder());
+    let overrides = team.settings.tests.as_ref();
+    let Ok(loaded) = crate::test_discipline::config::load_project(root, overrides) else { return false };
+    if loaded.active() && loaded.config.merge_queue.enabled {
+        return true;
+    }
+    // Owner, 2026-11-09: when neither the project nor the team says, a team
+    // whose members work in their own clones or worktrees has the queue on:
+    // their accepted branches live there, so nothing else lands them.
+    let said = overrides.is_some_and(|fields| fields.get("merge_queue").is_some())
+        || std::fs::read_to_string(root.join(crate::test_discipline::config::FILE)).is_ok_and(|text| text.contains("merge_queue"));
+    !said && team.members.iter().any(|member| {
+        member.id != team.lead && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+    })
 }
 
 /// The queue entry an accept of task `id` makes, or None when the accept

@@ -27,6 +27,13 @@ const rows = [rowOut("", 1), rowOut("", 2, { status: "attention" }), rowOut("", 
 
 let undo: (() => void)[] = [];
 beforeAll(() => applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: rows }));
+// Task #22 (team ede724c4): the first import of a large module graph is
+// transformed inside the 5 s test timeout, which the full client run on a
+// loaded machine exceeded ("Test timed out in 5000ms" only under that run).
+// It is transformed once here, with its own bound; the tests' own imports then
+// resolve from the module cache and test exactly what they did.
+beforeAll(async () => { await Promise.all([import("./model"), import("../../store/session"), import("../../store/teamCollapse"), import("../../store/testing")]); }, 60_000);
+
 afterAll(() => applyBatch({ ...emptyBatch(), removes: rows.map((row) => ({ computer: "", key: row.key })) }));
 beforeEach(() => {
   setPage("sessions"); setSearch(""); setSearchCursor(""); setDetailTab("activity"); setSelectedKey(undefined);

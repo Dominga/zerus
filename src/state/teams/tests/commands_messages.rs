@@ -166,9 +166,11 @@ fn a_message_is_stored_with_its_urgency_within_its_bounds() {
     });
 }
 
-/// Task 173: the lead's team message naming a task goes only to the member
-/// that holds it, bound to its attempt; anything else is refused with the
-/// hand-out, and a message naming no task goes through unbound.
+/// Task 173: the lead's team message naming a task the member holds is bound
+/// to its attempt; a message naming no task goes through unbound. Task #30
+/// (team ede724c4): a task the text only mentions is a reference and the
+/// message goes with a note; only a "task" the member does not hold is refused,
+/// naming hgs team reassign.
 #[test]
 fn a_lead_message_naming_a_task_binds_to_its_attempt_or_is_refused() {
     let (team, dev_attempt, _) = review_team();
@@ -176,11 +178,18 @@ fn a_lead_message_naming_a_task_binds_to_its_attempt_or_is_refused() {
         as_lead(|| {
             let sent = call("message", json!({"to":"dev","text":"On #1: keep the old field name"})).unwrap();
             assert_eq!(sent["status"], "queued");
-            let error = call("message", json!({"to":"qa","text":"Lead, for 3: write the docs too"})).unwrap_err().to_string();
+            assert!(sent.get("references").is_none(), "{sent}");
+            // A mention of another member's task is a reference, not work.
+            let sent = call("message", json!({"to":"qa","text":"Lead, for 3: see how #1 named it"})).unwrap();
+            assert_eq!((sent["status"].as_str(), sent["references"].clone()), (Some("queued"), json!([3, 1])), "{sent}");
+            assert!(sent["reference_note"].as_str().unwrap().contains("for reference only"), "{sent}");
+            let sent = call("message", json!({"to":"team","text":"Everyone: #3 shows the pattern to follow"})).unwrap();
+            assert_eq!(sent["status"], "queued", "a broadcast mentioning a task goes: {sent}");
+            // The message's "task" naming a task the member does not hold is refused.
+            let error = call("message", json!({"to":"qa","task":3,"text":"write the docs too"})).unwrap_err().to_string();
             assert!(error.starts_with("Task #3 is not handed to qa"), "{error}");
-            assert!(error.contains("hgs team retry --json"), "{error}");
-            let error = call("message", json!({"to":"team","text":"Everyone help with #1"})).unwrap_err().to_string();
-            assert!(error.contains("Task #1 is not handed to qa"), "a broadcast naming a task is refused: {error}");
+            assert!(error.contains("hgs team retry --json") && error.contains("hgs team reassign --json"), "{error}");
+            assert!(call("message", json!({"to":"dev","task":"one","text":"x"})).unwrap_err().to_string().contains("task number"));
             call("message", json!({"to":"qa","text":"Standup in 5"})).unwrap();
         });
         let saved = stored();

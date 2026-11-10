@@ -1368,7 +1368,12 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     found
 }
 
-pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The phase checks' overall bound. They run inside a team change (under the
+/// store's write lock), so the bound stays short here; task #32: in tests it is
+/// one a busy machine fits (`worktrees::read_window`).
+pub(crate) fn phase_check_timeout() -> std::time::Duration {
+    super::super::worktrees::read_window(10)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -1378,10 +1383,14 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Task #32 (team ede724c4): what a prerequisite Git was too slow to check says,
+/// instead of Git's bare "timed out".
+const SLOW_CHECK: &str = "Git was too slow to answer (the computer is busy); the check runs again at approval";
+
 fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
     -> Result<Vec<u8>, super::super::worktrees::GitError>
 {
-    let deadline = overall.min(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    let deadline = overall.min(std::time::Instant::now() + super::super::worktrees::read_window(5));
     #[cfg(test)]
     if let Some(delay) = BEFORE_PREREQUISITE_GIT.with(std::cell::Cell::get) {
         delay();
@@ -1395,6 +1404,7 @@ fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::ti
         match prerequisite_git(folder, &["show-ref", "--verify", "--quiet", &reference], deadline) {
             Ok(_) => return Ok(reference),
             Err(error) if error.code == Some(1) => {},
+            Err(error) if error.state == "timeout" => return Err(format!("cannot verify branch {branch} yet: {SLOW_CHECK}")),
             Err(error) => return Err(format!("cannot verify branch {branch}: {}", error.detail.chars().take(200).collect::<String>())),
         }
     }
@@ -1453,6 +1463,8 @@ pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Inst
                             &["merge-base", "--is-ancestor", &reference, base], deadline)
                             .err().map(|error| if error.code == Some(1) {
                                 format!("{commit} is not an ancestor of {base}")
+                            } else if error.state == "timeout" {
+                                format!("cannot verify {commit} yet: {SLOW_CHECK}")
                             } else {
                                 format!("cannot verify {commit}: {}", error.detail.chars().take(200).collect::<String>())
                             })

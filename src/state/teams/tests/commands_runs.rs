@@ -191,7 +191,7 @@ fn a_pipeline_runs_through_hgs_team() {
 
 #[test]
 fn a_member_prompt_snapshot_survives_a_catalog_edit_through_run() {
-    let _env = crate::state::ENV_LOCK.lock().unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));
     for key in ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] { std::env::remove_var(key); }
     let dir = tempfile::tempdir().unwrap();
@@ -231,7 +231,7 @@ fn a_member_prompt_snapshot_survives_a_catalog_edit_through_run() {
 
 #[test]
 fn phase35_findings_work_through_run() {
-    let _env = crate::state::ENV_LOCK.lock().unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));
     for key in ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] { std::env::remove_var(key); }
     let dir = tempfile::tempdir().unwrap();

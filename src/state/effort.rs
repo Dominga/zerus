@@ -2592,7 +2592,20 @@ pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
         || string(&receipt, "run_id") != string(pending, "receipt_run_id")
         || string(&receipt, "conversation_id") != request.expected_conversation_id
     {
-        return Err("pending settings are not safe to retry; inspect Terminal".into());
+        // Owner, 2026-11-10: an interrupted attempt left its receipt
+        // "in_progress"; refusing here refused every later message while the
+        // agent was idle, so nothing but Terminal could reach it. Pending
+        // settings that are not safe to retry are dropped (never typed
+        // again) and the message goes on; the owner chooses them again.
+        let mut record = record;
+        record.as_object_mut().map(|object| object.remove("pending_settings"));
+        write(&mut record)?;
+        if string(&receipt, "status") == "scheduled" || string(&receipt, "status") == "in_progress" {
+            receipt["status"] = json!("abandoned");
+            receipt["note"] = json!("not safe to retry: dropped so input is not blocked");
+            let _ = atomic(&path, &receipt.to_string());
+        }
+        return Ok(record);
     }
     let native = Request {
         request_id: id,

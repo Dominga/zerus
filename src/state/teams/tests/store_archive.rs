@@ -281,6 +281,127 @@ fn archived_task_stubs_and_the_full_task_keep_the_origin() {
     });
 }
 
+/// Task #469: one done phase of three tasks, 2 waiting for 1 and 3 for 2, so
+/// the plan has layers to draw and links between them.
+fn chained_phase() -> Team {
+    let dep = |task| vec![Dependency { task, kind: Default::default() }];
+    Team {
+        id: "stub-deps".into(), name: "Stub deps".into(), lead: "lead".into(), status: TeamStatus::Running,
+        phases: vec![Phase { n: 1, title: "Done".into(), state: PhaseState::Approved, tasks: vec![1, 2, 3], ..Default::default() }],
+        tasks: vec![
+            Task { id: 1, phase: 1, title: "Root".into(), assignee: "dev".into(), status: TaskStatus::Accepted, ..Default::default() },
+            Task { id: 2, phase: 1, title: "Middle".into(), assignee: "dev".into(), status: TaskStatus::Accepted, deps: dep(1), ..Default::default() },
+            Task { id: 3, phase: 1, title: "Last".into(), assignee: "dev".into(), status: TaskStatus::Accepted, deps: dep(2), ..Default::default() },
+        ],
+        ..Default::default()
+    }
+}
+
+/// A stub as the hgs before task #469 wrote it: no dependencies at all.
+fn old_stub(task: &Task) -> Value {
+    serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
+        "status":task.status,"archived":task.archived})
+}
+
+/// Rewrites a task's plan row and the archive's own stub copy as that hgs left
+/// them: an archived stub without dependencies.
+fn strip_deps(store: &Store, team: &str, task: &Task) {
+    let stub = old_stub(task).to_string();
+    store.db.execute("UPDATE team_tasks SET payload=?2 WHERE team=?1 AND task=?3", params![team, stub, task.id]).unwrap();
+    store.db.execute("UPDATE team_task_archive SET stub=?2 WHERE team=?1 AND task=?3", params![team, stub, task.id]).unwrap();
+}
+
+#[test]
+fn archived_stubs_keep_their_dependencies_so_the_plan_keeps_its_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let team = chained_phase();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        assert!(saved.tasks.iter().all(|task| task.archived.is_some()), "the phase is archived");
+        // The stub keeps what the plan draws: the dependencies in their order.
+        assert_eq!(saved.task(2).unwrap().deps, vec![Dependency { task: 1, kind: Default::default() }]);
+        assert_eq!(saved.task(3).unwrap().deps, vec![Dependency { task: 2, kind: Default::default() }]);
+        // A done phase lays out in its layers again, not in one row.
+        let layers = super::super::plan::layers(&saved.tasks);
+        assert_eq!((layers[&1], layers[&2], layers[&3]), (0, 1, 2));
+        // The status wire carries them to the client's graph and edges.
+        let view = crate::state::teams::commands::view_with_cancelled(&saved, &[], Some(&[]), true);
+        let shown = view["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 2).unwrap();
+        assert_eq!(shown["deps"], serde_json::json!([{"task":1,"kind":"hard"}]));
+        assert_eq!(view["layers"]["2"], 1);
+        // The page of the archived phase carries them too.
+        let page = store.archived_tasks(&team.id, 1, 0, 50).unwrap();
+        let stub = page["items"].as_array().unwrap().iter().find(|task| task["id"] == 3).unwrap();
+        assert_eq!(stub["deps"], serde_json::json!([{"task":2,"kind":"hard"}]));
+    });
+}
+
+#[test]
+fn an_old_stub_gets_its_dependencies_back_from_the_archive_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let path = dir.path().join("teams.sqlite3");
+        let mut store = Store::open_at(&path, true).unwrap();
+        let team = chained_phase();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        // Rewrite the two dependent stubs as the earlier hgs did: no deps key.
+        for id in [2u32, 3] {
+            strip_deps(&store, &team.id, saved.task(id).unwrap());
+        }
+        let stored: String = store.db.query_row("SELECT payload FROM team_tasks WHERE team=?1 AND task=2", [&team.id], |row| row.get(0)).unwrap();
+        assert!(serde_json::from_str::<Value>(&stored).unwrap().get("deps").is_none(), "the old stub has no deps");
+        // A store written before this hgs has no backfill marker either.
+        store.db.execute("DELETE FROM store_migrations WHERE name=?1", [super::STUB_DEPS]).unwrap();
+        drop(store);
+        // A read keeps its plan: the dependencies come back from the payload.
+        let store = Store::open_at(&path, false).unwrap();
+        let loaded = store.load(&team.id).unwrap().unwrap();
+        assert_eq!(loaded.task(2).unwrap().deps, vec![Dependency { task: 1, kind: Default::default() }]);
+        assert_eq!(loaded.task(3).unwrap().deps, vec![Dependency { task: 2, kind: Default::default() }]);
+        let layers = super::super::plan::layers(&loaded.tasks);
+        assert_eq!((layers[&1], layers[&2], layers[&3]), (0, 1, 2));
+        drop(store);
+        // The one write open backfills the store itself, in place.
+        let mut store = Store::open_at(&path, true).unwrap();
+        let backfilled: String = store.db.query_row("SELECT payload FROM team_tasks WHERE team=?1 AND task=2", [&team.id], |row| row.get(0)).unwrap();
+        let backfilled: Value = serde_json::from_str(&backfilled).unwrap();
+        assert_eq!(backfilled["deps"], serde_json::json!([{"task":1,"kind":"hard"}]));
+        let archive_stub: String = store.db.query_row("SELECT stub FROM team_task_archive WHERE team=?1 AND task=2", [&team.id], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&archive_stub).unwrap()["deps"], serde_json::json!([{"task":1,"kind":"hard"}]));
+        // A later change keeps them: the next save writes the same stub back.
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let kept: String = store.db.query_row("SELECT payload FROM team_tasks WHERE team=?1 AND task=3", [&team.id], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&kept).unwrap()["deps"], serde_json::json!([{"task":2,"kind":"hard"}]));
+    });
+}
+
+#[test]
+fn the_archived_task_page_carries_the_dependencies_of_an_old_stub() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let team = chained_phase();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        for id in [2u32, 3] {
+            strip_deps(&store, &team.id, saved.task(id).unwrap());
+        }
+        // The page takes them from the payload the full task is frozen in.
+        let page = store.archived_tasks(&team.id, 1, 0, 50).unwrap();
+        let items = page["items"].as_array().unwrap();
+        let stub = items.iter().find(|task| task["id"] == 2).unwrap();
+        assert_eq!(stub["deps"], serde_json::json!([{"task":1,"kind":"hard"}]));
+        let last = items.iter().find(|task| task["id"] == 3).unwrap();
+        assert_eq!(last["deps"], serde_json::json!([{"task":2,"kind":"hard"}]));
+    });
+}
+
 #[test]
 fn evicted_phase_modes_are_pruned_while_live_modes_and_free_planning_survive() {
     use crate::state::teams::model::PlanMode;

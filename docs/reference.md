@@ -3074,11 +3074,14 @@ belongs to the attempt (or stage run) handed to it.
 - A lead's message to a member that names a task (`#N`, `task N`, `for N:`
   for one of the team's tasks) is bound to that task's attempt when the task is
   handed to that member (the attempt's `lead_messages`, at most 20, with a
-  `lead_message` event); otherwise it is refused, naming the task's state and
-  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
-  `hgs send` from the lead's own session to a member's session and for the
-  lead's `hgs team message` (a broadcast naming a task is refused). A message
-  naming no task goes through; it carries no work. Answers and decisions keep
+  `lead_message` event). Task #30 (2026-11-10): a task the text only mentions
+  and the member does not hold is a reference: the message goes, its answer
+  names it (`references`, `reference_note`). Only a message whose `"task"`
+  field names a task the member does not hold is refused, naming the task's
+  state and the hand-out to use (`hgs team retry`, `hgs team reassign`). This
+  holds for `hgs send` from the lead's own session to a member's session and
+  for the lead's `hgs team message`. A message naming no task goes through; it
+  carries no work. Answers and decisions keep
   their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
   owner's messages and Zerus's own sends are never checked.
 - A team member's `hgs run` needs its open attempt or stage run; it may name
@@ -10509,6 +10512,28 @@ task/commit pairs and every accepted task's `unlanded` state and why (queued,
 testing, conflict with its `resolve` task, or no landing queued); the lead's
 inbox lists each with an `unlanded` item, and an accept answers with its
 `landing`.
+
+#### Landing by hand on a named line (task #19)
+
+Owner, 2026-11-10: a lead who reviews and merges by hand names the team's
+line, `{"manual_line":"BRANCH"}` through `hgs team settings` (the lead may set
+it; the name is a plain branch name). With it:
+
+- the merge queue is off for the team whatever the project's tests file says:
+  an accept answers `accepted`, queues no landing and runs no suites;
+- `hgs team landed` takes a commit on `BRANCH` of the team folder's
+  repository, whatever that folder has checked out (it may be on another
+  team's detached line), and refuses one off it naming the line; accepted work
+  whose commit reaches the line is recorded as landed by itself (task #443);
+- members merge `BRANCH` with git-merge-lead, and hand-outs bring a member's
+  branch up to it (task #15). Without a manual line, a team folder on no
+  branch merges the team's `base_branch` (else its recorded line) instead of
+  refusing "The folder is on no branch"; with none named the refusal says to
+  set `manual_line`;
+- the playbook's rules (a), (b) and (h) raise nothing, nor for a team created
+  with working mode `none`;
+- the lore takes a task's landed commit, else its accepted report's commit,
+  when Zerus made none: no "accepted with no commit Zerus made" item.
 
 #### Nothing blocks creating a team (task #13)
 

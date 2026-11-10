@@ -81,13 +81,15 @@ describe("the Compact skins' title bar (task 243)", () => {
     const html = render();
     expect(html).toMatch(/<header[^>]*class="titlebar"[^>]*data-tauri-drag-region/);
     const positions = order(html, ["[logo]", ">Zerus<", "data-sessions-toggle", "[add]", 'data-page="sessions"', 'data-page="projects"', 'data-page="machines"',
-      'data-page="accounts"', 'data-page="waiting"', "tb-search", "data-log-line", "[unpinned]", "[settings]", 'data-window="minimize"', 'data-window="maximize"', 'data-window="close"']);
+      'data-page="accounts"', 'data-page="waiting"', "data-log-line", "[unpinned]", "[settings]", 'data-window="minimize"', 'data-window="maximize"', 'data-window="close"']);
     expect(positions.every((at) => at >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     // The Sessions badge and the waiting count.
     expect(plain(html)).toMatch(/\[sessions\]<span[^>]*class="tb-badge"[^>]*>2<\/span>/);
-    // Task 409: the search field no longer carries the Ctrl+K hint.
+    // Task 409: the search field no longer carries the Ctrl+K hint. Owner,
+    // 2026-11-09 (07e0ddacb): the title bar has no search field at all.
     expect(plain(html)).not.toContain("Ctrl+K");
+    expect(html).not.toContain("tb-search");
     // The model servers tab shows only while a server exists.
     expect(html).not.toContain('data-page="modelservers"');
   });

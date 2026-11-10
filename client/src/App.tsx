@@ -30,10 +30,6 @@ import { windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { appLog } from "./store/appLog";
 import { bus } from "./store/notices";
-import { WaitingPage } from "./ui/teams/Waiting";
-import { NewTeamPage } from "./ui/teams/NewTeamPage";
-import { CatalogPage } from "./ui/teams/CatalogPage";
-import { TeamDesigner } from "./ui/teams/TeamDesigner";
 import { staleNote } from "./ui/status-summary";
 import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
@@ -42,6 +38,11 @@ import { BootSplash } from "./ui/BootSplash";
 import { lazyView } from "./ui/lazy-view";
 import { LazyBoundary } from "./ui/lazy-boundary";
 const ParentDialogs = lazyView(() => import("./ui/sessions/ParentDialogs"), (m) => m.ParentDialogs);
+// Task #61 (CI #22): the team pages load on first use, outside the entry chunk.
+const WaitingPage = lazyView(() => import("./ui/teams/Waiting"), (m) => m.WaitingPage);
+const NewTeamPage = lazyView(() => import("./ui/teams/NewTeamPage"), (m) => m.NewTeamPage);
+const CatalogPage = lazyView(() => import("./ui/teams/CatalogPage"), (m) => m.CatalogPage);
+const TeamDesigner = lazyView(() => import("./ui/teams/TeamDesigner"), (m) => m.TeamDesigner);
 
 // The client shell: the rail, the pages and the status bar.
 const WorktreeCleanup = lazy(() => import("./ui/screens/WorktreeCleanup"));
@@ -157,10 +158,10 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
           <Match when={page() === "projects"}><Suspense><ProjectsScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
-          <Match when={page() === "waiting"}><WaitingPage /></Match>
-          <Match when={page() === "newteam"}><NewTeamPage /></Match>
-          <Match when={page() === "catalog"}><CatalogPage /></Match>
-          <Match when={page() === "designer"}><TeamDesigner onClose={() => setPage("sessions")} /></Match>
+          <Match when={page() === "waiting"}><LazyBoundary><WaitingPage /></LazyBoundary></Match>
+          <Match when={page() === "newteam"}><LazyBoundary><NewTeamPage /></LazyBoundary></Match>
+          <Match when={page() === "catalog"}><LazyBoundary><CatalogPage /></LazyBoundary></Match>
+          <Match when={page() === "designer"}><LazyBoundary><TeamDesigner onClose={() => setPage("sessions")} /></LazyBoundary></Match>
           <Match when={page() === "modelservers"}><ModelServersScreen /></Match>
         </Switch>
       </main>

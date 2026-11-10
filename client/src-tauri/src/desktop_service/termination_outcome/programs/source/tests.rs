@@ -310,12 +310,35 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 initial_completion.join() == run::Retirement::Retired
             })
             .await;
+            // zerus-1y897.5: two unarmed phases, each with its own real child,
+            // pipes and loan; they stay unsettled until the control retires them.
+            let unarmed = [(); 2].map(|()| {
+                let (unarmed, resources) = Mutation::new(source.clone(), &input);
+                unarmed.armed.store(false, Ordering::Release);
+                let inherited = resources.descendants.clone();
+                let exit = run::run_accounted_frozen_with_completion(
+                    &f.0.join("mutator"),
+                    &inv,
+                    source.context.environment(),
+                    1024,
+                    &AtomicBool::new(false),
+                    (resources, Some(unarmed.completion.clone())),
+                    move |command| {
+                        inherited.inherit(command)?;
+                        command.spawn()
+                    },
+                )
+                .unwrap();
+                assert!(matches!(exit, Exit::Code { code: 0, .. }));
+                unarmed
+            });
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,
                 input,
                 initial_completion,
                 mutation,
+                unarmed,
             );
             assert!(
                 !source.current(),

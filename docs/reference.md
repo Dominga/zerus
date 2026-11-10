@@ -3561,6 +3561,26 @@ decision note, another cancelled dependency, another unread count, a newer
 digest); a decision is never marked seen - it is answered. Unknown or
 decision keys come back in `unknown` and mark nothing.
 
+Task 29 (owner, 2026-11-10): every item in `hgs team inbox --json` carries its
+`key`, and every informational item closes the same way and carries the `seen`
+command (`"notice": true`): the notices above, test results (`test_result`),
+playbook items (`playbook`), records lore cannot write yet (`lore_missing`),
+accepted work waiting to land (`waiting_to_land`), refused queued calls
+(`refused_queued_call`), idle notices (`idle_with_ready_work`), recovered
+attempts (`attempt_recovered`) and any item whose command starts with "no
+action". A decision (a report, question, permission, a card or anything else
+that waits for an accept, reject or answer) is never closed and clears only by
+being decided; `seen` lists such keys in `unknown` and names each in
+`decisions` with its command. The signature leaves out times: an item that
+only grew older (a playbook item dated now, "#1 (26 min)") stays closed.
+
+Informational items also clear by themselves: a task's test results once it
+is accepted and landed, and every test result after 12 hours; a playbook item
+as soon as its rule no longer breaks; a `lore_missing` record once its task
+has a commit (a member's own commit counts: the accepted attempt's reported
+folder head, the commit the merge queue lands); `waiting_to_land` once the
+work landed.
+
 `dependency_cancelled` offers `keep` next to hold and cancel:
 `{"request_id":"UUID","team":"ID","task":N} | hgs team keep --json` (or
 `"deps":[ids]` for some of them) records that the task does not need the

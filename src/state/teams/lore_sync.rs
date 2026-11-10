@@ -126,6 +126,17 @@ fn commits(task: &Task) -> Vec<String> {
     found.split_off(skip)
 }
 
+/// Task #29: whether a record the last lore pass left waiting still waits.
+/// A task's record that waited for its commit stops waiting once the task
+/// has one (or is no longer accepted); other records wait for the next pass.
+pub(crate) fn still_pending(team: &Team, pending: &LorePending) -> bool {
+    if pending.kind != "item" || pending.missing.iter().all(|field| field != "commits") {
+        return true;
+    }
+    let task = pending.id.rsplit_once('#').and_then(|(_, id)| id.parse::<u32>().ok()).and_then(|id| team.task(id));
+    task.is_some_and(|task| task.status == TaskStatus::Accepted && commits(task).is_empty())
+}
+
 /// A task's latest passing test run on a commit, as `template args`: the
 /// check a fault names.
 fn passing_run(task: &Task) -> Option<String> {

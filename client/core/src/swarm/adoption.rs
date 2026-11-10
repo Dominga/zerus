@@ -677,6 +677,22 @@ pub fn status_invocation(alias: &str, request_id: &str) -> Result<Invocation, St
     })
 }
 
+/// This computer's own journal for one original request, read-only. The
+/// desktop uses it after a restart, from the request the organization read
+/// discloses; it never creates a ticket or authorizes another call.
+pub fn local_status_invocation(request_id: &str) -> Result<Invocation, String> {
+    if Uuid::parse_str(request_id).is_err() || request_id != request_id.to_ascii_lowercase() {
+        return Err(INVALID.into());
+    }
+    let body = serde_json::to_vec(&json!({"request_id": request_id})).map_err(|_| INVALID)?;
+    Ok(Invocation {
+        args: vec!["swarm".into(), "adoption-status".into(), "--json".into()],
+        stdin: Some(body),
+        timeout: std::time::Duration::from_secs(30),
+        request_id: None,
+    })
+}
+
 pub fn revision(list: &Value, alias: &str) -> Result<String, String> {
     configuration_revision(list, alias)
 }

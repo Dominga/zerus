@@ -3177,8 +3177,14 @@ The result stays unknown and status-only, the ticket stays held, and nothing is
 retried or continued. Windows keeps its per-child kill-on-close jobs.
 setsid-detached processes stay outside the group. Two boundaries remain: if the
 desktop has crashed, a later kill of the CLI is not accounted by anyone; and
-after a desktop restart the dialog cannot reopen the original (the organization
-read still discloses its request).
+after a desktop restart the dialog cannot reopen the original. It can still
+review it read-only: when the organization read discloses an adoption request
+and the dialog holds no original of its own, **Review original status** reads
+this computer's journal for that request (`hgs swarm adoption-status --json`)
+and, for a source original whose recorded peer is configured here, the
+destination's status. Nothing creates a ticket, continues the original or
+sends a mutation, and a mismatched request or an unconfigured peer refuses
+before any remote call.
 
 Adoption-specific raw JSON rejects duplicate object keys recursively before a
 typed map is constructed. The source catalog and sidecars must match their

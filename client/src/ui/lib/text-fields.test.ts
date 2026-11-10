@@ -25,5 +25,8 @@ describe("editable controlled fields",()=>{
       };visit(tree);
     }
     expect(missed).toEqual([]);
-  });
+  // Task #22 (team ede724c4): a CPU-bound static check that parses every UI
+  // file (185, about 1 s alone); the full client run on a loaded machine made
+  // it pass 5 s, so it has its own bound.
+  }, 30_000);
 });

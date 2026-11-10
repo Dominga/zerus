@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 const port = vi.hoisted(() => ({ opened: (): boolean => false, open: () => {}, close: () => {}, model: (): string => "first", chooseModel: (_value: string) => {}, effort: () => "low", chooseEffort: (_value: string) => {}, apply: vi.fn() }));
@@ -12,6 +12,12 @@ vi.mock("../../store/sessionModels", () => ({ sessionModels: {
 vi.mock("../../store/terminal", () => ({ terminal: { opened: vi.fn() } }));
 vi.mock("../../store/ui", () => ({ setDetailTab: vi.fn() }));
 import { ModelSettingsButton } from "./ModelSettings";
+// Task #22 (team ede724c4): the first import of a large module graph is
+// transformed inside the 5 s test timeout, which the full client run on a
+// loaded machine exceeded ("Test timed out in 5000ms" only under that run).
+// It is transformed once here, with its own bound; the tests' own imports then
+// resolve from the module cache and test exactly what they did.
+beforeAll(async () => { await import("./ModelSettingsDialog"); }, 60_000);
 let host: HTMLDivElement, dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.clearAllMocks(); });
 function setup() {

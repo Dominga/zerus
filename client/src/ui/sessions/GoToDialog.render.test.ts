@@ -73,10 +73,11 @@ describe("the title-bar search opens in place (task 423)", () => {
     expect(html).toMatch(/width:\s*560px/);
     expect(html).toContain(`placeholder="${PLACEHOLDER}"`);
     expect(html).not.toContain("Go to… (type &gt; for commands)");
-    // The title bar's field says the same words.
+    // Owner, 2026-11-09 (07e0ddacb): the title bar has no search field any
+    // more (Ctrl+K opens Go to); the anchored form stays for an anchor given.
     const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
     const bar = fs.readFileSync(new URL("../components/TitleBar.tsx", import.meta.url), "utf8");
-    expect(bar).toContain(`tr("${PLACEHOLDER}")`);
+    expect(bar).not.toContain("tb-search");
   });
 
   it("lists sessions and the messages that match", () => {

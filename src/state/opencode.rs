@@ -856,6 +856,51 @@ pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec
     let service = service::connect().map_err(|_| "baseline_unavailable")?;
     notification_snapshot_with(&service, record, || history::fetch(&service, record))
 }
+/// Every read of one observation ends by the same absolute deadline.
+struct Bounded<'a> {
+    service: &'a service::Service,
+    deadline: Instant,
+}
+impl Native for Bounded<'_> {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+        service::request(&self.service.reg, method, path, body, self.deadline)
+    }
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Response> {
+        service::request(
+            &self.service.reg,
+            method,
+            path,
+            body,
+            deadline.min(self.deadline),
+        )
+    }
+}
+/// Whether a claimed parent runs now: the same observation as its status, every
+/// read ending within `limit` of the service connection. No service is a
+/// definite no; a service that has not answered by then is busy, never live.
+pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
+    if record["service"] != "opencode2" {
+        return Ok(false);
+    }
+    let Ok(service) = service::connect() else {
+        return Ok(false);
+    };
+    claim_live_on(&service, record, Instant::now() + limit)
+}
+fn claim_live_on(service: &service::Service, record: &Value, deadline: Instant) -> Result<bool> {
+    let bounded = Bounded { service, deadline };
+    match notification_snapshot_with(&bounded, record, || history::fetch(&bounded, record)) {
+        Ok((row, _)) => Ok(row["state"] == "running" && row["process_state"] == "running"),
+        Err(_) if Instant::now() >= deadline => Err(parent_link::CLAIM_BUSY.into()),
+        Err(_) => Ok(false),
+    }
+}
 fn notification_snapshot_with(native: &dyn Native, record: &Value, history: impl FnOnce() -> Result<history::Page>) -> Result<(Value, Option<Vec<Value>>)> {
     let active = active_sessions(native)?;
     let observed = observe(native, record, &active, history, false)?;
@@ -2136,6 +2181,55 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_claim_check_never_waits_past_its_bound_or_counts_silence_as_live() {
+        // zerus-p24ce: a service that accepts and never answers is busy.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let service = |port| service::Service {
+            reg: service::Registration {
+                id: String::new(),
+                version: String::new(),
+                port,
+                pid: 0,
+                password: None,
+            },
+        };
+        let record =
+            json!({"service":"opencode2","conversation_id":"ses_claim","cwd":"/tmp/example"});
+        let started = Instant::now();
+        let busy = claim_live_on(
+            &service(port),
+            &record,
+            started + Duration::from_millis(300),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(busy, Err(parent_link::CLAIM_BUSY.to_owned()));
+        // Nothing listening: a definite no, before the bound.
+        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = closed.local_addr().unwrap().port();
+        drop(closed);
+        let started = Instant::now();
+        assert_eq!(
+            claim_live_on(&service(free), &record, started + Duration::from_secs(2)),
+            Ok(false)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
     use super::*;
     use std::collections::HashMap;
 

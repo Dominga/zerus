@@ -29,7 +29,7 @@ Start a session (hgs guide launch)
   For adopt, include that object as parent. It must exactly match a live local
   session's durable ID, run and conversation. Source "claimed" grants no
   operation or permission authority. --parent refuses existing sessions;
-  peer launches require the claimed-parent-v1 help marker.
+  peer launches need the claimed-parent-v1 marker and a parent live there.
 
 Continue existing work:
   hgs [@h] resume SESSION -d          restore a Saved conversation

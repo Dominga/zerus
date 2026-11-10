@@ -98,6 +98,36 @@ pub(crate) fn settle_running(folder: &Path, request_id: &str, outcome: &Value) -
 }
 
 /// N4: a request with this id still queued, for a member asking again.
+/// Task #49 (team ede724c4): the template runs `member` queued in this folder
+/// that no runner claimed yet, with the time each was queued. Read only: an
+/// unusable file is left for `pending` to answer and move away.
+pub(crate) fn queued_runs(folder: &Path, member: &str) -> Vec<(Value, f64)> {
+    let Ok(entries) = fs::read_dir(dir(folder)) else { return Vec::new() };
+    let mut found = Vec::new();
+    for entry in entries.take(SCAN_LIMIT).flatten() {
+        if found.len() >= READS_PER_TICK {
+            break;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `<id>.json` only: a result, a claim or a temporary file is no request.
+        let Some(id) = name.strip_suffix(".json") else { continue };
+        if !super::store::canonical_uuid(id) {
+            continue;
+        }
+        let Ok(value) = read_request(&entry.path(), &name) else { continue };
+        if value["op"] == "run" && value["member"].as_str() == Some(member) {
+            let queued = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0.0, |at| at.as_secs_f64());
+            found.push((value, queued));
+        }
+    }
+    found
+}
+
 pub(crate) fn request(folder: &Path, request_id: &str) -> Option<Value> {
     read_request(&request_path(folder, request_id), &format!("{request_id}.json")).ok()
 }

@@ -331,3 +331,142 @@ fn the_no_report_item_offers_the_last_reply_as_the_one_action() {
     assert_eq!(report.text, "Done: the parser and its tests");
     assert!(!report.captured);
 }
+
+/// The listing row of a quiet member whose last reply r7 came at 50, and the
+/// attempt's turn end recorded with it, the gate first seen open at 50.
+fn finished_turn(team: &mut Team) -> Seen {
+    delivered(team);
+    let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+    attempt.started_at = Some(11.0);
+    attempt.turn_ended_at = Some(50.0);
+    attempt.turn_reply = "r7".into();
+    attempt.report_ready_at = Some(50.0);
+    let mut quiet = session("codex/x/dev", "r1", true);
+    quiet.reply_at = Some(50.0);
+    quiet.reply_id = "r7".into();
+    quiet
+}
+
+fn no_report(found: &[Step]) -> bool {
+    found.iter().any(|step| matches!(step, Step::NoReport { .. }))
+}
+
+/// Task #49 (team ede724c4; owner's screenshot of 2026-11-10): the plan's
+/// cards of three members showed No report while each waited for its own
+/// build or test run. A member whose turn ends while a job of its own runs -
+/// a background job its hooks registered (a shell job it reports running),
+/// the Zerus run the dispatcher remembers, its own build - gets no No report,
+/// and a No report set before the wait was seen is cleared. A member with
+/// nothing running still gets No report.
+#[test]
+fn a_turn_that_ends_while_its_own_job_runs_is_no_no_report() {
+    let mut team = team();
+    let quiet = finished_turn(&mut team);
+    let timeout = team.settings.report_timeout_seconds as f64;
+    let late = 50.0 + timeout;
+    // Nothing of its own runs: No report, as before.
+    assert!(no_report(&steps(&team, &[quiet.clone()], late)));
+    // A shell job its hooks registered (idle session, no Background work).
+    let mut shell = quiet.clone();
+    shell.jobs = vec![SeenJob { kind: "shell".into(), what: "its background job `cargo build`".into(), command: "cargo build".into(), since: 45.0 }];
+    let found = steps(&team, &[shell.clone()], late);
+    assert!(!no_report(&found), "{found:?}");
+    // The report clock is cleared once, so the timeout starts when the job ends.
+    assert!(found.contains(&Step::OwnJobFound { task: 1 }), "{found:?}");
+    team.task_mut(1).unwrap().attempts[0].report_ready_at = None;
+    let found = steps(&team, &[shell.clone()], late + 600.0);
+    assert!(!no_report(&found) && !found.contains(&Step::GateOpen { task: 1 }), "nothing is written while it waits: {found:?}");
+    assert!(!found.contains(&Step::OwnJobFound { task: 1 }), "{found:?}");
+    // The job ended: the gate opens now and the timeout counts from here.
+    let found = steps(&team, &[quiet.clone()], late + 600.0);
+    assert!(found.contains(&Step::GateOpen { task: 1 }) && !no_report(&found), "{found:?}");
+    team.task_mut(1).unwrap().attempts[0].report_ready_at = Some(late + 600.0);
+    assert!(no_report(&steps(&team, &[quiet.clone()], late + 600.0 + timeout)));
+    // The Zerus run the dispatcher remembers counts between two listings.
+    team.task_mut(1).unwrap().attempts[0].awaited_run = "d2300000-0000-4000-8000-000000000001".into();
+    assert!(!no_report(&steps(&team, &[quiet.clone()], late + 600.0 + timeout)));
+    // A session that stopped waits for nothing.
+    let gone = stopped("codex/x/dev", "r1", "stopped");
+    assert!(no_report(&steps(&team, &[gone], late + 600.0 + timeout)));
+    team.task_mut(1).unwrap().attempts[0].awaited_run.clear();
+    // A No report set before the wait was seen is cleared once it is seen.
+    team.task_mut(1).unwrap().attempts[0].no_report = true;
+    let found = steps(&team, &[shell.clone()], late + 600.0 + timeout);
+    assert!(found.contains(&Step::OwnJobFound { task: 1 }), "{found:?}");
+    let mut building = quiet.clone();
+    building.building = true;
+    building.build_run = "d2300000-0000-4000-8000-000000000002".into();
+    assert!(steps(&team, &[building], late + 600.0 + timeout).contains(&Step::OwnJobFound { task: 1 }));
+    // Nothing of its own: a No report stays as it is.
+    assert!(!steps(&team, &[quiet.clone()], late + 600.0 + timeout).contains(&Step::OwnJobFound { task: 1 }));
+    // A quiet turn whose end never reached the listing (no reply mark) is
+    // decided after the timeout only when nothing of its own runs either.
+    let mut unmarked = team.clone();
+    {
+        let attempt = &mut unmarked.task_mut(1).unwrap().attempts[0];
+        attempt.no_report = false;
+        attempt.turn_ended_at = None;
+        attempt.report_ready_at = None;
+    }
+    let mut silent = quiet.clone();
+    silent.reply_at = None;
+    silent.reply_id.clear();
+    assert!(no_report(&steps(&unmarked, &[silent.clone()], 10.0 + timeout)));
+    silent.jobs = shell.jobs.clone();
+    assert!(!no_report(&steps(&unmarked, &[silent], 10.0 + timeout)));
+}
+
+/// Task #49: clearing a No report that the member's own job proved premature
+/// keeps the attempt open and restarts the report clock.
+#[test]
+fn a_found_wait_clears_the_no_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    finished_turn(&mut team);
+    team.task_mut(1).unwrap().attempts[0].no_report = true;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    run_step(&mut store, &team, &Step::OwnJobFound { task: 1 }, "").unwrap();
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let attempt = &saved.task(1).unwrap().attempts[0];
+    assert!(!attempt.no_report && attempt.report_ready_at.is_none());
+    assert_eq!((attempt.state, attempt.turn_ended_at), (AttemptState::Delivered, Some(50.0)));
+    let events = store.events(&team.id, None, 20).unwrap();
+    assert!(events.to_string().contains("no_report_cleared"), "{events}");
+}
+
+/// Task #49: a template run the member queued (not claimed yet, so the
+/// listing shows no build) and a claim made after the listing are its jobs.
+#[test]
+fn a_queued_or_freshly_claimed_run_is_the_members_own_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut team = team();
+    let mut quiet = finished_turn(&mut team);
+    quiet.cwd = dir.path().display().to_string();
+    let late = 50.0 + team.settings.report_timeout_seconds as f64;
+    assert!(with_outbox_runs(&team, &[quiet.clone()])[0].jobs.is_empty());
+    let request = json!({"op":"run","request_id":"d2300000-0000-4000-8000-000000000003","team":team.id,"member":"dev",
+        "attempt":"00000000-0000-4000-8000-000000000001","template":"cargo-test","args":{},"task":1});
+    super::super::outbox::push(dir.path(), &request).unwrap();
+    // Another member's request in the same folder is not dev's.
+    let other = json!({"op":"run","request_id":"d2300000-0000-4000-8000-000000000004","team":team.id,"member":"qa",
+        "attempt":"x","template":"cargo-build","args":{},"task":2});
+    super::super::outbox::push(dir.path(), &other).unwrap();
+    let seen = with_outbox_runs(&team, &[quiet.clone()]);
+    assert_eq!(seen[0].jobs.len(), 1, "{:?}", seen[0].jobs);
+    assert!(seen[0].jobs[0].what.contains("cargo-test") && seen[0].jobs[0].what.contains("queued"), "{:?}", seen[0].jobs);
+    assert!(!no_report(&steps(&team, &seen, late)));
+    // Claimed: the request leaves the queue and its running marker counts.
+    std::fs::remove_file(super::super::outbox::request_path(dir.path(), "d2300000-0000-4000-8000-000000000003")).unwrap();
+    std::fs::remove_file(super::super::outbox::request_path(dir.path(), "d2300000-0000-4000-8000-000000000004")).unwrap();
+    super::super::outbox::write_running(dir.path(), "d2300000-0000-4000-8000-000000000003",
+        &json!({"request_id":"d2300000-0000-4000-8000-000000000003","started":60.0,"label":"cargo-test","command":"cargo test"})).unwrap();
+    let seen = with_outbox_runs(&team, &[quiet.clone()]);
+    assert_eq!(seen[0].jobs.len(), 1, "{:?}", seen[0].jobs);
+    assert!(!no_report(&steps(&team, &seen, late)));
+    // Settled: nothing of its own, and No report again.
+    std::fs::remove_file(super::super::outbox::running_path(dir.path(), "d2300000-0000-4000-8000-000000000003")).unwrap();
+    let seen = with_outbox_runs(&team, &[quiet]);
+    assert!(seen[0].jobs.is_empty() && no_report(&steps(&team, &seen, late)));
+}

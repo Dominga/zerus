@@ -130,8 +130,24 @@ const STARTUP_POLL: Duration = Duration::from_millis(100);
 /// server's environment, which never holds them. A launch sets those its session
 /// needs again. `CLAUDECODE` is the mark Claude Code sets for the commands it
 /// runs; a Claude Code that finds it refuses to start as one nested in another.
+/// The `CLAUDE_CODE_*` names and `CLAUDE_PID` are the rest of what Claude Code
+/// gives those commands about its own session. A session launched by an
+/// agent's command (a lead starting a team member, a session starting another)
+/// that kept `CLAUDE_CODE_CHILD_SESSION` ran as a child of the launching
+/// conversation: Claude Code saved no transcript for it ("Transcript saving is
+/// off"), so it could not be resumed and reported no usage or cache lifetime.
+/// Its messaging socket and token are the launching session's own. Only these
+/// session marks are dropped: settings such as `CLAUDE_CODE_PROMPT_CACHE_TTL`
+/// or `CLAUDE_CODE_GIT_BASH_PATH` are the person's and stay.
 const SESSION_CONTEXT: &[&str] = &[
     "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
     "HGS_PARENT",
     "TMUX",
     "TMUX_PANE",
@@ -1917,6 +1933,16 @@ mod tests {
             "HGS_LAUNCH_ID=outer-launch",
             "HGS_FORK_PARENT_ID=outer-parent",
             "CLAUDECODE=1",
+            // What Claude Code gives the commands it runs about its own
+            // session; its settings stay.
+            "CLAUDE_CODE_CHILD_SESSION=1",
+            "CLAUDE_CODE_ENTRYPOINT=cli",
+            r"CLAUDE_CODE_MESSAGING_SOCKET=\\.\pipe\LOCAL\cc-msg-outer",
+            "CLAUDE_CODE_MESSAGING_TOKEN=outer-token",
+            "CLAUDE_CODE_SESSION_ATTENDED=1",
+            "CLAUDE_CODE_SESSION_ID=outer-conversation",
+            "CLAUDE_PID=4242",
+            "CLAUDE_CODE_PROMPT_CACHE_TTL=1h",
             "HGS_STATE_DIR=C:\\state",
             "ANTHROPIC_API_KEY=secret",
             "CLAUDE_CONFIG_DIR=C:\\claude",
@@ -1940,6 +1966,7 @@ mod tests {
             [
                 r"Path=C:\bin",
                 "=C:=C:\\work",
+                "CLAUDE_CODE_PROMPT_CACHE_TTL=1h",
                 "HGS_STATE_DIR=C:\\state",
                 "CLAUDE_CONFIG_DIR=C:\\accounts\\work",
                 r"HGS_EXECUTABLE=C:\Users\u\.local\bin\hgs.exe",

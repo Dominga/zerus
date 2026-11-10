@@ -977,6 +977,39 @@ impl Store {
         Ok(member.map(|member| (team, member)))
     }
 
+    /// Task #6 (team ede724c4): the active teams (planning, running, paused)
+    /// with a member whose stored session has this name, run or conversation,
+    /// found through the members projection without decoding any other team.
+    /// They are a superset of the teams whose member the caller is: the caller
+    /// still checks each one. None when this store has no projection.
+    pub(crate) fn session_teams(&self, name: &str, run: &str, conversation: &str) -> anyhow::Result<Option<Vec<Team>>> {
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_rule_members')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists || (name.is_empty() && run.is_empty() && conversation.is_empty()) {
+            return Ok(None);
+        }
+        let mut query = self.db.prepare(
+            "SELECT DISTINCT t.id FROM teams t JOIN team_rule_members m ON t.id=m.team
+             WHERE t.status IN ('planning','running','paused')
+               AND ((?1<>'' AND m.name=?1) OR (?2<>'' AND m.run=?2) OR (?3<>'' AND m.conversation=?3))
+             ORDER BY t.updated DESC LIMIT 8",
+        )?;
+        let ids = query
+            .query_map(params![name, run, conversation], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        let mut teams = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(team) = self.load(&id)? {
+                teams.push(team);
+            }
+        }
+        Ok(Some(teams))
+    }
+
     /// Every team, most recently changed first, at most `limit`.
     pub(crate) fn teams(&self, include_archived: bool, limit: i64) -> anyhow::Result<Vec<Team>> {
         let mut statement = self.db.prepare(&format!(
@@ -2497,6 +2530,38 @@ mod tests {
         assert_eq!(merged["name"], "b");
         assert_eq!(merge3(&json!({"a":1,"b":2}), &json!({"a":1}), &json!({"a":1,"b":2,"c":3})), json!({"a":1,"c":3}), "removed by us, untouched by them");
         assert_eq!(merge3(&json!({"a":1}), &json!({"a":1,"b":2}), &json!({})), json!({"b":2}), "added by us, a removal by them kept");
+    }
+
+    /// Task #6 (team ede724c4): a member's own call finds its team through the
+    /// members projection: only active teams whose member list names the
+    /// session's name, run or conversation, and nothing when nothing does.
+    #[test]
+    fn a_session_finds_its_active_teams_through_the_member_projection() {
+        use super::super::model::{Member, SessionRef, TeamStatus};
+        let (_dir, mut store) = store();
+        let member = |id: &str, name: &str, run: &str, conversation: &str| Member {
+            id: id.into(),
+            session: Some(SessionRef { name: name.into(), run_id: run.into(), conversation_id: conversation.into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut mine = team("mine");
+        mine.status = TeamStatus::Running;
+        mine.members.push(member("dev", "claude/x/dev", "run-1", "conv-1"));
+        let mut other = team("other");
+        other.status = TeamStatus::Running;
+        other.members.push(member("qa", "claude/x/qa", "run-2", "conv-2"));
+        let mut finished = team("finished");
+        finished.status = TeamStatus::Done;
+        finished.members.push(member("dev", "claude/x/dev", "run-1", "conv-1"));
+        for (n, team) in [mine, other, finished].into_iter().enumerate() {
+            store.create(&format!("11111111-1111-4111-8111-11111111111{n}"), &json!({}), team, vec![]).unwrap();
+        }
+        let ids = |found: Option<Vec<Team>>| found.unwrap().into_iter().map(|team| team.id).collect::<Vec<_>>();
+        assert_eq!(ids(store.session_teams("claude/x/dev", "", "").unwrap()), ["mine"], "a finished team is not read");
+        assert_eq!(ids(store.session_teams("renamed", "run-1", "").unwrap()), ["mine"], "by its run after a rename");
+        assert_eq!(ids(store.session_teams("", "", "conv-2").unwrap()), ["other"], "a DeepSeek member by its conversation");
+        assert!(ids(store.session_teams("nobody", "none", "").unwrap()).is_empty());
+        assert!(store.session_teams("", "", "").unwrap().is_none(), "no identity: the caller reads the teams as before");
     }
 
     /// Task 287: the member projection's trigger parsed the whole record on

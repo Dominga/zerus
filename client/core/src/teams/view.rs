@@ -203,6 +203,17 @@ struct Progress {
 
 fn phase_progress(item: &Value) -> Progress {
     use std::collections::BTreeMap;
+    // Task #6: hgs gives the strip's numbers; a peer's older hgs gives the
+    // tasks, and the numbers are counted from them as before.
+    if let Some(given) = item.get("progress").filter(|progress| progress.is_object()) {
+        return Progress {
+            phase: count(given, "phase"),
+            phase_done: count(given, "phase_done"),
+            phase_total: count(given, "phase_total"),
+            phases_done: count(given, "phases_done"),
+            phases_total: count(given, "phases_total"),
+        };
+    }
     let mut groups: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
     for task in array(item, "tasks") {
         let phase = task.get("phase").and_then(Value::as_u64).unwrap_or(1);
@@ -253,16 +264,29 @@ pub fn list(value: &Value) -> TeamList {
                     })
                     .collect(),
                 lead,
-                tasks: array(item, "tasks").len() as u64,
+                // Task #6: the counts hgs gives, else (a peer's older hgs)
+                // counted from the arrays it sent.
+                tasks: if item.get("task_count").is_some() {
+                    count(item, "task_count")
+                } else {
+                    array(item, "tasks").len() as u64
+                },
                 accepted: count(item, "accepted"),
                 submitted: count(item, "submitted"),
                 in_review: count(item, "in_review"),
                 in_test: count(item, "in_test"),
-                attention: array(item, "attention").len() as u64,
-                open_proposals: array(item, "proposals")
-                    .iter()
-                    .filter(|proposal| proposal["state"] == "open")
-                    .count() as u64,
+                attention: if item.get("attention_count").is_some() {
+                    count(item, "attention_count")
+                } else {
+                    array(item, "attention").len() as u64
+                },
+                open_proposals: match item.get("open_proposals") {
+                    Some(given) if !given.is_array() => count(item, "open_proposals"),
+                    _ => array(item, "proposals")
+                        .iter()
+                        .filter(|proposal| proposal["state"] == "open")
+                        .count() as u64,
+                },
                 waiting_for_lead: flag(item, "waiting_for_lead"),
                 pending_phase: item.get("pending_phase").and_then(Value::as_u64),
                 updated: number(item, "updated"),

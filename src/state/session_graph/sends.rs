@@ -63,8 +63,22 @@ fn proven(record: Value) -> Option<Value> {
 /// Whether this process is `owner` or descends from it through live
 /// processes of this user.
 fn descends_from(owner: u32) -> bool {
+    // Task #6 (team ede724c4): on Windows `process_identity` snapshots every
+    // process to read one parent, so a walk of eight ancestors took eight
+    // snapshots on each call of a member's hgs. One table serves the whole
+    // walk; each process is still verified (alive, this user, created before
+    // the table, its parent older than it), as the process listing does.
+    #[cfg(windows)]
+    let listed = {
+        let at = now();
+        let Ok(table) = crate::platform::process_table() else { return false };
+        (table, at)
+    };
     let mut pid = std::process::id();
     for _ in 0..64 {
+        #[cfg(windows)]
+        let Some(process) = listed.0.get(&pid).and_then(|row| crate::platform::listed_identity(pid, row.parent, listed.1)) else { return false };
+        #[cfg(not(windows))]
         let Some(process) = crate::platform::process_identity(pid) else { return false };
         if pid == owner {
             return true;
@@ -386,6 +400,19 @@ mod caller_proof_tests {
         let result = body();
         set_test_host_session(None);
         result
+    }
+
+    /// Task #6 (team ede724c4): the walk reads one process table and still
+    /// verifies each ancestor: this process and its parent are reached, a PID
+    /// no ancestor has is not.
+    #[test]
+    fn the_ancestry_walk_reaches_this_process_and_its_parent_only() {
+        assert!(descends_from(std::process::id()));
+        let parent = crate::platform::process_identity(std::process::id()).map(|process| process.parent).unwrap_or(0);
+        if parent != 0 {
+            assert!(descends_from(parent), "the parent {parent} is an ancestor");
+        }
+        assert!(!descends_from(u32::MAX - 7));
     }
 
     /// Task #33: a broken chain is proven only by the host naming this exact

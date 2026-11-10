@@ -117,6 +117,34 @@ fn a_stream_delivers_frames_and_writes_controls() {
 }
 
 #[test]
+fn a_server_without_older_pages_answers_false_and_writes_nothing() {
+    let fake = FakeHgs::new(
+        "stream_older_old_server",
+        json!({"": {"runs": [[{"file": "basic.ndjson"}, {"serve": true}]]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let handle = stream::spawn(&fake.path(), &ComputerId::local(), quick(), tx);
+    // Before any hello nothing pages, followed or not.
+    assert!(!handle.older("run:run-draft-1", 50, 100).unwrap());
+    seen.until("live", live);
+    let session = SessionRef {
+        name: "claude/docs-site/draft".into(),
+        run_id: Some("run-draft-1".into()),
+        conversation_id: Some("conv-draft".into()),
+    };
+    handle.follow(session, None, 100).unwrap();
+    seen.until("activity", |event| {
+        matches!(change_of(event), Some(Change::Activity { update: ActivityUpdate::Events { .. }, .. }))
+    });
+    // The fixture's hello lacks `activity_older`: the caller reads the old way.
+    assert!(!handle.older("run:run-draft-1", 50, 100).unwrap());
+    assert!(!handle.older("run:unfollowed", 50, 100).unwrap());
+    assert_eq!(fake.stdin("").len(), 1, "only the follow's subscribe");
+    handle.stop();
+}
+
+#[test]
 fn a_stream_that_ends_reconnects_after_growing_delays_and_keeps_its_rows() {
     let fake = FakeHgs::new(
         "stream_reconnects",

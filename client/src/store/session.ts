@@ -52,6 +52,7 @@ function sharedPort(others: () => readonly (string | undefined)[]): ActivityPort
       unfollowing.set(id, done);
       return done;
     },
+    older: (computer, key, before, limit) => activityPort.older?.(computer, key, before, limit) ?? Promise.resolve(false),
   };
 }
 

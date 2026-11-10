@@ -189,6 +189,7 @@ const tauriSource: Source = {
   next: () => invoke<unknown>("next_batch").then(decodeBatch),
   follow: (request: FollowRequest) => invoke<void>("follow", { ...request }),
   unfollow: (computer: ComputerId, key: string) => invoke<void>("unfollow", { computer, key }),
+  older: (computer: ComputerId, key: string, before: number, limit: number) => invoke<boolean>("activity_older", { computer, key, before, limit }),
 };
 
 /** Starts the data source and the per-frame pump; resolves with the mode in use. */
@@ -325,6 +326,7 @@ export function normalize(b: Partial<Batch>): Batch {
 export const activityPort: ActivityPort = {
   follow: (request) => source?.follow(request) ?? Promise.resolve(),
   unfollow: (computer, key) => source?.unfollow(computer, key) ?? Promise.resolve(),
+  older: (computer, key, before, limit) => source?.older?.(computer, key, before, limit) ?? Promise.resolve(false),
 };
 
 /** Bounded current row identities; native code selects the actual paths. */

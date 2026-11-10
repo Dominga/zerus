@@ -10116,6 +10116,46 @@ carries the `inspect --skip-processes` summary without `events`, `cursor` and
 `history_truncated`. It is sent when anything other than `goal_observed_at`
 changed.
 
+An inspection that fails when a subscription begins (the session state lock is
+busy, say) is reported as a non-fatal `inspect_failed`; the subscription stays,
+and its first frames follow as soon as an inspection succeeds, read again after
+1 s and then at doubling waits of at most 8 s. A client never subscribes again
+for that. Only `session_changed` refuses the subscription.
+
+Earlier Activity is read by position, as pages:
+
+```json
+{"op":"subscribe","topic":"activity","session":{"name":"claude/sample-project/review","run_id":"RUN"},"before":123,"tail":100}
+{"v":1,"seq":57,"t":"older","topic":"activity","key":"run:RUN","events":[],"cursor":88,"last":true,"more":true}
+```
+
+A subscribe with `before` belongs to a session the stream already follows. It
+leaves that subscription, its cursor and its `state` as they are, inspects
+nothing, and answers with `older` frames: the newest `tail` events before that
+`seq` (100 by default, at most `limits.activity_older`, 200), oldest first, in
+one or more frames. The frame with `last` ends the read; its `more` says whether
+earlier events remain, and `cursor` is the `before` of the next page, also when
+every row of the page was left out. A failed read ends with an empty last frame
+and `more`, so the client stops waiting and may ask again. A server whose
+`hello` has no `limits.activity_older` ignores `before` and would subscribe
+anew: a client asks for a page only when that limit is above 0, and otherwise
+reads earlier events by subscribing with an earlier `after`. Journal sequence
+numbers are shared by every session, so a client never estimates how far back a
+session's earlier events lie.
+
+The stream's loop answers controls and sends Activity frames; the catalog's
+slow reads never run on it. A whole listing, the rows derived again between
+listings, the probe of the terminal and agent processes, and the rows of
+DeepSeek and OpenCode sessions (read from their hosts, which may take a host's
+whole request limit to answer) each run on a thread of their own, at most one
+of each at a time: a slow host or a held session state lock delays those rows
+only, never subscriptions, controls or Activity frames. A row derived again
+while a whole listing ran is newer than the listing's: it stays when the
+listing lands and is derived once more, so a slow listing never brings back an
+answered approval or a finished turn. A pass of the loop that takes a second or
+more leaves a `watch-loop` line with the milliseconds of each step in
+`logs/slow-calls.log`.
+
 For Codex and Claude sessions the stream follows the conversation's native
 transcript from where it ended when the subscription began, and sends each
 public message written there as an `event` frame within about half a second:

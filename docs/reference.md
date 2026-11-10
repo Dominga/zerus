@@ -2303,11 +2303,14 @@ Missing or invalid priorities follow ranked entries in their original order;
 a legacy catalog without priorities keeps its source order. This shared catalog
 order applies to both desktop and Android without changing the current model.
 
-Claude options are the models its `/model` picker lists, from the catalog Claude
-Code caches in the account's profile. Zerus selects the model and effort in that
-picker and applies them with its session-only choice (`s`). Its Enter, and a typed
-`/model NAME` or `/effort LEVEL`, would save new defaults and are never used. The
-change is confirmed by Claude's receipt in the exact conversation transcript and by
+Claude options are the models its `/model` picker lists, including **More models**,
+from the catalog Claude Code caches in the account's profile. Zerus expands a
+section only when the native picker advertises that action, selects the model
+and effort, and applies them with its session-only choice (`s`). Enter on a model
+row saves new defaults; Zerus never uses that action or the typed `/model NAME`
+and `/effort LEVEL` shortcuts for a session change. An unconfirmed selection
+closes the recognized model picker with Escape while its original input authority
+is still valid. The change is confirmed by Claude's receipt in the exact conversation transcript and by
 its effort indicator when shown. In a conversation that already has replies, Claude
 warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in

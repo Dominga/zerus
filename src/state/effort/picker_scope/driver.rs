@@ -21,6 +21,10 @@ pub(super) fn helper_read(
 ) -> Option<Result<std::process::Output>> {
     read::route(call, args)
 }
+pub(super) fn close_claude_model(name: &str, request: &Request) -> Result<()> {
+    let owner = context::owner()?.ok_or("Original picker owner missing during model cancellation")?;
+    read::close_claude_model(&owner, name, request)
+}
 pub(super) fn refuse<T>(error: String) -> Result<T> {
     match context::owner()? {
         Some(owner) => owner.refuse(error),

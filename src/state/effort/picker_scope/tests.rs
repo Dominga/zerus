@@ -145,11 +145,17 @@ fn record() -> Value {
 }
 
 pub(in crate::state::effort::picker_scope) fn setup(kind: &str) -> (Guard, Value) {
+    setup_agent(kind, "claude")
+}
+
+pub(in crate::state::effort::picker_scope) fn setup_agent(kind: &str, agent: &str) -> (Guard, Value) {
     let writer = lock(None).unwrap();
     for name in ["sessions", "effort_receipts", "settings_receipts"] {
         private_dir(&root().join(name)).unwrap();
     }
     let mut record = record();
+    record["agent"] = json!(agent);
+    record["name"] = json!(format!("{agent}/example/shared"));
     if kind == "fresh" {
         record["layout"] = json!("id");
         publish_new_id(&writer, &mut record).unwrap();

@@ -2958,8 +2958,13 @@ mod tests {
         // 744 ms wait beside 277 ms batches). A queue of batches or a lock
         // held across ticks still fails, and the holds themselves are bounded
         // by the machine's speed below (task 288: rows, not whole records).
+        // A shared CI runner deschedules a member for longer still (seen: a
+        // 1139 ms wait beside 106 ms batches and 137 ms calls on GitHub's
+        // Windows runner), so the slack is a fourth batch and a second: a lock
+        // held across the worker's ticks keeps a member waiting for many
+        // batches, far beyond it.
         let member_held = calls.iter().map(|(_, held)| *held).max().unwrap_or(0);
-        let bound = 3 * worker_held + 2 * member_held + 500;
+        let bound = 4 * worker_held + 2 * member_held + 1000;
         let waits: Vec<u64> = calls.iter().map(|(waited, _)| *waited).collect();
         assert!(waits.iter().all(|wait| *wait <= bound), "the members' longest waits {waits:?} ms exceed one worker batch ({worker_held} ms) and two member calls ({member_held} ms each)");
         let reference = crate::state::reference_work().as_millis() as u64;

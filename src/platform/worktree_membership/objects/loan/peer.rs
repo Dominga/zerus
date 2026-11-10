@@ -162,10 +162,13 @@ impl Peer {
         check(until)
     }
     pub(crate) fn exited(&self) -> io::Result<bool> {
-        self.pin
-            .state()
-            .map(|state| state == ProcessState::Exited)
-            .map_err(io::Error::other)
+        self.pin.exit_observed()
+    }
+    /// Admission retains the old currentness refusal as well as requiring no
+    /// physical exit. A false physical-exit observation supplies no live-code
+    /// or socket authority; current()/pin() still own those independent gates.
+    pub(crate) fn refuses_admission(&self) -> io::Result<bool> {
+        Ok(self.pin.state().map_err(io::Error::other)? == ProcessState::Exited || self.exited()?)
     }
 }
 pub(crate) fn own_audit() -> io::Result<Option<[u32; 8]>> {

@@ -510,3 +510,29 @@ fn a_retained_adoption_call_keeps_the_desktop_responsive_and_status_only() {
     assert_eq!(calls(&fake, "adoption-status").len(), 1);
     fake.finish(org);
 }
+
+#[test]
+fn a_replaced_nested_terminal_original_retains_the_original_ticket() {
+    let mut settings = config();
+    // Replace only remote.original: the outer original, postimages and
+    // component receipts stay valid (no shared fixture object is mutated).
+    settings["adopt"] = json!([{
+        "complete_adoption_receipt": "settled",
+        "receipt_mutation": {"remote.original": {"malformed": true}},
+    }]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    wait_until("the refused terminal receipt", || {
+        calls(&fake, "adopt").len() == 1 && idle(&org)
+    });
+    assert!(
+        org.lock().sync.busy(),
+        "a replaced nested original released the ticket"
+    );
+    assert_eq!(view(&org, &id)["can_resume"], true);
+    assert_eq!(view(&org, &id)["error"], true);
+    fake.finish(org);
+}

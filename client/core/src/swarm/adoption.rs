@@ -451,7 +451,10 @@ impl Adoption {
                 "membership_by_id_ready",
             ],
         )?;
-        if reply["schema"] != 1
+        // The nested original is the same immutable context the outer one
+        // was checked against (parity with the CLI terminal validator).
+        if reply["original"] != *original
+            || reply["schema"] != 1
             || reply["phase"] != "remote_committed"
             || reply["outcome"] != "remote_committed"
             || reply["request_id"] != original["request_id"]
@@ -784,5 +787,29 @@ mod tests {
             .unwrap()
             .adopt("owner".into(), 1)
             .is_err());
+    }
+
+    #[test]
+    fn the_nested_terminal_original_must_equal_the_checked_original() {
+        let adoption = preview("peer-b").adopt("owner".into(), 1).unwrap();
+        assert!(adoption.receipt(&settled(&adoption)).is_ok());
+        let mut receipt = settled(&adoption);
+        receipt["remote"]["original"]["destination"]["node_id"] = Uuid::new_v4().to_string().into();
+        assert!(
+            adoption.receipt(&receipt).is_err(),
+            "a changed nested original leaf was accepted"
+        );
+        let mut receipt = settled(&adoption);
+        receipt["remote"]["original"] = json!({"request_id": adoption.request_id()});
+        assert!(
+            adoption.receipt(&receipt).is_err(),
+            "a replaced nested original was accepted"
+        );
+        let mut receipt = settled(&adoption);
+        receipt["remote"]["original"]["request_raw_sha256"] = "1".repeat(64).into();
+        assert!(
+            adoption.receipt(&receipt).is_err(),
+            "a nested original with another raw request hash was accepted"
+        );
     }
 }

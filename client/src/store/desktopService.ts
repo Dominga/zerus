@@ -477,7 +477,23 @@ export function takeoverRefusal(view: NotificationOwnership | undefined): Takeov
       return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it)."),
         next: tr("Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.") };
     case "agent_descended_frontend_refused":
-      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };    // Task #421 (2026-11-09, package 167): the takeover's hgs child failed
+      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };
+    // Task #53 (owner, 2026-11-10, build 175): why the install before the
+    // takeover recorded no binding for this app, with the step that fixes it.
+    case "frontend_parent_not_beside":
+    case "frontend_ancestry_unverified":
+      return { check: tr("Process ancestry"), reason: tr("Zerus was started by another program (an installer or a terminal), so hgs could not record this app."),
+        next: tr("Close Zerus and start it from the Start menu or Explorer.") };
+    case "frontend_parent_gone":
+      return { check: tr("Process ancestry"), reason: tr("The program that started Zerus ended while hgs recorded this app."),
+        next: tr("Close Zerus and start it from the Start menu or Explorer.") };
+    case "frontend_record_timed_out":
+      return { check: tr("App binding"), reason: tr("Recording this app took too long: the computer was busy."), next: tr("Restart Zerus when the computer is less busy.") };
+    case "frontend_cli_pin_changed":
+    case "frontend_cli_image_unreadable":
+    case "frontend_app_unreadable":
+    case "frontend_record_refused":
+      return { check: tr("App binding"), reason: tr("hgs could not read or pin the program files while it recorded this app."), next: reinstall };    // Task #421 (2026-11-09, package 167): the takeover's hgs child failed
     // because the desktop service could not open its store; "Restart Zerus"
     // never helped. Starting the service once shows why, or migrates it.
     case "child_failed":

@@ -104,9 +104,21 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
         note.step(crate::native_text::render(&crate::startup_note::text(
             "install",
         )));
-        if let Err(error) = session_host(&selected, "install") {
-            eprintln!("zerus-client: session-host install: {error}");
-            return choice.fallback;
+        match session_host(&selected, "install") {
+            Ok(installed) => {
+                // Task #53 (owner, 2026-11-10, build 175): the install recorded
+                // no binding for this app; its fixed code goes to hgs-tray.log
+                // and names the step the window shows (never the CLI's text).
+                if let Some(code) = installed["frontend_refusal_code"].as_str().and_then(crate::takeover_refusal::record_code) {
+                    crate::startup_log::record("failed", "frontend_record_refused", Some(code));
+                    crate::takeover_refusal::note_record_refusal(code);
+                }
+            }
+            Err(error) => {
+                eprintln!("zerus-client: session-host install: {error}");
+                crate::startup_log::record("failed", "session_host_install_failed", None);
+                return choice.fallback;
+            }
         }
     }
     choice.path

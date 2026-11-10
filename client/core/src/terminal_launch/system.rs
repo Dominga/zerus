@@ -43,6 +43,38 @@ impl Desktop for System {
     }
 }
 
+/// Task #53 (team ede724c4): what a terminal, shell or console Zerus opens
+/// never inherits from the app: an agent session's markers (a window started
+/// from an agent's tree carries them, and every tab of a Windows Terminal it
+/// starts would then refuse the native takeover of a Zerus started there) and
+/// the app's own choice of hgs (a Zerus started there would skip the binding
+/// install of a newer build).
+pub const NOT_INHERITED: [&str; 4] = ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID", "ZERUS_CLIENT_HGS"];
+
+/// Whether a terminal inherits the variable `name` (case-insensitive on
+/// Windows, as its environment is).
+pub fn inherited(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    !NOT_INHERITED.iter().any(|hidden| if cfg!(windows) { hidden.eq_ignore_ascii_case(&name) } else { *hidden == name })
+}
+
+/// The UTF-16 environment block a Windows terminal starts with: `vars` less
+/// [`NOT_INHERITED`], each `NAME=VALUE` NUL-terminated, then one more NUL.
+pub fn environment_block(vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>) -> Vec<u16> {
+    let mut block = Vec::new();
+    for (name, value) in vars.into_iter().filter(|(name, _)| inherited(name)) {
+        block.extend(name.to_string_lossy().encode_utf16());
+        block.push(u16::from(b'='));
+        block.extend(value.to_string_lossy().encode_utf16());
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 /// The names `program` may have in `folder`: on Windows with each PATHEXT
 /// extension, then as given when it has one.
 fn candidates(folder: &Path, program: &str) -> Vec<PathBuf> {
@@ -82,6 +114,9 @@ fn start_detached(start: &Start) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let mut command = crate::child_environment::command(&start.program);
     command.args(&start.arguments).current_dir(&start.directory);
+    for name in NOT_INHERITED {
+        command.env_remove(name);
+    }
     // SAFETY: the hook runs between fork and exec and only makes
     // async-signal-safe system calls.
     unsafe {
@@ -154,6 +189,8 @@ fn start_detached(start: &Start) -> Result<(), String> {
     let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() };
     let mut line = wide(&windows_program_line(&start.program, &start.arguments));
     let directory = wide(&start.directory);
+    // Task #53: the app's environment less what a terminal never inherits.
+    let environment = environment_block(std::env::vars_os());
     // SAFETY: zeroed STARTUPINFOW and PROCESS_INFORMATION are valid; every
     // buffer is NUL-terminated and outlives the call.
     unsafe {
@@ -180,7 +217,7 @@ fn start_detached(start: &Start) -> Result<(), String> {
             null(),
             FALSE,
             flags,
-            null(),
+            environment.as_ptr().cast(),
             directory.as_ptr(),
             &startup,
             &mut info,
@@ -235,5 +272,39 @@ pub(super) fn format_message(code: u32, language: u32) -> Option<String> {
         let text = String::from_utf16_lossy(std::slice::from_raw_parts(buffer, length as usize));
         LocalFree(buffer.cast());
         Some(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn vars(names: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        names.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))).collect()
+    }
+
+    /// Task #53 (team ede724c4): a terminal Zerus opens never inherits an
+    /// agent session's markers or the app's choice of hgs; everything else is
+    /// passed as it is.
+    #[test]
+    fn a_terminal_inherits_no_agent_marker_and_no_app_hgs() {
+        let given = vars(&[
+            ("PATH", "C:/bin"),
+            ("HGS_SESSION", "claude/x/lead"),
+            ("HGS_SESSION_ID", "8354a5b9"),
+            ("HGS_RUN_ID", "token"),
+            ("ZERUS_CLIENT_HGS", "C:/app/hgs.exe"),
+            ("HGS_STATE_DIR", "C:/state"),
+        ]);
+        let block = environment_block(given);
+        let text = String::from_utf16(&block).unwrap();
+        let entries: Vec<&str> = text.split('\0').filter(|entry| !entry.is_empty()).collect();
+        assert_eq!(entries, ["PATH=C:/bin", "HGS_STATE_DIR=C:/state"]);
+        assert!(block.ends_with(&[0, 0]), "the block ends with two NULs");
+        assert_eq!(environment_block(vars(&[("HGS_RUN_ID", "x")])), [0, 0], "an empty block is still terminated");
+        // Windows names are case-insensitive.
+        assert_eq!(inherited(std::ffi::OsStr::new("hgs_session")), !cfg!(windows));
+        assert!(inherited(std::ffi::OsStr::new("HGS_SESSIONS")));
     }
 }

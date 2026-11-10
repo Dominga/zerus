@@ -10,11 +10,13 @@ Read the draft before every change, so the revision is the current one:
 The answer carries draft (revision, unseen, owner_edited), revision, unseen and
 preflight - the plan errors the owner would hit on create - and fields.
 Set only the fields you change (hgs guide team-input).
-Change the draft (lead or owner), carrying the revision you read:
+Change the draft, carrying the revision you read:
   {"action":"update","request_id":"UUID","team":"ID","revision":N,
    "set":{"name":"...","goal":"...","addendum":"...","settings":{...},
           "members":[...],"tasks":[...]}} | hgs team draft --json
 Set "phases" ({"n","title","barrier"}) and task "phase" as in a plan.
+Owner-only settings you set (base_branch, branch_per_task, max_members)
+become setting_offers: the owner applies each with one click.
 A field the owner edited after you last read the draft is refused ("Owner
 changed members"): read the draft again. The owner's update marks the field
 owner_edited and drops it from unseen; your get answers the marks it cleared
@@ -27,13 +29,11 @@ discard (with "stop_lead":true it stops the lead's session; the reason is
 kept), and seen, which drops the fields it names from unseen:
   {"action":"seen","request_id":"UUID","team":"ID","by":"human",
    "fields":["goal"]} | hgs team draft --json
-Every change, seen too, carries a new request_id. Only the owner creates,
-discards or approves; do not create the team yourself.
+Every change carries a new request_id. Only the owner creates the team.
 
-Draft the plan as tasks with acceptance criteria and dependencies, as a team
-lead does (hgs guide team-lead): the owner approves the phases in order. Keep
-the role prompts and settings; propose members the goal needs, and say why in
-your reply to the owner. A draft task may already name "pipeline", "models" and
+Draft tasks with acceptance criteria and dependencies (hgs guide team-lead);
+the owner approves the phases in order. Propose the members the goal needs
+and say why. A draft task may already name "pipeline", "models" and
 "role" (hgs guide team-lead), and a draft member its "models". Say which plan
 mode the work needs: standard for a release, free for a stream (hgs guide
 team-lead).

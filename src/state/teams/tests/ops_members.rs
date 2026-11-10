@@ -1148,3 +1148,68 @@ fn a_swap_to_an_agent_without_the_permissions_mode_is_refused() {
     assert_eq!(error, "Member \"rev\": field \"permissions\": Codex has no \"auto\" permissions mode; it takes bypass");
     assert_eq!(team.member("rev").unwrap().agent, "claude", "the refused swap changed nothing");
 }
+
+/// Task #13 (team ede724c4, owner 2026-11-10): the lead's draft values for the
+/// owner's settings (base_branch, branch_per_task, max_members) are offers,
+/// never a refusal: the owner's values stay, the offers wait for one click,
+/// and an applied or otherwise-set field drops its offer.
+#[test]
+fn the_leads_owner_settings_in_a_draft_are_offers() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(Draft { revision: 1, ..Default::default() });
+    let none = BTreeSet::new();
+    let lead = Actor::Member("lead".into());
+    let mut settings = serde_json::to_value(&team.settings).unwrap();
+    settings["base_branch"] = json!("main");
+    settings["branch_per_task"] = json!({"template":"task/{id}"});
+    settings["max_members"] = json!(9);
+    settings["restart_crashed"] = json!(false);
+    settings["folder_policy"] = json!("worktree");
+    let before = team.settings.clone();
+    let receipt = apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"settings":settings}}), &lead, &none, &mut Vec::new()).unwrap();
+    assert_eq!(receipt["status"], "updated", "{receipt}");
+    assert!(receipt["note"].as_str().unwrap().contains("base_branch"), "{receipt}");
+    // The owner's settings stay; the lead's own field (folder_policy) is taken.
+    assert_eq!((team.settings.base_branch.as_str(), team.settings.max_members), (before.base_branch.as_str(), before.max_members));
+    assert_eq!(team.settings.branch_per_task, before.branch_per_task);
+    assert_eq!(team.settings.folder_policy, FolderPolicy::Worktree);
+    let offers = team.draft.as_ref().unwrap().setting_offers.clone();
+    assert_eq!(offers.get("base_branch"), Some(&json!("main")));
+    assert_eq!(offers.get("branch_per_task"), Some(&json!({"template":"task/{id}"})));
+    assert_eq!(offers.get("max_members"), Some(&json!(9)));
+    assert!(team.draft.as_ref().unwrap().unseen.contains(&"settings".to_owned()), "the field is marked for the owner");
+    // The owner changes something else: the offers stay.
+    let mut owner = serde_json::to_value(&team.settings).unwrap();
+    owner["approval"] = json!("auto");
+    apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"settings":owner.clone()}}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    assert_eq!(team.draft.as_ref().unwrap().setting_offers.len(), 4);
+    // Apply (one click): base_branch and max_members as offered; branch_per_task set otherwise.
+    owner["base_branch"] = json!("main");
+    owner["max_members"] = json!(9);
+    owner["branch_per_task"] = json!({"template":"work/{id}"});
+    let receipt = apply(&mut team, "draft", &json!({"action":"update","revision":3,"set":{"settings":owner}}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    assert_eq!((team.settings.base_branch.as_str(), team.settings.max_members), ("main", 9));
+    let left: Vec<String> = team.draft.as_ref().unwrap().setting_offers.keys().cloned().collect();
+    assert_eq!(left, ["restart_crashed"], "{receipt}");
+}
+
+/// Task #13: a member whose session failed to start is relaunched by the lead
+/// itself; a running member still needs the owner's card.
+#[test]
+fn the_lead_relaunches_a_member_that_failed_to_start() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let lead = Actor::Member(team.lead.clone());
+    let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.session = None;
+    dev.state = MemberState::Active;
+    dev.error = "Another worktree operation is running. Try again after it finishes.".into();
+    let value = apply(&mut team, "relaunch", &json!({"member":"dev"}), &lead, &none, &mut Vec::new()).unwrap();
+    assert_eq!(value["status"], "relaunch", "{value}");
+    let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+    qa.session = Some(SessionRef { name: "claude/x/qa".into(), run_id: "r9".into(), ..Default::default() });
+    qa.error.clear();
+    let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut Vec::new()).unwrap_err().to_string();
+    assert!(error.contains("proposes"), "{error}");
+}

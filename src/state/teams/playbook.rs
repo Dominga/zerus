@@ -135,7 +135,12 @@ pub(crate) fn breaches(team: &Team) -> Vec<Breach> {
     }
     let integration = team.settings.integration_folder.trim();
     // (a) the working mode its project needs: the 270 proposal cached on the team.
-    if team.working_mode.is_empty() && team.mode_proposal.as_ref().and_then(|proposal| proposal["preset"].as_str()).is_some_and(|preset| !preset.is_empty()) {
+    // Task #13 (team ede724c4): a preset the owner kept (Keep, or "none" at
+    // Create team) is the owner's decision, not a missing mode.
+    let kept = super::working_mode::kept(team).and_then(|kept| kept["preset"].as_str()).unwrap_or_default();
+    if team.working_mode.is_empty()
+        && team.mode_proposal.as_ref().and_then(|proposal| proposal["preset"].as_str()).is_some_and(|preset| !preset.is_empty() && preset != kept)
+    {
         let preset = team
             .mode_proposal
             .as_ref()

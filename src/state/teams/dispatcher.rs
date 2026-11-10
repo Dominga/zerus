@@ -5171,6 +5171,16 @@ fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     })
 }
 
+/// Task #13 (team ede724c4): how long a member's worktree creation waits for
+/// another creation in the same repository before it fails.
+const WORKTREE_BUSY_WAIT: Duration = Duration::from_secs(300);
+
+/// Task #13: `worktrees create` refused because another worktree operation
+/// holds the repository's lock (nothing was created).
+fn worktree_busy(stderr: &str) -> bool {
+    stderr.contains("Another worktree operation is running")
+}
+
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
@@ -5263,8 +5273,29 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     if member.agent == "dsh" {
         args.insert(2, "--sandbox");
     }
-    let output = run(&member.computer, &args)?;
-    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    // Task #13 (team ede724c4): members created at once share the
+    // repository's worktree lock, which `worktrees create` waits for only a
+    // few seconds. A creation refused because another one holds it is tried
+    // again until WORKTREE_BUSY_WAIT, never a failed member; the refusal
+    // reserved nothing, so trying again is safe.
+    let started = Instant::now();
+    let mut pause = Duration::from_secs(1);
+    let output = loop {
+        let output = run(&member.computer, &args)?;
+        let busy = !output.status.success() && worktree_busy(&String::from_utf8_lossy(&output.stderr));
+        if !busy || started.elapsed() >= WORKTREE_BUSY_WAIT {
+            break output;
+        }
+        std::thread::sleep(if cfg!(test) { Duration::from_millis(1) } else { pause });
+        pause = (pause * 2).min(Duration::from_secs(10));
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::ensure!(
+        output.status.success(),
+        "{}{}",
+        stderr.trim(),
+        if worktree_busy(&stderr) { "; Zerus starts the member again on its next tick (hgs team relaunch starts it now)" } else { "" }
+    );
     // F1.4: the new folder is the repository's (a clone by its origin), on the
     // member's branch. `worktrees create` confirmed this where it ran; a
     // member on this computer is checked here again.
@@ -7261,7 +7292,50 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
         Err((_, error)) => return Some(step(&head, "refused", format!("the folder's changes were not read: {error}"))),
     }
     let short = |commit: &str| commit.chars().take(9).collect::<String>();
+    // A merge into the member's branch: done, or the step that refuses (or is
+    // uncertain) with the conflicting files and the folder put back.
+    let merge = |rev: &str, message: &str, what: &str, merged: &[String]| -> std::result::Result<(), PrepareStep> {
+        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
+        // queue, this path passes the driver rather than trusting repo config.
+        let driver = super::merge_queue::i18n_driver_config();
+        let Err((timed_out, error)) = git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", message, rev]) else {
+            return Ok(());
+        };
+        let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
+        let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
+        let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
+        let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
+        let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
+        Err(if timed_out || !restored {
+            step(&head, "uncertain", format!("{what} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge"))
+        } else {
+            step(&head, "refused", format!(
+                "{what} {why}. Zerus put the folder back{earlier}; merge it into the member's branch ({folder}) and resolve it, or reassign the task, then retry"
+            ))
+        })
+    };
     let mut merged = Vec::new();
+    // Task #15 (team ede724c4, lead of team 2b863c49, 2026-11-10): when the
+    // team has a line (its base branch, or the lead's branch), a branch that
+    // lacks accepted work is brought up to the line's head first. The lead
+    // resolves the predecessors' conflicts there once; merging them commit by
+    // commit met the same conflict again in every folder that lacked one.
+    let missing = wanted.iter().any(|work| git_bounded(&folder, &["merge-base", "--is-ancestor", &work.commit, "HEAD"]).is_err());
+    let line = if missing { dependency_line(team, &folder) } else { None };
+    if let Some((base, line_head)) = &line {
+        match git_bounded(&folder, &["merge-base", "--is-ancestor", line_head, "HEAD"]) {
+            Ok(_) => {}
+            Err((true, error)) => return Some(step(&head, "uncertain", error)),
+            Err((false, _)) => {
+                let message = format!("Merge the line {base} ({}) before task #{task_id}", short(line_head));
+                if let Err(refused) = merge(line_head, &message, &format!("The line {base} ({})", short(line_head)), &merged) {
+                    return Some(refused);
+                }
+                merged.push(format!("the line {base} ({})", short(line_head)));
+            }
+        }
+    }
     for work in &wanted {
         let object = format!("{}^{{commit}}", work.commit);
         if git_bounded(&folder, &["cat-file", "-e", &object]).is_err() {
@@ -7291,39 +7365,48 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             Err((true, error)) => return Some(step(&head, "uncertain", error)),
             Err((false, _)) => {}
         }
-        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
-        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
-        // queue, this path passes the driver rather than trusting repo config.
-        let driver = super::merge_queue::i18n_driver_config();
-        match git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
-            Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
-            Err((timed_out, error)) => {
-                let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-                let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
-                let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
-                let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
-                let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
-                let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
-                return Some(if timed_out || !restored {
-                    step(&head, "uncertain", format!(
-                        "#{}'s accepted commit {} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge",
-                        work.task, short(&work.commit)
-                    ))
-                } else {
-                    step(&head, "refused", format!(
-                        "#{}'s accepted commit {} {why}. Zerus put the folder back{earlier}; merge it into the member's branch \
-                         ({folder}) and resolve it, or reassign the task, then retry",
-                        work.task, short(&work.commit)
-                    ))
-                });
+        // Task #15: a predecessor the line holds as an equivalent commit (a
+        // cherry-pick or a rebase of it) is on the line already.
+        if let Some((_, line_head)) = &line {
+            let cherry = git_bounded(&folder, &["cherry", line_head, &work.commit, &format!("{}^", work.commit)]).unwrap_or_default();
+            if !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with('-')) {
+                continue;
             }
         }
+        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
+        if let Err(refused) = merge(&work.commit, &message, &format!("#{}'s accepted commit {}", work.task, short(&work.commit)), &merged) {
+            return Some(refused);
+        }
+        merged.push(format!("#{} ({})", work.task, short(&work.commit)));
     }
     Some(if merged.is_empty() {
         step(&head, "skipped", format!("the branch holds the accepted work of {names} already"))
     } else {
         step(&head, "done", format!("merged {}", merged.join(", ")))
     })
+}
+
+/// Task #15 (team ede724c4): the line a hand-out brings a member's branch up
+/// to, as (branch, head commit) in the member's `folder`: the team's base
+/// branch, else the lead's branch. Its head is fetched from the team's folder
+/// (a separate clone has it only if it fetched it, as `prepare_branch` does);
+/// without that the folder's own branch of that name. None when the team
+/// names no line or it is not read.
+fn dependency_line(team: &Team, folder: &str) -> Option<(String, String)> {
+    let base = match team.settings.base_branch.trim() {
+        "" => lead_branch(team).ok()?,
+        named => named.to_owned(),
+    };
+    if base.is_empty() || base == "HEAD" || base.starts_with('-') {
+        return None;
+    }
+    let source = team.integration_folder();
+    if !source.trim().is_empty() && git_bounded(folder, &["fetch", "--no-tags", "--quiet", source, &base]).is_ok() {
+        if let Ok(head) = git_bounded(folder, &["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]) {
+            return Some((base, head));
+        }
+    }
+    git_bounded(folder, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]).ok().map(|head| (base, head))
 }
 
 /// Spec 0: a refused or unconfirmed step before a hand-out leaves the task
@@ -10535,6 +10618,13 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+/// Tests outside the dispatcher (task #13's walk from New team to running
+/// members): one step as the worker runs it.
+#[cfg(test)]
+pub(crate) fn test_run_step(store: &mut Store, team: &Team, step: &Step) -> anyhow::Result<()> {
+    run_step(store, team, step, "")
 }
 
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {

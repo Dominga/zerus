@@ -164,3 +164,6 @@
 .nt-howto { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .nt-howto-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--z-color-text-2); font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
 .nt-howto-steps { margin: 0; padding-left: 22px; color: var(--z-color-text-3); font-size: var(--fs-xs); line-height: 1.5; }
+
+/* Task #13 (team ede724c4): the lead's offers for the owner's settings. */
+.nt-setting-offers { border: 1px solid color-mix(in srgb, var(--z-color-accent) 60%, var(--z-color-border)); border-radius: var(--z-radius-lg); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); }

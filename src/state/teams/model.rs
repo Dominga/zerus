@@ -52,6 +52,13 @@ pub(crate) struct Draft {
     /// one is refused ("owner changed <field>").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owner_edited: Vec<String>,
+    /// Task #13 (team ede724c4): the owner's settings the lead set in the
+    /// draft (base_branch, branch_per_task, max_members, ...), by field: the
+    /// owner's values stay, the lead's are offers New team marks and applies
+    /// with one click. An offer goes when the owner applies it or sets the
+    /// field otherwise.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setting_offers: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1325,6 +1332,13 @@ fn is_zero_usize(value: &usize) -> bool {
 }
 
 impl Member {
+    /// Task #13 (team ede724c4): the member's session could not start and the
+    /// dispatcher waits for a relaunch (`error` names why); the lead relaunches
+    /// it itself.
+    pub(crate) fn failed_to_start(&self) -> bool {
+        self.session.is_none() && !self.error.trim().is_empty() && self.state != MemberState::Removed
+    }
+
     /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
         self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
@@ -2708,6 +2722,31 @@ pub(crate) struct LeadChange {
     pub reverted_at: Option<f64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reverted_by: String,
+    /// Task #4 (team ede724c4): the ids of `tasks_before`, kept in the team's
+    /// head while the snapshots live in `team_lead_changes` (read on demand).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<u32>,
+    /// The numbers of `phases_before`, as `changed` is for the tasks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_changed: Vec<u32>,
+}
+
+impl LeadChange {
+    /// The tasks it changed: from the snapshots when they are loaded, else
+    /// from the ids the head keeps.
+    pub(crate) fn changed_tasks(&self) -> Vec<u32> {
+        if self.tasks_before.is_empty() { self.changed.clone() } else { self.tasks_before.iter().map(|task| task.id).collect() }
+    }
+
+    /// The phases it changed, as `changed_tasks` is for the tasks.
+    pub(crate) fn changed_phases(&self) -> Vec<u32> {
+        if self.phases_before.is_empty() { self.phases_changed.clone() } else { self.phases_before.iter().map(|phase| phase.n).collect() }
+    }
+
+    /// Whether it changed tasks or phases whose snapshots are not loaded.
+    pub(crate) fn history_missing(&self) -> bool {
+        (self.tasks_before.is_empty() && !self.changed.is_empty()) || (self.phases_before.is_empty() && !self.phases_changed.is_empty())
+    }
 }
 
 /// Task 162: at most this many lead changes are kept (the oldest seen or

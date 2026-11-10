@@ -856,6 +856,7 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                 object.remove("added");
                 object.remove("removed");
                 object.remove("changed");
+                object.remove("phases_changed");
             }
             if let Some(summary) = change.get("summary").and_then(|summary| summary.as_str()) {
                 let clipped = clip(summary, 300);
@@ -4526,17 +4527,24 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
     let swapped = op == "swap-member"
         && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
         && filled["session"].is_object();
+    // Task #11 (team ede724c4): the request's optional fields are read with
+    // `get_mut`, never `filled["..."]` on a mutable value: serde_json's IndexMut
+    // inserts a missing key as null, and a draft update that never named its
+    // members was refused for the `"members": null` this added.
     if planned {
-        if let Some(members) = filled["members"].as_array_mut() {
+        if let Some(members) = filled.get_mut("members").and_then(Value::as_array_mut) {
             adopt_members(store, &team, members)?;
         }
     } else if drafted {
         // The lead keeps its own session; the others are checked.
-        for member in filled["set"]["members"].as_array_mut().into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
+        let members = filled.get_mut("set").and_then(|set| set.get_mut("members")).and_then(Value::as_array_mut);
+        for member in members.into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
             adopt_members(store, &team, std::slice::from_mut(member))?;
         }
     } else if joined {
-        adopt_members(store, &team, std::slice::from_mut(&mut filled["member"]))?;
+        if let Some(member) = filled.get_mut("member") {
+            adopt_members(store, &team, std::slice::from_mut(member))?;
+        }
     } else if swapped {
         // H6: the session named for the swap is adopted under the same checks
         // as a new member's existing session.
@@ -4998,9 +5006,12 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // U54: the lead relaunches a member's session on the owner's word.
             // #728: except a stuck member when the owner set lead_restarts_stuck;
             // that route is the lead's own decision.
+            // Task #13 (team ede724c4): and except a member whose session
+            // failed to start: starting it again is the lead's own step.
             let id = text(input, "member");
             if id.is_empty()
                 || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
+                || team.member(id).is_some_and(super::model::Member::failed_to_start)
             {
                 WordRule::default()
             } else {
@@ -5181,6 +5192,13 @@ fn check_phase_word(
     // A decline is the owner's alone and needs no word; the change refuses
     // anyone else.
     if !matches!(caller, Actor::Member(id) if *id == team.lead) || input["decline"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    // Task #13 (team ede724c4): inside the approved goal (a running or paused
+    // team) the lead adds to a running phase itself (task 162), and `propose`
+    // refuses that card; demanding the owner's word here was a loop with no
+    // way through. A word the lead does send is still checked.
+    if super::lead_plan::lead_plans(team, caller) && input.get("owner_word").is_none_or(|word| !word.is_object()) {
         return Ok(());
     }
     let phase = input["phase"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("A phase number is required")?;

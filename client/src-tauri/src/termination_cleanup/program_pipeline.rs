@@ -215,6 +215,18 @@ fn publish(
     let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
         return;
     };
+    let live = record_stop(job, stopped);
+    changed(&app, &mut m);
+    drop(m);
+    if live {
+        watch_job(&inner, app, id);
+    }
+}
+/// The model half of `publish` for a stop that did not complete: a known
+/// normal refusal becomes a retained, read-only cleanup that only Check again
+/// reviews (no automatic removal), every entry is Kept, and the result says
+/// whether a passive watcher must follow the retained original.
+pub(super) fn record_stop(job: &mut Job, stopped: Result<programs::Stopped, String>) -> bool {
     job.busy = false;
     job.phase = "checking";
     let (detail, live) = match stopped {
@@ -247,11 +259,7 @@ fn publish(
         entry.status = Some(Status::Kept);
         entry.detail = detail.into();
     }
-    changed(&app, &mut m);
-    drop(m);
-    if live {
-        watch_job(&inner, app, id);
-    }
+    live
 }
 fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
     // Expiry is one-way. Retaining a UI row never keeps an Actions claim

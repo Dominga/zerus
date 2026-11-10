@@ -581,16 +581,38 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
     }
 }
 
-/// Kimi's preparation banner: a spinner cell and its own progress line. A
-/// transcript can quote the words, so the spinner row's shape is required.
+/// Kimi's startup progress frame: its spinner-led preparation banner is the
+/// first non-blank row and the rest of the frame holds only the bordered
+/// progress box. A live session has content above its composer and its status
+/// footer below the box, so a transcript row that quotes the banner cannot
+/// make the session look like it is still preparing.
 fn kimi_preparing(screen: &str) -> bool {
-    screen.lines().any(|row| {
-        let plain: String = styled_row(row).iter().map(|(ch, _)| ch).collect();
-        let plain = plain.trim();
-        let mut chars = plain.chars();
-        matches!(chars.next(), Some(ch) if ('\u{2800}'..='\u{28ff}').contains(&ch))
-            && chars.as_str().trim_start().starts_with("Preparing Kimi Code")
-    })
+    let rows: Vec<String> = screen
+        .lines()
+        .map(|row| styled_row(row).iter().map(|(ch, _)| ch).collect())
+        .collect();
+    let Some(first) = rows.iter().position(|row| !row.trim().is_empty()) else {
+        return false;
+    };
+    spinner_banner(&rows[first])
+        && rows[first + 1..].iter().all(|row| {
+            let row = row.trim();
+            row.is_empty() || progress_box_row(row)
+        })
+}
+
+/// The preparation banner's own row: a spinner cell, then its progress line.
+fn spinner_banner(row: &str) -> bool {
+    let row = row.trim();
+    let mut chars = row.chars();
+    matches!(chars.next(), Some(ch) if ('\u{2800}'..='\u{28ff}').contains(&ch))
+        && chars.as_str().trim_start().starts_with("Preparing Kimi Code")
+}
+
+/// A row of the startup progress box: its borders and the bordered `> ` row.
+fn progress_box_row(row: &str) -> bool {
+    row.starts_with(['╭', '│', '╰'])
+        && row.chars().all(|ch| ch.is_whitespace() || "╭╮╰╯─│>".contains(ch))
 }
 
 /// Cursor at the start is not evidence that the entire composer is empty: a
@@ -811,7 +833,7 @@ fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn 
         // Kimi replaces its progress screen with the session while the launch
         // prompt waits, so its decision frame must be one read (zerus-vg4mm).
         let (state, screen) = if string(record, "agent") == "kimi" {
-            stable_frame(terminal, &claim)?
+            stable_frame(terminal, &claim, state)?
         } else {
             let screen = terminal.capture(pane, backend::Capture::Styled)?;
             (state, String::from_utf8_lossy(&screen).into_owned())
@@ -857,18 +879,23 @@ fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn 
 /// read. The TUI redraws the composer as its progress screen is replaced
 /// (zerus-vg4mm), so the pair is re-read until the cursor stops moving,
 /// bounded: a terminal that keeps moving is refused rather than guessed.
+/// `first` is the cursor read taken before the empty check; each retry takes
+/// only the after-capture read and reuses it as the next attempt's before, so
+/// a stable frame costs one read beyond that first one (zerus-0vjx5).
 fn stable_frame(
     terminal: &dyn backend::TerminalBackend,
     claim: &backend::InputClaim,
+    first: backend::InputState,
 ) -> Result<(backend::InputState, String)> {
     const ATTEMPTS: usize = 5;
+    let mut before = first;
     for attempt in 0..ATTEMPTS {
-        let before = terminal.input_state(claim)?;
         let screen = terminal.capture(claim.pane, backend::Capture::Styled)?;
         let after = terminal.input_state(claim)?;
         if before.cursor_x == after.cursor_x && before.cursor_y == after.cursor_y {
             return Ok((before, String::from_utf8_lossy(&screen).into_owned()));
         }
+        before = after;
         if attempt + 1 < ATTEMPTS {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -2118,6 +2145,15 @@ mod tests {
         // A transcript that merely quotes the words is not the progress screen.
         let quoted = " Preparing Kimi Code… was quoted\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n";
         assert!(composer_empty("kimi", quoted, 5, 3));
+        // A transcript row that quotes the spinner banner inside a live session
+        // is not the startup frame: content is above it and the status footer
+        // is below the composer (zerus-hh0ky).
+        let transcript = "\n ╭────────────────────────────╮\n │  Welcome to Kimi Code!     │\n ╰────────────────────────────╯\n   ⠋ Preparing Kimi Code…\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n Never Ask  fixture  ~/project with spaces\n                          context: 0% (0/32k)\n";
+        assert!(composer_empty("kimi", transcript, 5, 7));
+        // A session frame that still shows the preparation banner above the
+        // composer keeps its status footer, so it is not the startup frame.
+        let late_banner = "  ⠋ Preparing Kimi Code…\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n Never Ask  fixture  ~/project with spaces\n                          context: 0% (0/32k)\n";
+        assert!(composer_empty("kimi", late_banner, 5, 3));
     }
 
     /// zerus-vg4mm: a Kimi decision read must not pair the cursor of one frame
@@ -2128,16 +2164,34 @@ mod tests {
     fn kimi_decision_frame_is_read_until_the_cursor_settles() {
         use std::collections::VecDeque;
         use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         struct Frames {
             cursors: Mutex<VecDeque<(&'static str, &'static str)>>,
             screens: Mutex<VecDeque<&'static str>>,
+            reads: AtomicUsize,
+            captures: AtomicUsize,
+        }
+        impl Frames {
+            fn new(cursors: Vec<(&'static str, &'static str)>, screens: Vec<&'static str>) -> Self {
+                Self {
+                    cursors: Mutex::new(VecDeque::from(cursors)),
+                    screens: Mutex::new(VecDeque::from(screens)),
+                    reads: AtomicUsize::new(0),
+                    captures: AtomicUsize::new(0),
+                }
+            }
+            fn counts(&self) -> (usize, usize) {
+                (self.reads.load(Ordering::Relaxed), self.captures.load(Ordering::Relaxed))
+            }
         }
         impl backend::TerminalBackend for Frames {
             fn input_state(&self, _claim: &backend::InputClaim) -> Result<backend::InputState> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
                 let (x, y) = self.cursors.lock().unwrap().pop_front().expect("extra cursor read");
                 Ok(backend::InputState { cursor_x: x.into(), cursor_y: y.into() })
             }
             fn capture(&self, _pane: &str, _mode: backend::Capture) -> Result<Vec<u8>> {
+                self.captures.fetch_add(1, Ordering::Relaxed);
                 Ok(self.screens.lock().unwrap().pop_front().expect("extra capture").as_bytes().to_vec())
             }
         }
@@ -2145,27 +2199,29 @@ mod tests {
         let draft = " ╭────────────╮\n │ > hello    │\n ╰────────────╯";
         let record = json!({"name": "kimi/p/initial", "agent": "kimi", "run_id": "run-1", "pane": "%1"});
         // The progress screen's cursor row (4) then the session's (1): the
-        // first pair is torn, the next agrees, so the launch proceeds.
-        let frames = Frames {
-            cursors: Mutex::new(VecDeque::from([("5", "4"), ("5", "4"), ("5", "1"), ("5", "1"), ("5", "1")])),
-            screens: Mutex::new(VecDeque::from([empty, empty])),
-        };
+        // first pair is torn, the next agrees, so the launch proceeds.  The
+        // check reads the cursor once before the empty branch (reused as the
+        // first attempt's before) and once after each capture: 3 reads, 2
+        // captures for one retry (zerus-0vjx5).
+        let frames = Frames::new(
+            vec![("5", "4"), ("5", "1"), ("5", "1")],
+            vec![empty, empty],
+        );
         terminal_check_on(&record, true, false, &frames).unwrap();
-        // A stable draft still refuses with the draft reason.
-        let frames = Frames {
-            cursors: Mutex::new(VecDeque::from([("5", "1"), ("5", "1"), ("5", "1")])),
-            screens: Mutex::new(VecDeque::from([draft])),
-        };
+        assert_eq!(frames.counts(), (3, 2), "the first cursor read is reused");
+        // A stable draft still refuses with the draft reason: one cursor read
+        // before and one after the capture.
+        let frames = Frames::new(vec![("5", "1"), ("5", "1")], vec![draft]);
         assert_eq!(terminal_check_on(&record, true, false, &frames).unwrap_err().to_string(), DRAFT);
-        // A screen that never settles is refused after the bounded reads.
-        let frames = Frames {
-            cursors: Mutex::new(VecDeque::from([
-                ("5", "1"), ("5", "1"), ("5", "4"), ("5", "1"), ("5", "4"),
-                ("5", "1"), ("5", "4"), ("5", "1"), ("5", "4"), ("5", "1"), ("5", "4"),
-            ])),
-            screens: Mutex::new(VecDeque::from([empty; 5])),
-        };
+        assert_eq!(frames.counts(), (2, 1));
+        // A screen that never settles is refused after the bounded reads:
+        // one cursor read before and one after each of the five captures.
+        let frames = Frames::new(
+            vec![("5", "1"), ("5", "4"), ("5", "1"), ("5", "4"), ("5", "1"), ("5", "4")],
+            vec![empty; 5],
+        );
         let refusal = terminal_check_on(&record, true, false, &frames).unwrap_err().to_string();
         assert!(refusal.contains("redrew"), "{refusal}");
+        assert_eq!(frames.counts(), (6, 5));
     }
 }

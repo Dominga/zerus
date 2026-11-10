@@ -650,6 +650,13 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+hgs recognises its own entries by the program they run: a path named `hgs` or
+`hgs.exe`, a legacy `hgs_state.py`, or exactly the current `HGS_EXECUTABLE`,
+which a wrapper may name differently. A later launch therefore adds nothing.
+Earlier versions added another group for a wrapper at each launch. Exact copies
+of such a group are removed once, and Codex may ask to review that change. A
+group that holds any personal hook is kept as it is, and a command for another
+program is never treated as hgs's.
 Codex can request **Hooks need review** before both a new session and a saved
 conversation's resume or archive restore. Activity shows that exact native
 decision; messages remain blocked while it is open. Only the person's explicit

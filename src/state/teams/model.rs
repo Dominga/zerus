@@ -1145,6 +1145,10 @@ pub(crate) struct TestNotice {
     /// #718: the suite's recorded seconds, to say how much slower it ran.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub recorded_seconds: f64,
+    /// Task #24 (team ede724c4): the task the run was for, so the lead's
+    /// inbox shows one item per task with its counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
 }
 
 /// #718: a test item for the lead: a flaky suite to file a task for, or a
@@ -1586,12 +1590,34 @@ pub(crate) struct Inbox {
     /// Item keys already named, oldest first, bounded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub told: Vec<String>,
+    /// Task #24 (team ede724c4): told items that closed, with when, for
+    /// `CLOSED_MEMORY_SECONDS`: one that opens again unchanged in that time
+    /// (a member between two turns, a rework whose member is briefly idle)
+    /// is not told again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<ClosedItem>,
 }
+
+/// Task #24: a told inbox item that closed, and when.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ClosedItem {
+    pub key: String,
+    pub at: f64,
+}
+
+/// Task #24: how long a closed item is remembered as told.
+pub(crate) const CLOSED_MEMORY_SECONDS: f64 = 30.0 * 60.0;
 
 impl Inbox {
     /// An empty record adds no key to an old team's JSON.
     pub(crate) fn is_empty(&self) -> bool {
-        self.told_at == 0.0 && self.told.is_empty()
+        self.told_at == 0.0 && self.told.is_empty() && self.closed.is_empty()
+    }
+
+    /// Task #24: whether the item `key` was told: it is still listed as told,
+    /// or it closed less than `CLOSED_MEMORY_SECONDS` ago and opened again.
+    pub(crate) fn knows(&self, key: &str, now: f64) -> bool {
+        self.told.iter().any(|told| told == key) || self.closed.iter().any(|closed| closed.key == key && now - closed.at < CLOSED_MEMORY_SECONDS)
     }
 }
 

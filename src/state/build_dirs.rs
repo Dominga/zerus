@@ -995,12 +995,20 @@ pub(crate) fn report_leftovers(team: &str, member: &str, since: f64, folder: &st
         }
     }
     if !folder.is_empty() {
+        // Fork Windows build #160: the member's folder came in its short 8.3
+        // spelling (a runner's TEMP names the user folder so) while git lists
+        // the long one, and the member's own checkout read as a worktree it
+        // had added. Both sides are compared as the file system names them.
+        let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let here = real(Path::new(folder));
+        let theirs: Vec<std::path::PathBuf> = others.iter().map(|other| real(Path::new(other))).collect();
         if let Some(list) = super::teams::dispatcher::git_at(folder, &["worktree", "list", "--porcelain"]) {
             for (index, path) in list.lines().filter_map(|line| line.strip_prefix("worktree ")).enumerate() {
                 let tree = Path::new(path);
+                let found = real(tree);
                 let known = index == 0
-                    || Path::new(folder).ancestors().any(|up| same(up, tree))
-                    || others.iter().any(|other| Path::new(other).ancestors().any(|up| same(up, tree)));
+                    || here.ancestors().any(|up| same(up, &found))
+                    || theirs.iter().any(|other| other.ancestors().any(|up| same(up, &found)));
                 if known || !tree.exists() || !created_after(tree, since) {
                     continue;
                 }

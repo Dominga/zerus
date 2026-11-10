@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use std::path::Path;
 
 const FILES: [&str; 2] = ["drive-folders.json", "drive-folders-init.json"];

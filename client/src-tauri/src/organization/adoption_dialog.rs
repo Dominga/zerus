@@ -2,11 +2,12 @@ use super::*;
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
 use zerus_client_core::{
-    ComputerId, Invocation, reads,
+    reads,
     swarm::{
         adoption,
-        sync::{EXTERNAL_CHANGED, ExternalTicket},
+        sync::{ExternalTicket, EXTERNAL_CHANGED},
     },
+    ComputerId, Invocation,
 };
 
 const BUSY: &str = "An adoption request is already running.";

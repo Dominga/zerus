@@ -1,19 +1,18 @@
 use super::{
-    Unread,
     catalog::{self, Catalog, Key},
     drive_footprint,
     session_ids::Twins,
     session_memberships::{self, Memberships},
     store::{AdoptionLock, Peer, Store},
-    transport,
+    transport, Unread,
 };
 use crate::{config::Config, platform};
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use serde::{
-    Deserialize, Deserializer as _, Serialize,
     de::{DeserializeOwned, Error as _},
+    Deserialize, Deserializer as _, Serialize,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1581,41 +1580,80 @@ fn read_only_original(
     journal: Journal,
     lock: &AdoptionLock,
 ) -> Result<Value> {
-    ensure!(journal.role == Role::Source, "request belongs to another endpoint");
+    ensure!(
+        journal.role == Role::Source,
+        "request belongs to another endpoint"
+    );
     let snapshot = capture_locked(config, lock)?;
     if journal.phase == Phase::Settled {
         let original = &journal.original;
-        let preview = make_preview(options.preview.source.clone(), options.preview.destination.clone())?;
+        let preview = make_preview(
+            options.preview.source.clone(),
+            options.preview.destination.clone(),
+        )?;
         ensure!(options.preview == preview, "original preview changed");
-        ensure!(original.source == options.preview.source && original.destination == options.preview.destination,
-            "original endpoint preimages changed");
-        ensure!(original.request_id == options.request_id && original.lease_id == options.lease_id
-            && original.native_generation == options.native_generation,
-            "original request or lease changed");
-        ensure!(original.request_sha256 == request_hash(&options.request_id, &options.preview)?,
-            "original request body hash mismatch");
-        ensure!(original.source_alias == alias
-            && original.source_configuration_revision == options.preview.source.configuration_revision,
-            "original source binding changed");
+        ensure!(
+            original.source == options.preview.source
+                && original.destination == options.preview.destination,
+            "original endpoint preimages changed"
+        );
+        ensure!(
+            original.request_id == options.request_id
+                && original.lease_id == options.lease_id
+                && original.native_generation == options.native_generation,
+            "original request or lease changed"
+        );
+        ensure!(
+            original.request_sha256 == request_hash(&options.request_id, &options.preview)?,
+            "original request body hash mismatch"
+        );
+        ensure!(
+            original.source_alias == alias
+                && original.source_configuration_revision
+                    == options.preview.source.configuration_revision,
+            "original source binding changed"
+        );
         let binding = sha256(&serde_json::to_vec(&json!({
             "request_sha256": original.request_sha256,
             "source_alias": alias,
             "source_configuration_revision": original.source_configuration_revision,
         }))?);
-        ensure!(original.binding_sha256 == binding, "original request binding mismatch");
-        ensure!(original.owner_sha256 == owner_hash(
-            &options.native_ticket, options.native_generation, &options.lease_id)?,
-            "original native owner mismatch");
-        ensure!(original.source_catalog_raw_sha256 == options.preview.source.catalog_raw_sha256
-            && original.request_raw_sha256.len() == 64
-            && original.request_raw_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "original raw request proof mismatch");
-        ensure!(snapshot.store.node_id == original.source.node_id
-            && snapshot.store.catalog.swarm_id == original.source.swarm_id
-            && machines_revision(config)? == original.source_configuration_revision
-            && snapshot.store.peers.get(alias).is_some_and(|peer| peer.node == original.destination.node_id),
-            "settled source or membership changed");
-        let value = journal.receipts.get("settlement")
+        ensure!(
+            original.binding_sha256 == binding,
+            "original request binding mismatch"
+        );
+        ensure!(
+            original.owner_sha256
+                == owner_hash(
+                    &options.native_ticket,
+                    options.native_generation,
+                    &options.lease_id
+                )?,
+            "original native owner mismatch"
+        );
+        ensure!(
+            original.source_catalog_raw_sha256 == options.preview.source.catalog_raw_sha256
+                && original.request_raw_sha256.len() == 64
+                && original
+                    .request_raw_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()),
+            "original raw request proof mismatch"
+        );
+        ensure!(
+            snapshot.store.node_id == original.source.node_id
+                && snapshot.store.catalog.swarm_id == original.source.swarm_id
+                && machines_revision(config)? == original.source_configuration_revision
+                && snapshot
+                    .store
+                    .peers
+                    .get(alias)
+                    .is_some_and(|peer| peer.node == original.destination.node_id),
+            "settled source or membership changed"
+        );
+        let value = journal
+            .receipts
+            .get("settlement")
             .ok_or_else(|| anyhow::anyhow!("settled receipt is unavailable"))?;
         let receipt: SettledReceipt = bounded(&serde_json::to_vec(value)?, "settled receipt")?;
         validate_settled_receipt(original, &receipt)?;
@@ -1625,7 +1663,10 @@ fn read_only_original(
     let request_bytes = serde_json::to_vec(&request)?;
     validate_source_candidate(&request, request_bytes.len())?;
     let original = original_proof(&request, &sha256(&request_bytes));
-    ensure!(journal.original == original, "original full request/context mismatch");
+    ensure!(
+        journal.original == original,
+        "original full request/context mismatch"
+    );
     anyhow::bail!("original adoption is Partial/Unknown and read-only in a distinct CLI; no continuation is available")
 }
 
@@ -1637,7 +1678,10 @@ fn source_journal(config: &Config, lock: &AdoptionLock, lease: &OriginalLease) -
         "original source context changed"
     );
     let snapshot = capture_locked(config, lock)?;
-    ensure!(snapshot.outer_raw == lease.outer_raw, "original outer store bytes changed");
+    ensure!(
+        snapshot.outer_raw == lease.outer_raw,
+        "original outer store bytes changed"
+    );
     ensure!(
         source_summary(config, &snapshot)? == lease.request.source,
         "original source changed"

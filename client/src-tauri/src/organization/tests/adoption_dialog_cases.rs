@@ -139,21 +139,17 @@ fn eligible_action_settles_with_original_identity_and_no_reverse_peer() {
     let done = view(&org, &id);
     assert!(!org.lock().sync.busy(), "original was not settled: {done}");
     assert_eq!(done["error"], false);
-    assert!(
-        done["status"]
-            .as_str()
-            .unwrap()
-            .contains("Drive folders remain uninitialized")
-    );
+    assert!(done["status"]
+        .as_str()
+        .unwrap()
+        .contains("Drive folders remain uninitialized"));
     assert_eq!(done["drive_status"], DRIVE_UNSUPPORTED);
     let payload: Value =
         serde_json::from_str(calls(&fake, "adopt")[0]["stdin"].as_str().unwrap()).unwrap();
     assert!(uuid::Uuid::parse_str(payload["request_id"].as_str().unwrap()).is_ok());
-    assert!(
-        payload["native_generation"]
-            .as_u64()
-            .is_some_and(|generation| generation > 0)
-    );
+    assert!(payload["native_generation"]
+        .as_u64()
+        .is_some_and(|generation| generation > 0));
     fake.finish(org);
 }
 
@@ -165,10 +161,9 @@ fn ineligible_preview_has_no_mutation_path() {
     let id = open(&org);
     preview(&org, &id);
     assert_eq!(view(&org, &id)["can_adopt"], false);
-    assert!(
-        org.adoption_request(Some(&id), Some(Action::Adopt), false)
-            .is_err()
-    );
+    assert!(org
+        .adoption_request(Some(&id), Some(Action::Adopt), false)
+        .is_err());
     assert!(calls(&fake, "adopt").is_empty());
     fake.finish(org);
 }

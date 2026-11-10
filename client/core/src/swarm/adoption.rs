@@ -1,6 +1,6 @@
-use super::connection::{NETWORK_TIMEOUT, configuration_revision};
-use crate::{Invocation, fleet::valid_alias};
-use serde_json::{Value, json};
+use super::connection::{configuration_revision, NETWORK_TIMEOUT};
+use crate::{fleet::valid_alias, Invocation};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -763,12 +763,9 @@ mod tests {
         let invocation = adoption.invocation().unwrap();
         assert_eq!(invocation.args[1], "adopt");
         assert_eq!(invocation.timeout, NETWORK_TIMEOUT);
-        assert!(
-            invocation
-                .stdin
-                .as_ref()
-                .is_some_and(|body| !body.windows(b"previous_lease_drained".len()).any(|w| w == b"previous_lease_drained"))
-        );
+        assert!(invocation.stdin.as_ref().is_some_and(|body| !body
+            .windows(b"previous_lease_drained".len())
+            .any(|w| w == b"previous_lease_drained")));
         assert!(adoption.receipt(&settled(&adoption)).is_ok());
     }
 
@@ -783,11 +780,9 @@ mod tests {
         assert!(adoption.receipt(&receipt).is_err());
         let mut value = preview("peer-b").reply;
         value["eligible"] = false.into();
-        assert!(
-            Preview::checked("peer-b", value)
-                .unwrap()
-                .adopt("owner".into(), 1)
-                .is_err()
-        );
+        assert!(Preview::checked("peer-b", value)
+            .unwrap()
+            .adopt("owner".into(), 1)
+            .is_err());
     }
 }

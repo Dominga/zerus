@@ -38,7 +38,6 @@ pub(crate) struct Observers {
     pub mode_helpers: Option<PathBuf>,
     pub projections: Vec<Projection>,
     pub notification_controls: Option<crate::desktop_notification_controls::Setup>,
-    pub retained_sources: Option<retained_import::Inputs>,
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub activation: Option<activation::Sink>,
 }
@@ -83,7 +82,6 @@ mod mode_transition;
 pub(crate) mod notification_controls;
 mod read_import;
 mod reconnect;
-pub(crate) mod retained_import;
 mod state_refusal;
 mod status;
 pub(crate) mod termination_outcome;
@@ -493,7 +491,6 @@ struct Shared {
     /// The reviewed observations a confirmation may name, each sent once.
     held_inputs: task_message_inputs::Reviewed,
     read_import: Mutex<read_import::State>,
-    retained_import: Option<Arc<retained_import::Report>>,
     projections: Vec<Projection>,
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     activation: Option<activation::Sink>,
@@ -610,7 +607,6 @@ impl Service {
                 mode_helpers: None,
                 projections,
                 notification_controls: None,
-                retained_sources: None,
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 activation: None,
             },
@@ -683,7 +679,6 @@ impl Service {
             frontend: frontend::Frontend::default(),
             held_inputs: task_message_inputs::Reviewed::default(),
             read_import: Mutex::new(read_import::State::default()),
-            retained_import: observers.retained_sources.map(retained_import::Report::new),
             projections: observers.projections,
             #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             activation: observers.activation,
@@ -694,23 +689,6 @@ impl Service {
                 shared.publish_notification_controls();
             }
         }));
-        if let Some(report) = &shared.retained_import {
-            let weak = Arc::downgrade(&shared);
-            report.hook_creations(Arc::new(move || {
-                if let Some(shared) = weak.upgrade() {
-                    shared.publish_retained_import();
-                    retained_import::creations::schedule_current(&shared);
-                }
-            }));
-            let weak = Arc::downgrade(&shared);
-            // A settled drafts capture also starts its historical report.
-            report.hook_drafts(Arc::new(move || {
-                if let Some(shared) = weak.upgrade() {
-                    shared.publish_retained_import();
-                    retained_import::creations::schedule_current(&shared);
-                }
-            }));
-        }
         let (control, receiver) = watch::channel(Control::Retry(0));
         let (finished, join) = oneshot::channel();
         let service = Arc::new(Self {
@@ -741,36 +719,6 @@ impl Service {
             return self.ownership_result().await;
         }
         self.shared.mode_transition.confirmed_scheduling();
-        if self.shared.retained_import.is_some() {
-            let relay = self
-                .shared
-                .relay
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            let configuration = self
-                .shared
-                .configuration
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            let cancel = self
-                .shared
-                .cancellation
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            match (relay, configuration, cancel) {
-                (Some(relay), Some(configuration), Some(cancel)) => {
-                    retained_import::before_grant(&self.shared, relay, configuration, cancel, true)
-                        .await
-                }
-                _ => retained_import::record_error(
-                    &self.shared,
-                    "retained_import_connection_unavailable",
-                ),
-            }
-        }
         let view = if self.shared.ownership.granted() {
             self.shared.ownership.view()
         } else {
@@ -1050,22 +998,6 @@ impl Service {
                                     Ordering::AcqRel,
                                     Ordering::Acquire,
                                 );
-                                let relay = self
-                                    .shared
-                                    .relay
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .clone();
-                                if let Some(relay) = relay {
-                                    retained_import::before_grant(
-                                        &self.shared,
-                                        relay,
-                                        configuration,
-                                        stop.clone(),
-                                        false,
-                                    )
-                                    .await;
-                                }
                                 if self.shared.business_permitted() && !stop.load(Ordering::Acquire)
                                 {
                                     self.shared.ownership.keep_epoch_refresh(grant, stop).await;
@@ -1148,9 +1080,6 @@ impl Service {
             && !self.shared.mode_transition.blocks_resume()
             && self.shared.mode_transition.startup_permitted()
         {
-            if let Some(report) = &self.shared.retained_import {
-                report.request_retry();
-            }
         }
         self.retry_connection();
     }
@@ -1380,9 +1309,6 @@ impl Service {
         self.shared.rpc.close();
         self.shared.cache_rpc.close();
         self.shared.creation_rpc.close();
-        if let Some(report) = &self.shared.retained_import {
-            report.close();
-        }
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         self.shared.activation_rpc.close();
         let _ = self.control.send(Control::Stop);
@@ -1413,12 +1339,6 @@ impl Service {
         let ownership_closed = self.shared.ownership.close();
         let mode_closed = self.shared.mode_transition.close();
         let notification_closed = self.shared.notification_controls.close();
-        let retained_closed = self
-            .shared
-            .retained_import
-            .as_ref()
-            .map(|report| report.close())
-            .unwrap_or_default();
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let activation_closed = self.shared.activation_rpc.close();
         let drained = tauri::async_runtime::spawn_blocking(move || {
@@ -1440,9 +1360,6 @@ impl Service {
             let drained = (notification_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
                 && drained;
-            let drained = retained_closed.iter().all(|closed| {
-                closed.wait_until(until) == zerus_client_core::desktop::drain::Observation::Idle
-            }) && drained;
             #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             let drained = (activation_closed.wait_until(until)
                 == zerus_client_core::desktop::drain::Observation::Idle)
@@ -1569,12 +1486,6 @@ impl Shared {
             && ((!self.mode_transition.blocks_resume() && self.mode_transition.startup_permitted())
                 || self.mode_transition.scheduling_permitted())
     }
-    fn publish_retained_import(&self) {
-        let report = self.retained_import.as_ref().map(|report| report.status());
-        let mut snapshot = self.snapshot.lock();
-        snapshot.retained_source_import = report;
-        self.pump.service(snapshot.clone());
-    }
     fn observe_peer_choices(&self, state: &service::State, value: &Value) {
         // A runtime draining its sources is not a peer-membership removal.
         // The parser already checked configuration/epoch and the <=64 roster.
@@ -1640,8 +1551,6 @@ impl Shared {
                 .unwrap_or_else(PoisonError::into_inner)
                 .status(),
         );
-        snapshot.retained_source_import =
-            self.retained_import.as_ref().map(|report| report.status());
         snapshot.state_refusal = self.state_refusal.shown();
         let mut current = self.snapshot.lock();
         *current = snapshot.clone();
@@ -2211,20 +2120,6 @@ async fn connection(
         && !shared.read_checks_only()
         && !shared.mode_transition.blocks_resume()
         && shared.mode_transition.startup_permitted();
-    if business {
-        let explicit = shared
-            .retained_import
-            .as_ref()
-            .is_some_and(|report| report.take_retry());
-        retained_import::before_grant(
-            &shared,
-            relay.clone(),
-            configuration.clone(),
-            stop.clone(),
-            explicit,
-        )
-        .await;
-    }
     if shared.ownership_supported.load(Ordering::Acquire) {
         if !business {
             // Recovery is read-only until the owner chooses Resume. Reopening a read stream is never a new Grant/Rearm or replay of
@@ -2364,7 +2259,6 @@ async fn connection(
                         if state.snapshot().executable_upgrade == Some(service::ExecutableUpgrade::ManualRefreshRequired) {
                             return Err("manual_refresh_required");
                         }
-                        retained_import::creations::schedule_current(&shared);
                         #[cfg(test)]
                         shared.report_frame_finished.fetch_add(1, Ordering::Release);
                         if frame["t"] == "hello" && notification_worker.is_none()

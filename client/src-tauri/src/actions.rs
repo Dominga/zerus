@@ -23,7 +23,6 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tauri::State;
-mod local_read_capture;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod program_termination;
 mod read_barrier;
@@ -763,8 +762,6 @@ pub struct AttentionOrder {
 }
 
 struct AttentionShared {
-    listener: MarksListener,
-    capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
     state: Mutex<AttentionState>,
     /// Signals a load, a change, a finished write and the end.
     signal: Condvar,
@@ -772,8 +769,6 @@ struct AttentionShared {
 
 #[derive(Default)]
 struct AttentionState {
-    source_paused: bool,
-    source_loaded: bool,
     /// None until the writer thread has read the file.
     marks: Option<AttentionMarks>,
     /// A change the file does not have yet.
@@ -805,13 +800,7 @@ pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
 
 impl Attention {
     pub fn new(path: PathBuf) -> Self {
-        Self::new_with_capture(path, None)
-    }
-    pub(crate) fn new_with_capture(
-        path: PathBuf,
-        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
-    ) -> Self {
-        Self::new_with_spawn(path, capture, |job| {
+        Self::new_with_spawn(path, |job| {
             std::thread::Builder::new()
                 .name("zerus-attention-marks".into())
                 .spawn(job)
@@ -820,41 +809,18 @@ impl Attention {
     }
     fn new_with_spawn(
         path: PathBuf,
-        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
     ) -> Self {
         let listener = MarksListener::default();
         let shared = Arc::new(AttentionShared {
-            listener: listener.clone(),
-            state: Mutex::new(AttentionState {
-                source_paused: capture.is_some(),
-                ..AttentionState::default()
-            }),
-            capture,
+            state: Mutex::new(AttentionState::default()),
             signal: Condvar::new(),
         });
-        if let Some(capture) = &shared.capture {
-            let weak = Arc::downgrade(&shared);
-            capture.retry_hook(Arc::new(move || {
-                if let Some(shared) = weak.upgrade() {
-                    // Serialize the wake with the existing condition wait.
-                    let _state = shared.lock();
-                    shared.signal.notify_all();
-                }
-            }));
-        }
         let writer = Arc::clone(&shared);
         let file = path.clone();
         if let Err(error) = spawn(Box::new(move || writer.write_changes(file))) {
             eprintln!("zerus-client: the attention-marks writer did not start: {error}");
-            // Never perform a capture/write fallback on the GUI thread.
-            let view = if let Some(capture) = &shared.capture {
-                capture.local_read_owner_unavailable();
-                AttentionMarks::from_bytes(path, None)
-            } else {
-                AttentionMarks::load(path)
-            };
-            shared.lock().marks = Some(view);
+            shared.lock().marks = Some(AttentionMarks::load(path));
             shared.signal.notify_all();
         }
         Self { shared, listener }
@@ -866,9 +832,6 @@ impl Attention {
     /// thread, so a reader copies them only after they changed.
     pub fn marks_since(&self, seen: Option<u64>) -> Option<MarkMaps> {
         let state = self.shared.loaded();
-        if self.shared.capture.is_some() && (state.source_paused || state.marks.is_none()) {
-            return None;
-        }
         if seen == Some(state.version) {
             return None;
         }
@@ -894,13 +857,8 @@ impl Attention {
     ) -> Result<(), String> {
         let changed = {
             let mut state = self.shared.loaded();
-            if state.closed
-                || self.shared.capture.is_some() && !state.source_loaded
-                || state.marks.is_none()
-            {
-                return Err(
-                    "Local read marks are paused. Review the migration report and retry.".into(),
-                );
+            if state.closed || state.marks.is_none() {
+                return Err("Local read marks are not loaded yet.".into());
             }
             let changed = state
                 .marks
@@ -939,10 +897,10 @@ impl Attention {
             .shared
             .signal
             .wait_timeout_while(state, limit, |state| {
-                state.marks.is_none() || state.dirty || state.writing || state.source_paused
+                state.marks.is_none() || state.dirty || state.writing
             })
             .unwrap_or_else(PoisonError::into_inner);
-        !(state.marks.is_none() || state.dirty || state.writing || state.source_paused)
+        !(state.marks.is_none() || state.dirty || state.writing)
     }
 
     /// Waits until the file holds every change made so far. A failed write
@@ -955,10 +913,7 @@ impl Attention {
             .shared
             .signal
             .wait_while(state, |state| {
-                state.marks.is_none()
-                    || state.writing
-                    || state.source_paused
-                    || state.dirty && state.failure.is_none()
+                state.marks.is_none() || state.writing || state.dirty && state.failure.is_none()
             })
             .unwrap_or_else(PoisonError::into_inner);
         if let (true, Some(failure)) = (state.dirty, &state.failure) {
@@ -981,10 +936,6 @@ impl AttentionShared {
 
     /// The state once the file has been read.
     fn loaded(&self) -> std::sync::MutexGuard<'_, AttentionState> {
-        // Source capture never blocks a GUI presentation read.
-        if self.capture.is_some() {
-            return self.lock();
-        }
         self.signal
             .wait_while(self.lock(), |state| state.marks.is_none())
             .unwrap_or_else(PoisonError::into_inner)
@@ -992,11 +943,6 @@ impl AttentionShared {
 
     fn snapshot_checked(&self) -> Result<AttentionSnapshot, String> {
         let state = self.loaded();
-        if self.capture.is_some() && (state.source_paused || state.marks.is_none()) {
-            return Err(
-                "Local read marks are paused. Review the migration report and retry.".into(),
-            );
-        }
         let Some(store) = state.marks.as_ref() else {
             return Ok(AttentionSnapshot::default());
         };
@@ -1020,10 +966,6 @@ impl AttentionShared {
     /// run and the recovery are logged. The end with a failed change pending
     /// gives up.
     fn write_changes(&self, path: PathBuf) {
-        if let Some(capture) = &self.capture {
-            self.write_captured(path, capture);
-            return;
-        }
         #[cfg(test)]
         let mut test_write = {
             let mut hooks = TEST_ATTENTION_WRITE
@@ -4679,8 +4621,7 @@ mod tests {
 
     #[test]
     fn queued_read_marks_are_merged_saved_and_wake_the_worker() {
-        let path =
-            std::env::temp_dir().join(format!("zerus-actions-queue-{}.json", std::process::id()));
+        let path = attention_folder().join("queue.json");
         let _ = std::fs::remove_file(&path);
         let actions = Actions::new(path.clone());
         let mark = |name: &str, reply: Option<&str>, signature: Option<&str>| ReadMark {
@@ -4714,8 +4655,7 @@ mod tests {
 
     #[test]
     fn marks_for_computers_no_longer_configured_are_dropped_once_peers_are_known() {
-        let path =
-            std::env::temp_dir().join(format!("zerus-actions-orphans-{}.json", std::process::id()));
+        let path = attention_folder().join("orphans.json");
         let _ = std::fs::remove_file(&path);
         let actions = Actions::new(path.clone());
         let on = |computer: &str| ReadMark {
@@ -4742,11 +4682,21 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// This test run's own folder for the files the actions tests write.
+    fn attention_folder() -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("zerus-actions-tests-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&folder);
+        folder
+    }
+
+    /// Task #54 (team ede724c4, 2026-11-10): each attention file lives in
+    /// this run's own folder, never directly in the shared %TEMP%. On Windows
+    /// the termination image tests pin their fixture's ancestor folders,
+    /// %TEMP% among them, and while they hold them a rename directly in %TEMP%
+    /// is refused ("being used by another process", os error 32): the
+    /// attention writer retried, and a test counting its writes saw 4 or 5.
     fn attention_path(test: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "zerus-actions-attention-{}-{test}.json",
-            std::process::id()
-        ));
+        let path = attention_folder().join(format!("{test}.json"));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -5247,8 +5197,7 @@ mod tests {
     fn a_snapshot_drops_marks_of_sessions_it_no_longer_lists() {
         use zerus_client_core::readmarks::ReadMark;
         use zerus_client_core::{ComputerId, ReplaceOut, RowOut, ViewRow};
-        let path =
-            std::env::temp_dir().join(format!("zerus-actions-observe-{}.json", std::process::id()));
+        let path = attention_folder().join("observe.json");
         let _ = std::fs::remove_file(&path);
         let actions = Actions::new(path.clone());
         let mark = |name: &str| ReadMark {
@@ -5317,10 +5266,7 @@ mod tests {
     #[test]
     fn every_change_of_the_pending_read_marks_is_heard_once() {
         use zerus_client_core::{ComputerId, ReplaceOut, RowOut, ViewRow};
-        let path = std::env::temp_dir().join(format!(
-            "zerus-actions-listener-{}.json",
-            std::process::id()
-        ));
+        let path = attention_folder().join("listener.json");
         let _ = std::fs::remove_file(&path);
         let actions = Actions::new(path.clone());
         let calls = counted(&actions.listener);

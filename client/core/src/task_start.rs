@@ -1059,33 +1059,6 @@ mod tests {
             .unwrap()
             .unwrap();
         let input = before["intent"]["retained_input"].as_str().unwrap();
-        let source = crate::migration::sources::task_start_delivery(
-            "example",
-            TASK,
-            FIRST,
-            &serde_json::to_vec(&before).unwrap(),
-        )
-        .unwrap();
-        let mut snapshots = 0;
-        for item in crate::migration::Bundle::new(
-            zerus_desktop_migration::SOURCE,
-            false,
-            "a".repeat(64),
-            SECOND.into(),
-            1,
-            vec![source],
-            1 << 20,
-        )
-        .unwrap()
-        {
-            if let crate::migration::BundleItem::Snapshot { reader, .. } = item.unwrap() {
-                let body: Value = serde_json::from_slice(reader.get_ref()).unwrap();
-                assert!(body["record"] == before);
-                assert!(body["record"]["intent"]["retained_input"].as_str() == Some(input));
-                snapshots += 1;
-            }
-        }
-        assert_eq!(snapshots, 1);
         release(&s.0, "example", TASK, FIRST, &unknown.snapshot, |call| {
             assert!(call.args.iter().any(|s| s == "--recover-only"));
             assert!(call.input == input);

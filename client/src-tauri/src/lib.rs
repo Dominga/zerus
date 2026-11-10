@@ -238,7 +238,7 @@ pub mod window_theme;
 mod window_visibility;
 mod wsl_mapping;
 // Task 102: Qt's presets and raised notices, read once at the first start.
-mod qt_first_start;
+mod private_store_notices;
 mod model_servers;
 // G1: the Windows session host that stays for other computers.
 mod resident_host;
@@ -924,8 +924,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 std::fs::create_dir_all(&dir)?;
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
-                // Task 102: Qt's WSL presets and raised notices, once, before their readers.
-                qt_first_start::import(&dir, settings::seed_source(&app.state::<identity::Identity>().bundle_id, replay));
                 if desktop_service::mode() {
                     let source=desktop_notification_controls::Source::default();
                     let handle=app.handle().clone();
@@ -940,16 +938,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
-                    // The report shows the configured download folder's G3
-                    // evidence, resolved each time it is shown.
-                    let downloads_app = app.handle().clone();
-                    if let Some(inputs) = desktop_service::retained_import::Inputs::native(
-                        &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
-                        app.state::<settings::Store>().0.clone(),
-                        std::sync::Arc::new(move || files::folder(&downloads_app)),
-                    ) {
-                        app.state::<commands::AppState>().set_retained_import_source(inputs);
-                    }
                 }
                 app.manage(speech_settings::SpeechPage::default());
                 // Task #6: the Teams views' reads; a replay runs no hgs.
@@ -1012,10 +1000,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
                 let local_read_path = dir.join(actions::attention_file(replay));
-                app.manage(match app.state::<commands::AppState>().local_read_capture() {
-                    Some(capture) => actions::Attention::new_with_capture(local_read_path, Some(capture)),
-                    None => actions::Attention::new(local_read_path),
-                });
+                app.manage(actions::Attention::new(local_read_path));
                 let pump = app.state::<commands::AppState>().pump();
                 // Task 235: the last session list shows at once, marked
                 // stale, until each computer's live listing replaces it; the
@@ -1061,12 +1046,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     draft_path,
                     replay,
                 );
-                let qt_source = organization::run_seed_source(
-                    &app.state::<identity::Identity>().bundle_id, replay,
-                );
-                organization.seed_runs(qt_source.clone());
-                organization.recover_qt(qt_source.clone(),app.state::<settings::Store>().0.clone());
-                organization.import_legacy_projects(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -1085,46 +1064,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(screens);
                 app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
                     "worktree-snapshots-replay.json"
-                } else { "worktree-snapshots.json" })), app.state::<commands::AppState>().worktree_cache_capture()));
+                } else { "worktree-snapshots.json" }))));
                 let creations = creations::start(app.handle(), &dir, replay, allowed);
                 app.state::<commands::AppState>().set_creations(creations.clone());
                 app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let seeds_qt = app.state::<identity::Identity>().seeds_qt(replay);
-                // Every switch-build run records Next's drafts first (G3,
-                // zerus-5wmh.66.5.2.1.2), in service mode or not: the capture
-                // is the store's first job, before the import and any load
-                // or save. Only service mode publishes its status and Retry.
-                let capture = zerus_client_core::migration::draft_preload::Capture::for_run(
-                    seeds_qt,
-                    app.state::<commands::AppState>().draft_capture(),
-                    &dir,
-                );
-                let drafts = std::sync::Arc::new(match &capture {
-                    Some(capture) => zerus_client_core::drafts::DraftStore::open_captured(
-                        drafts_root(&dir, replay),
-                        capture.clone(),
-                    ),
-                    None => zerus_client_core::drafts::DraftStore::open(drafts_root(&dir, replay)),
-                });
-                if let Some(capture) = &capture {
-                    // Weak: the store flushes when the app drops it.
-                    let store = std::sync::Arc::downgrade(&drafts);
-                    capture.hook_retry(std::sync::Arc::new(move || {
-                        if let Some(store) = store.upgrade() {
-                            store.retry_import();
-                        }
-                    }));
-                    // Saved drafts shows the status and Retry in every mode
-                    // (zerus-5wmh.66.5.2.1.2.1); it reads the status again
-                    // whenever it opens, so a change before this is not lost.
-                    let changed = app.handle().clone();
-                    capture.hook(std::sync::Arc::new(move || {
-                        let _ = tauri::Emitter::emit(&changed, "draft-capture-changed", ());
-                    }));
-                }
-                app.manage(composer::saved::DraftCapture(capture.clone()));
+                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(drafts_root(&dir, replay)));
                 // Keep Next's existing interim draft import and writer fence.
                 // The core startup importer excludes Qt under the 0.48 policy.
                 if seeds_qt {
@@ -1990,8 +1937,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         mobile::mobile_legacy_close,
         mobile::mobile_local_services,
         mobile::mobile_local_relay,
-        qt_first_start::private_store_notices_known,
-        qt_first_start::private_store_notices_save,
+        private_store_notices::private_store_notices_known,
+        private_store_notices::private_store_notices_save,
         mobile::mobile_view,
         mobile::mobile_open,
         mobile::mobile_refresh_workspace,
@@ -2274,8 +2221,6 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::saved::draft_conflicts,
         composer::saved::draft_recover,
         composer::saved::draft_restore,
-        composer::saved::draft_capture_status,
-        composer::saved::draft_capture_retry,
         composer::send::send_message,
         composer::queue::queue_send_now,
         composer::queue::send_push,

@@ -197,14 +197,6 @@ impl Contents {
     pub fn path(&self) -> &Path {
         &self.path
     }
-    pub(crate) fn encode_bounded(&self, limit: usize) -> io::Result<Vec<u8>> {
-        let mut out = crate::fsx::checkpoint::Bounded {
-            bytes: Vec::new(),
-            limit,
-        };
-        serde_json::to_writer(&mut out, &self.file)?;
-        Ok(out.bytes)
-    }
 }
 
 /// The file: each map as `[key, value]` pairs, oldest written first.

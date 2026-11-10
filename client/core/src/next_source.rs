@@ -48,7 +48,6 @@ pub type SourceResult<T> = Result<T, SourceError>;
 pub struct SourceStream {
     pub(crate) identity: SourceRecord,
     pub(crate) chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
-    pub(crate) rechecked: bool,
 }
 
 impl SourceStream {
@@ -59,7 +58,6 @@ impl SourceStream {
         Self {
             identity,
             chunks: Box::new(chunks),
-            rechecked: false,
         }
     }
 
@@ -113,7 +111,6 @@ impl SourceStream {
         Self {
             identity: self.identity,
             chunks: Box::new(chunks),
-            rechecked: true,
         }
     }
 }

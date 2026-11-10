@@ -20,7 +20,6 @@
 //! `createDirectory`, `requestOpenCodeModels`, `requestOpenCodeFavorite`,
 //! `requestAccounts`).
 
-mod cache_capture;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -125,7 +124,6 @@ struct Shared {
     sequence: AtomicU64,
     written: Mutex<u64>,
     clock: Clock,
-    capture: Option<cache_capture::Cache>,
 }
 
 /// The managed state of New session's commands; clones share it.
@@ -193,35 +191,18 @@ impl NewSession {
             sequence: AtomicU64::new(0),
             written: Mutex::new(0),
             clock,
-            capture: None,
         }))
     }
 
     /// The app's: `default_hgs()`, the replay rule of the actions and the
     /// system clock.
-    pub fn tauri(
-        file: Option<PathBuf>,
-        capture: Option<Arc<zerus_client_core::migration::preload::Capture>>,
-    ) -> Self {
+    pub fn tauri(file: Option<PathBuf>) -> Self {
         let var = |name: &str| std::env::var(name).ok();
         let allowed = crate::actions::actions_allowed(
             var("ZERUS_CLIENT_REPLAY").as_deref(),
             var("ZERUS_CLIENT_HGS").as_deref(),
         );
-        let construct = |hgs, allowed, file, clock| match capture {
-            Some(source) => Self::new_captured(
-                hgs,
-                allowed,
-                file,
-                clock,
-                source,
-                Arc::new(|job| {
-                    tauri::async_runtime::spawn_blocking(job);
-                }),
-            ),
-            None => Self::new(hgs, allowed, file, clock),
-        };
-        construct(
+        Self::new(
             zerus_client_core::default_hgs(),
             allowed,
             file,
@@ -248,12 +229,6 @@ impl NewSession {
     /// Writes the snapshots when a file keeps them; a newer state already
     /// written makes an older one unnecessary.
     fn save(&self) {
-        // A captured owner never falls back to the legacy writer, including
-        // after Quit or a failed capture. Only an uncaptured owner uses it.
-        if self.0.capture.is_some() {
-            self.save_captured();
-            return;
-        }
         let Some(file) = &self.0.file else {
             return;
         };

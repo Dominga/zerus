@@ -106,15 +106,6 @@ pub fn draft_file(replay: bool) -> &'static str {
     }
 }
 
-/// The switch seeds run_groups from the same read-only store as Settings.
-/// Replays and development identities never read Qt for organization data.
-pub fn run_seed_source(
-    identifier: &str,
-    replay: bool,
-) -> Option<zerus_client_core::settings::QtStore> {
-    crate::settings::seed_source(identifier, replay)
-}
-
 #[derive(Default)]
 struct Hub {
     sync: Controller,
@@ -185,8 +176,6 @@ struct Shared {
     layout_writable: bool,
     draft: PathBuf,
     clock: Instant,
-    /// One Qt seed read at a time; failed reads leave the persisted mark unset.
-    seed_started: std::sync::atomic::AtomicBool,
     /// Passes the worker started, so a test can tell when it acted.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicUsize,
@@ -204,29 +193,6 @@ struct Shared {
 pub struct Organization(Arc<Shared>);
 
 impl Organization {
-    /// Only the production switch supplies a source. Recovery is queued by
-    /// the existing local organization topic and runs on this hub's worker.
-    pub fn recover_qt(
-        &self,
-        source: Option<zerus_client_core::settings::QtStore>,
-        settings: zerus_client_core::settings::Settings,
-    ) {
-        if !self.0.allowed {
-            return;
-        }
-        let Some(source) = source else {
-            return;
-        };
-        let mut hub = self.lock();
-        hub.qt_recovery = Some(QtRecovery { source, settings });
-        hub.presentation_due = true;
-        if let Some(value) = hub.sync.observed_value() {
-            Self::queue_recovery(&mut hub, &value);
-        }
-        drop(hub);
-        self.0.wake.notify_all();
-    }
-
     fn queue_recovery(hub: &mut Hub, value: &Value) {
         if hub.qt_recovery.is_none() || hub.stopped {
             return;
@@ -443,7 +409,6 @@ impl Organization {
             layout_writable,
             draft: draft_path,
             clock: Instant::now(),
-            seed_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             passes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -464,55 +429,6 @@ impl Organization {
         }
         organization.spawn();
         organization
-    }
-
-    pub fn seed_runs(&self, source: Option<zerus_client_core::settings::QtStore>) {
-        if let Some(source) = source {
-            let _ = self
-                .seed_runs_with(move || zerus_client_core::swarm::layout::qt_run_groups(&source));
-        }
-    }
-
-    fn seed_runs_with(
-        &self,
-        read: impl FnOnce() -> Result<serde_json::Map<String, Value>, String> + Send + 'static,
-    ) -> Option<std::thread::JoinHandle<()>> {
-        use std::sync::atomic::Ordering::SeqCst;
-        if !self.0.layout_writable
-            || self.0.pump.runs_seeded()
-            || self.0.seed_started.swap(true, SeqCst)
-        {
-            return None;
-        }
-        let shared = Arc::downgrade(&self.0);
-        let started = std::thread::Builder::new()
-            .name("zerus-run-seed".into())
-            .spawn(move || {
-                // Neither the pump nor the hub, writer or a strong organization
-                // reference is held across Qt's file/cfprefsd I/O and JSON parsing.
-                let groups = read();
-                let Some(shared) = shared.upgrade() else {
-                    return;
-                };
-                match groups {
-                    Ok(groups) => {
-                        shared.pump.seed_runs(&groups);
-                        shared.wake.notify_all();
-                    }
-                    Err(error) => {
-                        shared.seed_started.store(false, SeqCst);
-                        eprintln!("zerus-client: the archive project seed was not loaded: {error}");
-                    }
-                }
-            });
-        match started {
-            Ok(worker) => Some(worker),
-            Err(error) => {
-                self.0.seed_started.store(false, SeqCst);
-                eprintln!("zerus-client: the archive project seed worker did not start: {error}");
-                None
-            }
-        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Hub> {
@@ -2012,96 +1928,6 @@ mod tests {
     }
 
     #[test]
-    fn presentation_import_checkpoints_with_its_record_and_a_second_start_never_reads_qt() {
-        let fake = Fake::landing();
-        let qt = fake.dir.join("synthetic-qt.conf");
-        let org = json!({"version":2,"default_project":"beta","projects":[
-            {"id":"alpha","name":"Alpha","collapsed":true,"sessions":["peer\ncodex/example/two","peer\ncodex/example/one"]},
-            {"id":"beta","name":"Beta","sessions":[]}]});
-        let original = format!(
-            "[workspace]\norganization={}\n",
-            serde_json::to_string(&org.to_string()).unwrap()
-        );
-        std::fs::write(&qt, &original).unwrap();
-        let mtime = std::fs::metadata(&qt).unwrap().modified().unwrap();
-        std::fs::write(
-            fake.layout(),
-            json!({"version":1,"collapsed":[],"order":{},"default_project":null,
-            "run_groups":[["peer\noriginal-run","next-run-project"]],"runs_seeded":true})
-            .to_string(),
-        )
-        .unwrap();
-        let settings_file = fake.dir.join("settings.json");
-        std::fs::write(
-            &settings_file,
-            json!({"version":1,"seed":{"at":0},"values":{}}).to_string(),
-        )
-        .unwrap();
-        let settings = zerus_client_core::settings::Settings::open(settings_file, None);
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        pump.present(&org, Arc::new(Default::default()), 1, SyncView::default());
-        organization.recover_qt(
-            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
-            settings.clone(),
-        );
-        wait_until(
-            "the presentation family and values to checkpoint together",
-            || {
-                std::fs::read(fake.layout())
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                    .is_some_and(|value| value["g3_organization_presentation"]["version"] == 1)
-            },
-        );
-        let saved: Value = serde_json::from_slice(&std::fs::read(fake.layout()).unwrap()).unwrap();
-        assert_eq!(saved["collapsed"], json!(["alpha"]));
-        assert_eq!(saved["default_project"], "beta");
-        assert_eq!(pump.default_project(), "beta");
-        assert_eq!(
-            saved["run_groups"],
-            json!([["peer\noriginal-run", "next-run-project"]])
-        );
-        assert_eq!(
-            saved["g3_organization_presentation"]["source_mtime_after_switch"],
-            true
-        );
-        assert_eq!(std::fs::read_to_string(&qt).unwrap(), original);
-        assert_eq!(std::fs::metadata(&qt).unwrap().modified().unwrap(), mtime);
-        assert!(
-            !fake.dir.join("log.ndjson").exists(),
-            "local presentation runs no hgs command"
-        );
-        let runs = organization.runs_writer();
-        let shared = Arc::downgrade(&organization.0);
-        drop(organization);
-        wait_until("the first presentation worker to end", || {
-            shared.strong_count() == 0
-        });
-        runs.stop();
-
-        std::fs::write(&qt, b"[workspace]\norganization=malformed\n").unwrap();
-        let before = std::fs::read(fake.layout()).unwrap();
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        let before_parked = parked(&organization);
-        organization.recover_qt(
-            Some(zerus_client_core::settings::QtStore::Ini(qt)),
-            settings.clone(),
-        );
-        wait_until("the handled family's startup pass to finish", || {
-            parked(&organization) > before_parked
-        });
-        assert!(pump.presentation_seeded().unwrap());
-        assert!(!organization.lock().sync.view().status_error);
-        organization.flush();
-        assert_eq!(std::fs::read(fake.layout()).unwrap(), before);
-        assert!(!fake.dir.join("log.ndjson").exists());
-        drop(settings);
-        fake.finish(organization);
-    }
-
-    #[test]
     fn a_refused_layout_also_blocks_presentation_import_without_reading_qt() {
         let fake = Fake::landing();
         let original = b"{\"version\":99,\"unknown\":\"retained\"}";
@@ -2121,193 +1947,6 @@ mod tests {
         fake.finish(organization);
     }
 
-    #[test]
-    fn a_qt_profile_without_an_organization_still_sets_up_projects() {
-        // win-accept-cl importonce: Qt saves workspace/organization only once
-        // its organization first changes. A real store without it left the
-        // catalog uninitialized, so Projects could never add a project.
-        let fake = Fake::landing();
-        let node = "11111111-1111-4111-8111-111111111111";
-        let qt = fake.dir.join("synthetic-qt.conf");
-        let ini = "[General]\nlanguage=ru\n\n[window]\ngeometry=@ByteArray(AAAA)\n\n[accounts]\ndefault=claude\n";
-        std::fs::write(&qt, ini).unwrap();
-        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
-            .snapshot()
-            .unwrap()
-            .unwrap()
-            .sha256;
-        let inbox = swarm::qt_import::shared(None, node).unwrap();
-        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
-            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":inbox,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
-        let settings =
-            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
-        let organization = fake.organization(&Pump::default(), true);
-        organization.recover_qt(
-            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
-            settings.clone(),
-        );
-        let mut observed = full("d1");
-        observed["node_id"] = json!(node);
-        observed["initialized"] = json!(false);
-        organization.set_source(snapshot_of(&observed));
-        organization.observe(&state_of(&observed));
-        wait_until("the first-use import", || {
-            settings.organization_import().unwrap()
-                == zerus_client_core::settings::OrganizationImport::Handled
-        });
-        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
-        let imports: Vec<_> = log
-            .lines()
-            .filter(|line| line.contains("\"--g3\""))
-            .collect();
-        assert_eq!(imports.len(), 1);
-        let request = input(imports[0]);
-        assert_eq!(request["organization"], inbox);
-        assert_eq!(request["source_sha256"], hash);
-        assert!(organization.lock().notice.is_none());
-        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
-        drop(settings);
-        fake.finish(organization);
-    }
-
-    #[test]
-    fn an_unreadable_qt_organization_still_sets_up_projects() {
-        // P1 (b): a malformed saved organization kept the catalog uninitialized
-        // for good. The CLI first-use bootstrap sets it up once, the refusal
-        // stays visible, and Projects can add projects.
-        let fake = Fake::landing();
-        let node = "11111111-1111-4111-8111-111111111111";
-        let qt = fake.dir.join("synthetic-qt.conf");
-        let ini = "[workspace]\norganization=\"{\\\"version\\\":99}\"\n";
-        std::fs::write(&qt, ini).unwrap();
-        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[
-                {"stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}},
-                {"stdout":{"version":1,"node_id":node,"initialized":true,"gui_import_pending":true}}],
-            "g3-bootstrap":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"g3_bootstrap":{"version":1}}}]}).to_string()).unwrap();
-        let settings =
-            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
-        let organization = fake.organization(&Pump::default(), true);
-        organization.recover_qt(
-            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
-            settings.clone(),
-        );
-        let mut observed = full("d1");
-        observed["node_id"] = json!(node);
-        observed["initialized"] = json!(false);
-        organization.set_source(snapshot_of(&observed));
-        organization.observe(&state_of(&observed));
-        wait_until("the first-use bootstrap", || {
-            std::fs::read_to_string(fake.dir.join("log.ndjson"))
-                .is_ok_and(|log| log.contains("--g3-bootstrap"))
-        });
-        let refused = swarm::sync::unavailable(swarm::qt_import::SOURCE_FAILED);
-        wait_until("the visible refusal", || {
-            organization.lock().sync.view().status == refused
-        });
-        // The CLI publishes the bootstrapped catalog. Its next recovery pass
-        // reads Qt again and refuses visibly, while project edits stay ready.
-        observed["initialized"] = json!(true);
-        organization.set_source(snapshot_of(&observed));
-        organization.observe(&state_of(&observed));
-        wait_until("the second recovery pass", || {
-            std::fs::read_to_string(fake.dir.join("log.ndjson"))
-                .is_ok_and(|log| log.matches("--g3-status").count() == 2)
-        });
-        wait_until("ready projects with the visible refusal", || {
-            let hub = organization.lock();
-            hub.sync.ready() && hub.sync.view().status == refused
-        });
-        organization.flush();
-        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
-        let bootstraps: Vec<_> = log
-            .lines()
-            .filter(|line| line.contains("--g3-bootstrap"))
-            .collect();
-        assert_eq!(bootstraps.len(), 1);
-        assert_eq!(
-            input(bootstraps[0]),
-            json!({"version":1,"expected_node_id":node})
-        );
-        assert_eq!(
-            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
-            0
-        );
-        assert_eq!(
-            settings.organization_import().unwrap(),
-            zerus_client_core::settings::OrganizationImport::Unhandled
-        );
-        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
-        drop(settings);
-        fake.finish(organization);
-    }
-
-    #[test]
-    fn qt_recovery_uses_the_existing_worker_without_holding_ui_or_checkpoint_locks() {
-        let fake = Fake::landing();
-        let node = "11111111-1111-4111-8111-111111111111";
-        let qt = fake.dir.join("synthetic-qt.conf");
-        let org = json!({"version":2,"projects":[{"id":"alpha","name":"Qt project","color":"#123456","sessions":[],"folders":[]}]});
-        // QSettings text JSON: the entire value is quoted, not a string list.
-        let ini = format!(
-            "[workspace]\norganization={}\n",
-            serde_json::to_string(&org.to_string()).unwrap()
-        );
-        std::fs::write(&qt, &ini).unwrap();
-        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
-            .snapshot()
-            .unwrap()
-            .unwrap()
-            .sha256;
-        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"gate":"recovery-gate","stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
-            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":org,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
-        let settings =
-            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
-        let organization = fake.organization(&Pump::default(), true);
-        organization.recover_qt(
-            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
-            settings.clone(),
-        );
-        let mut observed = full("d1");
-        observed["node_id"] = json!(node);
-        observed["initialized"] = json!(false);
-        organization.set_source(snapshot_of(&observed));
-        organization.observe(&state_of(&observed));
-        wait_until("the held recovery status", || {
-            std::fs::read_to_string(fake.dir.join("log.ndjson"))
-                .is_ok_and(|log| log.contains("--g3-status"))
-        });
-        let (sent, received) = std::sync::mpsc::channel();
-        let flushing = organization.clone();
-        let worker = std::thread::spawn(move || {
-            flushing.flush();
-            sent.send(()).unwrap();
-        });
-        received
-            .recv_timeout(Duration::from_secs(2))
-            .expect("a held CLI must not block checkpoint locks");
-        worker.join().unwrap();
-        organization.observe(&state_of(&observed)); // same false state never queues another import
-        std::fs::write(fake.dir.join("recovery-gate"), b"release").unwrap();
-        wait_until("the completed recovery record", || {
-            settings.organization_import().unwrap()
-                == zerus_client_core::settings::OrganizationImport::Handled
-        });
-        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
-        assert_eq!(
-            log.lines()
-                .filter(|line| line.contains("--g3-status"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
-            1
-        );
-        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
-        drop(settings);
-        fake.finish(organization);
-    }
-
     /// The passes the worker finished.
     fn parked(organization: &Organization) -> usize {
         organization.0.parked.load(Ordering::SeqCst)
@@ -2319,124 +1958,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_live_switch_identity_reads_qt_for_the_run_seed() {
-        assert!(run_seed_source("dev.zerus.next", false).is_none());
-        assert!(run_seed_source("dev.zerus.next.phase2", false).is_none());
-        assert!(run_seed_source(crate::settings::SWITCH_IDENTITY, true).is_none());
-        assert_eq!(
-            run_seed_source(crate::settings::SWITCH_IDENTITY, false),
-            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY, false)
-        );
-    }
-
-    #[test]
-    fn a_blocked_run_seed_does_not_stall_catalog_changes_and_merges_the_current_layout() {
-        let fake = Fake::landing();
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        let org = full("d1")["organization"].clone();
-        pump.present(
-            &org,
-            Arc::new(zerus_client_core::swarm::members(&org)),
-            1,
-            SyncView::default(),
-        );
-        let (entered, started) = std::sync::mpsc::channel();
-        let (release, held) = std::sync::mpsc::channel();
-        let seed = organization
-            .seed_runs_with(move || {
-                entered.send(()).unwrap();
-                held.recv().unwrap();
-                Ok(
-                    json!({"workstation\nlive":"alpha", "workstation\nold":"alpha"})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                )
-            })
-            .unwrap();
-        started.recv_timeout(Duration::from_secs(2)).unwrap();
-        // A duplicate startup callback neither reads again nor blocks.
-        let duplicate = organization.seed_runs_with(|| panic!("the seed is already being read"));
-        let changed = pump.clone();
-        let (flowed, flow) = std::sync::mpsc::channel();
-        let drain = std::thread::spawn(move || {
-            changed.push(Change::Upsert {
-                computer: ComputerId::local(),
-                key: "run:live".into(),
-                row: ViewRow {
-                    machine: "workstation".into(),
-                    name: "codex/sample-project/implicit".into(),
-                    state: "running".into(),
-                    run_id: Some("live".into()),
-                    ..ViewRow::default()
-                },
-            });
-            changed.set_collapsed("alpha", true);
-            flowed.send(()).unwrap();
-        });
-        let result = flow.recv_timeout(Duration::from_secs(2));
-        release.send(()).unwrap();
-        drain.join().unwrap();
-        seed.join().unwrap();
-        assert!(duplicate.is_none(), "the second call starts no reader");
-        assert!(
-            result.is_ok(),
-            "the catalog flowed before the Qt read finished"
-        );
-        wait_until("the run seed to merge", || pump.runs_seeded());
-        organization.flush();
-        let saved = zerus_client_core::swarm::layout::Layout::from_json(
-            &std::fs::read(fake.layout()).unwrap(),
-        );
-        assert!(saved.collapsed("alpha"));
-        assert_eq!(
-            saved.run_project("workstation", "live"),
-            None,
-            "live implicit membership clears the stale seed"
-        );
-        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
-        assert!(organization
-            .seed_runs_with(|| panic!("a saved seed never reads Qt again"))
-            .is_none());
-        fake.finish(organization);
-    }
-
-    #[test]
-    fn a_run_seed_read_error_leaves_the_mark_pending_and_can_be_retried() {
-        let fake = Fake::landing();
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        organization
-            .seed_runs_with(|| Err("synthetic seed read error".into()))
-            .unwrap()
-            .join()
-            .unwrap();
-        wait_until("the seed read to fail", || {
-            !organization.0.seed_started.load(Ordering::SeqCst)
-        });
-        assert!(!pump.runs_seeded());
-        organization
-            .seed_runs_with(|| {
-                Ok(json!({"workstation\nold":"alpha"})
-                    .as_object()
-                    .unwrap()
-                    .clone())
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-        wait_until("the retry to seed", || pump.runs_seeded());
-        organization.flush();
-        let saved = zerus_client_core::swarm::layout::Layout::from_json(
-            &std::fs::read(fake.layout()).unwrap(),
-        );
-        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
-        fake.finish(organization);
-    }
-
-    #[test]
-    fn layout_refusal_preserves_original_and_blocks_seed_and_later_saves() {
+    fn layout_refusal_preserves_original_and_blocks_later_saves() {
         for original in [
             b"not json".as_slice(),
             br#"{"version":99,"private_extension":"retain"}"#,
@@ -2455,9 +1977,6 @@ mod tests {
                     .view(&organization.0.hub.lock().unwrap())
                     .layout_save_paused
             );
-            assert!(organization
-                .seed_runs_with(|| panic!("blocked target never reads Qt"))
-                .is_none());
             pump.set_collapsed("alpha", true);
             organization.flush();
             assert_eq!(std::fs::read(fake.layout()).unwrap(), original);
@@ -2510,54 +2029,6 @@ mod tests {
             .unwrap()
             .contains(&json!("beta")));
         fake.finish(organization);
-    }
-
-    #[test]
-    fn a_persisted_run_seed_mark_skips_qt_on_the_next_start() {
-        let fake = Fake::landing();
-        let mut layout = zerus_client_core::swarm::layout::Layout::default();
-        layout.seed_runs(&serde_json::Map::new());
-        std::fs::write(fake.layout(), layout.to_json()).unwrap();
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        assert!(pump.runs_seeded());
-        assert!(!organization.0.seed_started.load(Ordering::SeqCst));
-        let reader = organization.seed_runs_with(|| panic!("a persisted seed never reads Qt"));
-        let skipped = reader.is_none();
-        if let Some(reader) = reader {
-            let _ = reader.join();
-        }
-        fake.finish(organization);
-        assert!(skipped);
-    }
-
-    #[test]
-    fn a_blocked_run_seed_never_keeps_the_organization_alive_during_quit() {
-        let fake = Fake::landing();
-        let pump = Pump::default();
-        let organization = fake.organization(&pump, true);
-        let weak = Arc::downgrade(&organization.0);
-        let (entered, started) = std::sync::mpsc::channel();
-        let (release, held) = std::sync::mpsc::channel();
-        let seed = organization
-            .seed_runs_with(move || {
-                entered.send(()).unwrap();
-                held.recv().unwrap();
-                Ok(serde_json::Map::new())
-            })
-            .unwrap();
-        started.recv_timeout(Duration::from_secs(2)).unwrap();
-        drop(organization);
-        let until = Instant::now() + Duration::from_secs(2);
-        while weak.strong_count() != 0 && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let ended = weak.strong_count() == 0;
-        release.send(()).unwrap();
-        seed.join().unwrap();
-        wait_until("the organization to end", || weak.strong_count() == 0);
-        std::fs::remove_dir_all(fake.dir).unwrap();
-        assert!(ended, "quit did not wait for the seed read");
     }
 
     /// The layout saves done; taken under the writer's lock, so a save in

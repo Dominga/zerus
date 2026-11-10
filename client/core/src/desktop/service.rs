@@ -73,9 +73,6 @@ pub struct Snapshot {
     pub notification_ownership: Option<Value>,
     /// Native-client transfer state, attached locally; never a service writer grant.
     pub pending_read_import: Option<Value>,
-    /// Native managed-source report progress only. Never deserialized authority.
-    #[serde(skip_deserializing)]
-    pub retained_source_import: Option<Value>,
     pub connected: bool,
     #[serde(default)]
     pub reconnecting: bool,
@@ -137,7 +134,6 @@ impl Default for Snapshot {
             notification_preferences: None,
             notification_ownership: None,
             pending_read_import: None,
-            retained_source_import: None,
             connected: false,
             reconnecting: false,
             epoch: None,
@@ -280,7 +276,6 @@ impl State {
             connected: true,
             reconnecting: false,
             pending_read_import: None,
-            retained_source_import: None,
             epoch: Some(epoch.into()),
             generation: Some(generation),
             background,

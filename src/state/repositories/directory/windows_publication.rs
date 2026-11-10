@@ -226,3 +226,8 @@ unsafe fn rename(file: &File, name: &str, replace: bool) -> std::io::Result<()> 
 #[cfg(test)]
 #[path = "windows_publication/tests.rs"]
 mod tests;
+
+// Existing-source fault establishment has a separate test-only safety contract.
+#[cfg(test)]
+#[path = "windows_publication/fault_move.rs"]
+pub(in crate::state) mod fault_move;

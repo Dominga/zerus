@@ -397,35 +397,46 @@ fn commit(
     let Command::Execute(plan) = &envelope.command else {
         anyhow::bail!(CLOSED)
     };
-    let verify = |db: &rusqlite::Connection| -> Result<()> {
-        ensure!(Instant::now() < until, "task-control deadline expired");
-        custody.verify(location, db)?;
-        guard.verify(db, &location.configuration)?;
-        proof.verify(until)?;
-        let (image, loaded) = proof.actor.guards(until)?;
-        ensure!(
-            plan.configuration == location.configuration
-                && plan.store_identity == guard.digest()
-                && plan.cli_image == image
-                && plan.loaded_adapter == loaded
-                && plan.request.executor == *proof.actor.executor(),
-            "task-control frozen guards changed"
-        );
-        Ok(())
-    };
-    verify(db)?;
-    let imports = proof
+    // Keep ONE typed current namespace lease across the complete SQL use.
+    // The final read-scope recheck may fail AFTER COMMIT: the caller above
+    // retains Unknown and lookup-only settlement, never rollback or replay.
+    proof
         .stops
-        .facts()
-        .iter()
-        .map(|fact| {
-            stop_import::entry(fact, &location.configuration, guard.digest())
-                .map_err(anyhow::Error::msg)
+        .with_current(proof.actor.executor(), |_, facts, check_stops| {
+            (|| -> Result<Value> {
+                let verify = |db: &rusqlite::Connection| -> Result<()> {
+                    ensure!(Instant::now() < until, "task-control deadline expired");
+                    custody.verify(location, db)?;
+                    guard.verify(db, &location.configuration)?;
+                    proof.actor.current(until)?;
+                    check_stops().map_err(anyhow::Error::msg)?;
+                    let (image, loaded) = proof.actor.guards(until)?;
+                    ensure!(
+                        plan.configuration == location.configuration
+                            && plan.store_identity == guard.digest()
+                            && plan.cli_image == image
+                            && plan.loaded_adapter == loaded
+                            && plan.request.executor == *proof.actor.executor(),
+                        "task-control frozen guards changed"
+                    );
+                    Ok(())
+                };
+                verify(db)?;
+                let imports = facts
+                    .iter()
+                    .map(|fact| {
+                        stop_import::entry(fact, &location.configuration, guard.digest())
+                            .map_err(anyhow::Error::msg)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut ledger =
+                    ledger::open_checked(db, verify)?.context("task_controls_inactive")?;
+                let control = ledger.refuse_with_stops(&plan.request, &imports, CLOSED, verify)?;
+                Ok(retained(&envelope.request_id, control))
+            })()
+            .map_err(|error| error.to_string())
         })
-        .collect::<Result<Vec<_>>>()?;
-    let mut ledger = ledger::open_checked(db, verify)?.context("task_controls_inactive")?;
-    let control = ledger.refuse_with_stops(&plan.request, &imports, CLOSED, verify)?;
-    Ok(retained(&envelope.request_id, control))
+        .map_err(anyhow::Error::msg)
 }
 
 fn unknown(id: &str) -> Value {

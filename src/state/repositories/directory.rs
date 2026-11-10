@@ -6,6 +6,10 @@ use std::fs::{File, OpenOptions};
 #[path = "directory/windows_publication.rs"]
 mod windows_publication;
 
+#[cfg(windows)]
+#[path = "directory/stop_capture.rs"]
+pub(in crate::state) mod stop_capture;
+
 pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
@@ -23,7 +27,19 @@ pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
     SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }
 
+#[cfg(all(test, windows))]
+pub(in crate::state) type FaultMove<'a> = windows_publication::fault_move::Moved<'a>;
+
 impl Directory {
+    #[cfg(all(test, windows))]
+    pub(in crate::state) fn move_private_for_fault<'a>(
+        &'a self,
+        reader: &'a File,
+        source: &str,
+        destination: &str,
+    ) -> Result<FaultMove<'a>> {
+        windows_publication::fault_move::move_original(self, reader, source, destination)
+    }
     /// Namespace durability, rather than the platform's compatibility no-op.
     /// A caller requiring this proof must retain Unknown when unavailable.
     pub(in crate::state) fn sync(&self) -> Result<()> {

@@ -342,3 +342,70 @@ fn unsupported_ex_refuses_without_a_fallback_or_new_publication_change() {
     assert_eq!(original, b"original");
     directory.verify().unwrap();
 }
+
+#[test]
+fn private_fault_move_retains_the_original_reader_guard_and_rejects_an_existing_destination() {
+    let temp = private_root();
+    let path = crate::platform::canonical(temp.path()).unwrap();
+    let directory = Directory::open(&path).unwrap();
+    directory.write_new("source", b"original object").unwrap();
+    directory
+        .write_new("occupied", b"untouched destination")
+        .unwrap();
+    let reader = directory.read_private("source").unwrap();
+    assert!(directory
+        .move_private_for_fault(&reader, "source", "occupied")
+        .is_err());
+    assert_eq!(
+        std::fs::read(path.join("source")).unwrap(),
+        b"original object"
+    );
+    assert_eq!(
+        std::fs::read(path.join("occupied")).unwrap(),
+        b"untouched destination"
+    );
+    for name in [
+        "",
+        "..",
+        "../escape",
+        "other/name",
+        "other\\name",
+        "stream:name",
+        "tail.",
+        "tail ",
+        "nul\0name",
+    ] {
+        assert!(directory
+            .move_private_for_fault(&reader, name, "kept")
+            .is_err());
+        assert!(directory
+            .move_private_for_fault(&reader, "source", name)
+            .is_err());
+    }
+    let moved = directory
+        .move_private_for_fault(&reader, "source", "kept")
+        .unwrap();
+    assert!(!path.join("source").exists());
+    assert_eq!(
+        std::fs::read(path.join("kept")).unwrap(),
+        b"original object"
+    );
+    directory
+        .write_new("source", b"different equal-scope object")
+        .unwrap();
+    moved.verify_replacement().unwrap();
+    // An old reader cannot authorize moving a different object now at source.
+    assert!(directory
+        .move_private_for_fault(&reader, "source", "must-stay-absent")
+        .is_err());
+    assert!(!path.join("must-stay-absent").exists());
+    moved.verify_replacement().unwrap();
+    assert_eq!(
+        std::fs::read(path.join("source")).unwrap(),
+        b"different equal-scope object"
+    );
+    assert_eq!(
+        std::fs::read(path.join("kept")).unwrap(),
+        b"original object"
+    );
+}

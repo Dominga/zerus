@@ -25,7 +25,11 @@ export interface PlacedLayer {
 }
 
 export interface PlanPhase {
-  phase: PhaseView;
+  /** The phase number (task #16: read without the live record below). */
+  n: number;
+  /** The phase record with its live counts: read from the team each time, so
+   * a phase object kept across a status change still shows the new counts. */
+  readonly phase: PhaseView;
   tasks: TaskView[];
   nodes: PlacedNode[];
   layers: PlacedLayer[];
@@ -164,10 +168,8 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
       const placed = ordered.flatMap((layer) => layer.nodes);
       const columns = Math.max(0, ...ordered.map((layer) => layer.nodes.length));
       return {
-        // Task 196 (P10): a cancelled task is not work the phase still owes, as
-        // Qt counts it: a Done phase with one cancelled task reads 7/7, not 7/8.
-        // An archived phase keeps only some of its tasks live: its record's total stands.
-        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: phaseRecord(team, n).archived ? Math.max(phaseRecord(team, n).total, tasks.length) : tasks.filter((task) => task.status !== "cancelled").length },
+        n,
+        get phase() { return livePhase(team, n, tasks); },
         tasks,
         nodes: placed,
         layers: ordered,
@@ -176,6 +178,46 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
         height: ordered.length * ROW_H,
       };
     });
+}
+
+/** A phase's record with the counts its tasks give now. */
+function livePhase(team: TeamView, n: number, tasks: TaskView[]): PhaseView {
+  const record = phaseRecord(team, n);
+  // Task 196 (P10): a cancelled task is not work the phase still owes, as
+  // Qt counts it: a Done phase with one cancelled task reads 7/7, not 7/8.
+  // An archived phase keeps only some of its tasks live: its record's total stands.
+  return {
+    ...record,
+    done: record.done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length,
+    total: record.archived ? Math.max(record.total, tasks.length) : tasks.filter((task) => task.status !== "cancelled").length,
+  };
+}
+
+/** Whether two plans of one phase hold the same tasks (the same objects), the
+ * same placed nodes and the same links, so the older one can stay. */
+function samePlan(old: PlanPhase, plan: PlanPhase): boolean {
+  if (old.n !== plan.n || old.width !== plan.width || old.height !== plan.height) return false;
+  if (old.tasks.length !== plan.tasks.length || old.tasks.some((task, index) => task !== plan.tasks[index])) return false;
+  if (old.nodes.length !== plan.nodes.length) return false;
+  const placed = (a: PlacedNode, b: PlacedNode) =>
+    a.node.id === b.node.id && a.node.layer === b.node.layer && a.x === b.x && a.y === b.y && a.task === b.task;
+  if (old.nodes.some((node, index) => !placed(node, plan.nodes[index]))) return false;
+  if (old.layers.length !== plan.layers.length || old.layers.some((layer, index) => layer.layer !== plan.layers[index].layer)) return false;
+  return old.edges.length === plan.edges.length
+    && old.edges.every((edge, index) => edge.from === plan.edges[index].from && edge.to === plan.edges[index].to && edge.hard === plan.edges[index].hard);
+}
+
+/**
+ * Task #16 (team ede724c4): the phase plans with every unchanged phase kept as
+ * the object it was (`previous`, by phase number). A task's status change
+ * leaves its phase's tasks, nodes and links as they were, so the views keyed
+ * by the plan objects keep their rows; the live record shows the new counts.
+ */
+export function keptPlans(previous: ReadonlyMap<number, PlanPhase>, plans: PlanPhase[]): PlanPhase[] {
+  return plans.map((plan) => {
+    const old = previous.get(plan.n);
+    return old && samePlan(old, plan) ? old : plan;
+  });
 }
 
 /** The virtualized vertical list: a phase header, then one row per layer. */

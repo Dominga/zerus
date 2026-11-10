@@ -121,7 +121,7 @@ pub fn on_event(app: &AppHandle, event: &RunEvent) {
 pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = match crate::main_window(app) {
         Some(window) => window,
-        None => crate::create_main_window(app)?,
+        None => regular_first(app, || crate::create_main_window(app))?,
     };
     #[cfg(feature = "live")]
     if !std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto")
@@ -138,7 +138,7 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         crate::platform::windows::foreground::present(&window);
     }
     #[cfg(not(windows))]
-    {
+    regular_first(app, || -> tauri::Result<()> {
         if window.is_minimized()? {
             window.unminimize()?;
         }
@@ -146,7 +146,8 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // Not Windows: no synthetic Alt here (clippy.toml).
         #[allow(clippy::disallowed_methods)]
         window.set_focus()?;
-    }
+        Ok(())
+    })?;
     sync_policy(app);
     #[cfg(all(windows, feature = "live"))]
     crate::platform::windows::tray::apply_badge(app);
@@ -202,14 +203,42 @@ pub fn sync_policy(app: &AppHandle) {
     let _ = app;
 }
 
+/// Runs `put_on_screen`, which creates the main window or orders it in, with
+/// a macOS menu-bar app already regular (zerus-ywz55). A window that appears
+/// while the app is still Accessory, as after the hidden LaunchAgent start or
+/// a reopen from the menu bar, gets the window server's accessory treatment
+/// and keeps it after [`sync_policy`] turns the app regular: Mission Control
+/// neither lays it out as a thumbnail nor moves it between desktop Spaces, and
+/// it opens over another app's full-screen Space. A show the theme gate holds
+/// leaves the app regular until the window appears; [`sync_policy`] settles
+/// the policy once it is shown or hidden again.
+pub fn regular_first<T>(app: &AppHandle, put_on_screen: impl FnOnce() -> T) -> T {
+    in_order(
+        menu_bar(app),
+        || {
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(native(Policy::Regular));
+        },
+        put_on_screen,
+    )
+}
+
+/// [`regular_first`]'s order, apart from the app.
+fn in_order<T>(menu_bar: bool, regular: impl FnOnce(), put_on_screen: impl FnOnce() -> T) -> T {
+    if menu_bar {
+        regular();
+    }
+    put_on_screen()
+}
+
 /// The policy the app launches with, set before the run loop starts (macOS
 /// menu-bar builds). tao makes every app a normal one when it finishes
 /// launching, before `setup` runs, so a hidden start would show a Dock icon
-/// first. The switch bundle no longer sets `LSUIElement` (zerus-v5ft5): an
-/// app that launches as a menu-bar agent keeps its window out of Mission
-/// Control's moves between desktop Spaces even while it is regular. A start
-/// without a window may therefore show the Dock icon briefly before this
-/// Accessory policy applies; that is the accepted trade-off.
+/// first. The switch bundle sets no `LSUIElement` (zerus-v5ft5), so a start
+/// without a window may show the Dock icon briefly before this Accessory
+/// policy applies; that is the accepted trade-off. The app stays Accessory
+/// until its window first opens, and [`regular_first`] makes it regular
+/// before that window appears (zerus-ywz55).
 #[cfg(target_os = "macos")]
 pub fn prepare(app: &mut tauri::App, menu_bar: bool, opens_sessions: bool) {
     if menu_bar {
@@ -314,6 +343,35 @@ mod tests {
         );
         assert!(close_hides(true));
         assert!(!close_hides(false));
+    }
+
+    #[test]
+    fn a_menu_bar_app_turns_regular_before_its_window_appears() {
+        // zerus-ywz55: the window used to appear first and the app turned
+        // regular only afterwards, too late for Mission Control's Spaces.
+        let steps = std::cell::RefCell::new(Vec::new());
+        let shown = in_order(
+            true,
+            || steps.borrow_mut().push("regular"),
+            || {
+                steps.borrow_mut().push("show");
+                "shown"
+            },
+        );
+        assert_eq!(shown, "shown");
+        assert_eq!(*steps.borrow(), ["regular", "show"]);
+
+        steps.borrow_mut().clear();
+        in_order(
+            false,
+            || steps.borrow_mut().push("regular"),
+            || steps.borrow_mut().push("show"),
+        );
+        assert_eq!(
+            *steps.borrow(),
+            ["show"],
+            "a build without a menu-bar item keeps its policy"
+        );
     }
 
     #[test]

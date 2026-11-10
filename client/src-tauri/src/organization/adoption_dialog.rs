@@ -552,7 +552,11 @@ impl Context {
                 local_phase,
             } => {
                 let reply = object(exit)?;
-                if reply["request_id"] != request_id.as_str() {
+                // The same identity checks as this computer's own journal.
+                if reply["schema"] != 1
+                    || reply["request_id"] != request_id.as_str()
+                    || reply["journal"]["original"]["request_id"] != request_id.as_str()
+                {
                     return Err(adoption::INVALID.into());
                 }
                 let remote = disclosed_phase(&reply["journal"]["phase"])?;

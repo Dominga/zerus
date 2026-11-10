@@ -676,8 +676,7 @@ fn restarted(role: &str, alias: &str, local_request: &str) -> (Fake, Organizatio
         "journal": {"schema": 1, "role": role, "phase": if role == "source" { "source_pending" } else { "main_committed" },
             "original": {"request_id": local_request, "source_alias": alias}},
     }}]);
-    settings["adoption-status"] = json!([{"stdout": {"schema": 1, "guard_present": false,
-        "journal": {"phase": "remote_committed"}}, "echo": ["request_id"]}]);
+    settings["adoption-status"] = json!([remote_status(1, DISCLOSED, DISCLOSED)]);
     let (fake, org, cache) = fixture(settings, true);
     let mut disclosed = local();
     disclosed["adoption"] = json!({"state": "pending", "ordinary_writes": true,
@@ -685,6 +684,12 @@ fn restarted(role: &str, alias: &str, local_request: &str) -> (Fake, Organizatio
     *cache.lock().unwrap() = disclosed.clone();
     org.observe(&state_of(&disclosed));
     (fake, org)
+}
+
+/// The destination's status reply, as `adoption-status PEER --json` returns it.
+fn remote_status(schema: u64, request: &str, original: &str) -> Value {
+    json!({"stdout": {"schema": schema, "request_id": request, "guard_present": false,
+        "journal": {"phase": "remote_committed", "original": {"request_id": original}}}})
 }
 
 #[test]
@@ -763,4 +768,47 @@ fn without_a_disclosure_there_is_no_status_action() {
         .is_err());
     assert!(calls(&fake, "adoption-status").is_empty());
     fake.finish(org);
+}
+
+#[test]
+fn a_disclosed_destination_reply_for_another_request_is_refused() {
+    const OTHER: &str = "00000000-0000-4000-8000-0000000000d3";
+    for (name, reply) in [
+        ("request", remote_status(1, OTHER, DISCLOSED)),
+        ("journal original", remote_status(1, DISCLOSED, OTHER)),
+        ("schema", remote_status(2, DISCLOSED, DISCLOSED)),
+    ] {
+        let (fake, org) = restarted("source", "empty-peer", DISCLOSED);
+        std::fs::write(
+            fake.dir.join("config.json"),
+            serde_json::to_vec(&{
+                let mut settings: Value =
+                    serde_json::from_slice(&std::fs::read(fake.dir.join("config.json")).unwrap())
+                        .unwrap();
+                settings["adoption-status"] = json!([reply]);
+                settings
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let id = open(&org);
+        org.adoption_request(Some(&id), Some(Action::Status), false)
+            .unwrap();
+        wait_until("the refused destination reply", || idle(&org));
+        let done = view(&org, &id);
+        let status = done["status"].as_str().unwrap();
+        assert_eq!(done["error"], true, "{name}");
+        assert!(
+            !status.contains("destination remote_committed"),
+            "{name}: {status}"
+        );
+        assert_eq!(
+            calls(&fake, "adoption-status").len(),
+            2,
+            "{name}: no further call"
+        );
+        assert!(calls(&fake, "adopt").is_empty());
+        assert!(!org.lock().sync.busy());
+        fake.finish(org);
+    }
 }

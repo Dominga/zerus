@@ -55,11 +55,35 @@ fn a_hook_agent_gets_the_line_and_any_other_the_text_after_it() {
     };
     let list = vec![message];
     for agent in ["claude", "codex"] {
-        let text = paste(agent, "", &list);
+        let text = paste(agent, "", &list, false);
         assert!(!text.contains('\n') && !text.contains("Rebase"), "{agent}: {text}");
     }
     for agent in ["kimi", "dsh", "opencode"] {
-        let text = paste(agent, "", &list);
+        let text = paste(agent, "", &list, false);
         assert!(text.lines().next().unwrap().contains("hgs team inbox") && text.contains("Rebase on main first"), "{agent}: {text}");
     }
+}
+
+/// Task #24 (team ede724c4): a post rings for its own message and the unread
+/// ones whose schedule is due, never every unread one; only those can make it
+/// URGENT. A lead's normal inbox list said URGENT every 2 minutes while one
+/// urgent question waited unread, and each post counted a ring on every
+/// unread message (11 rings in an hour).
+#[test]
+fn a_post_rings_for_its_message_and_the_due_ones_only() {
+    let message = |id: &str, at: f64, urgency: &str, rings: u32, rung_at: Option<f64>| Message {
+        id: id.into(), request_id: format!("r-{id}"), team: "t".into(), by: "zerus".into(), to: "lead".into(), kind: "inbox".into(),
+        urgency: urgency.into(), text: "list".into(), at, state: "rung".into(), rung_at, rings,
+        safe_point: String::new(), injected_at: rung_at, read_at: None, read_via: String::new(), read_request: String::new(), expires: 1e9,
+    };
+    // An urgent question rang once at 100; a normal list rang at 200; a new
+    // normal list posts at 320.
+    let list = vec![message("urgent", 100.0, "urgent", 1, Some(100.0)), message("older", 200.0, "normal", 1, Some(200.0)), message("new", 320.0, "normal", 0, None)];
+    let rung = ringing(&list, "r-new", 600.0, 320.0);
+    assert_eq!(rung.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), vec!["new"], "only the new message rings");
+    assert!(!rung.iter().any(Message::urgent), "a normal post's doorbell is normal");
+    assert!(paste("claude", "", &list, rung.iter().any(Message::urgent)).contains("\u{b7} normal \u{b7} new \u{b7} 3 messages]"));
+    // Past the urgent one's bound it is due again: then it rings, URGENT.
+    let later = ringing(&list, "r-new", 600.0, 701.0);
+    assert!(later.iter().any(|message| message.id == "urgent") && later.iter().any(Message::urgent), "{later:?}");
 }

@@ -461,6 +461,7 @@ pub(crate) fn record_notices(team: &mut super::model::Team, records: &[Record], 
             flags: record.flags.clone(),
             reused_from: record.reused_from.clone(),
             recorded_seconds: record.recorded_ms as f64 / 1000.0,
+            task: record.task,
         });
     }
     let extra = team.test_notices.len().saturating_sub(50);

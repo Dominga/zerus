@@ -25,6 +25,17 @@ fn invalid() -> io::Error {
     )
 }
 
+fn borrower_unavailable(borrower: &Peer) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        borrower.refuses_admission()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        borrower.exited()
+    }
+}
+
 struct Phase {
     request: Request,
     borrower: Peer,
@@ -171,7 +182,7 @@ impl Holder {
             || binding.manifest != manifest.binding()
             || self.used.contains(&binding.request)
             || self.source.as_ref().is_some_and(|old| old != &input.source)
-            || borrower.exited()?
+            || borrower_unavailable(&borrower)?
         {
             return Err(invalid());
         }

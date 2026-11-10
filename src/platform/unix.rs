@@ -708,6 +708,20 @@ pub struct PinnedProcess {
     handle: fs::File,
 }
 
+/// Pure decoding for one nonblocking poll of an original process pidfd.
+#[cfg(target_os = "linux")]
+fn classify_exit_poll(ready: io::Result<libc::c_int>, events: libc::c_short) -> io::Result<bool> {
+    match (ready?, events) {
+        (0, _) => Ok(false),
+        (1, libc::POLLIN) => Ok(true),
+        (1, mask) if mask == libc::POLLIN | libc::POLLHUP => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unexpected original process exit readiness",
+        )),
+    }
+}
+
 /// A verified process state. Inspection failure is distinct from confirmed exit.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -781,6 +795,28 @@ impl PinnedProcess {
     }
     pub fn alive(&self) -> bool {
         process_identity(self.pid).is_some_and(|p| p.birth == self.birth)
+    }
+    /// Physical completion of this SAME already-held process pidfd, never a
+    /// currentness, signal, child-wait or complete pipe/worker drain witness.
+    /// pin() uses flags0: Linux pidfd_poll waits for the last thread even when
+    /// its leader exits or a surviving nonleader execs into the old struct pid.
+    /// See Linux fs/pidfs.c pidfd_poll and fs/exec.c de_thread (v6.17).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn exit_observed(&self) -> io::Result<bool> {
+        let mut item = libc::pollfd {
+            fd: self.handle.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd borrows this live, original handle.
+        // Exactly one zero-time poll: no retry, reopen, /proc, wait or signal.
+        let ready = unsafe { libc::poll(&mut item, 1, 0) };
+        let result = if ready < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(ready)
+        };
+        classify_exit_poll(result, item.revents)
     }
     /// Ask the process to exit (SIGTERM).
     pub fn terminate(&self) -> std::result::Result<(), String> {
@@ -1998,6 +2034,53 @@ mod tests {
             .iter()
             .any(|(pid, cwd, name)| *pid == child.id() && *cwd == folder && name == "sleep"));
         assert!(directories.iter().all(|(pid, _, _)| *pid != own));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn physical_exit_poll_accepts_only_exact_documented_readiness() {
+        for events in [
+            0,
+            libc::POLLIN,
+            libc::POLLHUP,
+            libc::POLLERR,
+            libc::POLLNVAL,
+        ] {
+            assert!(!classify_exit_poll(Ok(0), events).unwrap());
+        }
+        for events in [libc::POLLIN, libc::POLLIN | libc::POLLHUP] {
+            assert!(classify_exit_poll(Ok(1), events).unwrap());
+        }
+        for events in [
+            0,
+            libc::POLLHUP,
+            libc::POLLRDNORM,
+            libc::POLLIN | libc::POLLRDNORM,
+            libc::POLLERR,
+            libc::POLLNVAL,
+            libc::POLLPRI,
+            libc::POLLOUT,
+            libc::POLLIN | libc::POLLERR,
+            libc::POLLIN | libc::POLLNVAL,
+            libc::POLLIN | libc::POLLPRI,
+            libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+        ] {
+            assert!(
+                classify_exit_poll(Ok(1), events).is_err(),
+                "mask {events:#x}"
+            );
+        }
+        for count in [-2, -1, 2, 3] {
+            assert!(
+                classify_exit_poll(Ok(count), libc::POLLIN).is_err(),
+                "count {count}"
+            );
+        }
+        for errno in [libc::EINTR, libc::EBADF, libc::EINVAL, libc::EIO] {
+            let error = classify_exit_poll(Err(io::Error::from_raw_os_error(errno)), libc::POLLIN)
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
     }
 
     #[test]

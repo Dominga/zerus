@@ -18,6 +18,10 @@ const JOURNAL_BYTES: u64 = 512 * 1024;
 struct Parts {
     topped_up: i64,
     granted: i64,
+    /// When this currency was last read; 0 (journals before carried baselines)
+    /// means the reading's own time.
+    #[serde(default)]
+    at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -104,7 +108,14 @@ fn reading(balances: &Value) -> BTreeMap<String, Parts> {
     parts
         .into_iter()
         .filter_map(|(currency, part)| match part {
-            (Some(topped_up), Some(granted)) => Some((currency, Parts { topped_up, granted })),
+            (Some(topped_up), Some(granted)) => Some((
+                currency,
+                Parts {
+                    topped_up,
+                    granted,
+                    at: 0,
+                },
+            )),
             _ => None,
         })
         .collect()
@@ -135,17 +146,22 @@ fn update(
         }
         let mut spent = BTreeMap::new();
         let mut top_up = false;
+        let mut from = u64::MAX;
         for (currency, parts) in &now {
             let Some(before) = last.currencies.get(currency) else {
                 continue;
             };
+            // A currency missing from intervening readings spans from its own last reading.
+            let start = if before.at > 0 { before.at } else { last.at };
             let topped_up = parts.topped_up - before.topped_up;
             if topped_up > 0 {
                 top_up = true;
+                from = from.min(start);
                 continue;
             }
             let granted = (before.granted - parts.granted).max(0);
             if topped_up < 0 || granted > 0 {
+                from = from.min(start);
                 spent.insert(
                     currency.clone(),
                     Spent {
@@ -161,7 +177,7 @@ fn update(
                 None => {
                     journal.days.push(Day {
                         day: day.to_owned(),
-                        from: last.at,
+                        from,
                         top_up: false,
                         spent: BTreeMap::new(),
                     });
@@ -169,7 +185,7 @@ fn update(
                 }
             };
             let entry = &mut journal.days[index];
-            entry.from = entry.from.min(last.at);
+            entry.from = entry.from.min(from);
             entry.top_up |= top_up;
             for (currency, add) in spent {
                 let total = entry.spent.entry(currency).or_default();
@@ -178,10 +194,29 @@ fn update(
             }
         }
     }
-    journal.last = Some(Reading {
-        at,
-        currencies: now,
-    });
+    // A currency missing from this reading keeps its previous baseline.
+    let mut currencies: BTreeMap<String, Parts> = journal
+        .last
+        .take()
+        .map(|last| {
+            last.currencies
+                .into_iter()
+                .map(|(c, p)| {
+                    (
+                        c,
+                        Parts {
+                            at: if p.at > 0 { p.at } else { last.at },
+                            ..p
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for (currency, parts) in now {
+        currencies.insert(currency, Parts { at, ..parts });
+    }
+    journal.last = Some(Reading { at, currencies });
     journal.days.retain(|d| d.day.as_str() >= oldest);
     journal.days.sort_by(|a, b| a.day.cmp(&b.day));
     let excess = journal.days.len().saturating_sub(RETENTION_DAYS as usize);
@@ -310,8 +345,13 @@ mod tests {
             Parts {
                 topped_up: micros(topped_up).unwrap(),
                 granted: micros(granted).unwrap(),
+                at: 0,
             },
         )])
+    }
+
+    fn usd_parts(topped_up: &str) -> BTreeMap<String, Parts> {
+        usd(topped_up, "0.00")
     }
 
     fn spent(journal: &Journal, day: &str) -> Option<Spent> {
@@ -553,6 +593,114 @@ mod tests {
         assert_eq!(
             (journal.identity.as_str(), journal.since, journal.days.len()),
             ("api-key:b", 1400, 0)
+        );
+    }
+
+    #[test]
+    fn a_reading_without_one_currency_keeps_that_currencys_baseline() {
+        let both = |usd: &str, cny: &str| {
+            let mut now = usd_parts(usd);
+            now.insert(
+                "CNY".to_owned(),
+                Parts {
+                    topped_up: micros(cny).unwrap(),
+                    granted: 0,
+                    at: 0,
+                },
+            );
+            now
+        };
+        let mut journal = Journal::default();
+        update(
+            &mut journal,
+            "api-key:a",
+            1000,
+            "2026-11-10",
+            "2025-10-06",
+            both("6.00", "100.00"),
+        );
+        update(
+            &mut journal,
+            "api-key:a",
+            1300,
+            "2026-11-10",
+            "2025-10-06",
+            usd_parts("5.90"),
+        );
+        update(
+            &mut journal,
+            "api-key:a",
+            1600,
+            "2026-11-10",
+            "2025-10-06",
+            both("5.80", "90.00"),
+        );
+        let day = journal.days.iter().find(|d| d.day == "2026-11-10").unwrap();
+        assert_eq!(
+            day.spent["USD"],
+            Spent {
+                topped_up: 200_000,
+                granted: 0
+            }
+        );
+        assert_eq!(
+            day.spent["CNY"],
+            Spent {
+                topped_up: 10_000_000,
+                granted: 0
+            }
+        );
+        assert_eq!(day.from, 1000);
+    }
+
+    #[test]
+    fn a_carried_baseline_names_its_own_reading_across_midnight() {
+        let mut journal = Journal::default();
+        let mut both = usd_parts("6.00");
+        both.insert(
+            "CNY".to_owned(),
+            Parts {
+                topped_up: 100_000_000,
+                granted: 0,
+                at: 0,
+            },
+        );
+        update(
+            &mut journal,
+            "api-key:a",
+            1000,
+            "2026-11-09",
+            "2025-10-06",
+            both.clone(),
+        );
+        update(
+            &mut journal,
+            "api-key:a",
+            80_000,
+            "2026-11-09",
+            "2025-10-06",
+            usd_parts("6.00"),
+        );
+        both.insert(
+            "CNY".to_owned(),
+            Parts {
+                topped_up: 90_000_000,
+                granted: 0,
+                at: 0,
+            },
+        );
+        update(
+            &mut journal,
+            "api-key:a",
+            90_000,
+            "2026-11-10",
+            "2025-10-06",
+            both,
+        );
+        // CNY spend spans 1000..90000: the gap starts at its own last reading.
+        assert_eq!(
+            project(&journal, "2026-11-10", 86_400, 100)["periods"][0]["gap_from"],
+            1000
         );
     }
 

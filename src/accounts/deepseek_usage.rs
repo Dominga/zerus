@@ -24,6 +24,7 @@ const MODELS_PER_DAY: usize = 8;
 type Counts = [u64; 4];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 struct Entry {
     dev: u64,
     ino: u64,
@@ -33,6 +34,11 @@ struct Entry {
     /// SHA-256 of the first `head_len` bytes: a replacement under the same inode differs.
     head: String,
     head_len: u64,
+    /// SHA-256 of the `tail_len` bytes ending at `offset`: what was already
+    /// counted. A rewrite of them, even under the same inode and first bytes,
+    /// means the log is read again from its start.
+    tail: String,
+    tail_len: u64,
     done: bool,
     /// Unreadable or malformed until the log changes.
     failed: bool,
@@ -108,18 +114,20 @@ fn logs(sessions: &Path) -> (Vec<(String, PathBuf)>, bool) {
 }
 
 fn head(path: &Path, len: u64) -> Option<String> {
-    use std::io::Read;
+    range_hash(path, 0, len)
+}
+
+/// SHA-256 of `len` bytes from `start`, or None when fewer can be read.
+fn range_hash(path: &Path, start: u64, len: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
     let mut options = fs::OpenOptions::new();
     options.read(true);
     platform::no_follow(&mut options);
+    let mut file = options.open(path).ok()?;
+    file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    options
-        .open(path)
-        .ok()?
-        .take(len)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    Some(format!("{:x}", Sha256::digest(&bytes)))
+    file.take(len).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 == len).then(|| format!("{:x}", Sha256::digest(&bytes)))
 }
 
 #[cfg(unix)]
@@ -199,17 +207,28 @@ fn plan(
         let mut entry = match previous {
             Some(e) if unchanged => e,
             previous => {
-                // Grown in place: the same inode and the same first bytes.
+                // Grown in place: the same inode, a larger size, and the same
+                // first bytes and bytes before the committed offset. dsh only
+                // appends, so a write that keeps the size is a rewrite.
                 let same = previous.as_ref().filter(|e| {
-                    e.dev == dev && e.ino == ino && size >= e.offset && size >= e.head_len
+                    e.dev == dev
+                        && e.ino == ino
+                        && size > e.size
+                        && size >= e.offset
+                        && size >= e.head_len
                 });
                 let grown = match same {
-                    Some(e) if !budget.take(e.head_len) => {
+                    Some(e) if !budget.take(e.head_len + e.tail_len) => {
                         deferred = true;
                         files.insert(key, e.clone());
                         continue;
                     }
-                    Some(e) => head(&path, e.head_len).as_ref() == Some(&e.head),
+                    Some(e) => {
+                        head(&path, e.head_len).as_ref() == Some(&e.head)
+                            && (e.tail_len == 0
+                                || range_hash(&path, e.offset - e.tail_len, e.tail_len).as_ref()
+                                    == Some(&e.tail))
+                    }
                     None => false,
                 };
                 match previous {
@@ -298,6 +317,13 @@ fn apply(index: &mut Index, results: &Value) {
                 for (i, value) in row.as_array().into_iter().flatten().take(4).enumerate() {
                     counts[i] = counts[i].saturating_add(value.as_u64().unwrap_or(0));
                 }
+            }
+        }
+        if let (Some(tail), Some(tail_len)) = (result["tail"].as_str(), result["tail_len"].as_u64())
+        {
+            if tail_len <= offset && tail.len() == 64 {
+                entry.tail = tail.to_owned();
+                entry.tail_len = tail_len;
             }
         }
         entry.offset = offset;
@@ -490,6 +516,62 @@ mod tests {
         base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .unwrap()
+    }
+
+    /// Several frames from one Node run, in order.
+    fn frames(texts: &[String]) -> Vec<Vec<u8>> {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "const z=require('zlib');let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.stringify(JSON.parse(s).map(t=>z.zstdCompressSync(Buffer.from(t),{params:{[z.constants.ZSTD_c_checksumFlag]:1}}).toString('base64')))))",
+        ]);
+        let encoded =
+            super::super::inspection::capture(command, json!(texts).to_string().as_bytes(), 20)
+                .expect("node compresses");
+        use base64::Engine;
+        serde_json::from_slice::<Vec<String>>(&encoded)
+            .unwrap()
+            .iter()
+            .map(|f| base64::engine::general_purpose::STANDARD.decode(f).unwrap())
+            .collect()
+    }
+
+    /// A first frame longer than HEAD_BYTES even compressed: hex of hashes.
+    fn long_first_frame() -> Vec<u8> {
+        let text: String = (0..400u32)
+            .map(|i| format!("{:x}", Sha256::digest(i.to_le_bytes())))
+            .collect();
+        let first = frame(
+            &(header(false)
+                + &format!(
+                    "{}\n",
+                    json!({"type":"system/message","seq":0,"time":0,"data":{"text":text}})
+                )),
+        );
+        assert!(first.len() as u64 > HEAD_BYTES);
+        first
+    }
+
+    /// Two message frames of the same compressed length with different counts
+    /// (1000 and the first of 1001..1200 that compresses to the same length),
+    /// stamped at today's noon so the search is deterministic.
+    fn same_length_messages() -> (Vec<u8>, Vec<u8>, u64) {
+        let noon = Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
+        let texts: Vec<String> = (1000..1200u64)
+            .map(|n| message(noon, "deepseek-flash", n, n, n))
+            .collect();
+        let all = frames(&texts);
+        let index = (1..all.len())
+            .find(|i| all[*i].len() == all[0].len())
+            .expect("a same-length frame");
+        (all[0].clone(), all[index].clone(), 1000 + index as u64)
     }
 
     fn header(seeded: bool) -> String {
@@ -918,6 +1000,74 @@ mod tests {
         assert_eq!(second["partial"], false);
         assert_eq!(counts(&second, &today(), "older-model"), Some((1, 1, 1, 1)));
         assert_eq!(counts(&second, &today(), "newer-model"), Some((1, 1, 1, 1)));
+    }
+
+    #[test]
+    fn a_message_that_quotes_the_seed_marker_is_still_counted() {
+        let f = fixture();
+        let log = f.log("p", "s", "session.v4.jsonl.zstd");
+        let quoting = format!(
+            "{}\n",
+            json!({"type":"assistant/message","seq":1,"time":now_ms(),"data":{
+                "message":{"role":"assistant","source":{"kind":"model","provider":"deepseek-official","model":"deepseek-flash"},
+                    "content":[{"type":"tool-call","input":{"pattern":"session/end-seed"}}]},
+                "usage":{"inputTokens":3,"outputTokens":2,"cacheReadTokens":1,"cacheWriteTokens":0,"totalTokens":6}}})
+        );
+        assert!(quoting.contains("\"session/end-seed\""));
+        append(&log, &frame(&(header(false) + &quoting)));
+        assert_eq!(
+            counts(&f.refresh(), &today(), "deepseek-flash"),
+            Some((1, 1, 3, 2))
+        );
+    }
+
+    #[test]
+    fn an_in_place_rewrite_with_the_same_size_and_head_is_read_again() {
+        use std::io::{Seek, SeekFrom};
+        let f = fixture();
+        let log = f.log("p", "s", "session.v4.jsonl.zstd");
+        let first = long_first_frame();
+        let (before, after, n) = same_length_messages();
+        append(&log, &first);
+        append(&log, &before);
+        assert_eq!(
+            counts(&f.refresh(), &today(), "deepseek-flash"),
+            Some((1, 1000, 1000, 1000))
+        );
+        let mut file = fs::OpenOptions::new().write(true).open(&log).unwrap();
+        file.seek(SeekFrom::Start(first.len() as u64)).unwrap();
+        file.write_all(&after).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(5))
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            counts(&f.refresh(), &today(), "deepseek-flash"),
+            Some((1, n, n, n))
+        );
+    }
+
+    #[test]
+    fn a_rewrite_before_the_committed_offset_is_read_again_even_when_the_log_grows() {
+        use std::io::{Seek, SeekFrom};
+        let f = fixture();
+        let log = f.log("p", "s", "session.v4.jsonl.zstd");
+        let first = long_first_frame();
+        let (before, after, n) = same_length_messages();
+        append(&log, &first);
+        append(&log, &before);
+        assert_eq!(
+            counts(&f.refresh(), &today(), "deepseek-flash"),
+            Some((1, 1000, 1000, 1000))
+        );
+        let mut file = fs::OpenOptions::new().write(true).open(&log).unwrap();
+        file.seek(SeekFrom::Start(first.len() as u64)).unwrap();
+        file.write_all(&after).unwrap();
+        drop(file);
+        append(&log, &frame(&message(now_ms(), "deepseek-flash", 1, 1, 1)));
+        assert_eq!(
+            counts(&f.refresh(), &today(), "deepseek-flash"),
+            Some((2, n + 1, n + 1, n + 1))
+        );
     }
 
     #[test]

@@ -9,7 +9,6 @@
   "automaticApprovals/category/web": true,
   "automaticApprovals/enabled": false,
   "automaticApprovals/error": "",
-  "automaticApprovals/qtEnabledAtSwitch": false,
   "client/darkSkin": "zerus-dark",
   "client/lightSkin": "zerus-light",
   "client/newTeamHowToClosed": true,

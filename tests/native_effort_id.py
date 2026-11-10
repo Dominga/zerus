@@ -9,13 +9,30 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
+import time
 import uuid
 
 import test_input
 
 SEED_METHOD = 'state::effort::picker_scope::tests::effort::seed_actual_effort_record'
+
+
+def bounded_bytes(path, limit):
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    with os.fdopen(os.open(path, flags), 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise ValueError('native fixture snapshot is not a bounded regular file')
+        raw = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        if (len(raw) != before.st_size or len(raw) > limit or
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError('native fixture snapshot changed while reading')
+        return raw
 
 
 def image_digest(path):
@@ -63,12 +80,23 @@ def moved_record(case, name, record):
     return current, path, legacy
 
 
-def key_log(case):
+def key_log(case, existing=None):
     """Observe actual attempts while forwarding to the unchanged private tmux."""
+    log = Path(existing) if existing is not None else Path(case.root) / 'native-effort-keys.jsonl'
+
+    def attempts():
+        try:
+            return bounded_bytes(log, 1 << 20)
+        except FileNotFoundError:
+            return b''
+
+    if existing is not None:
+        # Claude already observes the real sends. Reuse that raw observer;
+        # another Python wrapper on every read would distort the native budget.
+        return attempts
     original = Path(case.bin) / 'tmux-native-effort-original'
     current = Path(case.bin) / 'tmux'
     current.rename(original)
-    log = Path(case.root) / 'native-effort-keys.jsonl'
     script = Path(case.root) / 'native-effort-tmux.py'
     script.write_text('import json,pathlib,subprocess,sys\n'
                       'args=sys.argv[1:]\n'
@@ -79,8 +107,6 @@ def key_log(case):
     case.script('tmux', '#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' ' +
                 shlex.quote(str(script)) + ' "$@"\n')
 
-    def attempts():
-        return log.read_bytes() if log.exists() else b''
     return attempts
 
 
@@ -103,7 +129,24 @@ def change_and_replay(case, name, record, path, effort, attempts):
                               capture_output=True, timeout=30)
 
     before = attempts()
+    started = time.monotonic()
     result = call(raw)
+    if result.returncode:
+        diagnostic = dict(request_id=request['request_id'], seconds=round(time.monotonic() - started, 3))
+        for label, source in [('record', path), ('receipt', Path(case.env['HGS_STATE_DIR']) /
+                              'effort_receipts' / (request['request_id'] + '.json'))]:
+            try:
+                value = json.loads(bounded_bytes(source, 64 << 10))
+                diagnostic[label] = {key: value.get(key) for key in (
+                    'status', 'request_id', 'digest', 'session_id', 'run_id', 'conversation_id',
+                    'model', 'effort', 'settings_unconfirmed_at')}
+            except Exception as error:
+                diagnostic[label] = dict(snapshot_error=str(error)[:500])
+        try:
+            diagnostic['attempts_tail'] = attempts()[-8192:].decode(errors='replace')
+        except Exception as error:
+            diagnostic['attempts_tail'] = dict(snapshot_error=str(error)[:500])
+        print('ZERUS_NATIVE_ID_EFFORT_FAILURE=' + json.dumps(diagnostic), flush=True)
     case.assertEqual(result.returncode, 0, result.stdout + result.stderr)
     receipt = json.loads(result.stdout)
     case.assertEqual(receipt['status'], 'confirmed')

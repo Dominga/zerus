@@ -200,7 +200,7 @@ class NativeClaudeSettings(unittest.TestCase):
         before = self.settings_file.read_bytes()
         record, path, legacy = contract.moved_record(self, self.name, self.record)
         self.record, self.record_path = record, path
-        attempts = contract.key_log(self)
+        attempts = contract.key_log(self, existing=self.root / 'sent-keys')
         observed = contract.inspect(self, self.name, record['session_id'])
         self.assertTrue(observed['effort_change_supported'], observed['effort_change_reason'])
         choices = ('low', 'high') if observed['effort'] == 'high' else ('high', 'low')

@@ -348,6 +348,29 @@ const REPORT: &str = "HGS_TEST_PORTABLE_REPORT";
 const BARRIER: &str = "HGS_TEST_PORTABLE_BARRIER";
 const DELAY: &str = "HGS_TEST_PORTABLE_DELAY_MS";
 const AGENT_MARKER: &str = "HGS_SESSION";
+/// Every variable the ancestry check reads as an agent's mark or an injection.
+/// Task #43 (team ede724c4, 2026-11-10): the fixtures removed only
+/// HGS_SESSION, so a run from an agent session (HGS_SESSION_ID, HGS_RUN_ID)
+/// marked the fixture app itself and its proof was refused.
+const AGENT_MARKERS: [&str; 7] = [
+    "HGS_SESSION",
+    "HGS_SESSION_ID",
+    "HGS_RUN_ID",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+];
+/// The app waits for this file before it starts its hgs: the test writes it
+/// once the launcher that started the app has exited.
+const LAUNCHED: &str = "launched";
+
+fn without_agent_markers(command: &mut Command) -> &mut Command {
+    for name in AGENT_MARKERS {
+        command.env_remove(name);
+    }
+    command
+}
 const GUI: &str = "HGS_TEST_PORTABLE_GUI";
 
 /// Called by `record` between its proof and its last check, in test builds
@@ -390,16 +413,24 @@ fn creation_role() {
     match role.as_str() {
         // The app: start the hgs beside it, as its staging step does, without
         // passing on an agent marker of its own.
+        // The launcher: start the app and exit at once, so the app's ancestry
+        // ends at an exited parent, as an app the person started from
+        // Explorer does, whoever started this test run (task #43).
+        "launch" => {
+            run_role(&own, "app").spawn().unwrap();
+        }
         "app" => {
             let mode = std::env::var(MODE).unwrap();
+            let home = PathBuf::from(std::env::var(HOME).unwrap());
+            let end = Instant::now() + Duration::from_secs(60);
+            while !home.join(LAUNCHED).exists() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             let mut install = run_role(&own.with_file_name(staging::EXECUTABLE), "install");
-            install
-                .env_remove(AGENT_MARKER)
+            without_agent_markers(&mut install)
                 .env_remove(BARRIER)
                 .env_remove(DELAY);
-            let barrier = std::env::var(HOME)
-                .map(|home| Path::new(&home).join("barrier"))
-                .unwrap();
+            let barrier = home.join("barrier");
             match mode.as_str() {
                 "late-marker" => {
                     fs::create_dir_all(&barrier).unwrap();
@@ -421,7 +452,9 @@ fn creation_role() {
                 std::env::set_var(AGENT_MARKER, "late-agent-marker-fixture");
                 fs::write(barrier.join("go"), b"").unwrap();
             }
-            assert!(child.wait().unwrap().success());
+            let status = child.wait().unwrap();
+            let report = PathBuf::from(std::env::var(REPORT).unwrap());
+            fs::write(report.with_extension("app"), if status.success() { "ok".to_owned() } else { format!("install failed: {status}") }).unwrap();
         }
         // A fixture GUI: run until its quit file appears.
         "gui" => {
@@ -469,7 +502,8 @@ fn creation_role() {
             let outcome = match staging::install_bound(&layout, &own, "1.0.0", record) {
                 Ok(_) => match staging::read_frontend(&layout.images) {
                     Some(binding) => serde_json::to_string(&binding).unwrap(),
-                    None => "none".into(),
+                    // Task #43: a refused proof says why.
+                    None => format!("none: {}", last_refusal().unwrap_or_else(|| "no reason recorded".into())),
                 },
                 Err(error) => format!("error: {error}"),
             };
@@ -484,17 +518,32 @@ fn creation_role() {
 /// install's report: the published binding, "none" or an error.
 fn bind_through_app(dir: &Path, app: &Path, home: &Path, mode: &str) -> String {
     let report = dir.join(format!("report-{mode}.txt"));
-    let _ = fs::remove_file(&report);
+    let done = report.with_extension("app");
+    for stale in [&report, &done, &home.join(LAUNCHED)] {
+        let _ = fs::remove_file(stale);
+    }
     let _ = fs::remove_dir_all(home.join("barrier"));
-    let mut command = run_role(app, "app");
-    command.env(MODE, mode).env(HOME, home).env(REPORT, &report);
+    fs::create_dir_all(home).unwrap();
+    // The app's ancestry must not reach this test run, which may descend
+    // from an agent session or the running GUI (the team worker): a launcher
+    // starts it and exits, and only then may the app start its hgs.
+    let mut command = run_role(app, "launch");
+    without_agent_markers(&mut command).env(MODE, mode).env(HOME, home).env(REPORT, &report);
     if mode == "agent" {
         command.env(AGENT_MARKER, "agent-descended-fixture");
-    } else {
-        command.env_remove(AGENT_MARKER);
     }
-    assert!(command.status().unwrap().success(), "{mode}");
-    fs::read_to_string(&report).unwrap()
+    assert!(command.status().unwrap().success(), "{mode}: the launcher");
+    fs::write(home.join(LAUNCHED), b"").unwrap();
+    // The delay mode alone outlasts the record's deadline.
+    let end = Instant::now() + Duration::from_secs(120);
+    while !done.exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(done.exists(), "{mode}: the app's install never finished");
+    let app_outcome = fs::read_to_string(&done).unwrap();
+    let outcome = fs::read_to_string(&report).unwrap_or_else(|_| "no report".into());
+    assert_eq!(app_outcome, "ok", "{mode}: {outcome}");
+    outcome
 }
 
 /// A zip folder with copies of this test binary as its app and its hgs.exe.
@@ -514,8 +563,8 @@ fn a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_in
     let app = fixture_zip(dir.path());
     let home = dir.path().join("home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
-    let old: FrontendBinding =
-        serde_json::from_str(&bind_through_app(dir.path(), &app, &home, "plain")).unwrap();
+    let outcome = bind_through_app(dir.path(), &app, &home, "plain");
+    let old: FrontendBinding = serde_json::from_str(&outcome).unwrap_or_else(|_| panic!("plain: {outcome}"));
     assert_eq!(
         status(&layout).map(|(_, cli, app)| (cli, app)),
         Some((true, true))
@@ -532,8 +581,8 @@ fn a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_in
     assert!(cli && !current);
     assert!(!is(&PinnedImage::open(&app).unwrap(), &old.frontend));
     // The app's own install binds the new object.
-    let new: FrontendBinding =
-        serde_json::from_str(&bind_through_app(dir.path(), &app, &home, "plain")).unwrap();
+    let outcome = bind_through_app(dir.path(), &app, &home, "plain");
+    let new: FrontendBinding = serde_json::from_str(&outcome).unwrap_or_else(|_| panic!("rebind: {outcome}"));
     assert!(is(&PinnedImage::open(&app).unwrap(), &new.frontend));
     assert_ne!(new.frontend.file_id, old.frontend.file_id);
     assert_eq!(
@@ -553,28 +602,16 @@ fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
     fs::copy(&own, zip.join(staging::EXECUTABLE)).unwrap();
     let home = dir.path().join("home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
-    for (mode, expected) in [
-        ("plain", true),
-        ("agent", false),
-        ("late-marker", false),
-        ("delay", false),
+    // Each refusal names its reason (task #43).
+    for (mode, refusal) in [
+        ("plain", None),
+        ("agent", Some("the ancestry: agent-descended frontend request refused: hop 1 (hgs-tray.exe) has HGS_SESSION in its environment")),
+        ("late-marker", Some("the last check: the ancestry: frontend process evidence unavailable")),
+        ("delay", Some("the last check: the ancestry: frontend process evidence unavailable")),
     ] {
-        let report = dir.path().join(format!("report-{mode}.txt"));
-        let _ = fs::remove_dir_all(home.join("barrier"));
-        let mut command = run_role(&app, "app");
-        command
-            .env(MODE, mode)
-            .env(HOME, &home)
-            .env(REPORT, &report);
-        if mode == "agent" {
-            command.env(AGENT_MARKER, "agent-descended-fixture");
-        } else {
-            command.env_remove(AGENT_MARKER);
-        }
-        assert!(command.status().unwrap().success(), "{mode}");
-        let outcome = fs::read_to_string(&report).unwrap();
-        if expected {
-            let binding: FrontendBinding = serde_json::from_str(&outcome).unwrap();
+        let outcome = bind_through_app(dir.path(), &app, &home, mode);
+        if refusal.is_none() {
+            let binding: FrontendBinding = serde_json::from_str(&outcome).unwrap_or_else(|_| panic!("{mode}: {outcome}"));
             assert!(binding.valid());
             assert!(binding
                 .frontend
@@ -583,8 +620,8 @@ fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
                 .eq_ignore_ascii_case(PinnedImage::open(&app).unwrap().path().as_os_str()));
             let staged = PinnedImage::open(&layout.cli).unwrap();
             assert!(is(&staged, &binding.cli));
-        } else {
-            assert_eq!(outcome, "none", "{mode}: nothing may be published");
+        } else if let Some(refusal) = refusal {
+            assert_eq!(outcome, format!("none: {refusal}"), "{mode}: nothing may be published, and the refusal says why");
         }
         // A refused or completed publication leaves no candidate behind.
         assert!(fs::read_dir(&layout.images).unwrap().all(|entry| !entry

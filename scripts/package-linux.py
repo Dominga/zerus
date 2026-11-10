@@ -66,9 +66,9 @@ def main():
         install(unit, destination / "usr/lib/systemd/user" / unit.name)
     install(ROOT / "packaging/linux/hgs-tray.desktop", destination / "usr/share/applications/hgs-tray.desktop")
     for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
-        install(ROOT / f"tray/resources/icons/hgs-zerus-{size}.png",
+        install(ROOT / f"packaging/desktop/icons/hgs-zerus-{size}.png",
                 destination / f"usr/share/icons/hicolor/{size}x{size}/apps/hgs-zerus.png")
-    install(ROOT / "tray/resources/icons/hgs-zerus-symbolic.svg",
+    install(ROOT / "packaging/desktop/icons/hgs-zerus-symbolic.svg",
             destination / "usr/share/icons/hicolor/scalable/apps/hgs-zerus-swarm-symbolic.svg")
     documentation = destination / "usr/share/doc/zerus"
     for name in ("README.md", "CONTRIBUTING.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "tmux.conf"):

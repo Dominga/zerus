@@ -1986,8 +1986,13 @@ printf '{{"node_id":"{PEER}"}}'
         ProjectStore::open(&members.configs[name].state.join("replica"), "p").unwrap().load(uuid).ok()
     }
 
+    /// A deadline the operation is meant to meet. Task #44 (team ede724c4):
+    /// two minutes, which a machine busy with parallel builds and test threads
+    /// fits; 10 s ran out while the node read its own store identity (the
+    /// proof closed with reason "store"). A test of a missed deadline passes
+    /// its own (`Instant::now()`).
     fn soon() -> Instant {
-        Instant::now() + Duration::from_secs(10)
+        Instant::now() + Duration::from_secs(120)
     }
 
     fn chain_abc() -> Members {

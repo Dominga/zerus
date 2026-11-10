@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("prepare_mac_pair", ROOT / "tray/prepare-local-macos.py")
+spec = importlib.util.spec_from_file_location("prepare_mac_pair", ROOT / "packaging/desktop/prepare-local-macos.py")
 prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
 sign = prepare.signer
@@ -344,7 +344,7 @@ else:
                        "XDG_STATE_HOME": str(private / "state"), "XDG_CACHE_HOME": str(private / "cache"),
                        "XDG_RUNTIME_DIR": str(private / "runtime"), "TMPDIR": str(private / "tmp"),
                        "TMUX_TMPDIR": str(private / "tmux"), "PYTHONDONTWRITEBYTECODE": "1"}
-                result = subprocess.run([sys.executable, "-c", child, str(ROOT / "tray/sign-local-macos.py"),
+                result = subprocess.run([sys.executable, "-c", child, str(ROOT / "packaging/desktop/sign-local-macos.py"),
                                          action, str(app)], env=env, text=True, capture_output=True, timeout=2)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("ordinary-file refusal before tools", result.stdout)

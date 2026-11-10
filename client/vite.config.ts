@@ -62,5 +62,11 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     // Task 245: numbers and dates read the same on every machine's locale.
     setupFiles: ["src/test-locale.ts"],
+    // Task #28 (team ede724c4): 24 render suites start a Vite SSR server and
+    // transform a large component graph in beforeAll; on a loaded machine that
+    // one-time setup passed the default 10 s ("Hook timed out in 10000ms",
+    // seven suites at once, each passing alone). Setup gets its own bound;
+    // the tests keep the default 5 s.
+    hookTimeout: 60_000,
   },
 });

@@ -361,6 +361,34 @@ fn the_last_native_object_is_released_inside_the_apartment_before_it_is_left() {
 
 #[test]
 fn a_real_notifier_released_before_the_apartment_ends_leaves_the_process_intact() {
+    // Task #45 (team ede724c4): this thread's RoUninitialize ends the
+    // process's MTA when it created it, and a WinRT object another test made
+    // on a thread without an apartment (windows-rs then joins that implicit
+    // MTA without holding it) faults on its next call: the full hgs test run
+    // ended with 0xC0000005 when the order fell that way, and a test that
+    // made that order crashed every time. The real object runs in a child
+    // process of its own, where nothing else holds the MTA.
+    const CHILD: &str = "HGS_TEST_MTA_NOTIFIER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "desktop::notifications::windows::native::tests::a_real_notifier_released_before_the_apartment_ends_leaves_the_process_intact",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{:?}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     // The actual WinRT object in its own MTA thread, released by the same
     // helper the backend uses; the reversed order faults (zerus-1an7q).
     std::thread::spawn(|| {
@@ -421,3 +449,4 @@ fn identity_bootstrap_toast_is_suppressed_expiring_and_has_only_its_exact_identi
         0
     );
 }
+

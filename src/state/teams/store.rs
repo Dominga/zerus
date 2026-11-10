@@ -2920,7 +2920,8 @@ mod tests {
                     // and ticks seconds apart; SQLite queues nobody.
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                ticks
+                let held = take_lock_lines().iter().filter_map(|line| line["held_ms"].as_u64()).max().unwrap_or(0);
+                (ticks, held)
             })
         };
         let members: Vec<_> = (0..3u32)
@@ -2937,15 +2938,33 @@ mod tests {
                             })
                             .unwrap();
                     }
-                    take_lock_lines().iter().map(|line| line["waited_ms"].as_u64().unwrap_or(0)).max().unwrap_or(0)
+                    let lines = take_lock_lines();
+                    let waited = lines.iter().map(|line| line["waited_ms"].as_u64().unwrap_or(0)).max().unwrap_or(0);
+                    let held = lines.iter().filter_map(|line| line["held_ms"].as_u64()).max().unwrap_or(0);
+                    (waited, held)
                 })
             })
             .collect();
-        let waits: Vec<u64> = members.into_iter().map(|member| member.join().unwrap()).collect();
+        let calls: Vec<(u64, u64)> = members.into_iter().map(|member| member.join().unwrap()).collect();
         done.store(true, Ordering::SeqCst);
-        let ticks = worker.join().unwrap();
+        let (ticks, worker_held) = worker.join().unwrap();
         assert!(ticks > 0);
-        assert!(waits.iter().all(|wait| *wait < 1000), "the longest waits of the members' calls: {waits:?} ms");
+        // Task #44 (team ede724c4): the bound is the holds this run measured,
+        // so a loaded machine (waits of 2 to 7.5 s while every hold grew
+        // alike) passes. A waiting call polls on SQLite's busy handler (sleeps
+        // of up to 100 ms) and the worker pauses 100 ms between batches, so a
+        // descheduled member may miss a window or two: at most three worker
+        // batches, the other two members' calls and the polling (seen: a
+        // 744 ms wait beside 277 ms batches). A queue of batches or a lock
+        // held across ticks still fails, and the holds themselves are bounded
+        // by the machine's speed below (task 288: rows, not whole records).
+        let member_held = calls.iter().map(|(_, held)| *held).max().unwrap_or(0);
+        let bound = 3 * worker_held + 2 * member_held + 500;
+        let waits: Vec<u64> = calls.iter().map(|(waited, _)| *waited).collect();
+        assert!(waits.iter().all(|wait| *wait <= bound), "the members' longest waits {waits:?} ms exceed one worker batch ({worker_held} ms) and two member calls ({member_held} ms each)");
+        let reference = crate::state::reference_work().as_millis() as u64;
+        assert!(worker_held <= 1000 + 50 * reference && member_held <= 1000 + 50 * reference,
+            "a hold grew beyond what the machine's speed explains: worker {worker_held} ms, member {member_held} ms, reference work {reference} ms");
         let saved = store.load("t1").unwrap().unwrap();
         assert_eq!(saved.task(100).unwrap().title, "member 0 call 0");
         assert_eq!(saved.task(311).unwrap().title, "member 2 call 11");

@@ -29,7 +29,7 @@ client/core/tests/fixtures/inspect-details.json text eol=lf
 src/state/data/*.txt -text -whitespace
 
 # Keep vendored libvterm byte-for-byte identical to the documented upstream.
-tray/vendor/libvterm/** -whitespace
+client/core/tests/fixtures/qt-fork-helper/*.ps1 -text -whitespace
 
 # Design prototypes and artwork are documentation, not application source.
 design/** linguist-documentation

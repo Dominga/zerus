@@ -577,7 +577,7 @@ python3 -m unittest discover -s tests -p test_mobile_release.py -v
 The Next update controller, settings page and menu routes are covered by the
 client core/native/frontend suites documented in [CONTRIBUTING.md](../CONTRIBUTING.md).
 Deploy only the reviewed current-main GUI within the existing update
-authorization, with `tray/install.sh`, which replaces a running GUI through
-`tray/update-installed.py`. An older worktree GUI must not replace a newer
+authorization, with `packaging/desktop/install.sh`, which replaces a running GUI through
+`packaging/desktop/update-installed.py`. An older worktree GUI must not replace a newer
 desktop. Source commits, pushes and hosted CI dispatch remain separately
 controlled.

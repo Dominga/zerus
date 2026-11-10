@@ -241,9 +241,41 @@ fn a_decision_is_recorded_listed_and_never_messaged() {
         as_lead(|| {
             let error = call("message", json!({"to":"dev","text":"The owner decided: no reqwest anywhere"})).unwrap_err().to_string();
             assert!(error.contains("hgs team decide --json"), "{error}");
+            // Task #36 (team ede724c4): a hand-off that quotes the owner and
+            // the binding decisions as context is delivered.
+            let sent = call("message", json!({"to":"dev","text":"Owner, 2026-11-10. Slice docs/reference.md into records, one per heading.\nDecisions that bind this task (the owner's; follow them):\n- d1 (owner, 2026-11-10): ureq or hyper"})).unwrap();
+            assert_eq!(sent["status"], "queued", "{sent}");
             // Without the owner's word the lead records nothing.
             let error = call("decide", json!({"question":"Q","choice":"C"})).unwrap_err().to_string();
             assert!(error.contains("owner_word"), "{error}");
         });
     });
 }
+
+/// Task #45 (team ede724c4): a debug hgs.exe overflowed its 1 MB main stack on
+/// `hgs team inbox`, for the owner and for a member: `run` kept every arm's
+/// locals in one 683 KB frame (debug builds give each its own slot). Both
+/// reads, and a change, fit a thread with the space the main thread has left
+/// once `main` and the CLI dispatch reach `run` (35 KB of the 1 MB in a debug
+/// build), less a margin.
+#[test]
+fn team_reads_and_changes_fit_the_main_threads_stack() {
+    let (team, dev_attempt, _) = review_team();
+    let reads = std::thread::Builder::new()
+        .stack_size(900 * 1024)
+        .spawn(move || {
+            with_review_team(&team, || {
+                post("dev", "r-stack", "For dev", Urgency::Normal);
+                let owner = call("inbox", json!({"by":"human"})).unwrap();
+                let member = run("inbox", &json!({"attempt":dev_attempt}), false).unwrap();
+                // A change goes through the same dispatch, then ops::apply.
+                call("settings", json!({"settings":{"remind_lead_minutes":9}})).unwrap();
+                (owner["for"].clone(), member["for"].clone(), member["messages"].as_array().map_or(0, Vec::len))
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(reads, (json!("lead"), json!("dev"), 1));
+}
+

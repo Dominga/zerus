@@ -1,9 +1,11 @@
 # Agent instructions
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
-agent sessions. The CLI lives in `src/`; the released GUI lives in `client/`. `tray/` retains
-compatible installers, the guarded updater and shared artwork, not a Qt build.
-Read-only Qt migration decoders remain in the Rust client. Replicated documents (Loro) live in `crates/replica/`, the only code that
+agent sessions. The CLI lives in `src/`; the released GUI lives in `client/`. Zerus has
+no Qt code: the desktop installers, the guarded updater, the service units and
+the packaged icons live in `packaging/desktop/`. Read-only migration decoders for
+an installation's old Qt data remain in the Rust client until the owner retires
+them. Replicated documents (Loro) live in `crates/replica/`, the only code that
 imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in
@@ -89,8 +91,8 @@ and service identifiers compatible. A repository rename must not reset accounts,
 project catalogs, native agent processes or saved conversations.
 
 Never restart or kill native agents, tmux servers or DeepSeek hosts as part of a
-GUI update. Update local installations only with `install.sh`, `tray/install.sh`
-and `mac-install.sh`; a running GUI is replaced through `tray/update-installed.py`,
+GUI update. Update local installations only with `install.sh`, `packaging/desktop/install.sh`
+and `mac-install.sh`; a running GUI is replaced through `packaging/desktop/update-installed.py`,
 which saves drafts and keeps one rollback copy. Never stage GUI copies in
 `~/Applications` or `~/.local/bin` by hand. Another session may be testing its own
 build: check the running GUI's `--build-info` and

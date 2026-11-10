@@ -8234,7 +8234,7 @@ embedded cookies and cache are memory-only, and questions and approvals for
 Zerus-managed sessions remain in Activity (**Respond in Activity** points there
 when needed). The embedded view is the plugin
 `<prefix>/lib/hgs-tray/plugins/libhgs-tray-native-ui.so` (`/usr/lib/...` from
-Arch packages, `~/.local/lib/...` from `tray/install.sh`), which alone needs Qt
+Arch packages, `~/.local/lib/...` from `packaging/desktop/install.sh`), which alone needs Qt
 WebEngine (`qt6-webengine` is an optional dependency on Arch). The GUI loads it
 when a DeepSeek session is first shown. Without it, or on macOS, there is no
 Native UI tab, and Sign in, Open terminal and the other Native UI actions open
@@ -8767,7 +8767,7 @@ variables and application/service IDs stay compatible with existing installation
 
 The GUI installer updates only Zerus and its desktop integration. It never
 restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces a
-running Zerus through `tray/update-installed.py`, the only supported live update:
+running Zerus through `packaging/desktop/update-installed.py`, the only supported live update:
 Zerus quits as its Quit action does, so drafts are saved, then starts again through
 systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
 hand. The GUI it replaces stays aside until the new one was verified (running, or,
@@ -8790,25 +8790,22 @@ they are an hour old, hold only installer copies and no process uses them. A
 failed check leaves Zerus running and prints the private draft snapshot it kept. Zerus quits
 gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
 is closed from its tray menu, or the installer asks you to quit it first. Use
-`HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
+`HGS_TRAY_RESTART=0 ./packaging/desktop/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
 
 The installer refuses to put an unnumbered build over a numbered Dev
 installation (AGENTS.md), right after its build and before it changes anything,
 for the live update and `HGS_TRAY_RESTART=0` alike. A numbered Dev installation is
-replaced only by a numbered Dev build or by a local preview build: configure
-`tray/build` with `-DZERUS_DEV_BUILD_NUMBER=N`, or build the Tauri client with
-`ZERUS_DEV_BUILD_NUMBER=N` in its environment, N being the CI sequence of the
-main push the build comes from, or build an owner-requested branch preview with
-`ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32 lowercase letters and
-digits in hyphen-separated words; it needs a clean Git checkout and no Dev
-number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
-reads it as a CMake cache variable (configure `tray/build` with
-`-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
-running `tray/install.sh`); the Tauri client reads the environment variable
-when it builds. Clear the label before building main again. On either platform,
-a switch between the Qt GUI and the Tauri client always takes the live update,
-never `HGS_TRAY_RESTART=0`.
+replaced only by a numbered Dev build or by a local preview build: build the
+Tauri client with `ZERUS_DEV_BUILD_NUMBER=N` in its environment, N being the CI
+sequence of the main push the build comes from, or build an owner-requested
+branch preview with `ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32
+lowercase letters and digits in hyphen-separated words; it needs a clean Git
+checkout and no Dev number, and the build shows as
+`DEV_VERSION-preview.LABEL.COMMIT`. The Tauri client reads the environment
+variable when it builds. Clear the label before building main again. Task #28
+removed the Qt GUI; an installed Qt build is replaced by the Tauri client with
+the live update, never `HGS_TRAY_RESTART=0`.
 
 Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.

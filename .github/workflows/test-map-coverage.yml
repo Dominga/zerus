@@ -44,38 +44,3 @@ jobs:
           name: test-map-coverage-rust
           path: artifacts/coverage
           retention-days: 14
-
-  tray:
-    name: Qt binaries (Arch)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-    container:
-      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
-    env:
-      CMAKE_GENERATOR: Ninja
-    steps:
-      - name: Bootstrap Git before checkout
-        run: pacman -Syu --noconfirm --needed git
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Arch dependencies and unprivileged builder
-        run: |
-          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python dbus rust gcovr
-          useradd -m user
-          chown -R user:user "$GITHUB_WORKSPACE"
-      - name: hgs and a coverage build of the desktop
-        run: |
-          runuser -u user -- cargo build --locked
-          runuser -u user -- cmake -S tray -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
-            -DCMAKE_CXX_FLAGS=--coverage -DCMAKE_C_FLAGS=--coverage -DCMAKE_EXE_LINKER_FLAGS=--coverage
-          runuser -u user -- cmake --build build-coverage --parallel 4
-      - name: Each test binary alone under gcov
-        run: runuser -u user -- env QTWEBENGINE_DISABLE_SANDBOX=1 python3 scripts/ci/test-map-coverage.py tray --build build-coverage --out artifacts/coverage
-      - name: Retain the comparison
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-map-coverage-tray
-          path: artifacts/coverage
-          retention-days: 14

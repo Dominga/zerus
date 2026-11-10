@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("cutover_updater", ROOT / "tray/update-installed.py")
+spec = importlib.util.spec_from_file_location("cutover_updater", ROOT / "packaging/desktop/update-installed.py")
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 CONFIG = "a" * 64

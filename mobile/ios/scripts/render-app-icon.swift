@@ -1,5 +1,5 @@
 // Renders the iOS app icon from the Swarm blade geometry of
-// tray/resources/icons/hgs-zerus-symbolic.svg, using the same blade transforms
+// packaging/desktop/icons/hgs-zerus-symbolic.svg, using the same blade transforms
 // as the Android adaptive icon (mobile/android/app/src/main/res/drawable/ic_launcher_foreground.xml).
 //
 // Usage: swift mobile/ios/scripts/render-app-icon.swift OUTPUT.png [SIZE]

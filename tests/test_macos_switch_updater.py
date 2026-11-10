@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('update_installed_mac', ROOT / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('update_installed_mac', ROOT / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 

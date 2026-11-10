@@ -4,7 +4,7 @@
 
 **Goal:** Give the Tauri client (`client/`) the native Mac work it needs before it replaces the Qt GUI as Zerus (`com.hgdev.hgs-tray`): the menu-bar item, Qt's single-instance protocol and command line, login through the existing LaunchAgent, quit handling, attention notifications, Qt's main-thread watchdog, a switch bundle, and an updater that switches, verifies and rolls back.
 
-**Architecture:** Decision logic is pure and tested on Linux. The menu-bar model, the tile geometry and a port of Qt's `AttentionTracker` live in `client/core`. The command line, build identity, bundle identity and single-instance protocol are pure modules of `client/src-tauri`. The updater's rules are pure Python functions in `tray/update-installed.py`. Thin macOS glue (objc2, IOKit and Tauri's `tray-icon`) draws the tile, shows the menu, posts notifications, beats the watchdog's heartbeat and keeps the app in the menu bar. The switch bundle is the Tauri build with Qt's identifier, executable name and Info.plist keys. `tray/sign-local-macos.py` signs it, and `tray/install.sh` installs it through `tray/update-installed.py`.
+**Architecture:** Decision logic is pure and tested on Linux. The menu-bar model, the tile geometry and a port of Qt's `AttentionTracker` live in `client/core`. The command line, build identity, bundle identity and single-instance protocol are pure modules of `client/src-tauri`. The updater's rules are pure Python functions in `packaging/desktop/update-installed.py`. Thin macOS glue (objc2, IOKit and Tauri's `tray-icon`) draws the tile, shows the menu, posts notifications, beats the watchdog's heartbeat and keeps the app in the menu bar. The switch bundle is the Tauri build with Qt's identifier, executable name and Info.plist keys. `packaging/desktop/sign-local-macos.py` signs it, and `packaging/desktop/install.sh` installs it through `packaging/desktop/update-installed.py`.
 
 **Tech Stack:** Rust 1.99.1, Tauri 2.12 (`tray-icon` feature), objc2 0.6, objc2-foundation, objc2-app-kit and objc2-user-notifications 0.3.2, block2 0.6, libc, IOKit and libdispatch through a few hand-declared calls; SolidJS and Vitest; Python 3 `unittest`; bash.
 
@@ -16,7 +16,7 @@
   - Watchdog scope: it runs in the switch bundle, which launchd restarts, and elsewhere only with `ZERUS_CLIENT_WATCHDOG=1`. Accepted, so dev runs on shared machines are never aborted.
   - Client private paths: every path comes from the bundle identity helper (Task 2). The phase 4 plan's Global Constraints now say so, so Task 3's draft store and every later path use the helper.
   - macOS `-D warnings`: zerus-5wmh.51 (PR #426) lands before Task 4 starts. Until then the Mac check expects only main's 20 known warnings.
-  - `mac-install.sh` cannot make numbered or preview builds, so on a numbered Dev Mac it updates the CLI and refuses the GUI. Accepted, as AGENTS.md states; numbered switch builds go through `tray/install.sh` from a clean clone.
+  - `mac-install.sh` cannot make numbered or preview builds, so on a numbered Dev Mac it updates the CLI and refuses the GUI. Accepted, as AGENTS.md states; numbered switch builds go through `packaging/desktop/install.sh` from a clean clone.
   - Task 7 stays one commit.
 
 - **Controller rulings on the open questions (2026-10-28).**
@@ -35,7 +35,7 @@
 
 These are settled for this plan. Items 1 to 3 deviate from the spec text and are recorded in the spec's Decisions section by Task 9.
 
-1. **Single instance follows Qt, not `tauri-plugin-single-instance` (deviates from spec row 298).** The client implements Qt's `SingleInstance` protocol (`tray/src/SingleInstance.{h,cpp}`, `tray/src/main.cpp:337-361` and `:424-433`): the per-user start lock `hgs-tray-start.lock` in Qt's runtime location, the socket named `hgs-tray` in the canonical temporary folder, and the one-line `show` and `sessions` activations. `tray/update-installed.py` finds the old GUI's socket by `lsof` (a path ending in `/hgs-tray`), waits on that same path for the new GUI and sends `sessions` (`update-installed.py:187-208`, `:295-315`). The plugin uses another path, so the updater would time out and roll back.
+1. **Single instance follows Qt, not `tauri-plugin-single-instance` (deviates from spec row 298).** The client implements Qt's `SingleInstance` protocol (`tray/src/SingleInstance.{h,cpp}`, `tray/src/main.cpp:337-361` and `:424-433`): the per-user start lock `hgs-tray-start.lock` in Qt's runtime location, the socket named `hgs-tray` in the canonical temporary folder, and the one-line `show` and `sessions` activations. `packaging/desktop/update-installed.py` finds the old GUI's socket by `lsof` (a path ending in `/hgs-tray`), waits on that same path for the new GUI and sends `sessions` (`update-installed.py:187-208`, `:295-315`). The plugin uses another path, so the updater would time out and roll back.
 2. **The bundle takes over Qt's identity (supersedes the spec's "A distinct bundle identifier from the Qt app" and "Binary names and paths must not collide with `hgs-tray`", for the Mac only).** These are the owner's decisions of 2026-10-28. The switch bundle is `com.hgdev.hgs-tray`, named Zerus, with executable `hgs-tray`. It replaces `~/Applications/hgs-tray.app` in place, and Qt is not kept beside it on the Mac. The dev app keeps `dev.zerus.next` and its name.
 3. **Menu entries: Qt's, except Refresh and the update entries (deviates from spec row 289's "menu with machines and sessions" parity).** Every computer streams through `hgs watch`, and a failed stream restarts on its own schedule, so there is nothing to poll. The client has no update controller yet (spec row 300). The tooltip drops Qt's poll ages for the same reason. The "?" error tile shows while this computer's stream is reconnecting.
 4. **The main-thread watchdog follows Qt (spec row 297, `zerus-5wmh.12.3`, coordinator ruling).** Task 8 ports `tray/src/MainThreadWatchdog.{h,cpp}` and `MacSystemPower`: a main-thread heartbeat every 7.5 s, a check every 15 s on a thread named `hgs-watchdog`, a 30 s threshold, uptime that stops during sleep, a hold from the sleep notice until the main thread beats after a wake (10 minutes at most), and `abort()` so launchd's `KeepAlive Crashed` restarts the client and the crash report shows the main thread. The decision logic is pure and tested on Linux; the heartbeat (an `NSTimer` in the common run-loop modes, a GLib timeout on Linux) and the IOKit power notices are thin glue. It runs in the switch bundle, which launchd supervises, and in other builds only with `ZERUS_CLIENT_WATCHDOG=1`, so a dev run on the shared machine is never aborted (Decision 7's rule). Qt's other guard stays too: no status-item update while its menu is open (`QuietTrayIcon`).
@@ -43,7 +43,7 @@ These are settled for this plan. Items 1 to 3 deviate from the spec text and are
    - **One source for every client path.** Read marks, `menubar.json`, `attention-observed.json` and phase 4's drafts root (`<data dir>/drafts`) all come from `Identity::data_dir_now()`. Tauri's `app.path().app_data_dir()` reports the compile-time identifier, which is `com.hgdev.hgs-tray.local` in a switch build (Decision 6), so the client never calls it. Task 2 manages the `Identity` in the app state for that reason. Phase 4's composer (`DraftStore::open(root.join("drafts"))`) currently takes its root from `app_data_dir`: whichever of phase 4 and this plan lands second routes it through `app.state::<identity::Identity>()`, and `grep -rn "app_data_dir()" client/src-tauri/src` must print nothing (Task 9 checks it). Otherwise the client would write its drafts under the `.local` identifier and the updater would verify an empty drafts root. Phase 4's attachment cache (`app_cache_dir`) is disposable; under the `.local` identifier it is only a misnamed cache, and phase 4 may move it the same way.
    - **Data carry-over (coordinator ruling).** Settings start at their defaults (superseded: the phase 3b ruling seeds them once from Qt's), and read marks start fresh: the hosts' read state stays authoritative. The dev app's webview settings (Animate working sessions, Reduce motion, panel widths) and its pending read marks stay with the dev app. Its durable drafts reach the switched client through the one-time import of `zerus-5wmh.13.1`, which reads the dev app's drafts root (`~/Library/Application Support/dev.zerus.next/drafts`) read-only, the same way it reads Qt's store. That import is phase 4's work; this plan only depends on it (runbook step 8), and until it lands those drafts stay readable in the dev app.
    - **Why not pin:** after the switch the dev app keeps running beside the installed client for testing. A pinned directory would give one drafts root two writers, which the phase 4 core section rules out ("each store has exactly one writer").
-6. **The switch build is configured as `com.hgdev.hgs-tray.local` and promoted at signing.** This is Qt's privacy split (`tray/CMakeLists.txt:283-285`, `tray/sign-local-macos.py:134-143`): an unsigned copy in a build folder never registers the public identifier. The runtime identity therefore comes from the bundle, not from Tauri's compile-time configuration (Decision 5).
+6. **The switch build is configured as `com.hgdev.hgs-tray.local` and promoted at signing.** This is Qt's privacy split (`tray/CMakeLists.txt:283-285`, `packaging/desktop/sign-local-macos.py:134-143`): an unsigned copy in a build folder never registers the public identifier. The runtime identity therefore comes from the bundle, not from Tauri's compile-time configuration (Decision 5).
 7. **Only the switch identity claims Qt's names, posts notifications and runs the watchdog.** The dev app gets single-instance only with `ZERUS_CLIENT_SINGLE_INSTANCE=1`, under its own name, notifications only with `ZERUS_CLIENT_NOTIFICATIONS=1`, and the main-thread watchdog only with `ZERUS_CLIENT_WATCHDOG=1`. This keeps parallel headless runs on the shared arch machine working. It also means a dev client never claims Qt's `/tmp/hgs-tray` on arch and never doubles Qt's banners on the Mac. A replay (`ZERUS_CLIENT_REPLAY`) never posts notifications.
 8. **Primary click shows and activates the window, as Qt's `TrayAgent::showSessions` does (`TrayAgent.cpp:781-783`).** Qt never hides on click; the controller confirmed it.
 9. **`show` changes nothing visible.** Qt's handler acts only on `sessions` (`main.cpp:428`). A launchd or second plain start therefore never pops the window.
@@ -53,7 +53,7 @@ These are settled for this plan. Items 1 to 3 deviate from the spec text and are
 13. **Numbered Dev guard, all platforms (coordinator ruling).** `update-installed.py` refuses to replace an installed numbered Dev build with a build that has neither a Dev number nor a local preview label (`previewLabel` in `--build-info`, from `ZERUS_LOCAL_PREVIEW_LABEL`). `HGS_TRAY_RESTART=0` installs, which replace the GUI on disk without the live update, ask the updater first (`--check`), so no path skips the guard. `docs/reference.md` states the rule and the label, and the refusal quotes the same sentence; a test keeps the two equal. The Tauri client embeds the label as Qt does (Task 2).
 14. **Mute applies as in Qt.** Muting is the host-confirmed `notification_preferences` (`SessionNotifications::valid`). The optional-questions banner setting (`notifications/optionalQuestions`, default off) is read from Qt's domain until the client has its own Settings entry. Qt has no notification setting named "Reduce"; the controller confirmed it.
 15. **Run-event hook merge rule.** All lifecycle handling lives in `client/src-tauri/src/lifecycle.rs`. The run chain in `lib.rs` is `let mut app = …build(context).expect(…);`, then `lifecycle::prepare(&mut app, menu_bar, opens_sessions);` (macOS: the policy the app launches with, Task 3), then `app.run(|app, event| { lifecycle::on_event(app, &event); })`, with `on_event` as the closure's first statement. `RunEvent::Exit` reaches `lifecycle::exit`, the one exit hook. The watchdog stops first (Task 8). Other exit work (phase 4's drafts flush, the media branch's voice close, the organisation and read-mark flushes) runs there next. `state.release()` comes last, so the single-instance socket goes after every flush, as Qt's `QLocalServer` outlives the tray agent whose `aboutToQuit` flushes (`main.cpp:340` vs `:378`). The media branch (`work-ba0ed9fd-media`) adds a `.build(...).expect(...).run(...)` chain with an `if let tauri::RunEvent::Exit` block calling its `exit(app)`. Whichever lands second keeps the chain above and moves that exit work into `lifecycle::exit`, before `state.release()`. The shared `.build(...)` takes a `context` built earlier.
-16. **Merge point with M1c (media).** M1c adds `client/src-tauri/Info.plist` (microphone text), `Entitlements.plist` (audio input) and the `media` feature. The switch configuration names its own `Info.switch.plist`, which repeats Qt's microphone text. `tray/install.sh` adds `--features media` whenever the manifest has that feature, so the build order does not matter.
+16. **Merge point with M1c (media).** M1c adds `client/src-tauri/Info.plist` (microphone text), `Entitlements.plist` (audio input) and the `media` feature. The switch configuration names its own `Info.switch.plist`, which repeats Qt's microphone text. `packaging/desktop/install.sh` adds `--features media` whenever the manifest has that feature, so the build order does not matter.
 17. **Release packaging stays phase 7.** A notarized Tauri Zerus.app with the CLI, connector, setup scripts and notices is phase 7 work. This plan makes `scripts/check-macos-bundle.py --gui tauri` and `scripts/sign-macos.py` accept the switch bundle (hardened runtime, `packaging/macos/Zerus.entitlements`). Notarization itself runs only in the `macos-signing` environment.
 
 ## Global Constraints
@@ -155,10 +155,10 @@ These are the conditions most likely to hurt a person using this client that the
 | `client/src-tauri/src/lib.rs`, `commands.rs` (modify) | 2, 3, 4, 6, 8 | Startup order, state, command list |
 | `client/src-tauri/Cargo.toml`, `Cargo.lock` (modify) | 2, 4, 6, 8 | The `tray-icon` feature, objc2 crates already in the lock, feature lists |
 | `client/src/bridge.ts`, `client/src/store/desk.ts` (new), `client/src/main.tsx` | 4 | `open-session` and `desk-notice` events |
-| `tray/update-installed.py` (modify) | 7 | Draft roots, GUI kind, slot policy, Dev guard, settings snapshot and check, `--rollback`, `--installed-gui`, `--check` |
+| `packaging/desktop/update-installed.py` (modify) | 7 | Draft roots, GUI kind, slot policy, Dev guard, settings snapshot and check, `--rollback`, `--installed-gui`, `--check` |
 | `docs/reference.md` (modify) | 7 | The numbered Dev guard and the local preview label |
 | `client/src-tauri/tauri.switch.conf.json`, `Info.switch.plist`, `client/scripts/switch-config.py` (new) | 9 | The switch bundle |
-| `tray/install.sh`, `mac-install.sh` (modify) | 7, 9 | `HGS_TRAY_RESTART=0` asks `--check` (7); build and install the client when chosen or already installed (9) |
+| `packaging/desktop/install.sh`, `mac-install.sh` (modify) | 7, 9 | `HGS_TRAY_RESTART=0` asks `--check` (7); build and install the client when chosen or already installed (9) |
 | `scripts/check-macos-bundle.py`, `scripts/sign-macos.py` (modify) | 9 | Accept the Tauri bundle |
 | `docs/macos-distribution.md`, `client/README.md`, the spec (modify) | 2, 9 | Docs and the switch runbook |
 
@@ -1721,7 +1721,7 @@ Expected: FAIL to compile: `Identity`, `Platform`, `paths`, `LockInfo`, `start` 
 use std::path::{Path, PathBuf};
 
 pub const SWITCH_ID: &str = "com.hgdev.hgs-tray";
-/// Qt's LaunchAgent label (`tray/packaging/com.hgdev.hgs-tray.plist`).
+/// Qt's LaunchAgent label (`packaging/desktop/com.hgdev.hgs-tray.plist`).
 pub const LAUNCHD_LABEL: &str = "com.hgdev.hgs-tray";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1832,7 +1832,7 @@ In `client/src-tauri/Cargo.toml`, add `"NSBundle"` to the `objc2-foundation` fea
 //! per-user lock in turn; the running instance listens on a Unix socket and
 //! reads one line, `sessions` or `show`; a start that reaches it forwards its
 //! line and exits. The switch bundle uses Qt's names, so
-//! `tray/update-installed.py` finds the socket (a path ending in `/hgs-tray`)
+//! `packaging/desktop/update-installed.py` finds the socket (a path ending in `/hgs-tray`)
 //! and sends `sessions` to the new build.
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, Permissions};
@@ -6450,7 +6450,7 @@ git commit -m "feat(client): attention notifications on macOS with Qt's rules, s
 
 ### Task 7: The updater's drafts roots, rollback slot, Dev guard, settings check and rollback command (zerus-5wmh.12.1, then the updater part of zerus-5wmh.12.2)
 
-`tray/update-installed.py` keeps its contract (quit, snapshot, replace, start, wait for the socket, verify, provenance) and learns:
+`packaging/desktop/update-installed.py` keeps its contract (quit, snapshot, replace, start, wait for the socket, verify, provenance) and learns:
 
 **zerus-5wmh.12.1, client drafts root.** When the installed or the new bundle is the Tauri client (Info.plist `ZerusGUI = tauri`), its drafts root is snapshotted and verified next to Qt's. The root is `<app data>/drafts` under the bundle's identifier (Decision 5). Each root gets a private folder in the snapshot: 0700 folders, 0600 files, symbolic links refused. A nonempty draft that goes missing or changes keeps the snapshot and is reported with its root.
 
@@ -6460,11 +6460,11 @@ git commit -m "feat(client): attention notifications on macOS with Qt's rules, s
 - **Settings snapshot.** At a Qt-to-client switch, snapshot Qt's settings domain beside the rollback copy, through `defaults export` (cfprefsd), never the plist file.
 - **Settings check.** Report every Qt key that changed, every unexpected non-Cocoa key, and, as information, the Cocoa keys written. Client updates compare after the new client starts; a rollback compares before Qt starts, since Qt then writes its own keys.
 - **`--rollback INSTALLED`.** Reinstalls exactly the rollback copy through the same flow.
-- **`--installed-gui INSTALLED`.** Prints `qt`, `tauri` or `none` for `tray/install.sh`.
+- **`--installed-gui INSTALLED`.** Prints `qt`, `tauri` or `none` for `packaging/desktop/install.sh`.
 
 **Files:**
-- Modify: `tray/update-installed.py`
-- Modify: `tray/install.sh` (the `HGS_TRAY_RESTART=0` branches of macOS and Linux ask `--check` first)
+- Modify: `packaging/desktop/update-installed.py`
+- Modify: `packaging/desktop/install.sh` (the `HGS_TRAY_RESTART=0` branches of macOS and Linux ask `--check` first)
 - Modify: `docs/reference.md` (the guard and the local preview label, in "Installation, configuration and diagnostics")
 - Create: `tests/test_tray_update_switch.py` (Linux and macOS, in-process with patched paths)
 - Modify: `tests/test_tray_update.py` (snapshot layout, the guard through the updater and `HGS_TRAY_RESTART=0`, rollback end to end on Linux)
@@ -6485,7 +6485,7 @@ git commit -m "feat(client): attention notifications on macOS with Qt's rules, s
 Create `tests/test_tray_update_switch.py`:
 
 ```python
-"""The updater's switch rules (tray/update-installed.py): GUI kinds, drafts
+"""The updater's switch rules (packaging/desktop/update-installed.py): GUI kinds, drafts
 roots, the rollback slot, the numbered Dev guard and the Qt settings check.
 Fake HOME, fake bundles (com.example.zerus-switch-test) and a fake `defaults`;
 nothing reaches an installed GUI, its LaunchAgent or a real settings domain."""
@@ -6503,7 +6503,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 
@@ -6570,7 +6570,7 @@ class Switch(Fixture):
         self.assertEqual(updater.gui_kind(updater.bundle_info(self.bundle('qt', 'qt'))), 'qt')
         self.assertEqual(updater.gui_kind(updater.bundle_info(self.bundle('client', 'tauri'))), 'tauri')
         self.assertEqual(updater.bundle_info(self.root / 'missing.app'), {})
-        script = [sys.executable, str(ROOT / 'tray/update-installed.py'), '--installed-gui']
+        script = [sys.executable, str(ROOT / 'packaging/desktop/update-installed.py'), '--installed-gui']
         for path, kind in ((self.bundle('cli', 'tauri'), 'tauri'), (self.root / 'none.app', 'none')):
             result = subprocess.run(script + [str(path)], capture_output=True, text=True, timeout=30,
                                     env=dict(os.environ, HOME=str(self.home)))
@@ -6718,7 +6718,7 @@ Expected: FAIL with `AttributeError` (`gui_kind`, `bundle_info`, `draft_roots`, 
 
 - [ ] **Step 2: Add the bundle, roots and slot rules**
 
-In `tray/update-installed.py`:
+In `packaging/desktop/update-installed.py`:
 - import `argparse` and `plistlib`;
 - after `QUIT_SECONDS`/`START_SECONDS`, add the constants;
 - replace `snapshot`, `changed_drafts`, `replace` and `roll_back` with the versions below;
@@ -6913,7 +6913,7 @@ def check_replace(built, installed):
         raise UpdateError(refusal + ' Nothing was replaced.')
     if MAC and gui_kind(bundle_info(built)) != gui_kind(bundle_info(installed)):
         raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
-                          'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
+                          'run packaging/desktop/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
     return 0
 
 
@@ -6992,7 +6992,7 @@ digits in hyphen-separated words; it needs a clean Git checkout and no Dev
 number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
 reads it as a CMake cache variable (configure `tray/build` with
 `-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
-running `tray/install.sh`); the Tauri client reads the environment variable
+running `packaging/desktop/install.sh`); the Tauri client reads the environment variable
 when it builds. Clear the label before building main again. On macOS, a switch
 between the Qt GUI and the Tauri client always takes the live update, never
 `HGS_TRAY_RESTART=0`.
@@ -7056,7 +7056,7 @@ In `tests/test_tray_update.py`:
 ```
 
 Run: `python3 -m unittest discover -s tests -p test_tray_update.py -v` (the module imports `tray_update_fixture` from `tests/`, so it runs through discovery)
-Expected: the three new tests FAIL (`--rollback` is not an option yet, and `tray/install.sh` does not ask `--check`); `test_lost_drafts_are_reported_with_their_snapshot` FAILS until Step 6 wires the roots into `update`.
+Expected: the three new tests FAIL (`--rollback` is not an option yet, and `packaging/desktop/install.sh` does not ask `--check`); `test_lost_drafts_are_reported_with_their_snapshot` FAILS until Step 6 wires the roots into `update`.
 
 - [ ] **Step 6: Wire the rules into `update`, add the rollback command and the options**
 
@@ -7223,7 +7223,7 @@ def main():
     return 2
 ```
 
-In `tray/install.sh`, both `HGS_TRAY_RESTART=0` branches ask the updater before they replace anything:
+In `packaging/desktop/install.sh`, both `HGS_TRAY_RESTART=0` branches ask the updater before they replace anything:
 - macOS, step 2, in the `else` branch, before `rm -rf "${APP_DEST}"`:
   ```bash
         # The numbered Dev guard, and no switch between Qt and the client without the live update.
@@ -7239,7 +7239,7 @@ In `tray/install.sh`, both `HGS_TRAY_RESTART=0` branches ask the updater before 
 - [ ] **Step 7: Run all updater tests on Linux**
 
 Run: `python3 -m unittest discover -s tests -p 'test_tray_update*.py' -v`
-Expected: PASS, including `test_rollback_reinstalls_the_kept_copy`, `test_rollback_without_a_copy_changes_nothing`, `test_an_unnumbered_build_never_replaces_a_numbered_dev_install` and the Linux updates that were green before. Also run `python3 -m unittest discover -s tests -p 'test_mac_install.py' -v` and the same for `test_macos_local_signing.py`: they copy `tray/install.sh` and must stay green.
+Expected: PASS, including `test_rollback_reinstalls_the_kept_copy`, `test_rollback_without_a_copy_changes_nothing`, `test_an_unnumbered_build_never_replaces_a_numbered_dev_install` and the Linux updates that were green before. Also run `python3 -m unittest discover -s tests -p 'test_mac_install.py' -v` and the same for `test_macos_local_signing.py`: they copy `packaging/desktop/install.sh` and must stay green.
 
 - [ ] **Step 8: Write the macOS updater test with codesign**
 
@@ -7263,7 +7263,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('update_installed_mac', ROOT / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('update_installed_mac', ROOT / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 
@@ -7341,7 +7341,7 @@ then **mac-done**. Expected: PASS. Nothing outside the temporary folders changes
 Run `python3 -m unittest discover -s tests -p 'test_macos_*.py' -v`, the updater tests and `python3 scripts/check-source-privacy.py`.
 
 ```bash
-git add tray/update-installed.py tray/install.sh docs/reference.md tests/test_tray_update_switch.py \
+git add packaging/desktop/update-installed.py packaging/desktop/install.sh docs/reference.md tests/test_tray_update_switch.py \
   tests/test_tray_update.py tests/test_macos_switch_updater.py
 git commit -m "feat(tray): updater keeps client drafts, the Qt rollback copy and Qt settings, guards Dev numbers and can roll back"
 ```
@@ -7515,7 +7515,7 @@ Expected: FAIL to compile: `Limits`, `Pulse`, `Watchdog`, `now_ms`, `THREAD` and
 //! A timer on the main thread records a beat every quarter of [`HANG_MS`]; a
 //! thread named `hgs-watchdog` checks every half. Once the main thread has not
 //! beaten for longer than [`HANG_MS`], it prints why and aborts, at most once:
-//! launchd (`KeepAlive Crashed`, `tray/packaging/com.hgdev.hgs-tray.plist`) or
+//! launchd (`KeepAlive Crashed`, `packaging/desktop/com.hgdev.hgs-tray.plist`) or
 //! systemd (`Restart=on-failure`) starts the client again, and the crash report
 //! shows where the main thread stood. A plain exit would not be restarted.
 //!
@@ -7941,18 +7941,18 @@ The switch bundle is the Tauri build with Qt's Info.plist identity:
 - `ZerusGUI = tauri`.
 - The LaunchAgent template in `Contents/Resources/setup`.
 
-`tray/install.sh` builds it when `HGS_MAC_GUI=client` is set or the installed bundle is already the client. It signs it through `tray/sign-local-macos.py` (Developer ID continuity, no hardened runtime, like Qt's local builds) and installs it through the updater of Task 7. `mac-install.sh` ships the client sources and forwards the choice. `scripts/check-macos-bundle.py --gui tauri` checks the bundle, and `scripts/sign-macos.py` signs it for release with the hardened runtime and `packaging/macos/Zerus.entitlements` (no JIT entitlement: WKWebView runs JavaScript out of process). The docs and the coordinator's runbook land here.
+`packaging/desktop/install.sh` builds it when `HGS_MAC_GUI=client` is set or the installed bundle is already the client. It signs it through `packaging/desktop/sign-local-macos.py` (Developer ID continuity, no hardened runtime, like Qt's local builds) and installs it through the updater of Task 7. `mac-install.sh` ships the client sources and forwards the choice. `scripts/check-macos-bundle.py --gui tauri` checks the bundle, and `scripts/sign-macos.py` signs it for release with the hardened runtime and `packaging/macos/Zerus.entitlements` (no JIT entitlement: WKWebView runs JavaScript out of process). The docs and the coordinator's runbook land here.
 
 As built (webui's rulings of 2026-10-28):
 - `mac-install.sh` also ships `crates/watch-protocol` (`Cargo.toml`, `src`) beside `client/`, because `client/core` and `client/src-tauri` take it by path (`../../crates`) and on the Mac the CLI's copy sits under `.rust-build`. Its tarball excludes every `client/*/target`.
 - `TrayInstallGui`'s installed-client fixture carries a `CFBundleIdentifier`: after Task 7's review, `--installed-gui` names a kind only for a complete bundle.
-- Task 9's review: the client branch of `tray/install.sh` exports `CARGO_TARGET_DIR` (its own `target`) and `CARGO_BUILD_JOBS` (default `JOBS`); `mac-install.sh` also replaces `client/src-tauri/capabilities`; `TrayInstallGui` drops the caller's `HGS_MAC_*`, `HGS_TRAY_RESTART` and Cargo variables. The docs state the settings seed (phase 3b's ruling) instead of defaults, and step 8 checks it.
+- Task 9's review: the client branch of `packaging/desktop/install.sh` exports `CARGO_TARGET_DIR` (its own `target`) and `CARGO_BUILD_JOBS` (default `JOBS`); `mac-install.sh` also replaces `client/src-tauri/capabilities`; `TrayInstallGui` drops the caller's `HGS_MAC_*`, `HGS_TRAY_RESTART` and Cargo variables. The docs state the settings seed (phase 3b's ruling) instead of defaults, and step 8 checks it.
 - `Identity::cache_dir_now()` (Tauri's `app_cache_dir` formula with the running identifier) replaces `app_cache_dir` for the attachment cache, and a `build_info` Tauri command returns what `--build-info` prints, registered with and without `live`.
 - The docs and the runbook follow Task 7 as built: Qt waits aside until the client runs, the success line ends "the replaced GUI is the rollback copy in …", and kept copies live in `~/Applications/.hgs-tray-kept-*`. Runbook step 7 also checks the draft import marker.
 
 **Files:**
 - Create: `client/src-tauri/tauri.switch.conf.json`, `client/src-tauri/Info.switch.plist`, `client/scripts/switch-config.py`
-- Modify: `tray/install.sh` (macOS branch), `mac-install.sh`
+- Modify: `packaging/desktop/install.sh` (macOS branch), `mac-install.sh`
 - Modify: `scripts/check-macos-bundle.py` (`--gui tauri`)
 - Create: `tests/test_macos_switch_bundle.py`; modify `tests/test_mac_install.py`, `tests/test_macos_signing.py`
 - Modify: `docs/macos-distribution.md`, `client/README.md`, `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`
@@ -7962,7 +7962,7 @@ As built (webui's rulings of 2026-10-28):
 - Produces:
   - `switch-config.py OUTPUT` (writes the merged Tauri configuration).
   - `check-macos-bundle.py --gui tauri`, with `tauri_plist_findings(plist, version)`, `tauri_bundle_findings(bundle, version)` and `tauri_selftest(bundle, version, release, commit)`.
-  - `HGS_MAC_GUI=qt|client` for `tray/install.sh` and `mac-install.sh`.
+  - `HGS_MAC_GUI=qt|client` for `packaging/desktop/install.sh` and `mac-install.sh`.
 
 - [ ] **Step 1: Write the failing bundle tests**
 
@@ -7988,7 +7988,7 @@ spec = importlib.util.spec_from_file_location("check_macos_bundle", ROOT / "scri
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
-QT_INFO = plistlib.loads((ROOT / "tray/packaging/Info.plist").read_bytes())
+QT_INFO = plistlib.loads((ROOT / "packaging/desktop/Info.plist").read_bytes())
 SWITCH_INFO = plistlib.loads((ROOT / "client/src-tauri/Info.switch.plist").read_bytes())
 VERSION = (ROOT / "VERSION").read_text().strip()
 OTOOL = """hgs-tray:
@@ -8010,7 +8010,7 @@ MACH_O = b"\xcf\xfa\xed\xfe" + b"\0" * 28
 
 
 def installed_folder():
-    install = (ROOT / "tray/install.sh").read_text()
+    install = (ROOT / "packaging/desktop/install.sh").read_text()
     return re.search(r'^APP_DEST="\$\{HOME\}/Applications/(.+)\.app"$', install, re.M).group(1)
 
 
@@ -8120,15 +8120,15 @@ Create `client/src-tauri/tauri.switch.conf.json` (paths relative to `client/src-
     "active": true,
     "targets": ["app"],
     "resources": {
-      "../../tray/packaging/com.hgdev.hgs-tray.plist": "setup/com.hgdev.hgs-tray.plist"
+      "../../packaging/desktop/com.hgdev.hgs-tray.plist": "setup/com.hgdev.hgs-tray.plist"
     },
     "macOS": {
       "minimumSystemVersion": "14.0",
       "infoPlist": "Info.switch.plist",
       "files": {
-        "Resources/en.lproj/InfoPlist.strings": "../../tray/packaging/en.lproj/InfoPlist.strings",
-        "Resources/hgs-zerus-swarm.icns": "../../tray/resources/icons/hgs-zerus-swarm.icns",
-        "Resources/Assets.car": "../../tray/resources/icons/macos/Assets.car"
+        "Resources/en.lproj/InfoPlist.strings": "../../packaging/desktop/en.lproj/InfoPlist.strings",
+        "Resources/hgs-zerus-swarm.icns": "../../packaging/desktop/icons/hgs-zerus-swarm.icns",
+        "Resources/Assets.car": "../../packaging/desktop/icons/macos/Assets.car"
       }
     }
   }
@@ -8156,7 +8156,7 @@ Create `client/src-tauri/Info.switch.plist`:
     <key>NSMicrophoneUsageDescription</key><string>Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.</string>
     <key>NSCameraUsageDescription</key><string>Zerus records video messages when you hold the video recording button.</string>
     <key>NSAppleEventsUsageDescription</key><string>Zerus opens your agent sessions in Terminal.</string>
-    <!-- tray/update-installed.py tells the clients apart by this key. -->
+    <!-- packaging/desktop/update-installed.py tells the clients apart by this key. -->
     <key>ZerusGUI</key>                  <string>tauri</string>
 </dict>
 </plist>
@@ -8233,7 +8233,7 @@ def tauri_plist_findings(plist, version):
                 "LSMinimumSystemVersion": MINIMUM_SYSTEM, "CFBundleIconName": "hgs-zerus-swarm", "ZerusGUI": "tauri"}
     findings = [f"Info.plist {key} is {plist.get(key)!r}, expected {value!r}"
                 for key, value in expected.items() if plist.get(key) != value]
-    # The raw build keeps the local identifier; tray/sign-local-macos.py promotes its signed copy.
+    # The raw build keeps the local identifier; packaging/desktop/sign-local-macos.py promotes its signed copy.
     if plist.get("CFBundleIdentifier") not in (BUNDLE_ID, BUNDLE_ID + ".local"):
         findings.append(f"Info.plist CFBundleIdentifier is {plist.get('CFBundleIdentifier')!r}, "
                         f"expected {BUNDLE_ID!r} or {BUNDLE_ID + '.local'!r}")
@@ -8253,7 +8253,7 @@ def tauri_bundle_findings(bundle, version):
         for name in sorted(names + files):
             path = Path(directory) / name
             label = str(path.relative_to(bundle))
-            # tray/sign-local-macos.py refuses links and nested code.
+            # packaging/desktop/sign-local-macos.py refuses links and nested code.
             if path.is_symlink():
                 findings.append(f"{label}: symbolic link")
                 continue
@@ -8343,7 +8343,7 @@ In `tests/test_mac_install.py`, change the expectation of `test_local_signing_se
 
 ```python
         self.assertEqual(shlex.split(commands[0]), ['HGS_MACOS_SIGN_IDENTITY=' + selector, 'HGS_MAC_GUI=',
-                                                  'bash', '~/.local/src/hgs/tray/install.sh'])
+                                                  'bash', '~/.local/src/hgs/packaging/desktop/install.sh'])
 ```
 
 Add to `MacInstall`:
@@ -8358,7 +8358,7 @@ Add to `MacInstall`:
         for expected in ('client', 'VERSION', 'DEV_VERSION', '--exclude=client/node_modules',
                          '--exclude=client/src-tauri/target', '--exclude=client/dist'):
             self.assertIn(expected, tray[0])
-        commands = [line for line in (self.root / 'transport.log').read_text().splitlines() if 'tray/install.sh' in line]
+        commands = [line for line in (self.root / 'transport.log').read_text().splitlines() if 'packaging/desktop/install.sh' in line]
         self.assertIn("HGS_MAC_GUI='client'", commands[0])
 ```
 
@@ -8372,7 +8372,7 @@ class TrayInstallGui(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='zerus-tray-gui-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ('tray/install.sh', 'tray/update-installed.py', 'client/scripts/switch-config.py',
+        for name in ('packaging/desktop/install.sh', 'packaging/desktop/update-installed.py', 'client/scripts/switch-config.py',
                      'client/src-tauri/tauri.switch.conf.json', 'VERSION'):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / name).write_bytes((REPO / name).read_bytes())
@@ -8392,7 +8392,7 @@ class TrayInstallGui(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.home), PATH=str(tools) + os.pathsep + os.environ['PATH'])
 
     def install(self, **settings):
-        return subprocess.run(['bash', str(self.root / 'tray/install.sh')], env=dict(self.env, **settings),
+        return subprocess.run(['bash', str(self.root / 'packaging/desktop/install.sh')], env=dict(self.env, **settings),
                               text=True, capture_output=True, timeout=30)
 
     def test_the_client_is_built_with_the_switch_configuration(self):
@@ -8425,9 +8425,9 @@ Add `import json` and `import plistlib` to the test module's imports.
 Run: `python3 -m unittest discover -s tests -p test_mac_install.py -v`
 Expected: the new tests FAIL (no `HGS_MAC_GUI` handling, no client build).
 
-- [ ] **Step 7: Build the client from `tray/install.sh`**
+- [ ] **Step 7: Build the client from `packaging/desktop/install.sh`**
 
-In the macOS branch of `tray/install.sh`, replace the `# --- 1. build ---` block with:
+In the macOS branch of `packaging/desktop/install.sh`, replace the `# --- 1. build ---` block with:
 
 ```bash
 # --- 0. which GUI -------------------------------------------------------------
@@ -8482,7 +8482,7 @@ The LaunchAgent step does not change: the template's `ProgramArguments` (`__APP_
 Replace the tray tarball and install lines at the end of `mac-install.sh` with:
 
 ```bash
-# The Tauri client's sources travel too, so tray/install.sh can build it
+# The Tauri client's sources travel too, so packaging/desktop/install.sh can build it
 # (HGS_MAC_GUI=client, or a Mac whose installed Zerus is already the client).
 # Source folders are replaced; their build caches stay. A numbered Dev build
 # needs a clean Git checkout on the Mac instead (docs/macos-distribution.md).
@@ -8491,7 +8491,7 @@ tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' \
   --exclude='client/src-tauri/gen' --exclude='client/core/target' \
   tray client DEV_VERSION VERSION \
   | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/src-tauri/src && tar xzf -'
-ssh -o BatchMode=yes "$host" "HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") HGS_MAC_GUI=$(shq "${HGS_MAC_GUI:-}") bash ~/.local/src/hgs/tray/install.sh"
+ssh -o BatchMode=yes "$host" "HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") HGS_MAC_GUI=$(shq "${HGS_MAC_GUI:-}") bash ~/.local/src/hgs/packaging/desktop/install.sh"
 ```
 
 Add `HGS_MAC_GUI` to the help comment at the top of `mac-install.sh`: `# HGS_MAC_GUI=qt|client chooses the desktop GUI; by default the installed kind stays.`
@@ -8504,7 +8504,7 @@ Expected: PASS.
 Commit the install path, the second unit:
 
 ```bash
-git add tray/install.sh mac-install.sh tests/test_mac_install.py
+git add packaging/desktop/install.sh mac-install.sh tests/test_mac_install.py
 git commit -m "feat(tray): build and install the Tauri client on the Mac when chosen or installed"
 ```
 
@@ -8521,12 +8521,12 @@ On the owner's decision of 2026-10-28, the Tauri client (`client/`) replaces the
 
 `client/scripts/switch-config.py` writes `client/src-tauri/target/switch.conf.json` from `client/src-tauri/tauri.switch.conf.json` and `VERSION`; `tauri build --config` with it produces `Zerus.app`:
 
-- **Identity.** It has the executable `hgs-tray` and the build identifier `com.hgdev.hgs-tray.local`; `tray/sign-local-macos.py` promotes its signed copy to `com.hgdev.hgs-tray`, as for Qt's raw bundles.
+- **Identity.** It has the executable `hgs-tray` and the build identifier `com.hgdev.hgs-tray.local`; `packaging/desktop/sign-local-macos.py` promotes its signed copy to `com.hgdev.hgs-tray`, as for Qt's raw bundles.
 - **Info.plist.** `Info.switch.plist` adds Qt's keys:
   - `CFBundleName` Zerus, with `CFBundleDisplayName` hgs-tray and `en.lproj` naming it Zerus;
   - `LSUIElement`;
   - Qt's icons and usage texts;
-  - `ZerusGUI = tauri`, which `tray/update-installed.py` uses to tell the clients apart.
+  - `ZerusGUI = tauri`, which `packaging/desktop/update-installed.py` uses to tell the clients apart.
 - **LaunchAgent template.** It ships in `Contents/Resources/setup/com.hgdev.hgs-tray.plist`. The installed agent is unchanged: `KeepAlive Crashed`, `ProcessType Interactive`, `--hgs` and the same label.
 
 The client behaves as Qt does at the points other tools rely on:
@@ -8546,12 +8546,12 @@ Numbered Dev installs need a clean checkout of the exact main commit, as for Qt:
 
 ```sh
 export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
-HGS_MAC_GUI=client bash tray/install.sh
+HGS_MAC_GUI=client bash packaging/desktop/install.sh
 ```
 
 - **Choosing the GUI.** `HGS_MAC_GUI=client` chooses the client; later runs keep whichever GUI is installed (`HGS_MAC_GUI=qt` chooses Qt again). `mac-install.sh` ships the client sources and forwards `HGS_MAC_GUI`, but its tarball has no Git metadata and cannot make a numbered build.
 - **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it. It always builds into `client/src-tauri/target`, whatever `CARGO_TARGET_DIR` says, since the installer takes the bundle from there, and the installer's job count bounds Cargo as it bounds the Qt build (`CARGO_BUILD_JOBS` overrides it).
-- **The updater at the switch.** `tray/update-installed.py`:
+- **The updater at the switch.** `packaging/desktop/update-installed.py`:
   1. quits Qt as its Quit action does, so Qt saves its drafts: SIGTERM, which current builds handle, or the quit Apple Event for an older one;
   2. snapshots Qt's drafts and the client's drafts root;
   3. exports Qt's settings with `defaults export com.hgdev.hgs-tray` to `~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`;
@@ -8567,14 +8567,14 @@ HGS_MAC_GUI=client bash tray/install.sh
 ### Rollback
 
 ```sh
-python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
+python3 packaging/desktop/update-installed.py --rollback ~/Applications/hgs-tray.app
 ```
 
 The rollback reinstalls exactly the rollback copy through the same quit, snapshot, start and verification steps. After the switch, that copy is the last Qt bundle. It compares Qt's settings with the copy taken at the switch before Qt starts. If they differ, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray`, since KeepAlive Crashed does not restart a clean quit. The client then becomes the rollback copy. Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt.
 
 ### Privacy identity
 
-TCC grants and the Notification Center entry belong to the bundle identifier and its designated requirement. The installed Qt is signed with a Developer ID Application certificate, without the hardened runtime. A switch bundle signed by `tray/sign-local-macos.py` with a Developer ID Application certificate of the same team satisfies Qt's requirement, so the grants carry over. An ad hoc or Apple Development signature would not, and the grants would be asked for again. Before the switch, compare the two requirements (the runbook below); `tray/sign-local-macos.py` already refuses an incompatible signature.
+TCC grants and the Notification Center entry belong to the bundle identifier and its designated requirement. The installed Qt is signed with a Developer ID Application certificate, without the hardened runtime. A switch bundle signed by `packaging/desktop/sign-local-macos.py` with a Developer ID Application certificate of the same team satisfies Qt's requirement, so the grants carry over. An ad hoc or Apple Development signature would not, and the grants would be asked for again. Before the switch, compare the two requirements (the runbook below); `packaging/desktop/sign-local-macos.py` already refuses an incompatible signature.
 
 ### Release signing
 
@@ -8674,7 +8674,7 @@ git commit -m "docs(client): the Mac switch, its rollback and the coordinator's 
 
 The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to main and their main push has a CI sequence `N`. Steps marked **display** run only in a window the owner gives: the implementer tells the coordinator when the work reaches step 4, and step 8 is the coordinator's own, done with the owner. Nothing here touches the hgs CLI, `com.hgdev.hgs-recovery`, `com.hgdev.hgs-voice`, native agents, tmux or the mobile connector. Signing needs the login keychain, so signing steps run as a `.command` in Terminal, like other Dev rollouts.
 
-**Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `tray/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
+**Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `packaging/desktop/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
 
 **What the switch carries over (coordinator rulings).** Settings are seeded once from Qt's, read-only, except the client's own `client/…` settings (defaults), the microphone (chosen again) and automatic approvals (off; Qt's choice is only recorded). Read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
@@ -8684,7 +8684,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    git fetch origin && git switch --detach SHA_OF_THAT_MAIN_PUSH
    export ZERUS_DEV_BUILD_NUMBER=N CLONE="$PWD" SHA="$(git rev-parse HEAD)"
    ```
-2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `CARGO_TARGET_DIR` set to the clone's own target, as `tray/install.sh` sets it, wins over any `build.target-dir` in the Cargo configuration, so the bundle lands where the next lines take it from:
+2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `CARGO_TARGET_DIR` set to the clone's own target, as `packaging/desktop/install.sh` sets it, wins over any `build.target-dir` in the Cargo configuration, so the bundle lands where the next lines take it from:
    ```sh
    cd "${CLONE:?}/client" && npm ci --no-audit --no-fund
    python3 scripts/switch-config.py src-tauri/target/switch.conf.json
@@ -8693,7 +8693,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    S="$(mktemp -d)"; ditto src-tauri/target/release/bundle/macos/Zerus.app "$S/hgs-tray.app"
    python3 ../scripts/check-macos-bundle.py --gui tauri --version "$(cat ../VERSION)" \
      --release "$(cat ../DEV_VERSION)-dev.$ZERUS_DEV_BUILD_NUMBER" --source-commit "$SHA" --selftest "$S/hgs-tray.app"
-   python3 ../tray/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
+   python3 ../packaging/desktop/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
    codesign -d -r- ~/Applications/hgs-tray.app 2>&1 | grep designated
    codesign -d -r- "$S/hgs-tray.app" 2>&1 | grep designated
    rm -rf "$S"; cd "${CLONE:?}"
@@ -8764,7 +8764,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
 6. **Switch** (Terminal). From the root of the clean clone, not the dev app's clone of step 4, with `ZERUS_DEV_BUILD_NUMBER`, `CLONE` and `SHA` still set, run only the GUI installer, not the CLI `install.sh`:
    ```sh
-   cd "${CLONE:?}" && HGS_MAC_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-switch.log
+   cd "${CLONE:?}" && HGS_MAC_GUI=client bash packaging/desktop/install.sh 2>&1 | tee ~/zerus-switch.log
    ```
    Expected lines:
    - quitting Zerus;
@@ -8798,10 +8798,10 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - the owner's sessions, and the drafts in Qt's store, are where they were; Qt drafts and the dev app's drafts appear in the client (the import of step 7);
    - the settings seed: a key from step 7's list shows Qt's value in Settings (for example the theme in Settings > Appearance), automatic approvals are off, and Voice input asks for the microphone again;
    - after the Mac's next sleep and wake, `launchctl print gui/$(id -u)/com.hgdev.hgs-tray | grep 'pid ='` shows the same pid as before, and `~/Library/Logs/hgs-tray.log` has no `main thread unresponsive` line.
-9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
+9. **Later Dev rollouts.** Run the same `bash packaging/desktop/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
-    cd "${CLONE:?}" && python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
+    cd "${CLONE:?}" && python3 packaging/desktop/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
     Qt comes back with its drafts, and the client moves into the rollback folder, so a second `--rollback` returns to the client. If the updater reports changed Qt settings, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` (KeepAlive Crashed does not restart a clean quit). Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause.
 

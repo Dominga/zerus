@@ -20,7 +20,7 @@ class TestMapCoverage(unittest.TestCase):
     def test_every_measured_target_writes_its_own_report(self):
         coverage = load()
         test_map = json.loads((ROOT / '.zerus' / 'test-map.json').read_text(encoding='utf-8'))
-        for provider in ('rust', 'tray'):
+        for provider in ('rust',):
             targets = test_map['providers'][provider]['targets']
             names = [coverage.safe(target) for target in targets]
             with self.subTest(provider=provider):
@@ -35,7 +35,8 @@ class TestMapCoverage(unittest.TestCase):
         self.assertIn("cron: '47 3 1 * *'", text)
         self.assertIn('without unique coverage', SCRIPT.read_text(encoding='utf-8'))
         self.assertIn('test-map-coverage.py rust --out artifacts/coverage', text)
-        self.assertIn('test-map-coverage.py tray --build build-coverage --out artifacts/coverage', text)
+        # Task #28: the Qt desktop and its ctest provider are gone.
+        self.assertNotIn('test-map-coverage.py tray', text)
         self.assertNotIn('--fail-on-gaps', text)
         self.assertNotIn('actions/cache', text)
         self.assertNotIn('secrets.', text)

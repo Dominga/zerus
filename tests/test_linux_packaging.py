@@ -30,10 +30,10 @@ class LinuxPackaging(unittest.TestCase):
                      "packaging/linux/hgs-tray.service", "scripts/install-mobile-connector-service.py",
                      "scripts/install-linux-desktop-service.py",
                      "scripts/desktop-revoke-hold.py", "scripts/desktop-service-activation.py",
-                     "docs/licenses/codex-LICENSE.txt", "tray/resources/icons/hgs-zerus-symbolic.svg"):
+                     "docs/licenses/codex-LICENSE.txt", "packaging/desktop/icons/hgs-zerus-symbolic.svg"):
             self.file("source/" + name)
         for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
-            self.file(f"source/tray/resources/icons/hgs-zerus-{size}.png")
+            self.file(f"source/packaging/desktop/icons/hgs-zerus-{size}.png")
         self.file("source/VERSION", "1.2.3\n")
         for name in ("Cargo.toml", "services/mobile/connector/Cargo.toml", "crates/lore-bin/Cargo.toml"):
             self.file("source/" + name, '[package]\nversion = "1.2.3"\n')

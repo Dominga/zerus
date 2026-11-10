@@ -34,7 +34,7 @@ input; do not delete it. The Mac source route builds Next on macOS 14 or later.
 git clone https://github.com/ufna/zerus.git
 cd zerus
 ./install.sh
-./tray/install.sh
+./packaging/desktop/install.sh
 ```
 
 On macOS, install the dependencies first:
@@ -51,7 +51,7 @@ ambiguous, choose an exact name or SHA-1 fingerprint from
 `security find-identity -v -p codesigning` with `HGS_MACOS_SIGN_IDENTITY`:
 
 ```sh
-HGS_MACOS_SIGN_IDENTITY='Developer ID Application: Example (ABCDE12345)' ./tray/install.sh
+HGS_MACOS_SIGN_IDENTITY='Developer ID Application: Example (ABCDE12345)' ./packaging/desktop/install.sh
 ```
 
 Compatible certificate signatures keep the privacy identity across local
@@ -77,7 +77,7 @@ See [Linux packages and source installation](linux-distribution.md).
 The desktop starts in English on every operating system. Settings > Appearance >
 Interface language offers an optional Russian preview; restart only Zerus to
 apply it. Agent sessions keep running, and untranslated text stays in English.
-See [translation coverage and maintenance](../tray/translations/README.md).
+See [translation coverage and maintenance](../client/i18n/shared/README.md).
 
 Add `~/.local/bin` to `PATH`. The CLI installs to `~/.local/bin/hgs`; SSH calls
 use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or
@@ -130,7 +130,7 @@ For a local Linux Zerus Next source build, an explicit private WebKitGTK/GTK3
 stack can be selected at installation:
 
 ```sh
-HGS_LINUX_GUI=client HGS_LINUX_WEBKIT_PREFIX=/absolute/private/prefix ./tray/install.sh
+HGS_LINUX_GUI=client HGS_LINUX_WEBKIT_PREFIX=/absolute/private/prefix ./packaging/desktop/install.sh
 ```
 
 The prefix must contain `lib/libwebkit2gtk-4.1.so.0`, its JavaScriptCore library,
@@ -153,7 +153,7 @@ to the maintained updater and its rollback checks. If the stack disappears or
 is incomplete, the next launch uses system libraries. Qt and older Zerus Next
 rollback builds also use system libraries. Published packages continue using stock WebKitGTK.
 
-Run `HGS_LINUX_WEBKIT_PREFIX= ./tray/install.sh` to clear the selection. Changing
+Run `HGS_LINUX_WEBKIT_PREFIX= ./packaging/desktop/install.sh` to clear the selection. Changing
 the setting takes effect at the next GUI start; if the binary is unchanged, the
 installer leaves the current GUI running. A changed build still uses the normal
 draft-preserving update. The opt-in does not modify global library paths or

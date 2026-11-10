@@ -32,25 +32,15 @@ fn feed_json(build: u64, commit: &str, size: u64, sha256: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// The raw string `name` of the Qt updater, as the C++ compiler sees it.
-fn qt_script(name: &str) -> String {
-    let source = include_str!("../../../../tray/src/ForkUpdater.cpp").replace("\r\n", "\n");
-    let start = format!("const char *{name} = R\"PS(");
-    let at = source.find(&start).unwrap_or_else(|| panic!("{name} is in ForkUpdater.cpp")) + start.len();
-    let end = source[at..].find(")PS\";").unwrap();
-    source[at..at + end].to_owned()
-}
-
+/// Task #28 (team ede724c4): the Qt updater is gone, so the helper no longer
+/// has a Qt copy to match; an installed Qt build's own text is a fixture of
+/// tests/fork_handoff.rs.
 #[test]
-fn the_helper_is_the_qt_updaters_own_script() {
-    let qt_versioned = format!("{}{}{}", qt_script("versionedHead"), qt_script("bannerScript"), qt_script("versionedBody"));
-    let qt_plain = format!("{}{}{}", qt_script("installHead"), qt_script("bannerScript"), qt_script("installBody"));
-    assert_eq!(helper_script(true), qt_versioned, "fork_update/*.ps1 drifted from tray/src/ForkUpdater.cpp");
-    assert_eq!(helper_script(false), qt_plain, "fork_update/*.ps1 drifted from tray/src/ForkUpdater.cpp");
+fn the_helper_installs_versioned_and_plain_layouts() {
     assert!(helper_script(true).contains("New-Item -ItemType Junction"));
     assert!(helper_script(false).contains("'.previous'") || helper_script(false).contains("$Previous"));
     // Task 114: both helpers take -Quiet (tests only): no banner, and builds
-    // start without a window. The comparison above holds the Qt copy to it.
+    // start without a window.
     for versioned in [true, false] {
         let script = helper_script(versioned);
         assert!(script.lines().next().unwrap().ends_with(", [switch]$Quiet)"), "{versioned}");

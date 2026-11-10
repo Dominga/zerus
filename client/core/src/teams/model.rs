@@ -39,6 +39,12 @@ pub const HIDDEN_WAITING: Duration = Duration::from_secs(30);
 const QUEUED: usize = 8;
 /// How long a read in flight keeps its slot from running again.
 const IN_FLIGHT: Duration = Duration::from_secs(3600);
+/// Task #14 (team ede724c4): the teams whose last views are held, so a tab
+/// opened again shows its team at once while the fresh read runs.
+const HELD_TEAMS: usize = 8;
+/// Task #14: the views of a team that are held: its status, plan graph,
+/// draft and inbox (the feed has its own paging state and is read again).
+const HELD_VIEWS: [&str; 4] = ["team", "graph", "new", "inbox"];
 
 /// What the Teams views follow on one computer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -165,6 +171,9 @@ pub struct TeamsModel {
     again: std::collections::BTreeSet<Slot>,
     /// Task #10: the window is hidden or minimized: only Waiting is read.
     hidden: bool,
+    /// Task #14: the last held views of recently watched teams, newest last,
+    /// at most [`HELD_TEAMS`] teams.
+    held: VecDeque<(String, BTreeMap<String, TeamsUpdate>)>,
 }
 
 /// An update as the model sends it (task #9): its payload is computed once
@@ -243,6 +252,20 @@ impl TeamsModel {
             for slot in [Slot::Status, Slot::Inbox, Slot::Feed] {
                 self.due.remove(&slot);
             }
+            // Task #14: the tab shows the views held for its team at once;
+            // the fresh reads (due now) replace them, and an unchanged one
+            // sends nothing.
+            if let Some(team) = self.follow.team.clone() {
+                if let Some(at) = self.held.iter().position(|(held, _)| *held == team) {
+                    let (team, views) = self.held.remove(at).expect("found");
+                    for (key, update) in &views {
+                        let digest = digest(update.kind(), &update.payload());
+                        self.shown.insert(key.clone(), digest);
+                        out.push((key.clone(), update.clone()));
+                    }
+                    self.held.push_back((team, views));
+                }
+            }
         }
         let wanted = [
             (Slot::List, self.follow.list),
@@ -270,6 +293,31 @@ impl TeamsModel {
             self.end("catalog", &mut out);
         }
         out
+    }
+
+    /// Task #14: keeps a watched team's view to show at once when its tab
+    /// opens again; a draft that ended is dropped.
+    fn hold(&mut self, key: &str, update: &TeamsUpdate) {
+        let Some((kind, team)) = key.split_once(':') else { return };
+        if !HELD_VIEWS.contains(&kind) || self.watched() != Some(team) {
+            return;
+        }
+        let at = match self.held.iter().position(|(held, _)| held == team) {
+            Some(at) => at,
+            None => {
+                if self.held.len() >= HELD_TEAMS {
+                    self.held.pop_front();
+                }
+                self.held.push_back((team.to_owned(), BTreeMap::new()));
+                self.held.len() - 1
+            }
+        };
+        let views = &mut self.held[at].1;
+        if update.is_view() {
+            views.insert(key.to_owned(), update.clone());
+        } else if matches!(update, TeamsUpdate::Ended) {
+            views.remove(key);
+        }
     }
 
     fn end<T: From<(String, TeamsUpdate)>>(&mut self, key: &str, out: &mut Vec<T>) {
@@ -382,6 +430,11 @@ impl TeamsModel {
     /// The next read to run now, if any: an asked-for read first, then the
     /// followed read due longest. Its slot waits until its reply is applied.
     pub fn next(&mut self, now: Instant) -> Option<TeamRead> {
+        // Task #14: the watched team's status goes first, ahead of the list,
+        // Waiting and asked-for reads: it is what an opened tab waits for.
+        if let Some(read) = self.next_status(now) {
+            return Some(read);
+        }
         if let Some(read) = self.queued.pop_front() {
             return Some(read);
         }
@@ -407,6 +460,19 @@ impl TeamsModel {
         };
         self.due.insert(slot, now + IN_FLIGHT);
         Some(read)
+    }
+
+    /// Task #14: the watched team's status read when it is due now, else
+    /// None. The poller also runs it beside a read still in flight for a team
+    /// no longer watched, so a newly opened tab never waits behind that.
+    pub fn next_status(&mut self, now: Instant) -> Option<TeamRead> {
+        let team = self.watched()?.to_owned();
+        let due = *self.due.get(&Slot::Status)?;
+        if due > now || !self.eligible(Slot::Status) {
+            return None;
+        }
+        self.due.insert(Slot::Status, now + IN_FLIGHT);
+        Some(TeamRead::Status { team })
     }
 
     /// Task 8: the team heads of the computer's stream, or None. A moved
@@ -508,6 +574,7 @@ impl TeamsModel {
         let digest = digest(update.kind(), &payload);
         if self.shown.get(&key) != Some(&digest) {
             self.shown.insert(key.clone(), digest);
+            self.hold(&key, &update);
             out.push(Sent {
                 key,
                 update,
@@ -539,7 +606,11 @@ impl TeamsModel {
         now: Instant,
     ) -> Vec<Sent> {
         let mut out = Vec::new();
-        if let Some(slot) = Self::slot(read) {
+        // Task #14: a reply about a team no longer watched leaves the slots
+        // alone: they belong to the newly watched team now, whose read may
+        // not have run yet (its tab waited a whole interval behind it).
+        let stale = read.team().is_some_and(|team| Some(team) != self.watched());
+        if let Some(slot) = Self::slot(read).filter(|_| !stale) {
             // With the stream's heads a slot waits for its revision to move,
             // and at most STREAM_POLL: the inbox and feed too, whose messages
             // and events are written without a revision bump (task #10,
@@ -556,7 +627,7 @@ impl TeamsModel {
                 *due = if again { now } else { now + every };
             }
         }
-        if read.team().is_some_and(|team| Some(team) != self.watched()) {
+        if stale {
             return out;
         }
         let value = match reply {
@@ -617,7 +688,10 @@ impl TeamsModel {
                         &mut out,
                     ),
                     // Created or discarded: the form's draft view ends.
-                    None => self.end(&team_key("new", team), &mut out),
+                    None => {
+                        self.hold(&team_key("new", team), &TeamsUpdate::Ended);
+                        self.end(&team_key("new", team), &mut out)
+                    }
                 }
             }
             TeamRead::Inbox { team } => self.send(

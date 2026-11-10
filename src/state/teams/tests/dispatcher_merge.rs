@@ -27,7 +27,7 @@ fn a_complete_testing_merge_does_not_read_the_machine_config() {
         let broken = dir.path().join("broken-config");
         std::fs::create_dir_all(broken.join("config")).unwrap();
         let old = std::env::var("HGS_CONFIG_DIR").ok();
-        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         std::env::set_var("HGS_CONFIG_DIR", &broken);
         let result = super::merge_queue_tick(&mut store, "t", 1.0);
         match &old {
@@ -376,4 +376,68 @@ fn an_unrelated_change_meanwhile_keeps_both_and_lands_once() {
         super::merge_queue_tick(store, "t", 101.0).unwrap();
         assert_eq!((kinds(store, "merged"), queued_tests()), (1, 1), "never landed twice");
     });
+}
+
+/// Task #19 (team ede724c4, owner 2026-11-10): a lead who lands by hand names
+/// its line. An accept queues nothing and runs no suites, though the project
+/// turns the queue on; `landed` takes a commit on that branch and refuses one
+/// off it, whatever the team folder has checked out (a detached HEAD).
+#[test]
+fn a_manual_line_queues_nothing_and_takes_a_landing_on_its_branch() {
+    with_queue(|store, repo| {
+        let mut team = store.load("t").unwrap().unwrap();
+        // Back to the reported task, then the line named and the folder detached.
+        let task = team.task_mut(1).unwrap();
+        task.merge = None;
+        task.status = TaskStatus::Submitted;
+        queue_git(&repo.lead, &["branch", "line"]).unwrap();
+        queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+        team.settings.manual_line = "line".into();
+        assert!(!super::super::merge_queue::enabled(&team), "the queue is off for a manual line");
+        let mut events = Vec::new();
+        let receipt = ops::apply(&mut team, "accept", &json!({"task":1}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_ne!(receipt["status"], "merge_queued", "{receipt}");
+        assert!(team.task(1).unwrap().merge.is_none(), "no landing is queued");
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+        assert!(!events.iter().any(|event| event.kind == "merge_queued"));
+        // The member's commit is not on the line yet: refused, naming the line.
+        let work = queue_git(&repo.member, &["rev-parse", "HEAD"]).unwrap();
+        let error = ops::apply(&mut team, "landed", &json!({"task":1,"commit":work}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the line line"), "{error}");
+        // The lead merges it into the line by hand: landed takes the merge commit.
+        queue_git(&repo.lead, &["checkout", "-q", "line"]).unwrap();
+        queue_git(&repo.lead, &["merge", "-q", "--no-ff", "--no-edit", &work]).unwrap();
+        let merge = queue_git(&repo.lead, &["rev-parse", "HEAD"]).unwrap();
+        queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+        let landed = ops::apply(&mut team, "landed", &json!({"task":1,"commit":merge}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(landed["status"], "landed", "{landed}");
+        // A tick runs no queue for it.
+        store.mutate(None, "t", None, |stored, _| { *stored = team.clone(); Ok(Value::Null) }).unwrap();
+        super::merge_queue_tick(store, "t", 200.0).unwrap();
+        assert_eq!(queued_tests(), 0, "no suites run");
+    });
+}
+
+/// Task #19: git-merge-lead merges the named line when the lead's folder is on
+/// no branch (it refused with "The folder is on no branch"), and without a
+/// named line it says how to name one.
+#[test]
+fn git_merge_lead_merges_the_named_line_from_a_detached_lead_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(repo) = queue_repo(dir.path()) else { return };
+    queue_git(&repo.lead, &["branch", "line"]).unwrap();
+    queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+    let mut team = queued_team(&repo);
+    let member = team.member("dev").unwrap().clone();
+    let request = json!({"template":"git-merge-lead","args":{}});
+    // No line named at all (the recorded line_branch is a fallback too).
+    team.line_branch.clear();
+    let error = run_outcome(&team, &member, &repo.member, &request).unwrap_err().to_string();
+    assert!(error.contains("manual_line"), "names the one setting that gets through: {error}");
+    team.settings.manual_line = "line".into();
+    let outcome = run_outcome(&team, &member, &repo.member, &request).unwrap();
+    assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+    assert!(repo.member.join("c.txt").exists(), "the line's commit was merged: {}", outcome.tail);
 }

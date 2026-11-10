@@ -104,14 +104,21 @@ fn commits(task: &Task) -> Vec<String> {
             }
         }
     }
-    // Task #29 (team ede724c4): a member that committed by hand leaves no
-    // Zerus commit; the accepted work is its reported folder head, the commit
-    // the merge queue lands (merge_queue::accepted_commit). Without it every
-    // such task stayed "accepted with no commit" in the lead's inbox.
+    // Task #19 (owner, 2026-11-10): a member that commits with git itself
+    // leaves no commit Zerus made; the landing's commit (a hand landing's
+    // `hgs team landed`, or the queue's) and the accepted report's commit
+    // are the task's commits then.
     if found.is_empty() && task.status == TaskStatus::Accepted {
-        if let Some(head) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).map(|attempt| attempt.folder_head.as_str()) {
-            if (7..=64).contains(&head.len()) && head.chars().all(|c| c.is_ascii_hexdigit()) {
-                found.push(head.to_owned());
+        let landed = task.landed.as_ref().map(|landed| landed.commit.clone());
+        let reported = task
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+            .map(|attempt| attempt.folder_head.clone());
+        for sha in [reported, landed].into_iter().flatten() {
+            if sha.len() <= 64 && !found.contains(&sha) {
+                found.push(sha);
             }
         }
     }

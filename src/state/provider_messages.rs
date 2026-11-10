@@ -82,6 +82,21 @@ fn repeated(recent: &[Value], message: &Value) -> bool {
     })
 }
 
+/// An assistant message Claude stored as an `api-request-blob`, read as its
+/// transcript line would be, at `at`; one already shown (by text) is skipped.
+fn push_blob(messages: &mut Vec<Value>, agent: &str, id: &str, blob: Value, at: &Value, since: f64) {
+    let event = json!({"type":"assistant","sessionId":id,"uuid":blob["hash"],"timestamp":at,"message":blob["message"]});
+    let Ok(line) = serde_json::to_vec(&event) else { return };
+    for message in line_messages(agent, id, &line) {
+        if message["type"] == "AgentThinking" || message["detail"].as_str().unwrap_or("").trim().is_empty() {
+            continue;
+        }
+        if own(&message, since) && !messages.iter().any(|seen| seen["detail"] == message["detail"]) {
+            messages.push(message);
+        }
+    }
+}
+
 pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
     if string(record, "agent") == "kimi" {
         return kimi_messages::read(record);
@@ -104,8 +119,29 @@ pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
         .map_err(|e| e.to_string())?;
     let mut messages: Vec<Value> = Vec::new();
     let since = own_since(record);
+    // Owner, 2026-11-09: Claude Code 2.1.3xx writes the replies between tool
+    // calls only as content-addressed `api-request-blob` lines (no timestamp);
+    // the `api-request` that sends them next carries the time.
+    let mut pending: Vec<Value> = Vec::new();
     for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         if (offset > 0 && index == 0) || line.len() > LINE_BYTES || !line.ends_with(b"\n") {
+            continue;
+        }
+        if agent == "claude" && line.starts_with(b"{\"type\":\"api-request") {
+            let Ok(event) = serde_json::from_slice::<Value>(line) else { continue };
+            if !string(&event, "sessionId").is_empty() && event["sessionId"] != id {
+                continue;
+            }
+            match string(&event, "type") {
+                "api-request-blob" if string(&event["message"], "role") == "assistant" => pending.push(event),
+                "api-request" => {
+                    let at = event["timestamp"].clone();
+                    for blob in pending.drain(..) {
+                        push_blob(&mut messages, agent, id, blob, &at, since);
+                    }
+                }
+                _ => {}
+            }
             continue;
         }
         for message in line_messages(agent, id, line) {
@@ -113,6 +149,10 @@ pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
                 messages.push(message);
             }
         }
+    }
+    let now = json!(chrono::Utc::now().to_rfc3339());
+    for blob in pending.drain(..) {
+        push_blob(&mut messages, agent, id, blob, &now, since);
     }
     messages.sort_by(|a,b|a["at"].as_f64().unwrap_or(0.).total_cmp(&b["at"].as_f64().unwrap_or(0.)));
     if messages.len() > 100 {

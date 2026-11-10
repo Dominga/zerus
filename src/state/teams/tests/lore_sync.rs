@@ -379,3 +379,26 @@ fn a_find_over_every_store_names_each_one() {
     assert_eq!(store_label("workspace", ".", &team), "team Core");
     assert_eq!(store_label("project", "./", &team), "project");
 }
+
+/// Task #19 (team ede724c4, owner 2026-11-10): a member that commits with git
+/// itself leaves no commit Zerus made; a landed task gives lore its landing
+/// commit (and the accepted report's), with no "name its commit" notice.
+#[test]
+fn a_landed_task_gives_lore_its_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut team = team(dir.path());
+    let no_commit = team.tasks.iter_mut().find(|task| task.id == 6).unwrap();
+    no_commit.landed = Some(crate::state::teams::model::Landed { commit: "feed123".into(), by: "lead".into(), at: 30.0 });
+    let (records, pending) = desired(&team);
+    let found = by_id(&records);
+    assert_eq!(found["t33fbafeb-phase-1#6"]["status"], "done");
+    assert_eq!(found["t33fbafeb-phase-1#6"]["commits"], json!(["feed123"]));
+    assert!(!pending.iter().any(|item| item.id == "t33fbafeb-phase-1#6"), "{pending:?}");
+    // The accepted report's commit counts as well.
+    let task = team.tasks.iter_mut().find(|task| task.id == 6).unwrap();
+    task.landed = None;
+    task.attempts[0].folder_head = "beef456".into();
+    let (records, pending) = desired(&team);
+    assert_eq!(by_id(&records)["t33fbafeb-phase-1#6"]["commits"], json!(["beef456"]));
+    assert!(!pending.iter().any(|item| item.id == "t33fbafeb-phase-1#6"), "{pending:?}");
+}

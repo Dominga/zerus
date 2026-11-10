@@ -1,8 +1,14 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { Dropdown, type DropdownOption } from "./Dropdown";
+// Task #22 (team ede724c4): the first import of a large module graph is
+// transformed inside the 5 s test timeout, which the full client run on a
+// loaded machine exceeded ("Test timed out in 5000ms" only under that run).
+// It is transformed once here, with its own bound; the tests' own imports then
+// resolve from the module cache and test exactly what they did.
+beforeAll(async () => { await Promise.all([import("../../store/shortcuts"), import("../../perf/dropdown")]); }, 60_000);
 
 let host: HTMLDivElement, dispose: (() => void) | undefined;
 const options: DropdownOption[] = [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta", disabled: true }, { value: "g", label: "Gamma" }, { value: "d", label: "Delta" }];

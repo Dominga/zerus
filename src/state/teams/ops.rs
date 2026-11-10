@@ -215,6 +215,10 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     super::super::iron_rules::validate(&json!(settings.iron_rules))?;
+    // Task #19: the manual line is a branch name Zerus passes to git as one word.
+    if !settings.manual_line.trim().is_empty() {
+        super::templates::check_branch(settings.manual_line.trim()).context("manual_line names the line's branch")?;
+    }
     if let Some(memory) = &settings.memory {
         ensure!(
             super::super::project_memory::MODES.contains(&memory.mode.as_str()) || memory.mode == super::super::project_memory::LEGACY_LORE,
@@ -677,7 +681,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         let folder = std::path::PathBuf::from(text(input, "folder"));
         match super::working_mode::propose(&folder) {
-            Some(proposal) => {
+            Ok(proposal) => {
                 let preset = if mode == "auto" { proposal.preset.clone() } else { mode.clone() };
                 ensure!(
                     super::working_mode::PRESETS.contains(&preset.as_str()),
@@ -692,8 +696,17 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
                 cached["checked_at"] = json!(now());
                 Some(cached)
             }
-            None if mode == "auto" => Some(json!({"preset":""})),
-            None => bail!("The working mode needs a Git repository to profile: {}", folder.display()),
+            // Task #32 (team ede724c4): Git too slow to read the project never
+            // blocks the team: auto profiles it again soon; a mode named
+            // explicitly asks to try again.
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) if mode == "auto" => {
+                Some(super::working_mode::slow_cache(&error, now()))
+            }
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                bail!("The working mode {mode} needs the project's profile: {error}. Try again in a moment, or choose auto.")
+            }
+            Err(_) if mode == "auto" => Some(json!({"preset":""})),
+            Err(error) => bail!("The working mode needs a Git repository to profile: {} ({error})", folder.display()),
         }
     };
     validate_settings(&settings)?;
@@ -2496,6 +2509,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // word, and only while none of its work has started, so nothing done is
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
+    // Owner, 2026-11-10: approving a phase that is already approved, running
+    // or done is what the owner wanted anyway; it answers so, never an error.
+    if approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted()) {
+        return Ok(json!({"status":"approved","phase":n,"already":true}));
+    }
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
     // U56: an accepted phase left with no tasks (they were moved out, U58) is
     // not done: it stays yours to discard, or the lead's on your word. An empty
@@ -2558,7 +2576,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     if approve {
         accept_blockers(team, at, offline)?;
         if run_checks {
-            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT);
+            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::phase_check_timeout());
             ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
                 "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
             if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
@@ -5820,10 +5838,15 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         // Feedback 2026-11-04 (6): an object changes only the
                         // members it names ({"dev":{"model":"opus"}}, null removes
                         // one, a new id adds it); a list replaces them all.
+                        // Owner, 2026-11-09: a desktop save that arrives with its
+                        // members encoded as JSON text is read as that list; any
+                        // other shape names what it got, never a bare refusal.
+                        let decoded = value.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
+                        let value = decoded.as_ref().unwrap_or(value);
                         let value = &match value {
                             Value::Object(patches) => patch_members(team, patches)?,
                             Value::Array(_) => value.clone(),
-                            _ => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}"),
+                            other => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}; this update sent {}", match other { Value::Null => "null", Value::Bool(_) => "true/false", Value::Number(_) => "a number", Value::String(_) => "text", _ => "something else" }),
                         };
                         let mut members: Vec<Member> = value
                             .as_array()
@@ -5966,7 +5989,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             // at Create team.
             let folder = std::path::PathBuf::from(team.folder.trim());
             match super::working_mode::propose(&folder) {
-                Some(proposal) => {
+                Ok(proposal) => {
                     let mut cached = proposal.value();
                     cached["checked_at"] = json!(now());
                     team.mode_proposal = Some(cached);
@@ -5990,7 +6013,13 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.working_mode.clear();
                     }
                 }
-                None => team.mode_proposal = Some(json!({"preset":""})),
+                // Task #32: Git too slow to read the project never blocks Create
+                // team; the dispatcher profiles it again soon.
+                Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                    team.mode_proposal = Some(super::working_mode::slow_cache(&error, now()));
+                    events.push(Event::new("working_mode_slow", json!({"reason":error.to_string()})));
+                }
+                Err(_) => team.mode_proposal = Some(json!({"preset":""})),
             }
             // Task 271: the playbook is stored with a team that has a mode.
             if !team.working_mode.is_empty() {
@@ -6256,7 +6285,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             );
             let folder = std::path::PathBuf::from(team.folder.trim());
             let proposal = super::working_mode::propose(&folder)
-                .context("The project cannot be profiled: its folder is not a Git repository")?;
+                .map_err(|error| anyhow::anyhow!("The project cannot be profiled: {error}"))?;
             let preset = if requested.is_empty() || requested == "auto" { proposal.preset.clone() } else { requested };
             // #451: a stale lead step (a preset the project no longer profiles
             // to) is refused with the mode the project selects now, not turned
@@ -7315,7 +7344,7 @@ fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     let commit = text(input, "commit").trim().to_owned();
     ensure!(!commit.is_empty(), "Name the integration line's commit: {{\"commit\":\"...\"}}");
     ensure!(team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted), "Only an accepted task is marked landed");
-    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on the integration line");
+    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on {}", super::merge_queue::line_name(team));
     let label = actor.label(team);
     if let Some(task) = team.task_mut(id) {
         task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });
@@ -7812,7 +7841,10 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
-                        && (input["roster_word"].as_bool() == Some(true) || failed || (team.settings.lead_restarts_stuck && stuck))),
+                        && (input["roster_word"].as_bool() == Some(true)
+                            || failed
+                            || (team.settings.lead_restarts_stuck && stuck)
+                            || super::lead_plan::lead_relaunches(team, &member_id))),
                 "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
@@ -8172,7 +8204,7 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
     }
     if run_checks && matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
-        let deadline = std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT;
+        let deadline = std::time::Instant::now() + plan::phase_check_timeout();
         let checks: Vec<_> = team.phases.iter().map(|phase| {
             (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
         }).collect();

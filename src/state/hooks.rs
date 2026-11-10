@@ -3036,7 +3036,7 @@ mod tests {
     /// once and its time reaches the record on the next read.
     #[test]
     fn a_heartbeat_never_waits_on_the_state_lock() {
-        let _env = super::super::ENV_LOCK.lock().unwrap();
+        let _env = super::super::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = std::env::temp_dir().join(format!("hgs-heartbeat-hook-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

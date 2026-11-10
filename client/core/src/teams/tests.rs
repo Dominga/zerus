@@ -241,6 +241,42 @@ fn the_list_projects_each_team_with_its_members_and_counts() {
     assert_eq!((long.teams.len(), long.truncated), (view::LIST_KEPT, true));
 }
 
+/// Task #6 (team ede724c4): hgs's list now gives counts and the phase strip
+/// instead of tasks, attention items and proposals. The same teams in the old
+/// shape (a peer's older hgs) and the summary shape show the same cards and
+/// strips.
+#[test]
+fn the_summary_list_shows_the_same_cards_as_the_old_one() {
+    let old = fixture("list");
+    let summary = fixture("list-summary");
+    for item in summary["items"].as_array().unwrap() {
+        for absent in ["tasks", "phases", "attention", "proposals"] {
+            assert!(item.get(absent).is_none(), "{absent}");
+        }
+    }
+    assert_eq!(view::list(&summary), view::list(&old));
+    let team = &view::list(&summary).teams[0];
+    assert_eq!((team.tasks, team.phase, team.phase_done, team.phase_total), (4, 1, 2, 4));
+    // An empty strip and no counts read zero, as an empty old list did.
+    let bare = view::list(&json!({"items":[{"id":"t","task_count":0,"progress":{},"attention_count":0,"open_proposals":0}]}));
+    assert_eq!((bare.teams[0].tasks, bare.teams[0].phase_total, bare.teams[0].attention, bare.teams[0].open_proposals), (0, 0, 0, 0));
+}
+
+/// Task #6 (team ede724c4): a real store's list answered by the old hgs and by
+/// this one decodes to the same cards and strips. It runs only when
+/// HGS_TEST_LIST_OLD and HGS_TEST_LIST_NEW name the two answers.
+#[test]
+fn a_real_list_decodes_the_same_in_both_shapes() {
+    let (Some(old), Some(new)) = (std::env::var_os("HGS_TEST_LIST_OLD"), std::env::var_os("HGS_TEST_LIST_NEW")) else { return };
+    let read = |path: &std::ffi::OsStr| -> Value { serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap() };
+    let (old, new) = (view::list(&read(&old)), view::list(&read(&new)));
+    assert_eq!(old.teams.len(), new.teams.len());
+    for (before, after) in old.teams.iter().zip(&new.teams) {
+        assert_eq!(before, after, "{}", before.name);
+    }
+    println!("same cards for {} teams", new.teams.len());
+}
+
 #[test]
 fn a_status_projects_the_team_tab_and_its_plan_graph() {
     let value = fixture("status");
@@ -1014,13 +1050,14 @@ fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
     let at = start + POLL * 6;
     model.heads(heads(&[(TEAM, 7), ("other", 2)]), at);
     let running = model.next(at).unwrap();
-    assert_eq!(running, TeamRead::List);
+    // Task #14: the watched team's status runs first.
+    assert_eq!(running, TeamRead::Status { team: TEAM.into() });
     model.heads(heads(&[(TEAM, 8), ("other", 2)]), at);
     model.apply(&running, Ok(replies(&running)), at);
     assert_eq!(
         due_reads(&mut model, at),
         ["feed", "inbox", "list", "status", "waiting"],
-        "the list again, at once"
+        "the status again, at once"
     );
     assert_eq!(model.next(at + POLL), None);
     // The safety read after a minute, the inbox and feed included: their
@@ -1965,4 +2002,134 @@ fn task_199_builds_are_read_and_bounded() {
     assert!(group.recent[0].hit && group.recent[0].by == "ui");
     let empty = view::builds("t1", &json!({"folders":[]}));
     assert!(!empty.enabled && empty.folders.is_empty());
+}
+
+const OTHER: &str = "2b863c49-6255-4580-8cd1-82dd023a556a";
+
+fn follow(team: &str) -> TeamsFollow {
+    TeamsFollow { team: Some(team.into()), ..follow_team() }
+}
+
+/// Task #14 (team ede724c4, owner 2026-11-10): the opened tab's status is the
+/// first read, ahead of the list, Waiting and asked-for reads.
+#[test]
+fn the_watched_teams_status_is_read_first() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    // The Teams page has run for a while: the list and Waiting are due.
+    model.follow(TeamsFollow { team: None, ..follow_team() }, start);
+    assert_eq!(model.next(start), Some(TeamRead::List));
+    model.apply(&TeamRead::List, Ok(replies(&TeamRead::List)), start);
+    let later = start + POLL * 2;
+    model.follow(follow_team(), later);
+    assert!(model.request_profile(), "an asked-for read waits too");
+    assert_eq!(model.next(later), Some(TeamRead::Status { team: TEAM.into() }), "the tab's status goes first");
+    let rest: Vec<TeamRead> = std::iter::from_fn(|| model.next(later)).collect();
+    assert_eq!(rest.first(), Some(&TeamRead::Profile { team: TEAM.into() }), "{rest:?}");
+    assert!(rest.contains(&TeamRead::List) && rest.contains(&TeamRead::Waiting { before: None }), "{rest:?}");
+    assert!(!rest.iter().any(|read| matches!(read, TeamRead::Status { .. })), "one status read: {rest:?}");
+}
+
+/// Task #14: a reply about the team no longer watched does not move the newly
+/// watched team's slots: its status is still read at once (it waited a whole
+/// interval - 60 s with the stream's heads - behind that reply).
+#[test]
+fn a_stale_reply_does_not_delay_the_new_teams_status() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow(OTHER), start);
+    let stale = model.next(start).unwrap();
+    assert_eq!(stale, TeamRead::Status { team: OTHER.into() });
+    // The owner opens another team while that read runs.
+    model.follow(follow(TEAM), start);
+    let out = model.apply(&stale, Ok(replies(&stale)), start);
+    assert!(out.is_empty(), "nothing about the team no longer watched: {out:?}");
+    assert_eq!(model.next(start), Some(TeamRead::Status { team: TEAM.into() }));
+    // Beside a read in flight the poller asks for the status alone.
+    let mut model = TeamsModel::default();
+    model.follow(follow(OTHER), start);
+    let inbox = std::iter::from_fn(|| model.next(start)).find(|read| matches!(read, TeamRead::Inbox { .. }));
+    assert!(inbox.is_some());
+    model.follow(follow(TEAM), start);
+    assert_eq!(model.next_status(start), Some(TeamRead::Status { team: TEAM.into() }));
+    assert_eq!(model.next_status(start), None, "once");
+}
+
+/// Task #14: a tab opened again shows the views held for its team at once,
+/// the fresh read sends nothing when it found the same, and opening it costs
+/// the same reads as before: no extra hgs process.
+#[test]
+fn a_reopened_tab_shows_its_held_team_at_once() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow(TEAM), start);
+    let first = poll_once(&mut model, start, replies);
+    assert!(first.iter().any(|(key, _)| *key == team_key("team", TEAM)));
+    // Another team, then this one again.
+    model.follow(follow(OTHER), start);
+    poll_once(&mut model, start, replies);
+    let shown = model.follow(follow(TEAM), start);
+    let keys: Vec<&str> = shown.iter().map(|(key, _)| key.as_str()).collect();
+    assert!(keys.contains(&team_key("team", TEAM).as_str()), "the held status shows at once: {keys:?}");
+    assert!(keys.contains(&team_key("inbox", TEAM).as_str()), "{keys:?}");
+    assert!(keys.iter().any(|key| key.starts_with(&format!("team:{OTHER}"))), "the other team's views end: {keys:?}");
+    // The fresh reads run as for a first open; an unchanged reply sends nothing.
+    let mut reads = Vec::new();
+    let mut out = Vec::new();
+    while let Some(read) = model.next(start) {
+        out.extend(model.apply(&read, Ok(replies(&read)), start));
+        reads.push(read);
+    }
+    let team_reads = reads.iter().filter(|read| read.team() == Some(TEAM)).count();
+    assert_eq!(team_reads, 3, "status, inbox and feed once each: {reads:?}");
+    assert!(!out.iter().any(|(key, _)| *key == team_key("team", TEAM) || *key == team_key("inbox", TEAM)), "{out:?}");
+    // Nothing more until the interval.
+    assert_eq!(model.next(start + POLL - Duration::from_millis(1)), None);
+}
+
+/// Task #14: the poller runs the opened tab's status beside a read of the
+/// team no longer watched (a slow SSH read) instead of waiting behind it.
+#[test]
+fn the_poller_never_holds_a_tab_behind_another_teams_read() {
+    use std::sync::{Arc, Mutex};
+    let started = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = Arc::clone(&started);
+    let (tx, rx) = mpsc::channel();
+    let poller = super::TeamsPoller::spawn_with(
+        ComputerId::local(),
+        Box::new(move |read: &TeamRead| {
+            log.lock().unwrap().push(format!("{read:?}"));
+            // Every read of the first team after its status takes 5 s.
+            if read.team() == Some(OTHER) && !matches!(read, TeamRead::Status { .. }) {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+            Ok(replies(read))
+        }),
+        Box::new(move |change| {
+            let _ = tx.send(change);
+        }),
+    )
+    .unwrap();
+    poller.follow(TeamsFollow { list: false, waiting: false, team: Some(OTHER.into()), catalog: false });
+    let wait_key = |key: String, within: Duration| -> Option<Duration> {
+        let asked = Instant::now();
+        while asked.elapsed() < within {
+            if let Ok(Change::Teams { key: got, .. }) = rx.recv_timeout(Duration::from_millis(50)) {
+                if got == key {
+                    return Some(asked.elapsed());
+                }
+            }
+        }
+        None
+    };
+    assert!(wait_key(team_key("team", OTHER), Duration::from_secs(10)).is_some());
+    // Its slow inbox read is in flight now; the owner opens the other tab.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !started.lock().unwrap().iter().any(|read| read.starts_with("Inbox")) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    poller.follow(TeamsFollow { list: false, waiting: false, team: Some(TEAM.into()), catalog: false });
+    let took = wait_key(team_key("team", TEAM), Duration::from_secs(10)).expect("the tab's team");
+    assert!(took < Duration::from_secs(2), "the tab waited {took:?} behind the other team's read");
+    drop(poller);
 }

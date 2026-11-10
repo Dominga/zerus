@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { steadyTitle } from "../lib/steady-title";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, AgentLogo, Icon } from "../lib/icons";
@@ -447,10 +447,18 @@ export function rowChips(s: Session, at = Date.now()): RowChip[] {
 export function RowChips(props: { session: Session; room?: number; onChip?: (kind: "services" | "background" | "git") => void }) {
   const s = () => props.session;
   const click = (kind: RowChip["kind"]) => (e: MouseEvent) => { e.stopPropagation(); props.onChip?.(kind === "more" ? "git" : kind); };
-  const chips = () => fitChips(rowChips(s(), now() * 1000), props.room ?? Infinity, { tip: s().git ? gitTooltip(s(), now() * 1000) : "" });
+  // Task #22 (team ede724c4): the chips stay the same elements while what
+  // they show is unchanged, as the Git marks did: a clock tick re-renders none.
+  const chips = createMemo(() => fitChips(rowChips(s(), now() * 1000), props.room ?? Infinity, { tip: s().git ? gitTooltip(s(), now() * 1000) : "" }), [], {
+    equals: (a, b) => a.length === b.length && a.every((chip, i) => chip.kind === b[i].kind && chip.icon === b[i].icon && chip.count === b[i].count && chip.tone === b[i].tone && chip.tip === b[i].tip),
+  });
+  // Task #22 (team ede724c4): the chips' frame says the whole Git state
+  // (branch, upstream, remote evidence), as the card's Git marks did before
+  // task 195 made them chips; each chip keeps its own count's tooltip.
+  const tip = steadyTitle(() => (s().git ? gitTooltip(s(), now() * 1000) : undefined));
   return (
     <Show when={chips().length}>
-      <span class="gmarks">
+      <span class="gmarks" title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave}>
         <For each={chips()}>{(chip) => (
           <button type="button" class={`gmark chip t-${chip.tone}`} classList={{ counted: !!chip.count }} data-chip={chip.kind} title={chip.tip} onClick={click(chip.kind)} onDblClick={(e) => e.stopPropagation()}>
             <Icon name={chip.icon} size={16} />
@@ -658,6 +666,12 @@ export function SessionCard(props: {
     observer.observe(el);
     onCleanup(() => observer.disconnect());
   };
+  // Task #22 (team ede724c4, zerus-92hkz): the full row tooltip is computed
+  // when the pointer enters, as Qt computes a tooltip on hover, never on each
+  // refresh: its summary and timers move every tick, and WebKitGTK restarts
+  // a native tooltip whose title changes.
+  const [rowTip, setRowTip] = createSignal(untrack(() => fullTooltip(s(), props.teamSummary)));
+  const freshTip = () => setRowTip(fullTooltip(s(), props.teamSummary));
   return (
     <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
       "sc-team-lead": !!props.teamSummary, "sc-member": !!props.member, "sc-member-first": !!props.teamFirst, "sc-member-last": !!props.teamLast }}
@@ -667,7 +681,7 @@ export function SessionCard(props: {
       // Task 425: a member's card is an ordinary card inside the tree's indent
       // (the stylesheet places it); the connector runs in the indent beside it.
       style={props.member ? undefined : { left: "2px" }} data-emphasis={emphasis(s())}
-      title={fullTooltip(s(), props.teamSummary)}>
+      title={rowTip()} onPointerEnter={freshTip}>
       <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
         {/* Supervision and Mute are independent: the arrow before the name,

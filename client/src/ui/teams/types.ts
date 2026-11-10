@@ -110,6 +110,8 @@ export interface NewTeamView {
   settings: Record<string, unknown>;
   members: DraftMember[];
   tasks: TaskView[];
+  /** Owner, 2026-11-09: the draft's phases (Phases page). */
+  phases?: PhaseView[];
   draft: DraftView;
   validation: ValidationView;
   updated: number;

@@ -20,6 +20,10 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24; options: Record<string, unknown>; textarea?: HTMLTextAreaElement;
   constructor(options: Record<string, unknown>) { this.options = options; }
   loadAddon() {} onData() {} onBinary() {} onResize() {} attachCustomKeyEventHandler() {} write(_bytes: unknown, done?: () => void) { done?.(); }
+  // The team-notice folder (terminal-notices.ts, fa2fd9a01) reads these.
+  buffer = { active: { baseY: 0, cursorY: 0, length: 0, getLine: () => undefined } };
+  onWriteParsed() { return { dispose() {} }; } onRender() { return { dispose() {} }; } onScroll() { return { dispose() {} }; }
+  registerMarker() { return undefined; } registerDecoration() { return undefined; }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
   focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste() {}
 } }));
@@ -269,13 +273,15 @@ describe("the header's keep-warm mark (zerus-yacns)", () => {
   const on = (until: number | null, revision = 2) => ({ enabled: true, until, revision, state: "waiting", next_at: null, reason: "", turn_active: false });
   const mark = () => host.querySelector<HTMLButtonElement>(".detail-head .dh-row2 .dh-warm");
 
-  it("shows the bolt and the time left, or an infinity sign for Always, next to the model label", async () => {
+  it("shows the bolt and the time left, or an infinity sign for Always, at the row's end", async () => {
     const row = warmRow(on(now() + 2 * 3600 - 30)); await open(row);
     const shown = mark()!;
     expect(shown.textContent).toBe("1 h 59 m");
     expect(shown.getAttribute("aria-label")).toBe("Keep cache warm: 1 h 59 m left");
     expect(shown.title.split("\n")[0]).toBe("Keep cache warm: 1 h 59 m left");
-    expect(shown.nextElementSibling?.classList.contains("dh-model")).toBe(true);
+    // Owner, 2026-11-09 (07e0ddacb): the header no longer repeats the model.
+    expect(shown.nextElementSibling).toBeNull();
+    expect(host.querySelector(".detail-head .dh-model")).toBeNull();
     put({ ...row, keep_warm: on(null, 3) }); await flush();
     expect(mark()).toBe(shown);
     expect([mark()!.textContent, mark()!.getAttribute("aria-label")]).toEqual(["∞", "Keep cache warm: Always"]);

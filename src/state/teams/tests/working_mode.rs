@@ -152,13 +152,39 @@ fn a_team_whose_settings_disagree_with_its_project_names_what_is_missing() {
     // The proposed mode clears it.
     apply(&mut team.settings, SHARED_FOLDER, "main").unwrap();
     assert!(disagreement(&team).is_none());
-    // A project that cannot be profiled has no proposal.
+    // A project that cannot be profiled has no proposal, and says why.
     team.folder = tempfile::tempdir().unwrap().path().display().to_string();
     assert!(proposal_of(&team).is_none());
+    assert_eq!(propose(Path::new(&team.folder)).unwrap_err(), ProfileError::NotRepository);
 }
 
 fn proposal_of(team: &Team) -> Option<Proposal> {
-    propose(Path::new(&team.folder))
+    propose(Path::new(&team.folder)).ok()
+}
+
+/// Task #32 (team ede724c4): a Git too slow to answer (stubbed: every read
+/// runs out of time) is said, never read as "not a repository": propose
+/// returns `Slow` naming the read, the cache says so and is read again in two
+/// minutes; once Git answers, the same folder profiles as before.
+#[test]
+fn a_slow_git_is_a_slow_profile_never_no_repository() {
+    let dir = code_repository(true);
+    super::SLOW_GIT.with(|slow| slow.set(true));
+    let slow = propose(dir.path());
+    super::SLOW_GIT.with(|slow| slow.set(false));
+    let error = slow.unwrap_err();
+    assert!(matches!(&error, ProfileError::Slow { read, seconds } if read == "rev-parse" && *seconds == 30), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("Git was too slow to read it") && text.contains("git rev-parse") && text.contains("read again later"), "{text}");
+    let now = 10_000.0;
+    let cached = slow_cache(&error, now);
+    assert_eq!(cached["preset"], "");
+    assert_eq!(cached["slow"], text);
+    let due = cached["checked_at"].as_f64().unwrap() + super::super::dispatcher::MODE_CHECK_SECONDS;
+    assert_eq!(due, now + SLOW_RETRY_SECONDS, "read again in two minutes");
+    // Git answers again: the profile is read.
+    let proposal = propose(dir.path()).expect("a profile once Git answers");
+    assert_eq!(proposal.preset, BRANCH_PIPELINE);
 }
 
 #[test]

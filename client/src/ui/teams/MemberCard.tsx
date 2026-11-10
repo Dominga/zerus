@@ -8,7 +8,7 @@ import { composer } from "../../store/composer";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
 import { useModel, windowPort } from "./ProposalCards";
 import { TeamActions } from "./actions";
-import { TextDialog } from "./TeamActions";
+import { QuestionAnswer, TextDialog } from "./TeamActions";
 import { SwapMemberDialog } from "./SwapMemberDialog";
 import { roleStyle } from "./roles";
 import { memberProgress, memberStateColor, unreadBadge, type MemberStatus } from "./team-model";
@@ -298,6 +298,13 @@ export function MemberCard(props: {
             </div>
           </div>
         </Show>
+        {/* Owner, 2026-11-09: a member's question shows in one place only, its card. */}
+        <For each={(props.team.tasks ?? []).filter((task) => task.assignee === props.member.id).flatMap((task) => (task.questions ?? []).map((question) => ({ task, question })))}>{(entry) => (
+          <div class="team-member-permission team-member-question" data-member={props.member.id} onClick={stop}>
+            <div class="team-member-line"><span class="team-chip warn">{tr("Question")}</span><span class="dim ell">#{entry.task.id} {entry.task.title}</span></div>
+            <QuestionAnswer computer={props.computer} team={props.team as never} task={entry.task} question={entry.question} />
+          </div>
+        )}</For>
         <Show when={read().notice}><div class="danger team-member-notice" role="status">{read().notice}</div></Show>
       </div>
       <Show when={menu()}>{(at) => (

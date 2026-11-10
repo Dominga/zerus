@@ -580,6 +580,6 @@
 
 /* Owner, 2026-11-09 (package 170 check): with real button styling the cold actions ran past the card edge. Compact actions, a shrinking "from" hint, the line clipped inside the card. Unlayered: packaged layer order. */
 .sc-l3 { min-width: 0; overflow: hidden; }
-.sc-cold { gap: 4px; margin-left: 4px; }
+.sc-cold { flex: none; gap: 4px; margin-left: 4px; }
 .sc-cold button { height: 18px; padding: 0 6px; font-size: 11px; line-height: 16px; border-radius: 5px; }
 .sc-from { flex: 0 1 auto; min-width: 0; max-width: 34%; }

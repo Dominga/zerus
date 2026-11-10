@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import type { TeamBuildsView, TeamProfileView, TeamTimelineView, TeamView } from "../../types";
@@ -68,6 +68,13 @@ afterEach(async () => {
   dispose?.(); dispose = undefined; await settle();
   document.body.replaceChildren(); vi.clearAllMocks();
 });
+
+// Task #22 (team ede724c4): the first import of a large module graph is
+// transformed inside the 5 s test timeout, which the full client run on a
+// loaded machine exceeded ("Test timed out in 5000ms" only under that run).
+// It is transformed once here, with its own bound; the tests' own imports then
+// resolve from the module cache and test exactly what they did.
+beforeAll(async () => { await Promise.all([import("./profile-page"), import("./plan-panels")]); }, 60_000);
 
 async function mountProfile() {
   const { ProfilePage } = await import("./profile-page");

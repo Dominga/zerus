@@ -3084,11 +3084,14 @@ belongs to the attempt (or stage run) handed to it.
 - A lead's message to a member that names a task (`#N`, `task N`, `for N:`
   for one of the team's tasks) is bound to that task's attempt when the task is
   handed to that member (the attempt's `lead_messages`, at most 20, with a
-  `lead_message` event); otherwise it is refused, naming the task's state and
-  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
-  `hgs send` from the lead's own session to a member's session and for the
-  lead's `hgs team message` (a broadcast naming a task is refused). A message
-  naming no task goes through; it carries no work. Answers and decisions keep
+  `lead_message` event). Task #30 (2026-11-10): a task the text only mentions
+  and the member does not hold is a reference: the message goes, its answer
+  names it (`references`, `reference_note`). Only a message whose `"task"`
+  field names a task the member does not hold is refused, naming the task's
+  state and the hand-out to use (`hgs team retry`, `hgs team reassign`). This
+  holds for `hgs send` from the lead's own session to a member's session and
+  for the lead's `hgs team message`. A message naming no task goes through; it
+  carries no work. Answers and decisions keep
   their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
   owner's messages and Zerus's own sends are never checked.
 - A team member's `hgs run` needs its open attempt or stage run; it may name
@@ -3760,6 +3763,45 @@ whole record (`layout` 1). An older hgs cannot read a migrated team. Its
 shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
 answers "Invalid team record" and never writes the team back without its
 tasks. Every hgs and desktop on the computer is updated together.
+
+### The polled team list and inbox are small
+
+The desktop follows `hgs team list` of every computer, peers over SSH
+included, and reads it again whenever a team's revision moves. Since task #6
+(team ede724c4) each item carries only what the session list's cards and strips
+show. Tasks, phase records, attention items, proposals and each member's
+queue, services, jobs and question are in `hgs team status`. Each item has:
+
+- `id`, `name`, `status`, `project`, `folder`, `lead`, `revision`, `updated`;
+- `plan_mode` and `phase_modes` (every phase's mode, phase 1 included);
+- `members`: each one's `id`, `role`, `agent`, `state`, `session` (`host`,
+  `name`, `run_id`, `conversation_id`), `session_state` and `state_reason`;
+- `task_count`: the tasks the request covers (cancelled ones only with
+  `include_cancelled`, as the desktop asks);
+- `progress`: the phase strip over those tasks. `phase` is the lowest phase
+  with an unfinished task (accepted and cancelled count as finished), else the
+  last; `phase_done` and `phase_total` count its tasks; `phases_done` and
+  `phases_total` count the phases. A team with no task has all five at 0;
+- `accepted` (archived phases included), `submitted`, `in_review`, `in_test`;
+- `attention_count` (the owner's attention items) and `open_proposals` (the
+  lead's open proposals);
+- `waiting_for_lead`, `pending_phase`, `stuck_scope`, `auto_accept` and
+  `parent` (`team` and `task` of a sub-team, else null).
+
+On the store copy of 2026-11-10 (21 teams), the list fell from 352 KB to 44 KB.
+A desktop that follows a peer with an older hgs still reads that peer's
+`tasks`, `attention` and `proposals` arrays and counts them itself. An older
+desktop reading this hgs's list shows 0 tasks, attention items and proposals
+until it is updated.
+
+`hgs team inbox` resolves its caller once. A member's own call (`{}`) finds
+its team through the members projection (`team_rule_members`), so only teams
+whose member list names the session are read. Only when the projection names
+none are all running teams read, as before. On Windows the ancestry check that
+proves the session reads one process table for the whole walk, not one per
+ancestor; each ancestor is still verified. The owner's read of a named team
+(`{"team"}`) has no session identity to prove. Proposals are settled and
+items are built only for the lead, a sub-lead or the owner.
 
 ### A stalled lead tells the owner
 
@@ -10480,6 +10522,28 @@ task/commit pairs and every accepted task's `unlanded` state and why (queued,
 testing, conflict with its `resolve` task, or no landing queued); the lead's
 inbox lists each with an `unlanded` item, and an accept answers with its
 `landing`.
+
+#### Landing by hand on a named line (task #19)
+
+Owner, 2026-11-10: a lead who reviews and merges by hand names the team's
+line, `{"manual_line":"BRANCH"}` through `hgs team settings` (the lead may set
+it; the name is a plain branch name). With it:
+
+- the merge queue is off for the team whatever the project's tests file says:
+  an accept answers `accepted`, queues no landing and runs no suites;
+- `hgs team landed` takes a commit on `BRANCH` of the team folder's
+  repository, whatever that folder has checked out (it may be on another
+  team's detached line), and refuses one off it naming the line; accepted work
+  whose commit reaches the line is recorded as landed by itself (task #443);
+- members merge `BRANCH` with git-merge-lead, and hand-outs bring a member's
+  branch up to it (task #15). Without a manual line, a team folder on no
+  branch merges the team's `base_branch` (else its recorded line) instead of
+  refusing "The folder is on no branch"; with none named the refusal says to
+  set `manual_line`;
+- the playbook's rules (a), (b) and (h) raise nothing, nor for a team created
+  with working mode `none`;
+- the lore takes a task's landed commit, else its accepted report's commit,
+  when Zerus made none: no "accepted with no commit Zerus made" item.
 
 #### Nothing blocks creating a team (task #13)
 

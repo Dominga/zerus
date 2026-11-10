@@ -428,6 +428,19 @@ fn fill_folder(team: &Team, member: &mut Member, no_folder_given: bool) {
             super::dispatcher::default_folder(&member.agent)
         };
     }
+    deepseek_own_folder(team.settings.folder_policy, team.settings.worktrees_forbidden, member, !no_folder_given);
+}
+
+/// Task #35 (team ede724c4): a DeepSeek member may work only in its own
+/// folder, so one the plan gives no folder takes its own clone under every
+/// folder policy (the default `lead` policy left it shared, which its start
+/// now refuses). A project that leaves no own folder (the shared policy, or
+/// worktrees and clones forbidden) keeps it shared: the preflight then names
+/// the refusal and its action.
+fn deepseek_own_folder(policy: FolderPolicy, worktrees_forbidden: bool, member: &mut Member, folder_given: bool) {
+    if member.agent == "dsh" && !folder_given && member.directory.is_empty() && member.session.is_none() && policy != FolderPolicy::Shared && !worktrees_forbidden {
+        member.folder = MemberFolder::Clone;
+    }
 }
 
 /// U49: a role's own words as a member id: "Backend" gives "backend", "QA
@@ -875,6 +888,9 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
                 };
             }
         }
+    }
+    for (member, value) in members.iter_mut().skip(1).zip(input["members"].as_array().into_iter().flatten()) {
+        deepseek_own_folder(policy, team.settings.worktrees_forbidden, member, value.get("folder").is_some());
     }
     // The roadmap (spec section 10): phases 2..N in order, all Draft. The owner
     // approves each one strictly after the phase before it ended.
@@ -5856,6 +5872,9 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                                     };
                                 }
                             }
+                        }
+                        for (member, value) in members.iter_mut().zip(value.as_array().into_iter().flatten()).filter(|(member, _)| member.id != team.lead) {
+                            deepseek_own_folder(team.settings.folder_policy, team.settings.worktrees_forbidden, member, value.get("folder").is_some());
                         }
                         if let Some(lead) = lead {
                             members.retain(|member| member.id != lead.id);

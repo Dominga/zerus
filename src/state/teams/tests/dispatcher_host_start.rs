@@ -9,6 +9,20 @@ use crate::state::teams::model::{Member, MemberFolder};
 /// The exact failure team 33fbafeb saw for its `hgs` member on 2026-11-05.
 const STILL_STARTING: &str = "hgs: DeepSeek host is still starting; retry opening the session";
 
+/// Task #35: a DeepSeek member starts only in its own clone (as hgs and ui2
+/// had in team 33fbafeb); the computer's catalog says it is there, on the
+/// member's branch.
+fn own_clone(args: &[&str]) -> Option<std::process::Output> {
+    if args.first() != Some(&"worktrees") {
+        return None;
+    }
+    let path = args[args.iter().position(|arg| *arg == "--path")? + 1];
+    let name = Path::new(path).file_name()?.to_str()?;
+    let (short, member) = name.rsplit_once("-team-")?.1.split_once('-')?;
+    let catalog = json!({"state":"ok","selected_root":path,"worktrees":[{"path":path,"branch":format!("team/{short}/{member}")}]});
+    Some(fake_output(0, &catalog.to_string(), ""))
+}
+
 /// A team with two DeepSeek members on one computer (one host), each with a
 /// ready task, as hgs and ui2 were in team 33fbafeb.
 fn deepseek_team() -> Team {
@@ -19,7 +33,7 @@ fn deepseek_team() -> Team {
             id: id.into(),
             role: format!("DeepSeek {id}"),
             agent: "dsh".into(),
-            folder: MemberFolder::Shared,
+            folder: MemberFolder::Clone,
             computer: "devbox".into(),
             ..Default::default()
         });
@@ -64,6 +78,9 @@ fn a_member_whose_deepseek_host_was_still_starting_starts_once_it_is_up() {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let (up, record) = (host_up.clone(), seen.clone());
         set_fake_hgs(Some(Box::new(move |computer, args: &[&str], _| {
+            if let Some(output) = own_clone(args) {
+                return Ok(output);
+            }
             assert_eq!((computer, args[0]), ("devbox", "dsh"));
             let name = args[args.iter().position(|arg| *arg == "-n").unwrap() + 1].to_owned();
             record.borrow_mut().push(name);
@@ -98,7 +115,10 @@ fn a_deepseek_host_that_never_comes_up_fails_the_member_once() {
         stored(&mut store, &t);
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
         let count = calls.clone();
-        set_fake_hgs(Some(Box::new(move |_, _: &[&str], _| {
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            if let Some(output) = own_clone(args) {
+                return Ok(output);
+            }
             count.set(count.get() + 1);
             Ok(fake_output(1, "", STILL_STARTING))
         })));
@@ -138,7 +158,10 @@ fn any_other_start_failure_reaches_the_inbox_at_once() {
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let t = deepseek_team();
         stored(&mut store, &t);
-        set_fake_hgs(Some(Box::new(|_, _: &[&str], _| {
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| {
+            if let Some(output) = own_clone(args) {
+                return Ok(output);
+            }
             Ok(fake_output(1, "", "hgs: Official DeepSeek host failed to start. Private log: host.log"))
         })));
         start(&mut store, &t.id, "hgs");

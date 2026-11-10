@@ -4683,6 +4683,37 @@ pub(crate) fn profile_mode(agent: &str, profile: &str) -> Option<&'static str> {
 /// B4/F10: a sandboxed agent's folder is a clone (its `.git` is inside, so
 /// merge and fetch work there); other agents get a worktree. Used when a plan
 /// leaves the folder to the team (folder policy auto).
+/// Task #35 (team ede724c4, 2026-11-10): a DeepSeek (dsh) session's sandbox
+/// gives the folder it works in Windows' inheritable Low integrity label
+/// (Zerus grants it WRITE_OWNER there, which setting a label needs). Every
+/// program built there afterwards starts at Low and is refused outside it:
+/// a qa member of team 33fbafeb shared D:\Tools\Zerus, the owner's checkout
+/// and the team's integration folder, and 2047 tests, the lead's runs and the
+/// Tauri build script failed with Access denied. So a DeepSeek member works
+/// only in its own Zerus-made folder (its clone or worktree): never a shared
+/// folder, and never as the lead, who works in the team folder. A member that
+/// has a session (adopted, or started before) is not launched; the check is
+/// for the start Zerus makes. None when the member may start; else the
+/// refusal with the one action.
+pub(crate) fn deepseek_folder_problem(team: &Team, member: &Member) -> Option<String> {
+    if member.agent != "dsh" || member.state == MemberState::Removed || member.session.is_some() {
+        return None;
+    }
+    let folder = if member.directory.is_empty() { team.folder.as_str() } else { member.directory.as_str() };
+    const WHY: &str = "a DeepSeek (dsh) session's sandbox gives the folder it works in Windows' Low integrity label, and every program built there afterwards is refused outside it";
+    if member.id == team.lead {
+        return Some(format!("{}: the lead works in the team folder {folder}, and {WHY}. Choose another agent for the lead.", member.id));
+    }
+    if member.folder != MemberFolder::Shared {
+        return None;
+    }
+    Some(format!(
+        "{id}: {WHY}, so it may not share {folder}. Give it its own clone: {{\"team\":\"{team}\",\"members_update\":[{{\"id\":\"{id}\",\"folder\":\"clone\"}}],\"request_id\":\"UUID\"}} | hgs team settings --json (or choose another agent for it).",
+        id = member.id,
+        team = team.id
+    ))
+}
+
 pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     if agent == "dsh" {
         MemberFolder::Clone
@@ -5398,6 +5429,11 @@ fn worktree_busy(stderr: &str) -> bool {
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
+    // Task #35: a DeepSeek member starts only in its own Zerus-made folder;
+    // nothing is created, granted or launched otherwise.
+    if let Some(problem) = deepseek_folder_problem(team, member) {
+        anyhow::bail!("{problem}");
+    }
     let destination = member_folder_path(team, member)?;
     // C11: a member on another computer works in a folder there; this
     // computer can neither see nor check it, so the checks run there.

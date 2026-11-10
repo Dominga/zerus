@@ -179,6 +179,108 @@ pub(crate) fn diagnose(output: &str, build: &[PathBuf], temp: Option<&Path>) -> 
     Some(message(&root, &folder, temp, true))
 }
 
+/// Task #35 (team ede724c4): a folder several sessions share - the team
+/// folder, its integration folder, a shared member's folder - that carries a
+/// Low label: `root` is the folder that carries it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LowFolder {
+    pub folder: PathBuf,
+    pub root: PathBuf,
+    pub what: String,
+}
+
+impl LowFolder {
+    /// What it breaks and the owner's one step.
+    pub(crate) fn text(&self) -> String {
+        let root = self.root.display().to_string();
+        let under = if self.root == self.folder { String::new() } else { format!(" (it holds {})", self.folder.display()) };
+        format!(
+            "{} {root}{under} carries Windows' Low integrity label, so every program built there starts at Low and is refused \
+             outside it (Access is denied, os error 5); a DeepSeek session that worked there set it. Owner step: in a terminal \
+             (no administrator needed) run\n  icacls \"{root}\" /setintegritylevel (OI)(CI)M /T /C /Q",
+            capitalized(&self.what)
+        )
+    }
+
+    pub(crate) fn json(&self) -> serde_json::Value {
+        let root = self.root.display().to_string();
+        serde_json::json!({"folder": self.folder.display().to_string(), "labeled": root, "what": self.what, "text": self.text(),
+            "owner_step": format!("icacls \"{root}\" /setintegritylevel (OI)(CI)M /T /C /Q")})
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// How long one folder's label reading is reused: status is polled every few
+/// seconds and labels change only by a person's step.
+#[cfg(not(test))]
+const LABEL_CACHE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `labeled_root`, read at most once a minute per folder (tests read live).
+fn labeled_root_cached(path: &Path) -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        labeled_root(path)
+    }
+    #[cfg(not(test))]
+    {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        type Cache = Mutex<HashMap<PathBuf, (std::time::Instant, Option<PathBuf>)>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some((at, found)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path) {
+            if at.elapsed() < LABEL_CACHE {
+                return found.clone();
+            }
+        }
+        let found = labeled_root(path);
+        let mut held = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.len() >= 256 {
+            held.clear();
+        }
+        held.insert(path.to_path_buf(), (std::time::Instant::now(), found.clone()));
+        found
+    }
+}
+
+/// Task #35: the team's shared folders on this computer that carry a Low
+/// label: its folder, its integration folder and each shared member's folder
+/// (a member's own clone or worktree is its own, Low by design for a DeepSeek
+/// member). Reads labels only; the owner's step changes them.
+pub(crate) fn low_shared_folders(team: &super::model::Team) -> Vec<LowFolder> {
+    use super::model::{MemberFolder, MemberState};
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+    if !team.folder.trim().is_empty() {
+        candidates.push((PathBuf::from(team.folder.trim()), "the team folder".to_owned()));
+    }
+    let integration = team.settings.integration_folder.trim();
+    if !integration.is_empty() {
+        candidates.push((PathBuf::from(integration), "the integration folder".to_owned()));
+    }
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.computer.is_empty() && member.folder == MemberFolder::Shared) {
+        if !member.directory.trim().is_empty() {
+            candidates.push((PathBuf::from(member.directory.trim()), format!("{}'s shared folder", member.id)));
+        }
+    }
+    let key = |path: &Path| path.display().to_string().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let mut seen: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    for (folder, what) in candidates {
+        if seen.contains(&key(&folder)) {
+            continue;
+        }
+        seen.push(key(&folder));
+        if let Some(root) = labeled_root_cached(&folder) {
+            found.push(LowFolder { folder, root, what });
+        }
+    }
+    found
+}
+
 /// The run's temporary folder: TEMP as the run's environment sets it, else
 /// this process's.
 pub(crate) fn run_temp(env: &[(String, String)]) -> PathBuf {

@@ -136,7 +136,15 @@ fn the_serialized_shared_contract_projection_is_current() {
     if std::env::var_os("ZERUS_UPDATE_FIXTURES").is_some() {
         std::fs::write(fixture_file(), &current).unwrap();
     }
-    assert_eq!(std::fs::read_to_string(fixture_file()).unwrap(), current);
+    // Task #33: compared as text. A Windows checkout with Git's autocrlf
+    // holds the fixture with CRLF, and the bytes then differed although the
+    // contents are equal.
+    assert_eq!(
+        std::fs::read_to_string(fixture_file())
+            .unwrap()
+            .replace("\r\n", "\n"),
+        current
+    );
 }
 
 #[test]

@@ -6,9 +6,12 @@
 // leave this process: no message text, paths or other record content.
 import {openSync, readSync, fstatSync, closeSync} from 'node:fs';
 import {zstdDecompressSync} from 'node:zlib';
+import {createHash} from 'node:crypto';
 
 const ZSTD_MAGIC = 0xFD2FB528;
 const WINDOW = 64 * 1024 * 1024;
+// The bytes just before a committed offset identify it: a rewrite of them means read again.
+const TAIL_BYTES = 4096;
 
 // The end of each complete frame from `start`, stopping before a torn one.
 // A structurally invalid frame throws.
@@ -93,15 +96,14 @@ function readLog(file, sinceDay, budget, deadline) {
       // the next frame and is read again from its start later.
       if (!text.endsWith('\n')) continue;
       for (const line of text.split('\n')) {
-        if (line.includes('"session/end-seed"')) {
-          const record = JSON.parse(line);
-          if (record.type === 'session/end-seed' && record.data?.inherited === true) {
-            pending = {}; pendingCut = true;
-          }
+        // The substrings only skip lines that cannot matter; the parsed type
+        // decides, since a message can quote either type in its own content.
+        if (!line.includes('"session/end-seed"') && !line.includes('"assistant/message"')) continue;
+        const record = JSON.parse(line);
+        if (record.type === 'session/end-seed') {
+          if (record.data?.inherited === true) { pending = {}; pendingCut = true; }
           continue;
         }
-        if (!line.includes('"assistant/message"')) continue;
-        const record = JSON.parse(line);
         const usage = record.data?.usage;
         if (record.type !== 'assistant/message' || !usage || typeof usage !== 'object' || !Number.isFinite(record.time)) continue;
         const day = localDay(record.time);
@@ -123,6 +125,18 @@ function readLog(file, sinceDay, budget, deadline) {
       if (Date.now() > deadline) break;
     }
     result.done = result.offset === size;
+    if (result.offset > file.offset) {
+      const tail = Buffer.alloc(Math.min(TAIL_BYTES, result.offset));
+      let got = 0;
+      while (got < tail.length) {
+        const n = readSync(fd, tail, got, tail.length - got, result.offset - tail.length + got);
+        if (n === 0) break;
+        got += n;
+      }
+      result.read += got;
+      result.tail = createHash('sha256').update(tail.subarray(0, got)).digest('hex');
+      result.tail_len = got;
+    }
     return result;
   } catch (error) {
     return {...result, error: error?.code ? 'read' : 'format'};

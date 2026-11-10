@@ -5400,6 +5400,8 @@ reading:
   because an expiring grant looks the same.
 - An interval without readings is counted on the day it ends, and the panel
   names the previous reading.
+- A currency missing from one reading keeps its previous baseline, so its
+  spend counts from its own last reading.
 
 The journal keeps the last reading and up to 400 days of daily totals. Days
 follow the computer's local time.
@@ -5417,7 +5419,9 @@ computer's native session logs (`DSH_HOME/sessions`). hgs only reads these logs:
   how many logs could not be read and are not counted.
 - A forked session counts only after its inherited prefix (`session/end-seed`
   with `inherited: true`). Only each session's current format generation
-  counts, and a replaced or shortened log is read again from its start.
+  counts. A log is read again from its start when it is replaced or shortened,
+  rewritten without growing, or rewritten in its first 4 KiB or in the 4 KiB
+  before the counted offset.
 - Logs untouched for 31 days are not opened.
 
 Other computers and tools using the same key are not included. No cost is

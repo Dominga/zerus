@@ -5,6 +5,11 @@ The outer process always starts a fresh private D-Bus, Xvfb and allowlisted
 HOME/XDG/TMPDIR/TMUX_TMPDIR. Build the app with the switch identity first:
 TAURI_CONFIG='{"identifier":"com.hgdev.hgs-tray"}' cargo build --locked     --manifest-path client/src-tauri/Cargo.toml --features media,tauri/custom-protocol
 Then run this script with --app and a new --output directory.
+
+It runs only inside bwrap with a private /tmp, network and /run/user, and
+refuses to start the app while a canonical GUI guard is reachable: that guard
+(/tmp/com.hgdev.hgs-tray-<uid>, instance_guard.rs) ignores HOME and TMPDIR,
+so an unsandboxed start forwards to the person's running GUI (zerus-06hh0).
 """
 import os, pathlib, subprocess, tempfile, json, importlib.util, shutil, re, time, threading, http.server, urllib.parse, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -29,6 +34,17 @@ async function resource(url) {
  await Promise.all(['tauri://localhost/index.html','asset://localhost/private-fixture','ipc://localhost/probe','zerus-file://localhost/private-fixture','file:///private-fixture'].map(resource));
  await fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:location.pathname,checks,scriptPopupBlocked,rects:Object.fromEntries([...document.querySelectorAll('a,button')].map(el=>{const r=el.getBoundingClientRect();return [el.id,{x:r.x,y:r.y,width:r.width,height:r.height}]}))})});
 })();</script>'''
+
+def canonical_guard():
+    """instance_guard::directory(): a fixed /tmp path, never HOME or TMPDIR."""
+    return pathlib.Path(f'/tmp/com.hgdev.hgs-tray-{os.geteuid()}')
+
+
+def refuse_reachable_guard():
+    if canonical_guard().exists():
+        raise SystemExit(f'refusing: the canonical GUI guard {canonical_guard()} is reachable; '
+                         'a start would reach the running GUI. Run only through this script, inside bwrap.')
+
 
 class NativeSmoke(unittest.TestCase):
 
@@ -140,6 +156,7 @@ class NativeSmoke(unittest.TestCase):
             with (base / 'log.ndjson').open('a') as f:
                 f.write(json.dumps({'argv': ['native-smoke-control', stage], 'stdin': ''}) + '\n')
         command = [str(BINARY), '--sessions']
+        refuse_reachable_guard()
         print('EXECUTED', json.dumps(command), 'private bus/Xvfb/allowlist HOME/XDG/TMPDIR/TMUX_TMPDIR', flush=True)
         with log.open('w') as output:
             process = subprocess.Popen(command, cwd=base, env=env, stdout=output, stderr=subprocess.STDOUT)
@@ -156,7 +173,7 @@ class NativeSmoke(unittest.TestCase):
             deadline = time.monotonic() + 180
             while process.poll() is None and time.monotonic() < deadline:
                 raw = log.read_text()
-                for marker, key, visible in [('READY', 'ready', True), ('MENU', 'menu', False), ('DIALOG', 'dialog', False), ('RESTORED', 'restored', True), ('RELOADED', 'reloaded', True)] + [(f'PROFILE_CHANGE {i}', f'profile-change-{i}', None) for i in range(1, 6)] + [(f'PROFILE_READY {i}', f'profile-ready-{i}', True) for i in range(1, 6)] + [('FALLBACK', 'fallback', False), ('FINAL_READY', 'final-ready', True)]:
+                for marker, key, visible in [('READY', 'ready', True), ('MENU', 'menu', False), ('DIALOG', 'dialog', False), ('RESTORED', 'restored', True), ('RELOADED', 'reloaded', True), ('AWAY', 'away', False), ('OTHER', 'other', False), ('BACK', 'back', True)] + [(f'PROFILE_CHANGE {i}', f'profile-change-{i}', None) for i in range(1, 6)] + [(f'PROFILE_READY {i}', f'profile-ready-{i}', True) for i in range(1, 6)] + [('FALLBACK', 'fallback', False), ('FINAL_READY', 'final-ready', True)]:
                     if key in stages or 'native-ui-smoke: ' + marker not in raw:
                         continue
                     if marker.startswith('PROFILE_CHANGE'):
@@ -313,7 +330,8 @@ class NativeSmoke(unittest.TestCase):
                         for flags in [[], ['--sessions']]:
                             second = subprocess.run([str(BINARY), *flags], env=env, capture_output=True, text=True, timeout=8)
                             self.assertEqual(second.returncode, 0, second.stderr)
-                            self.assertIn('already running', second.stderr)
+                            # The canonical guard forwards silently (ec9574f8f); the first app stays.
+                            self.assertIsNone(process.poll(), 'a second start replaced the running app')
                         primary = subprocess.run(['/usr/bin/gdbus', 'call', '--session', '--dest', f'org.kde.StatusNotifierItem-{process.pid}-1', '--object-path', '/StatusNotifierItem', '--method', 'org.kde.StatusNotifierItem.Activate', '0', '0'], env=env, capture_output=True, text=True, timeout=8)
                         self.assertEqual(primary.returncode, 0, primary.stderr)
                     if marker == 'RELOADED':
@@ -388,6 +406,24 @@ class NativeSmoke(unittest.TestCase):
                         wait_for(lambda: screen('tray-restored') == (26, 96, 78), 'SNI did not restore native frame after showing main')
                         self.assertIsNone(process.poll())
                         print('PASS reload guards, resize clipping, Close/Show/background/sessions/SNI with same native child and PID', flush=True)
+                    if marker in ('AWAY', 'OTHER'):
+                        # zerus-06hh0: Activity or another session now covers the frame. No later
+                        # main-window show (already shown, after Close, or from the tray) may
+                        # reveal the retained native child over it.
+                        time.sleep(0.25)
+                        self.assertNotEqual(screen(key + '-hidden'), (26, 96, 78), (marker, 'the switch left the native child shown'))
+                        for way in ['shown', 'closed', 'tray']:
+                            if way != 'shown':
+                                close_window()
+                            if way == 'tray':
+                                shown = subprocess.run(['/usr/bin/gdbus', 'call', '--session', '--dest', f'org.kde.StatusNotifierItem-{process.pid}-1', '--object-path', '/StatusNotifierItem', '--method', 'org.kde.StatusNotifierItem.Activate', '0', '0'], env=env, capture_output=True, text=True, timeout=8)
+                            else:
+                                shown = subprocess.run([str(BINARY), '--sessions'], cwd=base, env=env, capture_output=True, text=True, timeout=8)
+                            self.assertEqual(shown.returncode, 0, shown.stderr)
+                            wait_for(mapped, f'Show ({way}) did not present main')
+                            time.sleep(0.4)
+                            self.assertNotEqual(screen(f'{key}-{way}'), (26, 96, 78), (marker, way, 'a main-window show revealed the hidden native child over another view'))
+                        print('PASS', marker, 'native child stays hidden across Show while shown, after Close and from the tray', flush=True)
                     time.sleep(0.12)
                     pixel = screen(key)
                     if visible:
@@ -406,7 +442,7 @@ class NativeSmoke(unittest.TestCase):
         raw = log.read_text()
         print(raw, flush=True)
         self.assertEqual(process.returncode, 0, raw[-8000:])
-        self.assertEqual(stages, {'ready', 'menu', 'dialog', 'restored', 'reloaded', 'fallback', 'final-ready'} | {f'profile-change-{i}' for i in range(1, 6)} | {f'profile-ready-{i}' for i in range(1, 6)})
+        self.assertEqual(stages, {'ready', 'menu', 'dialog', 'restored', 'reloaded', 'away', 'other', 'back', 'fallback', 'final-ready'} | {f'profile-change-{i}' for i in range(1, 6)} | {f'profile-ready-{i}' for i in range(1, 6)})
         self.assertIn('native-ui-smoke: PASS', raw)
         steps = re.findall('phase4-smoke ([^:]+): done', raw)
         self.assertGreaterEqual(len(steps), 16)
@@ -422,7 +458,10 @@ def main():
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--private-run', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if sys.platform != 'linux':
+        parser.error('Linux only: other platforms have no private canonical GUI guard here')
     if args.private_run:
+        refuse_reachable_guard()
         if args.private_run != os.environ.get('ZERUS_NATIVE_SMOKE_PRIVATE'):
             parser.error('the private inner process must be launched by this script')
         unittest.main(argv=[sys.argv[0]], verbosity=2)
@@ -441,8 +480,20 @@ def main():
         env.update(GDK_BACKEND='x11', WAYLAND_DISPLAY='zerus-native-ui-nonexistent-wayland', NO_AT_BRIDGE='1', WEBKIT_DISABLE_DMABUF_RENDERER='1', GSETTINGS_BACKEND='memory', PYTHONWARNINGS='ignore::DeprecationWarning', ZERUS_NATIVE_SMOKE_PRIVATE=nonce, ZERUS_NATIVE_SMOKE_APP=str(app), ZERUS_NATIVE_SMOKE_OUTPUT=str(output))
         config = base / 'bus.conf'
         config.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(base) + '</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/><allow own="*"/><allow receive_sender="*"/><allow eavesdrop="true"/></policy></busconfig>')
-        command = ['dbus-run-session', '--config-file', str(config), '--', 'xvfb-run', '-a', '-s', '-screen 0 1440x900x24', sys.executable, str(pathlib.Path(__file__).resolve()), '--app', str(app), '--output', str(output), '--private-run', nonce]
-        print('EXECUTED private D-Bus/Xvfb; child env from scratch; no owner desktop/session bus', flush=True)
+        bwrap = shutil.which('bwrap')
+        if not bwrap:
+            parser.error('bubblewrap (bwrap) is required: there is no unsandboxed mode')
+        # Private /tmp (the canonical guard and X sockets), network (abstract
+        # sockets) and /run/user (the person's session bus and display).
+        sandbox = [bwrap, '--dev-bind', '/', '/', '--tmpfs', '/tmp']
+        runtime = pathlib.Path(f'/run/user/{os.geteuid()}')
+        if runtime.is_dir():
+            sandbox += ['--tmpfs', str(runtime)]
+        for keep in [base, output]:
+            sandbox += ['--bind', str(keep), str(keep)]
+        sandbox += ['--unshare-net', '--unshare-ipc', '--die-with-parent', '--']
+        command = sandbox + ['dbus-run-session', '--config-file', str(config), '--', 'xvfb-run', '-a', '-s', '-screen 0 1440x900x24', sys.executable, str(pathlib.Path(__file__).resolve()), '--app', str(app), '--output', str(output), '--private-run', nonce]
+        print('EXECUTED bwrap private /tmp/net/run-user, private D-Bus/Xvfb; child env from scratch; no owner desktop/session bus', flush=True)
         process = subprocess.Popen(command, cwd=ROOT, env=env, start_new_session=True)
         try:
             return process.wait(timeout=240)

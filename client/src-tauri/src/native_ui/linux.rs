@@ -27,45 +27,9 @@ pub(crate) fn mount(main: &tauri::WebviewWindow, child: &tauri::Webview) -> Resu
     let prepared = Arc::new(AtomicBool::new(false));
     let result = prepared.clone();
     main.with_webview(move |platform| {
-        let primary = platform.inner();
-        let Some(parent) = primary.parent() else {
-            return;
-        };
-        if parent
-            .downcast_ref::<gtk::Overlay>()
-            .is_some_and(|overlay| {
-                overlay.widget_name() == CONTAINER
-                    && overlay.child().as_ref() == Some(primary.upcast_ref())
-            })
-        {
+        if overlay_primary(&platform.inner()) {
             result.store(true, Ordering::Release);
-            return;
         }
-        let Some(container) = parent.downcast_ref::<gtk::Box>() else {
-            return;
-        };
-        let overlay = gtk::Overlay::new();
-        overlay.set_widget_name(CONTAINER);
-        overlay.connect_get_child_position(|overlay, widget| {
-            // WebKit's natural size follows its previous viewport, so
-            // GtkOverlay's natural-size default cannot bound a child.
-            // GTK subtracts these margins from the returned allocation
-            // when creating the overlay's native clipping window.
-            let (width, height) = widget.size_request();
-            let x = widget.margin_start();
-            let y = widget.margin_top();
-            Some(gtk::gdk::Rectangle::new(
-                0,
-                0,
-                (x + width.max(1)).min(overlay.allocated_width().max(1)),
-                (y + height.max(1)).min(overlay.allocated_height().max(1)),
-            ))
-        });
-        container.remove(&primary);
-        overlay.add(&primary);
-        container.pack_start(&overlay, true, true, 0);
-        overlay.show();
-        result.store(true, Ordering::Release);
     })
     .map_err(|_| ())?;
     if !prepared.load(Ordering::Acquire) {
@@ -75,35 +39,91 @@ pub(crate) fn mount(main: &tauri::WebviewWindow, child: &tauri::Webview) -> Resu
     let result = mounted.clone();
     child
         .with_webview(move |platform| {
-            let view = platform.inner();
-            let Some(parent) = view.parent() else { return };
-            let Some(container) = parent.downcast_ref::<gtk::Box>() else {
-                return;
-            };
-            let overlays: Vec<_> = container
-                .children()
-                .into_iter()
-                .filter_map(|widget| widget.downcast::<gtk::Overlay>().ok())
-                .filter(|overlay| overlay.widget_name() == CONTAINER)
-                .collect();
-            let [overlay] = overlays.as_slice() else {
-                return;
-            };
-            view.hide();
-            container.remove(&view);
-            view.set_halign(gtk::Align::Start);
-            view.set_valign(gtk::Align::Start);
-            view.set_hexpand(false);
-            view.set_vexpand(false);
-            view.set_size_request(1, 1);
-            overlay.add_overlay(&view);
-            result.store(true, Ordering::Release);
+            if overlay_child(&platform.inner()) {
+                result.store(true, Ordering::Release);
+            }
         })
         .map_err(|_| ())?;
     mounted.load(Ordering::Acquire).then_some(()).ok_or(())
 }
 
-/// CSS pixels and GTK allocations are logical pixels on this platform.
+/// The GTK half of `mount` for the primary webview, on GTK's main thread.
+fn overlay_primary(primary: &webkit2gtk::WebView) -> bool {
+    let Some(parent) = primary.parent() else {
+        return false;
+    };
+    if parent
+        .downcast_ref::<gtk::Overlay>()
+        .is_some_and(|overlay| {
+            overlay.widget_name() == CONTAINER
+                && overlay.child().as_ref() == Some(primary.upcast_ref())
+        })
+    {
+        return true;
+    }
+    let Some(container) = parent.downcast_ref::<gtk::Box>() else {
+        return false;
+    };
+    let overlay = gtk::Overlay::new();
+    overlay.set_widget_name(CONTAINER);
+    overlay.connect_get_child_position(|overlay, widget| {
+        // WebKit's natural size follows its previous viewport, so
+        // GtkOverlay's natural-size default cannot bound a child.
+        // GTK subtracts these margins from the returned allocation
+        // when creating the overlay's native clipping window.
+        let (width, height) = widget.size_request();
+        let x = widget.margin_start();
+        let y = widget.margin_top();
+        Some(gtk::gdk::Rectangle::new(
+            0,
+            0,
+            (x + width.max(1)).min(overlay.allocated_width().max(1)),
+            (y + height.max(1)).min(overlay.allocated_height().max(1)),
+        ))
+    });
+    container.remove(primary);
+    overlay.add(primary);
+    container.pack_start(&overlay, true, true, 0);
+    overlay.show();
+    true
+}
+
+/// The GTK half of `mount` for a native child, on GTK's main thread.
+fn overlay_child(view: &webkit2gtk::WebView) -> bool {
+    let Some(parent) = view.parent() else {
+        return false;
+    };
+    let Some(container) = parent.downcast_ref::<gtk::Box>() else {
+        return false;
+    };
+    let overlays: Vec<_> = container
+        .children()
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Overlay>().ok())
+        .filter(|overlay| overlay.widget_name() == CONTAINER)
+        .collect();
+    let [overlay] = overlays.as_slice() else {
+        return false;
+    };
+    view.hide();
+    // Tao shows the main window with gtk_widget_show_all on every Show (a
+    // notification, Open in Zerus, the tray, a second start), which would
+    // reveal a hidden child over another session or tab (zerus-06hh0).
+    // Only `place` shows it, for its own session's Native UI tab.
+    view.set_no_show_all(true);
+    container.remove(view);
+    view.set_halign(gtk::Align::Start);
+    view.set_valign(gtk::Align::Start);
+    view.set_hexpand(false);
+    view.set_vexpand(false);
+    view.set_size_request(1, 1);
+    overlay.add_overlay(view);
+    true
+}
+
+/// Places and shows the child. CSS pixels and GTK allocations are logical
+/// pixels on this platform. Tauri's Webview::show cannot show it: Wry calls
+/// gtk_widget_show_all, which the child's no-show-all flag ignores.
 pub(crate) fn place(
     child: &tauri::Webview,
     x: f64,
@@ -115,21 +135,28 @@ pub(crate) fn place(
     let result = placed.clone();
     child
         .with_webview(move |platform| {
-            let view = platform.inner();
-            if !view.parent().is_some_and(|parent| {
-                parent
-                    .downcast_ref::<gtk::Overlay>()
-                    .is_some_and(|overlay| overlay.widget_name() == CONTAINER)
-            }) {
-                return;
+            if place_widget(&platform.inner(), x, y, width, height) {
+                result.store(true, Ordering::Release);
             }
-            view.set_margin_start(x.round() as i32);
-            view.set_margin_top(y.round() as i32);
-            view.set_size_request(width.round() as i32, height.round() as i32);
-            result.store(true, Ordering::Release);
         })
         .map_err(|_| ())?;
     placed.load(Ordering::Acquire).then_some(()).ok_or(())
+}
+
+/// The GTK half of `place`, on GTK's main thread.
+fn place_widget(view: &webkit2gtk::WebView, x: f64, y: f64, width: f64, height: f64) -> bool {
+    if !view.parent().is_some_and(|parent| {
+        parent
+            .downcast_ref::<gtk::Overlay>()
+            .is_some_and(|overlay| overlay.widget_name() == CONTAINER)
+    }) {
+        return false;
+    }
+    view.set_margin_start(x.round() as i32);
+    view.set_margin_top(y.round() as i32);
+    view.set_size_request(width.round() as i32, height.round() as i32);
+    view.show();
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

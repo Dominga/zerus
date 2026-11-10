@@ -1215,6 +1215,9 @@ opener, keeps same-origin popups in place, and refuses new native windows.
 User-initiated `window.open` uses the same guarded browser handoff.
 Downloads require the exact foreground session and a native Save dialog.
 Its GTK overlay follows the measured frame and hides before menus or dialogs.
+Only that placement shows the child: it ignores `gtk_widget_show_all`, which
+Tao runs on every main-window Show, so a notification, Open in Zerus, the tray
+or a second start never reveals a hidden child over another session or tab.
 The GLib FFI block replaces Wry's single earlier navigation-policy
 handler on that owned child before its first URL load; an unexpected handler
 graph uses browser fallback. The primary view's policy is unchanged.
@@ -1229,14 +1232,20 @@ python3 client/scripts/native-ui-smoke.py \
   --output artifacts/validation/native-ui-proof
 ```
 
-The script always creates a private D-Bus, Xvfb and HOME/XDG/TMPDIR/TMUX_TMPDIR
-from a fresh environment, and uses only a local HTTP fixture and fake CLI.
+The script runs only inside `bwrap` with a private `/tmp`, network and
+`/run/user`, and it refuses to start the app while a canonical GUI guard
+(`/tmp/com.hgdev.hgs-tray-<uid>`) is reachable. That guard ignores HOME and
+TMPDIR, so an unsandboxed start forwards to the person's running GUI. Inside, it
+creates a private D-Bus, Xvfb and HOME/XDG/TMPDIR/TMUX_TMPDIR from a fresh
+environment, and uses only a local HTTP fixture and fake CLI.
 It records IPC and private-protocol refusals, native pointer gestures,
 download cancellation and exact saved bytes, profile eviction, explicit
-browser fallback, resize and activation, then the complete Phase 4 smoke.
-The ignored `native_ui::linux::tests` case separately qualifies the expected
-handler graph, primary-handler preservation and reload on that same private
-bus/display; run it explicitly with `--ignored --test-threads=1`.
+browser fallback, resize and activation, a hidden child staying hidden under
+Activity and another session across every main-window Show, then the complete
+Phase 4 smoke. The ignored `native_ui::linux::tests` cases separately qualify
+the expected handler graph, primary-handler preservation and reload, and the
+overlay's show rule, on a private bus/display; run each explicitly with
+`--ignored --exact`, one test per process.
 
 `scripts/make-fixture.py` deterministically generates the replay, including the
 warm and cold cache states, a paused resumable session, JSON and one-pixel PNG

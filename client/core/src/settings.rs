@@ -415,7 +415,9 @@ pub const KEYS: &[Key] = &[
         },
     ),
     // Task #8 (team ede724c4): New team's how-to, folded by the owner.
-    client("client/newTeamHowToClosed", Kind::Flag(false)),
+    // Task #31 (team ede724c4): the New team how-to starts collapsed, as the
+    // web client's defaults (settings-defaults.json) already say.
+    client("client/newTeamHowToClosed", Kind::Flag(true)),
     // Task 103: the Teams view preferences the move keeps. Qt keeps "hide
     // finished" and the catalog's unused-role switch as plain flags; its heat
     // mode is per team, so the imported map holds team -> "time" | "tokens".

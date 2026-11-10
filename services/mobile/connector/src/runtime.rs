@@ -1407,15 +1407,31 @@ mod attention_merge_tests {
         let stale = json!({"question_id":"old","question_hash":"o"});
         let cards = json!([{"question_id":"q1","question_hash":"h1"}]);
         let merged = merge_attention(Some(&json!([alert.clone(), stale])), &cards);
-        assert_eq!(merged, json!([alert, {"question_id":"q1","question_hash":"h1"}]));
+        assert_eq!(
+            merged,
+            json!([alert, {"question_id":"q1","question_hash":"h1"}])
+        );
         // Task 97: a deferred request of the owner queue is kept as well.
-        let deferred = json!({"question_id":"owner-deferred:ab","question_hash":"d","kind":"owner_deferred"});
-        assert_eq!(merge_attention(Some(&json!([deferred.clone()])), &cards), json!([deferred, {"question_id":"q1","question_hash":"h1"}]));
+        let deferred =
+            json!({"question_id":"owner-deferred:ab","question_hash":"d","kind":"owner_deferred"});
+        assert_eq!(
+            merge_attention(Some(&json!([deferred.clone()])), &cards),
+            json!([deferred, {"question_id":"q1","question_hash":"h1"}])
+        );
         // Task 113: a member's Terminal-only prompt raised on the lead's row.
         let prompt = json!({"question_id":"team-terminal-prompt:t:m:q","question_hash":"p","kind":"team_terminal_prompt"});
-        assert_eq!(merge_attention(Some(&json!([prompt.clone()])), &cards), json!([prompt, {"question_id":"q1","question_hash":"h1"}]));
+        assert_eq!(
+            merge_attention(Some(&json!([prompt.clone()])), &cards),
+            json!([prompt, {"question_id":"q1","question_hash":"h1"}])
+        );
         // Without a team alert the cards replace the row's items, as before.
-        assert_eq!(merge_attention(Some(&json!([{"question_id":"old","question_hash":"o"}])), &cards), cards);
+        assert_eq!(
+            merge_attention(
+                Some(&json!([{"question_id":"old","question_hash":"o"}])),
+                &cards
+            ),
+            cards
+        );
         assert_eq!(merge_attention(None, &cards), cards);
     }
 }

@@ -560,9 +560,8 @@ pub(super) fn programs_with_holder(
             return Err(limit());
         }
         #[cfg(test)]
-        let membership = membership.map(|membership| {
+        let membership = membership.inspect(|_| {
             roster::completed(pid);
-            membership
         });
         if !membership? {
             continue;

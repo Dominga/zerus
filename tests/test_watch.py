@@ -146,7 +146,7 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks', 'organization'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks', 'organization', 'organization.drive_folders'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
         self.assertEqual(hello['limits']['git_subscriptions'], 64)
         self.assertEqual(hello['limits']['processes_subscriptions'], 16)

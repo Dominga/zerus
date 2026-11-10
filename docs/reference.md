@@ -5238,6 +5238,26 @@ A new session waits for its first message. API-key `deepseek-official` connectio
 work independently of account sign-in. If `deepseek-account` needs login, Activity
 shows **Sign in** and keeps the draft until native authorization finishes.
 
+An API-key account shows its balance in place of limit windows. When the key
+comes from the native credentials file (`DSH_HOME/.credentials.yaml`), `hgs account
+inspect native-dsh` reads the official `GET https://api.deepseek.com/user/balance`
+at the usual account-status refresh, with no additional polling. The private
+Node.js reader parses the key with the installed harness and sends it only to
+`api.deepseek.com` as a bearer token: redirects are refused, the request times out
+after 5 seconds and the reply is bounded to 64 KiB. The key is never logged,
+cached or returned. Per currency (USD or CNY), the inspection reports a `Total`
+balance and its `Topped up` and `Granted` parts as `balances` rows, plus
+`balance_available: false` when DeepSeek says the balance no longer covers API
+calls. The status stays `configured`. Accounts, Overview, New session and the
+session footer show the Total as a bare amount such as `$6.20` (`¥` for CNY;
+another currency keeps its code). Its tooltip and accessible label name it in
+full, for example `Balance: 6.20 USD` with the Topped up and Granted parts. The
+account's usage panel lists all three amounts and warns about an insufficient
+balance. A key from the launch environment, an
+unreachable API or a rejected key leaves `configured` without a balance. A
+DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
+web host. DeepSeek publishes no usage or cost endpoint for API keys.
+
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange
 supplies authentication, and ports/tunnels are discovered automatically. The

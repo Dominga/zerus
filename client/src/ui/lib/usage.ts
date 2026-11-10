@@ -130,9 +130,64 @@ export const providerName = (provider: string) => PROVIDERS[provider] ?? provide
 /** No window to draw yet: the meters show their placeholders. */
 export const usageLoading = (u: Usage) => u.status === "loading" && !u.windows.length;
 
+const BALANCE_KINDS: Record<string, () => string> = {
+  Total: () => tr("Total"), "Topped up": () => tr("Topped up"), Granted: () => tr("Granted"), Wallet: () => tr("Wallet"), Bonus: () => tr("Bonus"),
+};
+/** A reported balance kind in the interface language; an unknown kind stays as the provider names it. */
+export const balanceKind = (kind: string) => BALANCE_KINDS[kind]?.() ?? kind;
+
+/**
+ * The balances a compact place shows. A DeepSeek API key reports a Total per
+ * currency with its Topped up and Granted parts, so only the Totals stand for
+ * it; other sources keep every balance.
+ */
+export function headlineBalances(u: Usage) {
+  const totals = u.balances.filter((b) => b.kind === "Total");
+  return totals.length ? totals : u.balances;
+}
+
+const AMOUNT = /^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/;
+const SYMBOLS: Record<string, string> = { USD: "$", CNY: "¥" };
+/** "$6.20", "¥110.00" or "-$0.03"; another currency keeps its code ("6.20 EUR"). */
+export function balanceAmount(b: Usage["balances"][number]) {
+  const amount = b.balance.trim();
+  const symbol = SYMBOLS[b.currency];
+  if (!symbol) return `${amount} ${b.currency}`.trim();
+  const negative = amount.startsWith("-");
+  return `${negative ? "-" : ""}${symbol}${amount.replace(/^[-+]/, "")}`;
+}
+
+const numeric = (b: Usage["balances"][number]) => AMOUNT.test(b.balance) && Number.isFinite(Number(b.balance));
+/** The compact balance in place of limit meters: each numeric headline amount ("$6.20"), joined by two spaces; empty without one. */
+export function balanceCompact(u: Usage) {
+  return headlineBalances(u).filter(numeric).map(balanceAmount).join("  ");
+}
+
+/**
+ * What the compact balance means, for its tooltip and accessible label:
+ * "Balance: 6.20 USD", then a Total's Topped up and Granted parts; other
+ * kinds keep their own names. Empty without a numeric headline balance.
+ */
+export function balanceTitle(u: Usage) {
+  const lines: string[] = [];
+  for (const b of headlineBalances(u).filter(numeric)) {
+    if (b.kind && b.kind !== "Total") { lines.push(`${balanceKind(b.kind)}: ${b.balance} ${b.currency}`.trim()); continue; }
+    lines.push(tr("Balance: %1 %2", b.balance, b.currency).trim());
+    if (b.kind === "Total") {
+      for (const part of u.balances) if (part.currency === b.currency && part.kind !== "Total") lines.push(`${balanceKind(part.kind)}: ${part.balance} ${part.currency}`.trim());
+    }
+  }
+  return lines.join("\n");
+}
+
+/** DeepSeek says the API-key balance no longer covers API calls. */
+export const balanceLow = (u: Usage) => u.balance_available === false;
+
 /** What replaces the meters without windows (AccountUsage::Button::summaryText). */
 export function summaryText(u: Usage) {
-  const b = u.balances[0];
+  const compact = balanceCompact(u);
+  if (compact) return compact;
+  const b = headlineBalances(u)[0];
   if (b) return `${b.balance} ${b.currency}`;
   if (u.status === "configured") return u.provider === "opencode" ? tr("Configured") : tr("API key");
   if (u.status === "signed_out") return tr("Sign in required");
@@ -148,7 +203,7 @@ export function stateText(u: Usage) {
   if (!s || s === "loading") return tr("Loading account details…");
   if (s === "rate_limited") return tr("Usage refresh is rate limited. Previous limits remain visible; sign-in is unchanged.");
   if (s === "configured" && u.provider === "opencode") return tr("OpenCode uses its native provider configuration. Usage is not available here.");
-  if (s === "configured") return tr("API key configured. Usage is available in the DeepSeek console.");
+  if (s === "configured") return tr("API key configured. Zerus could not read its DeepSeek balance; refresh to retry.");
   if (u.offline || s === "offline") return tr("Machine is offline. Showing the last available account data.");
   if (s === "expired") return tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.");
   if (s === "signed_out" && u.provider === "dsh") return tr("DeepSeek account is signed out. API-key connections are configured separately in the native settings.");
@@ -196,7 +251,8 @@ export function accountTooltip(u: Usage, now: number) {
     const f = forecast(w);
     if (f) lines.push(f);
   }
-  for (const b of u.balances) lines.push(`${b.kind}: ${b.balance} ${b.currency}`);
+  for (const b of u.balances) lines.push(b.kind === "Total" ? tr("Balance: %1 %2", b.balance, b.currency).trim() : `${balanceKind(b.kind)}: ${b.balance} ${b.currency}`);
+  if (balanceLow(u)) lines.push(tr("DeepSeek reports the balance is too low for API calls."));
   if (u.checked_at !== null) {
     if (u.seeded) lines.unshift(tr("Checked %1", clock(u.checked_at)));
     else lines.push(tr("Updated %1", clock(u.checked_at)));

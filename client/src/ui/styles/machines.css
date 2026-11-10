@@ -169,6 +169,8 @@
   .acct-usage { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font-size: var(--fs-sm); }
   .acct-window { display: flex; flex-direction: column; gap: 5px; padding: 6px 0; }
   .acct-window .row { gap: 8px; }
+  .acct-balance.total { font-weight: 600; }
+  .acct-balance-low { color: var(--z-color-warn); font-size: var(--fs-xs); }
   .acct-meter { display: flex; flex-direction: column; gap: 3px; }
   .acct-bar { position: relative; height: 6px; border-radius: 3px; background: var(--z-color-border); }
   .acct-bar > i { position: absolute; inset: 0 auto 0 0; width: var(--w); border-radius: 3px; background: var(--z-color-accent); }

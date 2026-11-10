@@ -586,17 +586,18 @@ fn the_lead_cannot_take_the_owners_settings() {
     .unwrap_err()
     .to_string();
     assert!(error.starts_with("Only you change the team's approval"), "{error}");
-    // Nor in a draft the owner creates; the lead may set the limits flag
-    // (spec 6.1).
+    // Nor in a draft the owner creates: task #13 (team ede724c4) keeps the
+    // owner's value there and makes the lead's an offer instead of a refusal.
     let (mut draft, _) = create("d", &json!({"name":"D","lead":{"id":"lead","agent":"claude"}})).unwrap();
     draft.status = TeamStatus::Draft;
     draft.draft = Some(Draft { revision: 1, ..Default::default() });
+    let before = draft.settings.approval.clone();
     let mut auto = serde_json::to_value(&draft.settings).unwrap();
     auto["approval"] = json!("auto");
-    let error = apply(&mut draft.clone(), "draft", &json!({"action":"update","revision":1,"set":{"settings":auto}}), &Actor::Member("lead".into()), &none, &mut events)
-        .unwrap_err()
-        .to_string();
-    assert!(error.starts_with("Only you change the team's approval"), "{error}");
+    let receipt = apply(&mut draft, "draft", &json!({"action":"update","revision":1,"set":{"settings":auto}}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap();
+    assert_eq!(draft.settings.approval, before, "{receipt}");
+    assert_eq!(receipt["setting_offers"]["approval"], json!("auto"), "{receipt}");
     apply(&mut team, "settings", &json!({"settings":{"resume_after_limits":true}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
     assert!(team.settings.resume_after_limits);
 }

@@ -2201,3 +2201,185 @@ fn a_startup_trust_request_is_the_owners_to_answer_in_person() {
     // An ordinary approval is the lead's to answer, as before.
     assert!(!owner_only_trust(&approval, &Actor::Member("lead".into())));
 }
+
+/// Task #13 (team ede724c4, owner 2026-11-10): the whole path from New team to
+/// running members, through the real command entry and the dispatcher's own
+/// steps, in an isolated state folder, meets no refusal: Start planning, the
+/// lead's draft (members, tasks and the owner's settings as offers), the
+/// owner's one-click apply and Create team, members started at once (one
+/// waits for the worktree lock), the lead adding a task to the running phase
+/// and relaunching a member that failed to start.
+#[test]
+fn new_team_to_running_members_meets_no_refusal() {
+    use crate::state::teams::dispatcher::{self as worker, Seen, Step};
+    let dir = tempfile::tempdir().unwrap();
+    worker::set_git_ceiling(&dir.path().display().to_string());
+    let repo = dir.path().join("project");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git").arg("-C").arg(&repo).args(["-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "T"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    crate::state::with_test_state_root(&state, || {
+        let _worker = hold_worker_lock();
+        let refusals = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let step = |what: &str, result: anyhow::Result<Value>| -> Value {
+            result.unwrap_or_else(|error| {
+                refusals.borrow_mut().push(format!("{what}: {error:#}"));
+                Value::Null
+            })
+        };
+        // The fake computer: `worktrees create` is busy twice (members
+        // created at once), then makes the worktree; qa's first start fails.
+        let busy = std::rc::Rc::new(std::cell::Cell::new(2));
+        let qa_fails = std::rc::Rc::new(std::cell::Cell::new(true));
+        let (busy_left, qa_first) = (busy.clone(), qa_fails.clone());
+        worker::set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            if args.first() == Some(&"worktrees") && args.get(1) == Some(&"create") {
+                if busy_left.get() > 0 {
+                    busy_left.set(busy_left.get() - 1);
+                    return Ok(worker::fake_output(1, "", "Another worktree operation is running. Try again after it finishes."));
+                }
+                let value = |key: &str| args.iter().position(|arg| *arg == key).map(|at| args[at + 1].to_owned()).unwrap();
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(value("--path"))
+                    .args(["worktree", "add", "--quiet", "-b", &value("--branch"), &value("--destination"), "HEAD"])
+                    .output()?;
+                return Ok(output);
+            }
+            if args.first() == Some(&"worktrees") {
+                return Ok(worker::fake_output(0, r#"{"state":"folder_unavailable"}"#, ""));
+            }
+            if args.iter().any(|arg| arg.ends_with("-qa")) && qa_first.get() {
+                qa_first.set(false);
+                return Ok(worker::fake_output(1, "", "the agent did not start"));
+            }
+            Ok(worker::fake_output(0, r#"{"status":"started"}"#, ""))
+        })));
+        let load = |id: &str| Store::open(false).unwrap().load(id).unwrap().unwrap();
+        // 1. New team, Start planning: only the draft and its lead.
+        super::set_test_caller_identities(Some((None, None, None)));
+        let started = step(
+            "start planning",
+            run(
+                "draft",
+                &json!({"action":"start","by":"human","request_id":"13131313-1313-4131-8131-000000000001",
+                    "folder":repo.display().to_string(),"name":"Walk","lead":{"agent":"claude"}}),
+                false,
+            ),
+        );
+        let id = started["team"].as_str().unwrap_or_default().to_owned();
+        assert!(!id.is_empty(), "{:?}", refusals.borrow());
+        let team = load(&id);
+        let mut store = Store::open(true).unwrap();
+        assert_eq!(team.members.len(), 1, "only the lead");
+        step("launch the lead", worker::test_run_step(&mut store, &team, &Step::Launch { member: "lead".into() }).map(|_| Value::Null));
+        // What the session listing gives the worker: the lead's session.
+        store
+            .mutate(None, &id, None, |team, _| {
+                let lead = team.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.session =
+                    Some(SessionRef { name: "claude/x/walk-lead".into(), run_id: "r0".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+                lead.state = MemberState::Active;
+                Ok(Value::Null)
+            })
+            .unwrap();
+        // 2. The lead drafts members, tasks and settings, the owner's among them.
+        super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+        step("the lead reads the draft", run("draft", &json!({"team":id,"action":"get","by":"human"}), false));
+        let mut settings = serde_json::to_value(&load(&id).settings).unwrap();
+        settings["branch_per_task"] = json!({"template":"task/{id}"});
+        settings["max_members"] = json!(5);
+        settings["base_branch"] = json!(walk_head(&repo));
+        let set = json!({"goal":"Walk the path","settings":settings,
+            "members":[{"id":"dev","role":"Backend","agent":"codex","folder":"worktree"},{"id":"qa","role":"Tester","agent":"codex","folder":"worktree"}],
+            "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"qa"}]});
+        let revision = load(&id).draft.unwrap().revision;
+        let drafted = step(
+            "the lead drafts",
+            run(
+                "draft",
+                &json!({"team":id,"action":"update","revision":revision,"by":"human","set":set,"request_id":"13131313-1313-4131-8131-000000000002"}),
+                false,
+            ),
+        );
+        assert_eq!(drafted["setting_offers"]["max_members"], json!(5), "the lead's owner settings are offers: {drafted}");
+        // 3. The owner applies the offers with one click and creates the team.
+        super::set_test_caller_identities(Some((None, None, None)));
+        let draft = load(&id);
+        let mut owner = serde_json::to_value(&draft.settings).unwrap();
+        for (field, value) in &draft.draft.as_ref().unwrap().setting_offers {
+            owner[field] = value.clone();
+        }
+        step(
+            "the owner applies the offers",
+            run(
+                "draft",
+                &json!({"team":id,"action":"update","revision":draft.draft.as_ref().unwrap().revision,"by":"human","set":{"settings":owner},
+                    "request_id":"13131313-1313-4131-8131-000000000003"}),
+                false,
+            ),
+        );
+        step(
+            "Create team",
+            run("draft", &json!({"team":id,"action":"create","approve":true,"by":"human","request_id":"13131313-1313-4131-8131-000000000004"}), false),
+        );
+        let team = load(&id);
+        assert_eq!(team.status, TeamStatus::Running, "{:?}", refusals.borrow());
+        assert!(team.settings.branch_per_task.is_some() && team.settings.max_members == 5, "the applied offers");
+        // 4. The worker starts every member at once.
+        let lead_seen = Seen { name: "claude/x/walk-lead".into(), run_id: "r0".into(), live: true, free: true, idle: true, ..Default::default() };
+        let launches: Vec<Step> = worker::steps(&team, std::slice::from_ref(&lead_seen), crate::state::now())
+            .into_iter()
+            .filter(|step| matches!(step, Step::Launch { .. }))
+            .collect();
+        assert_eq!(launches.len(), 2, "both members start: {launches:?}");
+        for launch in &launches {
+            step(&format!("{launch:?}"), worker::test_run_step(&mut store, &load(&id), launch).map(|_| Value::Null));
+        }
+        assert_eq!(busy.get(), 0, "the busy worktree lock was waited for");
+        let team = load(&id);
+        assert!(team.member("dev").unwrap().error.is_empty(), "dev started: {}", team.member("dev").unwrap().error);
+        assert!(team.member("qa").unwrap().failed_to_start(), "qa's start failed (the scripted failure)");
+        // 5. The lead adds a task to the running phase, by itself.
+        super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+        step(
+            "the lead adds a task",
+            run(
+                "add-to-phase",
+                &json!({"team":id,"phase":1,"tasks":[{"id":3,"title":"More API","assignee":"dev"}],"request_id":"13131313-1313-4131-8131-000000000005"}),
+                false,
+            ),
+        );
+        // 6. The lead relaunches the member that failed to start, by itself.
+        step("the lead relaunches qa", run("relaunch", &json!({"team":id,"member":"qa","request_id":"13131313-1313-4131-8131-000000000006"}), false));
+        let team = load(&id);
+        let relaunch = worker::steps(&team, std::slice::from_ref(&lead_seen), crate::state::now())
+            .into_iter()
+            .find(|step| matches!(step, Step::Launch { member } if member == "qa"));
+        match relaunch {
+            Some(launch) => step("qa starts again", worker::test_run_step(&mut store, &team, &launch).map(|_| Value::Null)),
+            None => step("qa starts again", Err(anyhow::anyhow!("no Launch step for qa after the relaunch"))),
+        };
+        super::set_test_caller_identities(None);
+        worker::set_fake_hgs(None);
+        assert!(refusals.borrow().is_empty(), "refusals on the happy path: {:#?}", refusals.borrow());
+        let team = load(&id);
+        assert!(team.task(3).is_some(), "the lead's task joined the phase");
+        assert!(team.member("qa").unwrap().error.is_empty(), "qa started: {}", team.member("qa").unwrap().error);
+    });
+}
+
+fn walk_head(repo: &std::path::Path) -> String {
+    let output = std::process::Command::new("git").arg("-C").arg(repo).args(["symbolic-ref", "--short", "HEAD"]).output().unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}

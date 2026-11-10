@@ -171,12 +171,55 @@ describe("draft polling", () => {
       members: [],
       tasks: [],
       working_mode: "auto",
+      plan_mode: "standard",
     };
     const merged = mergeDraft(local, new Set(["name", "goal"]), draftView());
     expect(merged.name).toBe("Local");
     expect(merged.goal).toBe("Local goal");
     expect(merged.members).toHaveLength(1);
     expect(merged.folder).toBe("C:\\plain-folder");
+  });
+});
+
+describe("plan mode (task #8, team ede724c4)", () => {
+  it("follows the draft's plan mode until the owner changes it, then keeps the owner's", () => {
+    const store = createNewTeam(new Port());
+    expect(store.fields().plan_mode).toBe("standard");
+    store.applyView(draftView({ plan_mode: "free", plan_mode_offer: "", plan_mode_reason: "" }));
+    expect(store.fields().plan_mode).toBe("free");
+    store.edit("plan_mode", "standard");
+    store.applyView(draftView({ plan_mode: "free", plan_mode_offer: "free", plan_mode_reason: "a stream of requests",
+      draft: { revision: 4, unseen: ["plan_mode", "plan_mode_reason"], owner_edited: [] } }));
+    expect(store.fields().plan_mode).toBe("standard");
+    expect(store.unseen()).toEqual(["plan_mode", "plan_mode_reason"]);
+    // An older hgs leaves the field out: standard.
+    expect(mergeDraft(store.fields(), new Set(), draftView()).plan_mode).toBe("standard");
+  });
+
+  it("saves a plan mode chosen before Start planning with the draft's first update", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.openNew();
+    store.edit("plan_mode", "free");
+    await store.startPlanning({ folder: "C:\\plain-folder", lead: member() });
+    expect(port.calls.map((call) => call.action.kind)).toEqual(["draft_start"]);
+    await store.flush();
+    const update = port.calls[1];
+    if (update?.action.kind !== "draft_update") throw new Error("kind");
+    expect((update.action.set as Record<string, unknown>).plan_mode).toBe("free");
+  });
+
+  it("marks the plan mode and its reason seen with one call", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.applyView(draftView({ plan_mode_offer: "free", plan_mode_reason: "small requests",
+      draft: { revision: 3, unseen: ["goal", "plan_mode", "plan_mode_reason"], owner_edited: [] } }));
+    await store.markSeen(["plan_mode", "plan_mode_reason"]);
+    expect(store.unseen()).toEqual(["goal"]);
+    expect(port.calls).toHaveLength(1);
+    const seen = port.calls[0].action;
+    if (seen.kind !== "draft_seen") throw new Error("kind");
+    expect(seen.fields).toEqual(["plan_mode", "plan_mode_reason"]);
   });
 });
 

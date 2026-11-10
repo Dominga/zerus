@@ -2317,6 +2317,21 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         }
         outcome.report = Some(read);
     }
+    // Task #18: a run refused because its programs started at Low integrity
+    // (a Low-labeled build folder, an ordinary TEMP) says so once, with the
+    // owner's step.
+    if outcome.exit != Some(0) && !outcome.timed_out {
+        let run_temp = isolated
+            .as_ref()
+            .map_or_else(|| temp.clone(), |run| super::environment::run_temp(&run.env));
+        let cwd = plan.cwd.as_ref().map_or_else(|| folder.to_path_buf(), |cwd| folder.join(cwd));
+        let text = format!("{}\n{}\n{}", outcome.tail, outcome.excerpt, outcome.error);
+        let folders = super::environment::build_folders(&cwd, &plan.argv.join(" "), &text);
+        if let Some(message) = super::environment::diagnose(&text, &folders, Some(&run_temp)) {
+            outcome.tail = last_chars(&format!("{}\n{message}", outcome.tail), TAIL_BYTES);
+            outcome.error = message;
+        }
+    }
     outcome
 }
 

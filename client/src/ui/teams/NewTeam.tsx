@@ -16,6 +16,7 @@ import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coo
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
+import { NewTeamHowTo, PlanModeField, SettingOffers } from "./NewTeamGuide";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
@@ -60,6 +61,8 @@ const EFFORTS = ["", "low", "medium", "high", "xhigh"];
 const PERMISSIONS: [string, () => string][] = [["", () => tr("Account")], ["auto", () => tr("Auto")], ["bypass", () => tr("Bypass")]];
 
 const FAVOURITES = "teams/templateFavourites";
+// Task #8 (team ede724c4): the how-to's collapse, remembered; open until the owner folds it.
+const HOWTO_CLOSED = "client/newTeamHowToClosed";
 const favourites = () => { const stored = settingsStore[FAVOURITES]; return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : []; };
 
 /**
@@ -235,9 +238,9 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       });
     } finally { setStarting(false); }
   };
-  const create = async () => {
+  const create = async (confirmWidening = false) => {
     const id = draft();
-    const result = await store.createTeam();
+    const result = await store.createTeam({ confirmWidening });
     if (result.ok) props.onCreated?.(id);
   };
   const discard = async (stopLead: boolean) => {
@@ -247,8 +250,10 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   };
 
   const badRows = () => members().filter((member) => memberRowErrors(member, props.computers).length > 0).length;
+  const counted = () => members().filter((member) => !member.lead && member.id !== "lead").length;
   const createWhy = () => createReason({ drafting: !!draft(), goal: fields().goal, name: fields().name, folderOk: folderOk(), badRows: badRows(),
-    members: members().length, max: maxMembers(settings()), preflightErrors: store.view()?.validation.errors.length ?? 0 });
+    // Owner, 2026-11-09: the limit counts the members besides the lead, as hgs does; counting the lead blocked a valid team.
+    members: counted(), max: maxMembers(settings()), preflightErrors: store.view()?.validation.errors.length ?? 0 });
   const startWhy = () => (fields().folder.trim() && props.folderChecking ? tr("Checking the folder…") : startReason(fields().folder, folderOk(), lead()));
   // Task 200 (Qt m_accounts[host]): a member's accounts are those of its computer.
   const accountsFor = (agent: string, at: ComputerId = "") =>
@@ -262,10 +267,87 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
     return modelOptions(item, models.get(item));
   };
   // Task 200 (Qt buildLead): the lead pane's Chat, Goal and Plan.
-  const [leadPage, setLeadPage] = createSignal<"chat" | "goal" | "plan">("chat");
+  const [leadPage, setLeadPage] = createSignal<"chat" | "goal" | "phases" | "plan">("chat");
   const draftLead = () => store.view()?.members.find((member) => member.lead);
   const coordinatorText = () => props.coordinator ? coordinatorLine(props.coordinator, props.accounts ?? []) : "";
 
+  // The draft's phases (the view's records, else the tasks' phase numbers).
+  const draftPhases = createMemo(() => {
+    const records = store.view()?.phases ?? [];
+    const tasks = fields().tasks;
+    const numbers = [...new Set([...records.map((p) => p.n), ...tasks.map((t) => t.phase).filter((n) => n > 0)])].sort((a, b) => a - b);
+    return numbers.map((n) => {
+      const record = records.find((p) => p.n === n);
+      return {
+        n,
+        title: record?.title ?? "",
+        gate: !!record?.barrier,
+        owner: !!(record?.owner_accepts || record?.acceptance === "owner"),
+        mode: record?.mode ?? "",
+        goal: (record?.note ?? "").trim(),
+        tasks: tasks.filter((t) => t.phase === n),
+      };
+    });
+  });
+  const leadPicker = () => (
+            <fieldset class="nt-lead">
+              <legend>{tr("Who leads the team? The chat here is with the lead: it drafts the team with you.")}</legend>
+              <label class="nt-check" title={props.coordinator?.name ?? ""}>
+                <input type="radio" name="nt-lead" disabled={!props.coordinator?.name} checked={lead().mode === "this"} onChange={() => setLead({ ...lead(), mode: "this" })} />
+                {tr("This session")}<Show when={props.coordinator?.name}><span class="nt-hint">{props.coordinator!.name}</span></Show>
+              </label>
+              <Show when={lead().mode === "this" && props.coordinator?.busy}>
+                <p class="nt-hint">{tr("This session is working. The draft's brief waits until it is free; it is queued once, never sent twice.")}</p>
+              </Show>
+              <label class="nt-check"><input type="radio" name="nt-lead" checked={lead().mode === "new"} onChange={() => setLead({ ...lead(), mode: "new" })} />{tr("A new session in the team folder")}</label>
+              <div class="nt-row nt-lead-row">
+                <select value={lead().agent} disabled={lead().mode !== "new"} aria-label={tr("Agent")} onChange={(event) => setLead({ ...lead(), agent: event.currentTarget.value, account: "" })}>
+                  <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
+                </select>
+                <TextInput placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => setLead({ ...lead(), model: event.currentTarget.value })} />
+                <datalist id="nt-lead-models"><For each={modelsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
+                <select value={lead().effort} disabled={lead().mode !== "new"} aria-label={tr("Effort")} onChange={(event) => setLead({ ...lead(), effort: event.currentTarget.value })}>
+                  <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
+                </select>
+                <select value={lead().account} disabled={lead().mode !== "new"} aria-label={tr("Account")} onChange={(event) => setLead({ ...lead(), account: event.currentTarget.value })}>
+                  <option value="">{tr("Default account")}</option>
+                  <For each={accountsFor(lead().agent)}>{(account) => <option value={account.id} selected={account.id === lead().account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
+                </select>
+              </div>
+            </fieldset>
+  );
+  // Owner, 2026-11-09: before a team exists, the New team tab explains how a
+  // team works and asks only who leads it; the full form (template, members,
+  // planning, memory) shows once the lead has started the draft.
+  const intro = () => (
+    <div class="nt-intro" data-new-team-intro>
+      <div class="nt-intro-guide">
+        <h3>{tr("How a team works")}</h3>
+        <ol>
+          <li>{tr("A lead plans the work: it reads your goal, drafts the members, their roles and the tasks, and asks you what it needs.")}</li>
+          <li>{tr("You decide: nothing runs until you approve the team and its plan.")}</li>
+          <li>{tr("Members work in their own folders or branches; reviewers check their work and mergers land it.")}</li>
+          <li>{tr("You follow it in the Team tab: progress, questions waiting for you, reports and the plan.")}</li>
+          <li>{tr("Everything stays editable: members, tasks and settings can change while the team works.")}</li>
+        </ol>
+      </div>
+      <div class="nt-intro-lead">
+        <div class="nt-field">
+          <span>{tr("Folder")}</span>
+          <div class="nt-inline">
+            <TextInput class="grow" value={fields().folder} onInput={(event) => store.setFolder(event.currentTarget.value)} />
+            <button type="button" class="btn small" onClick={() => void browse()}>{tr("Browse…")}</button>
+          </div>
+        </div>
+        {leadPicker()}
+        <button type="button" class="btn primary nt-intro-start" data-start-planning disabled={store.busy() || starting() || !!startWhy()} title={startWhy()} onClick={() => void start()}>
+          <Show when={store.busy() || starting()}><Spinner size={14} /> </Show>{tr("Start working with a team")}
+        </button>
+        <p class="nt-hint">{tr("This creates a draft and starts the lead; members, folders and tasks come only when you create the team.")}</p>
+        <Show when={store.error()}><p class="nt-error nt-block-error">{store.error()}</p></Show>
+      </div>
+    </div>
+  );
   return (
     <section class="nt" aria-label={tr("New team")}>
       <header class="nt-head">
@@ -281,8 +363,10 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         <button type="button" class="icon-btn small" aria-label={tr("Close")} onClick={store.close}><Icon name="x" size={14} /></button>
       </header>
 
+      <Show when={draft()} fallback={intro()}>
       <div class="nt-split">
       <div class="nt-body">
+        <NewTeamHowTo open={settingsStore[HOWTO_CLOSED] !== true} onToggle={(open) => void setSetting(HOWTO_CLOSED, !open)} />
         <div class="nt-field">
           <span>{tr("Template")}</span>
           <TemplateList catalog={props.catalog} value={template()} onPick={chooseTemplate} />
@@ -308,6 +392,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
             <span class="nt-hint">{branchHint(fields().name, props.git)}</span>
           </div>
         </div>
+        <SettingOffers offers={store.view()?.draft.setting_offers}
+          onApply={(field, value) => setSettings({ [field]: value === null ? undefined : value })} />
         <Show when={fields().folder.trim() && !props.git}>
           <p class="nt-note">{tr("This folder is not a Git repository. Every member will share it; worktrees are off.")}</p>
         </Show>
@@ -342,10 +428,14 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           </section>
         </Show>
 
+        <PlanModeField mode={fields().plan_mode} offer={store.view()?.plan_mode_offer} reason={store.view()?.plan_mode_reason}
+          unseen={unseen("plan_mode") || unseen("plan_mode_reason")} onChoose={(mode) => store.edit("plan_mode", mode)}
+          onSeen={() => void store.markSeen(["plan_mode", "plan_mode_reason"])} />
+
         <div class="nt-members">
           <div class="nt-members-head">
             <b>{tr("Members")}</b>
-            <span class="nt-hint" title={tr("The lead counts as one member")}>{tr("%1 / %2", members().length, maxMembers(settings()))}</span>
+            <span class="nt-hint" title={tr("The limit counts the members besides the lead")}>{tr("%1 / %2", counted(), maxMembers(settings()))}</span>
             {mark("members")}
             <span class="grow" />
             <div class="nt-add">
@@ -385,8 +475,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 <For each={props.computers.filter((choice) => choice.alias)}>{(choice) => <option value={choice.alias}>{choice.label}</option>}</For>
               </select>
               <select class="nt-account" value={member.account} aria-label={tr("Account")} onChange={(event) => setMember(index(), { account: event.currentTarget.value })}>
-                <option value="">{tr("Default account")}</option>
-                <For each={accountsFor(member.agent, member.computer)}>{(account) => <option value={account.id}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
+                <option value="" selected={!member.account}>{tr("Default account")}</option>
+                <For each={accountsFor(member.agent, member.computer)}>{(account) => <option value={account.id} selected={account.id === member.account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
               </select>
               <label class="nt-check" title={tr("Own worktree")}>
                 <input type="checkbox" checked={member.folder === "worktree"} disabled={!props.git || policy().policy === "shared"}
@@ -448,6 +538,13 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
 
         <Show when={store.error()}><p class="nt-error nt-block-error">{store.error()}</p></Show>
         <Show when={store.created()}><p class="nt-created">{tr("Team created.")}</p></Show>
+        {/* Owner, 2026-11-09: Create team and what blocks it sit under the form. */}
+        <NewTeamFooter draft={!!draft()} dirty={store.dirty().size > 0} revision={store.revision()} busy={store.busy()}
+          preflightErrors={store.view()?.validation.errors.length} errors={store.view()?.validation.errors} createWhy={createWhy()}
+          error={store.error()}
+          fix={counted() > maxMembers(settings()) ? { label: tr("Raise the limit to %1", counted()), run: () => setSettings({ max_members: Math.min(32, counted()) }) }
+            : /confirm_widening|wider permissions/i.test(store.error()) ? { label: tr("Confirm the wider permissions and create"), run: () => void create(true) } : undefined}
+          onUseLead={store.useLeadVersion} onDiscard={() => setDiscarding(true)} onCreate={() => void create()} />
       </div>
 
       {/* Task 200 (Qt buildLead): the lead's pane, Chat (who leads, then the lead's conversation), Goal and Plan. */}
@@ -456,7 +553,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           <b class="nt-caps">{tr("LEAD")}</b>
           <span class="nt-hint ell grow">{draftLead()?.session?.name ?? (draft() ? "" : lead().mode === "this" ? coordinatorText() : tr("A new session in the team folder"))}</span>
           <div class="seg nt-lead-tabs" role="tablist" aria-label={tr("Lead")}>
-            <For each={[["chat", tr("Chat")], ["goal", tr("Goal")], ["plan", tr("Plan")]] as const}>{([id, label]) => (
+            <For each={[["chat", tr("Chat")], ["goal", tr("Goal")], ["phases", tr("Phases")], ["plan", tr("Plan")]] as const}>{([id, label]) => (
               <button type="button" role="tab" data-lead-page={id} aria-selected={leadPage() === id} classList={{ on: leadPage() === id }} onClick={() => setLeadPage(id)}>
                 {label}{id === "goal" ? mark("goal") : id === "plan" ? mark("tasks") : null}
               </button>
@@ -466,35 +563,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
 
         <Show when={leadPage() === "chat"}>
           <Show when={draft()} fallback={
-            <fieldset class="nt-lead">
-              <legend>{tr("Who leads the team? The chat here is with the lead: it drafts the team with you.")}</legend>
-              <label class="nt-check" title={props.coordinator?.name ?? ""}>
-                <input type="radio" name="nt-lead" disabled={!props.coordinator?.name} checked={lead().mode === "this"} onChange={() => setLead({ ...lead(), mode: "this" })} />
-                {tr("This session")}<Show when={props.coordinator?.name}><span class="nt-hint">{props.coordinator!.name}</span></Show>
-              </label>
-              <Show when={lead().mode === "this" && props.coordinator?.busy}>
-                <p class="nt-hint">{tr("This session is working. The draft's brief waits until it is free; it is queued once, never sent twice.")}</p>
-              </Show>
-              <label class="nt-check"><input type="radio" name="nt-lead" checked={lead().mode === "new"} onChange={() => setLead({ ...lead(), mode: "new" })} />{tr("A new session in the team folder")}</label>
-              <div class="nt-row nt-lead-row">
-                <select value={lead().agent} disabled={lead().mode !== "new"} aria-label={tr("Agent")} onChange={(event) => setLead({ ...lead(), agent: event.currentTarget.value, account: "" })}>
-                  <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
-                </select>
-                <TextInput placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => setLead({ ...lead(), model: event.currentTarget.value })} />
-                <datalist id="nt-lead-models"><For each={modelsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
-                <select value={lead().effort} disabled={lead().mode !== "new"} aria-label={tr("Effort")} onChange={(event) => setLead({ ...lead(), effort: event.currentTarget.value })}>
-                  <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
-                </select>
-                <select value={lead().account} disabled={lead().mode !== "new"} aria-label={tr("Account")} onChange={(event) => setLead({ ...lead(), account: event.currentTarget.value })}>
-                  <option value="">{tr("Default account")}</option>
-                  <For each={accountsFor(lead().agent)}>{(account) => <option value={account.id}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
-                </select>
-              </div>
-              <div class="nt-start">
-                <button type="button" class="btn primary" data-start-planning disabled={store.busy() || starting() || !!startWhy()} title={startWhy()} onClick={() => void start()}><Show when={store.busy() || starting()}><Spinner size={12} /> </Show>{tr("Start planning")}</button>
-              </div>
-              <p class="nt-hint">{tr("Nothing is created until you press it. Start planning makes a draft and gives the lead its brief; worktrees and members come only with Create team.")}</p>
-            </fieldset>
+            leadPicker()
           }>
             <Show when={draftLead()?.session && memberRow(computer(), draftLead())} fallback={<p class="nt-hint nt-lead-starting">{tr("The lead's session is starting; its chat shows here once it runs.")}</p>}>
               <LeadConversation computer={computer()} lead={draftLead()} label={tr("Message the lead")} placeholder={tr("Message the lead…")} send={tr("Write to the lead")} />
@@ -511,6 +580,33 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
             <TextArea rows={10} placeholder={tr("Describe the result, constraints and what done means. The lead may write it with you.")}
               value={fields().goal} onInput={(event) => store.edit("goal", event.currentTarget.value)} />
           </label>
+        </Show>
+
+        {/* Owner, 2026-11-09: the draft's phases at a glance - how many, in what
+            order, which wait as gates, who accepts each, its goal and its tasks. */}
+        <Show when={leadPage() === "phases"}>
+          <div class="nt-phases" data-draft-phases>
+            <Show when={draftPhases().length > 0} fallback={<p class="nt-hint">{tr("No phases yet. Ask the lead in Chat to split the plan into phases, each with its goal.")}</p>}>
+              <p class="nt-hint nt-phases-sum">{tr("%1 phases, %2 gates, %3 accepted by you, %4 tasks", draftPhases().length, draftPhases().filter((p) => p.gate).length, draftPhases().filter((p) => p.owner).length, fields().tasks.length)}</p>
+              <ol class="nt-phase-list">
+                <For each={draftPhases()}>{(phase) => (
+                  <li class="nt-phase" data-phase={phase.n}>
+                    <div class="nt-inline">
+                      <b>{tr("Phase %1", phase.n)}</b><span class="ell grow">{phase.title}</span>
+                      <Show when={phase.gate}><span class="team-pill warn" title={tr("Starts only after every earlier phase is accepted")}>{tr("gate")}</span></Show>
+                      <span class="team-pill" title={tr("Who accepts the phase")}>{phase.owner ? tr("you accept") : tr("lead accepts")}</span>
+                      <Show when={phase.mode}><span class="nt-hint">{phase.mode}</span></Show>
+                      <span class="nt-hint">{tr("%1 tasks", phase.tasks.length)}</span>
+                    </div>
+                    <p class="nt-phase-goal" classList={{ empty: !phase.goal }}>{phase.goal ? tr("Done when: %1", phase.goal) : tr("No goal yet: ask the lead what this phase delivers and when it is done.")}</p>
+                    <Show when={phase.tasks.length > 0}>
+                      <ul class="nt-phase-tasks"><For each={phase.tasks}>{(task) => <li><span class="nt-hint">#{task.id}</span> {task.title}</li>}</For></ul>
+                    </Show>
+                  </li>
+                )}</For>
+              </ol>
+            </Show>
+          </div>
         </Show>
 
         <Show when={leadPage() === "plan"}>
@@ -531,10 +627,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         </Show>
       </aside>
       </div>
+      </Show>
 
-      <NewTeamFooter draft={!!draft()} dirty={store.dirty().size > 0} revision={store.revision()} busy={store.busy()}
-        preflightErrors={store.view()?.validation.errors.length} createWhy={createWhy()}
-        onUseLead={store.useLeadVersion} onDiscard={() => setDiscarding(true)} onCreate={() => void create()} />
       <Show when={discarding()}>
         <DiscardDialog name={fields().name.trim()} close={() => setDiscarding(false)} discard={(stopLead) => void discard(stopLead)} />
       </Show>

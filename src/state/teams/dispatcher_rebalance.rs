@@ -26,7 +26,7 @@ pub(crate) fn peer<'a>(
     let role = team.role_of(&from.id);
     let compatible = |other: &Member| {
         let found = team.role_of(&other.id);
-        found == role || (started && related_roles(&role, &found))
+found == role || (started && related_roles(&role, &found))
     };
     team.members
         .iter()

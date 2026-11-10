@@ -204,4 +204,6 @@ export const MEMORY_LABELS: Record<MemoryMode, { label: string; hint: string }> 
 /** The settings with the chosen memory mode; Zerus fills its store at Create team. */
 export const withMemory = (settings: TeamSettings, mode: MemoryMode): TeamSettings => ({ ...settings, memory: { mode } });
 export const maxMembers = (settings: TeamSettings) => (typeof settings.max_members === "number" && settings.max_members > 0 ? settings.max_members : 6);
-export const canAdd = (members: readonly DraftMember[], settings: TeamSettings) => members.length < maxMembers(settings);
+/** Owner, 2026-11-09: the limit counts the members besides the lead (as hgs and the hint say). */
+export const canAdd = (members: readonly DraftMember[], settings: TeamSettings) =>
+  members.filter((member) => !member.lead && member.id !== "lead").length < maxMembers(settings);

@@ -262,10 +262,10 @@ fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
         say(now - 200.0, "please continue with the plan");
         say(now - 100.0, "Please add a task to the current phase: fix the login crash");
         lead();
-        // 1. No word: refused, nothing changes.
-        let error = request(json!({"phase":1,"tasks":task})).unwrap_err().to_string();
-        assert!(error.contains("your word"), "{error}");
-        // A sentence that does not ask to add a task is not the word.
+        // 1. Owner, 2026-11-10: without a word the lead adds by itself (see
+        // the_lead_adds_to_a_running_phase_without_a_card); a word the lead
+        // does send is still checked. A sentence that does not ask to add a
+        // task is not the word.
         let error = request(json!({"phase":1,"tasks":task,"owner_word":{"text":"please continue with the plan"}})).unwrap_err().to_string();
         assert!(error.contains("has not asked to add a task to phase 1"), "{error}");
         // 2. The request word alone changes nothing and returns the warning.
@@ -377,13 +377,49 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
         let owner = call("relaunch", json!({"member":"dev","by":"human"})).unwrap();
         assert_eq!((owner["status"].as_str(), owner["fresh"].as_bool()), (Some("relaunch"), Some(true)));
     });
-    // Without the setting the lead still needs the owner's word.
+    // Owner, 2026-11-10: without the setting the lead relaunches a stuck
+    // member by itself too; a member that works normally still needs a card.
     let (mut strict, _, _) = review_team();
     strict.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
         Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     with_review_team(&strict, || {
+        let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
+        assert_eq!(receipt["status"].as_str(), Some("relaunch"), "{receipt}");
+    });
+    let (healthy, _, _) = review_team();
+    with_review_team(&healthy, || {
         let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
         assert!(error.contains("hgs team propose --json"), "{error}");
+    });
+}
+
+/// Owner, 2026-11-10: a member whose start failed is relaunched by the lead
+/// without a card.
+#[test]
+fn the_lead_relaunches_a_member_that_did_not_start() {
+    let (mut team, _, _) = review_team();
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.error = "hgs: Another worktree operation is running. Try again after it finishes.".into();
+        dev.state = crate::state::teams::model::MemberState::NotCreated;
+        dev.session = None;
+    }
+    with_review_team(&team, || {
+        let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["fresh"].as_bool()), (Some("relaunch"), Some(true)), "{receipt}");
+    });
+}
+
+/// Task 162 and the owner, 2026-11-10: inside the approved goal the lead adds
+/// a task to a running phase by itself; no word, no card.
+#[test]
+fn the_lead_adds_to_a_running_phase_without_a_card() {
+    let (team, _, _) = review_team();
+    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+    with_review_team(&team, || {
+        let added = as_lead(|| call("add-to-phase", json!({"phase":1,"tasks":[{"id":next,"title":"A follow-up","assignee":"dev"}]}))).unwrap();
+        assert_eq!(added["status"], "added", "{added}");
+        assert!(stored().task(next).is_some());
     });
 }
 
@@ -394,12 +430,21 @@ fn a_sentence_naming_them_all_relaunches_each_member() {
     assert!(super::super::owner_word::says_everyone("перезапусти их на additional аккаунте"));
     assert!(super::super::owner_word::says_everyone("Relaunch them all"));
     assert!(!super::super::owner_word::says_everyone("перезапусти бэкендера"));
+    // A member whose start failed needs no word since 2026-11-10; a running
+    // one is still named by the sentence.
     let mut team = full_team();
     for member in &mut team.members {
-        member.error = "start failed".into();
+        member.state = crate::state::teams::model::MemberState::Active;
+        member.session = Some(SessionRef { name: format!("claude/x/{}", member.id), run_id: "r1".into(), ..Default::default() });
     }
     let rule = roster_word_rule(&team, "relaunch", &json!({"member":"m1"}));
     assert!(rule.names.iter().any(|name| name == "их"), "{:?}", rule.names);
+    // Task #13 (team ede724c4): a member that failed to start needs no word.
+    for member in &mut team.members {
+        member.session = None;
+        member.error = "start failed".into();
+    }
+    assert!(!roster_word_rule(&team, "relaunch", &json!({"member":"m1"})).needed());
 }
 
 /// Task 162 (owner, 2026-11-07): the owner's typed word is no longer taken

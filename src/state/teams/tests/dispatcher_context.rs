@@ -853,3 +853,212 @@ fn the_leads_after_task_policy_runs_only_while_the_lead_is_free() {
         assert_eq!(saved.task(5).unwrap().waits.as_ref().unwrap().action, "compact");
     });
 }
+
+/// Task #2 (team ede724c4): a reading that only carries a new time is not
+/// worth a write; one that moved the shown figure, crossed the threshold,
+/// names another window or has grown old is.
+#[test]
+fn only_a_moved_context_reading_is_worth_a_write() {
+    let stored = MemberContext::of(400_000, 1_000_000, 1000.0);
+    let at = |used: u64, limit: u64, when: f64| MemberContext::of(used, limit, when);
+    assert!(super::context_moved(None, &stored, 95), "the first reading is written");
+    assert!(!super::context_moved(Some(&stored), &at(400_000, 1_000_000, 1030.0), 95), "same figure, new time");
+    assert!(!super::context_moved(Some(&stored), &at(419_000, 1_000_000, 1030.0), 95), "one point is not a move");
+    assert!(super::context_moved(Some(&stored), &at(420_000, 1_000_000, 1030.0), 95), "two points are");
+    assert!(super::context_moved(Some(&stored), &at(380_000, 1_000_000, 1030.0), 95), "down two points too");
+    assert!(super::context_moved(Some(&stored), &at(400_000, 2_000_000, 1030.0), 95), "another window");
+    let below = MemberContext::of(940_000, 1_000_000, 1000.0);
+    assert!(super::context_moved(Some(&below), &at(950_000, 1_000_000, 1030.0), 95), "crossing the threshold by one point");
+    assert!(!super::context_moved(Some(&stored), &at(400_000, 1_000_000, 1000.0 + super::CONTEXT_REFRESH - 1.0), 95));
+    assert!(super::context_moved(Some(&stored), &at(400_000, 1_000_000, 1000.0 + super::CONTEXT_REFRESH), 95), "an old reading is refreshed");
+    // The refresh keeps the stored reading fresh for a claim between two reads.
+    assert!(super::CONTEXT_REFRESH + super::CONTEXT_IDLE_EVERY < super::super::context::CLAIM_FRESH);
+}
+
+/// Task #2 (team ede724c4): the tick's context sampling. An unchanged reading
+/// writes nothing (no commit, the same revision) and is not read again before
+/// the interval; a moved one is written once.
+#[test]
+fn an_unchanged_context_reading_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        // A unique team id: the worker's read times are kept per team and member.
+        t.id = uuid::Uuid::new_v4().to_string();
+        with_context(&mut t, "dev", "");
+        stored(&mut store, &t);
+        let used = std::rc::Rc::new(std::cell::Cell::new(400_000u64));
+        let inspects = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let (reading, count) = (used.clone(), inspects.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            assert_eq!(args.first().copied(), Some("inspect"));
+            count.set(count.get() + 1);
+            let body = json!({"session_usage":{"context":{"used":reading.get(),"limit":1_000_000}}}).to_string();
+            Ok(fake_output(0, &body, ""))
+        })));
+        let listed = vec![session("codex/x/dev", "r1", true)];
+        let sample = |store: &mut Store, at: f64| {
+            let teams = vec![store.load(&t.id).unwrap().unwrap()];
+            super::super::store::take_lock_lines();
+            super::sample_contexts(store, &teams, &listed, at);
+            let commits = super::super::store::take_lock_lines().iter().filter(|line| line["outcome"] == "commit").count();
+            (commits, store.load(&t.id).unwrap().unwrap())
+        };
+        let start = crate::state::now();
+        let (commits, first) = sample(&mut store, start);
+        assert_eq!((commits, inspects.get()), (1, 1), "the first reading is written");
+        assert_eq!(first.member("dev").unwrap().context.unwrap().percent, 40);
+        // The idle interval later the same figure is read and not written.
+        let (commits, second) = sample(&mut store, start + super::CONTEXT_IDLE_EVERY + 1.0);
+        assert_eq!((commits, inspects.get()), (0, 2), "an unchanged reading writes nothing");
+        assert_eq!(second.revision, first.revision, "and leaves the revision alone");
+        // The skipped write does not make the next tick read again.
+        let (commits, _) = sample(&mut store, start + super::CONTEXT_IDLE_EVERY + 10.0);
+        assert_eq!((commits, inspects.get()), (0, 2), "no read before the interval");
+        // A moved figure is written once.
+        used.set(450_000);
+        let (commits, third) = sample(&mut store, start + 2.0 * super::CONTEXT_IDLE_EVERY + 2.0);
+        assert_eq!((commits, inspects.get()), (1, 3));
+        assert_eq!(third.member("dev").unwrap().context.unwrap().percent, 45);
+        assert_eq!(third.revision, first.revision + 1);
+        set_fake_hgs(None);
+    });
+}
+
+/// Task #2 (team ede724c4): a busy member's last event time alone is
+/// written at most every WATCH_EVENT_EVERY; a phase change at once.
+#[test]
+fn a_busy_members_event_time_alone_is_written_rarely() {
+    let mut t = team();
+    let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.state = MemberState::Active;
+    dev.seen = Some(MemberSeen { at: 1000.0, live: true });
+    dev.seen_phase = "working".into();
+    dev.seen_activity = "busy".into();
+    dev.seen_event_at = Some(1000.0);
+    let busy = |event: f64, phase: &str| Seen { activity: "busy".into(), phase: phase.into(), last_event_at: Some(event), ..session("codex/x/dev", "r1", false) };
+    let watched = |seen: Seen, now: f64| steps(&t, &[seen], now).iter().any(|step| matches!(step, Step::Watch { member, .. } if member == "dev"));
+    assert!(!watched(busy(1090.0, "working"), 1090.0), "a minute and a half of events is not written");
+    assert!(!watched(busy(1000.0 + super::WATCH_EVENT_EVERY - 1.0, "working"), 1300.0));
+    assert!(watched(busy(1000.0 + super::WATCH_EVENT_EVERY, "working"), 1300.0), "the bound is");
+    assert!(watched(busy(1010.0, "tool"), 1010.0), "a phase change is written at once");
+}
+
+/// Task #2 (team ede724c4): the measurement for the report. A scripted hour of
+/// 5-second ticks over three members with sessions: one working (an open
+/// attempt; its window grows half a point a minute) and two idle (unchanged).
+/// Before, every read was a write; now only a moved or old reading is.
+#[test]
+fn context_writes_per_minute_over_a_scripted_hour() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.id = uuid::Uuid::new_v4().to_string();
+        with_context(&mut t, "dev", "");
+        delivered(&mut t);
+        let qa = t.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), conversation_id: "c3".into(), ..Default::default() });
+        qa.state = MemberState::Active;
+        stored(&mut store, &t);
+        let start = 1_000_000.0;
+        let clock = std::rc::Rc::new(std::cell::Cell::new(start));
+        let inspects = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let (now, count) = (clock.clone(), inspects.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            count.set(count.get() + 1);
+            let minutes = (now.get() - start) / 60.0;
+            // dev grows from 30% by half a point a minute; the others stay.
+            let used = if args.get(1).copied() == Some("codex/x/dev") { 300_000 + (minutes * 5_000.0) as u64 } else { 200_000 };
+            Ok(fake_output(0, &json!({"session_usage":{"context":{"used":used,"limit":1_000_000}}}).to_string(), ""))
+        })));
+        let listed = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", false), session("kimi/x/qa", "r3", true)];
+        super::super::store::take_lock_lines();
+        let mut commits = 0;
+        let ticks = 12 * 60;
+        for tick in 0..ticks {
+            let at = start + 5.0 * tick as f64;
+            clock.set(at);
+            let teams = vec![store.load(&t.id).unwrap().unwrap()];
+            super::sample_contexts(&mut store, &teams, &listed, at);
+            commits += super::super::store::take_lock_lines().iter().filter(|line| line["outcome"] == "commit").count();
+        }
+        set_fake_hgs(None);
+        let (before, after) = (inspects.get() as f64 / 60.0, commits as f64 / 60.0);
+        eprintln!("context writes per minute over a scripted hour: before {before:.2} (every read), after {after:.2}");
+        assert!(after * 3.0 < before, "before {before:.2}, after {after:.2}");
+        // The shown value stays current: never older than the refresh plus a read.
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let end = start + 5.0 * (ticks - 1) as f64;
+        for member in saved.members.iter().filter(|member| member.session.is_some()) {
+            let context = member.context.unwrap_or_else(|| panic!("{} has a reading", member.id));
+            assert!(end - context.at <= super::CONTEXT_REFRESH + super::CONTEXT_IDLE_EVERY, "{}: {}", member.id, end - context.at);
+        }
+        assert!(saved.member("dev").unwrap().context.unwrap().percent >= 58, "dev's figure follows its growth");
+    });
+}
+
+/// Task #3 (team ede724c4): four members due for a context read. Each read is
+/// an `hgs inspect` of up to 10 s; the tick starts them side by side on
+/// threads of their own and returns at once, and the next tick's sampling
+/// records what they read. Before, the tick ran them one after another.
+#[test]
+fn four_context_reads_run_side_by_side_and_the_tick_does_not_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.id = uuid::Uuid::new_v4().to_string();
+        with_context(&mut t, "dev", "");
+        with_context(&mut t, "qa", "");
+        let mut doc = t.member("dev").unwrap().clone();
+        doc.id = "doc".into();
+        doc.session = Some(SessionRef { name: "codex/x/doc".into(), run_id: "r1".into(), conversation_id: "c1".into(), ..Default::default() });
+        t.members.push(doc);
+        stored(&mut store, &t);
+        let (running, most, reads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (now_running, peak, count) = (running.clone(), most.clone(), reads.clone());
+        super::set_context_reader(&t.id, Some(Arc::new(move |_member: &Member, at: f64| {
+            let inside = now_running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(inside, Ordering::SeqCst);
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+            now_running.fetch_sub(1, Ordering::SeqCst);
+            Some(MemberContext::of(300_000, 1_000_000, at))
+        })));
+        let listed = vec![
+            session("claude/x/lead", "r0", true),
+            session("codex/x/dev", "r1", true),
+            session("codex/x/qa", "r1", true),
+            session("codex/x/doc", "r1", true),
+        ];
+        let teams = vec![store.load(&t.id).unwrap().unwrap()];
+        let at = crate::state::now();
+        let started = Instant::now();
+        super::sample_contexts(&mut store, &teams, &listed, at);
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(400), "the tick waited {took:?} for the reads");
+        // A sampling while they run starts no second read of the same member.
+        super::sample_contexts(&mut store, &teams, &listed, at + 1.0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ["lead", "dev", "qa", "doc"].iter().any(|member| super::context_in_flight(&t.id, member)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 4, "one read per member");
+        assert_eq!(most.load(Ordering::SeqCst), 4, "the four reads ran side by side, not in sequence");
+        // Nothing was recorded by the tick that started them ...
+        let before = store.load(&t.id).unwrap().unwrap();
+        assert!(before.members.iter().all(|member| member.context.is_none()), "recorded only by a later sampling");
+        // ... the next sampling records every reading and starts none again.
+        super::sample_contexts(&mut store, &teams, &listed, at + 3.0);
+        let after = store.load(&t.id).unwrap().unwrap();
+        for id in ["lead", "dev", "qa", "doc"] {
+            assert_eq!(after.member(id).unwrap().context.map(|context| context.percent), Some(30), "{id}");
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+        super::set_context_reader(&t.id, None);
+    });
+}

@@ -69,8 +69,38 @@ fn release_conflicts(team: &mut Team) -> bool {
     !decided.is_empty()
 }
 
-/// Task #267: whether a commit is on the integration line.
+/// Task #19 (owner, 2026-11-10): the lead lands accepted work by hand on a
+/// named line (`manual_line`).
+pub(crate) fn manual(team: &Team) -> bool {
+    !team.settings.manual_line.trim().is_empty()
+}
+
+/// Task #19: the line a landing names, for messages.
+pub(crate) fn line_name(team: &Team) -> String {
+    if manual(team) {
+        format!("the line {}", team.settings.manual_line.trim())
+    } else {
+        "the integration line".into()
+    }
+}
+
+/// Task #19: a lead who lands by hand, or a team created with working mode
+/// "none": the queue's and the working mode's playbook rules (a), (b) and (h)
+/// say nothing.
+pub(crate) fn hand_landing(team: &Team) -> bool {
+    manual(team)
+        || team.working_mode.trim() == "none"
+        || team.mode_kept.as_ref().is_some_and(|kept| kept["by"] == "New team")
+}
+
+/// Task #267: whether a commit is on the integration line. Task #19: on the
+/// manual line's branch when the lead lands by hand, whatever the team
+/// folder has checked out (it may be on another team's detached line).
 pub(crate) fn landed(team: &Team, commit: &str) -> bool {
+    if manual(team) {
+        let line = format!("refs/heads/{}", team.settings.manual_line.trim());
+        return !commit.is_empty() && ancestry_at(team.integration_folder(), commit, &line) == Ancestry::Yes;
+    }
     !commit.is_empty() && ancestry(team.integration_folder(), commit) == Ancestry::Yes
 }
 
@@ -95,11 +125,16 @@ fn cherry_landed(team: &Team, commit: &str) -> bool {
 
 /// Task #370: the commits of rejected attempts of every task in the team: a
 /// merge whose range carries one would land rejected code.
+///
+/// Owner's team, 2026-11-10: an attempt the pipeline returned (its review or
+/// test round) is not the lead's rejection. Its member fixes it with commits
+/// on top, so it is the base of the accepted work; a cherry-pick of the last
+/// fix alone would drop it.
 fn rejected_commits(team: &Team) -> Vec<String> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())
-        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.folder_head.is_empty())
+        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.pipeline_return && !attempt.folder_head.is_empty())
         .map(|attempt| attempt.folder_head.clone())
         .collect()
 }
@@ -109,6 +144,9 @@ fn rejected_commits(team: &Team) -> Vec<String> {
 /// (no `integration_folder`, the owner's p92: a hand landing in the team's own
 /// folder).
 fn line_revision(team: &Team) -> String {
+    if manual(team) {
+        return format!("refs/heads/{}", team.settings.manual_line.trim());
+    }
     if team.settings.integration_folder.trim().is_empty() {
         return "HEAD".to_owned();
     }
@@ -496,11 +534,24 @@ const MERGE_RANGES: usize = 500;
 
 /// The project turned the queue on (the owner may override it in the team).
 pub(crate) fn enabled(team: &Team) -> bool {
-    if team.integration_folder().is_empty() {
+    // Task #19: a team whose lead lands by hand runs no queue.
+    if team.integration_folder().is_empty() || manual(team) {
         return false;
     }
-    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
-        .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
+    let root = Path::new(team.integration_folder());
+    let overrides = team.settings.tests.as_ref();
+    let Ok(loaded) = crate::test_discipline::config::load_project(root, overrides) else { return false };
+    if loaded.active() && loaded.config.merge_queue.enabled {
+        return true;
+    }
+    // Owner, 2026-11-09: when neither the project nor the team says, a team
+    // whose members work in their own clones or worktrees has the queue on:
+    // their accepted branches live there, so nothing else lands them.
+    let said = overrides.is_some_and(|fields| fields.get("merge_queue").is_some())
+        || std::fs::read_to_string(root.join(crate::test_discipline::config::FILE)).is_ok_and(|text| text.contains("merge_queue"));
+    !said && team.members.iter().any(|member| {
+        member.id != team.lead && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+    })
 }
 
 /// The queue entry an accept of task `id` makes, or None when the accept
@@ -568,7 +619,16 @@ pub(crate) enum Merged {
     Failed(String),
 }
 
+/// Task #1 (team ede724c4): a merge-queue git about to start. One started while
+/// this thread holds the team store's write lock is a warning in the lock log.
+fn note_git(folder: &str, args: &[&str]) {
+    let mut named = vec![folder.to_owned()];
+    named.extend(args.iter().take(7).map(|arg| (*arg).to_owned()));
+    super::store::note_process("git", &named);
+}
+
 fn git(folder: &str, args: &[&str]) -> super::templates::Outcome {
+    note_git(folder, args);
     let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
     let mut command = Command::new("git");
     command
@@ -586,6 +646,7 @@ fn git_text(folder: &str, args: &[&str]) -> Option<String> {
     if folder.trim().is_empty() {
         return None;
     }
+    note_git(folder, args);
     let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
     let output = Command::new("git")
         .arg("-C")
@@ -844,6 +905,7 @@ pub(crate) fn affected_requests(
 /// computer's test classes and `runners` the owner's configured test runners;
 /// a suite of another class without a runner is recorded as not run here. True
 /// when it changed something.
+#[cfg(test)]
 pub(crate) fn step(
     team: &mut Team,
     database: &TestStore,
@@ -858,12 +920,113 @@ pub(crate) fn step(
 /// The step whose host classes and configured runners are read only once a
 /// merge has completed: a merge that only waits, a conflict or a busy lead
 /// folder never reads them.
+#[cfg(test)]
 pub(crate) fn step_with<F>(
     team: &mut Team,
     database: &TestStore,
     now: f64,
     events: &mut Vec<Event>,
     affected_hosts: F,
+) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
+{
+    let mut queue = Vec::new();
+    let changed = step_into(team, database, now, events, affected_hosts, &mut queue)?;
+    for request in &queue {
+        database.enqueue(request)?;
+    }
+    Ok(changed)
+}
+
+/// Task #1 (team ede724c4): why a step's outcome, computed on `base` (as
+/// `ours`) outside the store's write lock, no longer applies to `theirs`, the
+/// team as stored under the lock; None when it applies. It does not apply when
+/// another writer changed a task the step changed, in its status, its landing
+/// entry, its landed record or any field the step also wrote; when a task the
+/// step added took an id another writer used meanwhile; or when another writer
+/// changed a team field the step also wrote. Every other change of theirs (a
+/// member's report, another accept queued, a message) merges with it.
+pub(crate) fn superseded(base: &Value, ours: &Value, theirs: &Value) -> Option<String> {
+    let empty = serde_json::Map::new();
+    let (base_map, our_map, their_map) =
+        (base.as_object().unwrap_or(&empty), ours.as_object().unwrap_or(&empty), theirs.as_object().unwrap_or(&empty));
+    for (key, our) in our_map {
+        if matches!(key.as_str(), "tasks" | "revision" | "updated") {
+            continue;
+        }
+        let was = base_map.get(key).unwrap_or(&Value::Null);
+        if our != was && their_map.get(key).unwrap_or(&Value::Null) != was {
+            return Some(format!("the team's {key} changed meanwhile"));
+        }
+    }
+    let by_id = |team: &Value| -> std::collections::BTreeMap<String, Value> {
+        team["tasks"].as_array().into_iter().flatten().map(|task| (task["id"].to_string(), task.clone())).collect()
+    };
+    let (base_tasks, our_tasks, their_tasks) = (by_id(base), by_id(ours), by_id(theirs));
+    for (id, our) in &our_tasks {
+        let Some(was) = base_tasks.get(id) else {
+            if their_tasks.contains_key(id) {
+                return Some(format!("task #{id}, which this step added, was added by another writer meanwhile"));
+            }
+            continue;
+        };
+        if our == was {
+            continue;
+        }
+        let Some(their) = their_tasks.get(id) else { return Some(format!("task #{id} is no longer in the team")) };
+        for key in ["status", "merge", "landed"] {
+            if their.get(key) != was.get(key) {
+                return Some(format!("task #{id}'s {key} changed meanwhile"));
+            }
+        }
+        for (key, value) in our.as_object().unwrap_or(&empty) {
+            if was.get(key) != Some(value) && their.get(key) != was.get(key) {
+                return Some(format!("task #{id}'s {key} changed meanwhile"));
+            }
+        }
+    }
+    for id in base_tasks.keys() {
+        if !our_tasks.contains_key(id) && their_tasks.get(id) != base_tasks.get(id) {
+            return Some(format!("task #{id} changed meanwhile"));
+        }
+    }
+    None
+}
+
+/// Task #1 (team ede724c4): a superseded outcome is retried on the next tick
+/// from the team as stored. A merge commit this step made that the stored team
+/// does not record is rolled back first while the line still stands on it, so
+/// the retry merges (and tests) the landing again instead of finding it on the
+/// line already; a task another writer marked landed keeps it.
+pub(crate) fn undo_superseded(base: &Team, ours: &Team, theirs: Option<&Team>) -> Option<String> {
+    let folder = ours.integration_folder();
+    for task in &ours.tasks {
+        let Some(entry) = task.merge.as_ref().filter(|entry| !entry.merged.is_empty() && entry.prev != entry.merged) else { continue };
+        let before = base.task(task.id).and_then(|task| task.merge.as_ref()).map(|entry| entry.merged.as_str()).unwrap_or_default();
+        if before == entry.merged {
+            continue;
+        }
+        let stored = theirs.and_then(|team| team.task(task.id));
+        if stored.is_some_and(|task| task.landed.is_some() || task.merge.as_ref().is_some_and(|found| found.merged == entry.merged)) {
+            continue;
+        }
+        return Some(roll_back(folder, entry).note());
+    }
+    None
+}
+
+/// Task #1 (team ede724c4): the step whose test requests are collected in
+/// `queue` instead of enqueued: the dispatcher runs it on a copy of the team
+/// outside the store's write lock, and enqueues them only once its outcome is
+/// written.
+pub(crate) fn step_into<F>(
+    team: &mut Team,
+    database: &TestStore,
+    now: f64,
+    events: &mut Vec<Event>,
+    affected_hosts: F,
+    queue: &mut Vec<Request>,
 ) -> anyhow::Result<bool>
 where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
@@ -946,7 +1109,12 @@ where
                     "The merge queue's tests could not start: an environment failure, not this work's. {rolled} The landing stays queued; the task is not reopened. Fix the dependency or toolchain and retry (hgs team merge --json with retry).\n{}",
                     environment
                         .iter()
-                        .map(|record| format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()))
+                        // Task #18: an environment failure Zerus named keeps its
+                        // whole text, the owner's step included.
+                        .map(|record| match record.excerpt.find(super::environment::MARKER) {
+                            Some(at) => format!("{}: {}", record.suite, &record.excerpt[at..]),
+                            None => format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()),
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 );
@@ -996,7 +1164,7 @@ where
     if !entry.merged.is_empty() {
         let reachable = ancestry(team.integration_folder(), &entry.merged);
         if reachable != Ancestry::No {
-            return resolve_reachable(team, database, id, RecordedMerge { entry, head: &head, reachable }, now, events, affected_hosts).map(|changed| changed || migrated);
+            return resolve_reachable(team, id, RecordedMerge { entry, head: &head, reachable }, now, events, affected_hosts, queue).map(|changed| changed || migrated);
         }
         // A hand reset or revert removed the merge: the commit can be merged again.
         if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
@@ -1134,9 +1302,7 @@ where
                     }
                 }
             };
-            for request in &affected.requests {
-                database.enqueue(request)?;
-            }
+            queue.extend(affected.requests.iter().cloned());
             events.push(Event::new("merged", json!({"task":id,"prev":prev,"merged":merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()})));
             if !affected.not_run.is_empty() {
                 events.push(Event::new("merge_not_run", json!({"task":id,"suites":affected.not_run.clone()})));
@@ -1169,6 +1335,9 @@ where
 /// its module, its toolchain or its test tool was missing - so the result says
 /// nothing about the merged work and must not reopen the task.
 fn environment_excerpt(excerpt: &str) -> bool {
+    if excerpt.contains(super::environment::MARKER) {
+        return true;
+    }
     let text = excerpt.to_lowercase();
     [
         "err_module_not_found",
@@ -1317,12 +1486,12 @@ struct RecordedMerge<'a> {
 /// selection error returns the task and records the open range.
 fn resolve_reachable<F>(
     team: &mut Team,
-    database: &TestStore,
     id: u32,
     merge: RecordedMerge<'_>,
     now: f64,
     events: &mut Vec<Event>,
     affected_hosts: F,
+    queue: &mut Vec<Request>,
 ) -> anyhow::Result<bool>
 where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
@@ -1380,9 +1549,7 @@ where
             return Ok(true);
         }
     };
-    for request in &affected.requests {
-        database.enqueue(request)?;
-    }
+    queue.extend(affected.requests.iter().cloned());
     events.push(Event::new(
         "merged",
         json!({"task":id,"prev":entry.prev,"merged":entry.merged,"tests":affected.requests.len(),"not_run":affected.not_run.clone()}),

@@ -12,6 +12,10 @@ compile_commands.json
 .cache/
 __pycache__/
 /target/
+# lore-bin is its own Cargo package; a build without --target-dir writes here.
+/crates/lore-bin/target/
+# Task #25: lore batches a sandboxed slicer leaves for the lead to import.
+.lore-slices/
 /artifacts/
 # The release candidate's per-commit evidence (scripts/release-candidate.py).
 /.zerus-release/

@@ -11,7 +11,8 @@ Each kind sends its exact change:
   {"kind":"question","question":"...","options":["A","B"],"recommended":"A"}
   {"kind":"switch-setting","setting":"build_broker","value":true}
     (also base_branch "main", full_tests "allowed", max_members 8)
-  {"kind":"relaunch","member":"ID"}; drain and remove-member the same
+  {"kind":"relaunch","member":"ID"} (failed to start: relaunch it yourself);
+  drain and remove-member the same
   {"kind":"rights","member":"ID","permissions_profile":"operate"}
   {"kind":"scale","role":"Tester","agent":"claude","count":2}
   {"kind":"approve"}; {"kind":"approve-phase","phase":N}

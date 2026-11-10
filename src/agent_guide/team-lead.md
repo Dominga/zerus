@@ -27,7 +27,8 @@ A new phase is a draft. Auto drafts (U61) approve a clean one; review drafts nee
 and no draft runs before approval. "barrier":true waits for earlier phases. pause-phase
 {phase, reason} holds one. Accepted phase not started: return-to-draft re-approves it. A phase
 needing the owner's acceptance holds later ones until accept-phase (a card). A phase is
-standard or free (the owner closes a free one).
+standard or free (the owner closes a free one). add-to-phase while the team runs, and
+relaunching a member that failed to start, need no card.
 
 Spawn from a task or review: {"team":"ID","origin":12,"severity":"crit","tasks":[...]} |
 hgs team spawn --json. A Crit joins its origin's phase (no card), deps on it,

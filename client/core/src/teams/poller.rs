@@ -1,7 +1,9 @@
 //! One thread per computer that runs [`TeamsModel`]: it runs each due read off
 //! the UI thread, one at a time, and hands every update to the client as a
 //! [`Change::Teams`]. Following, Load older, spans and the profile wake it.
-//! Dropping the poller stops it after the read in flight.
+//! Dropping the poller stops it after the read in flight. Task #14: while a
+//! read of a team no longer watched is still in flight, the newly watched
+//! team's status runs beside it instead of waiting behind it.
 use super::model::{Sent, TeamsFollow, TeamsModel, TeamsUpdate};
 use super::read::TeamRead;
 use crate::reads::ReadError;
@@ -12,10 +14,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Runs one read: `read::read` against `hgs`, or a fixture in tests.
-pub type Runner = Box<dyn Fn(&TeamRead) -> Result<Value, ReadError> + Send>;
-/// Receives each change.
+/// Runs one read: `read::read` against `hgs`, or a fixture in tests. Task
+/// #14: shared by the threads that run the reads.
+pub type Runner = Box<dyn Fn(&TeamRead) -> Result<Value, ReadError> + Send + Sync>;
+/// Receives each change (task #14: behind a lock, from the threads that run
+/// the reads).
 pub type Emit = Box<dyn Fn(Change) + Send>;
+type SharedEmit = Arc<Mutex<Emit>>;
 
 #[derive(Default)]
 struct State {
@@ -26,7 +31,13 @@ struct State {
     /// Task #10: where this computer's newest Waiting reply goes for the
     /// always-on watcher, which then reads none of its own.
     share: Option<WaitingShare>,
+    /// Task #14: the reads running now: one, or a stale team's read and the
+    /// watched team's status beside it.
+    in_flight: Vec<TeamRead>,
 }
+
+/// Task #14: at most this many reads run at once.
+const READS_AT_ONCE: usize = 2;
 
 /// Task #10: the newest Waiting page a poller read, kept for the always-on
 /// Waiting watcher (src-tauri `team_watch`): while a window follows Waiting
@@ -107,6 +118,7 @@ impl TeamsPoller {
             wake: Condvar::new(),
         });
         let thread_shared = Arc::clone(&shared);
+        let (runner, emit): (Arc<Runner>, SharedEmit) = (Arc::new(runner), Arc::new(Mutex::new(emit)));
         thread::Builder::new()
             .name("hgs-team-poll".into())
             .spawn(move || run(&thread_shared, &computer, &runner, &emit))?;
@@ -200,24 +212,37 @@ fn change(computer: &ComputerId, sent: Sent) -> Change {
     }
 }
 
-fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
+fn emit_to(emit: &SharedEmit, change: Change) {
+    (emit.lock().unwrap_or_else(PoisonError::into_inner))(change);
+}
+
+fn run(shared: &Arc<Shared>, computer: &ComputerId, runner: &Arc<Runner>, emit: &SharedEmit) {
     loop {
         let (read, outbox, share) = {
             let mut state = shared.lock();
-            let share = state.share.clone();
             loop {
                 // The ends of a last follow go out before a stop.
                 if !state.outbox.is_empty() {
-                    break (None, std::mem::take(&mut state.outbox), share);
+                    break (None, std::mem::take(&mut state.outbox), None);
                 }
                 if state.stop {
                     return;
                 }
                 let now = Instant::now();
-                if let Some(read) = state.model.next(now) {
+                let read = if state.in_flight.is_empty() {
+                    state.model.next(now)
+                } else if state.in_flight.len() < READS_AT_ONCE && stale_only(&state) {
+                    // Task #14: a read of a team no longer watched (45 s over
+                    // SSH at worst) never holds the opened tab's status.
+                    state.model.next_status(now)
+                } else {
+                    None
+                };
+                if let Some(read) = read {
+                    state.in_flight.push(read.clone());
                     break (Some(read), Vec::new(), state.share.clone());
                 }
-                let wait = state.model.wait(now);
+                let wait = if state.in_flight.is_empty() { state.model.wait(now) } else { super::model::POLL };
                 state = shared
                     .wake
                     .wait_timeout(state, wait)
@@ -226,24 +251,45 @@ fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
             }
         };
         for (key, update) in outbox {
-            emit(change(computer, Sent::new(key, update)));
+            emit_to(emit, change(computer, Sent::new(key, update)));
         }
         let Some(read) = read else { continue };
-        let reply = runner(&read);
-        if let (Some(share), TeamRead::Waiting { before: None }, Ok(value)) =
-            (&share, &read, &reply)
-        {
-            share.put(value, Instant::now());
+        let spawned = thread::Builder::new().name("hgs-team-read".into()).spawn({
+            let (shared, computer, runner, emit) = (Arc::clone(shared), computer.clone(), Arc::clone(runner), Arc::clone(emit));
+            let (read, share) = (read.clone(), share.clone());
+            move || run_read(&shared, &computer, &runner, &emit, share, &read)
+        });
+        if spawned.is_err() {
+            // No thread to spare: the read runs here, as before task #14.
+            run_read(shared, computer, runner, emit, share, &read);
         }
-        let updates = {
-            let mut state = shared.lock();
-            if state.stop {
-                return;
-            }
-            state.model.apply_sent(&read, reply, Instant::now())
-        };
-        for sent in updates {
-            emit(change(computer, sent));
+    }
+}
+
+/// Whether every read in flight is about a team no longer watched.
+fn stale_only(state: &State) -> bool {
+    let watched = state.model.following().team.as_deref();
+    state.in_flight.iter().all(|read| read.team().is_some_and(|team| Some(team) != watched))
+}
+
+/// One read on its own thread: its reply is applied and its updates sent.
+fn run_read(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &SharedEmit, share: Option<WaitingShare>, read: &TeamRead) {
+    let reply = runner(read);
+    if let (Some(share), TeamRead::Waiting { before: None }, Ok(value)) = (&share, read, &reply) {
+        share.put(value, Instant::now());
+    }
+    let updates = {
+        let mut state = shared.lock();
+        if let Some(at) = state.in_flight.iter().position(|running| running == read) {
+            state.in_flight.remove(at);
         }
+        if state.stop {
+            return;
+        }
+        state.model.apply_sent(read, reply, Instant::now())
+    };
+    shared.wake.notify_all();
+    for sent in updates {
+        emit_to(emit, change(computer, sent));
     }
 }

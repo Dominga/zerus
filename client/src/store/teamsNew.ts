@@ -10,7 +10,7 @@ import type {
 } from "../ui/teams/types";
 import { membersWithIds } from "./newTeamForm";
 
-export const DRAFT_FIELDS = ["name", "goal", "addendum", "settings", "members", "tasks", "working_mode"] as const;
+export const DRAFT_FIELDS = ["name", "goal", "addendum", "settings", "members", "tasks", "working_mode", "plan_mode"] as const;
 export type DraftField = (typeof DRAFT_FIELDS)[number];
 
 export interface NewTeamFields {
@@ -23,7 +23,12 @@ export interface NewTeamFields {
   tasks: TaskView[];
   /** Task #308: auto, a preset, or none for the settings as they are. */
   working_mode: string;
+  /** Task #8 (team ede724c4): standard or free; the owner chooses it, the lead offers one. */
+  plan_mode: PlanMode;
 }
+
+export type PlanMode = "standard" | "free";
+export const planModeOf = (value: unknown): PlanMode => (value === "free" ? "free" : "standard");
 
 export const emptyFields = (): NewTeamFields => ({
   name: "",
@@ -34,6 +39,7 @@ export const emptyFields = (): NewTeamFields => ({
   members: [],
   tasks: [],
   working_mode: "auto",
+  plan_mode: "standard",
 });
 
 export interface NewTeamPort {
@@ -83,12 +89,13 @@ export function mergeDraft(
 ): NewTeamFields {
   const merged: NewTeamFields = { ...local };
   for (const field of DRAFT_FIELDS) {
-    if (field === "working_mode") continue;
+    if (field === "working_mode" || field === "plan_mode") continue;
     if (!dirty.has(field)) {
       (merged as unknown as Record<string, unknown>)[field] = view[field as keyof NewTeamView];
     }
   }
   if (!dirty.has("working_mode")) merged.working_mode = view.working_mode?.accepted ?? "auto";
+  if (!dirty.has("plan_mode")) merged.plan_mode = planModeOf(view.plan_mode);
   merged.folder = view.folder || local.folder;
   return merged;
 }
@@ -265,7 +272,7 @@ export function createNewTeam(port: NewTeamPort) {
     }
   };
 
-  const createTeam = async (): Promise<NewTeamResult> => {
+  const createTeam = async (options: { confirmWidening?: boolean } = {}): Promise<NewTeamResult> => {
     const current = view();
     if (!current || !draftId()) return { ok: false, error: "no-draft" };
     setBusy(true);
@@ -286,7 +293,9 @@ export function createNewTeam(port: NewTeamPort) {
         team: draftId(),
         team_name: fields().name,
         confirmed: false,
-        action: { kind: "draft_create", approve: false, confirm_widening: false },
+        // Owner, 2026-11-09: a draft with wider member permissions needs the
+        // owner's explicit confirmation; the form asks for it (NewTeamFooter).
+        action: { kind: "draft_create", approve: false, confirm_widening: !!options.confirmWidening },
       });
       if (outcome.outcome !== "done") {
         setError(outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail);
@@ -363,14 +372,16 @@ export function createNewTeam(port: NewTeamPort) {
     if (current) setFields(mergeDraft(fields(), new Set<DraftField>(), current));
   };
 
-  const markSeen = async (field: string) => {
-    if (!draftId() || !unseen().includes(field)) return;
-    setUnseen(unseen().filter((value) => value !== field));
+  /** Marks a field the lead changed as seen; several at once for one mark (the plan mode and its reason). */
+  const markSeen = async (field: string | string[]) => {
+    const seen = (Array.isArray(field) ? field : [field]).filter((value) => unseen().includes(value));
+    if (!draftId() || seen.length === 0) return;
+    setUnseen(unseen().filter((value) => !seen.includes(value)));
     await port.action({
       team: draftId(),
       team_name: fields().name,
       confirmed: false,
-      action: { kind: "draft_seen", fields: [field] },
+      action: { kind: "draft_seen", fields: seen },
     });
   };
 

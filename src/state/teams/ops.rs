@@ -215,6 +215,10 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     super::super::iron_rules::validate(&json!(settings.iron_rules))?;
+    // Task #19: the manual line is a branch name Zerus passes to git as one word.
+    if !settings.manual_line.trim().is_empty() {
+        super::templates::check_branch(settings.manual_line.trim()).context("manual_line names the line's branch")?;
+    }
     if let Some(memory) = &settings.memory {
         ensure!(
             super::super::project_memory::MODES.contains(&memory.mode.as_str()) || memory.mode == super::super::project_memory::LEGACY_LORE,
@@ -1626,6 +1630,29 @@ fn keep_owner_memory(old: &Settings, new: &mut Settings, actor: &Actor) {
     }
 }
 
+/// Task #13 (team ede724c4): the owner's settings (`OWNER_SETTINGS`) the lead
+/// changed in `new`, as offers by field; `new` keeps the owner's values.
+fn setting_offers(old: &Settings, new: &mut Settings) -> anyhow::Result<BTreeMap<String, Value>> {
+    let (old_value, mut new_value) = (serde_json::to_value(&*old)?, serde_json::to_value(&*new)?);
+    let mut offers = BTreeMap::new();
+    for field in OWNER_SETTINGS {
+        let (was, wanted) = (old_value.get(field).cloned(), new_value.get(field).cloned());
+        if was == wanted {
+            continue;
+        }
+        offers.insert(field.to_owned(), wanted.unwrap_or(Value::Null));
+        let object = new_value.as_object_mut().context("Settings are an object")?;
+        match was {
+            Some(was) => object.insert(field.to_owned(), was),
+            None => object.remove(field),
+        };
+    }
+    if !offers.is_empty() {
+        *new = serde_json::from_value(new_value).context("Invalid settings")?;
+    }
+    Ok(offers)
+}
+
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
     if matches!(actor, Actor::Human) {
         return Ok(());
@@ -2457,6 +2484,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // word, and only while none of its work has started, so nothing done is
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
+    // Owner, 2026-11-10: approving a phase that is already approved, running
+    // or done is what the owner wanted anyway; it answers so, never an error.
+    if approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted()) {
+        return Ok(json!({"status":"approved","phase":n,"already":true}));
+    }
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
     // U56: an accepted phase left with no tasks (they were moved out, U58) is
     // not done: it stays yours to discard, or the lead's on your word. An empty
@@ -5744,8 +5776,16 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         let mut settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
                         keep_owner_memory(&team.settings, &mut settings, actor);
                         validate_settings(&settings)?;
-                        // C4: the lead drafts the rest; the owner's settings stay theirs.
-                        ensure_lead_settings(&team.settings, &settings, actor, false)?;
+                        // C4: the lead drafts the rest; the owner's settings stay
+                        // theirs. Task #13 (team ede724c4): in a draft the lead's
+                        // values for them are offers, never a refusal.
+                        if human {
+                            let (old, new) = (serde_json::to_value(&team.settings)?, serde_json::to_value(&settings)?);
+                            state.setting_offers.retain(|field, offer| new.get(field) != Some(&*offer) && new.get(field) == old.get(field));
+                        } else {
+                            let offered = setting_offers(&team.settings, &mut settings)?;
+                            state.setting_offers.extend(offered);
+                        }
                         team.settings = settings;
                     }
                     "members" => {
@@ -5753,10 +5793,15 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         // Feedback 2026-11-04 (6): an object changes only the
                         // members it names ({"dev":{"model":"opus"}}, null removes
                         // one, a new id adds it); a list replaces them all.
+                        // Owner, 2026-11-09: a desktop save that arrives with its
+                        // members encoded as JSON text is read as that list; any
+                        // other shape names what it got, never a bare refusal.
+                        let decoded = value.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
+                        let value = decoded.as_ref().unwrap_or(value);
                         let value = &match value {
                             Value::Object(patches) => patch_members(team, patches)?,
                             Value::Array(_) => value.clone(),
-                            _ => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}"),
+                            other => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}; this update sent {}", match other { Value::Null => "null", Value::Bool(_) => "true/false", Value::Number(_) => "a number", Value::String(_) => "text", _ => "something else" }),
                         };
                         let mut members: Vec<Member> = value
                             .as_array()
@@ -5869,7 +5914,18 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             team.draft = Some(state.clone());
             events.push(Event::new("draft_updated", json!({"by":actor.label(team),"fields":changed,"revision":state.revision})));
             // C1: the store answers its own team revision as "revision".
-            Ok(json!({"status":"updated","draft_revision":state.revision,"unseen":state.unseen}))
+            let mut receipt = json!({"status":"updated","draft_revision":state.revision,"unseen":state.unseen});
+            if !state.setting_offers.is_empty() {
+                receipt["setting_offers"] = json!(state.setting_offers);
+                if !human {
+                    receipt["note"] = json!(format!(
+                        "{} {} the owner's; your values are offers New team shows, and the owner applies them with one click",
+                        state.setting_offers.keys().cloned().collect::<Vec<_>>().join(", "),
+                        if state.setting_offers.len() == 1 { "is" } else { "are" }
+                    ));
+                }
+            }
+            Ok(receipt)
         }
         "seen" => {
             ensure!(human, "Only you mark the draft as seen");
@@ -5897,6 +5953,16 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     if !preset.is_empty() {
                         super::working_mode::apply(&mut team.settings, &preset, &proposal.profile.branch)?;
                         team.working_mode = preset;
+                    } else if !proposal.preset.is_empty() {
+                        // Task #13 (team ede724c4): "Keep the settings as they
+                        // are" is the owner's Keep of this profile's preset
+                        // (task 336): the playbook does not ask again right
+                        // after Create team.
+                        team.mode_kept = Some(json!({"preset":proposal.preset,"fingerprint":super::working_mode::fingerprint(&proposal.profile),
+                            "at":now(),"by":"New team"}));
+                        // "none" is the owner's choice, not a mode: no
+                        // playbook titled "the none working mode".
+                        team.working_mode.clear();
                     }
                 }
                 None => team.mode_proposal = Some(json!({"preset":""})),
@@ -7224,7 +7290,7 @@ fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     let commit = text(input, "commit").trim().to_owned();
     ensure!(!commit.is_empty(), "Name the integration line's commit: {{\"commit\":\"...\"}}");
     ensure!(team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted), "Only an accepted task is marked landed");
-    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on the integration line");
+    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on {}", super::merge_queue::line_name(team));
     let label = actor.label(team);
     if let Some(task) = team.task_mut(id) {
         task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });
@@ -7713,12 +7779,18 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             // fresh conversation with a handoff brief, never the same one; the
             // lead proposes it for a stuck member too, not only for one that
             // failed to start.
+            // Task #13 (team ede724c4): a member whose session failed to start
+            // is started again by the lead itself, with no card.
             let member_id = text(input, "member").to_owned();
             let stuck = team.member(&member_id).is_some_and(|member| member.stuck.is_some());
+            let failed = team.member(&member_id).is_some_and(Member::failed_to_start);
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
-                        && (input["roster_word"].as_bool() == Some(true) || (team.settings.lead_restarts_stuck && stuck))),
+                        && (input["roster_word"].as_bool() == Some(true)
+                            || failed
+                            || (team.settings.lead_restarts_stuck && stuck)
+                            || super::lead_plan::lead_relaunches(team, &member_id))),
                 "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;

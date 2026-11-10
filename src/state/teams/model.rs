@@ -52,6 +52,13 @@ pub(crate) struct Draft {
     /// one is refused ("owner changed <field>").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owner_edited: Vec<String>,
+    /// Task #13 (team ede724c4): the owner's settings the lead set in the
+    /// draft (base_branch, branch_per_task, max_members, ...), by field: the
+    /// owner's values stay, the lead's are offers New team marks and applies
+    /// with one click. An offer goes when the owner applies it or sets the
+    /// field otherwise.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setting_offers: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -271,6 +278,14 @@ pub(crate) struct Settings {
     /// U48: the branch a task's branch starts from; empty is the lead's branch.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
+    /// Task #19 (team ede724c4, owner 2026-11-10): the line the lead lands
+    /// accepted work on by hand (manual landing): the merge queue is off for
+    /// the team (an accept queues nothing and runs no suites), `hgs team
+    /// landed` takes a commit on this branch of the team folder's repository,
+    /// members merge it (git-merge-lead) and hand-outs start from it. Empty:
+    /// the queue or the lead's branch as before. The lead may set it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manual_line: String,
     /// Task 174 (owner, 2026-11-07): the checkout of the team's repository
     /// whose branch integrates the team's work: the merge queue merges into
     /// it and tests there, and members merge from it (git-merge-lead). Empty
@@ -455,6 +470,7 @@ impl Default for Settings {
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
+            manual_line: String::new(),
             integration_folder: String::new(),
             restart_crashed: true,
             stuck_minutes: 0,
@@ -699,6 +715,13 @@ pub(crate) struct Member {
     /// relaunch clears it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub host_waits: u32,
+    /// Task #17 (team ede724c4): the start after a swap or relaunch waits
+    /// because the session it replaces still works in the member's folder.
+    /// The old session keeps the member's name and its open attempt until its
+    /// turn ends and it is paused; only then does the new one start. Set
+    /// while waiting, so the wait is said once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced_busy: bool,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
@@ -1329,6 +1352,13 @@ fn is_zero_usize(value: &usize) -> bool {
 }
 
 impl Member {
+    /// Task #13 (team ede724c4): the member's session could not start and the
+    /// dispatcher waits for a relaunch (`error` names why); the lead relaunches
+    /// it itself.
+    pub(crate) fn failed_to_start(&self) -> bool {
+        self.session.is_none() && !self.error.trim().is_empty() && self.state != MemberState::Removed
+    }
+
     /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
         self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
@@ -3802,10 +3832,14 @@ impl Team {
     }
 }
 
-/// Archived rows have a deliberately small wire representation.
+/// Archived rows have a deliberately small wire representation: what the plan
+/// still draws of a done phase. Its dependencies (task #469) and the task it
+/// was spawned from are among them, or the phase falls into one layer without
+/// links; its history stays in the archive's payload.
 pub(crate) fn task_stub(task: &Task) -> serde_json::Value {
     let mut stub = serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
         "status":task.status,"archived":task.archived});
+    if !task.deps.is_empty() { stub["deps"] = serde_json::to_value(&task.deps).unwrap_or_default(); }
     if let Some(origin) = task.origin { stub["origin"] = serde_json::json!(origin); }
     stub
 }

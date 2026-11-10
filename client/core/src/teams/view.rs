@@ -203,6 +203,17 @@ struct Progress {
 
 fn phase_progress(item: &Value) -> Progress {
     use std::collections::BTreeMap;
+    // Task #6: hgs gives the strip's numbers; a peer's older hgs gives the
+    // tasks, and the numbers are counted from them as before.
+    if let Some(given) = item.get("progress").filter(|progress| progress.is_object()) {
+        return Progress {
+            phase: count(given, "phase"),
+            phase_done: count(given, "phase_done"),
+            phase_total: count(given, "phase_total"),
+            phases_done: count(given, "phases_done"),
+            phases_total: count(given, "phases_total"),
+        };
+    }
     let mut groups: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
     for task in array(item, "tasks") {
         let phase = task.get("phase").and_then(Value::as_u64).unwrap_or(1);
@@ -253,16 +264,29 @@ pub fn list(value: &Value) -> TeamList {
                     })
                     .collect(),
                 lead,
-                tasks: array(item, "tasks").len() as u64,
+                // Task #6: the counts hgs gives, else (a peer's older hgs)
+                // counted from the arrays it sent.
+                tasks: if item.get("task_count").is_some() {
+                    count(item, "task_count")
+                } else {
+                    array(item, "tasks").len() as u64
+                },
                 accepted: count(item, "accepted"),
                 submitted: count(item, "submitted"),
                 in_review: count(item, "in_review"),
                 in_test: count(item, "in_test"),
-                attention: array(item, "attention").len() as u64,
-                open_proposals: array(item, "proposals")
-                    .iter()
-                    .filter(|proposal| proposal["state"] == "open")
-                    .count() as u64,
+                attention: if item.get("attention_count").is_some() {
+                    count(item, "attention_count")
+                } else {
+                    array(item, "attention").len() as u64
+                },
+                open_proposals: match item.get("open_proposals") {
+                    Some(given) if !given.is_array() => count(item, "open_proposals"),
+                    _ => array(item, "proposals")
+                        .iter()
+                        .filter(|proposal| proposal["state"] == "open")
+                        .count() as u64,
+                },
                 waiting_for_lead: flag(item, "waiting_for_lead"),
                 pending_phase: item.get("pending_phase").and_then(Value::as_u64),
                 updated: number(item, "updated"),
@@ -890,6 +914,9 @@ pub struct DraftView {
     pub revision: u64,
     pub unseen: Vec<String>,
     pub owner_edited: Vec<String>,
+    /// Task #13 (team ede724c4): the lead's values for the owner's settings,
+    /// by field (an object; empty when none), applied with one click.
+    pub setting_offers: Value,
 }
 
 /// `team status` for the Team tab.
@@ -1380,6 +1407,10 @@ pub fn team(value: &Value) -> TeamView {
                 revision: count(draft, "revision"),
                 unseen: lines(draft, "unseen", NAME_CHARS),
                 owner_edited: lines(draft, "owner_edited", NAME_CHARS),
+                setting_offers: match bounded(draft.get("setting_offers")) {
+                    offers @ Value::Object(_) => offers,
+                    _ => Value::Object(Map::new()),
+                },
             }),
         truncated: members.len() > MEMBERS_KEPT
             || tasks.len() > TASKS_KEPT
@@ -1514,8 +1545,15 @@ pub struct NewTeamView {
     /// Task #308: the proposed working mode, its reasons and the accepted preset.
     #[serde(skip_serializing_if = "Value::is_null")]
     pub working_mode: Value,
+    /// Task #8 (team ede724c4): the plan mode the owner chose ("standard" or
+    /// "free"), the lead's offer ("" for none) and the lead's one-line reason.
+    pub plan_mode: String,
+    pub plan_mode_offer: String,
+    pub plan_mode_reason: String,
     pub members: Vec<DraftMember>,
     pub tasks: Vec<TaskView>,
+    /// Owner, 2026-11-09: the draft's phases for New team's Phases page.
+    pub phases: Vec<PhaseView>,
     pub draft: DraftView,
     pub validation: Validation,
     pub updated: f64,
@@ -1535,6 +1573,17 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
         folder: view.folder.clone(),
         settings: view.settings.clone(),
         working_mode: bounded(value.get("working_mode")),
+        // hgs leaves out the standard mode; an unknown one reads as standard.
+        plan_mode: if view.plan_mode == "free" {
+            "free".into()
+        } else {
+            "standard".into()
+        },
+        plan_mode_offer: match name(value, "plan_mode_offer").as_str() {
+            offer @ ("standard" | "free") => offer.into(),
+            _ => String::new(),
+        },
+        plan_mode_reason: text(value, "plan_mode_reason", LINE_CHARS),
         members: array(value, "members")
             .iter()
             .take(MEMBERS_KEPT)
@@ -1554,6 +1603,7 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
             })
             .collect(),
         tasks: view.tasks.clone(),
+        phases: view.phases.clone(),
         draft: view.draft.clone().unwrap_or_default(),
         validation: view.validation.clone(),
         updated: view.updated,

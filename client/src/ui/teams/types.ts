@@ -53,6 +53,8 @@ export interface DraftView {
   revision: number;
   unseen: string[];
   owner_edited: string[];
+  /** Task #13 (team ede724c4): the lead's values for the owner's settings, by field. */
+  setting_offers?: Record<string, unknown>;
 }
 
 export interface DraftMember {
@@ -99,11 +101,17 @@ export interface NewTeamView {
   goal: string;
   /** Task #308 */
   working_mode?: WorkingModeDraft | null;
+  /** Task #8 (team ede724c4): the owner's plan mode, the lead's offer ("" for none) and its reason. */
+  plan_mode?: string;
+  plan_mode_offer?: string;
+  plan_mode_reason?: string;
   addendum: string;
   folder: string;
   settings: Record<string, unknown>;
   members: DraftMember[];
   tasks: TaskView[];
+  /** Owner, 2026-11-09: the draft's phases (Phases page). */
+  phases?: PhaseView[];
   draft: DraftView;
   validation: ValidationView;
   updated: number;

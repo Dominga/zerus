@@ -1,0 +1,462 @@
+{
+  "items": [
+    {
+      "accepted": 8,
+      "auto_accept": false,
+      "folder": "C:\\work\\example",
+      "id": "33fbafeb-8291-4eda-a00c-6e1448ec6f20",
+      "in_review": 0,
+      "in_test": 0,
+      "lead": "lead",
+      "name": "Zerus Next for the fork",
+      "pending_phase": null,
+      "plan_mode": "standard",
+      "project": "ZERUS",
+      "revision": 612,
+      "status": "running",
+      "stuck_scope": [
+        1,
+        2,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        19,
+        23,
+        26,
+        27
+      ],
+      "submitted": 0,
+      "updated": 1793895184.912795,
+      "waiting_for_lead": false,
+      "members": [
+        {
+          "id": "lead",
+          "role": "Lead",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "0322c402-bf9b-4bd7-81fa-680f6c0ff926",
+            "host": "",
+            "name": "claude/Zerus/work-6926cceb",
+            "run_id": "d98bb419-557a-4725-a017-214ecd23595d"
+          }
+        },
+        {
+          "id": "core",
+          "role": "Tauri core (Rust)",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "da483eda-a37c-45ae-b97b-2645ad6d98a1",
+            "host": "",
+            "name": "claude/Zerus-team-33fbafeb-core/zerus-next-for-the-fork-core",
+            "run_id": "830f440e-c015-40cf-9779-a7afa1e46bba"
+          }
+        },
+        {
+          "id": "hgs",
+          "role": "hgs CLI (DeepSeek)",
+          "agent": "dsh",
+          "state": "not_created",
+          "session": null
+        },
+        {
+          "id": "ui1",
+          "role": "Frontend (SolidJS)",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "70cd50d6-7548-482b-96f0-20841337f979",
+            "host": "",
+            "name": "claude/Zerus-team-33fbafeb-ui1/zerus-next-for-the-fork-ui1",
+            "run_id": "72ddd41c-fa88-49b5-8301-ca9220aca1be"
+          }
+        },
+        {
+          "id": "ui2",
+          "role": "Frontend (DeepSeek)",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-f1e13b40-302a-4c2d-a1b4-ceaf301fe327",
+            "host": "",
+            "name": "dsh/Zerus-team-33fbafeb-ui2/zerus-next-for-the-fork-ui2",
+            "run_id": "e3c295e0-c27e-4e68-8600-31873b556cca"
+          }
+        },
+        {
+          "id": "merger",
+          "role": "Reviewer & Merger",
+          "agent": "claude",
+          "state": "not_created",
+          "session": null
+        },
+        {
+          "id": "qa",
+          "role": "QA tester (Windows, DeepSeek)",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-10e9dd92-4a7a-49be-a139-da281115f842",
+            "host": "",
+            "name": "dsh/Zerus/zerus-next-for-the-fork-qa",
+            "run_id": "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7"
+          }
+        }
+      ],
+      "task_count": 4,
+      "progress": {
+        "phase": 1,
+        "phase_done": 2,
+        "phase_total": 4,
+        "phases_done": 0,
+        "phases_total": 1
+      },
+      "attention_count": 0,
+      "open_proposals": 1
+    },
+    {
+      "accepted": 439,
+      "auto_accept": true,
+      "folder": "C:\\work\\example",
+      "id": "6d0aabee-ed96-43fe-97b4-9d568962e1e2",
+      "in_review": 0,
+      "in_test": 0,
+      "lead": "lead",
+      "name": "RogueDOD QA bot - stage 1",
+      "pending_phase": null,
+      "plan_mode": "free",
+      "project": "",
+      "revision": 17207,
+      "status": "paused",
+      "stuck_scope": [],
+      "submitted": 0,
+      "updated": 1793806091.7619245,
+      "waiting_for_lead": false,
+      "members": [
+        {
+          "id": "lead",
+          "role": "Lead",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "30eac8c5-288d-4f46-8869-172edc89b261",
+            "host": "",
+            "name": "claude/RogueDOD/work-96755ac6",
+            "run_id": "58b9a4a1-0647-4342-b59b-359715029ab1"
+          }
+        },
+        {
+          "id": "a-core",
+          "role": "backend-opus",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "18e15312-4845-4fb8-ac6d-ccfb7ffe4262",
+            "host": "",
+            "name": "claude/RogueDOD/roguedod-qa-bot-stage-1-a-core",
+            "run_id": "4151aad3-3195-44bb-9900-9fe025968213"
+          }
+        },
+        {
+          "id": "b-body",
+          "role": "backend-opus",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "e0da8718-8be3-434d-8aa5-2a74f193bbb5",
+            "host": "",
+            "name": "claude/RogueDOD/roguedod-qa-bot-stage-1-b-body",
+            "run_id": "28aedce1-e2b7-4125-864e-1b05a5b73694"
+          }
+        },
+        {
+          "id": "c-orch",
+          "role": "backend-opus",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "d4925ce7-678c-48b1-b6dc-72fdea8fe749",
+            "host": "",
+            "name": "claude/RogueDOD/roguedod-qa-bot-stage-1-c-orch",
+            "run_id": "dabbbabd-b8b2-47b7-8cb5-8f08af45d5d9"
+          }
+        },
+        {
+          "id": "d-data",
+          "role": "backend-opus",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "500323fd-dcc8-4ec0-a853-37754343582a",
+            "host": "",
+            "name": "claude/RogueDOD/roguedod-qa-bot-stage-1-d-data",
+            "run_id": "b40684b2-e092-4611-9664-d2e010f534b6"
+          }
+        },
+        {
+          "id": "e-research",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-197200ed-950a-4e33-b3ce-bf22d1b0b275",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-e-research",
+            "run_id": "9a05a3d9-1f2c-4c25-bb9e-74875cf51e02"
+          }
+        },
+        {
+          "id": "f-stats",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-67bb4b85-1775-40ae-ba3f-43d37f4a6e75",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-f-stats",
+            "run_id": "bea8ec46-8c81-482f-ae4d-7b9bc13bc92e"
+          }
+        },
+        {
+          "id": "g-tools",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-f8c86d7f-8b04-45da-9043-00242a094649",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-g-tools",
+            "run_id": "df04fd00-df9a-4698-8bc3-742f9e5e2d5d"
+          }
+        },
+        {
+          "id": "h-data",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-5eeb01ff-e992-4e3b-a22e-9f80d5a4b2b1",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-h-data",
+            "run_id": "5b142c87-6c97-4f25-b2c0-1bae942f1190"
+          }
+        },
+        {
+          "id": "i-eval",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-eac1fea6-1f99-4d3b-93a9-aef1c5c4bca5",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-i-eval",
+            "run_id": "8f4c645f-1389-45e2-ac50-01bfe508436c"
+          }
+        },
+        {
+          "id": "j-oracle",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-ced548e5-5ef5-43b0-b5f2-59bdfd3ce857",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-j-oracle",
+            "run_id": "1746cd50-e6c3-4932-b5d6-503bddff9876"
+          }
+        },
+        {
+          "id": "k-policy",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-5040609d-4b6a-4128-8f92-36bdc428f05f",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-k-policy",
+            "run_id": "ea0ba63e-c95a-4b4b-9dd1-c9e37b53677d"
+          }
+        },
+        {
+          "id": "l-detect",
+          "role": "backend-ds",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-de771763-c056-4a72-8eb2-da2f66646ba3",
+            "host": "",
+            "name": "dsh/RogueDOD/roguedod-qa-bot-stage-1-l-detect",
+            "run_id": "0a16362f-e89b-41ed-be3a-1ee9f46ca006"
+          }
+        }
+      ],
+      "task_count": 4,
+      "progress": {
+        "phase": 1,
+        "phase_done": 4,
+        "phase_total": 4,
+        "phases_done": 1,
+        "phases_total": 1
+      },
+      "attention_count": 0,
+      "open_proposals": 0
+    },
+    {
+      "accepted": 57,
+      "auto_accept": false,
+      "folder": "D:/OwlCats/DCB",
+      "id": "0392bb12-48b4-4528-8278-e7ecd0a2c284",
+      "in_review": 0,
+      "in_test": 0,
+      "lead": "lead",
+      "name": "DCB PBR export",
+      "pending_phase": null,
+      "plan_mode": "free",
+      "project": "",
+      "revision": 3111,
+      "status": "running",
+      "stuck_scope": [],
+      "submitted": 0,
+      "updated": 1793806090.5891361,
+      "waiting_for_lead": false,
+      "members": [
+        {
+          "id": "lead",
+          "role": "Lead",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "523bdceb-aae6-4272-8e1d-bd102ff508e5",
+            "host": "",
+            "name": "claude/DCB/work-0cca7c77",
+            "run_id": "c0eabdf8-ebc0-4480-981f-05f9928b62d0"
+          }
+        },
+        {
+          "id": "export",
+          "role": "Backend (DeepSeek)",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-c67624aa-9039-4d57-8cdd-5ada57fe296c",
+            "host": "",
+            "name": "dsh/DCB-team-0392bb12-export/dcb-pbr-export-export",
+            "run_id": "aae8ad3a-17fe-4882-8525-0b481461b4a7"
+          }
+        },
+        {
+          "id": "cook",
+          "role": "Backend (DeepSeek)",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-35369cc4-a411-46d4-940e-f026619f3bb9",
+            "host": "",
+            "name": "dsh/DCB-team-0392bb12-cook/dcb-pbr-export-cook",
+            "run_id": "98e9da41-1b1d-48d3-871c-a25c5c1ca4c2"
+          }
+        },
+        {
+          "id": "ui",
+          "role": "Frontend (Opus)",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "c18bd01b-b9b5-4e8d-a3e9-32929d0ffb1c",
+            "host": "",
+            "name": "claude/DCB-team-0392bb12-ui/dcb-pbr-export-ui",
+            "run_id": "39114250-53c0-4c06-9e49-ffe282f13d27"
+          }
+        },
+        {
+          "id": "review",
+          "role": "Reviewer & Merger",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "297659dd-f12a-4d91-81e7-053985162144",
+            "host": "",
+            "name": "claude/DCB/dcb-pbr-export-review",
+            "run_id": "f731dfcb-0045-4ea5-a951-ae7e424a9737"
+          }
+        },
+        {
+          "id": "qa",
+          "role": "QA tester",
+          "agent": "dsh",
+          "state": "active",
+          "session": {
+            "conversation_id": "session-70f7830f-7a63-4f57-8317-beb47ae75471",
+            "host": "",
+            "name": "dsh/DCB/dcb-pbr-export-qa",
+            "run_id": "ba13d3fb-1216-4783-b1cd-54ead0a14506"
+          }
+        },
+        {
+          "id": "engine",
+          "role": "Backend (DeepSeek)",
+          "agent": "dsh",
+          "state": "not_created",
+          "session": null
+        },
+        {
+          "id": "frontend-opus",
+          "role": "Frontend (Opus)",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "7abdeeef-aee1-4f31-a5e2-c8651d579a8d",
+            "host": "",
+            "name": "claude/DCB/dcb-pbr-export-frontend-opus",
+            "run_id": "6db0db30-2819-4bcc-9967-4f830e26ce19"
+          }
+        },
+        {
+          "id": "reviewer-merger",
+          "role": "Reviewer & Merger",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "961c4b7f-6d25-4270-a7a3-30820900dce2",
+            "host": "",
+            "name": "claude/DCB/dcb-pbr-export-reviewer-merger",
+            "run_id": "09b685b1-581a-4b5f-b8d0-859f9af7110f"
+          }
+        },
+        {
+          "id": "qa-tester",
+          "role": "QA tester",
+          "agent": "claude",
+          "state": "active",
+          "session": {
+            "conversation_id": "fe2f1939-68c3-4947-83a4-c09015786f93",
+            "host": "",
+            "name": "claude/DCB/dcb-pbr-export-qa-tester",
+            "run_id": "4e5fb3df-f07a-4ec7-a821-50883c34dd7b"
+          }
+        }
+      ],
+      "task_count": 4,
+      "progress": {
+        "phase": 1,
+        "phase_done": 4,
+        "phase_total": 4,
+        "phases_done": 1,
+        "phases_total": 1
+      },
+      "attention_count": 1,
+      "open_proposals": 0
+    }
+  ]
+}

@@ -130,3 +130,314 @@ fn a_merge_uses_the_leads_own_branch_and_never_a_shared_folder() {
     let error = run_outcome(&shared_team, &shared, &repo, &request).unwrap_err().to_string();
     assert!(error.contains("shared folder"), "{error}");
 }
+
+/// Task #1 (team ede724c4): a scripted repository for the merge queue: the
+/// lead's checkout with the queue on and one suite, and a member worktree
+/// whose reported commit waits in the queue. None when the sandbox blocks git.
+struct QueueRepo {
+    lead: std::path::PathBuf,
+    member: std::path::PathBuf,
+    line: String,
+}
+
+fn queue_git(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn queue_repo(dir: &Path) -> Option<QueueRepo> {
+    let lead = dir.join("lead");
+    let member = dir.join("member");
+    std::fs::create_dir_all(lead.join(".zerus")).ok()?;
+    let check = if cfg!(windows) { "if exist fail.txt (exit /b 1) else (exit /b 0)" } else { "test ! -f fail.txt" };
+    std::fs::write(
+        lead.join(".zerus/tests.toml"),
+        format!("version = 1\n[merge_queue]\nenabled = true\n[[provider]]\nname = \"unit\"\nkind = \"command\"\ncommand = '{check}'\nsources = [\"**\"]\naffected = \"all\"\n"),
+    )
+    .ok()?;
+    queue_git(&lead, &["init", "-q"])?;
+    for (key, value) in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")] {
+        queue_git(&lead, &["config", key, value])?;
+    }
+    std::fs::write(lead.join("a.txt"), "one\n").ok()?;
+    queue_git(&lead, &["add", "."])?;
+    queue_git(&lead, &["commit", "-q", "-m", "base"])?;
+    let line = queue_git(&lead, &["symbolic-ref", "--short", "HEAD"])?;
+    queue_git(&lead, &["worktree", "add", "-q", "-b", "task/1", &member.to_string_lossy()])?;
+    std::fs::write(member.join("b.txt"), "work\n").ok()?;
+    queue_git(&member, &["add", "."])?;
+    queue_git(&member, &["commit", "-q", "-m", "work"])?;
+    // The line moved meanwhile: the queue makes a merge commit.
+    std::fs::write(lead.join("c.txt"), "lead\n").ok()?;
+    queue_git(&lead, &["add", "."])?;
+    queue_git(&lead, &["commit", "-q", "-m", "lead work"])?;
+    Some(QueueRepo { lead, member, line })
+}
+
+/// The team whose task 1 the member reported and the lead accepted: its
+/// landing is queued.
+fn queued_team(repo: &QueueRepo) -> Team {
+    let head = queue_git(&repo.member, &["rev-parse", "HEAD"]).unwrap();
+    let attempt = Attempt {
+        n: 1,
+        id: "A1".into(),
+        member: "dev".into(),
+        state: AttemptState::Reported,
+        folder_head: head,
+        folder_branch: "task/1".into(),
+        report: Some(Report { text: "done".into(), at: 1.0, ..Default::default() }),
+        ..Default::default()
+    };
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        folder: repo.lead.to_string_lossy().into_owned(),
+        line_branch: repo.line.clone(),
+        status: TeamStatus::Running,
+        members: vec![
+            Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() },
+            Member {
+                id: "dev".into(),
+                role: "Backend".into(),
+                agent: "codex".into(),
+                state: MemberState::Active,
+                directory: repo.member.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        ],
+        tasks: vec![Task { id: 1, title: "Work".into(), assignee: "dev".into(), status: TaskStatus::Submitted, attempts: vec![attempt], ..Default::default() }],
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    ops::apply(&mut team, "accept", &json!({"task":1}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().merge.as_ref().map(|entry| entry.state.as_str()), Some("queued"));
+    team
+}
+
+/// Runs `test` with a state folder, a scripted queue repository and its team
+/// in a store, and an empty machine config.
+fn with_queue(test: impl FnOnce(&mut Store, &QueueRepo)) {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(repo) = queue_repo(dir.path()) else {
+        eprintln!("git could not build the test repository; the sandbox blocks it");
+        return;
+    };
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old = std::env::var("HGS_CONFIG_DIR").ok();
+    std::env::set_var("HGS_CONFIG_DIR", &config);
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::state::with_test_state_root(&state, || {
+            let mut store = Store::open_at(&state.join("teams/teams.sqlite3"), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), queued_team(&repo), vec![]).unwrap();
+            test(&mut store, &repo);
+        })
+    }));
+    super::set_merge_between(None);
+    match &old {
+        Some(value) => std::env::set_var("HGS_CONFIG_DIR", value),
+        None => std::env::remove_var("HGS_CONFIG_DIR"),
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn kinds(store: &Store, kind: &str) -> usize {
+    let page = store.events("t", None, 200).unwrap();
+    page["items"].as_array().unwrap().iter().filter(|item| item["kind"] == kind).count()
+}
+
+fn lead_head(repo: &QueueRepo) -> String {
+    queue_git(&repo.lead, &["rev-parse", "HEAD"]).unwrap()
+}
+
+fn queued_tests() -> usize {
+    super::super::test_queue::TestStore::open(false).unwrap().queued("t").unwrap().len()
+}
+
+/// Task #1 (team ede724c4): the merge queue's Git (fetch, merge, merge-base,
+/// the test selection) runs before the store's write lock is taken; the lock
+/// is held only for the short write of the outcome. The longest hold is
+/// printed for the report.
+#[test]
+fn a_merge_runs_no_git_under_the_store_write_lock() {
+    with_queue(|store, repo| {
+        let before = lead_head(repo);
+        super::super::store::take_lock_lines();
+        let started = Instant::now();
+        super::merge_queue_tick(store, "t", 100.0).unwrap();
+        let tick_ms = started.elapsed().as_millis();
+        let lines = super::super::store::take_lock_lines();
+        let processes: Vec<&Value> = lines.iter().filter(|line| line.get("process").is_some()).collect();
+        assert!(processes.is_empty(), "a process started under the write lock: {processes:?}");
+        let holds: Vec<u64> = lines.iter().filter_map(|line| line["held_ms"].as_u64()).collect();
+        assert_eq!(holds.len(), 1, "one short write: {lines:?}");
+        eprintln!("merge queue: tick {tick_ms} ms, longest write-lock hold {} ms", holds.iter().max().unwrap());
+        let saved = store.load("t").unwrap().unwrap();
+        let entry = saved.task(1).unwrap().merge.clone().unwrap();
+        assert_eq!((entry.state.as_str(), entry.prev.as_str()), ("testing", before.as_str()));
+        assert_eq!(entry.merged, lead_head(repo), "the merge is recorded");
+        assert_eq!((kinds(store, "merged"), queued_tests()), (1, 1), "one landing, its tests queued once");
+        // The next tick only waits for the tests: no write, no second landing.
+        let revision = saved.revision;
+        super::merge_queue_tick(store, "t", 101.0).unwrap();
+        assert_eq!(store.load("t").unwrap().unwrap().revision, revision);
+        assert_eq!((kinds(store, "merged"), queued_tests()), (1, 1));
+    });
+}
+
+/// Task #1 (team ede724c4): the lead marked the landing landed by hand while
+/// the queue merged it: the lead's record stands, the queue records nothing,
+/// keeps the merge on the line and queues no tests; a later tick lands nothing.
+#[test]
+fn a_landing_marked_landed_meanwhile_is_recorded_once() {
+    with_queue(|store, repo| {
+        let commit = store.load("t").unwrap().unwrap().task(1).unwrap().merge.clone().unwrap().commit;
+        super::set_merge_between(Some(Box::new(move |store: &mut Store, team: &str| {
+            let commit = commit.clone();
+            store
+                .mutate(None, team, None, move |team, _| {
+                    let task = team.task_mut(1).unwrap();
+                    task.merge = None;
+                    task.landed = Some(Landed { commit, by: "lead".into(), at: 100.5 });
+                    Ok(Value::Null)
+                })
+                .unwrap();
+        })));
+        super::merge_queue_tick(store, "t", 100.0).unwrap();
+        super::set_merge_between(None);
+        let merged = lead_head(repo);
+        let saved = store.load("t").unwrap().unwrap();
+        let task = saved.task(1).unwrap();
+        assert!(task.merge.is_none(), "{:?}", task.merge);
+        assert_eq!(task.landed.as_ref().map(|landed| landed.by.as_str()), Some("lead"));
+        assert_eq!((kinds(store, "merged"), queued_tests()), (0, 0), "the queue recorded no second landing");
+        super::merge_queue_tick(store, "t", 102.0).unwrap();
+        assert_eq!(lead_head(repo), merged, "the line keeps the landed merge");
+        assert_eq!((kinds(store, "merged"), queued_tests()), (0, 0));
+    });
+}
+
+/// Task #1 (team ede724c4): a landing cancelled while the queue merged it
+/// leaves no merge on the line and no record.
+#[test]
+fn a_landing_cancelled_meanwhile_is_rolled_back() {
+    with_queue(|store, repo| {
+        let before = lead_head(repo);
+        super::set_merge_between(Some(Box::new(|store: &mut Store, team: &str| {
+            store
+                .mutate(None, team, None, |team, _| {
+                    team.task_mut(1).unwrap().merge = None;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+        })));
+        super::merge_queue_tick(store, "t", 100.0).unwrap();
+        super::set_merge_between(None);
+        assert_eq!(lead_head(repo), before, "the queue's merge was rolled back");
+        let saved = store.load("t").unwrap().unwrap();
+        assert!(saved.task(1).unwrap().merge.is_none());
+        assert_eq!((kinds(store, "merged"), queued_tests()), (0, 0));
+    });
+}
+
+/// Task #1 (team ede724c4): another writer's unrelated change meanwhile (a new
+/// task, a renamed team) is kept beside the landing, which is recorded once.
+#[test]
+fn an_unrelated_change_meanwhile_keeps_both_and_lands_once() {
+    with_queue(|store, repo| {
+        super::set_merge_between(Some(Box::new(|store: &mut Store, team: &str| {
+            store
+                .mutate(None, team, None, |team, _| {
+                    team.name = "Renamed".into();
+                    team.tasks.push(Task { id: 2, title: "Other".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() });
+                    Ok(Value::Null)
+                })
+                .unwrap();
+        })));
+        super::merge_queue_tick(store, "t", 100.0).unwrap();
+        super::set_merge_between(None);
+        let saved = store.load("t").unwrap().unwrap();
+        assert_eq!(saved.name, "Renamed");
+        assert_eq!(saved.task(2).map(|task| task.title.as_str()), Some("Other"));
+        let entry = saved.task(1).unwrap().merge.clone().unwrap();
+        assert_eq!((entry.state.as_str(), entry.merged.as_str()), ("testing", lead_head(repo).as_str()));
+        assert_eq!((kinds(store, "merged"), queued_tests()), (1, 1));
+        super::merge_queue_tick(store, "t", 101.0).unwrap();
+        assert_eq!((kinds(store, "merged"), queued_tests()), (1, 1), "never landed twice");
+    });
+}
+
+/// Task #19 (team ede724c4, owner 2026-11-10): a lead who lands by hand names
+/// its line. An accept queues nothing and runs no suites, though the project
+/// turns the queue on; `landed` takes a commit on that branch and refuses one
+/// off it, whatever the team folder has checked out (a detached HEAD).
+#[test]
+fn a_manual_line_queues_nothing_and_takes_a_landing_on_its_branch() {
+    with_queue(|store, repo| {
+        let mut team = store.load("t").unwrap().unwrap();
+        // Back to the reported task, then the line named and the folder detached.
+        let task = team.task_mut(1).unwrap();
+        task.merge = None;
+        task.status = TaskStatus::Submitted;
+        queue_git(&repo.lead, &["branch", "line"]).unwrap();
+        queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+        team.settings.manual_line = "line".into();
+        assert!(!super::super::merge_queue::enabled(&team), "the queue is off for a manual line");
+        let mut events = Vec::new();
+        let receipt = ops::apply(&mut team, "accept", &json!({"task":1}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_ne!(receipt["status"], "merge_queued", "{receipt}");
+        assert!(team.task(1).unwrap().merge.is_none(), "no landing is queued");
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+        assert!(!events.iter().any(|event| event.kind == "merge_queued"));
+        // The member's commit is not on the line yet: refused, naming the line.
+        let work = queue_git(&repo.member, &["rev-parse", "HEAD"]).unwrap();
+        let error = ops::apply(&mut team, "landed", &json!({"task":1,"commit":work}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the line line"), "{error}");
+        // The lead merges it into the line by hand: landed takes the merge commit.
+        queue_git(&repo.lead, &["checkout", "-q", "line"]).unwrap();
+        queue_git(&repo.lead, &["merge", "-q", "--no-ff", "--no-edit", &work]).unwrap();
+        let merge = queue_git(&repo.lead, &["rev-parse", "HEAD"]).unwrap();
+        queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+        let landed = ops::apply(&mut team, "landed", &json!({"task":1,"commit":merge}), &ops::Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(landed["status"], "landed", "{landed}");
+        // A tick runs no queue for it.
+        store.mutate(None, "t", None, |stored, _| { *stored = team.clone(); Ok(Value::Null) }).unwrap();
+        super::merge_queue_tick(store, "t", 200.0).unwrap();
+        assert_eq!(queued_tests(), 0, "no suites run");
+    });
+}
+
+/// Task #19: git-merge-lead merges the named line when the lead's folder is on
+/// no branch (it refused with "The folder is on no branch"), and without a
+/// named line it says how to name one.
+#[test]
+fn git_merge_lead_merges_the_named_line_from_a_detached_lead_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(repo) = queue_repo(dir.path()) else { return };
+    queue_git(&repo.lead, &["branch", "line"]).unwrap();
+    queue_git(&repo.lead, &["checkout", "-q", "--detach"]).unwrap();
+    let mut team = queued_team(&repo);
+    let member = team.member("dev").unwrap().clone();
+    let request = json!({"template":"git-merge-lead","args":{}});
+    // No line named at all (the recorded line_branch is a fallback too).
+    team.line_branch.clear();
+    let error = run_outcome(&team, &member, &repo.member, &request).unwrap_err().to_string();
+    assert!(error.contains("manual_line"), "names the one setting that gets through: {error}");
+    team.settings.manual_line = "line".into();
+    let outcome = run_outcome(&team, &member, &repo.member, &request).unwrap();
+    assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+    assert!(repo.member.join("c.txt").exists(), "the line's commit was merged: {}", outcome.tail);
+}

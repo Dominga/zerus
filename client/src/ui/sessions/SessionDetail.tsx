@@ -321,6 +321,12 @@ createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab
 
 export function SessionDetail() {
   followProjectTasks();
+  // Owner, 2026-11-09: Start planning / Create team give the session its team
+  // (a draft first); the "+ New team" tab then hides, and the view used to fall
+  // back to Activity. It follows the team to the Team tab instead.
+  createEffect(() => {
+    if (detailTab() === "newteam" && selectedTeam()) setDetailTab("team");
+  });
   // A reply shown in Activity or Terminal for a second is read (Qt's checkViewedReply).
   followViewedReplies();
   const [available, setAvailable] = createSignal(900);

@@ -1753,6 +1753,27 @@ debug-record message, or `cannot execute ... c1.dll`), the result says so in
 `error` and carries `"compiler_cannot_start": true` instead of leaving only a
 tail to read.
 
+Task #18 (owner, 2026-11-10): Windows starts an executable whose file carries
+the Low mandatory label at Low integrity, whatever its parent's level, and a
+Low process may not create anything in an ordinary (Medium) folder. A DeepSeek
+session's sandbox labels its working folder Low, inheritable by everything
+below it, so every test program cargo builds there fails at its first
+temporary folder with `Access is denied. (os error 5)` when the run's TEMP is
+an ordinary folder. (A member template's isolated TEMP sits inside the
+member's own folder and is Low as well, so a DeepSeek member's own runs pass.)
+The merge queue checks a suite's folder, its `target` and a named target
+folder before it runs: a Low build folder with an ordinary TEMP is one result
+with status `failed`, flag `environment` and an excerpt starting
+`Environment failure:`, which names the folder that carries the label and the
+owner's step (`icacls "<folder>" /setintegritylevel (OI)(CI)M /T /C /Q`, no
+administrator needed, and DeepSeek sessions in their own worktree); nothing
+runs, nothing is retried, and the landing stays queued without reopening the
+task. A failed `hgs run`, member template or queued suite whose output was
+refused this way, from programs built in such a folder (its folder, a
+`CARGO_TARGET_DIR` or `--target-dir` it names, or the programs cargo says it
+ran), carries the same text in `error` (`hgs run` adds `"environment": true`).
+Zerus only reads labels; it never changes them.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the
@@ -2112,6 +2133,13 @@ members, tasks, phases and plan mode). A draft update sets only the fields it na
 `members` is a list that replaces them all or an object of changes by member
 id, where null removes a member and a new id adds one. `plan_mode` is a draft
 field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+The owner's settings (`OWNER_SETTINGS`: `base_branch`, `branch_per_task`,
+`max_members`, `approval`, ...) work the same way in a draft (task #13): a
+lead's draft update that sets one is not refused; the owner's value stays, the
+lead's goes into the draft's `setting_offers` (the receipt names them in
+`note`), New team lists them under **The lead offers settings only you set**
+with **Apply**, and an offer goes when the owner applies it or sets that field
+to something else. Outside a draft these settings stay the owner's card.
 A draft's tasks keep their `phase` and its `phases` list phases 2..N
 (`{"n":2,"title":"...","barrier":true}`), as a plan's do; a phase a task names
 but the list leaves out is kept untitled. Create keeps them all as Draft phases
@@ -3694,6 +3722,45 @@ whole record (`layout` 1). An older hgs cannot read a migrated team. Its
 shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
 answers "Invalid team record" and never writes the team back without its
 tasks. Every hgs and desktop on the computer is updated together.
+
+### The polled team list and inbox are small
+
+The desktop follows `hgs team list` of every computer, peers over SSH
+included, and reads it again whenever a team's revision moves. Since task #6
+(team ede724c4) each item carries only what the session list's cards and strips
+show. Tasks, phase records, attention items, proposals and each member's
+queue, services, jobs and question are in `hgs team status`. Each item has:
+
+- `id`, `name`, `status`, `project`, `folder`, `lead`, `revision`, `updated`;
+- `plan_mode` and `phase_modes` (every phase's mode, phase 1 included);
+- `members`: each one's `id`, `role`, `agent`, `state`, `session` (`host`,
+  `name`, `run_id`, `conversation_id`), `session_state` and `state_reason`;
+- `task_count`: the tasks the request covers (cancelled ones only with
+  `include_cancelled`, as the desktop asks);
+- `progress`: the phase strip over those tasks. `phase` is the lowest phase
+  with an unfinished task (accepted and cancelled count as finished), else the
+  last; `phase_done` and `phase_total` count its tasks; `phases_done` and
+  `phases_total` count the phases. A team with no task has all five at 0;
+- `accepted` (archived phases included), `submitted`, `in_review`, `in_test`;
+- `attention_count` (the owner's attention items) and `open_proposals` (the
+  lead's open proposals);
+- `waiting_for_lead`, `pending_phase`, `stuck_scope`, `auto_accept` and
+  `parent` (`team` and `task` of a sub-team, else null).
+
+On the store copy of 2026-11-10 (21 teams), the list fell from 352 KB to 44 KB.
+A desktop that follows a peer with an older hgs still reads that peer's
+`tasks`, `attention` and `proposals` arrays and counts them itself. An older
+desktop reading this hgs's list shows 0 tasks, attention items and proposals
+until it is updated.
+
+`hgs team inbox` resolves its caller once. A member's own call (`{}`) finds
+its team through the members projection (`team_rule_members`), so only teams
+whose member list names the session are read. Only when the projection names
+none are all running teams read, as before. On Windows the ancestry check that
+proves the session reads one process table for the whole walk, not one per
+ancestor; each ancestor is still verified. The owner's read of a named team
+(`{"team"}`) has no session identity to prove. Proposals are settled and
+items are built only for the lead, a sub-lead or the owner.
 
 ### A stalled lead tells the owner
 
@@ -10414,6 +10481,52 @@ task/commit pairs and every accepted task's `unlanded` state and why (queued,
 testing, conflict with its `resolve` task, or no landing queued); the lead's
 inbox lists each with an `unlanded` item, and an accept answers with its
 `landing`.
+
+#### Landing by hand on a named line (task #19)
+
+Owner, 2026-11-10: a lead who reviews and merges by hand names the team's
+line, `{"manual_line":"BRANCH"}` through `hgs team settings` (the lead may set
+it; the name is a plain branch name). With it:
+
+- the merge queue is off for the team whatever the project's tests file says:
+  an accept answers `accepted`, queues no landing and runs no suites;
+- `hgs team landed` takes a commit on `BRANCH` of the team folder's
+  repository, whatever that folder has checked out (it may be on another
+  team's detached line), and refuses one off it naming the line; accepted work
+  whose commit reaches the line is recorded as landed by itself (task #443);
+- members merge `BRANCH` with git-merge-lead, and hand-outs bring a member's
+  branch up to it (task #15). Without a manual line, a team folder on no
+  branch merges the team's `base_branch` (else its recorded line) instead of
+  refusing "The folder is on no branch"; with none named the refusal says to
+  set `manual_line`;
+- the playbook's rules (a), (b) and (h) raise nothing, nor for a team created
+  with working mode `none`;
+- the lore takes a task's landed commit, else its accepted report's commit,
+  when Zerus made none: no "accepted with no commit Zerus made" item.
+
+#### Nothing blocks creating a team (task #13)
+
+Owner, 2026-11-10: the path from New team to running members has no refusal
+without a way through. What changed on that path:
+
+- Members created at once share the repository's worktree lock, which
+  `worktrees create` waits for only five seconds. A member's creation refused
+  with "Another worktree operation is running" is tried again for up to five
+  minutes (nothing was reserved); after that the member's error says Zerus
+  starts it again on its next tick and that `hgs team relaunch` starts it now.
+- The lead relaunches a member whose session failed to start (no session and
+  a launch error) itself, with no card. A running member's relaunch is still
+  the owner's card.
+- `add-to-phase` by the lead of a running or paused team is the lead's own
+  operation (task 162). The CLI no longer asks for the owner's word first,
+  which `propose` refused as the lead's own operation: a loop with no way
+  through. A word the lead does send is still checked.
+- A lead's draft value for an owner's setting is an offer (above).
+- Create team with **Keep the settings as they are** (working mode `none`)
+  records the owner's Keep of the project's preset (task 336), so the playbook
+  and the working-mode block do not ask about the settings again.
+- A model or effort change the agent did not visibly confirm no longer blocks
+  sends or the planning brief: task #7 (settings evidence) covers it.
 
 #### The working mode follows the project (#270)
 

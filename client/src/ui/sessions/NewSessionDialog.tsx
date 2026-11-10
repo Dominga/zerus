@@ -263,7 +263,30 @@ export function Choice(props: {
   createEffect(() => {
     const key = active();
     if (!props.open || key === undefined) return;
-    root.querySelector(`[data-key="${CSS.escape(key)}"]`)?.scrollIntoView({ block: "nearest" });
+    // Owner, 2026-11-10: only the list scrolls to its row; scrollIntoView also
+    // scrolled the dialog and left it blank.
+    const row = root.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+    const list = row?.closest<HTMLElement>(".ns-choice-list");
+    if (!row || !list) return;
+    if (row.offsetTop < list.scrollTop) list.scrollTop = row.offsetTop;
+    else if (row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = row.offsetTop + row.offsetHeight - list.clientHeight;
+  });
+  // Owner, 2026-11-10: the open dialog keeps its scale from the pop animation,
+  // so it is the containing block of a fixed menu; the menu is moved by the
+  // difference between where it landed and where it was placed.
+  createEffect(() => {
+    if (!props.open) return;
+    const want = box();
+    queueMicrotask(() => {
+      const list = root.querySelector<HTMLElement>(".ns-choice-list");
+      if (!list) return;
+      const got = list.getBoundingClientRect();
+      const dx = got.left - want.left, dy = got.top - want.top;
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        list.style.left = `${want.left - dx}px`;
+        list.style.top = `${want.top - dy}px`;
+      }
+    });
   });
   const optionId = (key: string) => `${props.id}-o-${props.keys.indexOf(key)}`;
   return (

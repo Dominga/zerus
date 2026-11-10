@@ -921,10 +921,35 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
         let deadline = started + limit;
         let config_loaded = (request.asked_by == "merge queue").then(|| config::load(project, overrides).map_err(|error| error.to_string()));
-        let (mut outcome, preparation) = run_request(request, project, limit, deadline, config_loaded.as_ref());
+        // Task #18: a suite whose programs Windows would start at Low
+        // integrity (its folder carries a DeepSeek sandbox's Low label) is one
+        // environment failure naming the owner's step: it is not run, and a
+        // run it already failed that way is not retried.
+        let command = request.command_for(project);
+        let temp = std::env::temp_dir();
+        let refused = super::environment::preflight(&super::environment::build_folders(project, &command, ""), Some(&temp));
+        let (mut outcome, preparation) = match &refused {
+            Some(text) => (Outcome { exit: Some(1), tail: text.clone(), ..Default::default() }, None),
+            None => run_request(request, project, limit, deadline, config_loaded.as_ref()),
+        };
+        let environment = refused.or_else(|| {
+            (outcome.exit != Some(0) && !outcome.timed_out && preparation != Some(PreparationFailure::NotRun))
+                .then(|| {
+                    let text = format!("{}\n{}\n{}", outcome.tail, outcome.excerpt, outcome.error);
+                    super::environment::diagnose(&text, &super::environment::build_folders(project, &command, &text), Some(&temp))
+                })
+                .flatten()
+        });
         let mut flags = Vec::new();
-        let crash = super::test_results::crashed(outcome.exit, &outcome.tail);
-        let mut status = if preparation == Some(PreparationFailure::NotRun) {
+        if let Some(text) = &environment {
+            flags.push("environment".to_owned());
+            let before = if outcome.tail == *text { String::new() } else { last_chars(&outcome.excerpt, EXCERPT_BYTES / 2) };
+            outcome.excerpt = last_chars(&format!("{before}\n{text}"), EXCERPT_BYTES);
+        }
+        let crash = environment.is_none() && super::test_results::crashed(outcome.exit, &outcome.tail);
+        let mut status = if environment.is_some() {
+            "failed".to_owned()
+        } else if preparation == Some(PreparationFailure::NotRun) {
             "not_run".to_owned()
         } else if preparation == Some(PreparationFailure::Build) {
             flags.push("build".to_owned());
@@ -942,7 +967,7 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let first = outcome.clone();
         // Build failures, crashes and timeouts are not flaky test evidence.
         let mut retries = 0;
-        while status == "failed" && preparation != Some(PreparationFailure::Build) && retries < policy.retries {
+        while status == "failed" && environment.is_none() && preparation != Some(PreparationFailure::Build) && retries < policy.retries {
             retries += 1;
             let (again, preparation) = run_request(request, project, limit, deadline, config_loaded.as_ref());
             if preparation == Some(PreparationFailure::NotRun) {
@@ -1293,6 +1318,65 @@ results = { format = \"junit\", path = \"out/junit.xml\" }
         assert!(store.queued("t").unwrap().is_empty());
         let found = store.last_green("t", "echo", "h").unwrap().unwrap();
         assert_eq!(found.id, written[0].id);
+    }
+
+    /// Task #18: a suite in a folder with a DeepSeek sandbox's Low label (its
+    /// programs would start at Low and be refused in %TEMP%) is one
+    /// environment failure naming the owner's step, and nothing runs.
+    #[test]
+    fn a_suite_in_a_low_labeled_folder_is_one_environment_failure_and_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let project = dir.path().join("checkout");
+        std::fs::create_dir_all(project.join("target")).unwrap();
+        super::super::environment::set_test_low(Some(vec![project.clone()]));
+        let mut request = request("low", "rust", 5.0, false, "small");
+        request.asked_by = "merge queue".into();
+        request.command = if cfg!(windows) { "echo ran>ran.txt & exit /b 1".into() } else { "echo ran > ran.txt; exit 1".into() };
+        store.enqueue(&request).unwrap();
+        let policy = super::super::test_results::Policy { retries: 2, ..Default::default() };
+        let written = run_due(&store, &project, &store.queued("t").unwrap(), 100.0, &policy, None).unwrap();
+        super::super::environment::set_test_low(None);
+        assert_eq!(written.len(), 1);
+        let record = &written[0];
+        assert_eq!(record.status, "failed");
+        assert_eq!(record.flags, vec!["environment".to_owned()], "one environment failure, never retried");
+        assert!(record.excerpt.contains(super::super::environment::MARKER), "{}", record.excerpt);
+        assert!(record.excerpt.contains(&format!("icacls \"{}\" /setintegritylevel (OI)(CI)M", project.display())), "{}", record.excerpt);
+        assert!(!project.join("ran.txt").exists(), "nothing ran");
+        assert!(store.result_of("low").unwrap().is_some());
+    }
+
+    /// Task #18: a run that failed because its programs were refused ("Access
+    /// is denied", os error 5) while they were built in a Low-labeled target is
+    /// reported once as that environment failure and is not retried.
+    #[test]
+    fn a_run_refused_from_a_low_target_is_one_environment_failure_and_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let project = dir.path().join("line");
+        let target = dir.path().join("shared").join("target");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(target.join("debug").join("deps")).unwrap();
+        super::super::environment::set_test_low(Some(vec![dir.path().join("shared")]));
+        let exe = target.join("debug").join("deps").join("hgs-1.exe");
+        let mut request = request("refused", "rust", 5.0, false, "small");
+        request.command = if cfg!(windows) {
+            format!("echo x>>count.txt & echo Running unittests src\\main.rs ({}) & echo called `Result::unwrap()` on an `Err` value: Access is denied. (os error 5) & exit /b 101", exe.display())
+        } else {
+            format!("echo x >> count.txt; echo 'Running unittests src/main.rs ({})'; echo 'Access is denied. (os error 5)'; exit 101", exe.display())
+        };
+        store.enqueue(&request).unwrap();
+        let policy = super::super::test_results::Policy { retries: 2, ..Default::default() };
+        let written = run_due(&store, &project, &store.queued("t").unwrap(), 100.0, &policy, None).unwrap();
+        super::super::environment::set_test_low(None);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].status, "failed");
+        assert!(written[0].flags.contains(&"environment".to_owned()), "{:?}", written[0].flags);
+        let shared = dir.path().join("shared");
+        assert!(written[0].excerpt.contains(&format!("icacls \"{}\"", shared.display())), "{}", written[0].excerpt);
+        let runs = std::fs::read_to_string(project.join("count.txt")).unwrap();
+        assert_eq!(runs.lines().count(), 1, "an environment failure is not retried");
     }
 
     #[test]

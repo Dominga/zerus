@@ -20,6 +20,7 @@ import { installedAppName, railVersion } from "../screens/settings/about-version
 import { DesktopServiceStatus } from "./DesktopServiceStatus";
 import { BackgroundTasksChip } from "../screens/BackgroundTasks";
 import { CleanupChip } from "../screens/CleanupChip";
+import { TeamHelpButton } from "../teams/TeamHelpButton";
 
 // Task 243 (owner, 2026-11-07): the Compact skins' one title bar, as Qt's
 // WindowTitleBar with the rail's controls moved into it (placeRailControls):
@@ -102,6 +103,7 @@ export function TitleBar(props: { mode?: () => BridgeMode | "starting"; logTitle
         <button type="button" class="status-version tb-version" data-version data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
       </div>
       <div class="tb-group">
+        <TeamHelpButton titlebar />
         <button class="tb-btn" classList={{ pinned: windowLayer().on }} aria-pressed={windowLayer().on} aria-label={tr("Keep Zerus above other windows")} disabled={!windowLayer().supported}
           data-tip={!windowLayer().supported ? windowLayer().hint : windowLayer().on ? tr("Unpin Zerus") : tr("Keep Zerus above other windows")}
           onClick={() => void setWindowLayer(!windowLayer().on)}>

@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
+import { TeamGuideReader } from "./TeamGuideReader";
 
 // Task #8 (team ede724c4): New team's plan mode, which the owner chooses and
 // the lead may offer, and the page's short how-to.
@@ -64,24 +65,12 @@ export function PlanModeField(props: PlanModeFieldProps): JSX.Element {
   );
 }
 
-// Task #31 (team ede724c4): one guide. Before a draft the intro tells how a
-// team works and what Start working with a team does; the form's how-to
-// (after it) adds only what the intro does not say.
+// The full, OS-localized reader fills the introduction; the draft keeps
+// only its short notes about fields and starting members.
 
-/** The intro's steps, before a draft (owner, 2026-11-09). */
+/** The team guide, before a draft. Reading it performs no team actions. */
 export function NewTeamIntroSteps(): JSX.Element {
-  return (
-    <div class="nt-intro-guide" data-intro-steps>
-      <h3>{tr("How a team works")}</h3>
-      <ol>
-        <li>{tr("A lead plans the work: it reads your goal, drafts the members, their roles and the tasks, and asks you what it needs.")}</li>
-        <li>{tr("You decide: nothing runs until you approve the team and its plan.")}</li>
-        <li>{tr("Members work in their own folders or branches; reviewers check their work and mergers land it.")}</li>
-        <li>{tr("You follow it in the Team tab: progress, questions waiting for you, reports and the plan.")}</li>
-        <li>{tr("Everything stays editable: members, tasks and settings can change while the team works.")}</li>
-      </ol>
-    </div>
-  );
+  return <TeamGuideReader inline />;
 }
 
 /** What Start working with a team does, under its button. */

@@ -29,10 +29,13 @@ import { loadMarkdown } from "./ui/sessions/markdown";
 import { startWindowTheme } from "./skin/window";
 import { systemLocale } from "./bridge";
 import { setSystemLocale } from "./ui/sessions/usage-number";
+import { setTeamHelpLocale } from "./store/teamHelp";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 // Task #323: the owner's regional format decides how usage numbers group.
-setSystemLocale(await systemLocale().catch(() => ""));
+const osLocale = await systemLocale().catch(() => "");
+setSystemLocale(osLocale);
+setTeamHelpLocale(osLocale);
 
 // The motion and platform attributes are on the root before the first frame.
 document.documentElement.dataset.platform = platform;

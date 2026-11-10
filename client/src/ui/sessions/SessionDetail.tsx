@@ -44,6 +44,7 @@ import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopSe
 
 import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
+import { TeamHelpButton } from "../teams/TeamHelpButton";
 import { watchDetailRemoval } from "./detail-removal";
 import { lazyView } from "../lazy-view";
 import { LazyBoundary } from "../lazy-boundary";
@@ -161,6 +162,7 @@ function Header() {
         </Show>
         <Show when={!subagentOpen() && (s().status === "ended" || s().state === "archived")}><button class="btn small primary" title={act().change.hint} disabled={act().change.disabled} onClick={() => act().change.action()}><Icon name="play" size={12} />{tr("Restore")}</button></Show>
         <button class="icon-btn" data-tip={tr("Session actions")} aria-label={tr("Session actions")} onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
+        <TeamHelpButton />
       </div>
       <div class="dh-row2">
         <AgentBadge agent={s().agent} />

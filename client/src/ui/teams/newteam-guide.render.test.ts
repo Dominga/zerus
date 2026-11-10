@@ -21,8 +21,8 @@ beforeAll(async () => {
   });
   const { renderToString } = await server.ssrLoadModule("solid-js/web");
   const { createComponent } = await server.ssrLoadModule("solid-js");
-  const { PlanModeField, NewTeamHowTo, SettingOffers, NewTeamIntroSteps, NewTeamIntroHint } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
-  intro = () => renderToString(() => createComponent(NewTeamIntroSteps, {})) + renderToString(() => createComponent(NewTeamIntroHint, {}));
+  const { PlanModeField, NewTeamHowTo, SettingOffers, NewTeamIntroHint } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
+  intro = () => renderToString(() => createComponent(NewTeamIntroHint, {}));
   offers = (props) => renderToString(() => createComponent(SettingOffers, { onApply: () => {}, ...props }));
   planMode = (props) => renderToString(() => createComponent(PlanModeField, { onChoose: () => {}, ...props }));
   howTo = (props) => renderToString(() => createComponent(NewTeamHowTo, { onToggle: () => {}, ...props }));
@@ -109,33 +109,12 @@ describe("New team how-to (task #8)", () => {
   });
 });
 
-// Task #31 (team ede724c4): one guide. The intro before a draft and the
-// form's how-to after Start planning never tell the same step twice.
-describe("New team guide is told once (task #31)", () => {
-  const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-  const STEPS: [string, RegExp][] = [
-    ["the folder and the goal", /fill in the folder|the folder and the goal/gi],
-    ["the lead starts", /start(s|ing)? (planning|only the lead|the lead)/gi],
-    ["talking to the lead", /talk to the lead|asks you what it needs/gi],
-    ["nothing runs before", /nothing runs/gi],
-    ["the marked fields", /are marked/gi],
-    ["Create team starts the members", /create (the )?team|members, folders and tasks come/gi],
-  ];
-
-  it("tells each step at most once across the intro and the form's how-to", () => {
-    const before = text(intro());
-    const after = text(howTo({ open: true }));
-    expect(before).toContain("How a team works");
-    expect(before).toContain("This creates a draft and starts the lead in the team folder.");
-    for (const [step, pattern] of STEPS) {
-      const told = (before.match(pattern)?.length ?? 0) + (after.match(pattern)?.length ?? 0);
-      expect(told, `${step}: ${before} | ${after}`).toBeLessThanOrEqual(1);
-    }
-    // What the form adds is not in the intro, and the intro's steps are not in the form.
-    expect(before).not.toMatch(/are marked|starts the members/i);
-    expect(after).not.toMatch(/nothing runs|starts the lead|How a team works/i);
+// The full reader is checked in the browser; the draft retains its action hint.
+describe("New team guide entry", () => {
+  it("keeps the draft action explicit beside the reader", () => {
+    expect(intro()).toContain("This creates a draft and starts the lead in the team folder.");
+    expect(intro()).not.toContain("starts the members");
   });
-
   it("draws the intro from the guide, before a draft", () => {
     const form = fs.readFileSync(new URL("./NewTeam.tsx", import.meta.url), "utf8");
     const start = form.indexOf('data-new-team-intro');

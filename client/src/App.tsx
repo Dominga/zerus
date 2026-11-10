@@ -6,6 +6,7 @@ import { taskExecutorReview } from "./store/taskExecutors";
 import { taskStartReview } from "./store/taskStart";
 import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
+import { teamHelpOpen } from "./store/teamHelp";
 import { Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { TitleBar } from "./ui/components/TitleBar";
@@ -67,6 +68,7 @@ const TaskSettingsDialog = lazy(() => import("./ui/screens/TaskSettingsDialog"))
 const TaskCancelDialog = lazy(() => import("./ui/screens/TaskCancelDialog"));
 const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ default: m.GoToDialog })));
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
+const TeamHelpDialog = lazy(() => import("./ui/teams/TeamHelpDialog").then((m) => ({ default: m.TeamHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 /** Keyboard zoom changes Settings > Appearance > Content scale (Qt's syncContentScale). */
@@ -181,6 +183,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={taskCancellation()}><Suspense><TaskCancelDialog /></Suspense></Show>
       <Show when={goToOrigin()}><Suspense><GoToDialog /></Suspense></Show>
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
+      <Show when={teamHelpOpen()}><Suspense><TeamHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <LazyBoundary floating><ParentDialogs /></LazyBoundary>

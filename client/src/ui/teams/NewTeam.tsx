@@ -16,6 +16,7 @@ import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coo
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
+import { TeamHelpButton } from "./TeamHelpButton";
 import { NewTeamHowTo, NewTeamIntroHint, NewTeamIntroSteps, PlanModeField, SettingOffers } from "./NewTeamGuide";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
@@ -351,6 +352,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         <Show when={draft() && props.onOpenSettings}>
           <button type="button" class="btn ghost small" onClick={() => props.onOpenSettings?.()}>{tr("Team settings")}</button>
         </Show>
+        <TeamHelpButton />
         <button type="button" class="icon-btn small" aria-label={tr("Close")} onClick={store.close}><Icon name="x" size={14} /></button>
       </header>
 

@@ -66,6 +66,21 @@ open phase that takes tasks as they come; you close it when the stream ends.
 
 ## Getting started, step by step
 
+### The built-in team guide
+
+The question-mark button at the top right opens the team field guide in a
+keyboard-accessible reader. The same guide fills the left side of **New team**
+before planning starts. Choose a chapter, search the full text, or follow
+Previous and Next. The guide includes example lineups, folder policies, the
+build broker, tests, memory and the profiler. Reading it creates no team.
+
+The guide follows the operating system locale independently of the saved
+interface language: Russian locales use Russian; English and other locales
+use English. Windows uses the native regional locale instead of WebView2's
+language. Other hosts use the webview's system language when no native locale
+is available. Both documents are bundled for offline reading. A virtual
+cookie for the lead produces a small joke inside the reader.
+
 ### 1. New team
 
 Open **New team** and fill in:

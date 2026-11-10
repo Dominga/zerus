@@ -29,6 +29,9 @@ import "../ui/styles/teams.css";
 import "../ui/styles/newteam.css";
 import "../ui/styles/client.css";
 import { render } from "solid-js/web";
+import { Show } from "solid-js";
+import { setTeamHelpLocale, teamHelpOpen } from "../store/teamHelp";
+import { TeamHelpDialog } from "../ui/teams/TeamHelpDialog";
 import { NewTeam } from "../ui/teams/NewTeam";
 import { createNewTeam } from "../store/teamsNew";
 import { catalogOf } from "../store/newTeamSources";
@@ -76,6 +79,7 @@ const draftView: NewTeamView = {
 
 async function run() {
   await document.fonts.ready;
+  setTeamHelpLocale(query.get("locale") ?? "en-US");
   applySkin(skin());
   void setSetting("teams/templateFavourites", ["audit"]);
   const kind = query.get("case") ?? "new";
@@ -89,6 +93,7 @@ async function run() {
         catalog={catalog} git={query.get("git") !== "0"} folderOk coordinator={{ name: "claude/orbit/checkout", agent: "claude", model: "opus" }}
         project={kind === "project" ? "Orbit" : undefined} projectId={kind === "project" ? "p-orbit" : undefined}
         onOpenSettings={() => {}} onAskDesigner={() => {}} />
+      <Show when={teamHelpOpen()}><TeamHelpDialog /></Show>
     </div>
   ), document.getElementById("root")!);
   await new Promise((done) => setTimeout(done, 400));

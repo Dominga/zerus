@@ -78,16 +78,6 @@ pub fn command(args: &[String]) -> Result<String> {
     Ok(line)
 }
 
-/// The remote command line that runs hgs with `args` on `alias`, whichever
-/// kind of computer it is.
-pub fn hgs(config: &Config, alias: &str, args: &[String]) -> Result<String> {
-    if is_windows(config, alias) {
-        command(args)
-    } else {
-        Ok(format!("~/.local/bin/hgs {}", platform::remote_join(args)))
-    }
-}
-
 /// The `ConnectTimeout` option for `alias`: a Windows computer's sshd starts a
 /// session process before its banner, which over a relayed tailnet path can take
 /// longer than the few seconds a POSIX peer gets.

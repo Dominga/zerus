@@ -2467,7 +2467,7 @@ fn holds_work(team: &Team, member_id: &str) -> bool {
         .iter()
         .filter_map(|task| task.open_attempt())
         .any(|attempt| attempt.member == member_id && !(attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed")))
-        || super::stages::busy(team).iter().any(|busy| *busy == member_id)
+        || super::stages::busy(team).contains(&member_id)
 }
 
 /// U56/#728: interrupts a stuck member's session and resumes it in its own
@@ -4889,10 +4889,13 @@ pub(crate) fn set_git_ceiling(ceiling: &str) {
     GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
 }
 
+/// Git answers read before the write lock, by folder and arguments.
+type GitMemo = std::collections::HashMap<(String, Vec<String>), Option<String>>;
+
 thread_local! {
     /// Task 287: git answers gathered before a store transaction and served
     /// inside it (`with_git_answers`), so no git runs under the write lock.
-    static GIT_MEMO: std::cell::RefCell<Option<std::collections::HashMap<(String, Vec<String>), Option<String>>>> =
+    static GIT_MEMO: std::cell::RefCell<Option<GitMemo>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -5573,7 +5576,7 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
             || super::super::worktrees::git(source, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")], deadline).is_ok();
         if !known {
             let integration = team.integration_folder();
-            super::super::worktrees::git(source, &["fetch", "--no-tags", "--quiet", &integration, &base], deadline)
+            super::super::worktrees::git(source, &["fetch", "--no-tags", "--quiet", integration, &base], deadline)
                 .map_err(|error| anyhow::anyhow!("The line's branch {base} is not in {folder} and was not fetched from {integration}: {}", error.detail))?;
         }
     }
@@ -6567,12 +6570,6 @@ fn no_report_or_claim(team: &Team, task: &Task, at: f64) -> Step {
     }
 }
 
-/// Task 209: whether the member's collected reading asks for a context action
-/// before a hand-out: `compact` when its agent compacts natively, `fresh` when
-/// it does not, and empty when today's hand-out stands.
-fn due_context_action(team: &Team, member: &Member) -> String {
-    due_context(team, member).0
-}
 
 /// Task 209 and 254: the context action due before a member works, and
 /// whether only its cold cache asks for it: at the team's threshold (95%), or
@@ -7371,7 +7368,7 @@ pub(crate) fn prepare_branch(team: &Team, task_id: u32, member_id: &str) -> Opti
             base.clone()
         } else {
             let source = team.integration_folder();
-            let fetched = git_bounded(&folder, &["fetch", "--no-tags", "--quiet", &source, &base]);
+            let fetched = git_bounded(&folder, &["fetch", "--no-tags", "--quiet", source, &base]);
             match fetched {
                 Ok(_) => "FETCH_HEAD".to_owned(),
                 Err((_, error)) => {
@@ -7454,7 +7451,7 @@ pub(crate) fn prepare_integration_base(team: &Team, task_id: u32, member_id: &st
         Ok(_) => return None,
         Err(_) => return None,
     };
-    if same_path(&folder, &team.integration_folder()) || same_path(&folder, &team.folder) {
+    if same_path(&folder, team.integration_folder()) || same_path(&folder, &team.folder) {
         return None;
     }
     // Task #382 (owner, 2026-11-08): the base step never moves the branch the
@@ -7644,6 +7641,7 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
     let short = |commit: &str| commit.chars().take(9).collect::<String>();
     // A merge into the member's branch: done, or the step that refuses (or is
     // uncertain) with the conflicting files and the folder put back.
+    #[allow(clippy::result_large_err)] // the refusal is the prepare step itself
     let merge = |rev: &str, message: &str, what: &str, merged: &[String]| -> std::result::Result<(), PrepareStep> {
         // The catalogs merge as data (scripts/i18n-merge.py); like the merge
         // queue, this path passes the driver rather than trusting repo config.
@@ -9474,7 +9472,7 @@ fn scratch_rule_trusting(team: &Team, folder: &str, agent: &str) -> Option<super
 
 /// Whether a shell command runs the team's own CLI.
 fn command_is_hgs(command: &str) -> bool {
-    let first = command.trim_start().split_whitespace().next().unwrap_or_default();
+    let first = command.split_whitespace().next().unwrap_or_default();
     let first = first.trim_matches(|ch| ch == '"' || ch == '\'');
     let name = Path::new(first).file_name().and_then(|name| name.to_str()).unwrap_or(first);
     name.eq_ignore_ascii_case("hgs") || name.eq_ignore_ascii_case("hgs.exe")

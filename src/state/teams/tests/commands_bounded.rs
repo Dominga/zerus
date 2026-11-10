@@ -109,7 +109,7 @@ fn a_copy_of_the_live_store_reads_bounded_and_fast() {
             .iter()
             .map(|(name, value)| (name.clone(), serde_json::to_vec(value).map(|bytes| bytes.len()).unwrap_or(0)))
             .collect();
-        sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        sizes.sort_by_key(|size| std::cmp::Reverse(size.1));
         for (name, size) in sizes.iter().take(8) {
             eprintln!("field {name}: {size} bytes");
         }
@@ -214,7 +214,7 @@ fn a_team_of_200_tasks_with_long_reports_polls_well_inside_the_bound() {
         }
     }
     let mut fields: Vec<_> = fields.into_iter().collect();
-    fields.sort_by(|a, b| b.1.cmp(&a.1));
+    fields.sort_by_key(|field| std::cmp::Reverse(field.1));
     eprintln!("task fields: {:?}", &fields[..fields.len().min(10)]);
     // Well inside: two thirds of the bound, with the room left for the team's
     // other lists.

@@ -409,10 +409,14 @@ pub fn keep_installed_lore(installed: &LoreFacts, package: &LoreFacts) -> Option
     }
 }
 
+/// How a test describes a lore binary.
+#[cfg(test)]
+type LoreFactsFn = fn(&Path) -> LoreFacts;
+
 #[cfg(test)]
 thread_local! {
     /// Tests describe the lore binaries instead of running them.
-    static LORE_FACTS: std::cell::RefCell<Option<fn(&Path) -> LoreFacts>> = const { std::cell::RefCell::new(None) };
+    static LORE_FACTS: std::cell::RefCell<Option<LoreFactsFn>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -918,12 +922,6 @@ fn create_private_dirs(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)
 }
 
-/// One folder of the binding's chain, opened without following a link or
-/// junction, verified private to this user (owner and access) and held: on
-/// Windows without delete sharing, so it cannot be renamed while held.
-fn private_directory(path: &Path) -> io::Result<fs::File> {
-    chain_directory(path, true)
-}
 
 /// A folder of the chain, held like `private_directory`. `private` asks for an
 /// owner-only folder; otherwise (WhiteWh fork, an ancestor of the images

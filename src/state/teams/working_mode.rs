@@ -17,10 +17,12 @@
 //! create/plan request), the owner accepts or picks another, and the settings
 //! are written at Create team. A running team whose settings disagree with its
 //! profile gets one owner card from the lead at a safe point (no open attempt).
-use super::model::{BranchPerTask, FolderPolicy, Settings, Team, TeamStatus};
+use super::model::{BranchPerTask, FolderPolicy, Settings, Team};
+#[cfg(test)]
+use super::model::TeamStatus;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(crate) const BRANCH_PIPELINE: &str = "branch-pipeline";
 pub(crate) const BRANCH_PER_TASK: &str = "branch-per-task";
@@ -566,6 +568,7 @@ pub(crate) fn cached_disagreement(team: &Team) -> Option<(String, Vec<String>)> 
 /// What a team's settings miss of its project's preset, with the proposal; None
 /// when they agree, the project cannot be profiled, or the owner kept this
 /// preset for this profile. Reads the project.
+#[cfg(test)]
 pub(crate) fn disagreement(team: &Team) -> Option<(Proposal, Vec<String>)> {
     if team.folder.trim().is_empty() || matches!(team.status, TeamStatus::Done | TeamStatus::Archived) {
         return None;

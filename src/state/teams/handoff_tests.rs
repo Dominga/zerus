@@ -299,7 +299,7 @@ fn a_brief_that_cannot_answer_a_control_question_is_a_gap_the_lead_sees() {
     // Task 1 is not accepted in this variant, so its question has no answer either way.
     t.task_mut(2).unwrap().control.retain(|control| !control.q.contains("task 1"));
     let (_dir, mut store) = stored(&t);
-    let calls = fake();
+    let _calls = fake();
     swap_to_kimi(&mut store, &t.id, Some(json!({"name":"kimi/x/dev","run_id":"run-dev","conversation_id":"c"})));
     let swapped = store.load(&t.id).unwrap().unwrap();
     run_step(&mut store, &swapped, &Step::HandOut { task: 2, member: "dev".into() }, "").unwrap();

@@ -216,19 +216,19 @@ fn the_brief_comes_at_start_at_a_phase_and_after_a_compaction() {
     let seen = Seen { host: String::new(), name: "claude/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-1".into(), free: true, ..Default::default() };
     let now = crate::state::now();
     // The team started: the first brief.
-    let steps = steps_with(&team, &[seen.clone()], now, None);
+    let steps = steps_with(&team, std::slice::from_ref(&seen), now, None);
     assert!(
         steps.iter().any(|step| matches!(step, Step::LeadBrief { reason } if reason == "the team started")),
         "{steps:?}"
     );
     // The brief went: the same session and phase ask for nothing more.
     team.lead_briefed = Some(json!({"reason":"the team started","run":"r1","conversation":"conv-1","phase":0,"used":800_000,"at":now}));
-    let steps = steps_with(&team, &[seen.clone()], now, None);
+    let steps = steps_with(&team, std::slice::from_ref(&seen), now, None);
     assert!(!steps.iter().any(|step| matches!(step, Step::LeadBrief { .. })), "{steps:?}");
     // A new phase starts: a pending task sits in phase 2.
     team.tasks.push(task(10, TaskStatus::Pending));
     team.tasks[0].phase = 2;
-    let steps = steps_with(&team, &[seen.clone()], now, None);
+    let steps = steps_with(&team, std::slice::from_ref(&seen), now, None);
     assert!(
         steps.iter().any(|step| matches!(step, Step::LeadBrief { reason } if reason == "the phase started")),
         "{steps:?}"

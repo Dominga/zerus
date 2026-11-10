@@ -56,7 +56,7 @@ pub(crate) fn label(condition: &ParkCondition) -> String {
         }
         ParkCondition::Task { task } => format!("task #{task} accepted"),
         ParkCondition::Card { proposal } => format!("the owner's answer on card {proposal}"),
-        ParkCondition::Time { at } => format!("{}", local_time(*at)),
+        ParkCondition::Time { at } => local_time(*at).to_string(),
     }
 }
 

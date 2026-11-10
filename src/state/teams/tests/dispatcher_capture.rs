@@ -365,7 +365,7 @@ fn a_turn_that_ends_while_its_own_job_runs_is_no_no_report() {
     let timeout = team.settings.report_timeout_seconds as f64;
     let late = 50.0 + timeout;
     // Nothing of its own runs: No report, as before.
-    assert!(no_report(&steps(&team, &[quiet.clone()], late)));
+    assert!(no_report(&steps(&team, std::slice::from_ref(&quiet), late)));
     // A shell job its hooks registered (idle session, no Background work).
     let mut shell = quiet.clone();
     shell.jobs = vec![SeenJob { kind: "shell".into(), what: "its background job `cargo build`".into(), command: "cargo build".into(), since: 45.0 }];
@@ -378,13 +378,13 @@ fn a_turn_that_ends_while_its_own_job_runs_is_no_no_report() {
     assert!(!no_report(&found) && !found.contains(&Step::GateOpen { task: 1 }), "nothing is written while it waits: {found:?}");
     assert!(!found.contains(&Step::OwnJobFound { task: 1 }), "{found:?}");
     // The job ended: the gate opens now and the timeout counts from here.
-    let found = steps(&team, &[quiet.clone()], late + 600.0);
+    let found = steps(&team, std::slice::from_ref(&quiet), late + 600.0);
     assert!(found.contains(&Step::GateOpen { task: 1 }) && !no_report(&found), "{found:?}");
     team.task_mut(1).unwrap().attempts[0].report_ready_at = Some(late + 600.0);
-    assert!(no_report(&steps(&team, &[quiet.clone()], late + 600.0 + timeout)));
+    assert!(no_report(&steps(&team, std::slice::from_ref(&quiet), late + 600.0 + timeout)));
     // The Zerus run the dispatcher remembers counts between two listings.
     team.task_mut(1).unwrap().attempts[0].awaited_run = "d2300000-0000-4000-8000-000000000001".into();
-    assert!(!no_report(&steps(&team, &[quiet.clone()], late + 600.0 + timeout)));
+    assert!(!no_report(&steps(&team, std::slice::from_ref(&quiet), late + 600.0 + timeout)));
     // A session that stopped waits for nothing.
     let gone = stopped("codex/x/dev", "r1", "stopped");
     assert!(no_report(&steps(&team, &[gone], late + 600.0 + timeout)));
@@ -398,7 +398,7 @@ fn a_turn_that_ends_while_its_own_job_runs_is_no_no_report() {
     building.build_run = "d2300000-0000-4000-8000-000000000002".into();
     assert!(steps(&team, &[building], late + 600.0 + timeout).contains(&Step::OwnJobFound { task: 1 }));
     // Nothing of its own: a No report stays as it is.
-    assert!(!steps(&team, &[quiet.clone()], late + 600.0 + timeout).contains(&Step::OwnJobFound { task: 1 }));
+    assert!(!steps(&team, std::slice::from_ref(&quiet), late + 600.0 + timeout).contains(&Step::OwnJobFound { task: 1 }));
     // A quiet turn whose end never reached the listing (no reply mark) is
     // decided after the timeout only when nothing of its own runs either.
     let mut unmarked = team.clone();

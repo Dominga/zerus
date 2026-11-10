@@ -37,7 +37,9 @@ const TOPICS: &[(&str, &str)] = &[
 ];
 /// Task 166: the lead's page is one readable page of plain prose with worked
 /// examples, 4 to 6 KB (also in a CRLF checkout); every other page keeps 2400.
+#[cfg(test)]
 const LEAD_LIMIT: usize = 6000;
+#[cfg(test)]
 const LEAD_MIN: usize = 4000;
 const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|code|team-park|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
 

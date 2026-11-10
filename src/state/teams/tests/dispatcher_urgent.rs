@@ -26,6 +26,7 @@ fn post(store: &mut Store, team_id: &str, request: &str, by: &str, urgency: work
 }
 
 /// A fake hgs that records (args[0], session, input) and answers submitted.
+#[allow(clippy::type_complexity)]
 fn record(calls: &Rc<RefCell<Vec<(String, String, Value)>>>) {
     let seen = calls.clone();
     set_fake_hgs(Some(Box::new(move |_, args: &[&str], input| {

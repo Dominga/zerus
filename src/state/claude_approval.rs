@@ -10,7 +10,6 @@
 //! the keys, so a panel taller than its pane can still be answered.
 use super::*;
 use sha2::{Digest,Sha256};
-use std::path::Path;
 pub(super) mod channel;
 mod children;
 pub(super) fn observe(record:&mut Value,event:&Value) {children::observe(record,event);channel::observe(record,event);}

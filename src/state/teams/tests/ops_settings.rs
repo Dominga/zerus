@@ -591,7 +591,7 @@ fn the_lead_cannot_take_the_owners_settings() {
     let (mut draft, _) = create("d", &json!({"name":"D","lead":{"id":"lead","agent":"claude"}})).unwrap();
     draft.status = TeamStatus::Draft;
     draft.draft = Some(Draft { revision: 1, ..Default::default() });
-    let before = draft.settings.approval.clone();
+    let before = draft.settings.approval;
     let mut auto = serde_json::to_value(&draft.settings).unwrap();
     auto["approval"] = json!("auto");
     let receipt = apply(&mut draft, "draft", &json!({"action":"update","revision":1,"set":{"settings":auto}}), &Actor::Member("lead".into()), &none, &mut events)

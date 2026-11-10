@@ -417,6 +417,8 @@ fn creation_role() {
         // ends at an exited parent, as an app the person started from
         // Explorer does, whoever started this test run (task #43).
         "launch" => {
+            // The launcher exits and leaves the app running, as Explorer does.
+            #[allow(clippy::zombie_processes)]
             run_role(&own, "app").spawn().unwrap();
         }
         "app" => {

@@ -57,7 +57,7 @@ fn release_conflicts(team: &mut Team) -> bool {
             team.tasks.iter().any(|other| other.id == resolve && other.status.finished()).then_some((task.id, resolve))
         })
         .collect();
-    for (id, resolve) in &decided {
+    for (id, _resolve) in &decided {
         if let Some(entry) = team.task_mut(*id).and_then(|task| task.merge.as_mut()) {
             entry.state = "queued".into();
             entry.retry = true;

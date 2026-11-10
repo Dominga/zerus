@@ -381,6 +381,7 @@ pub(crate) fn settle(path: &Path, id: i64, status: &str, detail: &str) -> Result
 
 /// Task #349: the journal's page as the reader sees it, from a folder; the
 /// CLI's `list` is the same page.
+#[cfg(test)]
 pub(crate) fn entries(path: &Path, payload: &Value) -> Result<Value> {
     let db = open(path)?;
     list(&db, payload)
@@ -489,6 +490,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> Re
                 .as_i64()
                 .filter(|id| *id > 0)
                 .ok_or_else(|| bad("Invalid approval journal ID"))?;
+            #[allow(clippy::type_complexity)] // eight columns of one journal row
             let row: Option<(String, String, String, String, String, String, String, String)> = db
                 .query_row(
                     "SELECT question,status,detail,source,team,member,command,answer FROM attempts WHERE id=?1",

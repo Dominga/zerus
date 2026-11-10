@@ -719,7 +719,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     finish_rows(sessions, &marks, &names);
     phases.mark("finish_rows");
     // Task 193: a listing over SLOW_MS is one slow-calls line with its phases.
-    phases.finish("ls", &string(&box_value, "host"));
+    phases.finish("ls", string(&box_value, "host"));
     Ok(box_value)
 }
 
@@ -780,7 +780,7 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
     keep_warm::enrich(session, shared.keep_warm, &record);
     phases.mark("keep_warm");
     if phases.total_ms() >= 100 {
-        phases.finish_at("ls-row", &string(session, "name"), 100);
+        phases.finish_at("ls-row", string(session, "name"), 100);
     }
     Ok(())
 }

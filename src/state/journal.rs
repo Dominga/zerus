@@ -538,7 +538,7 @@ fn owner_prompt_in_turn(record: &Value, from: f64, to: f64) -> bool {
         return false;
     }
     let request = string(record, "input_pending_request");
-    if uuid::Uuid::parse_str(&request).is_err() {
+    if uuid::Uuid::parse_str(request).is_err() {
         return false;
     }
     let Ok(root) = super::storage::absolute_root() else { return false };

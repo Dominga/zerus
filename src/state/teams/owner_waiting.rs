@@ -758,7 +758,7 @@ mod tests {
         let list = items(&[paused.clone()], 200.0);
         let item = list.iter().find(|item| item["kind"] == "team_paused").unwrap().clone();
         let dismissal = json!({"id":item["id"],"state":item["state"],"at":150.0,"team":"t"});
-        let (active, dismissed) = split(list, &[dismissal.clone()]);
+        let (active, dismissed) = split(list, std::slice::from_ref(&dismissal));
         assert!(active.is_empty(), "{active:?}");
         assert_eq!(dismissed.len(), 1);
         assert_eq!(dismissed[0]["dismissed_at"], 150.0);

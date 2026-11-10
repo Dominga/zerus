@@ -2893,7 +2893,7 @@ console.log(' FAIL  src/app.test.ts > fails');
         assert_eq!((read.passed, read.failed, read.skipped), (1, 1, 1), "{read:?}");
         assert!(read.results.iter().all(|result| result.suite == "src/app.test.ts"), "{read:?}");
         assert!(outcome.failures.iter().any(|name| name.contains("fails")), "{:?}", outcome.failures);
-        assert_eq!(report_path(dir.path(), "web-test").map(|(path, format)| (path, format)), Some((report.clone(), super::super::run_results::Format::Junit)));
+        assert_eq!(report_path(dir.path(), "web-test"), Some((report.clone(), super::super::run_results::Format::Junit)));
         // Two files, one failing: the run's exit, its counts and the failing
         // name come back per file, not as one blob.
         std::fs::write(

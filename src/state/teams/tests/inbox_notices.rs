@@ -105,7 +105,7 @@ fn a_seen_notice_stays_away_across_a_restart_and_returns_when_it_changes() {
         .map(str::to_owned)
         .collect();
     let seen = store
-        .mutate(None, &team.id, None, |stored, events| run(stored, "seen", json!({"items":keys}), &lead()))
+        .mutate(None, &team.id, None, |stored, _events| run(stored, "seen", json!({"items":keys}), &lead()))
         .unwrap();
     assert_eq!(seen["status"], "seen", "{seen}");
     assert_eq!(seen["seen"], json!(keys));

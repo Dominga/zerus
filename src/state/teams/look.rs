@@ -324,11 +324,13 @@ pub(crate) fn lead_idle_text(team: &Team, stall: &LeadStall, now: f64) -> String
 pub(crate) struct Compared {
     /// The comparison's own state (task 269's tests read it; the listing does
     /// not need it, so nothing else may assume it).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub state: String,
     pub disagree: Vec<String>,
     pub sources: Value,
     /// Task #269: what the member waits on (its own build, Background work or a
     /// tool call), when that explains a quiet hook.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub waiting: Option<String>,
 }
 

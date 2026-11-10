@@ -1963,16 +1963,6 @@ fn apply_archive_windows(team: &mut Team) {
     team.tasks.retain(|task| task.archived.is_none() || tasks.contains(&task.id));
 }
 
-fn write(transaction: &rusqlite::Transaction, team: &Team) -> anyhow::Result<()> {
-    let status = serde_json::to_value(team.status)?;
-    transaction.execute(
-        "INSERT INTO teams(id,revision,status,updated,payload) VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,status=excluded.status,updated=excluded.updated,payload=excluded.payload",
-        params![team.id, team.revision as i64, status.as_str().unwrap_or_default(), team.updated, serde_json::to_string(team)?],
-    )?;
-    Ok(())
-}
-
 /// The rules every change of a team keeps, in a transaction or a batch.
 fn after_change(team: &mut Team, events: &mut Vec<Event>, at: f64) {
     // Task 111: every change re-checks the open proposals; one that can no

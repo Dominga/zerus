@@ -872,7 +872,7 @@ fn only_a_moved_context_reading_is_worth_a_write() {
     assert!(!super::context_moved(Some(&stored), &at(400_000, 1_000_000, 1000.0 + super::CONTEXT_REFRESH - 1.0), 95));
     assert!(super::context_moved(Some(&stored), &at(400_000, 1_000_000, 1000.0 + super::CONTEXT_REFRESH), 95), "an old reading is refreshed");
     // The refresh keeps the stored reading fresh for a claim between two reads.
-    assert!(super::CONTEXT_REFRESH + super::CONTEXT_IDLE_EVERY < super::super::context::CLAIM_FRESH);
+    const { assert!(super::CONTEXT_REFRESH + super::CONTEXT_IDLE_EVERY < super::super::context::CLAIM_FRESH) };
 }
 
 /// Task #2 (team ede724c4): the tick's context sampling. An unchanged reading

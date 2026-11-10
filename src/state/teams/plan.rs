@@ -1405,12 +1405,15 @@ const SLOW_CHECK: &str = "Git was too slow to answer (the computer is busy); the
 /// so a served timeout still reads as Git being slow (task #32's message).
 type PrerequisiteAnswer = Result<Vec<u8>, (&'static str, Option<i32>, String)>;
 
+/// The prerequisite reads of one operation, by folder and arguments.
+type PrerequisiteMemo = BTreeMap<(String, Vec<String>), PrerequisiteAnswer>;
+
 thread_local! {
     /// Task #41 (team ede724c4): the prerequisite reads an operation's phase
     /// checks make, read before the store's write lock (`prefetch_prerequisites`)
     /// and served inside it, like task 287's report reads. Set and cleared by
     /// `dispatcher::with_git_answers`; None outside it.
-    static PREREQUISITE_MEMO: std::cell::RefCell<Option<BTreeMap<(String, Vec<String>), PrerequisiteAnswer>>> =
+    static PREREQUISITE_MEMO: std::cell::RefCell<Option<PrerequisiteMemo>> =
         const { std::cell::RefCell::new(None) };
 }
 

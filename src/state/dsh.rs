@@ -2669,7 +2669,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
     // the command itself refuses a busy agent.
     let compact_supported = compact_capability(agent_id, &inspected);
     result["compact_context_supported"] = json!(compact_supported);
-    result["compact_context_reason"] = json!(compact_reason(compact_supported, &string(&result, "phase")));
+    result["compact_context_reason"] = json!(compact_reason(compact_supported, string(&result, "phase")));
     result["compact_context_request"] = inspected["compactRequest"].clone();
     if result["compact_context_request"].is_object() {
         result["compact_context_request"]["run_id"] = record["run_id"].clone();

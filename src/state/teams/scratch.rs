@@ -165,7 +165,7 @@ pub(crate) fn prepare(parent: &Team, member: &Member, input: &Value) -> anyhow::
     settings.tree_depth = settings.tree_depth.min(parent.settings.tree_depth.max(1));
     settings.tree_sessions = settings.tree_sessions.min(parent.settings.tree_sessions.max(1));
     anyhow::ensure!(
-        members.len() + 1 <= settings.max_members,
+        members.len() < settings.max_members,
         "The scratch team has {} members and the parent's cap is {}",
         members.len() + 1,
         settings.max_members

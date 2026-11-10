@@ -576,7 +576,7 @@ fn a_refused_queued_question_reaches_the_member_and_the_lead() {
     let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
     task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
     task.status = TaskStatus::InProgress;
-    let id = task.id;
+    let _id = task.id;
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
     let folder = dir.path().join("work");
     let request_id = "44444444-4444-4444-8444-444444444444";

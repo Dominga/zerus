@@ -759,7 +759,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         ensure!(members.iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
         members.push(member);
     }
-    if scratch_repository && !super::dispatcher::folder_facts(&scratch_folder).0.is_empty() {
+    if scratch_repository && !super::dispatcher::folder_facts(scratch_folder).0.is_empty() {
         for member in members.iter_mut().skip(1) {
             if member.folder == MemberFolder::Shared && member.directory.is_empty() && member.session.is_none() {
                 member.folder = super::dispatcher::default_folder(&member.agent);
@@ -1658,7 +1658,7 @@ fn keep_owner_memory(old: &Settings, new: &mut Settings, actor: &Actor) {
 /// Task #13 (team ede724c4): the owner's settings (`OWNER_SETTINGS`) the lead
 /// changed in `new`, as offers by field; `new` keeps the owner's values.
 fn setting_offers(old: &Settings, new: &mut Settings) -> anyhow::Result<BTreeMap<String, Value>> {
-    let (old_value, mut new_value) = (serde_json::to_value(&*old)?, serde_json::to_value(&*new)?);
+    let (old_value, mut new_value) = (serde_json::to_value(old)?, serde_json::to_value(&*new)?);
     let mut offers = BTreeMap::new();
     for field in OWNER_SETTINGS {
         let (was, wanted) = (old_value.get(field).cloned(), new_value.get(field).cloned());
@@ -3693,11 +3693,10 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         }
     }
     // A phase without a record is the approved plan's work (phase 1).
-    if record.is_none_or(|at| !proposed.phases[at].state.is_draft()) {
-        if !super::lead_plan::lead_plans(team, actor) {
+    if record.is_none_or(|at| !proposed.phases[at].state.is_draft())
+        && !super::lead_plan::lead_plans(team, actor) {
             ensure_owner_or_word(team, actor, input, n, "edits an accepted phase")?;
         }
-    }
     let in_phase = |team: &Team, id: u32| match record {
         Some(at) => team.phases[at].tasks.contains(&id),
         None => team.task(id).is_some_and(|task| task.phase == n),
@@ -3990,11 +3989,10 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
     // moves too: the owner moves it, the lead on the owner's word.
     let at = movable_phase(&proposed, n)?;
     let to_at = movable_phase(&proposed, to)?;
-    if !proposed.phases[at].state.is_draft() || !proposed.phases[to_at].state.is_draft() {
-        if !super::lead_plan::lead_plans(team, actor) {
+    if (!proposed.phases[at].state.is_draft() || !proposed.phases[to_at].state.is_draft())
+        && !super::lead_plan::lead_plans(team, actor) {
             ensure_owner_or_word(team, actor, input, n, "moves an accepted phase")?;
         }
-    }
     proposed.phases.sort_by_key(|phase| (phase.order(), phase.n));
     let at = proposed.phases.iter().position(|phase| phase.n == n).context("Unknown phase")?;
     let before: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();

@@ -130,7 +130,7 @@ fn requested(record: &Value, panel: &Panel) -> (String, Value) {
             .map(|key| string(pending, key))
             .find(|id| !id.is_empty());
         let detail = id
-            .and_then(|id| record["active_tools"].get(&id))
+            .and_then(|id| record["active_tools"].get(id))
             .map(|tool| string(tool, "detail"))
             .or_else(|| {
                 let tools = record["active_tools"].as_object()?;

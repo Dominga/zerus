@@ -2305,7 +2305,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     phases.mark("ended");
     crate::external_workstreams::append_listing(config,&mut merged)?;
     phases.mark("external");
-    phases.finish("ls", &config.host());
+    phases.finish("ls", config.host());
     Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {

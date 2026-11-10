@@ -87,7 +87,7 @@ fn the_members_own_work_and_its_scratch_team_are_in_scope() {
             assert!(own_scope(&team, &qa, op).is_some(), "{op}");
         }
         assert!(own_scope(&team, &qa, "settings").is_none());
-        assert!(own_scope(&team, &team.member("lead").unwrap(), "report").is_none(), "the lead's own requests are not the member's");
+        assert!(own_scope(&team, team.member("lead").unwrap(), "report").is_none(), "the lead's own requests are not the member's");
         // A create inside the scratch root, with the QA right and the rule.
         let inside = json!({"folder": format!("{}/check", scratch::root(&team))});
         assert!(scratch_create(&team, &qa, &inside).is_some());

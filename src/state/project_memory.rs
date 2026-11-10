@@ -681,6 +681,7 @@ pub(crate) fn project_enabled(project: &str) -> bool {
 /// Task 127 (docs/lore.md 4.1): the modes New team offers for a project and
 /// the one it preselects: `project` when the project's store is on, `team`
 /// when it is off. `project` and `read-only` need the store on.
+#[cfg(test)]
 pub(crate) fn modes_for(project: &str) -> (Vec<&'static str>, &'static str) {
     if project_enabled(project) {
         (vec!["project", "team", "read-only", "plain", "off"], "project")

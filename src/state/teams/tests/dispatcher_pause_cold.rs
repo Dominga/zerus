@@ -43,6 +43,7 @@ fn reading(team: &mut Team, percent: u64, cold: bool) {
 fn a_crashed_attempt_waits_out_every_pause_and_comes_back_after_it() {
     let base = crashed_team();
     assert!(gives_back(&base), "a running team gives it back");
+    #[allow(clippy::type_complexity)]
     let paused: [(&str, Box<dyn Fn(&mut Team)>); 5] = [
         ("the team is not running", Box::new(|team: &mut Team| team.status = TeamStatus::Paused)),
         ("its phase is paused", Box::new(|team: &mut Team| {

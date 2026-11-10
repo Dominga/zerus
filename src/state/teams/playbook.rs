@@ -313,7 +313,7 @@ pub(crate) fn breaches(team: &Team) -> Vec<Breach> {
                 rule: "g",
                 title: format!("#{} {} reports tests that were never run here", task.id, task.title),
                 detail: "The report names test lines or functions, and Zerus ran no tests for it: the tests may only exist in the report.".into(),
-                fix: format!("hgs test affected --json (run the affected tests; accept the report only after they pass)"),
+                fix: "hgs test affected --json (run the affected tests; accept the report only after they pass)".to_string(),
                 owner: false,
             });
         }
@@ -356,7 +356,7 @@ pub(crate) fn breaches(team: &Team) -> Vec<Breach> {
             rule: "i",
             title: format!("{where_} carries {what}"),
             detail: "A real-format token or secret is in the team's record: remove it from the task or the report and rotate it; it may already be in a public repository.".into(),
-            fix: format!("edit the task text or the report (and rotate the secret): hgs team extend --json, then tell the owner"),
+            fix: "edit the task text or the report (and rotate the secret): hgs team extend --json, then tell the owner".to_string(),
             owner: true,
         });
     }
@@ -367,7 +367,7 @@ pub(crate) fn breaches(team: &Team) -> Vec<Breach> {
 /// decisions, the integration head and who idles. Short, plain text.
 pub(crate) fn brief(team: &Team) -> String {
     let mode = if team.working_mode.is_empty() { "none recorded".to_owned() } else { team.working_mode.clone() };
-    let mut lines = vec![format!("[Zerus team · from: Zerus · brief] How this team runs (the lead playbook).")];
+    let mut lines = vec!["[Zerus team · from: Zerus · brief] How this team runs (the lead playbook).".to_string()];
     lines.push(format!(
         "Working mode: {mode}. Base: {}. Integration folder: {}. The playbook rules (a)-(i): {}",
         if team.settings.base_branch.trim().is_empty() { "the team's folder" } else { team.settings.base_branch.trim() },

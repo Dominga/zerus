@@ -947,7 +947,7 @@ pub(crate) fn messages(team: &Team, limit: usize) -> anyhow::Result<Vec<Value>> 
             }
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|found| std::cmp::Reverse(found.0));
     found.dedup_by_key(|(seq, _, _)| *seq);
     Ok(found
         .into_iter()

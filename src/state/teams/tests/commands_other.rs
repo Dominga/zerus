@@ -2171,7 +2171,7 @@ fn a_note_and_a_message_with_a_secret_are_stored_redacted() {
 
         let answer = call("message", json!({"to":"dev","text":concat!("the key is AKIA", "ABCDEFGHIJKLWXYZ")})).unwrap();
         assert_eq!(answer["redacted"], json!(["aws-access-key-id"]), "{answer}");
-        let messages = crate::state::teams::working::unread(&store.connection(), "rv", "dev", crate::state::now()).unwrap();
+        let messages = crate::state::teams::working::unread(store.connection(), "rv", "dev", crate::state::now()).unwrap();
         assert!(messages.iter().any(|message| message.text.contains("[redacted: aws-access-key-id]")), "{messages:?}");
         assert!(messages.iter().all(|message| !message.text.contains(concat!("AKIA", "ABCDEFGHIJKLWXYZ"))), "{messages:?}");
     });

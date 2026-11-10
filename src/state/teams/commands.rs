@@ -662,6 +662,7 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
 /// newest lead changes and proposals are listed. The full record of one task is
 /// `hgs team status --task N`; the full lead changes are `hgs team
 /// lead-changes`, and a proposal's stored form is what the card shows.
+#[cfg(test)]
 pub(crate) fn bound_status(value: &mut Value, team: &Team) {
     bound_status_with(value, team, false);
 }
@@ -3068,7 +3069,7 @@ fn create_inner(input: &Value, scratch: Option<(Team, Member)>) -> anyhow::Resul
         if let Some(record) = caller_record() {
             let rules = super::owner_steps::rules();
             if let Some(rule) = super::owner_steps::covering(&rules, &team.folder) {
-                let leads = store::path().exists().then(|| Store::open(false).and_then(|store| store.active_teams(ACTIVE_TEAMS)).unwrap_or_default()).unwrap_or_default();
+                let leads = if store::path().exists() { Store::open(false).and_then(|store| store.active_teams(ACTIVE_TEAMS)).unwrap_or_default() } else { Default::default() };
                 if super::owner_steps::lead_creating(&record, &leads) {
                     team.settings.approval = super::model::Approval::Auto;
                     team.scratch_rule = rule.id.clone();
@@ -3916,7 +3917,7 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             // and excerpt (the card itself never carries them).
             let record = text(input, "record");
             if !record.is_empty() {
-                let found = database.record_by_id(&record)?;
+                let found = database.record_by_id(record)?;
                 return match found {
                     Some(record) => Ok(json!({"status":"record","record":record})),
                     None => anyhow::bail!("Unknown test record {record}"),
@@ -5308,7 +5309,7 @@ fn check_roster_word(
         let inside = match op {
             "relaunch" | "remove-member" => team
                 .member(text(filled, "member"))
-                .is_some_and(|member| agents.iter().any(|agent| *agent == member.agent)),
+                .is_some_and(|member| agents.contains(&member.agent)),
             "add-member" => agents.iter().any(|agent| *agent == text(&filled["member"], "agent")),
             _ => false,
         };

@@ -63,7 +63,10 @@ fn the_bridged_inspection_details_are_current() {
     if std::env::var_os("ZERUS_UPDATE_FIXTURES").is_some() {
         std::fs::write(fixture_file(), &current).unwrap();
     }
-    assert_eq!(std::fs::read_to_string(fixture_file()).unwrap(), current);
+    // Task #20: compared as text: a checkout that converts line ends (Git's
+    // autocrlf on Windows) holds the same fixture with CRLF.
+    let saved = std::fs::read_to_string(fixture_file()).unwrap().replace("\r\n", "\n");
+    assert_eq!(saved, current);
     // The three fork states stay distinct in the bridged value.
     let value = fixture();
     assert_eq!(value["fork"]["fork_parent_id"], "source-conversation");

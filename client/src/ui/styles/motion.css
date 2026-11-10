@@ -26,16 +26,19 @@
 :root[data-animate-activity="0"] .gb-count.working,
 :root[data-animate-activity="0"] .status.working .dot,
 :root[data-animate-activity="0"] .state-dot.working,
-:root[data-animate-activity="0"] .typing i { animation: none; }
+:root[data-animate-activity="0"] .typing i,
+:root[data-animate-activity="0"] .pt-working-mark > svg { animation: none; }
 
 /* Reduce motion: the working indicators above, the Zerus mark, the loading
    shimmer and spinner, the connecting machine's ring, the recording chip, the
-   composer's compaction bar, the playing video note and an active task's ring. */
+   composer's compaction bar, the playing video note, an active task's ring and
+   the Plan's working mark (task #50). */
 :root[data-reduce-motion="1"] .sbadge.k-working .sb-mark::after,
 :root[data-reduce-motion="1"] .gb-count.working,
 :root[data-reduce-motion="1"] .status.working .dot,
 :root[data-reduce-motion="1"] .state-dot.working,
 :root[data-reduce-motion="1"] .typing i,
+:root[data-reduce-motion="1"] .pt-working-mark > svg,
 :root[data-reduce-motion="1"] .skeleton::before,
 :root[data-reduce-motion="1"] .busy-arc,
 :root[data-reduce-motion="1"] .su-spin,
@@ -66,6 +69,7 @@
 :root[data-motion-unfocused="1"] .status.working .dot,
 :root[data-motion-unfocused="1"] .state-dot.working,
 :root[data-motion-unfocused="1"] .typing i,
+:root[data-motion-unfocused="1"] .pt-working-mark > svg,
 :root[data-motion-unfocused="1"] .skeleton::before,
 :root[data-motion-unfocused="1"] .busy-arc,
 :root[data-motion-unfocused="1"] .su-spin,

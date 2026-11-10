@@ -2295,10 +2295,10 @@ mod tests {
                     "identity": identity},
             })
         }
-        let default_identity = json!({"auth_method":"claude.ai","email":"whitles.w@example.test",
-            "organization":"whitles.w@example.test's Organization","plan":"max"});
-        let additional_identity = json!({"auth_method":"claude.ai","email":"whitles.ae@example.test",
-            "organization":"whitles.ae@example.test's Organization","plan":"max"});
+        let default_identity = json!({"auth_method":"claude.ai","email":"person.one@example.test",
+            "organization":"person.one@example.test's Organization","plan":"max"});
+        let additional_identity = json!({"auth_method":"claude.ai","email":"person.two@example.test",
+            "organization":"person.two@example.test's Organization","plan":"max"});
         let mut state = AccountsState::default();
         state.catalogs.insert(
             ComputerId::local(),

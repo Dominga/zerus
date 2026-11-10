@@ -334,7 +334,7 @@
       .ns-accounts, .wt-tree, .ocm-list, .wtp-tree, .parent-choices, .su-page, .proj-list, .su-tablewrap, .ip-summary, .ip-body, .ip-diff,
       .bc-details, .sp-scroll, .strip-scroll, .set-nav, .set-table-wrap, .voice-list, .an-detail, .an-json, .sw-clist,
       .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tk-damaged-review, .tv-scroll, .tk-assign-list, .wtl-panel, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .lead-proposals, .team-waiting-list, .proj-session-list,
-      .team-waiting-output, .team-questions, .ms-list, .ms-raw, .ms-logs, .cat-list, .cat-proposals, .nt-body, .pt-plan-scroll, .pt-phase-body, .pm-board-phase, .team-findings-list, .nt-lead-pane, .nt-template-list, .qcard-subagents, .team-drawer-rows, .pt-detail,
+      .team-waiting-output, .team-questions, .ms-list, .ms-raw, .ms-logs, .cat-list, .cat-proposals, .nt-body, .pt-plan-scroll, .pt-phase-body, .pm-board-phase, .team-findings-list, .nt-lead-pane, .nt-template-list, .nt-intro, .nt-phases, .qcard-subagents, .team-drawer-rows, .pt-detail,
       .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page, .nsd-acc-list,
       .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-lanes, .pm-profile, .pm-tests, .pm-profile-scroll, .tl-host, .cl-list, .diff-text,
       .xterm-viewport):not(

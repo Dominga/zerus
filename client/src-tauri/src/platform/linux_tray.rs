@@ -993,6 +993,12 @@ fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
             let state = target.state::<crate::commands::AppState>();
             state.refresh();
         }
+        // Task #50: the tray's "Open log" (eefaaeadf) on Linux too, as on Windows.
+        MenuAction::OpenLog => {
+            if let Err(error) = crate::startup_log::open(&target) {
+                eprintln!("zerus-client: open log: {error}");
+            }
+        }
     });
 }
 pub fn present(app: &AppHandle, token: Option<&str>) {

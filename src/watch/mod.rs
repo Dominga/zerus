@@ -92,8 +92,55 @@ enum Input {
     Team(team::Done),
     /// Task 235: a whole listing finished on its own thread.
     Listing(ListingDone),
+    /// The DeepSeek and OpenCode rows were read from their hosts on a thread.
+    NativeRows(NativeDone),
+    /// Rows of live tracked sessions were derived again on a thread.
+    Rows(RowsDone),
+    /// A probe of what no file shows finished on a thread.
+    Probe(ProbeDone),
     End,
 }
+
+/// Rows derived again between listings. Deriving them waits for the session
+/// state lock and reads each session, which takes seconds on a busy computer:
+/// on a thread, the loop keeps answering meanwhile.
+struct RowsDone {
+    started: Instant,
+    wanted: BTreeSet<String>,
+    result: std::result::Result<Option<(Vec<Value>, u64)>, String>,
+}
+
+/// A probe's findings, with the listing's metrics and presence as they are now.
+struct ProbeDone {
+    started: Instant,
+    result: std::result::Result<source::Probe, String>,
+    metrics: Value,
+    presence: Option<Value>,
+}
+
+/// The DeepSeek and OpenCode rows between listings. Their hosts answer them,
+/// and a host that is slow or stuck answers only at its request limit (35 s):
+/// read on the loop, that kept every subscription, control and Activity frame
+/// of the stream waiting, so a session opened meanwhile showed no Activity.
+struct NativeDone {
+    started: Instant,
+    result: std::result::Result<Vec<Value>, String>,
+}
+
+/// What became of a subscription's first frames.
+enum Started {
+    Sent,
+    /// The inspection failed for now (a busy state lock, say): the
+    /// subscription stays and its first frames are read again.
+    Later,
+    /// The session cannot be followed as asked.
+    Refused,
+}
+
+/// The first wait before a subscription's first frames are read again; it
+/// doubles up to [`START_RETRY_MAX`].
+const START_RETRY: Duration = Duration::from_secs(1);
+const START_RETRY_MAX: Duration = Duration::from_secs(8);
 
 /// Task 235: a whole listing, built off the loop so Activity, controls and
 /// pulses keep flowing while it runs (it took seconds every ~28 s).
@@ -161,7 +208,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let mut next_pulse = Instant::now() + PULSE;
     loop {
         let now = Instant::now();
-        let deadline = [watch.listing_due, watch.refresh_due, Some(watch.replacement_due)]
+        let deadline = [watch.listing_due, watch.refresh_due, watch.native_due, Some(watch.replacement_due)]
             .into_iter()
             .flatten()
             .fold(next_pulse, Instant::min);
@@ -172,6 +219,10 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         if watch.out.writer.stopped() {
             return Ok(0);
         }
+        // Everything below runs on the loop, and every subscription, control
+        // and Activity frame waits for it: a pass that takes a second or more
+        // leaves a `watch-loop` line naming its steps in the slow-calls log.
+        let mut phases = crate::state::slow_calls::Phases::start();
         match input {
             Ok(Input::Line(text)) => watch.control(&text),
             Ok(Input::TooLong) => watch.out.error(
@@ -192,34 +243,49 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             Ok(Input::Organization(done)) => watch.organization_done(done),
             Ok(Input::Team(done)) => watch.team_done(done),
             Ok(Input::Listing(done)) => watch.listing_done(done),
+            Ok(Input::NativeRows(done)) => watch.native_done(done),
+            Ok(Input::Rows(done)) => watch.rows_done(done),
+            Ok(Input::Probe(done)) => watch.probe_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        phases.mark("input");
         if watch.out.writer.stopped() {
             return Ok(0);
         }
         let now = Instant::now();
         if now >= next_pulse {
             next_pulse = now + PULSE;
-            watch.pulse(now);
+            watch.pulse(now, &mut phases);
         }
         if watch.listing_due.is_some_and(|due| now >= due) {
             watch.list(now);
+            phases.mark("list");
         }
         if watch.refresh_due.is_some_and(|due| now >= due) {
             watch.refresh_rows(now);
+            phases.mark("rows");
+        }
+        if watch.native_due.is_some_and(|due| now >= due) {
+            watch.refresh_native(now);
+            phases.mark("native");
         }
         if now >= watch.replacement_due && watch.replaced(now) {
             watch.end_replaced();
             return Ok(0);
         }
+        phases.mark("replacement");
         watch.emit_catalog();
+        phases.mark("catalog");
         watch.resync_activity();
+        phases.mark("resync");
         watch.flush_git();
         watch.flush_processes();
         watch.flush_tasks();
         watch.flush_organization();
         watch.flush_team();
+        phases.mark("flush");
+        phases.finish("watch-loop", "");
     }
 }
 
@@ -390,10 +456,19 @@ struct Watch<'a> {
     listing: ListingGate,
     // Row refreshes between listings.
     stale: BTreeSet<String>,
-    stale_native: bool,
+    /// Sessions whose rows were derived again while a listing ran.
+    relisted: BTreeSet<String>,
     refresh_due: Option<Instant>,
     refreshed_at: Option<Instant>,
     refresh_cost: Duration,
+    // The DeepSeek and OpenCode rows between listings, read on a thread.
+    native_due: Option<Instant>,
+    native_at: Option<Instant>,
+    native_cost: Duration,
+    native_running: bool,
+    /// One derivation and one probe run at a time, each on its own thread.
+    rows_running: bool,
+    probe_running: bool,
     probed_at: Option<Instant>,
     // Activity.
     journal: Option<rusqlite::Connection>,
@@ -449,10 +524,16 @@ impl<'a> Watch<'a> {
             listing_cost: Duration::ZERO,
             listing: ListingGate::default(),
             stale: BTreeSet::new(),
-            stale_native: false,
+            relisted: BTreeSet::new(),
             refresh_due: None,
             refreshed_at: None,
             refresh_cost: Duration::ZERO,
+            native_due: None,
+            native_at: None,
+            native_cost: Duration::ZERO,
+            native_running: false,
+            rows_running: false,
+            probe_running: false,
             probed_at: None,
             journal: None,
             data_version: None,
@@ -536,6 +617,12 @@ impl<'a> Watch<'a> {
         self.refresh_due = Some(self.refresh_due.map_or(due, |current| current.min(due)));
     }
 
+    fn schedule_native(&mut self, at: Instant) {
+        let gap = LISTING_GAP.max(self.native_cost * 4);
+        let due = self.native_at.map_or(at, |started| at.max(started + gap));
+        self.native_due = Some(self.native_due.map_or(due, |current| current.min(due)));
+    }
+
     /// Re-runs the `ls --json --local --no-archives` builder on its own
     /// thread (task 235): the loop keeps serving Activity and controls; the
     /// rows arrive as [`Input::Listing`]. One asked for while one runs
@@ -549,8 +636,8 @@ impl<'a> Watch<'a> {
         // The listing covers every row refresh and probe asked for so far.
         self.probed_at = Some(now);
         self.stale.clear();
-        self.stale_native = false;
         self.refresh_due = None;
+        self.native_due = None;
         // The structure is taken first: a change during the listing lists again.
         self.structure = source::structure_now().ok();
         let config = self.config.clone();
@@ -568,14 +655,37 @@ impl<'a> Watch<'a> {
     fn listing_done(&mut self, done: ListingDone) {
         match done.result {
             Ok(listing) => {
-                let (rows, meta) = catalog::split(listing);
+                let (mut rows, meta) = catalog::split(listing);
+                // A listing reads each session once, near its start, and a
+                // slow one lands much later: a row derived meanwhile is newer
+                // than the listing's and stays, so an answered approval or a
+                // finished turn does not come back. It is derived once more.
+                let again = std::mem::take(&mut self.relisted);
+                if !again.is_empty() {
+                    let newer: BTreeMap<&str, &Value> = self
+                        .rows
+                        .iter()
+                        .filter(|(_, row)| row["name"].as_str().is_some_and(|name| again.contains(name)))
+                        .map(|(key, row)| (key.as_str(), row))
+                        .collect();
+                    for (key, row) in &mut rows {
+                        if let Some(kept) = newer.get(key.as_str()).filter(|kept| kept["name"] == row["name"]) {
+                            *row = (*kept).clone();
+                        }
+                    }
+                    self.stale.extend(again);
+                    self.schedule_refresh(Instant::now());
+                }
                 self.digests = rows.iter().map(|(_, row)| catalog::row_digest(row)).collect();
                 self.rows = rows;
                 self.meta = meta;
                 self.listed = true;
                 self.pending = true;
             }
-            Err(error) => self.out.failure("listing_failed", &error, Some(topic::CATALOG), None),
+            Err(error) => {
+                self.relisted.clear();
+                self.out.failure("listing_failed", &error, Some(topic::CATALOG), None);
+            }
         }
         self.listing_cost = done.started.elapsed();
         if self.listing.done() {
@@ -583,60 +693,77 @@ impl<'a> Watch<'a> {
         }
     }
 
-    /// Derives again the rows whose inputs changed since they were listed; a
-    /// whole listing follows when only it can tell.
+    /// Derives again, on a thread, the rows whose inputs changed since they
+    /// were listed; they arrive as [`Input::Rows`]. One derivation runs at a
+    /// time: names that change meanwhile wait for the next.
     fn refresh_rows(&mut self, now: Instant) {
         self.refresh_due = None;
+        if self.rows_running {
+            return;
+        }
         self.refreshed_at = Some(now);
         let wanted = std::mem::take(&mut self.stale);
-        let native = std::mem::take(&mut self.stale_native);
-        match self.derive(&wanted, native) {
-            Ok(true) => {}
-            Ok(false) => self.schedule(now),
+        if wanted.is_empty() {
+            return;
+        }
+        if !self.listed {
+            self.schedule(now);
+            return;
+        }
+        if self.listing.running {
+            self.relisted.extend(wanted.iter().cloned());
+        }
+        self.rows_running = true;
+        let results = self.git_results.clone();
+        let names = wanted.clone();
+        let spawned = std::thread::Builder::new().name("hgs-watch-rows".into()).spawn(move || {
+            let result = source::rows(&names);
+            let _ = results.send(Input::Rows(RowsDone { started: now, wanted: names, result }));
+        });
+        if let Err(error) = spawned {
+            self.rows_done(RowsDone { started: now, wanted, result: Err(format!("cannot derive the rows: {error}")) });
+        }
+    }
+
+    /// Replaces the rows of the live tracked sessions that were derived
+    /// again. A whole listing follows when only it can tell: the terminal
+    /// changed, a session is no longer live under its binding, or a row would
+    /// change its key or its place.
+    fn rows_done(&mut self, done: RowsDone) {
+        self.rows_running = false;
+        self.refresh_cost = done.started.elapsed();
+        let now = Instant::now();
+        match done.result {
+            // A listing that started meanwhile read these sessions after this
+            // derivation may have: its rows stay, and these are derived again.
+            Ok(_) if self.listed_at.is_some_and(|listed| listed > done.started) => {
+                self.stale.extend(done.wanted);
+            }
+            Ok(Some((derived, structure))) if Some(structure) == self.structure => {
+                if !self.replace_rows(derived) {
+                    self.schedule(now);
+                }
+            }
+            Ok(_) => self.schedule(now),
             Err(error) => {
                 self.out.failure("listing_failed", &error, Some(topic::CATALOG), None);
                 self.schedule(now);
             }
         }
-        self.refresh_cost = now.elapsed();
+        if !self.stale.is_empty() {
+            self.schedule_refresh(now);
+        }
     }
 
-    /// Replaces the rows of the live tracked sessions in `wanted` and, with
-    /// `native`, the DeepSeek and OpenCode rows. False when a whole listing
-    /// must decide: the terminal changed, a session is no longer live under
-    /// its binding, or a row would change its key or its place.
-    fn derive(&mut self, wanted: &BTreeSet<String>, native: bool) -> std::result::Result<bool, String> {
-        if !self.listed {
-            return Ok(false);
-        }
-        let mut rows = Vec::new();
-        if !wanted.is_empty() {
-            let Some((derived, structure)) = source::rows(wanted)? else { return Ok(false) };
-            if Some(structure) != self.structure {
-                return Ok(false);
-            }
-            rows = derived;
-        }
-        if native {
-            let derived = source::native_rows()?;
-            let listed: BTreeSet<&str> = self
-                .rows
-                .iter()
-                .filter(|(_, row)| row["name"].as_str().is_some_and(source::native))
-                .map(|(key, _)| key.as_str())
-                .collect();
-            let keys: Vec<String> = derived.iter().map(catalog::key).collect();
-            if keys.len() != listed.len() || keys.iter().any(|key| !listed.contains(key.as_str())) {
-                return Ok(false);
-            }
-            rows.extend(derived);
-        }
+    /// Puts derived rows in the place of their listed ones. False, changing
+    /// nothing, when one of them is not listed under its key and name.
+    fn replace_rows(&mut self, rows: Vec<Value>) -> bool {
         let mut updates = Vec::with_capacity(rows.len());
         for row in rows {
             let key = catalog::key(&row);
-            let Some(index) = self.rows.iter().position(|(listed, _)| *listed == key) else { return Ok(false) };
+            let Some(index) = self.rows.iter().position(|(listed, _)| *listed == key) else { return false };
             if self.rows[index].1["name"] != row["name"] {
-                return Ok(false);
+                return false;
             }
             updates.push((index, row));
         }
@@ -647,12 +774,67 @@ impl<'a> Watch<'a> {
         }
         catalog::redecorate(&mut self.rows, &mut self.digests, &updated);
         self.pending = true;
-        Ok(true)
+        true
+    }
+
+    /// Reads the DeepSeek and OpenCode rows again on their own thread; the
+    /// rows arrive as [`Input::NativeRows`]. At most one read runs: a host
+    /// that does not answer holds that thread, never the loop.
+    fn refresh_native(&mut self, now: Instant) {
+        self.native_due = None;
+        if self.native_running || !self.listed {
+            return;
+        }
+        self.native_running = true;
+        self.native_at = Some(now);
+        let results = self.git_results.clone();
+        let spawned = std::thread::Builder::new().name("hgs-watch-native".into()).spawn(move || {
+            let result = source::native_rows();
+            let _ = results.send(Input::NativeRows(NativeDone { started: now, result }));
+        });
+        if let Err(error) = spawned {
+            self.native_done(NativeDone { started: now, result: Err(format!("cannot read the DeepSeek and OpenCode rows: {error}")) });
+        }
+    }
+
+    /// The DeepSeek and OpenCode rows replace their listed ones; a whole
+    /// listing follows when they are no longer the same sessions.
+    fn native_done(&mut self, done: NativeDone) {
+        self.native_running = false;
+        self.native_cost = done.started.elapsed();
+        // A listing that started after this read holds these rows already, or newer ones.
+        if self.listing.running || self.listed_at.is_some_and(|listed| listed > done.started) {
+            return;
+        }
+        let now = Instant::now();
+        let derived = match done.result {
+            Ok(derived) => derived,
+            Err(error) => {
+                self.out.failure("listing_failed", &error, Some(topic::CATALOG), None);
+                self.schedule(now);
+                return;
+            }
+        };
+        let same = {
+            let listed: BTreeSet<&str> = self
+                .rows
+                .iter()
+                .filter(|(_, row)| row["name"].as_str().is_some_and(source::native))
+                .map(|(key, _)| key.as_str())
+                .collect();
+            let keys: Vec<String> = derived.iter().map(catalog::key).collect();
+            keys.len() == listed.len() && keys.iter().all(|key| listed.contains(key.as_str()))
+        };
+        if !same || !self.replace_rows(derived) {
+            self.schedule(now);
+        }
     }
 
     /// What no file shows: the terminal's structure, agent processes and
     /// their work, sessions without a hook event yet and DeepSeek and
     /// OpenCode hosts. The listing's metrics and presence are refreshed too.
+    /// It samples the terminal and every agent process, so it runs on a
+    /// thread; its findings arrive as [`Input::Probe`].
     fn probe(&mut self, now: Instant) {
         self.probed_at = Some(now);
         if !self.listed {
@@ -660,8 +842,37 @@ impl<'a> Watch<'a> {
             self.schedule(now);
             return;
         }
-        let rows: Vec<&Value> = self.rows.iter().map(|(_, row)| row).collect();
-        let probe = match source::probe(&rows) {
+        if self.probe_running {
+            return;
+        }
+        self.probe_running = true;
+        let rows: Vec<Value> = self.rows.iter().map(|(_, row)| row.clone()).collect();
+        let config = self.config.clone();
+        let results = self.git_results.clone();
+        let spawned = std::thread::Builder::new().name("hgs-watch-probe".into()).spawn(move || {
+            let listed: Vec<&Value> = rows.iter().collect();
+            let result = source::probe(&listed);
+            // `metrics` and `desktop_presence` as the listing reports them now.
+            let metrics = crate::metrics::snapshot(&config.state);
+            let presence = crate::presence::listing(&config.state, crate::presence::now());
+            let _ = results.send(Input::Probe(ProbeDone { started: now, result, metrics, presence }));
+        });
+        if spawned.is_err() {
+            self.probe_running = false;
+            self.schedule(now);
+        }
+    }
+
+    /// A finished probe asks for the rows it found stale, or for a whole
+    /// listing when the terminal changed or could not be read.
+    fn probe_done(&mut self, done: ProbeDone) {
+        self.probe_running = false;
+        let now = Instant::now();
+        // A listing that started meanwhile covers what this probe looked for.
+        if self.listing.running || self.listed_at.is_some_and(|listed| listed > done.started) {
+            return;
+        }
+        let probe = match done.result {
             Ok(probe) if Some(probe.structure) == self.structure => probe,
             // A changed terminal, or one this probe cannot read: list it whole.
             _ => {
@@ -670,14 +881,15 @@ impl<'a> Watch<'a> {
             }
         };
         let native = self.rows.iter().any(|(_, row)| row["name"].as_str().is_some_and(source::native));
-        if !probe.stale.is_empty() || native {
+        if !probe.stale.is_empty() {
             self.stale.extend(probe.stale);
-            self.stale_native |= native;
             self.schedule_refresh(now);
         }
-        // `metrics` and `desktop_presence` as the listing reports them now.
-        self.meta["metrics"] = crate::metrics::snapshot(&self.config.state);
-        match crate::presence::listing(&self.config.state, crate::presence::now()) {
+        if native {
+            self.schedule_native(now);
+        }
+        self.meta["metrics"] = done.metrics;
+        match done.presence {
             Some(presence) => self.meta["desktop_presence"] = presence,
             None => {
                 if let Some(meta) = self.meta.as_object_mut() {
@@ -923,9 +1135,11 @@ impl<'a> Watch<'a> {
 
     // ---- Pulse -------------------------------------------------------------
 
-    fn pulse(&mut self, now: Instant) {
+    fn pulse(&mut self, now: Instant, phases: &mut crate::state::slow_calls::Phases) {
         let journal = self.poll_journal();
+        phases.mark("journal");
         let scan = stamps::scan(&self.root);
+        phases.mark("stamps");
         let (changed, removed) = scan.changed_bindings(&self.scan);
         // Inputs other than bindings, and added or removed bindings, change
         // the whole listing; a changed binding changes its own row.
@@ -960,13 +1174,16 @@ impl<'a> Watch<'a> {
             self.stale.extend(names);
             self.schedule_refresh(now + DEBOUNCE);
         }
+        phases.mark("bindings");
         if self.probed_at.is_none_or(|at| now >= at + PROBE) {
             self.probe(now);
+            phases.mark("probe");
         }
         if self.listed_at.is_none_or(|at| now >= at + FULL) {
             self.schedule(now);
         }
         self.activity(now);
+        phases.mark("activity");
         self.pulse_git(now);
         if !self.processes.is_empty() {
             let jobs = self.processes.pulse(now);
@@ -982,6 +1199,7 @@ impl<'a> Watch<'a> {
         if let Some(job) = self.team.pulse(now, stamps::files) {
             self.run_team(job);
         }
+        phases.mark("topics");
     }
 
     fn open_journal(&mut self) {
@@ -1060,7 +1278,21 @@ impl<'a> Watch<'a> {
     }
 
     fn activity(&mut self, now: Instant) {
+        let mut refused = Vec::new();
         for index in 0..self.subs.len() {
+            if let Some((after, at, wait)) = self.subs[index].start {
+                if now >= at {
+                    match self.start(index, after, false) {
+                        Started::Sent => self.subs[index].start = None,
+                        Started::Later => {
+                            let wait = (wait * 2).min(START_RETRY_MAX);
+                            self.subs[index].start = Some((after, Instant::now() + wait, wait));
+                        }
+                        Started::Refused => refused.push(index),
+                    }
+                }
+                continue;
+            }
             if self.subs[index].resync.is_some() {
                 continue;
             }
@@ -1083,6 +1315,9 @@ impl<'a> Watch<'a> {
             if (sub.dirty && since >= STATE_GAP) || since >= interval {
                 self.refresh(index);
             }
+        }
+        for index in refused.into_iter().rev() {
+            self.subs.remove(index);
         }
     }
 
@@ -1212,6 +1447,11 @@ impl<'a> Watch<'a> {
     fn resync_activity(&mut self) {
         for index in 0..self.subs.len() {
             let Some(why) = self.subs[index].resync else { continue };
+            if self.subs[index].start.is_some() {
+                // Its first frames are still owed: they are a tail anyway.
+                self.subs[index].resync = None;
+                continue;
+            }
             if self.out.writer.backlog() > DEFER_BYTES {
                 return;
             }
@@ -1223,7 +1463,10 @@ impl<'a> Watch<'a> {
             self.subs[index].resync = None;
             self.subs[index].state = None;
             self.subs[index].events = None;
-            self.start(index, 0, true);
+            // A failed inspection leaves the tail owed; it is read again.
+            if matches!(self.start(index, 0, true), Started::Later) {
+                self.subs[index].start = Some((0, Instant::now() + START_RETRY, START_RETRY));
+            }
         }
     }
 
@@ -1718,6 +1961,9 @@ impl<'a> Watch<'a> {
             return;
         }
         let key = session.key();
+        if let Some(before) = request.before {
+            return self.older(&key, before, request.tail);
+        }
         self.subs.retain(|sub| sub.key != key);
         if self.subs.len() >= protocol::ACTIVITY_SUBSCRIPTIONS {
             self.out.error(
@@ -1744,14 +1990,78 @@ impl<'a> Watch<'a> {
         self.subs.push(sub);
         let index = self.subs.len() - 1;
         self.open_journal();
-        if !self.start(index, after, false) {
-            self.subs.pop();
+        match self.start(index, after, false) {
+            Started::Sent => {}
+            // The client was told nothing it acts on, and would wait for a
+            // first page that never comes: keep the subscription and read again.
+            Started::Later => self.subs[index].start = Some((after, Instant::now() + START_RETRY, START_RETRY)),
+            Started::Refused => {
+                self.subs.pop();
+            }
+        }
+    }
+
+    /// One page of a followed session's Activity before the journal `seq`
+    /// `before`, as `older` frames: at most `tail` rows (up to
+    /// [`protocol::ACTIVITY_OLDER`]), where the next older page starts and
+    /// whether one exists. The subscription, its cursor and its state stay as
+    /// they are, and nothing is inspected. A failed read still ends: the
+    /// client stops waiting and may ask again.
+    fn older(&mut self, key: &str, before: i64, tail: Option<u32>) {
+        let Some(index) = self.subs.iter().position(|sub| sub.key == key) else {
+            self.out.error("bad_request", "an older Activity page belongs to a followed session", Some(topic::ACTIVITY), Some(key));
+            return;
+        };
+        if before <= 0 {
+            self.out.error("bad_request", "before must be positive", Some(topic::ACTIVITY), Some(key));
+            return;
+        }
+        let limit = tail.map_or(protocol::ACTIVITY_TAIL, |tail| (tail as usize).clamp(1, protocol::ACTIVITY_OLDER));
+        self.open_journal();
+        let sub = &self.subs[index];
+        // A DeepSeek or OpenCode window, a session without a journal or a
+        // name that now holds another run has no earlier page.
+        let none = || Ok((Vec::new(), before, false));
+        let page = match (&self.journal, sub.native) {
+            (Some(db), false) => match source::timeline(&sub.name) {
+                Ok(Some(timeline)) if sub.run_id.as_deref().is_none_or(|run| run == timeline.run_id()) => {
+                    timeline.events_before(db, before, limit)
+                }
+                Ok(_) => none(),
+                Err(error) => Err(error),
+            },
+            _ => none(),
+        };
+        let (events, cursor, more) = match page {
+            Ok(page) => page,
+            Err(error) => {
+                self.out.failure("journal_failed", &error, Some(topic::ACTIVITY), Some(key));
+                (Vec::new(), before, true)
+            }
+        };
+        let mut pages = activity::event_pages(events, activity::PAYLOAD_LIMIT);
+        if pages.is_empty() {
+            pages.push(Vec::new());
+        }
+        let count = pages.len();
+        for (page, events) in pages.into_iter().enumerate() {
+            let last = page + 1 == count;
+            let body = Body::Older(protocol::Older {
+                topic: topic::ACTIVITY.into(),
+                key: key.to_owned(),
+                events,
+                cursor,
+                last,
+                more: last && more,
+            });
+            if !self.out.put(&body) {
+                return;
+            }
         }
     }
 
     /// The first frames of a subscription, or its resumption after a gap.
-    /// False when it cannot follow the requested session.
-    fn start(&mut self, index: usize, after: i64, resumed: bool) -> bool {
+    fn start(&mut self, index: usize, after: i64, resumed: bool) -> Started {
         let (minimum, maximum) = self.journal.as_ref().and_then(|db| source::bounds(db).ok()).unwrap_or((0, 0));
         let sub = &mut self.subs[index];
         let gap = if resumed || after == 0 || sub.native {
@@ -1776,8 +2086,8 @@ impl<'a> Watch<'a> {
         let inspection = match source::inspect(&sub.name, if gap.is_some() { 0 } else { after }) {
             Ok(inspection) => inspection,
             Err(error) => {
-                self.out.error("inspect_failed", &error, Some(topic::ACTIVITY), Some(&sub.key));
-                return false;
+                self.out.failure("inspect_failed", &error, Some(topic::ACTIVITY), Some(&sub.key));
+                return Started::Later;
             }
         };
         if let (Some(seen), Some(wanted)) = (inspection["run_id"].as_str(), sub.run_id.as_deref()) {
@@ -1788,7 +2098,7 @@ impl<'a> Watch<'a> {
                     Some(topic::ACTIVITY),
                     Some(&sub.key),
                 );
-                return false;
+                return Started::Refused;
             }
         }
         sub.refreshed = Instant::now();
@@ -1826,7 +2136,7 @@ impl<'a> Watch<'a> {
             sub.cursor = cursor;
         }
         send_state(&self.out, sub, &inspection);
-        true
+        Started::Sent
     }
 }
 
@@ -1922,6 +2232,9 @@ mod tests {
                 Input::Organization(_) => "<organization>".into(),
                 Input::Team(_) => "<team>".into(),
                 Input::Listing(_) => "<listing>".into(),
+                Input::NativeRows(_) => "<native rows>".into(),
+                Input::Rows(_) => "<rows>".into(),
+                Input::Probe(_) => "<probe>".into(),
                 Input::End => "<end>".into(),
             })
             .collect()

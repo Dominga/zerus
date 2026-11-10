@@ -967,6 +967,13 @@ fn activity_page(newest: bool) -> &'static str {
     query.get_or_init(|| activity_query(" AND seq>?4", newest, "?5"))
 }
 
+/// [`activity_query`] for [`timeline_rows_before`]: the newest ?5 rows before
+/// the sequence number ?4, each range on its own index entries as above.
+fn activity_before() -> &'static str {
+    static QUERY: OnceLock<String> = OnceLock::new();
+    QUERY.get_or_init(|| activity_query(" AND seq<?4", true, "?5"))
+}
+
 /// The sources a fork's Activity inherits, oldest first, as `[journal name,
 /// conversation, last sequence number]`: what the fork recorded when it
 /// began, or for a fork recorded before that, what [`derived_lineage`] finds
@@ -1508,6 +1515,16 @@ pub(super) struct TimelineRow {
 }
 
 impl TimelineRow {
+    /// One `seq, payload, own, name` row of [`activity_query`].
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let own: bool = row.get(2)?;
+        Ok(Self {
+            seq: row.get(0)?,
+            payload: row.get(1)?,
+            inherited_from: (!own).then(|| row.get(3)).transpose()?,
+        })
+    }
+
     /// The row as `inspect` returns it.
     pub(super) fn event(&self, record: &Value) -> Result<Value> {
         let mut event = timeline_event(record, self.seq, &self.payload)?;
@@ -1536,14 +1553,7 @@ pub(super) fn timeline_rows(
     let mut rows: Vec<TimelineRow> = statement
         .query_map(
             params![journal_name, conversation, scope, after, limit as i64],
-            |row| {
-                let own: bool = row.get(2)?;
-                Ok(TimelineRow {
-                    seq: row.get(0)?,
-                    payload: row.get(1)?,
-                    inherited_from: (!own).then(|| row.get(3)).transpose()?,
-                })
-            },
+            TimelineRow::read,
         )
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<_, _>>()
@@ -1556,6 +1566,39 @@ pub(super) fn timeline_rows(
         rows.reverse();
     }
     Ok(rows)
+}
+
+/// The page of a session's Activity before the sequence number `before`: its
+/// newest `limit` rows, oldest first, the oldest sequence number the read
+/// covered (`before` when it found none) and whether older rows remain. An
+/// earlier page is read by position, never by guessing how far back the
+/// session's rows lie among every other session's. The cursor also covers
+/// rows left out afterwards, so a reader always moves back.
+pub(super) fn timeline_rows_before(
+    db: &Connection,
+    journal_name: &str,
+    conversation: Option<&str>,
+    scope: &str,
+    before: i64,
+    limit: usize,
+) -> Result<(Vec<TimelineRow>, i64, bool)> {
+    let mut statement = db.prepare(activity_before()).map_err(|e| e.to_string())?;
+    let mut rows: Vec<TimelineRow> = statement
+        .query_map(
+            params![journal_name, conversation, scope, before, limit as i64 + 1],
+            TimelineRow::read,
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    // One row beyond the page says whether another page exists.
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let cursor = rows.last().map_or(before, |row| row.seq);
+    let conversation = conversation.unwrap_or_default();
+    rows.retain(|row| !legacy_keepalive_reply(db, journal_name, conversation, row.seq, row.inherited_from.is_none(), &row.payload));
+    rows.reverse();
+    Ok((rows, cursor, more))
 }
 
 /// One Activity event as `inspect` returns it.
@@ -2532,6 +2575,40 @@ mod attention_regressions {
             json!(lineage)
         );
         println!("lineage probe passed");
+    }
+
+    /// An earlier page is read by position: the newest rows before a sequence
+    /// number, however many rows of other sessions lie between them, and it
+    /// says where the next page starts and whether one exists.
+    #[test]
+    fn an_older_activity_page_is_read_by_position() {
+        let db = message_db();
+        let mut own = Vec::new();
+        for at in 0..25 {
+            insert_message(&db, "codex/p/t", Some("c1"), json!({"type":"Stop","agent_id":"","at":at,"detail":format!("own {at}")}));
+            own.push(db.last_insert_rowid());
+            // Other sessions write far more rows than this one.
+            for other in 0..40 {
+                insert_message(&db, "codex/p/other", Some("c2"), json!({"type":"Stop","agent_id":"","at":at,"detail":format!("other {other}")}));
+            }
+        }
+        let record = json!({"name":"codex/p/t","conversation_id":"c1"});
+        let scope = activity_scope(&db, &record);
+        let seqs = |rows: &[TimelineRow]| rows.iter().map(|row| row.seq).collect::<Vec<_>>();
+        let (rows, cursor, more) = timeline_rows_before(&db, "codex/p/t", Some("c1"), &scope, own[20], 10).unwrap();
+        assert_eq!(seqs(&rows), own[10..20]);
+        assert_eq!((cursor, more), (own[10], true));
+        let (rows, cursor, more) = timeline_rows_before(&db, "codex/p/t", Some("c1"), &scope, cursor, 10).unwrap();
+        assert_eq!(seqs(&rows), own[0..10]);
+        assert_eq!((cursor, more), (own[0], false));
+        let (rows, cursor, more) = timeline_rows_before(&db, "codex/p/t", Some("c1"), &scope, cursor, 10).unwrap();
+        assert!(rows.is_empty());
+        assert_eq!((cursor, more), (own[0], false));
+        // The read stays on the session's own index entries.
+        let mut statement = db.prepare(activity_before()).unwrap();
+        let count = statement.query_map(params!["codex/p/t", "c1", scope, own[24], 11], |_| Ok(())).unwrap().count();
+        assert_eq!(count, 11);
+        assert!(statement.get_status(rusqlite::StatementStatus::VmStep) < 2_000);
     }
 
     /// #1235 review R1: a fork's Activity reads one page per range, never

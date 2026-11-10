@@ -21,6 +21,10 @@ use zerus_client_core::{
     Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, TeamsUpdate, ViewRow,
 };
 
+/// Task 235: a computer still showing its cached rows: its id, when they were
+/// saved and the rows.
+type StaleRows = (String, f64, Vec<(String, ViewRow)>);
+
 mod terminations;
 pub(crate) use terminations::{Termination, MAX_TERMINATIONS};
 
@@ -382,10 +386,8 @@ impl Inner {
             }
             // Task 315: a team list that changes the muted members changes
             // the rows already shown, after this change.
-            Change::Teams { computer, update: TeamsUpdate::List(list), .. } => {
-                if self.team_mutes.observe(&computer.0, &**list) {
-                    remuted = self.remuted();
-                }
+            Change::Teams { computer, update: TeamsUpdate::List(list), .. } if self.team_mutes.observe(&computer.0, list) => {
+                remuted = self.remuted();
             }
             _ => {}
         }
@@ -517,7 +519,7 @@ impl Pump {
         }
         // Task 235: a computer still showing its cached rows keeps them: the
         // mirror holds none of its live rows yet, only its status.
-        let stale: Vec<(String, f64, Vec<(String, ViewRow)>)> = inner
+        let stale: Vec<StaleRows> = inner
             .stale
             .iter()
             .map(|(computer, saved)| (computer.clone(), *saved, inner.stale_rows.get(computer).cloned().unwrap_or_default()))
@@ -1604,7 +1606,7 @@ mod tests {
         assert_eq!(pump.seed_cached(vec![cached("mac", &["x"])]), 1);
         assert_eq!(pump.seed_cached(vec![cached("mac", &["y"])]), 0, "seeded once");
         let batch = pump.take(Duration::ZERO);
-        assert!(batch.replaces.iter().all(|replace| replace.computer.0 != ""), "the live computer keeps its rows");
+        assert!(batch.replaces.iter().all(|replace| !replace.computer.0.is_empty()), "the live computer keeps its rows");
     }
 
     /// Task 235: the desktop service names live rows page by page; once its

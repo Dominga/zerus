@@ -752,6 +752,19 @@ const STOPPED_ROWS_KEPT: usize = 2000;
 /// stopped rows of this machine at once took 7 s again every 5 minutes.
 const STALE_ROWS_PER_LISTING: usize = 1;
 
+/// Task #47 (team ede724c4, 2026-11-10): how long a listing waits for the
+/// host's row of one conversation. Each conversation is asked on its own, side
+/// by side, so one slow conversation holds up only its own row: the host took
+/// 45 s (its socket timeout) and answered nothing for two stopped sessions
+/// whose projections it rebuilt, and the one batch request held every
+/// `hgs ls` for its 35 s.
+const ROWS_WAIT: Duration = Duration::from_millis(1500);
+/// Task #47: a conversation whose row did not come within `ROWS_WAIT` is asked
+/// again only after this long. The host keeps rebuilding a projection it was
+/// asked for after the request is gone, so asking on every listing piled that
+/// work up (the host ran 1.5 cores for hours); its last row stands meanwhile.
+const SLOW_RETRY_SECONDS: f64 = 900.0;
+
 fn rows_cache_path(record: &Value) -> PathBuf {
     host_dir(record).join("listing-rows.json")
 }
@@ -874,28 +887,95 @@ fn listing_rows(records: &[&Value]) -> Result<Value> {
     let path = rows_cache_path(first);
     let cache = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).unwrap_or(Value::Null);
     let now = now();
-    let (mut items, ask) = plan_rows(&cache, records, &generation, loaded.as_ref(), now);
+    let (mut items, planned) = plan_rows(&cache, records, &generation, loaded.as_ref(), now);
+    // Task #47: a conversation that was slow lately is not asked again yet;
+    // its last row (if the host ever answered one) stands.
+    let (resting, ask) = rest_slow(&cache, &generation, planned, now);
+    for id in &resting {
+        if let Some(row) = Some(&cache["rows"][id.as_str()]["row"]).filter(|row| row.is_object()) {
+            items.push(row.clone());
+        }
+    }
     let mut answer_generation = generation.clone();
     if !ask.is_empty() {
-        let asked: Vec<&str> = ask.iter().map(String::as_str).collect();
-        let answer = session_rows(first, &asked)?;
-        if !answer["generation"].is_null() {
-            answer_generation = answer["generation"].clone();
+        let (answers, slow) = rows_each(&ask, |id| rpc_within(first, "rows", json!({ "sessionIds": [id] }), ROWS_WAIT));
+        let mut fresh = Vec::new();
+        for answer in &answers {
+            if !answer["generation"].is_null() {
+                answer_generation = answer["generation"].clone();
+            }
+            fresh.extend(answer["items"].as_array().cloned().unwrap_or_default());
         }
-        let fresh = answer["items"].as_array().cloned().unwrap_or_default();
+        // A bridge without `rows` lists every stored session at once, as
+        // before (bounded like one row).
+        if answers.is_empty() && slow.iter().any(|(_, error)| error == "Unsupported HGS native request") {
+            return rpc_within(first, "list", json!({}), Duration::from_secs(35));
+        }
         // A host that answered with another generation restarted meanwhile:
-        // its reused rows are not trusted, so every conversation is asked for.
+        // its reused rows are not trusted; only what it answered now stands.
         if answer_generation != generation {
-            return session_rows(first, &conversations);
-        } else {
-            let updated = update_rows(&cache, records, &generation, &fresh, now);
-            if updated != cache && private_dir(path.parent().unwrap_or(Path::new("."))).is_ok() {
-                let _ = atomic_private(&path, &updated.to_string());
+            return Ok(json!({"generation":answer_generation,"items":fresh}));
+        }
+        let slow: Vec<String> = slow.into_iter().map(|(id, _)| id).collect();
+        let mut updated = update_rows(&cache, records, &generation, &fresh, now);
+        updated["slow"] = slow_marks(&cache, &generation, records, &fresh, &slow, now);
+        if updated != cache && private_dir(path.parent().unwrap_or(Path::new("."))).is_ok() {
+            let _ = atomic_private(&path, &updated.to_string());
+        }
+        for id in &slow {
+            if let Some(row) = Some(&cache["rows"][id.as_str()]["row"]).filter(|row| row.is_object()) {
+                items.push(row.clone());
             }
         }
         items.extend(fresh);
     }
     Ok(json!({"generation":answer_generation,"items":items}))
+}
+
+/// Task #47: of the conversations a listing would ask for, the ones that did
+/// not answer within `ROWS_WAIT` less than `SLOW_RETRY_SECONDS` ago on this
+/// host generation rest; the others are asked. Returns (resting, ask).
+fn rest_slow(cache: &Value, generation: &Value, planned: Vec<String>, now: f64) -> (Vec<String>, Vec<String>) {
+    let same_host = !generation.is_null() && cache["generation"] == *generation;
+    planned.into_iter().partition(|id| {
+        same_host && cache["slow"][id.as_str()]["at"].as_f64().is_some_and(|at| at <= now && now - at < SLOW_RETRY_SECONDS)
+    })
+}
+
+/// Task #47: asks `ask` one conversation per request, side by side, each
+/// within `ROWS_WAIT`. Returns the answers, and the conversations that gave
+/// none in time (or an error) with their error.
+fn rows_each(ask: &[String], row: impl Fn(&str) -> Result<Value> + Sync) -> (Vec<Value>, Vec<(String, String)>) {
+    let results: Vec<(String, Result<Value>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ask.iter().map(|id| (id.clone(), scope.spawn(|| row(id)))).collect();
+        handles
+            .into_iter()
+            .map(|(id, handle)| (id, handle.join().unwrap_or_else(|_| Err("the row request failed".into()))))
+            .collect()
+    });
+    let mut answers = Vec::new();
+    let mut slow = Vec::new();
+    for (id, result) in results {
+        match result {
+            Ok(answer) => answers.push(answer),
+            Err(error) => slow.push((id, error)),
+        }
+    }
+    (answers, slow)
+}
+
+/// Task #47: the cache's slow marks after an answer: kept on the same host
+/// generation for conversations still bound and not answered now, and set
+/// now for those that gave no row in time.
+fn slow_marks(cache: &Value, generation: &Value, records: &[&Value], fresh: &[Value], slow: &[String], now: f64) -> Value {
+    let mut marks = if cache["generation"] == *generation { cache["slow"].as_object().cloned().unwrap_or_default() } else { Map::new() };
+    let bound: BTreeSet<&str> = records.iter().map(|record| string(record, "conversation_id")).collect();
+    let answered: BTreeSet<&str> = fresh.iter().filter_map(|item| item["sessionId"].as_str()).collect();
+    marks.retain(|id, _| bound.contains(id.as_str()) && !answered.contains(id.as_str()));
+    for id in slow {
+        marks.insert(id.clone(), json!({"at":now}));
+    }
+    Value::Object(marks)
 }
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     #[cfg(unix)]
@@ -4591,6 +4671,50 @@ mod listing_rows_tests {
         // A row with a pending question is never cached.
         let asking = json!({"sessionId":"a","agentAvailable":false,"running":false,"pendingQuestions":[{"id":"q"}]});
         assert!(update_rows(&Value::Null, &[&a], &generation, &[asking], 100.0)["rows"]["a"].is_null());
+    }
+
+    /// Task #47 (team ede724c4, 2026-11-10): the host took 45 s and answered
+    /// nothing for two stopped sessions while every other row came in
+    /// milliseconds. Each conversation is asked on its own within ROWS_WAIT:
+    /// the slow ones hold up only their own rows, rest SLOW_RETRY_SECONDS, and
+    /// keep their last rows.
+    #[test]
+    fn a_slow_conversation_holds_up_only_its_own_row_and_then_rests() {
+        let records_owned = [record("fast", "r1"), record("slow", "r2"), record("gone", "r3")];
+        let records: Vec<&Value> = records_owned.iter().collect();
+        let generation = json!("g1");
+        let ask = vec!["fast".to_owned(), "slow".to_owned()];
+        let started = std::time::Instant::now();
+        let (answers, slow) = rows_each(&ask, |id| {
+            if id == "slow" {
+                // As rpc_within answers when the host gives nothing in time.
+                std::thread::sleep(Duration::from_millis(300));
+                Err("Native request delivery uncertain: timed out".into())
+            } else {
+                Ok(json!({"generation":"g1","items":[row(id, false)]}))
+            }
+        });
+        assert!(started.elapsed() < Duration::from_secs(5), "side by side, not one after another");
+        assert_eq!(answers.len(), 1);
+        assert_eq!(slow.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["slow"]);
+        // The slow mark is kept with the cache; an answered or unbound
+        // conversation loses its mark, and another host generation drops all.
+        let fresh = vec![row("fast", false)];
+        let mut cache = update_rows(&Value::Null, &records, &generation, &fresh, 100.0);
+        cache["slow"] = slow_marks(&Value::Null, &generation, &records, &fresh, &["slow".to_owned()], 100.0);
+        assert_eq!(cache["slow"], json!({"slow":{"at":100.0}}));
+        // The next listings do not ask it again until SLOW_RETRY_SECONDS.
+        let (resting, ask) = rest_slow(&cache, &generation, vec!["slow".to_owned(), "other".to_owned()], 100.0 + SLOW_RETRY_SECONDS - 1.0);
+        assert_eq!((resting, ask), (vec!["slow".to_owned()], vec!["other".to_owned()]));
+        let (resting, ask) = rest_slow(&cache, &generation, vec!["slow".to_owned()], 100.0 + SLOW_RETRY_SECONDS);
+        assert!(resting.is_empty() && ask == ["slow"], "asked again after its rest");
+        let (resting, _) = rest_slow(&cache, &json!("g2"), vec!["slow".to_owned()], 101.0);
+        assert!(resting.is_empty(), "a restarted host is asked at once");
+        let answered = vec![row("slow", false)];
+        assert_eq!(slow_marks(&cache, &generation, &records, &answered, &[], 200.0), json!({}), "an answer clears the mark");
+        let unbound: Vec<&Value> = records[..1].to_vec();
+        assert_eq!(slow_marks(&cache, &generation, &unbound, &[], &[], 200.0), json!({}), "an unbound conversation's mark goes");
+        assert_eq!(slow_marks(&cache, &json!("g2"), &records, &[], &[], 200.0), json!({}));
     }
 }
 

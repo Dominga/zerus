@@ -330,6 +330,22 @@ impl CatalogState {
                     ));
                 }
             }
+            Body::Older(older) if older.topic == topic::ACTIVITY => {
+                // The followed cursor is the reconnect resume point; an older
+                // page is history behind it and leaves it alone.
+                if self.activity.contains_key(&older.key) {
+                    changes.push(activity_change(
+                        computer,
+                        &older.key,
+                        ActivityUpdate::Older {
+                            events: older.events.clone(),
+                            cursor: older.cursor,
+                            last: older.last,
+                            more: older.more,
+                        },
+                    ));
+                }
+            }
             Body::Event(event) if event.topic == topic::ACTIVITY => {
                 if let Some(activity) = self.activity.get_mut(&event.key) {
                     if activity.merge_event(&event.id, event.rev, event.event.clone()) {
@@ -835,6 +851,14 @@ impl CatalogState {
             .iter()
             .any(|name| name == topic::PROCESSES)
             .then_some(hello.limits.processes_subscriptions)
+    }
+
+    /// The older-page size limit of the latest `hello`; 0 before one and from
+    /// a server without paged older reads.
+    pub fn activity_older(&self) -> usize {
+        self.hello
+            .as_ref()
+            .map_or(0, |hello| hello.limits.activity_older)
     }
 
     /// The followed organization; see [`crate::organization`].
@@ -2083,6 +2107,35 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn older_pages_of_followed_sessions_leave_the_resume_cursor_alone() {
+        let local = ComputerId::local();
+        let older = |key: &str| {
+            frame(json!({"v":1,"seq":9,"t":"older","topic":"activity","key":key,
+                "events":[{"type":"Stop","seq":7}],"cursor":7,"last":true,"more":true}))
+        };
+        let mut state = CatalogState::new();
+        state.follow("run:run-review-1");
+        state.apply(&local, &fixture("basic.ndjson")[0]);
+        let before = state.cursor("run:run-review-1");
+        let changes = state.apply(&local, &older("run:run-review-1"));
+        let [Change::Activity { update, .. }] = changes.as_slice() else {
+            panic!("{changes:?}")
+        };
+        let ActivityUpdate::Older {
+            events,
+            cursor,
+            last,
+            more,
+        } = update
+        else {
+            panic!("{update:?}")
+        };
+        assert_eq!((events.len(), *cursor, *last, *more), (1, 7, true, true));
+        assert_eq!(state.cursor("run:run-review-1"), before);
+        assert!(state.apply(&local, &older("run:other")).is_empty(), "unfollowed");
     }
 
     #[test]

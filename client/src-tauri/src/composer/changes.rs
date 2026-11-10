@@ -220,7 +220,10 @@ mod tests {
     }
 
     /// A store whose calls are counted and whose clock the test moves.
-    fn store() -> (GitStatuses, Arc<Mutex<Vec<Vec<String>>>>, Arc<Mutex<f64>>) {
+    /// The store, its recorded calls and its clock.
+    type Store = (GitStatuses, Arc<Mutex<Vec<Vec<String>>>>, Arc<Mutex<f64>>);
+
+    fn store() -> Store {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let clock = Arc::new(Mutex::new(0.0));
         let (seen, time) = (Arc::clone(&calls), Arc::clone(&clock));

@@ -47,6 +47,8 @@ pub const TASKS_WINDOW: usize = 200;
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
 pub const ACTIVITY_READ: usize = 200;
+/// The most rows one older Activity page (`before`) carries.
+pub const ACTIVITY_OLDER: usize = 200;
 /// The longest control line the server accepts, without its newline.
 pub const CONTROL_LINE_BYTES: usize = 64 << 10;
 
@@ -117,6 +119,7 @@ pub enum Body {
     Snapshot(Snapshot),
     Delta(Delta),
     Events(Events),
+    Older(Older),
     Event(EventUpdate),
     State(State),
     Heartbeat(Heartbeat),
@@ -162,6 +165,10 @@ pub struct Limits {
     /// that always sends the whole list.
     #[serde(default)]
     pub tasks_window: usize,
+    /// The most rows one older Activity page (`before`) carries; 0 from a
+    /// server without older pages, which reads earlier Activity by `after`.
+    #[serde(default)]
+    pub activity_older: usize,
 }
 
 impl Default for Limits {
@@ -177,6 +184,7 @@ impl Default for Limits {
             processes_subscriptions: PROCESSES_SUBSCRIPTIONS,
             tasks_subscriptions: TASKS_SUBSCRIPTIONS,
             tasks_window: TASKS_WINDOW,
+            activity_older: ACTIVITY_OLDER,
         }
     }
 }
@@ -235,6 +243,25 @@ pub struct Events {
     pub events: Vec<Value>,
     /// The journal `seq` to resume after.
     pub cursor: i64,
+}
+
+/// One page of a followed session's Activity before a journal `seq`, oldest
+/// first: the answer to a subscribe with `before`. It never moves the
+/// subscription's cursor. A read may span several frames; the one with `last`
+/// ends it and says whether older rows remain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Older {
+    pub topic: String,
+    pub key: String,
+    pub events: Vec<Value>,
+    /// The `before` of the next older page: the oldest journal `seq` this read
+    /// covered, also when every row of it was left out.
+    pub cursor: i64,
+    /// The read's final frame.
+    pub last: bool,
+    /// On the final frame: rows older than `cursor` remain.
+    #[serde(default)]
+    pub more: bool,
 }
 
 /// A replacement of one open event by its stable ID; a higher `rev` wins.
@@ -325,9 +352,17 @@ pub struct Subscription {
     /// Resume Activity after this journal `seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<i64>,
-    /// How many recent events a subscription without `after` starts with.
+    /// How many recent events a subscription without `after` starts with, or
+    /// how many rows an older page (`before`) carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<u32>,
+    /// Activity: read one page of the followed session's rows before this
+    /// journal `seq` (at most `tail`, up to `activity_older`), answered with
+    /// `older` frames. The subscription itself, its cursor and its state stay
+    /// as they are. Only for a server whose `activity_older` limit is above 0:
+    /// one without it ignores this additive field and subscribes anew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<i64>,
     /// Tasks: only the first `window` rows of each stage (1 to `tasks_window`),
     /// with each stage's total and the cursor of its next page, instead of the
     /// whole list. Servers without it ignore this additive field.
@@ -522,6 +557,14 @@ mod tests {
                 key: "run:r1".into(),
                 events: vec![json!({"type":"Stop","seq":41,"at":1787840176.25})],
                 cursor: 41,
+            }),
+            Body::Older(Older {
+                topic: topic::ACTIVITY.into(),
+                key: "run:r1".into(),
+                events: vec![json!({"type":"Stop","seq":7,"at":1787840100.25})],
+                cursor: 7,
+                last: true,
+                more: true,
             }),
             Body::Event(EventUpdate {
                 topic: topic::ACTIVITY.into(),
@@ -718,6 +761,22 @@ mod tests {
         assert_eq!(older.processes_subscriptions, 0);
         assert_eq!(older.tasks_subscriptions, 0);
         assert_eq!(older.tasks_window, 0);
+        assert_eq!(older.activity_older, 0);
+        assert_eq!(Limits::default().activity_older, ACTIVITY_OLDER);
+        // An older page is an additive option of an Activity subscribe.
+        let Control::Subscribe(page) = decode_control(
+            r#"{"op":"subscribe","topic":"activity","session":{"name":"codex/p/t","run_id":"r1"},"before":41,"tail":100}"#,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!((page.before, page.tail, page.after), (Some(41), Some(100), None));
+        let Control::Subscribe(plain) =
+            decode_control(r#"{"op":"subscribe","topic":"activity","session":{"name":"codex/p/t"}}"#).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(plain.before, None);
         assert_eq!(
             Limits::default().processes_subscriptions,
             PROCESSES_SUBSCRIPTIONS

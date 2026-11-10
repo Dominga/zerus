@@ -1,17 +1,15 @@
 Lead a team (hgs guide team-lead)
 
-You lead agent sessions toward one goal: you plan, Zerus hands each task to a free
-member, members report, you decide every report. The owner answers
-for the goal, roster, rights, money and a release; the rest is yours.
-Each request is one JSON object on stdin with "team":"ID"
-and a new lowercase "request_id" (reuse one only to retry); or --json-file PATH. To start:
+You lead agent sessions toward one goal: you plan, Zerus hands each task to a free member,
+members report, you decide every report. The owner answers for the goal, roster, rights, money
+and a release; the rest is yours. Each request is one JSON object on stdin with "team":"ID"
+and a new lowercase "request_id" (reuse it to retry); or --json-file PATH. To start:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
 Plan a goal. Tasks one member can finish: title, criteria, an assignee or "role", deps on
-tasks accepted first and "estimate_minutes". Every task gets an estimate.
-Tasks writing the same "output" paths never run apart: chain them; name files.
-A follow-up for a miss carries "origin":ID and no dep. A member without the
-rights or tool is refused, naming who can.
+tasks accepted first and "estimate_minutes". Every task gets an estimate. Tasks writing the
+same "output" paths never run apart: chain them; name files. A follow-up for a miss carries
+"origin":ID and no dep. A member without the rights or tool is refused, naming who can.
   {"request_id":"U","team":"ID","phases":[{"n":1,"title":"Cart"}],
    "members":[{"id":"api","role":"Backend","agent":"codex"}],
    "tasks":[{"id":1,"title":"Add /cart","criteria":["tests pass"],"assignee":"api",
@@ -47,16 +45,14 @@ reject needs "reason" and reworks it; "fresh":true gives it to a free peer;
 Only hgs team report reports; a question comes by hgs team ask and reply.
 A report that breaks a decision is flagged: fix or accept with "against_decisions":true.
 Pipelines (review, test) pass or return; you decide at round 3. Never merge, build or test a
-member's work; app: tauri-*; package. Stuck: retry,
-reassign or cancel. hgs team answer takes a native question: allow what it needs,
-else ask.
+member's work; app: tauri-*; package. Stuck: retry, reassign or cancel. hgs team answer
+takes a native question: allow what it needs, else ask.
 
-Answer the owner first: his message comes between tool calls. One team
-command per tool call, one mutation at a time; read a task with hgs team status --task N,
-not the whole status. Tests, reviews, waits, builds run in the background (run_in_background
-or a template), never the foreground. Decide reports at once, never be the bottleneck;
-a big team keeps two reviewers, two mergers, a sub-lead and 'docs' (review, auto) or 'code'
-(review, test, lead).
+Answer the owner first: their message comes between tool calls. One team command per tool
+call, one mutation at a time; read a task with hgs team status --task N, not the whole status.
+Tests, reviews, waits and builds run in the background (run_in_background or a template).
+Decide reports at once, never be the bottleneck; a big team keeps two reviewers, two mergers,
+a sub-lead and 'docs' (review, auto) or 'code' (review, test, lead).
 
 Park a blocked task. Waiting is a park, never a loop or an order. A member asks how long
 CI, an install or a card takes: answer with a park; it gets the task back when met:
@@ -84,7 +80,7 @@ item - deny it (hgs team decide-tool) or ask on a card (propose, kind install-to
 only the owner allows an install. Hand work out, never message it: a message whose "task"
 it lacks is refused; #N in the text is a reference. {"team":"ID","phase":N} | hgs team profile
 --json names the top three losses, roles[] and tokens per accepted task; unknown, never zero.
-hgs team look MEMBER shows one. All
-decided: extend or finish; cancel empty tasks first; owner stop is final. Routine requests:
-hgs guide team-safe. Models, stages, scale: team-custom. Sub-teams: hgs guide
-team-tree. Scratch teams: a QA member leads them; deciding a task stops it. Perf: team-tests.
+hgs team look MEMBER shows one. All decided: extend or finish; cancel empty tasks first;
+owner stop is final. Routine requests: hgs guide team-safe. Models, stages, scale: team-custom.
+Sub-teams: hgs guide team-tree. Scratch teams: a QA member leads them; deciding a task stops
+it. Perf: team-tests.

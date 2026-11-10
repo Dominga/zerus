@@ -244,7 +244,7 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
 /// Active polling never opens every archived record or its conversation journal.
 /// Only bindings that might need reconciliation consult the metadata index.
 ///
-/// Task 193: the read-only counterpart of [`reconcile_active_locked`], for a
+/// Task 193: the read-only listing that replaced `reconcile_active_locked`, for a
 /// listing that must not take the writer lock (owner decision, 2026-11-07). It
 /// filters exactly as the writer's pass does but saves nothing: a record the
 /// writer would save is listed as its committed state until the writer's next

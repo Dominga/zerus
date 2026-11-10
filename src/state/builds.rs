@@ -1572,8 +1572,8 @@ pub(crate) mod tests {
             calls.borrow_mut().clear();
             let argv = fake_build(
                 "always.cmd",
-                "@echo off\necho error: error writing dependencies to `D:\\w\\deps\\y.d`: Access is denied. (os error 5)\nexit /b 101\n",
-                "echo 'error writing dependencies to `/w/deps/y.d`: Access is denied. (os error 5)'\nexit 101\n",
+                "@echo off\necho error: error writing dependencies to `D:\\work\\deps\\y.d`: Access is denied. (os error 5)\nexit /b 101\n",
+                "echo 'error writing dependencies to `/work/deps/y.d`: Access is denied. (os error 5)'\nexit 101\n",
             );
             let id = "88888888-8888-4888-8888-888888888888";
             start_argv_for(id, "cargo build", &argv, root.path(), session.clone(), 1, &[]).unwrap();

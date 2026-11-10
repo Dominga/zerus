@@ -75,39 +75,6 @@ fn unique_entries<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_map(Entries)
 }
 
-/// The existing bounded Settings/clone decoders, without a live store, lock,
-/// status call or writer. Retain the exact original extension JSON privately;
-/// no typed projection is serialized as source evidence. Missing is distinct
-/// from a malformed/null family, which remains unsupported.
-pub(crate) fn snapshot(
-    bytes: &[u8],
-) -> Result<Option<Box<serde_json::value::RawValue>>, SnapshotError> {
-    if bytes.len() as u64 > MAX_STORE {
-        return Err(SnapshotError::TooLarge);
-    }
-    let contents = Contents::parse(bytes).ok_or(SnapshotError::Unsupported)?;
-    let records = records(&contents).map_err(|_| SnapshotError::Unsupported)?;
-    if records.entries.values().any(|record| {
-        [&record.pending, &record.previous]
-            .into_iter()
-            .flatten()
-            .any(|pending| !crate::creation::safe_repository_url(&pending.url))
-    }) {
-        return Err(SnapshotError::Unsupported);
-    }
-    #[derive(Deserialize)]
-    struct Original {
-        repository_clones: Option<Box<serde_json::value::RawValue>>,
-    }
-    let original: Original =
-        serde_json::from_slice(bytes).map_err(|_| SnapshotError::Unsupported)?;
-    if let Some(raw) = &original.repository_clones {
-        // Parse the original too so duplicate known fields/scopes cannot be
-        // hidden by the compatibility Settings Value projection.
-        serde_json::from_str::<Records>(raw.get()).map_err(|_| SnapshotError::Unsupported)?;
-    }
-    Ok(original.repository_clones)
-}
 fn key(value: &str) -> bool {
     value.len() == 64
         && value

@@ -15,7 +15,6 @@ use crate::attachments::{
     Attachment, Draft, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
 };
 use crate::settings::qt::QtValue;
-use crate::migration::draft_preload;
 use crate::operation_recovery::deferred_input::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -56,9 +55,6 @@ pub const UNCONFIRMED: &str =
     crate::source!("Delivery is not confirmed. Check Terminal before retrying.");
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
-/// A write refused for this run: the store's earlier drafts could not be
-/// recorded first (zerus-5wmh.66.5.2.1.2), so nothing is overwritten.
-pub const NOT_RECORDED: &str = "Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.";
 /// A draft whose deferred-input checkpoint is inconsistent is never written:
 /// no dispatch may follow a save that did not record its identity.
 pub const NOT_SAVED_CHECKPOINT: &str =
@@ -780,44 +776,7 @@ impl Writer {
 pub struct DraftStore {
     root: PathBuf,
     writer: Arc<Writer>,
-    fence: Arc<Mutex<Fence>>,
     thread: Option<JoinHandle<()>>,
-}
-
-/// What the store's first job allows the jobs after it (G3 drafts capture,
-/// zerus-5wmh.66.5.2.1.2). Only writer jobs read or change it, in queue order.
-struct Fence {
-    capture: Option<Arc<draft_preload::Capture>>,
-    gate: draft_preload::Gate,
-    /// The one-time import's sources while it waits for an explicit Retry.
-    parked: Option<Vec<ImportSource>>,
-}
-
-impl Default for Fence {
-    fn default() -> Self {
-        Fence {
-            capture: None,
-            gate: draft_preload::Gate {
-                writes: true,
-                import: true,
-            },
-            parked: None,
-        }
-    }
-}
-
-/// Every draft write of the store: refused for the run while the capture's
-/// lineage is not durable, so no original is overwritten without it.
-fn save_fenced(
-    fence: &Mutex<Fence>,
-    root: &Path,
-    key: &str,
-    draft: &StoredDraft,
-) -> Result<(), String> {
-    if !lock(fence).gate.writes {
-        return Err(NOT_RECORDED.into());
-    }
-    save_direct(root, key, draft)
 }
 
 impl DraftStore {
@@ -834,31 +793,8 @@ impl DraftStore {
         DraftStore {
             root,
             writer,
-            fence: Arc::default(),
             thread: Some(thread),
         }
-    }
-
-    /// Opens the store with the G3 capture ([`draft_preload::Capture`]) as
-    /// its first job, queued before any other job can be: Next's manifests
-    /// are recorded as they were before this run's first load, save, recovery
-    /// or import. A failed attempt pauses the one-time import until
-    /// [`DraftStore::retry_import`]; a capture without durable lineage
-    /// refuses every write for the run ([`NOT_RECORDED`]).
-    pub fn open_captured(root: PathBuf, capture: Arc<draft_preload::Capture>) -> DraftStore {
-        let store = DraftStore::open(root);
-        let fence = Arc::clone(&store.fence);
-        store.writer.enqueue(
-            "",
-            false,
-            Box::new(move || {
-                let gate = capture.prepare();
-                let mut fence = lock(&fence);
-                fence.gate = gate;
-                fence.capture = Some(capture);
-            }),
-        );
-        store
     }
 
     pub fn root(&self) -> &Path {
@@ -876,11 +812,11 @@ impl DraftStore {
         if key.is_empty() {
             return;
         }
-        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
+        let (root, owned) = (self.root.clone(), key.to_owned());
         self.writer.enqueue(
             key,
             true,
-            Box::new(move || done(save_fenced(&fence, &root, &owned, &draft))),
+            Box::new(move || done(save_direct(&root, &owned, &draft))),
         );
     }
 
@@ -891,11 +827,11 @@ impl DraftStore {
         draft: StoredDraft,
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) {
-        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
+        let (root, owned) = (self.root.clone(), key.to_owned());
         self.writer.enqueue(
             key,
             false,
-            Box::new(move || done(save_fenced(&fence, &root, &owned, &draft))),
+            Box::new(move || done(save_direct(&root, &owned, &draft))),
         );
     }
 
@@ -930,7 +866,7 @@ impl DraftStore {
         clear: bool,
         done: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
-        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
+        let (root, owned) = (self.root.clone(), key.to_owned());
         self.writer.enqueue(
             key,
             false,
@@ -950,7 +886,7 @@ impl DraftStore {
                     }
                     current.sending = false;
                     current.uncertain = false;
-                    save_fenced(&fence, &root, &owned, &current).map(|()| true)
+                    save_direct(&root, &owned, &current).map(|()| true)
                 };
                 done(result);
             }),
@@ -967,7 +903,7 @@ impl DraftStore {
         next: StoredDraft,
         done: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
-        let (root, owned, fence) = (self.root.clone(), key.to_owned(), self.fence.clone());
+        let (root, owned) = (self.root.clone(), key.to_owned());
         self.writer.enqueue(
             key,
             false,
@@ -981,7 +917,7 @@ impl DraftStore {
                 } else if current != expected {
                     Ok(false)
                 } else {
-                    save_fenced(&fence, &root, &owned, &next).map(|()| true)
+                    save_direct(&root, &owned, &next).map(|()| true)
                 };
                 done(result);
             }),
@@ -1006,7 +942,6 @@ impl DraftStore {
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) {
         let (root, old, new) = (self.root.clone(), old.to_owned(), new.to_owned());
-        let fence = self.fence.clone();
         let key = old.clone();
         self.writer.enqueue(
             &key,
@@ -1016,8 +951,8 @@ impl DraftStore {
                 if destination.draft.occupied() || destination.storage_error.is_some() {
                     return done(Err(ALREADY_EXISTS.into()));
                 }
-                let result = save_fenced(&fence, &root, &new, &draft)
-                    .and_then(|()| save_fenced(&fence, &root, &old, &StoredDraft::default()));
+                let result = save_direct(&root, &new, &draft)
+                    .and_then(|()| save_direct(&root, &old, &StoredDraft::default()));
                 done(result)
             }),
         );
@@ -1041,7 +976,7 @@ impl DraftStore {
         session_label: &str,
         done: impl FnOnce(bool) + Send + 'static,
     ) {
-        let (root, fence) = (self.root.clone(), self.fence.clone());
+        let root = self.root.clone();
         let (legacy, owned, label) = (legacy.to_owned(), key.to_owned(), session_label.to_owned());
         self.writer.enqueue(
             key,
@@ -1063,7 +998,7 @@ impl DraftStore {
                     // the same draft at both keys: it ends now. Different
                     // drafts are never merged or chosen between; both stay.
                     if same_apart_from_label(&here, &draft) {
-                        let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                        let _ = save_direct(&root, &legacy, &StoredDraft::default());
                         return done(true);
                     }
                     return done(false);
@@ -1071,11 +1006,11 @@ impl DraftStore {
                 if draft.session_label.is_empty() {
                     draft.session_label = label;
                 }
-                if save_fenced(&fence, &root, &owned, &draft).is_err() {
+                if save_direct(&root, &owned, &draft).is_err() {
                     return done(false);
                 }
                 // The draft is durable at its new key: the old copy goes.
-                let _ = save_fenced(&fence, &root, &legacy, &StoredDraft::default());
+                let _ = save_direct(&root, &legacy, &StoredDraft::default());
                 done(true)
             }),
         );
@@ -1090,7 +1025,6 @@ impl DraftStore {
         done: impl FnOnce(Result<Loaded, String>) + Send + 'static,
     ) {
         let (root, qt_root, owned) = (self.root.clone(), qt_root.to_path_buf(), key.to_owned());
-        let fence = self.fence.clone();
         self.writer.enqueue(
             key,
             false,
@@ -1105,74 +1039,20 @@ impl DraftStore {
                 }
                 // A recovered draft never carries a deferred input either.
                 copy.draft.checkpoint = None;
-                done(save_fenced(&fence, &root, &owned, &copy.draft).map(|()| copy))
+                done(save_direct(&root, &owned, &copy.draft).map(|()| copy))
             }),
         );
     }
 
     /// The one-time import ([`import_once`]) on this store's writer, so it
-    /// runs between the client's own writes. While the G3 capture has not
-    /// recorded Next's drafts, an import not done yet waits, with its sources,
-    /// for [`DraftStore::retry_import`]; its report says so.
+    /// runs between the client's own writes.
     pub fn import(
         &self,
         sources: Vec<ImportSource>,
         done: impl FnOnce(ImportReport) + Send + 'static,
     ) {
-        let (root, fence) = (self.root.clone(), self.fence.clone());
-        self.writer.enqueue(
-            "",
-            false,
-            Box::new(move || {
-                let mut fence = lock(&fence);
-                if fence.gate.import || root.join(IMPORT_MARKER).exists() {
-                    drop(fence);
-                    return done(import_once(&root, &sources));
-                }
-                let report = ImportReport {
-                    sources: sources.iter().map(|source| source.name.clone()).collect(),
-                    unfinished: vec![IMPORT_PAUSED.into()],
-                    ..ImportReport::default()
-                };
-                fence.parked = Some(sources);
-                if let Some(capture) = &fence.capture {
-                    capture.set_paused(true);
-                }
-                drop(fence);
-                eprintln!("zerus-client-core: drafts import: {IMPORT_PAUSED}");
-                done(report)
-            }),
-        );
-    }
-
-    /// Retry (zerus-5wmh.66.5.2.1.2). A run whose capture lineage was not
-    /// durable wrote nothing and imported nothing, so it attempts the capture
-    /// again. After a recorded attempt, Retry runs the waiting import; the
-    /// attempt stays not captured: no original is backfilled.
-    pub fn retry_import(&self) {
-        let (root, fence) = (self.root.clone(), self.fence.clone());
-        self.writer.enqueue(
-            "",
-            false,
-            Box::new(move || {
-                let mut fence = lock(&fence);
-                let Some(capture) = fence.capture.clone() else {
-                    return;
-                };
-                if !fence.gate.writes {
-                    fence.gate = capture.prepare();
-                    if !fence.gate.import {
-                        return;
-                    }
-                }
-                let Some(sources) = fence.parked.take() else {
-                    return;
-                };
-                drop(fence);
-                capture.set_paused(false);
-                import_once(&root, &sources);
-            }),
-        );
+        let root = self.root.clone();
+        self.writer.enqueue("", false, Box::new(move || done(import_once(&root, &sources))));
     }
 
     /// Blocks until everything queued so far is written: on quit, and on a
@@ -1246,9 +1126,6 @@ pub struct ImportConflict {
 
 /// Marks this store's one-time import (`<root>/.imported-v1.json`).
 pub const IMPORT_MARKER: &str = ".imported-v1.json";
-
-/// Why an import waits: the G3 capture did not record Next's drafts first.
-pub const IMPORT_PAUSED: &str = "paused until Retry: earlier drafts were not recorded";
 
 /// The draft roots of the dev app (`dev.zerus.next` and its phase builds)
 /// that exist on this computer: Tauri's app data folder plus `drafts`.

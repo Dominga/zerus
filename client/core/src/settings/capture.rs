@@ -4,7 +4,7 @@ use super::Settings;
 #[cfg(any(unix, windows))]
 use super::{Contents, MAX_STORE};
 use super::{QtSnapshot, QtStore};
-use crate::migration::{SourceError, SourceResult};
+use crate::next_source::{SourceError, SourceResult};
 #[cfg(unix)]
 use std::io::{Read, Seek};
 use std::sync::atomic::AtomicBool;

@@ -80,11 +80,6 @@ impl Parents {
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
         Self::open_with(path, create, true)
     }
-    /// The existing canonical application data directory is owner-checked;
-    /// unlike new archive slots it need not have a 0700 umask.
-    pub(crate) fn managed_data(path: &Path) -> io::Result<Self> {
-        Self::open_with(path, false, false)
-    }
     fn open_with(path: &Path, create: bool, private: bool) -> io::Result<Self> {
         #[cfg(windows)]
         {
@@ -221,17 +216,6 @@ pub(crate) fn stat(path: &Path) -> io::Result<Option<Stamp>> {
     parents.recheck()?;
     Ok(Some(actual))
 }
-pub(crate) fn durable(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, true, true, false)
-}
-pub(crate) fn read_source(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, false, false)
-}
-/// ONLY the legacy worktree-snapshots read accepts owned 0644. Archives,
-/// checkpoints and every other Next source retain their private leaf policy.
-pub(crate) fn read_legacy_cache(path: &Path, limit: usize) -> io::Result<Option<(Vec<u8>, Stamp)>> {
-    read_with(path, limit, false, false, true)
-}
 fn read_with(
     path: &Path,
     limit: usize,
@@ -356,9 +340,6 @@ impl Lock {
     pub fn take(path: &Path) -> io::Result<Self> {
         Self::take_with(path, true)
     }
-    pub fn take_managed(path: &Path) -> io::Result<Self> {
-        Self::take_with(path, false)
-    }
     fn take_with(path: &Path, private: bool) -> io::Result<Self> {
         let parents = Parents::open_with(path.parent().ok_or_else(refused)?, false, private)?;
         #[cfg(unix)]
@@ -426,14 +407,8 @@ mod lock_tests {
             .join(format!("zerus-preload-lock-{}", uuid::Uuid::new_v4()));
         drop(Parents::open(&root, true).unwrap());
         let path = root.join("capture.lock");
-        for managed in [false, true] {
-            let take = || {
-                if managed {
-                    Lock::take_managed(&path)
-                } else {
-                    Lock::take(&path)
-                }
-            };
+        {
+            let take = || Lock::take(&path);
             let held = take().unwrap();
             // fork inherits this SAME open file description, just as dup does.
             // Keep it alive without creating a process in the parallel suite.

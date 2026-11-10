@@ -14,7 +14,7 @@ use std::{fs, io::Read};
 /// launcher always sets it, empty when no live tracked agent owns it, so an
 /// inherited value never reaches the record.
 pub(crate) const ENV: &str = "HGS_PARENT";
-const USAGE: &str = "usage: hgs parent <session> --json   (JSON stdin: expected_run_id, expected_conversation_id, action read|adopt|set|clear, optional replace; set names parent {session_id, name, conversation_id, run_id})";
+const USAGE: &str = "usage: hgs parent <session> --json   (JSON stdin: expected_run_id, expected_conversation_id, action read|adopt|set|clear, optional replace; set or claimed adopt names parent {session_id, name, conversation_id, run_id})";
 /// The longest parent chain walked when refusing a cycle.
 const DEPTH: usize = 8;
 /// The source of a link another computer forwarded with a launch: a claim
@@ -50,7 +50,7 @@ pub(crate) fn valid(link: &Value) -> bool {
         && (!session.is_empty()
             || !string(link, "conversation_id").is_empty()
             || !string(link, "run_id").is_empty())
-        && matches!(string(link, "source"), "launch" | "adopt" | "manual" | FORWARDED_SOURCE)
+        && matches!(string(link, "source"), "launch" | "adopt" | "manual" | "claimed" | FORWARDED_SOURCE)
         && object.get("at").is_some_and(Value::is_i64)
 }
 
@@ -97,18 +97,36 @@ fn proven_link() -> Option<String> {
 /// A link another computer's hgs forwarded with this launch (zerus-sa9qn.7).
 static FORWARDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// `HGS_PARENT`'s value for a session this process launches: the proven
-/// local caller's link; else a link forwarded by the computer that ran the
-/// launch; else empty, which keeps an inherited value from the record. The
-/// caller is proven first; only a proven caller reads the identity.
-pub(crate) fn launcher_value() -> String {
-    proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default()
+/// `HGS_PARENT`'s value for a session this process launches: an explicit live
+/// claim first, otherwise the proven local caller; else a forwarded link.
+/// Empty keeps an inherited value from the record. Claims never prove a caller.
+pub(crate) fn launcher_value() -> Result<String> {
+    if let Some(choice) = CLAIMED.get() {
+        let parent = claimed_parent(choice)?;
+        ancestors(&parent)?;
+        let config = crate::config::Config::load().map_err(|e| e.message)?;
+        let machine = observed_machine(&config).ok_or("This computer's identity cannot be read yet; retry later")?;
+        return link_of(&parent, &machine, config.host(), "claimed")
+            .map(|link| link.to_string()).ok_or("The parent identity is incomplete".into());
+    }
+    Ok(proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default())
 }
 
-/// The launcher of a new native-API session. Read the proven caller directly:
+/// The launcher of a new native-API session. Resolve the link directly:
 /// these sessions have no new terminal in which to replace inherited ENV.
-pub(super) fn launcher_link() -> Option<Value> {
-    serde_json::from_str::<Value>(&launcher_value()).ok().filter(valid)
+pub(super) fn launcher_link() -> Result<Option<Value>> {
+    Ok(serde_json::from_str::<Value>(&launcher_value()?).ok().filter(valid))
+}
+
+static CLAIMED: std::sync::OnceLock<Choice> = std::sync::OnceLock::new();
+pub(crate) fn claimed_launch() -> bool { CLAIMED.get().is_some() }
+
+/// An explicit, local presentation link, never process proof or permission.
+pub(crate) fn accept_claimed(value: &str) -> Result<()> {
+    if value.len() > 4096 { return Err("--parent identity exceeds limits".into()); }
+    let choice: Choice = serde_json::from_str(value).map_err(|_| "--parent needs JSON with session_id, run_id and conversation_id".to_owned())?;
+    claimed_parent(&choice)?;
+    CLAIMED.set(choice).map_err(|_| "--parent may be given once".to_owned())
 }
 
 /// `--parent-link HEX` for a launch on a peer: the proven caller's link, hex
@@ -287,6 +305,103 @@ struct Choice {
     run_id: String,
 }
 
+fn exact_choice(choice: &Choice) -> bool {
+    session_id::canonical(&choice.session_id)
+        && uuid::Uuid::parse_str(&choice.session_id).is_ok_and(|id| !id.is_nil())
+        && [&choice.run_id, &choice.conversation_id].iter().all(|s| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
+        && choice.name.len() <= 512 && !choice.name.chars().any(char::is_control)
+}
+
+/// Legacy label records can predate the SID index. Without a name hint,
+/// locate one exact SID through bounded metadata only, never full histories.
+fn claim_by_id(id: &str) -> Result<Option<Value>> {
+    use std::time::{Duration, Instant};
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut count = 0;
+    let mut bytes = 0;
+    let mut found = None;
+    for namespace in storage::BINDING_DIRS {
+        let entries = match fs::read_dir(root().join(namespace)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        for entry in entries {
+            count += 1;
+            if count > 5000 || Instant::now() >= until { return Err("Parent lookup exceeded its metadata bound; include a name hint".into()); }
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            if path.extension().is_none_or(|v| v != "json") || !storage::binding_stem(namespace, stem) { continue; }
+            let raw = labels::read_file(&path, storage::ID_RECORD_BYTES).map_err(|e| e.to_string())?.ok_or("A parent binding disappeared")?;
+            bytes += raw.len();
+            if bytes > 64 << 20 { return Err("Parent lookup exceeded its byte bound; include a name hint".into()); }
+            let record: Value = serde_json::from_slice(&raw).map_err(|_| "A parent binding cannot be read safely".to_owned())?;
+            if string(&record, "session_id") != id || !string(&record, "archive_id").is_empty() || record["rename_shadow"] == true { continue; }
+            if found.is_some() { return Err("The parent session ID is ambiguous".into()); }
+            found = Some(string(&record, "name").to_owned());
+        }
+    }
+    if Instant::now() >= until { return Err("Parent lookup exceeded its metadata bound; include a name hint".into()); }
+    match found { Some(name) => read_session(id, &name), None => Ok(None) }
+}
+
+/// Claims name a complete identity and must freshly match a live local row.
+fn claimed_parent(choice: &Choice) -> Result<Value> {
+    if !exact_choice(choice) { return Err("A claimed parent needs its exact session_id, run_id and conversation_id".into()); }
+    let record = match read_session(&choice.session_id, &choice.name)? {
+        Some(record) => Some(record),
+        None if choice.name.is_empty() => claim_by_id(&choice.session_id)?,
+        None => None,
+    }.ok_or("The claimed parent is not a session on this computer")?;
+    if string(&record, "run_id") != choice.run_id || string(&record, "conversation_id") != choice.conversation_id {
+        return Err("The claimed parent changed; refresh and retry".into());
+    }
+    require_live(&record)?;
+    let current = read_session(&choice.session_id, string(&record, "name"))?.ok_or("The claimed parent disappeared")?;
+    if string(&current, "run_id") != choice.run_id || string(&current, "conversation_id") != choice.conversation_id {
+        return Err("The claimed parent changed; refresh and retry".into());
+    }
+    if !string(&current, "archive_id").is_empty() || current["state"] == "archived" || current["rename_shadow"] == true {
+        return Err("A claimed parent must be a live session on this computer".into());
+    }
+    Ok(current)
+}
+
+fn require_live(record: &Value) -> Result<()> {
+    if !string(record, "archive_id").is_empty() || record["state"] == "archived" || record["rename_shadow"] == true {
+        return Err("A claimed parent must be a live session on this computer".into());
+    }
+    let live = match string(record, "backend") {
+        "dsh" => {
+            let row = dsh::snapshot_record(record)?;
+            row["state"] == "running" && row["process_state"] == "running"
+        }
+        "opencode" => {
+            let (row, _) = opencode::notification_snapshot(record)?;
+            row["state"] == "running" && row["process_state"] == "running"
+        }
+        _ => process_alive(record) && terminal_live(&live_sessions()?.0, record)?,
+    };
+    if !live { return Err("A claimed parent must be a live session on this computer".into()); }
+    Ok(())
+}
+
+/// Native shell environment is a claim, never the process proof used by sends,
+/// graph attribution or permissions. Native hosts already expose these IDs.
+pub(crate) fn native_self() -> Result<Option<Value>> {
+    use provider_binding::Provider;
+    let (provider, native, native_home) = match (nonempty_env("DSH_SESSION_ID"), nonempty_env("OPENCODE_SESSION_ID")) {
+        (None, None) => return Ok(None),
+        (Some(id), None) => (Provider::DeepSeek, id, nonempty_env("DSH_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".dsh"))),
+        (None, Some(id)) => (Provider::OpenCode, id, opencode::config_home()),
+        _ => return Err("Multiple native session identities are present; clear the inherited identity before using hgs self".into()),
+    };
+    let record = provider.native_caller(&native, &native_home)?.ok_or("The native conversation is not a tracked Zerus session on this computer")?;
+    let choice = Choice { session_id: string(&record, "session_id").into(), name: string(&record, "name").into(),
+        run_id: string(&record, "run_id").into(), conversation_id: string(&record, "conversation_id").into() };
+    claimed_parent(&choice).map(Some)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -303,7 +418,7 @@ struct Request {
 /// layout record or the label `name` hints, each read bounded, regular,
 /// no-follow and nonblocking. None when this computer has no such session;
 /// an indexed record that cannot be read safely is an error.
-fn read_session(id: &str, name: &str) -> Result<Option<Value>> {
+pub(super) fn read_session(id: &str, name: &str) -> Result<Option<Value>> {
     let unsafe_read = |_| "A session cannot be read safely; retry later".to_owned();
     let found = match session_index::indexed(id) {
         Some((label, session_index::Kind::Record)) => {
@@ -341,13 +456,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let request: Request = serde_json::from_slice(&bytes).map_err(|_| USAGE.to_owned())?;
     if !matches!(request.action.as_str(), "read" | "adopt" | "set" | "clear")
-        || (request.action == "set") != request.parent.is_some()
+        || (request.action == "set" && request.parent.is_none())
+        || (!matches!(request.action.as_str(), "set" | "adopt") && request.parent.is_some())
     {
         return Err(USAGE.into());
     }
     expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     // Prove the caller before taking the writer lock: its own record is read.
-    let caller = if request.action == "adopt" {
+    let caller = if request.action == "adopt" && request.parent.is_none() {
         Some(session_graph::caller_record().ok_or("hgs parent adopt: no live Zerus session owns this process")?)
     } else {
         None
@@ -393,9 +509,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
         }
         _ => {
-            // adopt: the proven calling agent; set: the session a person chose.
+            // Adopt uses process proof by default or an explicit live claim;
+            // set is the session a person chose.
             let (chosen, source) = match (caller, request.parent.as_ref()) {
                 (Some(caller), _) => (caller, "adopt"),
+                (None, Some(choice)) if request.action == "adopt" => (claimed_parent(choice)?, "claimed"),
                 (None, Some(choice)) => {
                     if !session_id::canonical(&choice.session_id) {
                         return Err("Choose the parent by its session ID".into());
@@ -520,13 +638,16 @@ mod tests {
                 let id = uuid::Uuid::new_v4().to_string();
                 let name = format!("{agent}/example/{by_id}");
                 let mut record = json!({"backend":agent,"agent":agent,"name":name,"session_id":id,
-                    "run_id":"run-native","conversation_id":conversation});
+                    "run_id":"run-native","conversation_id":format!("{conversation}-{by_id}"),"agent_home":root().join(agent)});
                 if let Some(parent) = prior.as_ref() { record["parent"] = parent.clone(); }
                 let path = if by_id {
                     record["layout"] = json!("id");
                     provider.id_path(&id).unwrap()
                 } else { provider.label_path(&name) };
                 atomic(&path, &record.to_string()).unwrap();
+                let native = string(&record, "conversation_id");
+                let home = PathBuf::from(string(&record, "agent_home"));
+                assert_eq!(provider.native_caller(native, &home).unwrap(), Some(record.clone()));
                 // A cache miss reads fixed ID locations or the link's exact label.
                 assert_eq!(read_session(&id, &name).unwrap(), Some(record.clone()));
                 let before = ancestors(&record).unwrap();
@@ -542,12 +663,28 @@ mod tests {
                 fs::remove_file(root().join("ids").join(format!("{id}.json"))).unwrap();
                 assert!(ancestors(&child).is_err());
                 atomic(&path, &record.to_string()).unwrap();
+                let mut duplicate = record.clone();
+                duplicate["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+                duplicate["name"] = json!(format!("{agent}/example/duplicate-{by_id}"));
+                let duplicate_path = if by_id { provider.id_path(string(&duplicate, "session_id")).unwrap() }
+                    else { provider.label_path(string(&duplicate, "name")) };
+                atomic(&duplicate_path, &duplicate.to_string()).unwrap();
+                // Writers note all holders of a native conversation. A warm
+                // cache must not turn duplicate identities into one caller.
+                provider.save(&mut duplicate).unwrap();
+                assert!(provider.native_caller(native, &home).is_err());
+                // A partial writer note cannot hide another unindexed legacy
+                // holder of the same native identity after a cache loss.
+                fs::remove_dir_all(root().join("native-identities")).unwrap();
+                provider.save(&mut duplicate).unwrap();
+                assert!(provider.native_caller(native, &home).is_err());
+                fs::remove_file(duplicate_path).unwrap();
             }
         }
         // Typed or inherited HGS_PARENT never establishes a native launcher.
         // This fixture runs alone in its own process.
         std::env::set_var(ENV, link().to_string());
-        assert!(launcher_link().is_none());
+        assert!(launcher_link().unwrap().is_none());
     }
 
     #[test]

@@ -300,7 +300,7 @@ pub(super) fn start_scoped(
         ),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         // A fork an agent runs is also that agent's child (zerus-sa9qn.2).
-        (parent_link::ENV, parent_link::launcher_value()),
+        (parent_link::ENV, parent_link::launcher_value()?),
         ("HGS_TRACKING", "1".into()),
         (
             "HGS_CLIENT",

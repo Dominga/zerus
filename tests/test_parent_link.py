@@ -1,9 +1,11 @@
 """Parent links between independent sessions (zerus-sa9qn.2), in private state without real agents."""
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import re
 import socket
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
@@ -71,6 +73,128 @@ class ParentLink(unittest.TestCase):
                       cwd=str(self.root), agent_home=str(self.home / agent), **extra)
         self.write(record)
         return record
+
+    @contextmanager
+    def native_host(self, record):
+        native_home = Path(record['agent_home'])
+        native_home.mkdir(parents=True, exist_ok=True)
+        host = self.state / 'dsh/hosts' / hashlib.sha256(str(native_home).encode()).hexdigest()[:16]
+        host.mkdir(parents=True)
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(host / 'host.sock')); server.listen(); server.settimeout(.1)
+        stopped = threading.Event()
+        rows = {record['conversation_id']: True}
+        requests = []
+        def serve():
+            while not stopped.is_set():
+                try:
+                    client, _ = server.accept()
+                except socket.timeout:
+                    continue
+                with client:
+                    line = client.makefile().readline()
+                    if not line:
+                        continue
+                    request = json.loads(line); requests.append(request)
+                    value = {'version':'0.2.1-rc.2','protocol':1,'generation':'private-claims','accountPermissions':True}
+                    if request['method'] == 'list':
+                        value = {'generation':'private-claims','items':[
+                            {'sessionId':sid,'agentAvailable':live,'running':False} for sid,live in rows.items()]}
+                    elif request['method'] == 'create':
+                        rows[request['params']['sessionId']] = True
+                    client.sendall((json.dumps({'ok':True,'value':value})+'\n').encode())
+        thread = threading.Thread(target=serve); thread.start()
+        env = dict(self.env, DSH_HOME=str(native_home), DSH_SESSION_ID=record['conversation_id'])
+        env.pop('OPENCODE_SESSION_ID', None)
+        try:
+            yield env, rows, requests
+        finally:
+            stopped.set(); thread.join(timeout=3); server.close()
+            self.assertFalse(thread.is_alive())
+
+    def test_native_self_is_claimed_and_never_becomes_process_proof(self):
+        parent = self.native('dsh', 40)
+        with self.native_host(parent) as (env, rows, _):
+            def current(env=env, success=True):
+                result = subprocess.run([str(HGS),'self','--json'], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, success, result.stdout+result.stderr)
+                return json.loads(result.stdout) if success else result.stderr
+            identity = current()
+            self.assertEqual(identity['identity_source'], 'claimed')
+            self.assertEqual(identity['session_id'], parent['session_id'])
+            self.assertEqual(identity['parent_identity'], {k:parent[k] for k in ('session_id','name','run_id','conversation_id')})
+            # A warm indexed lookup must not scan unrelated bad metadata.
+            damaged = self.path(dict(parent,name='dsh/example/unrelated'))
+            damaged.write_text('{broken')
+            self.assertEqual(current()['session_id'], parent['session_id'])
+            damaged.unlink()
+            cache = next(p for p in (self.state/'native-identities').glob('*.json')
+                         if parent['session_id'] in p.read_text())
+            cached = cache.read_bytes(); cache.unlink(); os.mkfifo(cache,0o600)
+            started = time.monotonic()
+            self.assertEqual(current()['session_id'],parent['session_id'])
+            self.assertLess(time.monotonic()-started,5)
+            self.assertTrue(stat.S_ISFIFO(cache.lstat().st_mode))
+            cache.unlink(); cache.write_bytes(cached)
+            adopted = self.parent(self.worker, 'adopt', parent=identity['parent_identity'])
+            self.assertEqual(adopted['parent']['source'], 'claimed')
+            self.assertEqual(self.listed()[self.worker['name']]['parent']['state'], 'live')
+            # The claimed environment cannot satisfy default adopt's caller proof.
+            result = subprocess.run([str(HGS),'parent',self.worker['name'],'--json'], env=env,
+                input=json.dumps(dict(expected_run_id=self.worker['run_id'], expected_conversation_id=self.worker['conversation_id'], action='adopt')),
+                capture_output=True,text=True,timeout=10)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('no live Zerus session',result.stderr)
+            self.assertEqual(current(dict(env,HGS_SESSION=self.lead['name'],HGS_RUN_ID=self.lead['run_id']))['identity_source'],'process')
+            self.assertIn('Multiple native',current(dict(env,OPENCODE_SESSION_ID='ses_other'),success=False))
+            rows[parent['conversation_id']] = False
+            self.assertIn('live session',current(success=False))
+
+    def test_claimed_adoption_requires_complete_fresh_live_identity_and_refuses_cycles(self):
+        parent = self.native('dsh', 41)
+        choice = {k:parent[k] for k in ('session_id','name','run_id','conversation_id')}
+        with self.native_host(parent) as (_, rows, _):
+            without_name = {k:v for k,v in choice.items() if k!='name'}
+            self.assertEqual(self.parent(self.worker,'adopt',parent=without_name)['parent']['source'],'claimed')
+            self.parent(self.worker,'clear')
+            for changed in (dict(choice,run_id='old'),dict(choice,conversation_id='session-old')):
+                self.assertIn('changed',self.parent(self.worker,'adopt',parent=changed,success=False))
+            for field in ('session_id','run_id','conversation_id'):
+                self.assertIn('exact',self.parent(self.worker,'adopt',parent=dict(choice,**{field:''}),success=False))
+            self.assertIn('own parent',self.parent(parent,'adopt',parent=choice,success=False))
+            self.choose(parent,self.worker)
+            self.assertIn('cycle',self.parent(self.worker,'adopt',parent=choice,success=False))
+            self.parent(parent,'clear')
+            rows[parent['conversation_id']] = False
+            self.assertIn('live session',self.parent(self.worker,'adopt',parent=choice,success=False))
+            rows[parent['conversation_id']] = True
+            self.write(dict(parent,state='archived'))
+            self.assertIn('live session',self.parent(self.worker,'adopt',parent=choice,success=False))
+
+    def test_explicit_launch_parent_is_claimed_and_never_changes_an_existing_session(self):
+        parent = self.native('dsh', 42)
+        choice = json.dumps({k:parent[k] for k in ('session_id','name','run_id','conversation_id')})
+        with self.native_host(parent) as (env, _, requests):
+            for agent in ('claude','codex','kimi','dsh','opencode'):
+                result = subprocess.run([str(HGS),'--dry-run',agent,str(self.root),'--new','-n','claim','-d','--parent',choice],
+                    env=env,capture_output=True,text=True,timeout=10)
+                self.assertEqual(result.returncode,0,result.stderr)
+            for agent in ('claude','dsh','opencode'):
+                result = subprocess.run([str(HGS),'--dry-run','@peer',agent,'/work/example','--new','-n','claim','-d','--parent',choice],
+                    env=dict(env,HGS_PEERS='peer'),capture_output=True,text=True,timeout=10)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertIn('claimed-parent-v1',result.stdout)
+            args = [str(HGS),'dsh',str(self.root),'-n','claimed-child','-d','--parent',choice]
+            result = subprocess.run([*args,'--new'],env=env,capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            child = next(json.loads(p.read_text()) for p in (self.state/'dsh/bindings').glob('*.json')
+                         if json.loads(p.read_text())['name'].endswith('/claimed-child'))
+            self.assertEqual((child['parent']['source'],child['parent']['session_id']),('claimed',parent['session_id']))
+            before = len([r for r in requests if r['method']=='create'])
+            refused = subprocess.run(args,env=env,capture_output=True,text=True,timeout=10)
+            self.assertNotEqual(refused.returncode,0)
+            self.assertIn('only to new sessions',refused.stderr)
+            self.assertEqual(before,len([r for r in requests if r['method']=='create']))
 
     def parent(self, target, action, caller=None, success=True, **extra):
         env = dict(self.env)

@@ -1863,3 +1863,15 @@ fn a_queued_landing_on_the_line_is_accepted_and_landed_by_itself() {
     assert!(!waits_for_landing(task));
 }
 
+/// Task #18: a suite Zerus found refused for Low integrity is an environment
+/// failure (the landing stays queued, the task is not reopened), and its whole
+/// text with the owner's step reaches the reason, not only its last line.
+#[test]
+fn a_low_integrity_refusal_is_an_environment_failure() {
+    let text = format!(
+        "test a ... FAILED\n{} D:\\Tools\\Zerus carries Windows' Low integrity label ...\n  icacls \"D:\\Tools\\Zerus\" /setintegritylevel (OI)(CI)M /T /C /Q\nand start DeepSeek sessions in their own worktree",
+        crate::state::teams::environment::MARKER
+    );
+    assert!(environment_excerpt(&text));
+    assert!(!environment_excerpt("test a ... FAILED\nassertion failed: left == right"));
+}

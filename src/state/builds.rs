@@ -715,6 +715,26 @@ fn worker(id: &str) -> Result<i32> {
                 developer variables, so check the folder and the token the command runs under");
             done["compiler_cannot_start"] = json!(true);
         }
+        // Task #18: programs built in a folder with a DeepSeek sandbox's Low
+        // label run at Low integrity and are refused outside it; the result
+        // says so once, with the owner's step, instead of the tests' failures.
+        // A sandboxed member's run is Low on purpose and is left as it is.
+        if claim["integrity"] != "low" && claim["sandbox"] != "codex" {
+            let cwd = PathBuf::from(string(&claim, "cwd"));
+            let env: Vec<(String, String)> = claim["env"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_owned())))
+                .collect();
+            let temp = teams::environment::run_temp(&env);
+            let folders = teams::environment::build_folders(&cwd, string(&claim, "command"), &text);
+            if let Some(message) = teams::environment::diagnose(&text, &folders, Some(&temp)) {
+                done["tail"] = json!(teams::templates::last_chars(&format!("{}\n{message}", outcome.tail), 4000));
+                done["error"] = json!(message);
+                done["environment"] = json!(true);
+            }
+        }
     }
     done["ended"] = json!(now());
     storage::atomic(&result_path(id), &done.to_string())?;

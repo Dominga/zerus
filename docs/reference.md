@@ -1753,6 +1753,27 @@ debug-record message, or `cannot execute ... c1.dll`), the result says so in
 `error` and carries `"compiler_cannot_start": true` instead of leaving only a
 tail to read.
 
+Task #18 (owner, 2026-11-10): Windows starts an executable whose file carries
+the Low mandatory label at Low integrity, whatever its parent's level, and a
+Low process may not create anything in an ordinary (Medium) folder. A DeepSeek
+session's sandbox labels its working folder Low, inheritable by everything
+below it, so every test program cargo builds there fails at its first
+temporary folder with `Access is denied. (os error 5)` when the run's TEMP is
+an ordinary folder. (A member template's isolated TEMP sits inside the
+member's own folder and is Low as well, so a DeepSeek member's own runs pass.)
+The merge queue checks a suite's folder, its `target` and a named target
+folder before it runs: a Low build folder with an ordinary TEMP is one result
+with status `failed`, flag `environment` and an excerpt starting
+`Environment failure:`, which names the folder that carries the label and the
+owner's step (`icacls "<folder>" /setintegritylevel (OI)(CI)M /T /C /Q`, no
+administrator needed, and DeepSeek sessions in their own worktree); nothing
+runs, nothing is retried, and the landing stays queued without reopening the
+task. A failed `hgs run`, member template or queued suite whose output was
+refused this way, from programs built in such a folder (its folder, a
+`CARGO_TARGET_DIR` or `--target-dir` it names, or the programs cargo says it
+ran), carries the same text in `error` (`hgs run` adds `"environment": true`).
+Zerus only reads labels; it never changes them.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the

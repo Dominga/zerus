@@ -1058,7 +1058,12 @@ where
                     "The merge queue's tests could not start: an environment failure, not this work's. {rolled} The landing stays queued; the task is not reopened. Fix the dependency or toolchain and retry (hgs team merge --json with retry).\n{}",
                     environment
                         .iter()
-                        .map(|record| format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()))
+                        // Task #18: an environment failure Zerus named keeps its
+                        // whole text, the owner's step included.
+                        .map(|record| match record.excerpt.find(super::environment::MARKER) {
+                            Some(at) => format!("{}: {}", record.suite, &record.excerpt[at..]),
+                            None => format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()),
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 );
@@ -1279,6 +1284,9 @@ where
 /// its module, its toolchain or its test tool was missing - so the result says
 /// nothing about the merged work and must not reopen the task.
 fn environment_excerpt(excerpt: &str) -> bool {
+    if excerpt.contains(super::environment::MARKER) {
+        return true;
+    }
     let text = excerpt.to_lowercase();
     [
         "err_module_not_found",

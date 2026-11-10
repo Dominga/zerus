@@ -484,17 +484,22 @@ fn dsh(home: &Path) -> Value {
         concat!(
             include_str!("../dsh/account-client.mjs"),
             "\n",
+            include_str!("../dsh/account-balance.mjs"),
+            "\n",
             include_str!("../dsh/account-read.mjs")
         ),
     ]);
-    capture(
+    let mut data = capture(
         cmd,
         json!({"url":url,"home":home}).to_string().as_bytes(),
         20,
     )
     .ok()
-    .and_then(|b| serde_json::from_slice(&b).ok())
-    .unwrap_or(fallback)
+    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    .filter(Value::is_object)
+    .unwrap_or(fallback);
+    super::deepseek::project_api_balance(&mut data);
+    data
 }
 
 // The signature identifies the signed-in account, so it is also the catalog's
@@ -629,9 +634,13 @@ pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &P
     if let Some(unlimited) = data["credits"]["unlimited"].as_bool() {
         credits["unlimited"] = json!(unlimited);
     }
-    json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"],"retry_at":data["retry_at"],
+    let mut status = json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"],"retry_at":data["retry_at"],
         "windows":rows("windows",&["id","label","used_percent","window_minutes","resets_at"]),
-        "balances":rows("balances",&["kind","balance","currency"]),"credits":credits})
+        "balances":rows("balances",&["kind","balance","currency"]),"credits":credits});
+    if let Some(available) = data["balance_available"].as_bool() {
+        status["balance_available"] = json!(available);
+    }
+    status
 }
 
 // Quota and identity requests can succeed independently. A partial response
@@ -815,6 +824,49 @@ mod tests {
         let mut identified = json!({"status":"ok","identity":{"email":"other@example.test"}});
         retain_cached_identity(&mut identified, &cached, "same-auth");
         assert_eq!(identified["identity"]["email"], "other@example.test");
+    }
+
+    #[test]
+    fn listing_reuses_a_cached_deepseek_api_key_balance() {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: root.path().to_string_lossy().into(),
+            dir: root.path().join("config"),
+            state: root.path().join("state"),
+            selves: vec!["fixture".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let home = root.path().join("dsh");
+        private_dir(&config.dir.join("account-status")).unwrap();
+        let mut data = json!({"status":"configured","api_key_configured":true,"checked_at":100,
+            "identity":{"auth_method":"API key","account_id":"api-key:abc"},"windows":[],
+            "api_balance":{"is_available":false,"balance_infos":[
+                {"currency":"USD","total_balance":"0.00","granted_balance":"0.00","topped_up_balance":"0.00"}]}});
+        super::super::deepseek::project_api_balance(&mut data);
+        let mut cache = tempfile::NamedTempFile::new_in(config.dir.join("account-status")).unwrap();
+        platform::make_private(cache.as_file()).unwrap();
+        cache
+            .write_all(
+                json!({"signature":signature(&home,"dsh"),"data":data})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        platform::persist(cache, cache_path(&config, "native-dsh", &home)).unwrap();
+        let status = catalog_status(&config, "native-dsh", "dsh", &home);
+        assert_eq!(status["status"], "configured");
+        assert_eq!(status["balance_available"], false);
+        assert_eq!(
+            status["balances"][0],
+            json!({"kind":"Total","balance":"0.00","currency":"USD"})
+        );
+        assert_eq!(status["balances"].as_array().unwrap().len(), 3);
+        assert!(status.get("api_balance").is_none());
     }
 
     fn jwt(claims: Value) -> String {

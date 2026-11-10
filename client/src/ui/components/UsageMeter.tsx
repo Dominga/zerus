@@ -53,14 +53,21 @@ function Meter(props: { w?: UsageWindow; width: number; indicator: UsageIndicato
 }
 
 /** The meters for one account. `summary` replaces them when the provider reports no windows; `resetFrom` (default 100) is the percent from which the text adds the time to reset. */
-export function UsageMeters(props: { windows: UsageWindow[]; loading?: boolean; compact?: boolean; indicator?: UsageIndicator; summary?: string; resetFrom?: number }) {
+/** `summaryTitle` explains a terse summary such as "$6.20": its tooltip, and what assistive technology reads instead. */
+export function UsageMeters(props: { windows: UsageWindow[]; loading?: boolean; compact?: boolean; indicator?: UsageIndicator; summary?: string; summaryTitle?: string; resetFrom?: number }) {
   const indicator = () => props.indicator ?? "rails";
   const bar = () => (props.compact ? 20 : 34);
   const slots = () => (props.loading ? [undefined, undefined] : props.windows.slice(0, 2));
   const countdownShown = (w?: UsageWindow) => indicator() === "marker-countdown" && !props.compact && !!w && current(w) && w.resetsIn !== null;
   return (
     <span class="usage-meters" classList={{ compact: props.compact }}>
-      <Show when={props.loading || props.windows.length} fallback={<span class="um-summary">{props.summary ?? tr("limits n/a")}</span>}>
+      <Show when={props.loading || props.windows.length} fallback={
+        <span class="um-summary" title={props.summaryTitle || undefined}>
+          <Show when={props.summaryTitle} fallback={props.summary ?? tr("limits n/a")}>
+            <span aria-hidden="true">{props.summary ?? tr("limits n/a")}</span><span class="sr-only">{props.summaryTitle}</span>
+          </Show>
+        </span>
+      }>
         <For each={slots()}>{(w) => {
           const fresh = () => !!w && current(w);
           const tone = () => (w && fresh() ? pace(w).tone : undefined);

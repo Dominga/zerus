@@ -541,6 +541,8 @@ export interface Usage {
   identity: Identity;
   windows: ProjectedWindow[];
   balances: { kind: string; balance: string; currency: string }[];
+  /** DeepSeek's API-key `is_available`: false once the balance no longer covers API calls; older peers omit it. */
+  balance_available?: boolean | null;
   credits: { balance: string; unlimited: boolean } | null;
   refreshing: boolean;
   refresh_error: boolean;

@@ -720,6 +720,32 @@ describe("composer store", () => {
     });
   });
 
+  // zerus-fsht5: Rust answers a delayed Clear with Sending; it starts no send, so the
+  // same composer stays editable without selecting another session and back.
+  it("a delayed Clear answered Sending while its own composer stays open never locks the editor", async () => {
+    const f = fakes();
+    const port: ComposerPort = { ...f.port, clear: async (_h, run, conversation, dismiss) => { f.calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "sending" }; } };
+    // The production driver's shape: a notice is shown by the driver, any other reply returns.
+    const driver = async (_s: SessionRef | undefined, _c: unknown, execute: (ref: { id: string; index: number }, key: string) => Promise<SendReply>) => {
+      const r = await execute({ id: "end-1", index: 0 }, "end-key");
+      return r.kind === "notice" ? undefined : r;
+    };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers, undefined, f.notify, undefined, driver);
+      await c.open(SESSION);
+      expect(c.locked()).toBe(false);
+      c.openClear();
+      await c.confirmClear();
+      expect(f.calls.at(-1)).toBe("clear run-1 conv-1 false");
+      // Rust republishes the same composer after the clear: same handle, same text epoch.
+      c.apply(view({ rev: 3 }));
+      expect(c.locked()).toBe(false);
+      c.input("next prompt", 11, 11);
+      expect(c.text()).toBe("next prompt");
+      expect(c.sendEnabled()).toBe(true);
+    });
+  });
+
   // I1 (probe P6): a question for the composer left is answered Cancel, never shown over another.
   it("a cold or start question that arrives after the switch is answered Cancel and not shown", async () => {
     const f = fakes();

@@ -255,6 +255,13 @@ export function apply(ctx, config) {
   function checkPermissions(mode) {
     if (mode !== undefined && !['provider', 'bypass'].includes(mode)) throw new Error('Unknown account permission mode');
   }
+  // The native default route, effort included, as the official session
+  // controller's agentOptions(). A selection the session already recorded
+  // still wins on resume; this is only the route of a session without one.
+  function defaultAgentOptions() {
+    const { provider, model, reasoningEffort } = ctx.agentDefaultModel.currentSelection();
+    return { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+  }
   async function resume(sessionId, permissionMode) {
     checkPermissions(permissionMode);
     const live = ctx.agents.get(sessionId);
@@ -265,8 +272,7 @@ export function apply(ctx, config) {
       try {
         if (observation.header.origin === 'subagent') throw new Error('Use the parent to manage a subagent');
         const composition = await models.compose(control.presetForObservation(observation));
-        const { provider, model } = ctx.agentDefaultModel.currentSelection();
-        const handle = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider, model }, setup: composition.setup });
+        const handle = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: defaultAgentOptions(), setup: composition.setup });
         applyPermissions(handle.agent, permissionMode);
         owned.set(sessionId, handle);
         await publishWorkspace(sessionId);
@@ -632,8 +638,7 @@ export function apply(ctx, config) {
           if (error?.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error;
         }
         const composition = await models.compose('standard');
-        const { provider, model } = ctx.agentDefaultModel.currentSelection();
-        const handle = await ctx.agents.create({ sessionId, agentOptions: { provider, model },
+        const handle = await ctx.agents.create({ sessionId, agentOptions: defaultAgentOptions(),
           meta: { cwd: p.cwd, agentPreset: composition.agentPreset }, setup: composition.setup });
         applyPermissions(handle.agent, p.permissionMode);
         owned.set(sessionId, handle);
@@ -707,7 +712,12 @@ export function apply(ctx, config) {
         return api.prompt(p, new AbortController().signal);
       }
       case 'settings': {
-        const agent = topLevel(await resume(p.sessionId));
+        // A launch applying account defaults binds the exact host generation
+        // that created the session. A paused session resumes under the
+        // account permission mode HGS passes, as a scoped resume does.
+        if (p.generation !== undefined && p.generation !== generation) throw new Error('DeepSeek host changed; refresh before changing settings');
+        checkPermissions(p.permissionMode);
+        const agent = topLevel(await resume(p.sessionId, p.permissionMode));
         const catalog = await api.modelCatalog();
         const model = catalog.groups.find(g => g.id === p.provider)?.models.find(m => m.id === p.model);
         if (!model) throw new Error('This model is unavailable for the native account');

@@ -675,8 +675,8 @@ process exit. A live process without verified activity shows **Status unknown**;
 
 ### Child sessions
 
-A session that a live tracked agent launches, or forks, on the same computer is
-that agent's child. The launching `hgs` proves its caller by native process
+A new session that a live tracked agent launches on the same computer is
+that agent's child. Terminal-agent forks also record their launching caller. The launching `hgs` proves its caller by native process
 ancestry, exactly as `hgs self` does, and passes it to the new session as
 `HGS_PARENT`; it always sets the variable, empty when no live agent owns the
 launch, so an inherited or typed value never reaches the record. The new
@@ -685,7 +685,12 @@ durable `session_id`, its name, conversation and run as hints, `source`
 (`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
-Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
+Codex, Kimi, DeepSeek and OpenCode sessions can be children and manually chosen
+parents. New DeepSeek and OpenCode bindings record the proven launcher directly,
+before native creation; they never trust an inherited `HGS_PARENT` value.
+DeepSeek and OpenCode agents cannot prove themselves as callers from their
+shared native host, so they cannot adopt sessions or record themselves as the
+parent of sessions they launch. Use an explicit `set` for those relationships.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
@@ -717,8 +722,8 @@ answer, approval, stop or removal, and never change project membership.
 `hgs wait` dependencies, native subagents, names and folders never create one.
 
 On the desktop the session menu offers **Set parent…** (a searchable list of
-the computer's other Claude, Codex and Kimi sessions, never the session's own
-descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
+the computer's other Claude, Codex, Kimi, DeepSeek and OpenCode sessions, never
+the session's own descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
 onto the middle of another card on the same computer frames it and asks to
 make the dragged session its child; the upper and lower parts of a card still
 reorder. Every change is confirmed in a dialog, which names a parent it
@@ -4827,13 +4832,27 @@ conversations with the selected account. One account has one model and effort
 account, the selected one first, and lists where it saved and where it failed,
 such as an offline computer. When the computers differ, the account shows
 **Differs between computers** with **Use everywhere**, which saves the selected
-computer's choice on all of them. Codex and Claude offer
+computer's choice on all of them. Codex, Claude and DeepSeek offer
 only models and effort levels from the selected computer's native catalog; each
 other computer checks the choice against its own catalog. Open the agent
 once and refresh Accounts if its catalog is empty. **Provider settings** removes
 the Zerus override; the dialog also shows readable native account defaults.
 Kimi supports a launch model choice; its effort remains controlled by Kimi's
-native settings. OpenCode and DeepSeek continue to manage their defaults natively.
+native settings. OpenCode continues to manage its defaults natively.
+
+The native DeepSeek account (`native-dsh`, zerus-v7tqa) saves a native route
+`provider/model` with exactly one slash, such as
+`deepseek-official/deepseek-flash` (shown as **DeepSeek-V4.1-Flash
+(DeepSeek)**), and an effort of `off`, `low`, `high` or `max` that the chosen
+model's catalog entry offers. Its catalog and native default
+(`agent-default-model`) come from the running DeepSeek host's read-only catalog
+method; Accounts never starts a host, so start or resume a DeepSeek session and
+refresh when the list is empty. Zerus applies the choice to each session it
+creates, from `hgs dsh FOLDER --new` and from New session, as described in
+[Official DeepSeek Harness](#official-deepseek-harness). An older `hgs` refuses
+an account catalog that holds a DeepSeek choice ("Invalid account model
+defaults"), which stops its launches on that computer: clear the DeepSeek
+choice (`--model ''`) before installing an older CLI build.
 Existing conversations, saved resumes and forks keep their own choices. Explicit
 native launch options after `--` take precedence. Nothing rewrites native account
 configuration or changes a running agent.
@@ -5219,6 +5238,26 @@ A new session waits for its first message. API-key `deepseek-official` connectio
 work independently of account sign-in. If `deepseek-account` needs login, Activity
 shows **Sign in** and keeps the draft until native authorization finishes.
 
+An API-key account shows its balance in place of limit windows. When the key
+comes from the native credentials file (`DSH_HOME/.credentials.yaml`), `hgs account
+inspect native-dsh` reads the official `GET https://api.deepseek.com/user/balance`
+at the usual account-status refresh, with no additional polling. The private
+Node.js reader parses the key with the installed harness and sends it only to
+`api.deepseek.com` as a bearer token: redirects are refused, the request times out
+after 5 seconds and the reply is bounded to 64 KiB. The key is never logged,
+cached or returned. Per currency (USD or CNY), the inspection reports a `Total`
+balance and its `Topped up` and `Granted` parts as `balances` rows, plus
+`balance_available: false` when DeepSeek says the balance no longer covers API
+calls. The status stays `configured`. Accounts, Overview, New session and the
+session footer show the Total as a bare amount such as `$6.20` (`¥` for CNY;
+another currency keeps its code). Its tooltip and accessible label name it in
+full, for example `Balance: 6.20 USD` with the Topped up and Granted parts. The
+account's usage panel lists all three amounts and warns about an insufficient
+balance. A key from the launch environment, an
+unreachable API or a rejected key leaves `configured` without a balance. A
+DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
+web host. DeepSeek publishes no usage or cost endpoint for API keys.
+
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange
 supplies authentication, and ports/tunnels are discovered automatically. The
@@ -5248,7 +5287,29 @@ by 0.2.0-rc.2 and cancelled before its first step stays listed with an empty
 view. A child without a valid identity reports native corruption. A
 child view shows the child's own model, which reading never changes. Request
 receipts prevent duplicate submission. Uncertain delivery requires inspection.
-Model changes do not replace profile defaults. A child keeps the model it
+Model changes do not replace profile defaults.
+
+Account launch defaults (zerus-v7tqa): when the DeepSeek account has a saved
+model and effort, Zerus applies them to a session it has just created, after
+creation and permission setup and before any message, through the same scoped
+`settings` method as a per-session change. It binds the exact session identity
+and host generation, so a resident host keeps its adapter and is never reloaded;
+a host that changed in between is not asked, because that call would resume the
+session. The binding records the outcome as `account_defaults` with `status`
+`applied`, `failed` (the host never applied it) or `uncertain` (the reply was
+lost, so it may have applied), and `hgs inspect SESSION` reports it. A failed or
+uncertain application never fails the launch or blocks the session: `hgs`
+reports it on standard error once and never retries it, and the session keeps
+the native default. The desktop marks such a session's model and effort
+selector with a warning sign and explains the outcome, the account's choice and
+the reason in its **Model and effort** dialog (zerus-fw3g5); an applied or still
+pending outcome shows nothing, and the dialog never re-applies the choice. Relaunching an existing name or resuming a session never
+applies account defaults, and the native profile default stays unchanged.
+Without an account choice, a new session starts on the native default
+including its configured effort; a session's own recorded selection still wins
+when it resumes. A settings change that resumes a paused session applies the
+account permission mode, as **Resume** does (hosts started by this version).
+A child keeps the model it
 inherits and takes messages only through its parent; the adapter refuses model
 changes, messages, compaction and interrupts addressed to the child itself.
 Stopping one session does not terminate neighboring agents or the shared host.

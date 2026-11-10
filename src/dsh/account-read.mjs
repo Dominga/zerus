@@ -8,7 +8,12 @@ try {
     const credential = (await call('credentials/describe', {refs: [ref]}))[ref];
     if (credential?.configured) {
       result.status = 'configured'; result.api_key_configured = true;
-      result.identity = {auth_method: 'API key', ...await keyIdentity(request.home, ref, credential.source)};
+      let key = await fileKey(request.home, ref, credential.source);
+      result.identity = {auth_method: 'API key', ...await keyIdentity(key)};
+      // Only the official API host learns the key; a failed read keeps the
+      // configured status without a balance.
+      if (key) try { result.api_balance = await apiBalance(key); } catch {}
+      key = '';
     }
   } catch {}
   if (result.api_key_configured) { process.stdout.write(JSON.stringify(result)); process.exit(0); }

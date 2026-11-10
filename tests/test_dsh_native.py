@@ -79,7 +79,7 @@ class NativeHarness(unittest.TestCase):
             bridge.write_text(source)
         patch = [
             {'id': 'llm-deepseek', 'disabled': True},
-            {'id': 'agent-default-model', 'config': {'provider': 'hgs-test', 'model': 'test-a'}},
+            {'id': 'agent-default-model', 'config': {'provider': 'hgs-test', 'model': 'test-a', **getattr(cls, 'DEFAULT_EFFORT', {})}},
             {'insert': [
                 {'id': 'hgs-test-model', 'name': str(REPO / 'tests/fixtures/dsh-model.mjs'), 'config': {'holds': str(cls.root / 'holds')}},
                 {'id': 'hgs-native-dsh', 'name': str(bridge), 'config': {'socket': cls.sock, 'recoveryPolicy': str(cls.state / 'recovery/policy.json')}},
@@ -153,6 +153,40 @@ class NativeHarness(unittest.TestCase):
     def payload(self, binding, **fields):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **fields}
+
+    def test_new_launch_records_parent_and_resume_keeps_identity_without_readopting(self):
+        # This entire host, native home, state and proven caller are fixture-owned.
+        lead = dict(version=1, agent='claude', name='claude/test/lead', session_id=str(uuid.uuid4()),
+                    run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()), pid=os.getpid(),
+                    process_start=subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='],
+                        env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip())
+        path = self.state / (hashlib.sha256(lead['name'].encode()).hexdigest() + '.json')
+        path.write_text(json.dumps(lead))
+        env = dict(self.env, HGS_SESSION=lead['name'], HGS_RUN_ID=lead['run_id'])
+        try:
+            reference = subprocess.run([str(HGS), 'reference', lead['name'], '--json'], env=env,
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(reference.returncode, 0, reference.stderr)
+            tag = 'parent-' + uuid.uuid4().hex[:8]
+            def launch(new=False):
+                result = subprocess.run([str(HGS), 'dsh', str(self.workspace), '-n', tag, '-d', *(['--new'] if new else [])],
+                    env=env, cwd=REPO, text=True, capture_output=True, timeout=35)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return next(json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json')
+                            if json.loads(p.read_text())['name'].endswith('/' + tag))
+            child = launch(new=True)
+            self.assertEqual(child['parent']['session_id'], lead['session_id'])
+            self.assertEqual(self.cli('inspect', child)['parent']['session_id'], lead['session_id'])
+            request = dict(expected_run_id=child['run_id'], expected_conversation_id=child['conversation_id'], action='clear')
+            cleared = subprocess.run([str(HGS), 'parent', child['name'], '--json'], input=json.dumps(request),
+                env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(cleared.returncode, 0, cleared.stderr)
+            self.assertIsNone(json.loads(cleared.stdout)['parent'])
+            resumed = launch()
+            self.assertEqual((resumed['session_id'], resumed['conversation_id']), (child['session_id'], child['conversation_id']))
+            self.assertNotIn('parent', resumed)
+        finally:
+            path.unlink(missing_ok=True)
 
     def wait(self, predicate, timeout=15):
         until = time.monotonic() + timeout
@@ -861,6 +895,62 @@ class NativeHarness(unittest.TestCase):
         self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
         self.assertEqual(self.rpc('catalog')['default'], before)
 
+    def test_account_defaults_reach_only_a_new_session_before_its_first_prompt(self):
+        # zerus-v7tqa: a launch applies the account's model and effort through
+        # the scoped settings method; relaunch and the native default keep theirs.
+        before = self.rpc('catalog')['default']
+        def run(*args, ok=True):
+            result = subprocess.run([str(HGS), *args], env=self.env, cwd=self.workspace, text=True, capture_output=True, timeout=45)
+            self.assertEqual(result.returncode == 0, ok, result.stderr); return result
+        def launch(tag, *flags):
+            out = run('dsh', str(self.workspace), '-n', tag, *flags)
+            return {'name': out.stdout.split('DeepSeek session ready: ')[1].split('\n')[0]}, out.stderr
+        settings = json.loads(run('account', 'model-settings', 'native-dsh', '--json').stdout)
+        self.assertIn({'id': 'hgs-test/test-b', 'label': 'Test B (HGS test model)', 'effort_options': ['off', 'high']}, settings['models'])
+        self.assertEqual((settings['provider_defaults'], settings['effort_supported']), ({'model': 'hgs-test/test-a', 'effort': ''}, True))
+        run('account', 'model-defaults', 'native-dsh', '--model', 'hgs-test/test-b', '--effort', 'max', ok=False)
+        try:
+            run('account', 'model-defaults', 'native-dsh', '--model', 'hgs-test/test-b', '--effort', 'off')
+            binding, warning = launch('defaults', '--new')
+            self.assertEqual(warning, '')
+            seen = self.cli('inspect', binding)
+            self.assertEqual((seen['model'], seen['effort'], seen['account_defaults']['status']), ('test-b', 'off', 'applied'))
+            records = self.rpc('inspect', {'sessionId': seen['conversation_id']})['page']['records']
+            self.assertFalse([r for r in records if r['event']['type'] == 'turn/start'])
+            self.assertEqual(self.rpc('catalog')['default'], before)
+            # Relaunching the name resumes it under its own stored selection.
+            run('account', 'model-defaults', 'native-dsh', '--model', 'hgs-test/test-a', '--effort', 'high')
+            launch('defaults')
+            again = self.cli('inspect', binding)
+            self.assertEqual((again['model'], again['effort'], again['account_defaults']['model']), ('test-b', 'off', 'hgs-test/test-b'))
+            # A default the host refuses is reported once; the session starts natively.
+            path = Path(self.env['HGS_CONFIG_DIR']) / 'accounts.json'
+            catalog = json.loads(path.read_text())
+            catalog['model_defaults']['native-dsh'] = {'model': 'hgs-test/missing', 'effort': ''}
+            path.write_text(json.dumps(catalog))
+            refused, warning = launch('refused', '--new')
+            self.assertIn('account defaults were not applied', warning)
+            seen = self.cli('inspect', refused)
+            self.assertEqual((seen['model'], seen['account_defaults']['status']), ('test-a', 'failed'))
+        finally:
+            run('account', 'model-defaults', 'native-dsh', '--model', '')
+
+    def test_settings_resume_a_paused_session_under_the_account_permissions(self):
+        def preset(binding):
+            return self.rpc('inspect', {'sessionId': binding['conversation_id']})['baseline']['values']['permissions']['currentValue']
+        command = [str(HGS), 'account', 'permissions', 'native-dsh', '--mode']
+        b = self.create(); old = preset(b)
+        try:
+            subprocess.run(command+['bypass'], env=self.env, check=True, capture_output=True)
+            self.cli('pause', b)
+            self.assertFalse(self.rpc('inspect', {'sessionId': b['conversation_id']})['live'])
+            self.cli('settings', b, self.payload(b, model='hgs-test/test-b', effort='off'))
+            self.assertTrue(self.rpc('inspect', {'sessionId': b['conversation_id']})['live'])
+            self.assertNotEqual(old, 'danger-full-access')
+            self.assertEqual(preset(b), 'danger-full-access')
+        finally:
+            subprocess.run(command+['provider'], env=self.env, check=True, capture_output=True)
+
     def test_settings_and_image_admission_use_the_same_native_queue(self):
         b = self.create()
         gate = self.root / 'holds' / 'MODEL_ADMISSION_HOLD'
@@ -1136,6 +1226,29 @@ class NativeSchedules(unittest.TestCase):
         self.assertEqual(json.loads(self.hgs('schedules', b['name']).stdout)['items'], [])
         self.wait(lambda: next(r for r in json.loads(self.hgs('ls', '--local', '--json').stdout)['sessions']
                                if r['name'] == b['name'])['schedules']['count'] == 0)
+
+
+@unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
+class NativeDefaultEffort(unittest.TestCase):
+    """A native default effort reaches sessions HGS creates or resumes (zerus-v7tqa)."""
+    DEFAULT_EFFORT = {'reasoningEffort': 'off'}
+    setUpClass = NativeHarness.__dict__['setUpClass']
+    tearDownClass = NativeHarness.__dict__['tearDownClass']
+    rpc = NativeHarness.__dict__['rpc']
+    create = NativeHarness.create
+    cli = NativeHarness.cli
+    payload = NativeHarness.payload
+
+    def test_native_default_effort_reaches_new_routes_but_not_stored_selections(self):
+        self.assertEqual(self.rpc('catalog')['default'], {'provider': 'hgs-test', 'model': 'test-a', 'reasoningEffort': 'off'})
+        fresh, chosen = self.create(), self.create()
+        selection = lambda b: (lambda v: (v['model'], v['effort']))(self.cli('inspect', b))
+        self.assertEqual(selection(fresh), ('test-a', 'off'))
+        self.cli('settings', chosen, self.payload(chosen, model='hgs-test/test-b', effort='high'))
+        for binding in (fresh, chosen):
+            self.cli('pause', binding); self.cli('resume', binding)
+        self.assertEqual(selection(fresh), ('test-a', 'off'))
+        self.assertEqual(selection(chosen), ('test-b', 'high'))
 
 
 if __name__ == '__main__':

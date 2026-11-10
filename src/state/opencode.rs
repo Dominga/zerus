@@ -383,6 +383,7 @@ pub(crate) fn launch(
         println!("Create native OpenCode session {name} in {cwd}");
         return Ok(());
     }
+    let parent = parent_link::launcher_link();
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
     if storage::label_taken(name) || live()?.contains_key(name) {
@@ -441,6 +442,7 @@ pub(crate) fn launch(
         .map(|value| catalog::offered_model(&service, &cwd, value, effort.unwrap_or("")))
         .transpose()?;
     let mut record = json!({"backend":"opencode","service":"opencode2","agent":"opencode","name":name,"cwd":cwd,"launch_id":launch_id,"run_id":uuid::Uuid::new_v4().to_string(),"conversation_id":new_id("ses_"),"created":now(),"agent_home":config_home(),"creation_pending":true});
+    if let Some(parent) = parent { record["parent"] = parent; }
     let mut body = creation_body(&record);
     if let Some(model) = selected {
         body["model"] = model;
@@ -623,6 +625,7 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     if !string(record, "session_id").is_empty() {
         value["session_id"] = record["session_id"].clone();
     }
+    if let Some(parent) = parent_link::listed(record) { value["parent"] = parent; }
     let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
         "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),
         "terminal_attach_supported":cfg!(unix) && available && record["service"] == "opencode2",

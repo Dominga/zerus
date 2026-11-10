@@ -28,29 +28,33 @@ async function apiKeyReference(call) {
   return value.apiKeyEnv;
 }
 
-// Only an opaque identity leaves the machine. Use the released parser and
-// only the active file source; environment overrides must never merge by a
-// different credential sitting in the file underneath them.
-async function keyIdentity(home, ref, source) {
-  if (source !== 'file') return {};
+// The active key, read with the released parser from the file source only;
+// environment overrides must never merge by a different credential sitting in
+// the file underneath them. The key stays in this process.
+async function fileKey(home, ref, source) {
+  if (source !== 'file') return '';
   try {
     const fs = await import('node:fs/promises');
     const {join} = await import('node:path');
     const {createRequire} = await import('node:module');
     const {pathToFileURL} = await import('node:url');
-    const {createHash} = await import('node:crypto');
     let executable;
     for (const dir of process.env.PATH.split(':')) {
       try { executable = await fs.realpath(join(dir, 'dsh')); break; } catch {}
     }
-    if (!executable) return {};
+    if (!executable) return '';
     const require = createRequire(executable);
     const {parseCredentialsDocument} = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-credentials-local')).href);
     const path = join(home, '.credentials.yaml');
     const stat = await fs.lstat(path);
-    if (!stat.isFile() || stat.size > 1024 * 1024 || (stat.mode & 0o077)) return {};
+    if (!stat.isFile() || stat.size > 1024 * 1024 || (stat.mode & 0o077)) return '';
     const key = parseCredentialsDocument(await fs.readFile(path, 'utf8'), path).refs.get(ref);
-    if (typeof key !== 'string' || !key) return {};
-    return {account_id: 'api-key:' + createHash('sha256').update('deepseek-api-key\0' + key).digest('hex')};
-  } catch { return {}; }
+    return typeof key === 'string' ? key : '';
+  } catch { return ''; }
+}
+// Only an opaque identity of the key leaves the machine.
+async function keyIdentity(key) {
+  if (!key) return {};
+  const {createHash} = await import('node:crypto');
+  return {account_id: 'api-key:' + createHash('sha256').update('deepseek-api-key\0' + key).digest('hex')};
 }

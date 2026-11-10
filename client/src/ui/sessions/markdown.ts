@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import type { Lexer as MarkedLexer, Token, Tokens } from "marked";
+import { fenceUnfencedDiffs } from "./unfenced-diff";
 
 // Agent replies follow CommonMark plus the GFM tables, strikethrough and task
 // lists agents write (Qt rendered them through a CommonMark parser). The
@@ -159,7 +160,8 @@ export function plainBlocks(text: string): MarkdownBlock[] {
 export function parseMarkdown(text: string, lexer: typeof MarkedLexer): MarkdownBlock[] {
   if (text.length > MAX_SOURCE) return plainBlocks(text);
   parsing = lexer;
-  try { return blocks(lexer.lex(text, { gfm: true, breaks: false }), 0); } finally { parsing = undefined; }
+  // A pasted unified diff reads as one code block, not bullets and prose (zerus-jj9jp).
+  try { return blocks(lexer.lex(fenceUnfencedDiffs(text), { gfm: true, breaks: false }), 0); } finally { parsing = undefined; }
 }
 
 let lexer: typeof MarkedLexer | undefined;

@@ -11,6 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use std::sync::mpsc::Sender;
+// The production gates name `run::Retirement`.
+mod run {
+    pub use super::Retirement;
+}
+
 struct OriginalCall;
 type NativeCall = OriginalCall;
 struct OriginalDone {
@@ -19,7 +25,7 @@ struct OriginalDone {
 }
 impl OriginalDone {
     pub(crate) fn original_call_joined(&self) -> bool {
-        self.completion.join() == Retirement::Retired && self.original_call.upgrade().is_none()
+        self.completion.join() == run::Retirement::Retired && self.original_call.upgrade().is_none()
     }
 }
 struct NativeDone {
@@ -38,7 +44,7 @@ impl Continuation {
         match &self.done {
             Done::Service(done) => done.original_call_joined(),
             Done::Native(done) => {
-                done.completion.join() == Retirement::Retired && done.call.upgrade().is_none()
+                done.completion.join() == run::Retirement::Retired && done.call.upgrade().is_none()
             }
         }
     }
@@ -263,7 +269,7 @@ type Shared = Arc<Mutex<Vec<u8>>>;
 fn reader(
     pipe: Option<impl Read + Send + 'static>,
     cap: usize,
-    done: mpsc::Sender<bool>,
+    done: Sender<bool>,
     limit: Option<(usize, Arc<AtomicBool>)>,
     guard: Option<Arc<dyn Send + Sync>>,
     completion: Option<Arc<Completion>>,
@@ -344,4 +350,82 @@ fn original_call_requires_positive_output_eof_not_only_loan_release() {
     assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap());
     assert_eq!(settle(&completion), Retirement::Failed);
     assert!(!original.original_call_joined());
+}
+
+/// zerus-1y897.4: the controls above run copies of the production original-call
+/// gates, Completion and output reader, and a fragment of run_inner's writer.
+/// Bind them to production so a change there fails here until the copies and
+/// their controls are updated and re-run.
+#[test]
+fn the_controls_run_the_exact_production_original_call_gates_and_completion() {
+    let service = include_str!("../src/desktop_service/termination_outcome/programs.rs");
+    let native = include_str!("../src/desktop_service/termination_outcome/programs/pipeline.rs");
+    let run = include_str!("../../core/src/run.rs");
+    let controls = include_str!("cleanup_initial_call_controls.rs");
+    let mut copies = vec![
+        ("impl OriginalDone {", "original_call_joined", service),
+        ("impl Continuation {", "original_call_joined", native),
+        ("", "reader", run),
+    ];
+    for name in ["new", "child", "track", "register", "finish", "join"] {
+        copies.push(("impl Completion {", name, run));
+    }
+    for (anchor, name, production) in copies {
+        let original = function(production, anchor, name)
+            .unwrap_or_else(|| panic!("production {anchor} {name} is missing"));
+        assert_eq!(
+            function(controls, anchor, name).as_deref(),
+            Some(original.as_str()),
+            "{anchor} {name} differs from production"
+        );
+    }
+    // The writer fragment, from taking stdin through registering the worker.
+    let writer = function(controls, "", "actual_writer_fragment").expect("writer fragment");
+    let lines: Vec<&str> = writer.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| *line == "let stdin = child.stdin.take();");
+    let last = lines
+        .iter()
+        .rposition(|line| line.starts_with("completion.register(writer,"));
+    let fragment = &lines[first.expect("writer start")..=last.expect("writer end") + 1];
+    let production: Vec<&str> = normalized(run).collect();
+    assert!(
+        production
+            .windows(fragment.len())
+            .any(|window| window == fragment),
+        "the writer fragment differs from production run_inner"
+    );
+}
+
+/// Trimmed code lines without comments, blank lines or `#[cfg(test)]`.
+fn normalized(code: &str) -> impl Iterator<Item = &str> {
+    code.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//") && *line != "#[cfg(test)]")
+}
+
+/// The normalized function `fn name(` after `anchor`, to its closing brace.
+fn function(source: &str, anchor: &str, name: &str) -> Option<String> {
+    let base = source.find(anchor)?;
+    let start = base + source[base..].find(&format!("fn {name}("))?;
+    let body = start + source[start..].find('{')?;
+    let mut depth = 0;
+    for (offset, c) in source[body..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(
+                        normalized(&source[start..=body + offset])
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

@@ -6064,143 +6064,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // to this list the desktop polls (C1).
             Ok(list_items(&teams, input["include_cancelled"].as_bool() == Some(true)))
         }
-        "status" => {
-            // Task #5 (team ede724c4): where a status's time goes; over SLOW_MS
-            // it is one slow-calls line naming its phases.
-            let mut phases = crate::state::slow_calls::Phases::start();
-            let store = Store::open(false)?;
-            phases.mark("open");
-            if input["archived_phases"].as_bool() == Some(true) {
-                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-                return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
-            }
-            if let Some(phase) = input.get("archived_phase") {
-                let phase = phase.as_u64().and_then(|n| u32::try_from(n).ok()).context("A phase number is required")?;
-                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-                return store.archived_tasks(text(input,"team"), phase, cursor, input["limit"].as_i64().unwrap_or(PAGE));
-            }
-            if let Some(task) = input.get("task") {
-                let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
-                return store.task(text(input, "team"), task);
-            }
-            let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
-            phases.mark("load");
-            // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
-            if input["digest"] == true {
-                return Ok(json!({"team":team.id,"digest":super::lore_sync::plain_digest(&team)}));
-            }
-            // Task 111: a proposal that can no longer apply reads withdrawn at
-            // once; the next change stores it so.
-            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
-            fill_pause(&store, &mut team);
-            phases.mark("pause");
-            let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
-            // Only a finished team reads the live listing, for its members left
-            // running (F7); a watched running team is polled often and must not
-            // spawn one (C1, L3).
-            let sessions = if status_lists_sessions(team.status) { recent_sessions().ok() } else { None };
-            phases.mark("sessions");
-            // Only the teams that still run, from the indexed query, so a
-            // finished team's status never reads every team (C1).
-            let mut teams = if finished { active_team_records(&store)? } else { Vec::new() };
-            // Section 9.4: the linked sub-teams are read by id (at most 32),
-            // whatever their status, for the parent task card and the children
-            // list; this is bounded and only for a team that has children.
-            for child in team.children.iter().take(32) {
-                if teams.iter().any(|team| &team.id == child) {
-                    continue;
-                }
-                if let Some(child) = store.load(child)? {
-                    teams.push(child);
-                }
-            }
-            // U58: cancelled tasks and phases stay out of the status unless the
-            // caller asks for them.
-            let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
-            phases.mark("teams");
-            let mut value = view_phased(&team, &teams, sessions.as_deref(), include_cancelled, &mut phases);
-            phases.mark("view_rest");
-            // Task 270 (owner, 2026-11-08): the project's working mode: the
-            // preset the team follows, the cached proposal with its reasons, and
-            // what the settings still miss of it (no Git read on a poll).
-            // Task #406: the worker's tick: the phase running now, the last
-            // tick and the slowest recent one (bounded).
-            value["worker_tick"] = super::tick_clock::status();
-            phases.mark("worker_tick");
-            // Task #35: a shared or integration folder with a Low label, with
-            // the owner's step (labels read at most once a minute).
-            value["low_folders"] = json!(super::environment::low_shared_folders(&team).iter().map(super::environment::LowFolder::json).collect::<Vec<_>>());
-            phases.mark("low_folders");
-            let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
-            phases.mark("working_mode");
-            value["working_mode"] = json!({
-                "preset": team.working_mode,
-                "proposal": team.mode_proposal,
-                "disagreeing": disagreeing,
-                // Task 336: the owner's Keep, {preset, fingerprint, at}.
-                "kept": team.mode_kept,
-            });
-            // D2: the findings page takes a before cursor.
-            value["findings"] = findings_page(&team, input["before"].as_u64());
-            phases.mark("findings");
-            // U38: the profile only on request, as hgs team profile gives it.
-            if input["profile"].is_object() {
-                let mut ask = input["profile"].clone();
-                ask["team"] = json!(team.id);
-                value["profile"] = profile_view(&ask)?;
-            }
-            // Task 160: a parked task and its member say until when.
-            let at = now();
-            if let Some(tasks) = value["tasks"].as_array_mut() {
-                for entry in tasks {
-                    let id = entry["id"].as_u64().unwrap_or(0) as u32;
-                    if let Some(park) = team.task(id).and_then(|task| task.park.as_ref()) {
-                        entry["parked"] = json!(super::park::summary(park, at));
-                    }
-                }
-            }
-            if let Some(members) = value["members"].as_array_mut() {
-                for entry in members {
-                    let id = entry["id"].as_str().unwrap_or_default().to_owned();
-                    let parked: Vec<Value> = team.tasks.iter()
-                        .filter_map(|task| task.park.as_ref().filter(|park| park.member == id).map(|park| json!({"task":task.id,"text":super::park::summary(park, at)})))
-                        .collect();
-                    if !parked.is_empty() {
-                        entry["parked"] = json!(parked);
-                    }
-                }
-            }
-            phases.mark("park");
-            // Task 133: each member's latest pulse, for the Team tab.
-            let pulses = store.latest_pulses(&team.id, now());
-            if let Some(members) = value["members"].as_array_mut() {
-                for entry in members {
-                    let id = entry["id"].as_str().unwrap_or_default().to_owned();
-                    entry["pulse"] = pulses.iter().find(|pulse| pulse.member == id).map_or(Value::Null, super::pulses::Pulse::json);
-                }
-            }
-            phases.mark("pulses");
-            // #756: with the build broker on, each member's build state for
-            // task nodes and member cards; the Builds tab reads the rest.
-            if team.settings.build_broker {
-                value["build_states"] = super::broker::build_states(&team, now());
-            }
-            phases.mark("broker");
-            // Task #393: the polled status is bounded; `status --task N` above
-            // answers with the task's full record.
-            bound_status(&mut value, &team);
-            phases.mark("bound");
-            #[cfg(test)]
-            let slow = STATUS_SLOW_MS.with(std::cell::Cell::get).unwrap_or(crate::state::slow_calls::SLOW_MS);
-            #[cfg(not(test))]
-            let slow = crate::state::slow_calls::SLOW_MS;
-            let timings = phases.finish_at("team status", &team.id, slow);
-            // On request, the phases ride in the answer (as `hgs inspect`'s do).
-            if input["timings"] == true {
-                value["timings_ms"] = timings;
-            }
-            Ok(value)
-        }
+        "status" => status_command(input),
         "inbox" => inbox_command(input),
         // Task 271 (owner, 2026-11-08): the lead's brief on demand: the
         // playbook, the open breaches, the owner's standing decisions, the
@@ -6253,357 +6117,504 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "handoff" => handoff_view(input),
         "escalate" => escalate(input),
-        op if MUTATIONS.contains(&op) => {
-            let request = text(input, "request_id");
-            ensure!(canonical_uuid(request), "A canonical request_id is required");
-            let team_id = text(input, "team");
-            let revision = expected_revision(op, input);
-            // A member in a sandbox may not write the team's files: its report
-            // waits in its own folder for the dispatcher, which checks it.
-            // SQLite may open the store read-only without a word, so the
-            // refusal can come with the write as well as with the open.
-            let mut store = match Store::open(true) {
-                Ok(store) => store,
-                Err(error) if queues_instead(op) && read_only(&error) => {
-                    return queue_write(op, input, wait)
-                }
-                // Task #346: a call for the member's own scratch team queues too;
-                // a call outside that scope keeps the sandbox's error.
-                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
-                // U20: a write the sandbox blocked says what to do, not a bare
-                // SQLite error.
-                Err(error) => return Err(super::store::write_error(error)),
-            };
-            // U54: a renamed session's member keeps its team record in step, so
-            // commands after the rename match it by name again.
-            follow_session_rename(&mut store, team_id, caller_record().as_ref())?;
-            let mut filled = input.clone();
-            // C1: a caller can never hand in a verified owner word; only the
-            // check below fills it, from the lead's own session.
-            if let Some(object) = filled.as_object_mut() {
-                object.remove("owner_word_checked");
-                object.remove("owner_word_event");
-                object.remove("owner_word_change");
-                object.remove("roster_word");
-            }
-            // Task 162 (owner, 2026-11-07): the owner's typed word is no longer
-            // a fallback where a card exists; the lead proposes the card, and
-            // planning inside the approved goal needs no word at all.
-            if input.get("owner_word").is_some_and(|word| !word.is_null()) {
-                if CARD_WORD_OPS.contains(&op) {
-                    bail!(
-                        "The owner's typed word is no longer taken for {op}: propose it as a card, {{\"kind\":\"{op}\",\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"
-                    );
-                }
-                if let Some(object) = filled.as_object_mut() {
-                    object.remove("owner_word");
-                }
-            }
-            // U54: one owner action moves every member whose session really
-            // runs on from_account, of the requested agent, the lead included.
-            // A same-provider move keeps the conversation through U53's switch;
-            // a member whose switch does not confirm stays where it is and the
-            // answer names why.
-            if op == "swap-member" && !text(&filled, "from_account").is_empty() {
-                let from = text(&filled, "from_account").to_owned();
-                let to = text(&filled, "to_account").to_owned();
-                ensure!(!to.is_empty(), "A bulk swap needs to_account");
-                let provider = text(&filled, "provider").to_owned();
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let sessions = live_sessions()?;
-                let ids = bulk_swap_members(&team, &sessions, &from, &provider);
-                ensure!(!ids.is_empty(), format!("No member of team {} runs on account {from}", team.name));
-                let mut moved = Vec::new();
-                let mut fresh = Vec::new();
-                let mut notes = Vec::new();
-                let mut failed = Vec::new();
-                for id in &ids {
-                    let member = team.member(id).context("Unknown member")?;
-                    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty() && !session.name.is_empty()) else {
-                        failed.push(json!({"member":id,"error":"the member has no local session to move"}));
-                        continue;
-                    };
-                    // A deterministic request id makes a replayed bulk swap
-                    // the same U53 request, never a second switch.
-                    use sha2::{Digest, Sha256};
-                    let digest = Sha256::digest(format!("{}:{}:{}", text(&filled, "request_id"), id, to).as_bytes());
-                    let mut bytes = [0u8; 16];
-                    bytes.copy_from_slice(&digest[..16]);
-                    let request = uuid::Uuid::from_bytes(bytes).to_string();
-                    match switch_member_account(&session.name, &to, &request) {
-                        Ok(receipt) if receipt["status"] == "switched" => moved.push(id.clone()),
-                        Ok(receipt) => match retire_old_session(&session.name, &from) {
-                            Ok(note) => {
-                                fresh.push(id.clone());
-                                notes.push(json!({"member":id,"note":format!("the account switch is {}; {note}", switch_status(&receipt))}));
-                            }
-                            Err(wait) => failed.push(json!({"member":id,"error":format!("the account switch is {}; {wait}", switch_status(&receipt))})),
-                        },
-                        Err(error) => match retire_old_session(&session.name, &from) {
-                            Ok(note) => {
-                                fresh.push(id.clone());
-                                notes.push(json!({"member":id,"note":format!("{error}; {note}")}));
-                            }
-                            Err(wait) => failed.push(json!({"member":id,"error":format!("{error}; {wait}")})),
-                        },
-                    }
-                }
-                ensure!(!moved.is_empty() || !fresh.is_empty(), format!("No member of team {} could move to account {to}", team.name));
-                fill_bulk_swap(&mut filled, &moved, &fresh, notes, failed, &to);
-            }
-            // Task 162: planning inside the approved goal is no card.
-            if op == "propose" {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                super::lead_plan::refuse_plan_card(&team, input)?;
-            }
-            if op == "use-last-reply" && text(input, "attempt").is_empty() {
-                // Without an attempt, the task's open one.
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
-                filled["attempt"] = json!(task.open_attempt().context("The task has no open attempt")?.id);
-            }
-            if op == "use-last-reply" && text(input, "text").trim().is_empty() {
-                // This reply becomes the report: the attempt keeps the reply
-                // that ended its turn (owner, 2026-11-07); an old record
-                // without it reads the member's session. Reading either is not
-                // part of the request's identity.
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
-                let attempt = task.attempts.iter().find(|a| a.id == text(&filled, "attempt")).context("Unknown attempt")?;
-                if !attempt.last_reply.trim().is_empty() {
-                    filled["text"] = json!(attempt.last_reply);
-                } else {
-                    let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
-                    filled["text"] = json!(super::dispatcher::last_reply(&session)?);
-                }
-            }
-            if matches!(op, "plan" | "add-member" | "swap-member" | "draft") {
-                // An existing session must run here and be free of another
-                // active team; its own folder replaces the planned one (F8).
-                // A retry returns here before any listing (L4).
-                adopt_existing_sessions(&store, request, input, op, &mut filled)?;
-            }
-            // Section 9.2: a change that can bind a new session keeps the whole
-            // tree within its master's budget (extend binds none, and is
-            // checked for a tree already over it).
-            if matches!(op, "plan" | "approve" | "add-member" | "scale" | "swap-member" | "extend") {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                // Bounded: ancestors by id and children by id; a flat team
-                // reads nothing beyond the team itself.
-                let tree = tree_around(&team, &mut |id| store.load(id))?;
-                ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
-                if op == "add-member" {
-                    // U32: a cap raise on the owner's word stays within the
-                    // master's session budget.
-                    filled["tree_sessions"] = json!(ops::root_of(&team, &tree).settings.tree_sessions);
-                }
-            }
-            if op == "archive" {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                ensure_children_closed(&store, &team)?;
-            }
-            // C6: a sub-team's plan and phases are decided by the parent lead,
-            // whose session is proven in the parent team, not in this one.
-            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase" | "return-to-draft" | "reject-phase" | "undo-reject-phase") && {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                parent_lead_calls(&store, &team)?
-            };
-            if matches!(op, "approve" | "approve-phase") {
-                // F13: the lead approves only on the owner's exact sentence,
-                // typed in the lead's own session; the CLI checks it here and
-                // records the verified quote for the state machine and the feed.
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let caller = if parent_lead { Actor::ParentLead } else { actor(&team, op, &filled)? };
-                let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
-                if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
-                    // U56/task #21: a refusal names the card this approval is.
-                    let phase = (op == "approve-phase").then(|| input["phase"].as_u64().and_then(|n| u32::try_from(n).ok())).flatten();
-                    let card = match phase {
-                        Some(n) => format!("{{\"kind\":\"approve-phase\",\"phase\":{n},\"reason\":\"...\"}}"),
-                        None => "{\"kind\":\"approve\",\"reason\":\"...\"}".to_owned(),
-                    };
-                    let word = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
-                        format!("The lead approves only with the owner's approval: propose it, {card} | hgs team propose --json, and the owner allows it with a click")
-                    })?;
-                    let verified = super::owner_word::verify(&team, word, phase, super::super::now())?;
-                    if let Some(used) = team.owner_word_used(verified.event) {
-                        bail!("That word was already used for {used}; ask the owner again");
-                    }
-                    filled["owner_word_checked"] = serde_json::to_value(&verified)?;
-                    filled["owner_word_event"] = json!(verified.event);
-                    filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
-                }
-            }
-            // U42 (#587): the lead discards an accepted phase, or returns one to
-            // a draft, on the owner's word naming the phase and the change; the
-            // CLI checks it here as it does for an approval.
-            // U63 (owner, 2026-10-31): so does the lead's edit, addition or
-            // move of an accepted phase, the removal of its own pause, who
-            // accepts a phase, and the owner's acceptance of one.
-            let phase_change = matches!(
-                op,
-                "discard-phase" | "return-to-draft" | "edit-draft" | "move-phase" | "unpause-phase" | "phase-acceptance" | "accept-phase"
-            ) || (op == "extend" && input.get("phase").is_some());
-            if phase_change && !parent_lead {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let caller = actor(&team, op, &filled)?;
-                check_phase_change_word(&team, op, input, &mut filled, &caller, super::owner_word::verify_phase_change)?;
-            }
-            // U26: a lead changes the roster (or max_members) only on the
-            // owner's fresh word, and only for the change that word names.
-            if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let caller = actor(&team, op, &filled)?;
-                let rule_agents = scratch_roster_agents(&store, &team)?;
-                check_roster_word(&team, op, input, &mut filled, &caller, rule_agents.as_deref(), |team, input, rule, now| {
-                    super::owner_word::verify_roster(team, input, rule, now)
-                })?;
-            }
-            // U29: a task joins a running phase on the owner's word twice.
-            if op == "add-to-phase" {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                let caller = actor(&team, op, &filled)?;
-                check_phase_word(&team, input, &mut filled, &caller, super::owner_word::verify_phase)?;
-            }
-            // Task 209: a report that claims there is no context left while the
-            // meter says otherwise is not a report. The member hears the actual
-            // figure, its attempt stays open, and a compaction starts when the
-            // meter reached the threshold.
-            if op == "report" && filled["interim"].as_bool() != Some(true) {
-                match super::dispatcher::report_context_answer(&mut store, team_id, &filled) {
-                    Ok(Some(answer)) => bail!("{answer}"),
-                    Ok(None) => {}
-                    // A sandboxed member's store is read-only: the worker
-                    // answers the claim from its outbox instead.
-                    Err(error) if read_only(&error) => {}
-                    Err(error) => return Err(super::store::write_error(error)),
-                }
-            }
-            // N7: a replayed discard does not stop the lead's session twice.
-            let replayed = op == "draft"
-                && text(&filled, "action") == "discard"
-                && store.receipt(request, input)?.is_some();
-            // Task 287: a report's git reads run before the store's lock and are
-            // served inside it; task #362: a lead's use-last-reply reads the
-            // member's folder the same way.
-            // Task #41 (team ede724c4): an operation that runs the phase checks
-            // reads their Git prerequisites the same way.
-            let reporting = if (matches!(op, "report" | "use-last-reply") && !parent_lead) || ops::checks_phases(op) {
-                store.load(team_id).ok().flatten()
-            } else {
-                None
-            };
-            let prefetch = || {
-                if let Some(team) = reporting.as_ref() {
-                    let caller = if parent_lead { Ok(Actor::ParentLead) } else { actor(team, op, &filled) };
-                    if let Ok(caller) = caller {
-                        ops::prefetch_git(team, op, &filled, &caller);
-                    }
-                }
-            };
-            let mut receipt = match super::dispatcher::with_git_answers(prefetch, || store.mutate(Some((request, input)), team_id, revision, |team, events| {
-                let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
-                let before = team.clone();
-                let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
-                if rules_changed(&before, team, op) {
-                    if let Some(word) = rules_word(&before, input, &actor)? {
-                        team.record_owner_word(word.event, "the team's iron rules");
-                    }
-                    events.push(Event::new("iron_rules_changed", json!({"by":actor.label(team)})));
-                }
-                Ok(result)
-            })) {
-                Ok(receipt) => receipt,
-                Err(error) if queues_instead(op) && read_only(&error) => {
-                    return queue_write(op, input, wait)
-                }
-                // Task #346: a call for the member's own scratch team queues too;
-                // a call outside that scope keeps the sandbox's error.
-                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
-                Err(error) => return Err(super::store::write_error(error)),
-            };
-            // Task #364: a member's report names the folders it made for the
-            // attempt and left in place, asking it to remove them or say why.
-            if matches!(op, "report" | "use-last-reply") && receipt["status"] == "submitted" {
-                if let Ok(Some(team)) = store.load(team_id) {
-                    let attempt = text(&filled, "attempt");
-                    let found = team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| (found.member.clone(), found.sent_at));
-                    if let Some((member, since)) = found.filter(|(member, _)| !member.is_empty()) {
-                        let folder = team.member(&member).and_then(|found| super::dispatcher::member_folder_path(&team, found).ok()).unwrap_or_default();
-                        let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder);
-                        if note["folders"].as_array().is_some_and(|folders| !folders.is_empty()) {
-                            receipt["leftovers"] = note;
-                        }
-                    }
-                }
-            }
-            // N7: discarding a draft stops the lead's session when the owner
-            // asked for it (spec 3); a failure leaves the discard done and names
-            // it in the answer.
-            if op == "draft" && text(&filled, "action") == "discard" && receipt["stop_lead"].as_bool() == Some(true) && !replayed {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                match team.member(&team.lead).and_then(|member| member.session.clone()) {
-                    Some(session) => match stop_lead_session(&session) {
-                        Ok(()) => receipt["lead_stopped"] = json!(true),
-                        Err(error) => receipt["lead_stop_error"] = json!(format!("{error:#}")),
-                    },
-                    None => receipt["lead_stopped"] = json!(false),
-                }
-            }
-            if starts_worker(op) {
-                // The dispatcher runs while any team runs; it exits by itself.
-                if let Err(error) = super::dispatcher::ensure_worker() {
-                    eprintln!("hgs: the team dispatcher did not start: {error}");
-                }
-            }
-            if receipt["status"] == "stale" {
-                bail!("This attempt is no longer current for task #{}; the report was not accepted", receipt["task"]);
-            }
-            // Task #228: a scratch team left running when its creating task is
-            // decided stops; the answer names any session it could not stop.
-            if matches!(op, "accept" | "reject" | "cancel") {
-                if let Some(task) = filled["task"].as_u64().and_then(|id| u32::try_from(id).ok()) {
-                    if let Err(error) = close_scratch_teams(&mut store, team_id, task) {
-                        receipt["scratch_error"] = json!(format!("{error:#}"));
-                    }
-                }
-            }
-            // Sections 9.5 and 9.7: the tree reacts to a finished, rejected,
-            // paused, resumed or stopped team, and to a parent answer. N28: the
-            // change above is already stored, so a tree hook that fails says so
-            // in the receipt instead of turning the stored change into an error.
-            if op == "finish" {
-                if let Err(error) = file_subteam_report(&mut store, team_id) {
-                    receipt["subteam_report_error"] = json!(format!("{error:#}"));
-                }
-            }
-            if op == "reject" {
-                if let Err(error) = reopen_rejected_subteam(&mut store, team_id, &filled) {
-                    receipt["subteam_reopen_error"] = json!(format!("{error:#}"));
-                }
-            }
-            if matches!(op, "cancel" | "reassign") {
-                // C5: the sub-team stops only once the cancel or reassign
-                // itself went through for its caller.
-                let team = store.load(team_id)?.context("Unknown team")?;
-                if let Err(error) = choose_subteam(&mut store, &team, &filled) {
-                    receipt["subteam_error"] = json!(format!("{error:#}"));
-                }
-            }
-            if matches!(op, "pause" | "resume" | "stop") {
-                if let Err(error) = cascade_status(&mut store, team_id, op, 0) {
-                    receipt["cascade_error"] = json!(format!("{error:#}"));
-                }
-            }
-            if op == "reply" {
-                if let Err(error) = route_reply_down(&mut store, team_id, &filled) {
-                    receipt["reply_down_error"] = json!(format!("{error:#}"));
-                }
-            }
-            Ok(receipt)
-        }
+        op if MUTATIONS.contains(&op) => mutation_command(op, input, wait),
         _ => bail!("Unknown team operation {op}"),
     }
+}
+
+/// `hgs team status`. Task #45 (team ede724c4): its own function, so its
+/// locals are not part of `run`'s frame (debug builds keep every arm's locals
+/// in one frame, and `run`'s reached 683 KB of the 1 MB main stack).
+#[inline(never)]
+fn status_command(input: &Value) -> anyhow::Result<Value> {
+    // Task #5 (team ede724c4): where a status's time goes; over SLOW_MS
+    // it is one slow-calls line naming its phases.
+    let mut phases = crate::state::slow_calls::Phases::start();
+    let store = Store::open(false)?;
+    phases.mark("open");
+    if input["archived_phases"].as_bool() == Some(true) {
+        let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+        return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
+    }
+    if let Some(phase) = input.get("archived_phase") {
+        let phase = phase.as_u64().and_then(|n| u32::try_from(n).ok()).context("A phase number is required")?;
+        let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+        return store.archived_tasks(text(input,"team"), phase, cursor, input["limit"].as_i64().unwrap_or(PAGE));
+    }
+    if let Some(task) = input.get("task") {
+        let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
+        return store.task(text(input, "team"), task);
+    }
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+    phases.mark("load");
+    // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
+    if input["digest"] == true {
+        return Ok(json!({"team":team.id,"digest":super::lore_sync::plain_digest(&team)}));
+    }
+    // Task 111: a proposal that can no longer apply reads withdrawn at
+    // once; the next change stores it so.
+    ops::withdraw_inapplicable(&mut team, &mut Vec::new());
+    fill_pause(&store, &mut team);
+    phases.mark("pause");
+    let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
+    // Only a finished team reads the live listing, for its members left
+    // running (F7); a watched running team is polled often and must not
+    // spawn one (C1, L3).
+    let sessions = if status_lists_sessions(team.status) { recent_sessions().ok() } else { None };
+    phases.mark("sessions");
+    // Only the teams that still run, from the indexed query, so a
+    // finished team's status never reads every team (C1).
+    let mut teams = if finished { active_team_records(&store)? } else { Vec::new() };
+    // Section 9.4: the linked sub-teams are read by id (at most 32),
+    // whatever their status, for the parent task card and the children
+    // list; this is bounded and only for a team that has children.
+    for child in team.children.iter().take(32) {
+        if teams.iter().any(|team| &team.id == child) {
+            continue;
+        }
+        if let Some(child) = store.load(child)? {
+            teams.push(child);
+        }
+    }
+    // U58: cancelled tasks and phases stay out of the status unless the
+    // caller asks for them.
+    let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
+    phases.mark("teams");
+    let mut value = view_phased(&team, &teams, sessions.as_deref(), include_cancelled, &mut phases);
+    phases.mark("view_rest");
+    // Task 270 (owner, 2026-11-08): the project's working mode: the
+    // preset the team follows, the cached proposal with its reasons, and
+    // what the settings still miss of it (no Git read on a poll).
+    // Task #406: the worker's tick: the phase running now, the last
+    // tick and the slowest recent one (bounded).
+    value["worker_tick"] = super::tick_clock::status();
+    phases.mark("worker_tick");
+    // Task #35: a shared or integration folder with a Low label, with
+    // the owner's step (labels read at most once a minute).
+    value["low_folders"] = json!(super::environment::low_shared_folders(&team).iter().map(super::environment::LowFolder::json).collect::<Vec<_>>());
+    phases.mark("low_folders");
+    let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
+    phases.mark("working_mode");
+    value["working_mode"] = json!({
+        "preset": team.working_mode,
+        "proposal": team.mode_proposal,
+        "disagreeing": disagreeing,
+        // Task 336: the owner's Keep, {preset, fingerprint, at}.
+        "kept": team.mode_kept,
+    });
+    // D2: the findings page takes a before cursor.
+    value["findings"] = findings_page(&team, input["before"].as_u64());
+    phases.mark("findings");
+    // U38: the profile only on request, as hgs team profile gives it.
+    if input["profile"].is_object() {
+        let mut ask = input["profile"].clone();
+        ask["team"] = json!(team.id);
+        value["profile"] = profile_view(&ask)?;
+    }
+    // Task 160: a parked task and its member say until when.
+    let at = now();
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for entry in tasks {
+            let id = entry["id"].as_u64().unwrap_or(0) as u32;
+            if let Some(park) = team.task(id).and_then(|task| task.park.as_ref()) {
+                entry["parked"] = json!(super::park::summary(park, at));
+            }
+        }
+    }
+    if let Some(members) = value["members"].as_array_mut() {
+        for entry in members {
+            let id = entry["id"].as_str().unwrap_or_default().to_owned();
+            let parked: Vec<Value> = team.tasks.iter()
+                .filter_map(|task| task.park.as_ref().filter(|park| park.member == id).map(|park| json!({"task":task.id,"text":super::park::summary(park, at)})))
+                .collect();
+            if !parked.is_empty() {
+                entry["parked"] = json!(parked);
+            }
+        }
+    }
+    phases.mark("park");
+    // Task 133: each member's latest pulse, for the Team tab.
+    let pulses = store.latest_pulses(&team.id, now());
+    if let Some(members) = value["members"].as_array_mut() {
+        for entry in members {
+            let id = entry["id"].as_str().unwrap_or_default().to_owned();
+            entry["pulse"] = pulses.iter().find(|pulse| pulse.member == id).map_or(Value::Null, super::pulses::Pulse::json);
+        }
+    }
+    phases.mark("pulses");
+    // #756: with the build broker on, each member's build state for
+    // task nodes and member cards; the Builds tab reads the rest.
+    if team.settings.build_broker {
+        value["build_states"] = super::broker::build_states(&team, now());
+    }
+    phases.mark("broker");
+    // Task #393: the polled status is bounded; `status --task N` above
+    // answers with the task's full record.
+    bound_status(&mut value, &team);
+    phases.mark("bound");
+    #[cfg(test)]
+    let slow = STATUS_SLOW_MS.with(std::cell::Cell::get).unwrap_or(crate::state::slow_calls::SLOW_MS);
+    #[cfg(not(test))]
+    let slow = crate::state::slow_calls::SLOW_MS;
+    let timings = phases.finish_at("team status", &team.id, slow);
+    // On request, the phases ride in the answer (as `hgs inspect`'s do).
+    if input["timings"] == true {
+        value["timings_ms"] = timings;
+    }
+    Ok(value)
+}
+
+/// A team change (`MUTATIONS`). Task #45 (team ede724c4): its own function,
+/// for the same reason as `status_command`.
+#[inline(never)]
+fn mutation_command(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    let team_id = text(input, "team");
+    let revision = expected_revision(op, input);
+    // A member in a sandbox may not write the team's files: its report
+    // waits in its own folder for the dispatcher, which checks it.
+    // SQLite may open the store read-only without a word, so the
+    // refusal can come with the write as well as with the open.
+    let mut store = match Store::open(true) {
+        Ok(store) => store,
+        Err(error) if queues_instead(op) && read_only(&error) => {
+            return queue_write(op, input, wait)
+        }
+        // Task #346: a call for the member's own scratch team queues too;
+        // a call outside that scope keeps the sandbox's error.
+        Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
+        // U20: a write the sandbox blocked says what to do, not a bare
+        // SQLite error.
+        Err(error) => return Err(super::store::write_error(error)),
+    };
+    // U54: a renamed session's member keeps its team record in step, so
+    // commands after the rename match it by name again.
+    follow_session_rename(&mut store, team_id, caller_record().as_ref())?;
+    let mut filled = input.clone();
+    // C1: a caller can never hand in a verified owner word; only the
+    // check below fills it, from the lead's own session.
+    if let Some(object) = filled.as_object_mut() {
+        object.remove("owner_word_checked");
+        object.remove("owner_word_event");
+        object.remove("owner_word_change");
+        object.remove("roster_word");
+    }
+    // Task 162 (owner, 2026-11-07): the owner's typed word is no longer
+    // a fallback where a card exists; the lead proposes the card, and
+    // planning inside the approved goal needs no word at all.
+    if input.get("owner_word").is_some_and(|word| !word.is_null()) {
+        if CARD_WORD_OPS.contains(&op) {
+            bail!(
+                "The owner's typed word is no longer taken for {op}: propose it as a card, {{\"kind\":\"{op}\",\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"
+            );
+        }
+        if let Some(object) = filled.as_object_mut() {
+            object.remove("owner_word");
+        }
+    }
+    // U54: one owner action moves every member whose session really
+    // runs on from_account, of the requested agent, the lead included.
+    // A same-provider move keeps the conversation through U53's switch;
+    // a member whose switch does not confirm stays where it is and the
+    // answer names why.
+    if op == "swap-member" && !text(&filled, "from_account").is_empty() {
+        let from = text(&filled, "from_account").to_owned();
+        let to = text(&filled, "to_account").to_owned();
+        ensure!(!to.is_empty(), "A bulk swap needs to_account");
+        let provider = text(&filled, "provider").to_owned();
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let sessions = live_sessions()?;
+        let ids = bulk_swap_members(&team, &sessions, &from, &provider);
+        ensure!(!ids.is_empty(), format!("No member of team {} runs on account {from}", team.name));
+        let mut moved = Vec::new();
+        let mut fresh = Vec::new();
+        let mut notes = Vec::new();
+        let mut failed = Vec::new();
+        for id in &ids {
+            let member = team.member(id).context("Unknown member")?;
+            let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty() && !session.name.is_empty()) else {
+                failed.push(json!({"member":id,"error":"the member has no local session to move"}));
+                continue;
+            };
+            // A deterministic request id makes a replayed bulk swap
+            // the same U53 request, never a second switch.
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(format!("{}:{}:{}", text(&filled, "request_id"), id, to).as_bytes());
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            let request = uuid::Uuid::from_bytes(bytes).to_string();
+            match switch_member_account(&session.name, &to, &request) {
+                Ok(receipt) if receipt["status"] == "switched" => moved.push(id.clone()),
+                Ok(receipt) => match retire_old_session(&session.name, &from) {
+                    Ok(note) => {
+                        fresh.push(id.clone());
+                        notes.push(json!({"member":id,"note":format!("the account switch is {}; {note}", switch_status(&receipt))}));
+                    }
+                    Err(wait) => failed.push(json!({"member":id,"error":format!("the account switch is {}; {wait}", switch_status(&receipt))})),
+                },
+                Err(error) => match retire_old_session(&session.name, &from) {
+                    Ok(note) => {
+                        fresh.push(id.clone());
+                        notes.push(json!({"member":id,"note":format!("{error}; {note}")}));
+                    }
+                    Err(wait) => failed.push(json!({"member":id,"error":format!("{error}; {wait}")})),
+                },
+            }
+        }
+        ensure!(!moved.is_empty() || !fresh.is_empty(), format!("No member of team {} could move to account {to}", team.name));
+        fill_bulk_swap(&mut filled, &moved, &fresh, notes, failed, &to);
+    }
+    // Task 162: planning inside the approved goal is no card.
+    if op == "propose" {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        super::lead_plan::refuse_plan_card(&team, input)?;
+    }
+    if op == "use-last-reply" && text(input, "attempt").is_empty() {
+        // Without an attempt, the task's open one.
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
+        filled["attempt"] = json!(task.open_attempt().context("The task has no open attempt")?.id);
+    }
+    if op == "use-last-reply" && text(input, "text").trim().is_empty() {
+        // This reply becomes the report: the attempt keeps the reply
+        // that ended its turn (owner, 2026-11-07); an old record
+        // without it reads the member's session. Reading either is not
+        // part of the request's identity.
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
+        let attempt = task.attempts.iter().find(|a| a.id == text(&filled, "attempt")).context("Unknown attempt")?;
+        if !attempt.last_reply.trim().is_empty() {
+            filled["text"] = json!(attempt.last_reply);
+        } else {
+            let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
+            filled["text"] = json!(super::dispatcher::last_reply(&session)?);
+        }
+    }
+    if matches!(op, "plan" | "add-member" | "swap-member" | "draft") {
+        // An existing session must run here and be free of another
+        // active team; its own folder replaces the planned one (F8).
+        // A retry returns here before any listing (L4).
+        adopt_existing_sessions(&store, request, input, op, &mut filled)?;
+    }
+    // Section 9.2: a change that can bind a new session keeps the whole
+    // tree within its master's budget (extend binds none, and is
+    // checked for a tree already over it).
+    if matches!(op, "plan" | "approve" | "add-member" | "scale" | "swap-member" | "extend") {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        // Bounded: ancestors by id and children by id; a flat team
+        // reads nothing beyond the team itself.
+        let tree = tree_around(&team, &mut |id| store.load(id))?;
+        ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
+        if op == "add-member" {
+            // U32: a cap raise on the owner's word stays within the
+            // master's session budget.
+            filled["tree_sessions"] = json!(ops::root_of(&team, &tree).settings.tree_sessions);
+        }
+    }
+    if op == "archive" {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        ensure_children_closed(&store, &team)?;
+    }
+    // C6: a sub-team's plan and phases are decided by the parent lead,
+    // whose session is proven in the parent team, not in this one.
+    let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase" | "return-to-draft" | "reject-phase" | "undo-reject-phase") && {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        parent_lead_calls(&store, &team)?
+    };
+    if matches!(op, "approve" | "approve-phase") {
+        // F13: the lead approves only on the owner's exact sentence,
+        // typed in the lead's own session; the CLI checks it here and
+        // records the verified quote for the state machine and the feed.
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let caller = if parent_lead { Actor::ParentLead } else { actor(&team, op, &filled)? };
+        let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
+        if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
+            // U56/task #21: a refusal names the card this approval is.
+            let phase = (op == "approve-phase").then(|| input["phase"].as_u64().and_then(|n| u32::try_from(n).ok())).flatten();
+            let card = match phase {
+                Some(n) => format!("{{\"kind\":\"approve-phase\",\"phase\":{n},\"reason\":\"...\"}}"),
+                None => "{\"kind\":\"approve\",\"reason\":\"...\"}".to_owned(),
+            };
+            let word = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
+                format!("The lead approves only with the owner's approval: propose it, {card} | hgs team propose --json, and the owner allows it with a click")
+            })?;
+            let verified = super::owner_word::verify(&team, word, phase, super::super::now())?;
+            if let Some(used) = team.owner_word_used(verified.event) {
+                bail!("That word was already used for {used}; ask the owner again");
+            }
+            filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+            filled["owner_word_event"] = json!(verified.event);
+            filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
+        }
+    }
+    // U42 (#587): the lead discards an accepted phase, or returns one to
+    // a draft, on the owner's word naming the phase and the change; the
+    // CLI checks it here as it does for an approval.
+    // U63 (owner, 2026-10-31): so does the lead's edit, addition or
+    // move of an accepted phase, the removal of its own pause, who
+    // accepts a phase, and the owner's acceptance of one.
+    let phase_change = matches!(
+        op,
+        "discard-phase" | "return-to-draft" | "edit-draft" | "move-phase" | "unpause-phase" | "phase-acceptance" | "accept-phase"
+    ) || (op == "extend" && input.get("phase").is_some());
+    if phase_change && !parent_lead {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let caller = actor(&team, op, &filled)?;
+        check_phase_change_word(&team, op, input, &mut filled, &caller, super::owner_word::verify_phase_change)?;
+    }
+    // U26: a lead changes the roster (or max_members) only on the
+    // owner's fresh word, and only for the change that word names.
+    if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let caller = actor(&team, op, &filled)?;
+        let rule_agents = scratch_roster_agents(&store, &team)?;
+        check_roster_word(&team, op, input, &mut filled, &caller, rule_agents.as_deref(), |team, input, rule, now| {
+            super::owner_word::verify_roster(team, input, rule, now)
+        })?;
+    }
+    // U29: a task joins a running phase on the owner's word twice.
+    if op == "add-to-phase" {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        let caller = actor(&team, op, &filled)?;
+        check_phase_word(&team, input, &mut filled, &caller, super::owner_word::verify_phase)?;
+    }
+    // Task 209: a report that claims there is no context left while the
+    // meter says otherwise is not a report. The member hears the actual
+    // figure, its attempt stays open, and a compaction starts when the
+    // meter reached the threshold.
+    if op == "report" && filled["interim"].as_bool() != Some(true) {
+        match super::dispatcher::report_context_answer(&mut store, team_id, &filled) {
+            Ok(Some(answer)) => bail!("{answer}"),
+            Ok(None) => {}
+            // A sandboxed member's store is read-only: the worker
+            // answers the claim from its outbox instead.
+            Err(error) if read_only(&error) => {}
+            Err(error) => return Err(super::store::write_error(error)),
+        }
+    }
+    // N7: a replayed discard does not stop the lead's session twice.
+    let replayed = op == "draft"
+        && text(&filled, "action") == "discard"
+        && store.receipt(request, input)?.is_some();
+    // Task 287: a report's git reads run before the store's lock and are
+    // served inside it; task #362: a lead's use-last-reply reads the
+    // member's folder the same way.
+    // Task #41 (team ede724c4): an operation that runs the phase checks
+    // reads their Git prerequisites the same way.
+    let reporting = if (matches!(op, "report" | "use-last-reply") && !parent_lead) || ops::checks_phases(op) {
+        store.load(team_id).ok().flatten()
+    } else {
+        None
+    };
+    let prefetch = || {
+        if let Some(team) = reporting.as_ref() {
+            let caller = if parent_lead { Ok(Actor::ParentLead) } else { actor(team, op, &filled) };
+            if let Ok(caller) = caller {
+                ops::prefetch_git(team, op, &filled, &caller);
+            }
+        }
+    };
+    let mut receipt = match super::dispatcher::with_git_answers(prefetch, || store.mutate(Some((request, input)), team_id, revision, |team, events| {
+        let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
+        let before = team.clone();
+        let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
+        if rules_changed(&before, team, op) {
+            if let Some(word) = rules_word(&before, input, &actor)? {
+                team.record_owner_word(word.event, "the team's iron rules");
+            }
+            events.push(Event::new("iron_rules_changed", json!({"by":actor.label(team)})));
+        }
+        Ok(result)
+    })) {
+        Ok(receipt) => receipt,
+        Err(error) if queues_instead(op) && read_only(&error) => {
+            return queue_write(op, input, wait)
+        }
+        // Task #346: a call for the member's own scratch team queues too;
+        // a call outside that scope keeps the sandbox's error.
+        Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
+        Err(error) => return Err(super::store::write_error(error)),
+    };
+    // Task #364: a member's report names the folders it made for the
+    // attempt and left in place, asking it to remove them or say why.
+    if matches!(op, "report" | "use-last-reply") && receipt["status"] == "submitted" {
+        if let Ok(Some(team)) = store.load(team_id) {
+            let attempt = text(&filled, "attempt");
+            let found = team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| (found.member.clone(), found.sent_at));
+            if let Some((member, since)) = found.filter(|(member, _)| !member.is_empty()) {
+                let folder = team.member(&member).and_then(|found| super::dispatcher::member_folder_path(&team, found).ok()).unwrap_or_default();
+                let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder);
+                if note["folders"].as_array().is_some_and(|folders| !folders.is_empty()) {
+                    receipt["leftovers"] = note;
+                }
+            }
+        }
+    }
+    // N7: discarding a draft stops the lead's session when the owner
+    // asked for it (spec 3); a failure leaves the discard done and names
+    // it in the answer.
+    if op == "draft" && text(&filled, "action") == "discard" && receipt["stop_lead"].as_bool() == Some(true) && !replayed {
+        let team = store.load(team_id)?.context("Unknown team")?;
+        match team.member(&team.lead).and_then(|member| member.session.clone()) {
+            Some(session) => match stop_lead_session(&session) {
+                Ok(()) => receipt["lead_stopped"] = json!(true),
+                Err(error) => receipt["lead_stop_error"] = json!(format!("{error:#}")),
+            },
+            None => receipt["lead_stopped"] = json!(false),
+        }
+    }
+    if starts_worker(op) {
+        // The dispatcher runs while any team runs; it exits by itself.
+        if let Err(error) = super::dispatcher::ensure_worker() {
+            eprintln!("hgs: the team dispatcher did not start: {error}");
+        }
+    }
+    if receipt["status"] == "stale" {
+        bail!("This attempt is no longer current for task #{}; the report was not accepted", receipt["task"]);
+    }
+    // Task #228: a scratch team left running when its creating task is
+    // decided stops; the answer names any session it could not stop.
+    if matches!(op, "accept" | "reject" | "cancel") {
+        if let Some(task) = filled["task"].as_u64().and_then(|id| u32::try_from(id).ok()) {
+            if let Err(error) = close_scratch_teams(&mut store, team_id, task) {
+                receipt["scratch_error"] = json!(format!("{error:#}"));
+            }
+        }
+    }
+    // Sections 9.5 and 9.7: the tree reacts to a finished, rejected,
+    // paused, resumed or stopped team, and to a parent answer. N28: the
+    // change above is already stored, so a tree hook that fails says so
+    // in the receipt instead of turning the stored change into an error.
+    if op == "finish" {
+        if let Err(error) = file_subteam_report(&mut store, team_id) {
+            receipt["subteam_report_error"] = json!(format!("{error:#}"));
+        }
+    }
+    if op == "reject" {
+        if let Err(error) = reopen_rejected_subteam(&mut store, team_id, &filled) {
+            receipt["subteam_reopen_error"] = json!(format!("{error:#}"));
+        }
+    }
+    if matches!(op, "cancel" | "reassign") {
+        // C5: the sub-team stops only once the cancel or reassign
+        // itself went through for its caller.
+        let team = store.load(team_id)?.context("Unknown team")?;
+        if let Err(error) = choose_subteam(&mut store, &team, &filled) {
+            receipt["subteam_error"] = json!(format!("{error:#}"));
+        }
+    }
+    if matches!(op, "pause" | "resume" | "stop") {
+        if let Err(error) = cascade_status(&mut store, team_id, op, 0) {
+            receipt["cascade_error"] = json!(format!("{error:#}"));
+        }
+    }
+    if op == "reply" {
+        if let Err(error) = route_reply_down(&mut store, team_id, &filled) {
+            receipt["reply_down_error"] = json!(format!("{error:#}"));
+        }
+    }
+    Ok(receipt)
 }
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {

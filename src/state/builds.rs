@@ -1305,6 +1305,10 @@ pub(crate) mod tests {
     fn hgs_runs_as_codex_sandbox_user_and_the_owners_config_stays_private() {
         let Some(codex) = crate::platform::which("codex") else { return };
         let workspace = tempfile::tempdir().unwrap();
+        // Task #45 (team ede724c4): Codex's workspace profile makes TEMP
+        // writable and grants CodexSandboxUsers Modify on it. With the
+        // runner's TEMP that grant stayed on a template run's temp folder;
+        // here it lands in the workspace, which is removed with it.
         let output = Command::new(codex)
             .args(["sandbox", "-P", ":workspace", "-C"])
             .arg(workspace.path())
@@ -1312,6 +1316,8 @@ pub(crate) mod tests {
             .arg(std::env::current_exe().unwrap())
             .args(["state::builds::tests::codex_sandbox_helper", "--exact", "--nocapture", "--test-threads=1"])
             .env("HGS_TEST_CODEX_HELPER", "1")
+            .env("TEMP", workspace.path())
+            .env("TMP", workspace.path())
             .stdin(Stdio::null())
             .output()
             .unwrap();

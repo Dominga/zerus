@@ -1,7 +1,11 @@
 use super::*;
 
+/// The ordinary read's deadline. Fork Windows build #158 ran the isolated
+/// `missing` probe past 2 s on a loaded runner ("coverage is unavailable"
+/// right after an empty folder was made); the cases that test the deadline
+/// pass their own 100 ms one.
 fn until() -> Instant {
-    Instant::now() + Duration::from_secs(2)
+    Instant::now() + Duration::from_secs(60)
 }
 fn record(id: &str, folder: &Path) -> Value {
     json!({"version":1,"archive_id":id,"agent":"codex","name":"codex/p/original",

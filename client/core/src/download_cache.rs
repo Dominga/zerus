@@ -2,16 +2,17 @@
 //! folder Download and open saves into, a verified copy found again by its
 //! source, and the least recently used copies removed past a size limit.
 //!
-//! The folder (by default `<Downloads>/Zerus Files`) is shared with the Qt
-//! client by design, so its formats are Qt's byte for byte: the index
-//! `.zerus-files.json` (version 1), in-progress `.zerus-part-*` files, and
-//! the `.zerus-files.lock` QLockFile ([`crate::qt_lock`]) that serializes
-//! every change across both apps. The index is written atomically (a temporary
+//! The folder (by default `<Downloads>/Zerus Files`) keeps the formats the
+//! Qt client defined, byte for byte: the index `.zerus-files.json` (version
+//! 1), in-progress `.zerus-part-*` files, and the `.zerus-files.lock`
+//! QLockFile ([`crate::qt_lock`]) that serializes every change across the
+//! processes that change it (the workspace and the desktop service's cache
+//! maintenance). The index is written atomically (a temporary
 //! file, then a rename); an index that cannot be read, is too large, a link
 //! or of another version is never rewritten, trimmed or removed from.
 //!
 //! File-system operations block; callers run them off the UI thread. The pure
-//! index decoder is also reused by read-only migration. No global state is kept.
+//! index decoder is also used by the cache maintenance. No global state is kept.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

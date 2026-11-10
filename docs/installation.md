@@ -25,8 +25,8 @@ native agents as part of a Zerus GUI/package update.
 For the Linux desktop: Rust, Node.js/npm, GTK3, WebKitGTK 4.1, ALSA and
 GStreamer. The source installer and AUR packages build Zerus Next by default;
 standard autostart uses user systemd. Linux/macOS Qt builds and explicit Qt
-installer selections are retired. Existing Qt state remains read-only migration
-input; do not delete it. The Mac source route builds Next on macOS 14 or later.
+installer selections are retired. Zerus no longer reads existing Qt state; it stays
+on disk untouched (reference, First start without Qt data); do not delete it. The Mac source route builds Next on macOS 14 or later.
 
 ## Local installation
 

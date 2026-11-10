@@ -1296,6 +1296,28 @@ that flag. `--bare` checks the native Codex and omits the flag for an older rele
 
 ## Desktop workspace
 
+### First start without Qt data
+
+Zerus reads no data of the retired Qt client. An installation that still has
+Qt's settings, drafts, run groups, organization, private-store notices, WSL
+presets or task forms starts with Zerus's own defaults: nothing is imported or
+seeded from them, and Qt's files stay on disk exactly as they were, never read,
+changed or removed. Zerus's own stores (`settings.json`, the drafts store,
+`organization-layout.json` and the rest) load as before. A `settings.json` or
+layout written while Qt data was still imported keeps the records of that import
+as extension fields, so nothing in it is lost.
+
+Two Qt-era formats remain because live code needs them:
+- The downloads folder (`Zerus Files`) is locked with `.zerus-files.lock` in Qt's
+  QLockFile format (`client/core/src/qt_lock.rs`). The workspace and the desktop
+  service's cache maintenance both change the folder and serialize on that lock.
+- The desktop service still reads an earlier switch's handoff marker
+  (`<state>/desktop/handoff-v1.json`). While it is not revoked, the desktop epoch
+  owns presence and the legacy CLI presence writer stays fenced. Ownership,
+  startup, Windows registration and `hgs desktop revoke` read it the same way.
+  Zerus no longer writes a new marker; `hgs desktop revoke` only marks an
+  existing one revoked.
+
 The tray's **Open Zerus**, a left click or `hgs-tray --sessions` opens the workspace.
 On macOS, use `~/Applications/hgs-tray.app/Contents/MacOS/hgs-tray --sessions`.
 On Windows, starting `hgs-tray.exe` without options opens it too; `--background`

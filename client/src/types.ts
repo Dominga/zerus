@@ -173,7 +173,7 @@ export interface KeyOut { computer: ComputerId; key: string; reason?: string | n
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
 export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "reconnecting" | "ended";
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
-export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
+export type ActivityKind = "events" | "replace" | "older" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
 /** The existing watch tasks topic; a list replaces the open project's board. */
 export interface TasksOut { computer: ComputerId; key: string; kind: string; payload: unknown }

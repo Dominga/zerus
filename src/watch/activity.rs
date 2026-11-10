@@ -38,6 +38,9 @@ pub(super) struct Subscription {
     pub more: bool,
     /// Frames were dropped: send `gap` and a tail snapshot once drained.
     pub resync: Option<&'static str>,
+    /// The first frames are still owed after a failed inspection: the cursor
+    /// to read after, when to read again and the wait that led there.
+    pub start: Option<(i64, Instant, std::time::Duration)>,
     /// The catalog listed the key at least once.
     pub listed: bool,
     /// The digest of the session's catalog row when last seen.
@@ -69,6 +72,7 @@ impl Subscription {
             busy: false,
             more: false,
             resync: None,
+            start: None,
             listed: false,
             row: None,
             journal: None,

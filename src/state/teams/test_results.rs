@@ -241,7 +241,13 @@ pub(crate) fn settle(team: &mut Team, action: &str, input: &Value, now: f64) -> 
 /// Task #401: more changed files than this, and a report gets the counts only.
 pub(crate) const DELTA_FILES: usize = 200;
 /// Task #401: a delta that already took this long reads no old contents.
+/// Task #44 (team ede724c4): under tests at least a minute, which a machine
+/// busy with parallel builds fits: the first git diff alone used the 5 s up
+/// and the report came back in its bounded form.
+#[cfg(not(test))]
 const DELTA_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const DELTA_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// #718: the test lines and test functions a report's change adds and
 /// removes, from its folder's diff against `base`. Test files are the

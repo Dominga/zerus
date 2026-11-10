@@ -350,20 +350,26 @@ fn thousands_of_tasks_compute_in_bounded_pages_and_time() {
     let journal: Vec<Journal> = (0..EVENT_LIMIT)
         .map(|n| entry(n as f64 * 6.0, if n % 2 == 0 { "question_forwarded" } else { "permission_answered" }, json!({"member":"Other"})))
         .collect();
-    let started = std::time::Instant::now();
-    let mut seen = 0;
-    for page in team.tasks.chunks(TASK_PAGE) {
-        let chosen: Vec<&Task> = page.iter().collect();
-        assert!(window(&team, &chosen, 40_000.0).is_some());
-        let holders = holders(&team, 40_000.0);
-        for task in chosen {
-            let value = spans(&team, task, &journal, &holders, 40_000.0);
-            assert!(value["spans"].as_array().unwrap().len() <= 16, "{value}");
-            seen += 1;
+    // Task #44 (team ede724c4): the bound is the work, as a multiple of this
+    // machine's reference work measured beside it; a fixed 20 s failed at
+    // 31 s on a loaded machine. This work takes 37 to 48 references here
+    // (2026-11-10, loaded and not); 500 keeps a tenfold margin, and work that
+    // grew by a factor of ten fails on any machine.
+    let seen = crate::state::within_reference(500, "3000 tasks' spans", || {
+        let mut seen = 0;
+        for page in team.tasks.chunks(TASK_PAGE) {
+            let chosen: Vec<&Task> = page.iter().collect();
+            assert!(window(&team, &chosen, 40_000.0).is_some());
+            let holders = holders(&team, 40_000.0);
+            for task in chosen {
+                let value = spans(&team, task, &journal, &holders, 40_000.0);
+                assert!(value["spans"].as_array().unwrap().len() <= 16, "{value}");
+                seen += 1;
+            }
         }
-    }
+        seen
+    });
     assert_eq!(seen, 3000);
-    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }
 
 #[test]

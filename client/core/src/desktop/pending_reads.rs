@@ -71,7 +71,7 @@ impl Capture {
         if bytes.len() > SOURCE_BYTES {
             return Err("pending_read_source_too_large");
         }
-        let stream = crate::migration::sources::next_pending_reads(bytes)
+        let stream = crate::next_source::next_pending_reads(bytes)
             .map_err(|_| "invalid_pending_read_source")?;
         let mut marks = Vec::new();
         for page in stream.into_chunks() {

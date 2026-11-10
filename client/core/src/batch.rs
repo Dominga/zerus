@@ -450,6 +450,7 @@ impl Coalescer {
             for mut update in updates {
                 match &mut update {
                     ActivityUpdate::Events { events, .. }
+                    | ActivityUpdate::Older { events, .. }
                     | ActivityUpdate::Replace { events, .. } => {
                         for event in events {
                             self.posters.strip(&id.0, &id.1, event);
@@ -558,6 +559,7 @@ impl Coalescer {
                 .flatten()
                 .map(|update| match update {
                     ActivityUpdate::Events { events, .. }
+                    | ActivityUpdate::Older { events, .. }
                     | ActivityUpdate::Replace { events, .. } => events.len().max(1),
                     _ => 1,
                 })
@@ -605,6 +607,9 @@ fn fold(list: &mut Vec<ActivityUpdate>, update: ActivityUpdate) {
             list.clear();
             list.push(ActivityUpdate::Ended);
         }
+        // A page answers one read; it neither merges nor is dropped by the
+        // live window's folding, and keeps its place among the entries.
+        ActivityUpdate::Older { .. } => list.push(update),
         ActivityUpdate::Replace { .. } => {
             let mut index = start;
             while index < list.len() {
@@ -705,6 +710,15 @@ fn out(update: ActivityUpdate) -> (&'static str, Value) {
         ActivityUpdate::Replace { events, cursor } => {
             ("replace", json!({"events": events, "cursor": cursor}))
         }
+        ActivityUpdate::Older {
+            events,
+            cursor,
+            last,
+            more,
+        } => (
+            "older",
+            json!({"events": events, "cursor": cursor, "last": last, "more": more}),
+        ),
         ActivityUpdate::Event { id, rev, event } => {
             ("event", json!({"id": id, "rev": rev, "event": event}))
         }
@@ -1006,6 +1020,31 @@ mod tests {
             batch.activity[0].payload,
             json!({"events": [{"seq": 10}, {"seq": 11}], "cursor": 11})
         );
+    }
+
+    #[test]
+    fn older_pages_are_never_merged_and_keep_their_order() {
+        let page = |seq: i64, last: bool| ActivityUpdate::Older {
+            events: vec![json!({"seq": seq})],
+            cursor: seq,
+            last,
+            more: last,
+        };
+        let mut coalescer = Coalescer::new();
+        coalescer.push(activity("run:a", page(5, false)));
+        coalescer.push(activity("run:a", events(20..22)));
+        coalescer.push(activity("run:a", page(2, true)));
+        coalescer.push(activity("run:a", events(22..23)));
+        let batch = coalescer.take();
+        assert_eq!(
+            kinds(&batch),
+            vec![("run:a", "older"), ("run:a", "events"), ("run:a", "older")]
+        );
+        assert_eq!(
+            batch.activity[2].payload,
+            json!({"events": [{"seq": 2}], "cursor": 2, "last": true, "more": true})
+        );
+        assert_eq!(batch.activity[1].payload["events"].as_array().unwrap().len(), 3);
     }
 
     #[test]

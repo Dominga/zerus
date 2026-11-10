@@ -14,6 +14,11 @@ use std::time::{Duration, Instant, SystemTime};
 #[allow(dead_code)]
 mod picker_scope;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn picker_custodian_entry() -> Result<i32> {
+    picker_scope::custodian_entry()
+}
+
 const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const LEVELS: &[&str] = &[
     "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",

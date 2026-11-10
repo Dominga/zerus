@@ -7,6 +7,8 @@ use std::{
 };
 use zerus_client_core::run::{writer_custody::Failure, GuardedChild};
 
+mod host_exit;
+
 #[test]
 fn owned_picker_scope_returns_only_after_original_helper_and_all_pipe_joins() {
     each("helper:success");
@@ -42,7 +44,10 @@ fn until() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
-fn await_peer(listener: &UnixListener, deadline: Instant) -> UnixStream {
+pub(in crate::state::effort::picker_scope) fn await_peer(
+    listener: &UnixListener,
+    deadline: Instant,
+) -> UnixStream {
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -62,7 +67,11 @@ fn await_peer(listener: &UnixListener, deadline: Instant) -> UnixStream {
     }
 }
 
-fn child(mode: &str, socket: &Path, effect: &Path) -> std::process::Child {
+pub(in crate::state::effort::picker_scope) fn child(
+    mode: &str,
+    socket: &Path,
+    effect: &Path,
+) -> std::process::Child {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .env_clear()

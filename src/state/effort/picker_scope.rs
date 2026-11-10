@@ -18,6 +18,13 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod helper;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod host;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn custodian_entry() -> Result<i32> {
+    host::entry()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Receipts {
@@ -167,6 +174,9 @@ pub(super) struct Scope<'a> {
     until: Instant,
     may_have_sent: bool,
     refused: Option<String>,
+    // LAST: its completion is sent only after every original above is dropped.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    host: Option<host::Hold>,
 }
 
 enum Writer<'a> {
@@ -243,6 +253,8 @@ impl<'a> Scope<'a> {
             until,
             may_have_sent: false,
             refused: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            host: None,
         };
         scope.current()?;
         Ok(scope)
@@ -251,6 +263,10 @@ impl<'a> Scope<'a> {
     fn current(&self) -> Result<Value> {
         if let Some(error) = &self.refused {
             return Err(error.clone());
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = &self.host {
+            host.check()?;
         }
         check_time(self.until)?;
         for directory in [&self.state, &self.sessions, &self.inputs, &self.receipts] {
@@ -274,6 +290,10 @@ impl<'a> Scope<'a> {
             return Err("The original picker binding changed".into());
         }
         check_time(self.until)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = &self.host {
+            host.check()?;
+        }
         Ok(record)
     }
 

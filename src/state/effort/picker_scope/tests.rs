@@ -8,7 +8,7 @@ use std::{
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod helper;
+pub(in crate::state::effort::picker_scope) mod helper;
 
 fn control(case: &str) {
     let private = tempfile::tempdir().unwrap();
@@ -141,7 +141,7 @@ fn record() -> Value {
         "future":{"opaque":[1,2,3]},"model":"before"})
 }
 
-fn setup(kind: &str) -> (Guard, Value) {
+pub(in crate::state::effort::picker_scope) fn setup(kind: &str) -> (Guard, Value) {
     let writer = lock(None).unwrap();
     for name in ["sessions", "effort_receipts", "settings_receipts"] {
         private_dir(&root().join(name)).unwrap();
@@ -162,7 +162,7 @@ fn setup(kind: &str) -> (Guard, Value) {
     (writer, record)
 }
 
-fn input(record: &Value) -> File {
+pub(in crate::state::effort::picker_scope) fn input(record: &Value) -> File {
     fs::OpenOptions::new()
         .read(true)
         .write(true)

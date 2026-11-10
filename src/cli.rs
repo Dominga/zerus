@@ -643,6 +643,16 @@ pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
 }
 
 fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
+    // This self-image owner inherits the original caller's already-selected
+    // executable search/locale context. Repeating prepare_environment would
+    // prepend PATH again before its exact context check. The shared state
+    // entry still rejects extra argv and validates inherited objects/frame
+    // before Root; no ordinary command or Windows control lane changes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.first().map(String::as_str)==Some("__state")
+        && args.get(1).map(String::as_str)==Some("native-picker-custodian-v1") {
+        return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
+    }
     if crate::desktop::launchd_command(&args) {
         args.pop();
         return dispatch(args).map_err(|mut error| {

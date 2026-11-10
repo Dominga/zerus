@@ -34,6 +34,14 @@ impl Prepared {
         until: Instant,
     ) -> Result<Self> {
         let scope = Scope::owned(writer, expected, receipts, until)?;
+        Self::from_scope(scope)
+    }
+
+    /// The fixed host already owns this same Scope; never acquire another
+    /// Root or SID exclusion while transferring its operation to a helper.
+    pub(super) fn from_scope(scope: Scope<'static>) -> Result<Self> {
+        scope.current()?;
+        let until = scope.until;
         let source = Arc::new(Mutex::new(scope));
         let admission = Admission::reserve(source.clone(), until)
             .map_err(|failure| format!("Original picker helper custody refused: {failure:?}"))?;

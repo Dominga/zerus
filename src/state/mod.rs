@@ -1153,6 +1153,14 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    // Fixed self-image owner, before any provider lookup or local writer. Its
+    // inherited endpoint/frame are synchronization and cancellation only; the
+    // dormant Effort/Settings operation remains explicitly unadmitted.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
+        if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}
+        return effort::picker_custodian_entry();
+    }
     // Receipt observation needs neither a native host nor a state writer.
     if args.first().map(String::as_str)==Some("session-action-status") { return session_action::status_dispatch(&args[1..]); }
     // Coordination metadata never starts or controls a native session host.

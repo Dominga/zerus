@@ -7264,7 +7264,50 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
         Err((_, error)) => return Some(step(&head, "refused", format!("the folder's changes were not read: {error}"))),
     }
     let short = |commit: &str| commit.chars().take(9).collect::<String>();
+    // A merge into the member's branch: done, or the step that refuses (or is
+    // uncertain) with the conflicting files and the folder put back.
+    let merge = |rev: &str, message: &str, what: &str, merged: &[String]| -> std::result::Result<(), PrepareStep> {
+        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
+        // queue, this path passes the driver rather than trusting repo config.
+        let driver = super::merge_queue::i18n_driver_config();
+        let Err((timed_out, error)) = git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", message, rev]) else {
+            return Ok(());
+        };
+        let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
+        let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
+        let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
+        let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
+        let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
+        Err(if timed_out || !restored {
+            step(&head, "uncertain", format!("{what} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge"))
+        } else {
+            step(&head, "refused", format!(
+                "{what} {why}. Zerus put the folder back{earlier}; merge it into the member's branch ({folder}) and resolve it, or reassign the task, then retry"
+            ))
+        })
+    };
     let mut merged = Vec::new();
+    // Task #15 (team ede724c4, lead of team 2b863c49, 2026-11-10): when the
+    // team has a line (its base branch, or the lead's branch), a branch that
+    // lacks accepted work is brought up to the line's head first. The lead
+    // resolves the predecessors' conflicts there once; merging them commit by
+    // commit met the same conflict again in every folder that lacked one.
+    let missing = wanted.iter().any(|work| git_bounded(&folder, &["merge-base", "--is-ancestor", &work.commit, "HEAD"]).is_err());
+    let line = if missing { dependency_line(team, &folder) } else { None };
+    if let Some((base, line_head)) = &line {
+        match git_bounded(&folder, &["merge-base", "--is-ancestor", line_head, "HEAD"]) {
+            Ok(_) => {}
+            Err((true, error)) => return Some(step(&head, "uncertain", error)),
+            Err((false, _)) => {
+                let message = format!("Merge the line {base} ({}) before task #{task_id}", short(line_head));
+                if let Err(refused) = merge(line_head, &message, &format!("The line {base} ({})", short(line_head)), &merged) {
+                    return Some(refused);
+                }
+                merged.push(format!("the line {base} ({})", short(line_head)));
+            }
+        }
+    }
     for work in &wanted {
         let object = format!("{}^{{commit}}", work.commit);
         if git_bounded(&folder, &["cat-file", "-e", &object]).is_err() {
@@ -7294,39 +7337,48 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             Err((true, error)) => return Some(step(&head, "uncertain", error)),
             Err((false, _)) => {}
         }
-        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
-        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
-        // queue, this path passes the driver rather than trusting repo config.
-        let driver = super::merge_queue::i18n_driver_config();
-        match git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
-            Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
-            Err((timed_out, error)) => {
-                let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-                let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
-                let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
-                let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
-                let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
-                let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
-                return Some(if timed_out || !restored {
-                    step(&head, "uncertain", format!(
-                        "#{}'s accepted commit {} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge",
-                        work.task, short(&work.commit)
-                    ))
-                } else {
-                    step(&head, "refused", format!(
-                        "#{}'s accepted commit {} {why}. Zerus put the folder back{earlier}; merge it into the member's branch \
-                         ({folder}) and resolve it, or reassign the task, then retry",
-                        work.task, short(&work.commit)
-                    ))
-                });
+        // Task #15: a predecessor the line holds as an equivalent commit (a
+        // cherry-pick or a rebase of it) is on the line already.
+        if let Some((_, line_head)) = &line {
+            let cherry = git_bounded(&folder, &["cherry", line_head, &work.commit, &format!("{}^", work.commit)]).unwrap_or_default();
+            if !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with('-')) {
+                continue;
             }
         }
+        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
+        if let Err(refused) = merge(&work.commit, &message, &format!("#{}'s accepted commit {}", work.task, short(&work.commit)), &merged) {
+            return Some(refused);
+        }
+        merged.push(format!("#{} ({})", work.task, short(&work.commit)));
     }
     Some(if merged.is_empty() {
         step(&head, "skipped", format!("the branch holds the accepted work of {names} already"))
     } else {
         step(&head, "done", format!("merged {}", merged.join(", ")))
     })
+}
+
+/// Task #15 (team ede724c4): the line a hand-out brings a member's branch up
+/// to, as (branch, head commit) in the member's `folder`: the team's base
+/// branch, else the lead's branch. Its head is fetched from the team's folder
+/// (a separate clone has it only if it fetched it, as `prepare_branch` does);
+/// without that the folder's own branch of that name. None when the team
+/// names no line or it is not read.
+fn dependency_line(team: &Team, folder: &str) -> Option<(String, String)> {
+    let base = match team.settings.base_branch.trim() {
+        "" => lead_branch(team).ok()?,
+        named => named.to_owned(),
+    };
+    if base.is_empty() || base == "HEAD" || base.starts_with('-') {
+        return None;
+    }
+    let source = team.integration_folder();
+    if !source.trim().is_empty() && git_bounded(folder, &["fetch", "--no-tags", "--quiet", source, &base]).is_ok() {
+        if let Ok(head) = git_bounded(folder, &["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]) {
+            return Some((base, head));
+        }
+    }
+    git_bounded(folder, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]).ok().map(|head| (base, head))
 }
 
 /// Spec 0: a refused or unconfirmed step before a hand-out leaves the task

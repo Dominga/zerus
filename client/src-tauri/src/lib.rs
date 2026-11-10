@@ -74,6 +74,7 @@ mod login_item;
 mod macos_notification_diagnostics;
 mod metrics;
 mod sandbox;
+mod system_language;
 
 /// Task 75: why this process is a sandbox, None on a normal desktop.
 #[tauri::command]
@@ -104,6 +105,12 @@ fn system_locale() -> String {
         }
     }
     String::new()
+}
+
+/// The OS display language is separate from its regional formatting locale.
+#[tauri::command]
+fn system_ui_language() -> String {
+    system_language::read()
 }
 
 /// Task #247: Qt's `sandbox-folder grant FOLDER --json [--elevated]` for the
@@ -1830,6 +1837,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::start,
         app_quit,
         system_locale,
+        system_ui_language,
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
@@ -2296,6 +2304,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::start,
         app_quit,
         system_locale,
+        system_ui_language,
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,

@@ -74,11 +74,12 @@ before planning starts. Choose a chapter, search the full text, or follow
 Previous and Next. The guide includes example lineups, folder policies, the
 build broker, tests, memory and the profiler. Reading it creates no team.
 
-The guide follows the operating system locale independently of the saved
-interface language: Russian locales use Russian; English and other locales
-use English. Windows uses the native regional locale instead of WebView2's
-language. Other hosts use the webview's system language when no native locale
-is available. Both documents are bundled for offline reading. A virtual
+The guide follows the operating system's display language independently of
+the saved interface language and regional number/date formats: Russian uses
+Russian; English and other languages use English. It reads the native user UI
+language on Windows, preferred languages on macOS and message languages on
+Linux, with the webview's language as a fallback. Both documents are bundled
+for offline reading. A virtual
 cookie for the lead produces a small joke inside the reader.
 
 ### 1. New team

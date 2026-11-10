@@ -61,13 +61,13 @@ try {
   await send("Page.enable");
   await send("Runtime.enable");
   for (const sample of [
-    { name: "english-dark", locale: "en-US", lang: "en", skin: "whitewh-dark", width: 1440, height: 1000 },
-    { name: "russian-dark", locale: "ru-RU", lang: "ru", skin: "whitewh-dark", width: 1440, height: 1000 },
-    { name: "english-light", locale: "en-GB", lang: "en", skin: "whitewh-light", width: 1280, height: 900 },
-    { name: "russian-narrow", locale: "ru-RU", lang: "ru", skin: "whitewh-light", width: 520, height: 850 },
+    { name: "english-dark", language: "en-US", region: "ru-RU", lang: "en", skin: "whitewh-dark", width: 1440, height: 1000 },
+    { name: "russian-dark", language: "ru-RU", region: "en-US", lang: "ru", skin: "whitewh-dark", width: 1440, height: 1000 },
+    { name: "english-light", language: "en-GB", lang: "en", skin: "whitewh-light", width: 1280, height: 900 },
+    { name: "russian-narrow", language: "ru-RU", lang: "ru", skin: "whitewh-light", width: 520, height: 850 },
   ]) {
     await send("Emulation.setDeviceMetricsOverride", { width: sample.width, height: sample.height, deviceScaleFactor: 1, mobile: false });
-    await send("Page.navigate", { url: `http://127.0.0.1:${port}/scripts/new-team-smoke.html?case=new&locale=${sample.locale}&skin=${sample.skin}` });
+    await send("Page.navigate", { url: `http://127.0.0.1:${port}/scripts/new-team-smoke.html?case=new&language=${sample.language}&region=${sample.region ?? "en-US"}&skin=${sample.skin}` });
     await wait("document.title.endsWith(': ready') && document.querySelectorAll('.tg-inline [data-guide-chapter]').length === 11");
     assert.equal(await evaluate("document.querySelector('.tg-inline').lang"), sample.lang);
     assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true, "no window overflow");

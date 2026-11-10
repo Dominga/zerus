@@ -137,6 +137,8 @@ export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_che
 export const quitApp = () => inTauri() ? invoke<void>("app_quit") : Promise.resolve();
 /** Task #323: the Windows regional format, so usage numbers group as Qt's QLocale::system. */
 export const systemLocale = () => inTauri() ? invoke<string>("system_locale") : Promise.resolve("");
+/** The OS display language, independent of regional formatting. */
+export const systemLanguage = () => inTauri() ? invoke<string>("system_ui_language") : Promise.resolve("");
 /** Task #247: Qt's `hgs sandbox-folder grant FOLDER --json [--elevated]` (creation panel, Fix folder rights). */
 export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
   inTauri() ? invoke<{ ok: boolean; error?: string; receipt?: unknown }>("sandbox_folder_grant", { folder, elevated })

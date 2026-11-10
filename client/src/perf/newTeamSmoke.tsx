@@ -30,8 +30,9 @@ import "../ui/styles/newteam.css";
 import "../ui/styles/client.css";
 import { render } from "solid-js/web";
 import { Show } from "solid-js";
-import { setTeamHelpLocale, teamHelpOpen } from "../store/teamHelp";
+import { setTeamHelpSystemLanguage, teamHelpOpen } from "../store/teamHelp";
 import { TeamHelpDialog } from "../ui/teams/TeamHelpDialog";
+import { setSystemLocale } from "../ui/sessions/usage-number";
 import { NewTeam } from "../ui/teams/NewTeam";
 import { createNewTeam } from "../store/teamsNew";
 import { catalogOf } from "../store/newTeamSources";
@@ -79,7 +80,8 @@ const draftView: NewTeamView = {
 
 async function run() {
   await document.fonts.ready;
-  setTeamHelpLocale(query.get("locale") ?? "en-US");
+  setTeamHelpSystemLanguage(query.get("language") ?? "en-US");
+  setSystemLocale(query.get("region") ?? "en-US");
   applySkin(skin());
   void setSetting("teams/templateFavourites", ["audit"]);
   const kind = query.get("case") ?? "new";

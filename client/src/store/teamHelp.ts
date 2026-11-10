@@ -2,9 +2,9 @@ import { createSignal } from "solid-js";
 
 export type HelpLanguage = "en" | "ru";
 
-/** Native OS locale wins over WebView2's language and the saved UI language. */
-export function guideLanguage(locale: string, browserLocale = "en"): HelpLanguage {
-  return /^ru(?:[-_@.]|$)/i.test((locale.trim() || browserLocale).trim()) ? "ru" : "en";
+/** Native display language wins over the WebView fallback; regional formats are not an input. */
+export function guideLanguage(systemLanguage: string, browserLanguage = "en"): HelpLanguage {
+  return /^ru(?:[-_@.]|$)/i.test((systemLanguage.trim() || browserLanguage).trim()) ? "ru" : "en";
 }
 
 const browserLocale = () => typeof navigator === "undefined" ? "en" : navigator.language;
@@ -14,7 +14,7 @@ let returnFocus: HTMLElement | undefined;
 
 export const teamHelpLanguage = language;
 export const teamHelpOpen = opened;
-export const setTeamHelpLocale = (locale: string) => setLanguage(guideLanguage(locale, browserLocale()));
+export const setTeamHelpSystemLanguage = (systemLanguage: string) => setLanguage(guideLanguage(systemLanguage, browserLocale()));
 export function openTeamHelp() {
   if (opened()) return;
   returnFocus = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : undefined;

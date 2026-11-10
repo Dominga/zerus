@@ -1,17 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { guideLanguage } from "../../../store/teamHelp";
+import { guideLanguage, setTeamHelpSystemLanguage, teamHelpLanguage } from "../../../store/teamHelp";
+import { numberText, setSystemLocale } from "../../sessions/usage-number";
 import { CHAPTERS, findChapters, splitGuide } from "./guide";
 import en from "./team-guide.en.md?raw";
 import ru from "./team-guide.ru.md?raw";
 import { resolveIcon } from "../../lib/icons";
 
-describe("the team's OS-localized guide", () => {
+describe("the team's system-language guide", () => {
   it.each([
     ["ru-RU", "en-US", "ru"], ["RU_ru.UTF-8", "en", "ru"], ["ru", "en", "ru"],
     ["en-GB", "ru-RU", "en"], ["", "ru-KZ", "ru"], ["", "en-US", "en"],
     ["de-DE", "ru-RU", "en"], ["russian", "en", "en"],
-  ])("uses OS %s before WebView %s", (os, browser, expected) => {
+  ])("uses display language %s before WebView %s", (os, browser, expected) => {
     expect(guideLanguage(os, browser)).toBe(expected);
+  });
+
+  it.each([
+    ["en-US", "ru-RU", "en"],
+    ["ru-RU", "en-US", "ru"],
+  ])("keeps display language %s separate from regional format %s", (display, region, expected) => {
+    try {
+      setSystemLocale(region);
+      setTeamHelpSystemLanguage(display);
+      expect(teamHelpLanguage()).toBe(expected);
+      expect(numberText(1234)).toBe(new Intl.NumberFormat(region).format(1234));
+    } finally {
+      setSystemLocale("");
+      setTeamHelpSystemLanguage("");
+    }
   });
 
   it("keeps the full approved document in matching translated chapters", () => {

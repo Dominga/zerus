@@ -27,15 +27,18 @@ import { startMotion } from "./ui/motion";
 import { platform } from "./store/shortcuts";
 import { loadMarkdown } from "./ui/sessions/markdown";
 import { startWindowTheme } from "./skin/window";
-import { systemLocale } from "./bridge";
+import { systemLocale, systemLanguage } from "./bridge";
 import { setSystemLocale } from "./ui/sessions/usage-number";
-import { setTeamHelpLocale } from "./store/teamHelp";
+import { setTeamHelpSystemLanguage } from "./store/teamHelp";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 // Task #323: the owner's regional format decides how usage numbers group.
-const osLocale = await systemLocale().catch(() => "");
+const [osLocale, osLanguage] = await Promise.all([
+  systemLocale().catch(() => ""),
+  systemLanguage().catch(() => ""),
+]);
 setSystemLocale(osLocale);
-setTeamHelpLocale(osLocale);
+setTeamHelpSystemLanguage(osLanguage);
 
 // The motion and platform attributes are on the root before the first frame.
 document.documentElement.dataset.platform = platform;

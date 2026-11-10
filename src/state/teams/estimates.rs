@@ -257,7 +257,74 @@ pub(crate) fn estimate_from(history: &History, team: &Team, task: &Task) -> Esti
     Estimate { minutes: None, source: "none" }
 }
 
-/// The minutes a running task has spent
+/// Task #5 (team ede724c4): `estimate_from` for many tasks against one
+/// history: the entries are grouped once by role and by role, agent and
+/// effort (case-insensitive, as `estimate_from` compares them) and each
+/// group's median is taken once, instead of filtering and sorting up to
+/// `MAX_ENTRIES` entries for every task.
+pub(crate) struct Estimator {
+    by_role: std::collections::HashMap<String, Option<f64>>,
+    by_traits: std::collections::HashMap<(String, String, String), Option<f64>>,
+    all: Option<f64>,
+}
+
+impl Estimator {
+    pub(crate) fn new(history: &History) -> Self {
+        let mut roles: std::collections::HashMap<String, Vec<&Entry>> = std::collections::HashMap::new();
+        let mut traits: std::collections::HashMap<(String, String, String), Vec<&Entry>> = std::collections::HashMap::new();
+        for entry in &history.entries {
+            let role = entry.role.to_ascii_lowercase();
+            traits.entry((role.clone(), entry.agent.to_ascii_lowercase(), entry.effort.to_ascii_lowercase())).or_default().push(entry);
+            roles.entry(role).or_default().push(entry);
+        }
+        Self {
+            by_role: roles.into_iter().map(|(key, entries)| (key, median(entries.into_iter()))).collect(),
+            by_traits: traits.into_iter().map(|(key, entries)| (key, median(entries.into_iter()))).collect(),
+            all: median(history.entries.iter()),
+        }
+    }
+
+    /// The same answer as `estimate_from` for this history.
+    pub(crate) fn estimate(&self, team: &Team, task: &Task) -> Estimate {
+        if let Some(minutes) = task.estimate_minutes {
+            return Estimate { minutes: Some(minutes), source: "lead" };
+        }
+        let role = role_of(team, task);
+        if !role.is_empty() {
+            let (agent, _model, effort) = traits_of(team, task);
+            let role = role.to_ascii_lowercase();
+            let key = (role.clone(), agent.to_ascii_lowercase(), effort.to_ascii_lowercase());
+            if let Some(Some(minutes)) = self.by_traits.get(&key) {
+                return Estimate { minutes: Some(*minutes), source: "history" };
+            }
+            if let Some(Some(minutes)) = self.by_role.get(&role) {
+                return Estimate { minutes: Some(*minutes), source: "role" };
+            }
+        }
+        match self.all {
+            Some(minutes) => Estimate { minutes: Some(minutes), source: "history" },
+            None => Estimate { minutes: None, source: "none" },
+        }
+    }
+}
+
+/// Task #5 (team ede724c4): whether `team` has an accepted task that `base`
+/// (the copy before a write) did not, so the write records it; true without
+/// a copy.
+pub(crate) fn newly_accepted(base: Option<&Team>, team: &Team) -> bool {
+    let accepted = |team: &Team| -> std::collections::HashSet<u32> {
+        team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted && task.archived.is_none()).map(|task| task.id).collect()
+    };
+    let now = accepted(team);
+    if now.is_empty() {
+        return false;
+    }
+    match base {
+        Some(base) => !now.is_subset(&accepted(base)),
+        None => true,
+    }
+}
+
 /// The minutes a running task has spent against its estimate so far.
 pub(crate) fn spent_minutes(task: &Task, now: f64) -> Option<f64> {
     if task.status.finished() {
@@ -292,16 +359,21 @@ pub(crate) fn prompt_line_from(history: &History, team: &Team, task: &Task) -> S
 }
 
 /// Adds each task's estimate and, while one runs, the time spent against it to
-/// the status-looking task objects of `value`. The history is refreshed first,
-/// so a task accepted just now counts for the next estimate.
+/// the status-looking task objects of `value`. Task #5 (team ede724c4): a read
+/// never writes the history; the store records a task when a write accepts it
+/// (`newly_accepted`). The history is read once and grouped once.
 pub(crate) fn fill_status(value: &mut Value, team: &Team, now: f64) {
-    let _ = record_accepted(team, now);
-    let history = load();
     let Some(tasks) = value["tasks"].as_array_mut() else { return };
+    let estimator = Estimator::new(&load());
+    let index: std::collections::HashMap<u32, &Task> = team.tasks.iter().map(|task| (task.id, task)).collect();
     for entry in tasks {
         let Some(id) = entry["id"].as_u64() else { continue };
-        let Some(task) = team.task(u32::try_from(id).unwrap_or(0)) else { continue };
-        let estimate = estimate_from(&history, team, task);
+        let id = u32::try_from(id).unwrap_or(0);
+        let Some(task) = index.get(&id).copied().or_else(|| team.task(id)) else { continue };
+        #[cfg(test)]
+        let estimate = if super::dispatcher::old_status() { estimate_from(&load(), team, task) } else { estimator.estimate(team, task) };
+        #[cfg(not(test))]
+        let estimate = estimator.estimate(team, task);
         entry["estimate_minutes"] = estimate.minutes.map_or(Value::Null, |minutes| json!(minutes));
         entry["estimate_source"] = json!(estimate.source);
         entry["estimate_text"] = json!(estimate.text());
@@ -459,6 +531,46 @@ mod tests {
         };
         let line = prompt_line_from(&history, &team, &task);
         assert!(line.contains("45 min") && line.contains("role"), "{line}");
+    }
+
+    /// Task #5 (team ede724c4): the grouped estimator answers what
+    /// `estimate_from` answers, for every task and every fallback.
+    #[test]
+    fn the_grouped_estimator_answers_as_estimate_from() {
+        let mut history = History::default();
+        for (n, (role, agent, effort)) in [("Backend", "codex", "high"), ("backend", "CODEX", "High"), ("Backend", "kimi", "low"), ("Tester", "kimi", "low"), ("", "codex", "")]
+            .iter()
+            .cycle()
+            .take(41)
+            .enumerate()
+        {
+            history.entries.push(Entry { role: (*role).into(), agent: (*agent).into(), effort: (*effort).into(), minutes: (n * 7 % 90) as f64 + 1.0, ..Default::default() });
+        }
+        let mut team = team();
+        team.members.push(member("ghost", "", "codex", ""));
+        team.members.push(member("odd", "Designer", "x", "y"));
+        let estimator = Estimator::new(&history);
+        let empty = Estimator::new(&History::default());
+        for assignee in ["backend", "qa", "ghost", "odd", "nobody", ""] {
+            let mut task = accepted(1, assignee, 0.0, 60.0);
+            task.role = if assignee.is_empty() { "Tester".into() } else { String::new() };
+            assert_eq!(estimator.estimate(&team, &task), estimate_from(&history, &team, &task), "{assignee}");
+            assert_eq!(empty.estimate(&team, &task), estimate_from(&History::default(), &team, &task), "{assignee}");
+            task.estimate_minutes = Some(5.0);
+            assert_eq!(estimator.estimate(&team, &task), estimate_from(&history, &team, &task));
+        }
+    }
+
+    #[test]
+    fn a_write_that_accepts_a_task_records_it() {
+        let mut before = team();
+        before.tasks = vec![accepted(1, "backend", 0.0, 60.0)];
+        assert!(!newly_accepted(Some(&before), &before), "nothing new");
+        let mut after = before.clone();
+        after.tasks.push(accepted(2, "qa", 0.0, 60.0));
+        assert!(newly_accepted(Some(&before), &after));
+        assert!(newly_accepted(None, &after), "no copy: record");
+        assert!(!newly_accepted(None, &team()), "nothing accepted");
     }
 
     #[test]

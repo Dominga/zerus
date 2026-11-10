@@ -23,9 +23,10 @@ pub(crate) fn turn_hook(agent: &str) -> bool {
 }
 
 /// What a doorbell pastes: the line, and for an agent without a turn hook
-/// the unread text after it (bounded as a turn's context is).
-pub(crate) fn paste(agent: &str, header: &str, list: &[Message]) -> String {
-    let mut text = working::doorbell(header, list);
+/// the unread text after it (bounded as a turn's context is). `urgent`: a
+/// message it rings for is urgent.
+pub(crate) fn paste(agent: &str, header: &str, list: &[Message], urgent: bool) -> String {
+    let mut text = working::doorbell(header, list, urgent);
     if !turn_hook(agent) {
         if let Some((context, _)) = working::turn_context(list, false) {
             text.push_str("\n\n");
@@ -65,15 +66,31 @@ pub(crate) fn post_and_ring(
         working::post(tx, team_id, &new, at)?;
         working::refresh(tx, team, member_id, at)?;
         let agent = team.member(member_id).map(|member| member.agent.clone()).unwrap_or_default();
-        Ok((working::unread(tx, team_id, member_id, at)?, agent))
+        Ok((working::unread(tx, team_id, member_id, at)?, agent, working::urgent_bound(team)))
     });
-    let (list, agent) = match posted {
+    let (list, agent, bound) = match posted {
         Ok(found) => found,
         Err(error) => return Sent::Refused(format!("the team message was not stored, so nothing was sent: {error:#}")),
     };
-    let outcome = send(session, request_id, &paste(&agent, working::header_of(&text), &list));
-    settle(store, team_id, member_id, &agent, request_id, &list, &outcome, "idle", false);
+    // Task #24 (team ede724c4): the doorbell rings for this message and the
+    // unread ones due; only those count a ring and only they make it URGENT.
+    // Every unread message used to count one per post (a lead's message 11
+    // rings in an hour, a member 'does not read' after two quick posts).
+    let rung = ringing(&list, request_id, bound, at);
+    let urgent = rung.iter().any(Message::urgent);
+    let outcome = send(session, request_id, &paste(&agent, working::header_of(&text), &list, urgent));
+    settle(store, team_id, member_id, &agent, request_id, &rung, &outcome, "idle", false);
     outcome
+}
+
+/// Task #24: the unread messages a doorbell posted with `request_id` rings
+/// for: that message, and those whose own schedule is due by `now`.
+fn ringing(list: &[Message], request_id: &str, bound: f64, now: f64) -> Vec<Message> {
+    let last = working::last_ring(list);
+    list.iter()
+        .filter(|message| message.request_id == request_id || working::next_ring(message, last, bound).is_some_and(|at| at <= now))
+        .cloned()
+        .collect()
 }
 
 /// Task 186 (docs/lore.md hard rule 3, 11.11): stores a team message for a
@@ -163,7 +180,7 @@ pub(crate) fn ring(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
         message.rings == 0 && message.injected_at.is_none() && last.is_none_or(|last| message.at >= last + working::COALESCE_SECONDS)
     });
     let request_id = uuid::Uuid::new_v4().to_string();
-    let outcome = send(&session, &request_id, &paste(&member.agent, "", &list));
+    let outcome = send(&session, &request_id, &paste(&member.agent, "", &list, due.iter().any(Message::urgent)));
     settle(store, &team.id, member_id, &member.agent, &request_id, &due, &outcome, if waited { "turn_end" } else { "idle" }, true);
     Ok(outcome)
 }
@@ -317,7 +334,7 @@ pub(crate) fn continue_after_interrupt(store: &mut Store, team: &Team, member_id
     };
     let agent = member.agent.clone();
     let count = list.len();
-    let mut text = working::doorbell(&header, &list);
+    let mut text = working::doorbell(&header, &list, list.iter().any(Message::urgent));
     text.push('\n');
     text.push_str(CONTINUE);
     if !turn_hook(&agent) {

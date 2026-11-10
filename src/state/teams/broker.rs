@@ -1020,6 +1020,56 @@ pub(crate) fn build_folder(template: &str) -> &'static str {
     }
 }
 
+/// The build folders a shared folder's builds are grouped by.
+const BUILD_GROUPS: [&str; 3] = ["target", ".ci-build/gui", "."];
+
+/// Whether a running or waiting build belongs to the build folder `name`.
+fn in_group(entry: &Value, name: &str) -> bool {
+    (if entry["snapshot"] == false { "." } else { build_folder(entry["template"].as_str().unwrap_or("qt-build")) }) == name
+}
+
+/// Each member's build state in the build folder `name`: building, else
+/// waiting with how many builds are ahead of it.
+fn member_states(running: &[Value], waiting: &[Value], name: &str, now: f64, states: &mut serde_json::Map<String, Value>) {
+    let now_running: Vec<&Value> = running.iter().filter(|entry| in_group(entry, name)).collect();
+    let mut queue: Vec<&Value> = waiting.iter().filter(|entry| in_group(entry, name)).collect();
+    queue.sort_by(|a, b| {
+        let since = |entry: &Value| entry["since"].as_f64().unwrap_or(now);
+        since(a).partial_cmp(&since(b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for entry in &now_running {
+        if let Some(member) = entry["member"].as_str() {
+            states.insert(
+                member.to_owned(),
+                json!({"state":"building","snapshot":entry["snapshot"] != false,"template":entry["template"],"since":entry["started"].as_f64().unwrap_or(now)}),
+            );
+        }
+    }
+    for (ahead, entry) in queue.iter().enumerate() {
+        if let Some(member) = entry["member"].as_str() {
+            states.entry(member.to_owned()).or_insert_with(|| {
+                json!({"state":"waiting","template":entry["template"],"since":entry["since"].as_f64().unwrap_or(now),"ahead":ahead + now_running.len()})
+            });
+        }
+    }
+}
+
+/// Task #5 (team ede724c4): `builds_view`'s `members` alone, for the polled
+/// status: the building and waiting folders only, without each member's
+/// changed files (a git read per member), the timeline or the cache server.
+pub(crate) fn build_states(team: &Team, now: f64) -> Value {
+    let mut states = serde_json::Map::new();
+    for (folder, _) in shared_folders(team) {
+        let runs = Path::new(&folder).join(".zerus-team").join("runs");
+        let running = read_dir_json(&runs.join("broker-building"));
+        let waiting = read_dir_json(&runs.join("broker-waiting"));
+        for name in BUILD_GROUPS {
+            member_states(&running, &waiting, name, now, &mut states);
+        }
+    }
+    Value::Object(states)
+}
+
 fn read_dir_json(dir: &Path) -> Vec<Value> {
     let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
     entries
@@ -1046,10 +1096,8 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
         let running = read_dir_json(&runs.join("broker-building"));
         let waiting = read_dir_json(&runs.join("broker-waiting"));
         let mut groups = Vec::new();
-        for name in ["target", ".ci-build/gui", "."] {
-            let ours = |entry: &&Value| {
-                (if entry["snapshot"] == false { "." } else { build_folder(entry["template"].as_str().unwrap_or("qt-build")) }) == name
-            };
+        for name in BUILD_GROUPS {
+            let ours = |entry: &&Value| in_group(entry, name);
             let finished: Vec<&Value> = results.iter().filter(ours).collect();
             let mut built: Vec<f64> = finished
                 .iter()
@@ -1078,16 +1126,7 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
                 })
                 .collect();
             queue.sort_by(|a, b| a["since"].as_f64().partial_cmp(&b["since"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
-            for entry in &now_running {
-                if let Some(member) = entry["member"].as_str() {
-                    states.insert(member.to_owned(), json!({"state":"building","snapshot":entry["snapshot"] != false,"template":entry["template"],"since":entry["started"]}));
-                }
-            }
-            for (ahead, entry) in queue.iter().enumerate() {
-                if let Some(member) = entry["member"].as_str() {
-                    states.entry(member.to_owned()).or_insert_with(|| json!({"state":"waiting","template":entry["template"],"since":entry["since"],"ahead":ahead + now_running.len()}));
-                }
-            }
+            member_states(&running, &waiting, name, now, &mut states);
             let timeline: Vec<Value> = finished
                 .iter()
                 .rev()

@@ -882,17 +882,32 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
 /// U58: `hgs team status` hides cancelled tasks and the phases whose tasks are
 /// all cancelled unless the caller asks for cancelled work; every other view
 /// keeps the whole team.
+#[cfg(test)]
 pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>, include_cancelled: bool) -> Value {
+    view_phased(team, teams, sessions, include_cancelled, &mut crate::state::slow_calls::Phases::start())
+}
+
+/// Task #5 (team ede724c4): `view_with_cancelled` with its phases marked, so a
+/// slow `hgs team status` names where its time went.
+pub(super) fn view_phased(
+    team: &Team,
+    teams: &[Team],
+    sessions: Option<&[super::dispatcher::Seen]>,
+    include_cancelled: bool,
+    phases: &mut crate::state::slow_calls::Phases,
+) -> Value {
     let mut value = serde_json::to_value(team).unwrap_or_default();
     // #538: the worker's own stage facts are stored with the team but are not
     // part of the status wire (the desktop and Android read the runs and the
     // hold through `holds`, `changed` and the stages' states).
     strip_stage_facts(&mut value);
+    phases.mark("view_serialize");
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
     // Owner 2026-10-31: every task carries its time estimate and, while it
     // runs, the time spent against it; accepted tasks refresh the history.
     super::estimates::fill_status(&mut value, team, now);
+    phases.mark("view_estimates");
     let mut validation = plan::validate(team, &BTreeSet::new());
     validation.health.starved = plan::starved(team, now);
     for starving in &validation.health.starved {
@@ -907,6 +922,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     value["health"] = json!(&validation.health);
     // C7 refinement: each phase's own health, at the top and on the phase.
     value["phases_health"] = json!(&validation.phases_health);
+    phases.mark("view_validate");
     // Section 10.2: the workspace header rows (G9).
     value["phase_summary"] = json!(plan::phase_summary(team));
     if let Some(phases) = value["phases"].as_array_mut() {
@@ -920,7 +936,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     }
     value["layers"] = json!(plan::layers(&team.tasks));
     value["cycle"] = json!(plan::cycle_tasks(&team.tasks));
-    value["ready"] = json!(plan::ready(team));
+    // Task #5 (team ede724c4): computed once; the tasks' waits below use it too.
+    let ready_list = plan::ready(team);
+    value["ready"] = json!(&ready_list);
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
     // U59: the plan mode (standard or free) the team's phase runs in, and the
@@ -969,9 +987,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     }
     // U25: only the running phases' open tasks can make the team Stuck.
     value["stuck_scope"] = json!(plan::stuck_scope(team));
+    phases.mark("view_plan");
     // U21: the command templates Zerus runs outside a member's sandbox: the
     // built-ins (with the global switch) and the project's additions.
     value["templates"] = super::templates::listed();
+    phases.mark("view_templates");
     // C5: the plan approval view lists every check command with its expected
     // exit code, so the owner sees what will run and where.
     value["checks"] = json!(team
@@ -990,7 +1010,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // dispatcher records each member's last seen liveness, so `stopped` is
     // derived here without a listing of status's own (L3).
     if let Some(tasks) = value["tasks"].as_array_mut() {
-        let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
+        let ready: BTreeSet<u32> = ready_list.iter().copied().collect();
         let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
             if let Some(archived) = &task.archived {
@@ -1030,6 +1050,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             }
         }
     }
+    phases.mark("view_tasks");
     // U17/B1: the answers stored on the member while an attempt ran belong to
     // it; the task card lists them with that attempt (newest shown first).
     if let Some(tasks) = value["tasks"].as_array_mut() {
@@ -1057,8 +1078,10 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             }
         }
     }
+    phases.mark("view_permissions");
     // C4: the reports the owner's attention list shows.
     value["attention"] = json!(super::inbox::attention(team, super::super::now()));
+    phases.mark("view_attention");
     // Section 9.4: a delegated task shows its sub-team, and the team lists its
     // children with rolled-up counts; each level keeps its own tasks and plan
     // health.
@@ -1164,6 +1187,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             });
         }
     }
+    phases.mark("view_children_phases");
     // H3: the DeepSeek host(s) serving members, read only from their host pid
     // files; every member of a host with others is marked shared.
     let host_members: Vec<(String, Option<Value>)> = team
@@ -1232,6 +1256,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             value["permission_answers"] = json!(member.permission_answers);
         }
     }
+    phases.mark("view_members");
     // Done and Stopped teams say which of their members still run (F7).
     if let Some(sessions) = sessions {
         if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) {
@@ -1312,6 +1337,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             entry["outside_project"] = json!(outside);
         }
     }
+    phases.mark("view_folders");
     // D2: the findings summary and the newest page of findings (50).
     let open = |severity: &str| {
         team.findings
@@ -4381,12 +4407,26 @@ pub(crate) fn live_sessions_override(sessions: Option<Vec<super::dispatcher::See
     LIVE_SESSIONS.with(|slot| *slot.borrow_mut() = sessions);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Task #5 (team ede724c4): a test's slow-calls threshold for status.
+    static STATUS_SLOW_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_status_slow_ms(ms: Option<u64>) {
+    STATUS_SLOW_MS.with(|slow| slow.set(ms));
+}
+
 /// How long a finished team's status reuses one live listing (C1, NEW-2): the
 /// desktop polls the watched team every 3 s, and a full listing may take 15 s.
 const LISTING_REUSE: f64 = 30.0;
 
 /// The live sessions for a finished team's left_running, from a listing at
 /// most LISTING_REUSE old: polling a Done team never runs hgs ls each time.
+/// Task #5 (team ede724c4, the lead's answer q4): the one file `hgs team
+/// status` writes besides a slow-calls line: this cache, at most once per
+/// LISTING_REUSE, because a spawn of hgs ls per poll costs more.
 fn recent_sessions() -> anyhow::Result<Vec<super::dispatcher::Seen>> {
     let path = root().join("teams/left-running-listing.json");
     let now = super::super::now();
@@ -5932,7 +5972,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(list_items(&teams, input["include_cancelled"].as_bool() == Some(true)))
         }
         "status" => {
+            // Task #5 (team ede724c4): where a status's time goes; over SLOW_MS
+            // it is one slow-calls line naming its phases.
+            let mut phases = crate::state::slow_calls::Phases::start();
             let store = Store::open(false)?;
+            phases.mark("open");
             if input["archived_phases"].as_bool() == Some(true) {
                 let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
                 return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
@@ -5947,6 +5991,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 return store.task(text(input, "team"), task);
             }
             let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+            phases.mark("load");
             // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
             if input["digest"] == true {
                 return Ok(json!({"team":team.id,"digest":super::lore_sync::plain_digest(&team)}));
@@ -5955,11 +6000,13 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // once; the next change stores it so.
             ops::withdraw_inapplicable(&mut team, &mut Vec::new());
             fill_pause(&store, &mut team);
+            phases.mark("pause");
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // Only a finished team reads the live listing, for its members left
             // running (F7); a watched running team is polled often and must not
             // spawn one (C1, L3).
             let sessions = if status_lists_sessions(team.status) { recent_sessions().ok() } else { None };
+            phases.mark("sessions");
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
             let mut teams = if finished { active_team_records(&store)? } else { Vec::new() };
@@ -5977,14 +6024,18 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // U58: cancelled tasks and phases stay out of the status unless the
             // caller asks for them.
             let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
-            let mut value = view_with_cancelled(&team, &teams, sessions.as_deref(), include_cancelled);
+            phases.mark("teams");
+            let mut value = view_phased(&team, &teams, sessions.as_deref(), include_cancelled, &mut phases);
+            phases.mark("view_rest");
             // Task 270 (owner, 2026-11-08): the project's working mode: the
             // preset the team follows, the cached proposal with its reasons, and
             // what the settings still miss of it (no Git read on a poll).
             // Task #406: the worker's tick: the phase running now, the last
             // tick and the slowest recent one (bounded).
             value["worker_tick"] = super::tick_clock::status();
+            phases.mark("worker_tick");
             let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
+            phases.mark("working_mode");
             value["working_mode"] = json!({
                 "preset": team.working_mode,
                 "proposal": team.mode_proposal,
@@ -5994,6 +6045,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             });
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
+            phases.mark("findings");
             // U38: the profile only on request, as hgs team profile gives it.
             if input["profile"].is_object() {
                 let mut ask = input["profile"].clone();
@@ -6021,6 +6073,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     }
                 }
             }
+            phases.mark("park");
             // Task 133: each member's latest pulse, for the Team tab.
             let pulses = store.latest_pulses(&team.id, now());
             if let Some(members) = value["members"].as_array_mut() {
@@ -6029,14 +6082,26 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     entry["pulse"] = pulses.iter().find(|pulse| pulse.member == id).map_or(Value::Null, super::pulses::Pulse::json);
                 }
             }
+            phases.mark("pulses");
             // #756: with the build broker on, each member's build state for
             // task nodes and member cards; the Builds tab reads the rest.
             if team.settings.build_broker {
-                value["build_states"] = super::broker::builds_view(&team, now())["members"].clone();
+                value["build_states"] = super::broker::build_states(&team, now());
             }
+            phases.mark("broker");
             // Task #393: the polled status is bounded; `status --task N` above
             // answers with the task's full record.
             bound_status(&mut value, &team);
+            phases.mark("bound");
+            #[cfg(test)]
+            let slow = STATUS_SLOW_MS.with(std::cell::Cell::get).unwrap_or(crate::state::slow_calls::SLOW_MS);
+            #[cfg(not(test))]
+            let slow = crate::state::slow_calls::SLOW_MS;
+            let timings = phases.finish_at("team status", &team.id, slow);
+            // On request, the phases ride in the answer (as `hgs inspect`'s do).
+            if input["timings"] == true {
+                value["timings_ms"] = timings;
+            }
             Ok(value)
         }
         "inbox" => inbox_command(input),

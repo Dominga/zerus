@@ -104,6 +104,139 @@ fn status_reads_each_members_own_folder_once_and_flags_another_repository() {
     });
 }
 
+/// Task #5 (team ede724c4): the cheap status answers as before. On a fixture
+/// team in real repositories (a shared member, a worktree member, a detached
+/// worktree, another repository) with an estimate history, the status reads
+/// the folder facts from the repositories' files and estimates from one
+/// grouped history, and its answer equals the old way's (git for every folder,
+/// an estimate per task over the whole history). It never writes the estimate
+/// history; a write that accepts a task records it. A status slower than the
+/// threshold leaves one slow-calls line naming its phases.
+#[test]
+fn the_cheap_status_answers_as_before_and_writes_no_history() {
+    use crate::state::teams::dispatcher;
+    use crate::state::teams::model::{Attempt, Member, MemberFolder, Report, Task, Team, TeamStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = std::path::PathBuf::from(base.to_string_lossy().trim_start_matches(r"\\?\").to_owned());
+    dispatcher::set_git_ceiling(&base.display().to_string());
+    let git = |path: &std::path::Path, args: &[&str]| {
+        assert!(std::process::Command::new("git").arg("-C").arg(path).args(args).status().unwrap().success(), "git {args:?}");
+    };
+    let make_repo = |path: &std::path::Path, name: &str| {
+        std::fs::create_dir(path).unwrap();
+        git(path, &["init", "-q"]);
+        git(path, &["config", "user.email", "t@example.com"]);
+        git(path, &["config", "user.name", "T"]);
+        std::fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-qm", name]);
+    };
+    let repo = base.join("project");
+    make_repo(&repo, "project");
+    let foreign = base.join("sibling");
+    make_repo(&foreign, "sibling");
+    let detached = base.join("detached");
+    git(&repo, &["worktree", "add", "--quiet", "--detach", &detached.display().to_string(), "HEAD"]);
+    // A clone of the team's repository (its origin is the team folder).
+    let clone = base.join("clone");
+    git(&base, &["clone", "-q", &repo.display().to_string(), &clone.display().to_string()]);
+    let origin = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&clone).args(["config", "--get", "remote.origin.url"]).output().unwrap().stdout).unwrap();
+    assert_eq!(dispatcher::origin_url_from_files(&clone.display().to_string()).as_deref(), Some(origin.trim()), "the clone's origin from its config file");
+    assert_eq!(dispatcher::origin_url_from_files(&foreign.display().to_string()), None, "no origin: git answers");
+    let mut team = Team {
+        id: "abcdef12-0000-4000-8000-000000000005".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        folder: repo.display().to_string(),
+        ..Default::default()
+    };
+    team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+    team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), effort: "high".into(), folder: MemberFolder::Worktree, ..Default::default() });
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), directory: detached.display().to_string(), ..Default::default() });
+    team.members.push(Member { id: "out".into(), role: "Ops".into(), agent: "kimi".into(), directory: foreign.display().to_string(), ..Default::default() });
+    team.members.push(Member { id: "cl".into(), role: "Ops".into(), agent: "kimi".into(), directory: clone.display().to_string(), ..Default::default() });
+    let worktree = dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "--quiet", "-b", "team/abcdef12/dev", &worktree, "HEAD"]);
+    let reported = |member: &str, at: f64| Attempt {
+        n: 1,
+        id: format!("00000000-0000-4000-8000-{:012}", at as u64),
+        member: member.into(),
+        sent_at: at - 600.0,
+        delivered_at: Some(at - 600.0),
+        report: Some(Report { text: "done".into(), at, ..Default::default() }),
+        ..Default::default()
+    };
+    team.tasks = vec![
+        Task { id: 1, title: "Save endpoint".into(), assignee: "dev".into(), status: TaskStatus::Accepted, attempts: vec![reported("dev", 1000.0)], ..Default::default() },
+        Task { id: 2, title: "Tests pass".into(), assignee: "qa".into(), status: TaskStatus::InProgress, attempts: vec![reported("qa", 2000.0)], ..Default::default() },
+        Task { id: 3, title: "Deploy".into(), assignee: "out".into(), ..Default::default() },
+        Task { id: 4, title: "Docs".into(), role: "Writer".into(), ..Default::default() },
+    ];
+    // Every member folder: the files answer what git answers.
+    for folder in [repo.display().to_string(), worktree.clone(), detached.display().to_string(), foreign.display().to_string()] {
+        let fast = dispatcher::folder_facts_from_files(&folder);
+        dispatcher::set_old_status(true);
+        let by_git = dispatcher::folder_facts(&folder);
+        dispatcher::set_old_status(false);
+        assert_eq!(fast, Some(by_git), "{folder}");
+    }
+    crate::state::with_test_state_root(dir.path(), || {
+        let entries: Vec<Value> = (0..30usize)
+            .map(|n| {
+                let (role, agent, effort) = (["Backend", "QA", "backend", "Ops"][n % 4], ["codex", "CODEX", "kimi"][n % 3], ["high", "", "High"][n % 3]);
+                json!({"role":role,"agent":agent,"effort":effort,"minutes":(n * 7 % 50) + 1,"task":1000 + n,"team":"other"})
+            })
+            .collect();
+        let history = json!({"entries":entries,"imported":["other"]});
+        let path = crate::state::teams::estimates::path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, history.to_string()).unwrap();
+        let mut store = Store::open(true).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let new = run("status", &json!({"team":team.id}), false).unwrap();
+        dispatcher::set_old_status(true);
+        let old = run("status", &json!({"team":team.id}), false).unwrap();
+        dispatcher::set_old_status(false);
+        assert_eq!(new, old, "the cheap status answers as before");
+        let member = |id: &str| new["members"].as_array().unwrap().iter().find(|member| member["id"] == id).cloned().unwrap();
+        assert_eq!((member("dev")["branch"].as_str(), member("qa")["branch"].as_str()), (Some("team/abcdef12/dev"), Some("HEAD")));
+        assert_eq!(member("out")["outside_project"], true);
+        assert_eq!(member("cl")["outside_project"], false, "a clone of the team's repository");
+        assert!(new["tasks"].as_array().unwrap().iter().filter(|task| task["status"] != "accepted").all(|task| task["estimate_source"].is_string()), "{}", new["tasks"]);
+        // A read writes nothing: task #1 is accepted and not in the history yet.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written, "status never writes the estimate history");
+        // A write that accepts a task records the team's accepted tasks.
+        store
+            .mutate(None, &team.id, None, |team, _| {
+                team.task_mut(2).unwrap().status = TaskStatus::Accepted;
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let recorded: crate::state::teams::estimates::History = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ours: Vec<u32> = recorded.entries.iter().filter(|entry| entry.team == team.id).map(|entry| entry.task).collect();
+        assert_eq!(ours, vec![1, 2], "{:?}", recorded.entries.len());
+        // A status over the threshold leaves one slow-calls line naming its phases.
+        let log = crate::state::slow_calls::log_path();
+        let _ = std::fs::remove_file(&log);
+        super::set_status_slow_ms(Some(0));
+        run("status", &json!({"team":team.id}), false).unwrap();
+        super::set_status_slow_ms(None);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let line: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!((line["command"].as_str(), line["subject"].as_str()), (Some("team status"), Some(team.id.as_str())));
+        for phase in ["open", "load", "view_serialize", "view_estimates", "view_folders", "bound"] {
+            assert!(line["timings_ms"][phase].is_u64(), "{phase}: {line}");
+        }
+        // Not slow: no line.
+        std::fs::remove_file(&log).unwrap();
+        run("status", &json!({"team":team.id,"timings":true}), false).map(|value| assert!(value["timings_ms"]["total"].is_u64())).unwrap();
+        assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().is_empty());
+    });
+}
+
 /// U36 through `hgs team`: the implementer's report enters review, status
 /// shows the stage, its candidates and its span, the reviewer's verdict is
 /// proven by its stage id alone, and the owner's overrides are mutations.

@@ -117,7 +117,7 @@ fn a_sub_lead_hands_out_its_reports_tasks_and_hears_its_own_inbox() {
     assert!(!found.contains(&Step::Inbox), "{found:?}");
     // Once told, it is quiet until a new item.
     let told: Vec<String> = super::inbox::items_for(&t, "qalead").into_iter().map(|item| item.key).collect();
-    t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox { told_at: 10.0, told };
+    t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox { told_at: 10.0, told, ..Default::default() };
     assert!(!steps(&t, &seen, 20.0).iter().any(|step| matches!(step, Step::SubInbox { .. })));
     // N8: a sub-lead with its own Background work still takes a message.
     t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox::default();

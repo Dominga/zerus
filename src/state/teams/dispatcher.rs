@@ -1560,7 +1560,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let lead_working = !lead_ready && mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
     if lead_ready || lead_working {
         let items = inbox::items(team);
-        let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        let new = items.iter().filter(|item| !team.inbox.knows(&item.key, now)).count();
         // A permission or question the free lead left unanswered is told once
         // more (owner, 2026-11-05).
         let again = if lead_ready { inbox::overdue(&items, &team.inbox.told, now).len() } else { 0 };
@@ -1575,7 +1575,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // draft team starts its lead alone.
     if active {
         for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
-            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.knows(&item.key, now));
             if untold && launching.insert(sub.id.clone()) {
                 steps.push(Step::Launch { member: sub.id.clone() });
             }
@@ -1592,7 +1592,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if !session_of(sub, seen).is_some_and(can_take_a_message) {
             continue;
         }
-        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
+        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.knows(&item.key, now)).count();
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (sub.inbox.told_at == 0.0 || now - sub.inbox.told_at >= interval) {
             steps.push(Step::SubInbox { member: sub.id.clone() });
@@ -5006,7 +5006,13 @@ pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -
 /// commit.
 fn clone_of(folder: &str, source: &str) -> bool {
     let canonical = |path: &str| crate::platform::canonical(Path::new(path)).ok();
-    if let Some(origin) = git_at(folder, &["config", "--get", "remote.origin.url"]) {
+    // Task #5 (team ede724c4): the origin from the clone's config file when it
+    // names it plainly, without a git process.
+    #[cfg(test)]
+    let from_files = if old_status() { None } else { origin_url_from_files(folder) };
+    #[cfg(not(test))]
+    let from_files = origin_url_from_files(folder);
+    if let Some(origin) = from_files.or_else(|| git_at(folder, &["config", "--get", "remote.origin.url"])) {
         let origin = origin.strip_prefix("file://").unwrap_or(&origin);
         if canonical(origin).is_some_and(|origin| Some(origin) == canonical(source)) {
             return true;
@@ -5064,6 +5070,16 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     if folder.is_empty() {
         return (String::new(), String::new());
     }
+    // Task #5 (team ede724c4): the repository's own files answer without a
+    // git process (one cost 100-400 ms on Windows, once per member folder of
+    // every status poll); git answers what they do not.
+    #[cfg(test)]
+    let fast = !old_status();
+    #[cfg(not(test))]
+    let fast = true;
+    if let Some(facts) = fast.then(|| folder_facts_from_files(folder)).flatten() {
+        return facts;
+    }
     // N37: one `rev-parse` prints the common dir and the branch together, so a
     // status call with several members in one folder spawns one git, not 2-4
     // per member.
@@ -5087,9 +5103,159 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     (project, branch)
 }
 
+/// Task #5 (team ede724c4): what `git rev-parse --path-format=absolute
+/// --git-common-dir --abbrev-ref HEAD` prints for `folder`, read from the
+/// repository's files: the folder of the common git dir (forward slashes, as
+/// git prints it) and the branch, or `HEAD` when detached. None for anything
+/// this reader does not know for certain (a git environment override, a
+/// reftable store, an unborn or ambiguous branch, a ref outside refs/heads,
+/// an unusual `.git`), which git then answers as before.
+pub(crate) fn folder_facts_from_files(folder: &str) -> Option<(String, String)> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let branch = if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let name = reference.strip_prefix("refs/heads/")?;
+        let packed = std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default();
+        let exists = |full: &str| common.join(full).is_file() || packed.lines().any(|line| line.split_once(' ').is_some_and(|(_, at)| at == full));
+        // An unborn branch has no commit to abbreviate; a tag or remote of
+        // the same name makes git print a longer name.
+        if name.is_empty() || !exists(reference) || exists(&format!("refs/tags/{name}")) || exists(&format!("refs/remotes/{name}")) || exists(&format!("refs/{name}")) || exists(name) {
+            return None;
+        }
+        name.to_owned()
+    } else if head.len() >= 40 && head.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        "HEAD".to_owned()
+    } else {
+        return None;
+    };
+    let project = common.parent()?.to_str()?;
+    #[cfg(windows)]
+    let project = {
+        // A verbatim path (\\?\D:\x) as git prints it (D:/x); a share is
+        // left to git.
+        let plain = project.strip_prefix(r"\\?\").unwrap_or(project);
+        if plain.starts_with(r"\\") || plain.starts_with("UNC") {
+            return None;
+        }
+        plain.replace('\\', "/")
+    };
+    #[cfg(not(windows))]
+    let project = project.to_owned();
+    Some((project, branch))
+}
+
+/// Task #5 (team ede724c4): `git config --get remote.origin.url` in `folder`,
+/// read from the repository's own config file when it names the origin
+/// plainly; None for anything else (an include, a worktree config, quoting or
+/// escapes beyond a doubled backslash, no origin there), which git answers.
+pub(crate) fn origin_url_from_files(folder: &str) -> Option<String> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    if git_dir.join("config.worktree").exists() || common.join("config.worktree").exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(common.join("config")).ok()?;
+    let mut in_origin = false;
+    let mut url = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let header = line.to_ascii_lowercase();
+            if header.starts_with("[include") {
+                return None;
+            }
+            in_origin = header.starts_with(r#"[remote "origin""#);
+            if in_origin && line != r#"[remote "origin"]"# {
+                return None;
+            }
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let value = value.trim();
+        if value.contains(['"', ';', '#']) || value.replace(r"\\", "").contains('\\') {
+            return None;
+        }
+        url = Some(value.replace(r"\\", "\\"));
+    }
+    url.filter(|url| !url.is_empty())
+}
+
+/// The git dir and the common git dir of the repository `folder` is in, as
+/// git would find them, from the files alone; None for anything unusual.
+fn git_dirs_from_files(folder: &str) -> Option<(PathBuf, PathBuf)> {
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return None;
+    }
+    let start = std::fs::canonicalize(folder).ok()?;
+    // A test's git ceiling, as its git reads get it: never looked at or above.
+    #[cfg(test)]
+    let ceiling = GIT_CEILING.with(|ceiling| ceiling.borrow().clone()).and_then(|ceiling| std::fs::canonicalize(ceiling).ok());
+    #[cfg(not(test))]
+    let ceiling: Option<PathBuf> = None;
+    let mut dir = start.as_path();
+    let dot_git = loop {
+        if ceiling.as_deref() == Some(dir) {
+            return None;
+        }
+        let candidate = dir.join(".git");
+        if candidate.symlink_metadata().is_ok() {
+            break candidate;
+        }
+        dir = dir.parent()?;
+    };
+    let meta = dot_git.symlink_metadata().ok()?;
+    let (git_dir, common) = if meta.is_dir() {
+        if dot_git.join("commondir").exists() {
+            return None;
+        }
+        (dot_git.clone(), dot_git.clone())
+    } else if meta.is_file() {
+        // A linked worktree: `gitdir: <its git dir>`, whose `commondir` names
+        // the repository's own git dir.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        let git_dir = std::fs::canonicalize(dir.join(target)).ok()?;
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(text) => std::fs::canonicalize(git_dir.join(text.lines().next()?.trim())).ok()?,
+            Err(_) => git_dir.clone(),
+        };
+        (git_dir, common)
+    } else {
+        return None;
+    };
+    if !common.join("objects").is_dir() || !common.join("refs").is_dir() || common.join("reftable").exists() {
+        return None;
+    }
+    Some((git_dir, common))
+}
+
 #[cfg(test)]
 thread_local! {
     static FOLDER_FACTS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Task #5 (team ede724c4): this test thread's status reads as before
+    /// (git for every folder fact, an estimate per task over the whole
+    /// history), to compare the old and the new view.
+    static OLD_STATUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_old_status(on: bool) {
+    OLD_STATUS.with(|old| old.set(on));
+}
+
+#[cfg(test)]
+pub(crate) fn old_status() -> bool {
+    OLD_STATUS.with(std::cell::Cell::get)
 }
 
 /// N37: how many folder-fact reads this test thread made, so a status call's
@@ -9404,7 +9570,9 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
     let team = &fresh;
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let items = inbox::items(team);
-    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
+    // Task #24 (team ede724c4): an item told before that closed and opened
+    // again unchanged is not new.
+    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.knows(&item.key, now())).cloned().collect();
     let again = inbox::overdue(&items, &team.inbox.told, now());
     // Task 112: what the tick saw may have been decided since (a report
     // accepted, a member back from its limit): nothing new now, nothing told.
@@ -9442,7 +9610,7 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
         for item in &again {
             team.inbox.told.push(format!("remind:{}", item.key));
         }
-        inbox::mark_told(&mut team.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut team.inbox, &new, &open, now());
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));
         Ok(())
@@ -9455,7 +9623,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
     let session = sub.session.clone().context("the sub-lead has no session")?;
     let new: Vec<inbox::Item> =
-        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).collect();
+        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.knows(&item.key, now())).collect();
     anyhow::ensure!(!new.is_empty(), "no new inbox items");
     let outcome = super::doorbell::post_and_ring(store, &team.id, member, &session, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus",
         inbox::urgency(new.iter()), &inbox::text(team, &new, now()));
@@ -9467,7 +9635,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
         let open: BTreeSet<String> = inbox::items_for(team, &member).into_iter().map(|item| item.key).collect();
         let role = team.role_of(&member);
         let Some(sub) = team.members.iter_mut().find(|found| found.id == member) else { return Ok(()) };
-        inbox::mark_told(&mut sub.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut sub.inbox, &new, &open, now());
         sub.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":new.len(),"member":role})));
         Ok(())

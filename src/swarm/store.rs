@@ -206,6 +206,64 @@ pub fn read_snapshot(config: &Config) -> Result<Value> {
     Ok(snapshot)
 }
 
+pub(super) struct AdoptionLock {
+    lock: Option<platform::FileLock>,
+}
+
+impl AdoptionLock {
+    pub fn acquire(config: &Config) -> Result<Self> {
+        let directory = config.dir.join("swarm");
+        ensure!(directory.is_dir(), "Shared projects are not initialized on this computer");
+        let lock = platform::private_open(
+            OpenOptions::new()
+                .create(false)
+                .truncate(false)
+                .read(true)
+                .write(true),
+        )
+        .open(directory.join("catalog.lock"))?;
+        Ok(Self {
+            lock: Some(platform::FileLock::exclusive(lock)?),
+        })
+    }
+
+    pub fn adoption_save_main(
+        &mut self,
+        config: &Config,
+        data: Store,
+        original: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let lock = self.lock.take().expect("adoption lock remains held");
+        let mut store = LockedStore {
+            data,
+            outdated: BTreeMap::new(),
+            replica_outdated: BTreeMap::new(),
+            session_ids: BTreeMap::new(),
+            path: config.dir.join("swarm/catalog.json"),
+            twins_original: Vec::new(),
+            id_memberships_original: Err(super::Unread::Missing),
+            _lock: lock,
+            original,
+            outdated_original: Vec::new(),
+            replica_outdated_original: Vec::new(),
+            session_ids_original: Vec::new(),
+        };
+        let result = (|| {
+            store.data.catalog.validate()?;
+            let bytes = serde_json::to_vec(&store.data)?;
+            if bytes != store.original {
+                store.record_membership(&bytes, true)?;
+                replace(&store.path, &bytes)?;
+                store.original = bytes.clone();
+            }
+            Ok(bytes)
+        })();
+        let LockedStore { _lock, .. } = store;
+        self.lock = Some(_lock);
+        result
+    }
+}
+
 pub struct LockedStore {
     pub data: Store,
     /// Alias -> node of members that keep syncing projects and folders but do
@@ -270,6 +328,7 @@ impl LockedStore {
         Self::load_with(config, true, Wait::Now, false).map(Self::taken)
     }
     fn load_with(config: &Config, scoped: bool, wait: Wait, refresh: bool) -> Result<Option<Self>> {
+        super::adoption::guard_load(config)?;
         let dir = config.dir.join("swarm");
         if scoped {
             ensure!(
@@ -307,6 +366,7 @@ impl LockedStore {
                 }
             },
         };
+        super::adoption::guard_load(config)?;
         let path = dir.join("catalog.json");
         let original = if scoped {
             let metadata = fs::symlink_metadata(&path)?;
@@ -489,6 +549,7 @@ impl LockedStore {
     /// Persist only the catalog and its session ID memberships. Scoped
     /// assignment must not prune peer metadata.
     pub fn save_catalog_only(&mut self) -> Result<()> {
+        super::adoption::guard_directory(self.path.parent().expect("catalog directory"))?;
         self.data.catalog.validate()?;
         // Promotion was computed under this same catalog lock, before the
         // caller changed a name. Publish primary data FIRST, so a changed

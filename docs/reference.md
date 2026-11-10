@@ -3043,6 +3043,97 @@ catalog and session access. It does not deny inbound exchange from an existing
 member; SSH controls transport access. `HGS_SWARM_SERVICE=0 ./install.sh` skips
 worker installation.
 
+### Empty-peer adoption
+
+`hgs swarm adoption-preview PEER --json` checks whether the configured empty
+computer can adopt the local catalog without opening its desktop UI. The
+destination accepts either an untouched store (`imported=false`, no operations
+or pending marker) or the narrow first-read bootstrap: a valid same-node v1
+`gui-import-pending.json`, only the current self machine-name operation, the
+initial empty-peer membership and empty/missing sidecars. Peers, other product
+history, foreign or unreadable data, an existing drive store, or a
+present/unreadable Qt store refuses. The pending marker is preserved byte for
+byte, and the later missing-only GUI import retains adopted values, tombstones
+and concurrent heads.
+
+`hgs swarm adopt PEER --json` performs the explicitly previewed original
+request. It copies the complete catalog, primary session memberships and twins,
+including every raw operation and parent. Canonical full-body hashes are bound
+to raw file presence (`missing`, `valid_empty` or `nonempty`), swarm identity and
+pre/post receipts. An absent file's zero bytes are not a valid empty JSON
+component. The aggregate request is at most 32 MiB including every component;
+preview, status and mutation receipts are at most 64 KiB. Disk read ceilings do
+not widen wire limits. Journals and the registry are bounded and directly
+indexed by original UUID; one adoption is active per catalog.
+
+The destination keeps its own node and self bindings and gets no reverse peer
+or source-local binding. Only the source adds the configured destination peer
+and calls `sync_peer` for that peer, preserving existing peers and unrelated
+synchronization. Without real reverse enrollment, drive-folder import remains
+unsupported and the drive component stays `Uninitialized`; preview and
+settlement disclose this rather than claiming every component is shared.
+
+`hgs swarm adoption-status PEER --json` returns the bounded original phase and
+receipts without repairing anything. Main, primary and twins commit separately
+under the destination catalog lock, with write-ahead phases and fresh-read
+receipts. The durable `adoption-pending.json` guard blocks capable ordinary
+loaders and savers after every partial phase, including before directory/lock
+creation. It is removed with a parent barrier only after all components verify;
+`remote_committed` follows that removal. A crash or unknown result before the
+terminal receipt remains partial/unknown and read-only. Older binaries are not
+claimed to honor the guard.
+
+Exactly two continuations exist, and only within the original live CLI call: a
+durable original `refused_not_started` with zero product effects plus fresh
+identical proof, or a terminal `remote_committed` with an explicitly unstarted
+local source-membership phase. Both require the original native owner,
+request/body, configuration, source preimages, per-UUID lease, and actual child
+exit plus both physical pipe EOFs within the original 25-second deadline. A
+receipt, idle output, byte count, or serialized drain claim is not drain proof.
+A distinct or restarted CLI has only original-status and fully validated
+committed-receipt lookup; it cannot continue mutation. A lost reply, changed
+context, active or unknown writer, restarted owner, missing receipt, or stranded
+guard is `Partial`/`Unknown` and status-only. No new UUID, remote replay after
+an unknown result, duplicate cleanup, or third destination repair is permitted.
+The native dialog binds the original to independently observed Live machine
+cards for this computer and the destination (computer, host and machine UUID
+equal to the preview node) and refuses a stopped hub. It rechecks those cards,
+the original generation, configuration, ticket and resource custody at the
+queued invocation barrier, at each preflight result, at the mutation's drained
+result and before native settlement. A refusal is sticky: a restored card or
+configuration never revives that original. Its later review action is
+read-only, not another adoption call.
+
+Each original remote call keeps the same ssh child (and its Windows job),
+request writer and both pipe readers until they physically settle. After any
+failure the child may exit by itself until the original deadline; then only
+that owned child is stopped and its exit confirmed by wait. No process group,
+descendant or name-based kill is used, and a PID whose status is no longer
+trusted is never signalled. The CLI then waits for the writer and both pipe
+EOFs before it reports the call as unknown, so a descendant that still holds a
+pipe keeps the call, and its native accounting, retained. A call whose exit
+cannot be confirmed stays pinned and admits no other call in that process. The
+adoption ssh passes `-o ControlPath=none` ahead of the configured connection
+options, so a user's `ControlMaster`/`ControlPersist` setting cannot start a
+background mux master that inherits stderr. The desktop runs the call beside
+its organization worker: other organization work continues, the dialog can be
+closed and reopened onto the same original, and after the original deadline it
+reports that the original is still settling with an unknown result. Only new
+adoption actions wait, and no failure or timeout settles or replays it.
+
+Adoption-specific raw JSON rejects duplicate object keys recursively before a
+typed map is constructed. The source catalog and sidecars must match their
+declared source and source-node machine operation. The original destination is
+validated independently against its own empty preimage, whose swarm may differ
+from the source. The complete main/primary/twins candidate, cross-component
+closure, aggregate operations, parent edges and encoded wire size are checked
+before any journal, guard or product effect. Primary counts come from the
+membership view validated with the main catalog's machine redirects, so a valid
+causal edge from an old machine key to its canonical child is accepted. Terminal and settlement receipts
+must match the full original request and all component preimages and postimages;
+a same-UUID or hash-shaped response is insufficient. `guard_cleared` is durable
+before `remote_committed`; a crash between them remains manual/status-only.
+
 ### Phone notification timing
 
 `hgs swarm preference get --json` prints `{"mobile_delivery": "away"}`;

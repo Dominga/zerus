@@ -198,3 +198,6 @@
 .nt-split .nt-member .nt-check input { margin: 0; }
 .nt-split .nt-member > .icon-btn { justify-self: center; }
 @media (max-width: 1100px) { .nt-split .nt-member { grid-template-columns: repeat(5, minmax(0, 1fr)); } .nt-split .nt-member .nt-check { font-size: inherit; } }
+
+/* Task #13 (team ede724c4): the lead's offers for the owner's settings. */
+.nt-setting-offers { border: 1px solid color-mix(in srgb, var(--z-color-accent) 60%, var(--z-color-border)); border-radius: var(--z-radius-lg); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); }

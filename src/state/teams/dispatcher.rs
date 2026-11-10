@@ -1125,11 +1125,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // A question, a Zerus build or Background work is never stuck; the lead
         // is never stuck either (L1).
         if found.live {
-            // L3: phase and activity on change, the event time at most once a
-            // minute (status rounds to minutes anyway).
+            // L3: phase and activity on change, the event time alone at most
+            // every WATCH_EVENT_EVERY. Task #2 (team ede724c4): it was once a
+            // minute, one team revision per busy member per minute; stuck
+            // detection reads the listing's own time, so only the minutes
+            // status shows for a busy member use the stored one.
             let moved = match (member.seen_event_at, found.last_event_at) {
                 (None, None) => false,
-                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= 60.0)),
+                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= WATCH_EVENT_EVERY)),
             };
             if member.seen_phase != found.phase || member.seen_activity != found.activity || moved || member.seen_cold != found.cold {
                 steps.push(Step::Watch {
@@ -5172,6 +5175,16 @@ fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     })
 }
 
+/// Task #13 (team ede724c4): how long a member's worktree creation waits for
+/// another creation in the same repository before it fails.
+const WORKTREE_BUSY_WAIT: Duration = Duration::from_secs(300);
+
+/// Task #13: `worktrees create` refused because another worktree operation
+/// holds the repository's lock (nothing was created).
+fn worktree_busy(stderr: &str) -> bool {
+    stderr.contains("Another worktree operation is running")
+}
+
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
@@ -5264,8 +5277,29 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     if member.agent == "dsh" {
         args.insert(2, "--sandbox");
     }
-    let output = run(&member.computer, &args)?;
-    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    // Task #13 (team ede724c4): members created at once share the
+    // repository's worktree lock, which `worktrees create` waits for only a
+    // few seconds. A creation refused because another one holds it is tried
+    // again until WORKTREE_BUSY_WAIT, never a failed member; the refusal
+    // reserved nothing, so trying again is safe.
+    let started = Instant::now();
+    let mut pause = Duration::from_secs(1);
+    let output = loop {
+        let output = run(&member.computer, &args)?;
+        let busy = !output.status.success() && worktree_busy(&String::from_utf8_lossy(&output.stderr));
+        if !busy || started.elapsed() >= WORKTREE_BUSY_WAIT {
+            break output;
+        }
+        std::thread::sleep(if cfg!(test) { Duration::from_millis(1) } else { pause });
+        pause = (pause * 2).min(Duration::from_secs(10));
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::ensure!(
+        output.status.success(),
+        "{}{}",
+        stderr.trim(),
+        if worktree_busy(&stderr) { "; Zerus starts the member again on its next tick (hgs team relaunch starts it now)" } else { "" }
+    );
     // F1.4: the new folder is the repository's (a clone by its origin), on the
     // member's branch. `worktrees create` confirmed this where it ran; a
     // member on this computer is checked here again.
@@ -6072,6 +6106,10 @@ pub(crate) fn check_context(session: &SessionRef, request: &ContextRequest) -> C
     }
 }
 
+/// Task #2 (team ede724c4): how often a live member's last event time alone is
+/// written (seconds); a phase or activity change is written at once.
+const WATCH_EVENT_EVERY: f64 = 300.0;
+
 /// Task 209: how often an active member's native context is read (seconds),
 /// how often one that holds no open attempt is, and how many inspects one tick
 /// may run so a slow agent never holds the tick.
@@ -6081,13 +6119,23 @@ const CONTEXT_READS_PER_TICK: usize = 4;
 /// Task 209: a compaction that refused or stayed unconfirmed is tried again
 /// after this long, never on every tick.
 const CONTEXT_RETRY_SECS: f64 = 600.0;
+/// Task #2 (team ede724c4): a reading is written to the team only when it
+/// moves the figure status shows by this many points (or crosses the team's
+/// compaction threshold, or names another window). Each write raises the
+/// team revision, and every desktop that follows the team re-reads it.
+const CONTEXT_STEP: u8 = 2;
+/// Task #2 (team ede724c4): an unchanged reading is still written after this
+/// long, so the stored one stays fresh for a claim (`CLAIM_FRESH`, 600 s) and
+/// the shown value is never older than this plus one read interval.
+const CONTEXT_REFRESH: f64 = super::context::CLAIM_FRESH / 2.0;
 /// Task 209: how long a handoff brief waits for its first refused send.
 const HANDOFF_RETRY_SECS: f64 = 5.0;
 
 /// Task 209: a member's native context reading, from its session's own
 /// `hgs inspect` (the listing carries no meter). None when the agent reports
-/// none or the read failed; the last reading stays on the member then.
-fn read_context(member: &Member) -> Option<MemberContext> {
+/// none or the read failed; the last reading stays on the member then. `at`
+/// is the reading's time: the tick's own (task #2), or now.
+fn read_context(member: &Member, at: f64) -> Option<MemberContext> {
     let session = member.session.as_ref()?;
     let output = hgs(&session.host, &["inspect", &session.name, "--json"], None, Duration::from_secs(10)).ok()?;
     if !output.status.success() {
@@ -6095,18 +6143,59 @@ fn read_context(member: &Member) -> Option<MemberContext> {
     }
     let value: Value = serde_json::from_slice(&output.stdout).ok()?;
     let (used, limit) = super::context::reading(&value)?;
-    Some(MemberContext::of(used, limit, now()))
+    Some(MemberContext::of(used, limit, at))
+}
+
+/// Task #2 (team ede724c4): whether a new reading is worth a write over the
+/// stored one: the shown figure moved by `CONTEXT_STEP` points, the reading
+/// crossed the compaction `threshold`, the window changed, or the stored
+/// reading is `CONTEXT_REFRESH` old. A reading that only carries a new time
+/// is not.
+pub(crate) fn context_moved(stored: Option<&MemberContext>, new: &MemberContext, threshold: u8) -> bool {
+    let Some(stored) = stored else { return true };
+    stored.limit != new.limit
+        || stored.percent.abs_diff(new.percent) >= CONTEXT_STEP
+        || stored.reached(threshold) != new.reached(threshold)
+        || new.at - stored.at >= CONTEXT_REFRESH
 }
 
 /// Task 209: keeps the reading with the team, so status and the member card
-/// show the percentage without a read of their own.
-fn record_context(store: &mut Store, team_id: &str, member_id: &str, context: MemberContext) -> anyhow::Result<()> {
-    change(store, team_id, |team, _| {
+/// show the percentage without a read of their own. Task #2 (team ede724c4):
+/// only a reading that moved (`context_moved`, against `team` as read) is
+/// written; true when it was.
+fn record_context(store: &mut Store, team: &Team, member_id: &str, context: MemberContext) -> anyhow::Result<bool> {
+    let stored = team.member(member_id).and_then(|member| member.context);
+    if !context_moved(stored.as_ref(), &context, team.settings.context_compact_percent) {
+        return Ok(false);
+    }
+    change(store, &team.id, |team, _| {
         if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
             found.context = Some(context);
         }
         Ok(())
-    })
+    })?;
+    Ok(true)
+}
+
+/// Task #2 (team ede724c4): when the worker last read each member's context
+/// (team, member), written or not: the next read waits for the interval from
+/// whichever is newer, this or the stored reading's time, so a reading that
+/// was not written is not read again on every tick.
+static CONTEXT_READ_AT: std::sync::Mutex<std::collections::BTreeMap<(String, String), f64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn context_read_at(team: &str, member: &str) -> Option<f64> {
+    CONTEXT_READ_AT.lock().ok()?.get(&(team.to_owned(), member.to_owned())).copied()
+}
+
+fn note_context_read(team: &str, member: &str, at: f64) {
+    if let Ok(mut reads) = CONTEXT_READ_AT.lock() {
+        // Bounded by the members the worker reads; a removed one is dropped
+        // when the map grows past what a busy machine has.
+        if reads.len() > 4096 {
+            reads.clear();
+        }
+        reads.insert((team.to_owned(), member.to_owned()), at);
+    }
 }
 
 /// Task 209: the task whose open attempt belongs to `member`, if any.
@@ -6204,23 +6293,130 @@ pub(crate) fn crash_held(team: &Team, task: &Task, member: &Member) -> Option<&'
     None
 }
 
+/// Task #3 (team ede724c4): the context reads in flight, (team, member), and
+/// the finished ones waiting for the next sampling to record them. Each read
+/// is one `hgs inspect` (up to 10 s), so the tick starts them on threads of
+/// their own and never waits for one.
+static CONTEXT_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+type FinishedRead = (String, String, f64, Option<MemberContext>, Instant);
+static CONTEXT_DONE: std::sync::Mutex<Vec<FinishedRead>> = std::sync::Mutex::new(Vec::new());
+
+/// A test's thread-safe stand-in for a member's context read, by team id: the
+/// read then runs on a thread as in the worker. Without one a test reads
+/// inline through its thread's fake `hgs`.
+#[cfg(test)]
+pub(crate) type ContextReader = std::sync::Arc<dyn Fn(&Member, f64) -> Option<MemberContext> + Send + Sync>;
+#[cfg(test)]
+static TEST_CONTEXT_READERS: std::sync::Mutex<std::collections::BTreeMap<String, ContextReader>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+#[cfg(test)]
+pub(crate) fn set_context_reader(team: &str, reader: Option<ContextReader>) {
+    let mut readers = TEST_CONTEXT_READERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match reader {
+        Some(reader) => readers.insert(team.to_owned(), reader),
+        None => readers.remove(team),
+    };
+}
+
+fn finish_context_read(team: String, member: String, at: f64, context: Option<MemberContext>) {
+    CONTEXT_DONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((team.clone(), member.clone(), at, context, Instant::now()));
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(team, member));
+}
+
+/// Starts one member's context read; false when none could start (one is in
+/// flight already, or no thread could be made).
+fn start_context_read(team: &str, member: &Member, at: f64) -> bool {
+    let key = (team.to_owned(), member.id.clone());
+    if !CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+        return false;
+    }
+    let (team_id, member_id, found) = (key.0.clone(), key.1.clone(), member.clone());
+    #[cfg(test)]
+    {
+        let reader = TEST_CONTEXT_READERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(team).cloned();
+        let Some(reader) = reader else {
+            // Inline, through this thread's fake hgs.
+            finish_context_read(team_id, member_id, at, read_context(&found, at));
+            return true;
+        };
+        let spawned = std::thread::Builder::new().name("hgs-team-context".into()).spawn(move || {
+            let context = reader(&found, at);
+            finish_context_read(team_id, member_id, at, context);
+        });
+        if spawned.is_err() {
+            CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            return false;
+        }
+        true
+    }
+    #[cfg(not(test))]
+    {
+        let spawned = std::thread::Builder::new().name("hgs-team-context".into()).spawn(move || {
+            let context = read_context(&found, at);
+            finish_context_read(team_id, member_id, at, context);
+        });
+        if spawned.is_err() {
+            CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            return false;
+        }
+        true
+    }
+}
+
+fn context_in_flight(team: &str, member: &str) -> bool {
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&(team.to_owned(), member.to_owned()))
+}
+
+/// The reads in flight for these teams' members (the worker's tick samples
+/// every team it runs, so this is the worker's whole count).
+fn contexts_in_flight(teams: &[Team]) -> usize {
+    let ids: std::collections::BTreeSet<&str> = teams.iter().map(|team| team.id.as_str()).collect();
+    CONTEXT_IN_FLIGHT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|(team, _)| ids.contains(team.as_str())).count()
+}
+
+/// Records the finished reads of `teams`' members against each team as
+/// stored now; a failed read records nothing and is tried again next tick. A
+/// reading for a team no longer ticked is dropped ten minutes after it
+/// finished, so the list stays bounded.
+fn apply_context_reads(store: &mut Store, teams: &[Team]) {
+    let ids: std::collections::BTreeSet<&str> = teams.iter().map(|team| team.id.as_str()).collect();
+    let finished: Vec<FinishedRead> = {
+        let mut done = CONTEXT_DONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, mut others): (Vec<_>, Vec<_>) = done.drain(..).partition(|(team, ..)| ids.contains(team.as_str()));
+        others.retain(|(.., finished)| finished.elapsed() < Duration::from_secs(600));
+        *done = others;
+        mine
+    };
+    for (team_id, member_id, at, context, _) in finished {
+        let Some(context) = context else { continue };
+        note_context_read(&team_id, &member_id, at);
+        let Ok(Some(team)) = store.load(&team_id) else { continue };
+        if let Err(error) = record_context(store, &team, &member_id, context) {
+            eprintln!("hgs team worker: {}: context: {error}", team.name);
+        }
+    }
+}
+
 /// Task 209: reads how many tokens a member's session holds and updates the
 /// member's reading. Called by the tick only; a hand-out or a report uses the
-/// reading already collected, never a second inspect.
+/// reading already collected, never a second inspect. Task #3 (team
+/// ede724c4): the reads run on threads of their own, at most
+/// CONTEXT_READS_PER_TICK at a time; the readings finished since the last
+/// sampling are recorded first, so the tick never waits for an inspect.
 fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
-    let mut reads = 0;
-    for team in teams {
+    apply_context_reads(store, teams);
+    'teams: for team in teams {
         for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
-            if reads >= CONTEXT_READS_PER_TICK {
-                return;
+            if contexts_in_flight(teams) >= CONTEXT_READS_PER_TICK {
+                break 'teams;
             }
             let Some(session) = member.session.as_ref() else { continue };
-            if member.context_compact.is_some() {
+            if member.context_compact.is_some() || context_in_flight(&team.id, &member.id) {
                 continue;
             }
             let open = open_attempt_task(team, &member.id).is_some();
             let every = if open { CONTEXT_EVERY } else { CONTEXT_IDLE_EVERY };
-            if member.context.is_some_and(|context| at - context.at < every) {
+            let last = member.context.map(|context| context.at).into_iter().chain(context_read_at(&team.id, &member.id)).reduce(f64::max);
+            if last.is_some_and(|last| at - last < every) {
                 continue;
             }
             // A session the listing did not answer is not an idle one: its
@@ -6228,13 +6424,11 @@ fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
             if !seen.iter().any(|found| found.host == session.host && found.name == session.name) {
                 continue;
             }
-            let Some(context) = read_context(member) else { continue };
-            reads += 1;
-            if let Err(error) = record_context(store, &team.id, &member.id, context) {
-                eprintln!("hgs team worker: {}: context: {error}", team.name);
-            }
+            start_context_read(&team.id, member, at);
         }
     }
+    // A read that finished at once (a test's inline read) is recorded now.
+    apply_context_reads(store, teams);
 }
 
 /// Task 209: starts the context action for an idle member whose meter reached
@@ -6516,8 +6710,8 @@ pub(crate) fn report_context_answer(store: &mut Store, team_id: &str, input: &Va
         return Ok(None);
     };
     let Some(member) = team.member(&attempt.member) else { return Ok(None) };
-    let Some(context) = read_context(member).or_else(|| member.context.filter(|context| context.fresh(now()))) else { return Ok(None) };
-    record_context(store, team_id, &member.id, context)?;
+    let Some(context) = read_context(member, now()).or_else(|| member.context.filter(|context| context.fresh(now()))) else { return Ok(None) };
+    record_context(store, &team, &member.id, context)?;
     let threshold = team.settings.context_compact_percent;
     if context.reached(threshold) {
         change(store, team_id, |team, events| {
@@ -7117,7 +7311,50 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
         Err((_, error)) => return Some(step(&head, "refused", format!("the folder's changes were not read: {error}"))),
     }
     let short = |commit: &str| commit.chars().take(9).collect::<String>();
+    // A merge into the member's branch: done, or the step that refuses (or is
+    // uncertain) with the conflicting files and the folder put back.
+    let merge = |rev: &str, message: &str, what: &str, merged: &[String]| -> std::result::Result<(), PrepareStep> {
+        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
+        // queue, this path passes the driver rather than trusting repo config.
+        let driver = super::merge_queue::i18n_driver_config();
+        let Err((timed_out, error)) = git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", message, rev]) else {
+            return Ok(());
+        };
+        let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
+        let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
+        let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
+        let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
+        let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
+        Err(if timed_out || !restored {
+            step(&head, "uncertain", format!("{what} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge"))
+        } else {
+            step(&head, "refused", format!(
+                "{what} {why}. Zerus put the folder back{earlier}; merge it into the member's branch ({folder}) and resolve it, or reassign the task, then retry"
+            ))
+        })
+    };
     let mut merged = Vec::new();
+    // Task #15 (team ede724c4, lead of team 2b863c49, 2026-11-10): when the
+    // team has a line (its base branch, or the lead's branch), a branch that
+    // lacks accepted work is brought up to the line's head first. The lead
+    // resolves the predecessors' conflicts there once; merging them commit by
+    // commit met the same conflict again in every folder that lacked one.
+    let missing = wanted.iter().any(|work| git_bounded(&folder, &["merge-base", "--is-ancestor", &work.commit, "HEAD"]).is_err());
+    let line = if missing { dependency_line(team, &folder) } else { None };
+    if let Some((base, line_head)) = &line {
+        match git_bounded(&folder, &["merge-base", "--is-ancestor", line_head, "HEAD"]) {
+            Ok(_) => {}
+            Err((true, error)) => return Some(step(&head, "uncertain", error)),
+            Err((false, _)) => {
+                let message = format!("Merge the line {base} ({}) before task #{task_id}", short(line_head));
+                if let Err(refused) = merge(line_head, &message, &format!("The line {base} ({})", short(line_head)), &merged) {
+                    return Some(refused);
+                }
+                merged.push(format!("the line {base} ({})", short(line_head)));
+            }
+        }
+    }
     for work in &wanted {
         let object = format!("{}^{{commit}}", work.commit);
         if git_bounded(&folder, &["cat-file", "-e", &object]).is_err() {
@@ -7147,39 +7384,48 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             Err((true, error)) => return Some(step(&head, "uncertain", error)),
             Err((false, _)) => {}
         }
-        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
-        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
-        // queue, this path passes the driver rather than trusting repo config.
-        let driver = super::merge_queue::i18n_driver_config();
-        match git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
-            Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
-            Err((timed_out, error)) => {
-                let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-                let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
-                let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
-                let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
-                let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
-                let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
-                return Some(if timed_out || !restored {
-                    step(&head, "uncertain", format!(
-                        "#{}'s accepted commit {} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge",
-                        work.task, short(&work.commit)
-                    ))
-                } else {
-                    step(&head, "refused", format!(
-                        "#{}'s accepted commit {} {why}. Zerus put the folder back{earlier}; merge it into the member's branch \
-                         ({folder}) and resolve it, or reassign the task, then retry",
-                        work.task, short(&work.commit)
-                    ))
-                });
+        // Task #15: a predecessor the line holds as an equivalent commit (a
+        // cherry-pick or a rebase of it) is on the line already.
+        if let Some((_, line_head)) = &line {
+            let cherry = git_bounded(&folder, &["cherry", line_head, &work.commit, &format!("{}^", work.commit)]).unwrap_or_default();
+            if !cherry.trim().is_empty() && cherry.lines().all(|line| line.starts_with('-')) {
+                continue;
             }
         }
+        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
+        if let Err(refused) = merge(&work.commit, &message, &format!("#{}'s accepted commit {}", work.task, short(&work.commit)), &merged) {
+            return Some(refused);
+        }
+        merged.push(format!("#{} ({})", work.task, short(&work.commit)));
     }
     Some(if merged.is_empty() {
         step(&head, "skipped", format!("the branch holds the accepted work of {names} already"))
     } else {
         step(&head, "done", format!("merged {}", merged.join(", ")))
     })
+}
+
+/// Task #15 (team ede724c4): the line a hand-out brings a member's branch up
+/// to, as (branch, head commit) in the member's `folder`: the team's base
+/// branch, else the lead's branch. Its head is fetched from the team's folder
+/// (a separate clone has it only if it fetched it, as `prepare_branch` does);
+/// without that the folder's own branch of that name. None when the team
+/// names no line or it is not read.
+fn dependency_line(team: &Team, folder: &str) -> Option<(String, String)> {
+    let base = match team.settings.base_branch.trim() {
+        "" => lead_branch(team).ok()?,
+        named => named.to_owned(),
+    };
+    if base.is_empty() || base == "HEAD" || base.starts_with('-') {
+        return None;
+    }
+    let source = team.integration_folder();
+    if !source.trim().is_empty() && git_bounded(folder, &["fetch", "--no-tags", "--quiet", source, &base]).is_ok() {
+        if let Ok(head) = git_bounded(folder, &["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]) {
+            return Some((base, head));
+        }
+    }
+    git_bounded(folder, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]).ok().map(|head| (base, head))
 }
 
 /// Spec 0: a refused or unconfirmed step before a hand-out leaves the task
@@ -10393,6 +10639,13 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Tests outside the dispatcher (task #13's walk from New team to running
+/// members): one step as the worker runs it.
+#[cfg(test)]
+pub(crate) fn test_run_step(store: &mut Store, team: &Team, step: &Step) -> anyhow::Result<()> {
+    run_step(store, team, step, "")
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     if matches!(step, Step::Brief | Step::SubBrief{..} | Step::Launch{..} | Step::HandOut{..} | Step::StageOut{..}) {
         match super::super::iron_rules::project_identity(team) {
@@ -11049,7 +11302,7 @@ fn tick_teams(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     if teams.is_empty() && super::owner_queue::watched().is_empty() {
         return Ok(false);
     }
-    let output = match super::tick_clock::phase("listing", || listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT))) {
+    let output = match super::tick_clock::phase("listing", tick_listing) {
         Some(result) => result?,
         // The previous session listing may still run: skip this tick, never
         // overlap two `hgs ls` children (U2).
@@ -12275,6 +12528,59 @@ impl WorkerFiles {
 
 /// Runs the worker's session listing unless one may still run: a tick is
 /// skipped rather than overlap two `hgs ls` children (U2).
+/// Task #3 (team ede724c4): how old a session listing the tick may use. A
+/// listing takes 1.4 to 3 s; the tick takes the newest one up to this old and
+/// starts the next on a thread of its own, so hand-outs never wait for `hgs
+/// ls`. Without a fresh one the tick lists itself, as before.
+#[cfg_attr(test, allow(dead_code))]
+const LISTING_MAX_AGE: Duration = Duration::from_secs(5);
+
+/// Task #3: the newest listing the worker read, and when it finished.
+#[cfg_attr(test, allow(dead_code))]
+static LAST_LISTING: std::sync::Mutex<Option<(Instant, Output)>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(test, allow(dead_code))]
+fn run_listing() -> anyhow::Result<Output> {
+    let output = hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)?;
+    if output.status.success() {
+        *LAST_LISTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), output.clone()));
+    }
+    Ok(output)
+}
+
+/// Task #3: the session listing of this tick: a fresh cached one (and the
+/// next started in the background), else one read now. None while a listing
+/// still runs and none is fresh: the tick is skipped, never two `hgs ls`
+/// children at once (U2). A test lists on its own thread, through its fake.
+fn tick_listing() -> Option<anyhow::Result<Output>> {
+    #[cfg(test)]
+    {
+        listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT))
+    }
+    #[cfg(not(test))]
+    {
+        let cached = LAST_LISTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() <= LISTING_MAX_AGE)
+            .map(|(_, output)| output.clone());
+        match cached {
+            Some(output) => {
+                // The next listing runs while this tick works; it is skipped
+                // when one still runs.
+                let _ = std::thread::Builder::new().name("hgs-team-listing".into()).spawn(|| {
+                    if let Some(Err(error)) = listing(run_listing) {
+                        eprintln!("hgs team worker: listing: {error}");
+                    }
+                });
+                Some(Ok(output))
+            }
+            None => listing(run_listing),
+        }
+    }
+}
+
 fn listing<T>(run: impl FnOnce() -> T) -> Option<T> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static RUNNING: AtomicBool = AtomicBool::new(false);

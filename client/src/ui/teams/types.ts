@@ -53,6 +53,8 @@ export interface DraftView {
   revision: number;
   unseen: string[];
   owner_edited: string[];
+  /** Task #13 (team ede724c4): the lead's values for the owner's settings, by field. */
+  setting_offers?: Record<string, unknown>;
 }
 
 export interface DraftMember {

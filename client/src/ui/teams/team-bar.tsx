@@ -3,7 +3,7 @@ import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { memberRow } from "../../store/teams";
 import { duration, progress, stateLabel, stateTone } from "./team-model";
-import { TeamBarActions, TeamBarChips, TeamModeControl } from "./TeamActions";
+import { PlanModeOption, TeamBarActions, TeamBarChips, TeamModeControl } from "./TeamActions";
 import { toComposer } from "./MemberCard";
 import { sendBackMessage } from "./actions";
 import { openRow } from "./openRow";
@@ -42,8 +42,9 @@ export function TeamBar(props: {
   width?: number;
 }) {
   const [finishOpen, setFinishOpen] = createSignal(false);
-  // U59: the owner's planning mode for the approval (none: as the lead planned).
-  const [freeMode, setFreeMode] = createSignal(false);
+  // U59/task #12: the planning mode Approve starts in is the team's stored
+  // one, which the Free planning switch below sets in hgs.
+  const freeMode = () => props.team.plan_mode === "free";
   const counts = createMemo(() => progress(props.team, props.problemTasks));
   const [now, setNow] = createSignal(Date.now() / 1000);
   const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
@@ -114,9 +115,7 @@ export function TeamBar(props: {
         <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
         <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
         <Show when={props.team.status === "planning"}>
-          <label class="team-proposal-option" title={tr("One open phase that takes tasks as they come until you close it")}>
-            <input type="checkbox" checked={freeMode()} onChange={(event) => setFreeMode(event.currentTarget.checked)} />{tr("Free planning")}
-          </label>
+          <PlanModeOption computer={props.computer} team={props.team} />
         </Show>
       </Show>
       <TeamBarActions computer={props.computer} team={props.team} planMode={freeMode() ? "free" : ""}

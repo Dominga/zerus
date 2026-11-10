@@ -439,6 +439,12 @@ fn a_sentence_naming_them_all_relaunches_each_member() {
     }
     let rule = roster_word_rule(&team, "relaunch", &json!({"member":"m1"}));
     assert!(rule.names.iter().any(|name| name == "их"), "{:?}", rule.names);
+    // Task #13 (team ede724c4): a member that failed to start needs no word.
+    for member in &mut team.members {
+        member.session = None;
+        member.error = "start failed".into();
+    }
+    assert!(!roster_word_rule(&team, "relaunch", &json!({"member":"m1"})).needed());
 }
 
 /// Task 162 (owner, 2026-11-07): the owner's typed word is no longer taken

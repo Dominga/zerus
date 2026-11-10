@@ -92,3 +92,42 @@ export function NewTeamHowTo(props: NewTeamHowToProps): JSX.Element {
     </section>
   );
 }
+
+// Task #13 (team ede724c4): the owner's settings the lead set in the draft
+// stay the owner's; the lead's values are offers applied with one click.
+const OFFER_LABELS: Record<string, () => string> = {
+  base_branch: () => tr("Base branch"),
+  branch_per_task: () => tr("Branch per task"),
+  max_members: () => tr("Max members"),
+  approval: () => tr("Approval"),
+};
+
+const offerValue = (value: unknown): string => {
+  if (value === true) return tr("Yes");
+  if (value === false) return tr("No");
+  if (value === null || value === undefined || value === "") return tr("not set");
+  return typeof value === "string" ? value : JSON.stringify(value);
+};
+
+export interface SettingOffersProps {
+  offers?: Record<string, unknown>;
+  onApply: (field: string, value: unknown) => void;
+}
+
+/** The lead's offers for the owner's settings, each with Apply. */
+export function SettingOffers(props: SettingOffersProps): JSX.Element {
+  const entries = () => Object.entries(props.offers ?? {});
+  return (
+    <Show when={entries().length > 0}>
+      <section class="nt-setting-offers" data-setting-offers>
+        <b>{tr("The lead offers settings only you set")}</b>
+        <For each={entries()}>{([field, value]) => (
+          <div class="nt-inline" data-setting-offer={field}>
+            <span class="nt-hint grow">{tr("%1: %2", OFFER_LABELS[field]?.() ?? field, offerValue(value))}</span>
+            <button type="button" class="btn small" onClick={() => props.onApply(field, value)}>{tr("Apply")}</button>
+          </div>
+        )}</For>
+      </section>
+    </Show>
+  );
+}

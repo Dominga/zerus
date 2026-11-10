@@ -45,6 +45,10 @@ pub fn sync_webview(window: &WebviewWindow) {
 
 fn report(app: &AppHandle, visible: bool) {
     if app.state::<Visibility>().changed(visible) {
+        // Task #10: a hidden window's Teams views read only Waiting.
+        if let Some(teams) = app.try_state::<crate::teams::Teams>() {
+            teams.hidden(!visible);
+        }
         if let Err(error) = app.emit(EVENT, serde_json::json!({ "visible": visible })) {
             eprintln!("zerus-client: could not report the window state: {error}");
         }

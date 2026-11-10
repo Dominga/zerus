@@ -778,3 +778,26 @@ fn a_folder_that_is_not_the_teams_repository_is_refused() {
     assert_eq!(Path::new(&project).file_name().and_then(|name| name.to_str()), Some("project"));
     assert_eq!(folder_facts(""), (String::new(), String::new()));
 }
+
+/// Task #13 (team ede724c4, owner 2026-11-10): members created at once share
+/// the repository's worktree lock; a creation refused because another holds
+/// it is tried again, never a member that failed to start.
+#[test]
+fn a_busy_worktree_lock_is_waited_for_not_a_failed_member() {
+    let dir = tempfile::tempdir().unwrap();
+    set_git_ceiling(&dir.path().display().to_string());
+    let repo = folder_repo(dir.path(), "project");
+    let member = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+    let team = folder_team(&repo, member.clone());
+    let refusals = std::cell::Cell::new(0);
+    let run = |_: &str, args: &[&str]| -> anyhow::Result<Output> {
+        if args[1] == "create" && refusals.get() < 3 {
+            refusals.set(refusals.get() + 1);
+            return Ok(fake_output(1, "", "Another worktree operation is running. Try again after it finishes."));
+        }
+        local_create(args)
+    };
+    let folder = member_folder_with(&team, &member, &run).unwrap();
+    assert_eq!(refusals.get(), 3);
+    assert_eq!(folder_facts(&folder).1, "team/abcdef12/dev");
+}

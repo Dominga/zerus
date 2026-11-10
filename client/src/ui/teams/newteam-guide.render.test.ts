@@ -8,6 +8,7 @@ import solid from "vite-plugin-solid";
 let server: ViteDevServer | undefined;
 let planMode: (props: Record<string, unknown>) => string;
 let howTo: (props: Record<string, unknown>) => string;
+let offers: (props: Record<string, unknown>) => string;
 const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
 
 beforeAll(async () => {
@@ -19,7 +20,8 @@ beforeAll(async () => {
   });
   const { renderToString } = await server.ssrLoadModule("solid-js/web");
   const { createComponent } = await server.ssrLoadModule("solid-js");
-  const { PlanModeField, NewTeamHowTo } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
+  const { PlanModeField, NewTeamHowTo, SettingOffers } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
+  offers = (props) => renderToString(() => createComponent(SettingOffers, { onApply: () => {}, ...props }));
   planMode = (props) => renderToString(() => createComponent(PlanModeField, { onChoose: () => {}, ...props }));
   howTo = (props) => renderToString(() => createComponent(NewTeamHowTo, { onToggle: () => {}, ...props }));
 });
@@ -100,5 +102,24 @@ describe("New team how-to (task #8)", () => {
     expect(form).toMatch(/<PlanModeField mode=\{fields\(\)\.plan_mode\}/);
     const defaults = JSON.parse(fs.readFileSync(new URL("../../store/settings-defaults.json", import.meta.url), "utf8")) as Record<string, unknown>;
     expect(defaults["client/newTeamHowToClosed"]).toBe(false);
+  });
+});
+
+describe("New team setting offers (task #13)", () => {
+  it("shows nothing without offers", () => {
+    expect(offers({})).not.toContain("data-setting-offers");
+    expect(offers({ offers: {} })).not.toContain("data-setting-offers");
+  });
+  it("lists each of the lead's offers with Apply", () => {
+    const html = offers({ offers: { base_branch: "main", branch_per_task: true, max_members: 5 } });
+    expect(html).toContain("The lead offers settings only you set");
+    expect(html).toContain("Base branch: main");
+    expect(html).toContain("Branch per task: Yes");
+    expect(html).toContain("Max members: 5");
+    expect(html.match(/>Apply</g)?.length).toBe(3);
+  });
+  it("is drawn in New team, applying through the settings", () => {
+    const form = fs.readFileSync(new URL("./NewTeam.tsx", import.meta.url), "utf8");
+    expect(form).toContain("<SettingOffers offers={store.view()?.draft.setting_offers}");
   });
 });

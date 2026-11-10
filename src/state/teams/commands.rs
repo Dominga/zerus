@@ -5021,12 +5021,15 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // U54: the lead relaunches a member's session on the owner's word.
             // #728: except a stuck member when the owner set lead_restarts_stuck;
             // that route is the lead's own decision.
+            // Task #13 (team ede724c4): and except a member whose session
+            // failed to start: starting it again is the lead's own step.
             let id = text(input, "member");
             // Owner, 2026-11-10: a member that did not start or is stuck is
             // relaunched by the lead without a card.
             if id.is_empty()
                 || super::lead_plan::lead_relaunches(team, id)
                 || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
+                || team.member(id).is_some_and(super::model::Member::failed_to_start)
             {
                 WordRule::default()
             } else {

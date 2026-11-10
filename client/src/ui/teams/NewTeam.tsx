@@ -16,7 +16,7 @@ import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coo
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
-import { NewTeamHowTo, PlanModeField } from "./NewTeamGuide";
+import { NewTeamHowTo, PlanModeField, SettingOffers } from "./NewTeamGuide";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
@@ -392,6 +392,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
             <span class="nt-hint">{branchHint(fields().name, props.git)}</span>
           </div>
         </div>
+        <SettingOffers offers={store.view()?.draft.setting_offers}
+          onApply={(field, value) => setSettings({ [field]: value === null ? undefined : value })} />
         <Show when={fields().folder.trim() && !props.git}>
           <p class="nt-note">{tr("This folder is not a Git repository. Every member will share it; worktrees are off.")}</p>
         </Show>

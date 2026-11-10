@@ -5,6 +5,7 @@
 //! never runs or parses an `hgs team` read. [`team_action`] runs the team
 //! actions (task #7). A replay never runs `hgs`.
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tauri::State;
@@ -16,7 +17,7 @@ use zerus_client_core::teams::catalog_edit::{
 };
 use zerus_client_core::teams::read::TeamRead;
 use zerus_client_core::teams::view::{builds as builds_view, tests as tests_view, BuildsView, TestsView};
-use zerus_client_core::teams::Heads;
+use zerus_client_core::teams::{Heads, WaitingShare};
 use zerus_client_core::{default_hgs, ComputerId, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
@@ -32,6 +33,12 @@ pub struct Teams {
     /// Task 8: each computer's latest stream team heads, for a poller that
     /// starts later; None or absent: it polls.
     heads: Mutex<BTreeMap<ComputerId, Arc<Heads>>>,
+    /// Task #10: the window is hidden or minimized: the pollers read only
+    /// Waiting, at the always-on watcher's pace.
+    hidden: AtomicBool,
+    /// Task #10: this computer's newest Waiting reply, which the always-on
+    /// watcher (`team_watch`) reuses instead of reading its own.
+    waiting: WaitingShare,
     replay: bool,
 }
 
@@ -41,8 +48,24 @@ impl Teams {
             pollers: Mutex::new(BTreeMap::new()),
             editors: Arc::new(Mutex::new(BTreeMap::new())),
             heads: Mutex::new(BTreeMap::new()),
+            hidden: AtomicBool::new(false),
+            waiting: WaitingShare::default(),
             replay,
         }
+    }
+
+    /// Task #10: the window was hidden or minimized (`true`) or shown again
+    /// (`window_visibility`). Every poller, and one that starts later, follows it.
+    pub fn hidden(&self, hidden: bool) {
+        self.hidden.store(hidden, Ordering::SeqCst);
+        for poller in self.lock().values() {
+            poller.hidden(hidden);
+        }
+    }
+
+    /// Task #10: this computer's newest Waiting reply for the watcher.
+    pub fn waiting_share(&self) -> &WaitingShare {
+        &self.waiting
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<ComputerId, TeamsPoller>> {
@@ -84,6 +107,12 @@ impl Teams {
                 .get(&computer)
             {
                 poller.heads(Some(Arc::clone(heads)));
+            }
+            if self.hidden.load(Ordering::SeqCst) {
+                poller.hidden(true);
+            }
+            if computer.is_local() {
+                poller.share_waiting(Some(self.waiting.clone()));
             }
             pollers.insert(computer.clone(), poller);
         }

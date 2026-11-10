@@ -281,7 +281,7 @@ mod unix {
                 assert_eq!(kept[0]["terminating"], record["terminating"]);
             }
             "active" => {
-                let kept = archive::reconcile_active_locked(&Snapshot::new()).unwrap();
+                let kept = archive::read_active(&Snapshot::new()).unwrap();
                 assert_eq!(kept.len(), 1);
                 assert_eq!(kept[0]["terminating"], record["terminating"]);
             }

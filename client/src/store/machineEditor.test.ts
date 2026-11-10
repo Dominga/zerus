@@ -170,14 +170,14 @@ describe("Machines connection editor", () => {
       t.editor.edit("hostname", "");
       t.editor.editWsl("distribution", "Ubuntu");
       t.editor.editWsl("user", "dev");
-      t.editor.editWsl("hgs_path", "/home/dev/.local/bin/hgs");
+      t.editor.editWsl("hgs_path", "/home/test/.local/bin/hgs");
       t.editor.edit("test_runner", "linux");
       expect(t.editor.valid()).toBe(true);
       expect(await t.editor.save()).toBe(true);
       expect(t.write).toHaveBeenCalledExactlyOnceWith({
         alias: "ubuntu-wsl", revision: "a".repeat(64),
         change: { kind: "set", create: true, connection: {
-          transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+          transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/test/.local/bin/hgs" },
           test_runner: "linux", hostname: "", user: "", port: null, identity_file: "", enabled: true,
         } },
       });
@@ -188,13 +188,13 @@ describe("Machines connection editor", () => {
     const t = setup();
     try {
       t.setView({ ...view(), machines: [{
-        alias: "ubuntu", transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+        alias: "ubuntu", transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/test/.local/bin/hgs" },
         test_runner: "linux", hostname: "", user: "", port: null, identity_file: "", enabled: true, source: "local", inherited: false, origin: "",
       }] });
       t.editor.choose("ubuntu");
       expect(t.editor.draft()).toMatchObject({
         transport: "wsl-local", test_runner: "linux",
-        wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+        wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/test/.local/bin/hgs" },
       });
     } finally { t.dispose(); }
   });

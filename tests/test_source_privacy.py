@@ -61,6 +61,20 @@ class BeadsAttributionTest(unittest.TestCase):
         self.assertEqual(privacy.findings(".beads/issues.jsonl", line), [(1, "non-example absolute home path")])
 
 
+class PrivateKeyTest(unittest.TestCase):
+    def test_only_the_vectors_bare_header_is_not_key_material(self):
+        # Spelled in parts: this file must not hold the header itself.
+        header = b"-----BEGIN " + b"RSA PRIVATE KEY-----"
+        bare = b'{"text": "' + header + b'", "pattern": "pem-private-key"}'
+        keyed = b'{"text": "' + header + b'\\nMIIEowIBAAKCAQEA"}'
+        vectors = privacy.SECRET_VECTORS
+        self.assertFalse(privacy.private_key_material(vectors, bare))
+        self.assertTrue(privacy.private_key_material(vectors, keyed))
+        self.assertTrue(privacy.private_key_material(vectors, bare + b"\n" + header))
+        self.assertTrue(privacy.private_key_material("tests/fixtures/other.json", bare))
+        self.assertTrue(privacy.private_key_material("docs/key.md", header))
+
+
 class FileNameTest(unittest.TestCase):
     def test_homebrew_cask_files_are_not_addresses(self):
         # Homebrew names channel casks token@channel; their files end in .rb.

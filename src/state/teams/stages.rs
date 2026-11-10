@@ -603,6 +603,15 @@ mod tests {
     }
 
     /// The team as the store keeps it: serde_json::to_string, then read back.
+    /// A worktree member's team has the merge queue on by default (owner,
+    /// 2026-11-09): the lead's accept then only queues the commit, and the stage
+    /// ends when the queue lands it. These tests are about the accept that ends
+    /// the stage at once, so their lead lands by hand (task #19: no queue).
+    fn lands_by_hand(team: &mut Team) {
+        team.settings.manual_line = "main".into();
+        assert!(!super::super::merge_queue::enabled(team));
+    }
+
     fn round_trip(team: &Team) -> Team {
         serde_json::from_str(&serde_json::to_string(team).unwrap()).unwrap()
     }
@@ -1097,6 +1106,7 @@ mod tests {
         isolated(|dir| {
             let project = project(dir, true);
             let (mut team, worktree) = team_in(&project, MemberFolder::Worktree, &builtin(), "code");
+            lands_by_hand(&mut team);
             report(&mut team, &worktree, true);
             let (review, _) = give(&mut team, "rev");
             verdict(&mut team, "rev", &review);
@@ -1130,6 +1140,7 @@ mod tests {
         isolated(|dir| {
             let project = project(dir, true);
             let (mut team, worktree) = team_in(&project, MemberFolder::Worktree, &builtin(), "code");
+            lands_by_hand(&mut team);
             report(&mut team, &worktree, true);
             // The hold from the report and the report's file state are saved
             // with the team and read back (the store writes serde_json::to_string).

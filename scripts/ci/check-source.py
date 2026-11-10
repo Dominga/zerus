@@ -55,7 +55,7 @@ def main():
     # not recognize the new key yet; validate its fixed enum before ignoring
     # only that known syntax warning in actionlint.
     for workflow in (ROOT / ".github/workflows").glob("*.yml"):
-        for line in workflow.read_text().splitlines():
+        for line in workflow.read_text(encoding="utf-8").splitlines():
             match = re.match(r"^( *)cache-mode:\s*([^#]*)(?:#.*)?$", line)
             if match and (len(match[1]) not in {0, 4} or
                           match[2].strip() not in {"read", "write", "write-only", "none"}):
@@ -65,7 +65,7 @@ def main():
         if not path.is_file():
             continue
         if path.suffix == ".py" or name in {"packaging/linux/zerus-setup", "packaging/macos/zerus-setup"}:
-            ast.parse(path.read_text(), filename=name)
+            ast.parse(path.read_text(encoding="utf-8"), filename=name)
         elif path.read_bytes().split(b"\n", 1)[0].startswith((b"#!/bin/sh", b"#!/usr/bin/env bash")) or path.name in {"PKGBUILD", "PKGBUILD.in"}:
             # CreateProcess searches System32 before PATH; use the selected Git Bash on Windows.
             subprocess.run([shutil.which("bash") or "bash", "-n", path.as_posix()], check=True)

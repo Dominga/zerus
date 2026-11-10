@@ -359,11 +359,11 @@ mod tests {
     fn folder_matching_is_qts() {
         assert_eq!(normalize("D:\\Work\\GIT\\repo\\"), "D:/Work/GIT/repo");
         assert_eq!(normalize("D:\\"), "D:/");
-        assert_eq!(normalize("/home/me/repo///"), "/home/me/repo");
+        assert_eq!(normalize("/home/user/repo///"), "/home/user/repo");
         assert!(same_folder("D:\\Work\\GIT\\repo", "d:/work/git/repo"));
         assert!(same_folder("d:/work/git/repo/", "D:\\Work\\GIT\\repo"));
-        assert!(!same_folder("/home/me/repo", "/home/me/Repo"));
-        assert!(!same_folder("/home/me/repo", "/home/me/repo2"));
+        assert!(!same_folder("/home/user/repo", "/home/user/Repo"));
+        assert!(!same_folder("/home/user/repo", "/home/user/repo2"));
     }
 
     #[test]

@@ -196,7 +196,7 @@ fn a_canonical_windows_path_is_compared_without_its_verbatim_prefix() {
     assert_eq!(plain(Path::new(r"\\?\C:\Users\a\.local\state\hgs\x.lock")).as_ref(),
         Path::new(r"C:\Users\a\.local\state\hgs\x.lock"));
     assert_eq!(plain(Path::new(r"\\?\UNC\server\share\x")).as_ref(), Path::new(r"\\?\UNC\server\share\x"));
-    assert_eq!(plain(Path::new("/home/a/x")).as_ref(), Path::new("/home/a/x"));
+    assert_eq!(plain(Path::new("/home/user/x")).as_ref(), Path::new("/home/user/x"));
 }
 
 /// Task #383: a refusal whose path is gone - a test's temporary file, a

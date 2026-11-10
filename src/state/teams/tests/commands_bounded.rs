@@ -66,7 +66,13 @@ fn the_polled_status_clips_reports_runs_and_pages() {
 #[test]
 fn a_copy_of_the_live_store_reads_bounded_and_fast() {
     const TEAM: &str = "33fbafeb-8291-4eda-a00c-6e1448ec6f20";
-    let live = std::path::Path::new("C:/Users/whitl/.local/state/hgs/sessions/teams");
+    // The person's own home, never a path written into the source: under the
+    // test runner's isolated HOME there is no store and the test skips.
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        eprintln!("skipped: no home folder");
+        return;
+    };
+    let live = std::path::Path::new(&home).join(".local/state/hgs/sessions/teams");
     let source = live.join("teams.sqlite3");
     if !source.is_file() {
         eprintln!("skipped: no live store on this machine");

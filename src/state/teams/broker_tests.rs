@@ -288,6 +288,9 @@ fn the_builds_view_shows_the_running_build_the_queue_the_timeline_and_who_change
     record_edits(shared, "dev2", &["src/b.c".into()]).unwrap();
 
     let view = builds_view(&team, now);
+    // Task #5 (team ede724c4): the polled status reads the members' states alone, the same.
+    assert_eq!(build_states(&team, now), view["members"], "{view}");
+    assert_eq!(view["members"]["dev"]["state"], "building");
     let folder = &view["folders"][0];
     assert_eq!(folder["members"], json!(["dev", "dev2"]), "{view}");
     let target = &folder["build_folders"][0];

@@ -652,18 +652,22 @@ pub(crate) fn timeout_in(id: &str, folder: &Path) -> u64 {
 /// Every template a member may name: the built-ins (when the switch is on) and
 /// the owner's additions, marked so the owner sees only the additions.
 pub(crate) fn listed() -> Value {
+    // Task #5 (team ede724c4): the settings file is read once per listing
+    // (it was read three times on every status poll).
+    let settings = read_settings();
+    let enabled = settings["enabled"].as_bool().unwrap_or(true);
     let mut items: Vec<Value> = Vec::new();
-    if enabled() {
+    if enabled {
         for template in BUILTIN {
             items.push(described(template, "builtin"));
         }
     }
-    for template in additions() {
+    for template in settings["templates"].as_array().into_iter().flatten() {
         let mut item = template.clone();
         item["source"] = json!("owner");
         items.push(item);
     }
-    json!({"enabled":enabled(), "items":items})
+    json!({"enabled":enabled, "items":items})
 }
 
 fn described(template: &Template, source: &str) -> Value {
@@ -1768,12 +1772,15 @@ fn qt6_from_cache(path: &Path) -> Option<String> {
 
 /// The checkout a worktree belongs to: the parent of Git's common folder.
 fn main_checkout(folder: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    // ZERUS/T-x8rhb6: a test's folder is under the temporary folder, which a
+    // Zerus template run puts inside the member's worktree
+    // (<folder>/.zerus-team/tmp); git then found that worktree's main
+    // checkout and its real Qt. A test never looks at or above it.
+    #[cfg(test)]
+    command.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
+    let output = command.stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     if !output.status.success() {
         return None;
     }

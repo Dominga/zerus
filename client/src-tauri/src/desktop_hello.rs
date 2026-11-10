@@ -16,7 +16,8 @@ impl Canonical {
     ) -> Arc<Responder> {
         crate::desktop_service::enter_startup_recovery();
         // Task 180: the app shows which check refused and the next step.
-        crate::desktop_service::record_startup_recovery_reason(original.reason);
+        // Task #53: a missing binding says why the install recorded none.
+        crate::desktop_service::record_startup_recovery_reason(crate::takeover_refusal::refined(original.reason));
         let responder = responder(identity);
         self.replace(responder)
     }

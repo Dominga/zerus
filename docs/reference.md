@@ -3720,6 +3720,45 @@ shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
 answers "Invalid team record" and never writes the team back without its
 tasks. Every hgs and desktop on the computer is updated together.
 
+### The polled team list and inbox are small
+
+The desktop follows `hgs team list` of every computer, peers over SSH
+included, and reads it again whenever a team's revision moves. Since task #6
+(team ede724c4) each item carries only what the session list's cards and strips
+show. Tasks, phase records, attention items, proposals and each member's
+queue, services, jobs and question are in `hgs team status`. Each item has:
+
+- `id`, `name`, `status`, `project`, `folder`, `lead`, `revision`, `updated`;
+- `plan_mode` and `phase_modes` (every phase's mode, phase 1 included);
+- `members`: each one's `id`, `role`, `agent`, `state`, `session` (`host`,
+  `name`, `run_id`, `conversation_id`), `session_state` and `state_reason`;
+- `task_count`: the tasks the request covers (cancelled ones only with
+  `include_cancelled`, as the desktop asks);
+- `progress`: the phase strip over those tasks. `phase` is the lowest phase
+  with an unfinished task (accepted and cancelled count as finished), else the
+  last; `phase_done` and `phase_total` count its tasks; `phases_done` and
+  `phases_total` count the phases. A team with no task has all five at 0;
+- `accepted` (archived phases included), `submitted`, `in_review`, `in_test`;
+- `attention_count` (the owner's attention items) and `open_proposals` (the
+  lead's open proposals);
+- `waiting_for_lead`, `pending_phase`, `stuck_scope`, `auto_accept` and
+  `parent` (`team` and `task` of a sub-team, else null).
+
+On the store copy of 2026-11-10 (21 teams), the list fell from 352 KB to 44 KB.
+A desktop that follows a peer with an older hgs still reads that peer's
+`tasks`, `attention` and `proposals` arrays and counts them itself. An older
+desktop reading this hgs's list shows 0 tasks, attention items and proposals
+until it is updated.
+
+`hgs team inbox` resolves its caller once. A member's own call (`{}`) finds
+its team through the members projection (`team_rule_members`), so only teams
+whose member list names the session are read. Only when the projection names
+none are all running teams read, as before. On Windows the ancestry check that
+proves the session reads one process table for the whole walk, not one per
+ancestor; each ancestor is still verified. The owner's read of a named team
+(`{"team"}`) has no session identity to prove. Proposals are settled and
+items are built only for the lead, a sub-lead or the owner.
+
 ### A stalled lead tells the owner
 
 When the lead's decisions (a member's report, question or permission) have

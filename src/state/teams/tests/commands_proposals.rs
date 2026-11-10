@@ -240,13 +240,13 @@ fn the_team_list_carries_the_open_proposals_for_their_cards() {
         ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
     }
     team.proposals[1]["state"] = json!("rejected");
+    // Task #6 (team ede724c4): the polled list counts the open proposals; their
+    // cards come from status.
     let listed = summary(&team, false);
-    let proposals = listed["proposals"].as_array().unwrap();
-    assert_eq!(proposals.len(), 1, "{listed}");
-    assert_eq!(proposals[0]["id"], "p1");
-    assert_eq!(proposals[0]["change"]["tasks"], json!([2]));
-    assert_eq!(proposals[0]["hash"], team.proposals[0]["hash"]);
-    assert!(proposals[0].get("operation_request").is_none(), "{}", proposals[0]);
+    assert_eq!(listed["open_proposals"], 1, "{listed}");
+    assert!(listed.get("proposals").is_none(), "{listed}");
+    assert_eq!(team.proposals[0]["state"], "open");
+    assert_eq!(team.proposals[0]["change"]["tasks"], json!([2]));
 }
 
 /// U57: Allow applies exactly the proposed change once, bound to the id and

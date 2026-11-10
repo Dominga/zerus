@@ -241,6 +241,42 @@ fn the_list_projects_each_team_with_its_members_and_counts() {
     assert_eq!((long.teams.len(), long.truncated), (view::LIST_KEPT, true));
 }
 
+/// Task #6 (team ede724c4): hgs's list now gives counts and the phase strip
+/// instead of tasks, attention items and proposals. The same teams in the old
+/// shape (a peer's older hgs) and the summary shape show the same cards and
+/// strips.
+#[test]
+fn the_summary_list_shows_the_same_cards_as_the_old_one() {
+    let old = fixture("list");
+    let summary = fixture("list-summary");
+    for item in summary["items"].as_array().unwrap() {
+        for absent in ["tasks", "phases", "attention", "proposals"] {
+            assert!(item.get(absent).is_none(), "{absent}");
+        }
+    }
+    assert_eq!(view::list(&summary), view::list(&old));
+    let team = &view::list(&summary).teams[0];
+    assert_eq!((team.tasks, team.phase, team.phase_done, team.phase_total), (4, 1, 2, 4));
+    // An empty strip and no counts read zero, as an empty old list did.
+    let bare = view::list(&json!({"items":[{"id":"t","task_count":0,"progress":{},"attention_count":0,"open_proposals":0}]}));
+    assert_eq!((bare.teams[0].tasks, bare.teams[0].phase_total, bare.teams[0].attention, bare.teams[0].open_proposals), (0, 0, 0, 0));
+}
+
+/// Task #6 (team ede724c4): a real store's list answered by the old hgs and by
+/// this one decodes to the same cards and strips. It runs only when
+/// HGS_TEST_LIST_OLD and HGS_TEST_LIST_NEW name the two answers.
+#[test]
+fn a_real_list_decodes_the_same_in_both_shapes() {
+    let (Some(old), Some(new)) = (std::env::var_os("HGS_TEST_LIST_OLD"), std::env::var_os("HGS_TEST_LIST_NEW")) else { return };
+    let read = |path: &std::ffi::OsStr| -> Value { serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap() };
+    let (old, new) = (view::list(&read(&old)), view::list(&read(&new)));
+    assert_eq!(old.teams.len(), new.teams.len());
+    for (before, after) in old.teams.iter().zip(&new.teams) {
+        assert_eq!(before, after, "{}", before.name);
+    }
+    println!("same cards for {} teams", new.teams.len());
+}
+
 #[test]
 fn a_status_projects_the_team_tab_and_its_plan_graph() {
     let value = fixture("status");

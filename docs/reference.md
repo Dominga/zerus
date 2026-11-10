@@ -3087,9 +3087,31 @@ committed-receipt lookup; it cannot continue mutation. A lost reply, changed
 context, active or unknown writer, restarted owner, missing receipt, or stranded
 guard is `Partial`/`Unknown` and status-only. No new UUID, remote replay after
 an unknown result, duplicate cleanup, or third destination repair is permitted.
-The native dialog rechecks the original generation, endpoint cards,
-configuration, ticket and resource custody before invocation and settlement;
-its later review action is read-only, not another adoption call.
+The native dialog binds the original to independently observed Live machine
+cards for this computer and the destination (computer, host and machine UUID
+equal to the preview node) and refuses a stopped hub. It rechecks those cards,
+the original generation, configuration, ticket and resource custody at the
+queued invocation barrier, at each preflight result, at the mutation's drained
+result and before native settlement. A refusal is sticky: a restored card or
+configuration never revives that original. Its later review action is
+read-only, not another adoption call.
+
+Each original remote call keeps the same ssh child (and its Windows job),
+request writer and both pipe readers until they physically settle. After any
+failure the child may exit by itself until the original deadline; then only
+that owned child is stopped and its exit confirmed by wait. No process group,
+descendant or name-based kill is used, and a PID whose status is no longer
+trusted is never signalled. The CLI then waits for the writer and both pipe
+EOFs before it reports the call as unknown, so a descendant that still holds a
+pipe keeps the call, and its native accounting, retained. A call whose exit
+cannot be confirmed stays pinned and admits no other call in that process. The
+adoption ssh passes `-o ControlPath=none` ahead of the configured connection
+options, so a user's `ControlMaster`/`ControlPersist` setting cannot start a
+background mux master that inherits stderr. The desktop runs the call beside
+its organization worker: other organization work continues, the dialog can be
+closed and reopened onto the same original, and after the original deadline it
+reports that the original is still settling with an unknown result. Only new
+adoption actions wait, and no failure or timeout settles or replays it.
 
 Adoption-specific raw JSON rejects duplicate object keys recursively before a
 typed map is constructed. The source catalog and sidecars must match their
@@ -3097,7 +3119,9 @@ declared source and source-node machine operation. The original destination is
 validated independently against its own empty preimage, whose swarm may differ
 from the source. The complete main/primary/twins candidate, cross-component
 closure, aggregate operations, parent edges and encoded wire size are checked
-before any journal, guard or product effect. Terminal and settlement receipts
+before any journal, guard or product effect. Primary counts come from the
+membership view validated with the main catalog's machine redirects, so a valid
+causal edge from an old machine key to its canonical child is accepted. Terminal and settlement receipts
 must match the full original request and all component preimages and postimages;
 a same-UUID or hash-shaped response is insufficient. `guard_cleared` is durable
 before `remote_committed`; a crash between them remains manual/status-only.

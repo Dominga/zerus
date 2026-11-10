@@ -2808,11 +2808,7 @@ impl LaunchOptions {
 /// symlink is looked up under its physical path as well (zerus-ngeih).
 fn claude_history_exists(history_root: &Path, directory: &str) -> bool {
     let has = |directory: &str| {
-        let escaped: String = directory
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        fs::read_dir(history_root.join(escaped))
+        fs::read_dir(history_root.join(claude_history_folder(directory)))
             .ok()
             .is_some_and(|entries| {
                 entries
@@ -2825,6 +2821,35 @@ fn claude_history_exists(history_root: &Path, directory: &str) -> bool {
             .ok()
             .map(|path| path.to_string_lossy().into_owned())
             .is_some_and(|physical| physical != directory && has(&physical))
+}
+
+/// Claude Code 2.1.322's VL/Pe/sre rule: escape UTF-16 units, and above 200
+/// units append the base-36 absolute signed wrapping hash of the original path.
+fn claude_history_folder(directory: &str) -> String {
+    let mut escaped = String::with_capacity(208);
+    let mut length = 0;
+    let mut hash = 0_i32;
+    for unit in directory.encode_utf16() {
+        if length < 200 {
+            escaped.push(char::from_u32(u32::from(unit)).filter(char::is_ascii_alphanumeric).unwrap_or('-'));
+        }
+        length += 1;
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    if length > 200 {
+        let mut value = hash.unsigned_abs();
+        let mut digits = [b'0'; 7];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b"0123456789abcdefghijklmnopqrstuvwxyz"[(value % 36) as usize];
+            value /= 36;
+            if value == 0 { break; }
+        }
+        escaped.push('-');
+        escaped.extend(digits[at..].iter().copied().map(char::from));
+    }
+    escaped
 }
 
 fn resolve_project(
@@ -3316,6 +3341,30 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_history_uses_the_released_folder_cap_and_hash() {
+        // Golden folder names from VL/Pe/sre in Claude Code 2.1.322. Each
+        // case gets a separate history root so a cap-only implementation
+        // cannot accidentally find the 200-character boundary case's file.
+        let prefix = format!("-fixture-{}", "a".repeat(191));
+        let cases = [
+            (format!("/fixture/{}", "a".repeat(191)), prefix.clone()),
+            (format!("/fixture/{}", "a".repeat(192)), format!("{prefix}-ble0s5")),
+            (format!("/fixture/{}", "a".repeat(240)), format!("{prefix}-vis0vp")),
+            (format!("/fixture/{}b", "a".repeat(240)), format!("{prefix}-h9g0ab")),
+            (format!("/fixture/{}c", "a".repeat(240)), format!("{prefix}-h9g0aa")),
+            (format!("/fixture/{}", "😀".repeat(100)), format!("-fixture-{}-ix5129", "-".repeat(191))),
+        ];
+        for (directory, folder) in cases {
+            let history = tempfile::tempdir().unwrap();
+            assert!(!super::claude_history_exists(history.path(), &directory));
+            let path = history.path().join(folder);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("conversation.jsonl"), "{}\n").unwrap();
+            assert!(super::claude_history_exists(history.path(), &directory), "history not found for {directory}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn claude_history_is_found_under_the_physical_path_of_a_symlinked_project() {

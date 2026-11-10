@@ -49,6 +49,9 @@ if [ "$run_tests" = true ]; then
     (cd client && npm run check && npm test) 2>&1 | tee artifacts/test-results/macos-bundle-web.log
     cargo test --locked --release --manifest-path client/core/Cargo.toml \
         2>&1 | tee artifacts/test-results/macos-bundle-core.log
+    # The drive-folder integration tests run the release CLI built above from
+    # this source, never an inherited or installed one (zerus-h43u3).
+    HGS_TEST_BIN="$CARGO_TARGET_DIR/release/hgs" \
     cargo test --locked --release --manifest-path client/src-tauri/Cargo.toml --features video \
         2>&1 | tee artifacts/test-results/macos-bundle-tauri.log
 else

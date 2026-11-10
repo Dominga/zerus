@@ -14,8 +14,8 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse delivery recovery, recent-Activity, child-session and visible-refresh
-# additions, then the reviewed task-tracker additions to 86aeab6d, then
+# fixtures first reverse presentation, delivery recovery, recent-Activity, child-session and
+# visible-refresh additions, then the reviewed task-tracker additions to 86aeab6d, then
 # the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
 # additions. None changes question eligibility or the ten verification writes.
@@ -51,6 +51,14 @@ RECENT_ACTIVITY_UPDATES_SHA = "05f9cb60d46c095e91561d5bdfe6c7d76c850218fd6ca9b44
 # every verification assignment and all historical reconstruction pins stay exact.
 DELIVERY_RECOVERY_UPDATES = ROOT / "tests/fixtures/question-availability-delivery-recovery-updates.patch"
 DELIVERY_RECOVERY_UPDATES_SHA = "9606f2de9579fb7100e4ca0878a4574cb919a651bf37743cee23177674b8a25e"
+# Exact two-file presentation delta 1e41c497d..e14859381: 288a92bf5 (quiet sync
+# status, stable Activity row keys and loaded-unread counts) and e14859381 (saved
+# positions through presentation aliases). It replaces the refresh status banner
+# with read timing only. Question eligibility, native availability, every
+# verification assignment and all historical reconstruction pins stay exact
+# (zerus-p7i3o). Reverse it first, as the newest reviewed update.
+PRESENTATION_UPDATES = ROOT / "tests/fixtures/question-availability-presentation-updates.patch"
+PRESENTATION_UPDATES_SHA = "dde1e6eb48faf7d29a8407726be4cf74b176e95802fd1249bb95ee49dc9f8003"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -102,6 +110,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, RECENT_ACTIVITY_UPDATES, RECENT_ACTIVITY_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, CHILD_SESSION_UPDATES, CHILD_SESSION_UPDATES_SHA)
@@ -128,6 +137,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 RECENT_ACTIVITY_UPDATES, RECENT_ACTIVITY_UPDATES_SHA)
@@ -170,10 +181,13 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
 
     def test_visible_refresh_projection_refuses_modified_missing_or_duplicate_hunks(self):
-        # Reversing the exact UI change must not hide a later policy edit.
+        # Reversing the exact UI change must not hide a later policy edit. The
+        # visible-refresh status row itself became read timing in 288a92bf5 and is
+        # covered by the presentation projection; this is the reviewed background
+        # refresh gate that still yields to native question review.
         additions = {
             "ZerusViewModel.kt": "    private var lastHistoryReadCompletedAt=0L\n",
-            "MainActivity.kt": "            if (selected != null) ConversationRefreshStatus(model, conversationLoad)\n",
+            "MainActivity.kt": "        if (refreshTarget?.archiveId?.isBlank() == true && !reviewingNativeInput && !model.demo) {\n",
         }
         for name, addition in additions.items():
             source = (MAIN / name).read_text()
@@ -186,6 +200,18 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         additions = {
             "ZerusViewModel.kt": "    private var historyViewIntent=0L\n",
             "MainActivity.kt": "        val needsHistory = model.hasNewer || model.olderLoading\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
+    def test_presentation_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        additions = {
+            "ZerusViewModel.kt": "    internal val conversationSupersededIds:Map<String,String> get() = activeFrame?.supersededIds.orEmpty()\n",
+            "MainActivity.kt": "            if (selected != null) ConversationReadTiming(model, conversationLoad)\n",
         }
         for name, addition in additions.items():
             source = (MAIN / name).read_text()

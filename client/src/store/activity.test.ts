@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
-import { FIRST_PAGE_MS, createActivity, type FollowRequest } from "./activity";
+import { FIRST_PAGE_MS, OLDER_PAGE, OLDER_PAGE_TIMEOUT_MS, createActivity, type FollowRequest } from "./activity";
 import { buildTranscript, mergeProvider } from "../ui/sessions/transcript";
 import type { ActivityEvent, ActivityOut } from "../types";
 
@@ -594,5 +594,111 @@ describe("a follow that never answers (zerus-bz54l)", () => {
     store.applyActivity([out("event", { id: "i22", rev: 1, event: ev(22, "AgentMessage", { turn_origin: "keep_warm", detail: "ok" }) })]);
     expect(store.events().map((e) => e.seq)).toEqual([21]);
     store.follow(undefined);
+  });
+});
+
+describe("activity store page reads", () => {
+  function paged(answer: boolean | Error = true) {
+    const calls: FollowRequest[] = [];
+    const asked: Array<[string, string, number, number]> = [];
+    const port = {
+      follow: vi.fn(async (r: FollowRequest) => { calls.push(r); }),
+      unfollow: vi.fn(async () => {}),
+      older: vi.fn(async (c: string, k: string, before: number, limit: number) => {
+        asked.push([c, k, before, limit]);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }),
+    };
+    return { store: createActivity(port), calls, asked };
+  }
+
+  it("asks for a page before the oldest row, merges the answer and passes its cursor next", async () => {
+    await createRoot(async (dispose) => {
+      const { store, calls, asked } = paged();
+      store.follow(target);
+      store.applyActivity([out("events", { events: [ev(900), ev(950)], cursor: 950 })]);
+      store.loadOlder();
+      await Promise.resolve();
+      expect(asked).toEqual([["", "run:a", 900, OLDER_PAGE]]);
+      expect(store.loadingOlder()).toBe(true);
+      store.applyActivity([out("older", { events: [ev(800), ev(850)], cursor: 800, last: false, more: false })]);
+      expect(store.loadingOlder()).toBe(true);
+      store.applyActivity([out("older", { events: [ev(700), ev(750)], cursor: 700, last: true, more: true })]);
+      expect(store.events().map((e) => e.seq)).toEqual([700, 750, 800, 850, 900, 950]);
+      expect(store.loadingOlder()).toBe(false);
+      expect(store.olderDone()).toBe(false);
+      store.loadOlder();
+      await Promise.resolve();
+      expect(asked.at(-1)).toEqual(["", "run:a", 700, OLDER_PAGE]);
+      expect(calls).toHaveLength(1);
+      dispose();
+    });
+  });
+
+  it("is done when the last page says nothing older remains", async () => {
+    await createRoot(async (dispose) => {
+      const { store } = paged();
+      store.follow(target);
+      store.applyActivity([out("events", { events: [ev(50)], cursor: 50 })]);
+      store.loadOlder();
+      await Promise.resolve();
+      store.applyActivity([out("older", { events: [ev(10)], cursor: 10, last: true, more: false })]);
+      expect(store.olderDone()).toBe(true);
+      expect(store.loadingOlder()).toBe(false);
+      dispose();
+    });
+  });
+
+  it("keeps reading when a live events out arrives during the read", async () => {
+    await createRoot(async (dispose) => {
+      const { store } = paged();
+      store.follow(target);
+      store.applyActivity([out("events", { events: [ev(900)], cursor: 900 })]);
+      store.loadOlder();
+      await Promise.resolve();
+      store.applyActivity([out("events", { events: [ev(901)], cursor: 901 })]);
+      expect(store.loadingOlder()).toBe(true);
+      store.applyActivity([out("older", { events: [ev(800)], cursor: 800, last: true, more: true })]);
+      expect(store.loadingOlder()).toBe(false);
+      expect(store.events().map((e) => e.seq)).toEqual([800, 900, 901]);
+      dispose();
+    });
+  });
+
+  it("falls back to the after read when the source cannot page", async () => {
+    for (const answer of [false, new Error("refused")]) {
+      await createRoot(async (dispose) => {
+        const { store, calls } = paged(answer);
+        store.follow(target);
+        store.applyActivity([out("events", { events: [ev(900)], cursor: 900 })]);
+        store.loadOlder();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(calls.at(-1)?.after).toBe(700);
+        expect(store.loadingOlder()).toBe(true);
+        dispose();
+      });
+    }
+  });
+
+  it("ends loading after the timeout without claiming the history is done", async () => {
+    vi.useFakeTimers();
+    try {
+      await createRoot(async (dispose) => {
+        const { store } = paged();
+        store.follow(target);
+        store.applyActivity([out("events", { events: [ev(900)], cursor: 900 })]);
+        store.loadOlder();
+        await Promise.resolve();
+        expect(store.loadingOlder()).toBe(true);
+        vi.advanceTimersByTime(OLDER_PAGE_TIMEOUT_MS);
+        expect(store.loadingOlder()).toBe(false);
+        expect(store.olderDone()).toBe(false);
+        dispose();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

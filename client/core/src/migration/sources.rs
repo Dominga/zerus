@@ -3,13 +3,13 @@
 //! SourceStream::recheck using that same reader before publication.
 use super::{bounded_json, SourceError, SourceResult, SourceStream};
 use crate::creation;
+pub use crate::next_source::next_pending_reads;
+pub(crate) use crate::next_source::pages;
+use crate::next_source::{valid_mark, READ_BYTES, READ_ENTRIES};
 use crate::readmarks::ReadMark;
 use crate::settings::{qt::QtValue, QtSnapshot};
 use serde_json::{json, Value};
 use zerus_desktop_migration::{sha256, SourceRecord, MAX_SNAPSHOT_BYTES};
-
-const READ_BYTES: usize = 16 << 20;
-const READ_ENTRIES: usize = 50_000;
 
 mod tasks;
 pub use tasks::{qt_task_forms, task_delivery, task_start_delivery};
@@ -128,27 +128,6 @@ fn qt_mark(key: &str, value: Value) -> SourceResult<Value> {
     Ok(json!({"key":key,"original":value,"read_mark":mark}))
 }
 
-fn valid_mark(mark: &ReadMark) -> SourceResult<()> {
-    let valid = |text: &str| text.len() <= 8192 && !text.chars().any(char::is_control);
-    if !valid(&mark.computer)
-        || mark.name.is_empty()
-        || !valid(&mark.name)
-        || mark.run_id.is_empty()
-        || !valid(&mark.run_id)
-        || mark.conversation_id.is_empty()
-        || !valid(&mark.conversation_id)
-        || mark.reply_id.as_deref().is_some_and(|s| !valid(s))
-        || mark
-            .attention_signature
-            .as_deref()
-            .is_some_and(|s| !valid(s))
-        || mark.is_empty()
-    {
-        return Err(SourceError::UnsupportedSource);
-    }
-    Ok(())
-}
-
 fn qt_json(value: &QtValue) -> SourceResult<Value> {
     qt_json_bounded(value, READ_BYTES)
 }
@@ -237,81 +216,6 @@ pub fn qt_shared_read_migrated(snapshot: &QtSnapshot) -> SourceResult<SourceStre
             Ok(json!({"host":value}))
         })),
     ))
-}
-
-/// The interim client's same queue shape, without creating a live ReadMarks
-/// store. Original unknown fields and exact request/conversation IDs survive.
-pub fn next_pending_reads(bytes: &[u8]) -> SourceResult<SourceStream> {
-    if bytes.len() > READ_BYTES {
-        return Err(SourceError::TooLarge);
-    }
-    let values: Vec<Value> =
-        serde_json::from_slice(bytes).map_err(|_| SourceError::UnsupportedSource)?;
-    if values.len() > READ_ENTRIES {
-        return Err(SourceError::TooLarge);
-    }
-    let chunks = values.into_iter().map(|value| {
-        let mark: ReadMark =
-            serde_json::from_value(value.clone()).map_err(|_| SourceError::UnsupportedSource)?;
-        valid_mark(&mark)?;
-        Ok(json!({"original":value,"read_mark":mark}))
-    });
-    Ok(SourceStream::new(
-        SourceRecord {
-            family: "next-pending-reads".into(),
-            schema: 1,
-            format: "read-marks-json".into(),
-            sha256: sha256(bytes),
-            build: None,
-        },
-        pages(chunks),
-    ))
-}
-
-/// Private pages of at most 64 entries and 1 MiB. An individual oversized
-/// entry is refused, never truncated. This is bounded source assembly, not
-/// a cache or a replacement journal.
-pub(crate) fn pages(
-    mut items: impl Iterator<Item = SourceResult<Value>> + Send + 'static,
-) -> impl Iterator<Item = SourceResult<Value>> + Send {
-    let mut pending = None;
-    let mut ended = false;
-    std::iter::from_fn(move || {
-        if ended {
-            return None;
-        }
-        let mut values = Vec::new();
-        let mut bytes = 0;
-        while values.len() < 64 {
-            let item = match pending.take().or_else(|| items.next()) {
-                None => {
-                    ended = true;
-                    break;
-                }
-                Some(Ok(value)) => value,
-                Some(Err(error)) => {
-                    ended = true;
-                    return Some(Err(error));
-                }
-            };
-            // Include its separating comma in the entry budget. Even the
-            // first entry must fit; otherwise None could hide a pending item.
-            let length = match bounded_json(&item, MAX_SNAPSHOT_BYTES as usize - 257) {
-                Ok(encoded) => encoded.len() + 1,
-                Err(error) => {
-                    ended = true;
-                    return Some(Err(error));
-                }
-            };
-            if bytes + length > MAX_SNAPSHOT_BYTES as usize - 256 {
-                pending = Some(Ok(item));
-                break;
-            }
-            bytes += length;
-            values.push(item);
-        }
-        (!values.is_empty()).then(|| Ok(json!({"entries":values})))
-    })
 }
 
 #[cfg(test)]

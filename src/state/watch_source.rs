@@ -170,6 +170,23 @@ impl Timeline {
         )?;
         rows.iter().map(|row| row.event(&self.record)).collect()
     }
+
+    /// The page of events before `before` as `inspect` shapes them, oldest
+    /// first: the newest `limit` of them, the sequence number the next older
+    /// page starts before, and whether one exists.
+    pub(crate) fn events_before(&self, db: &Connection, before: i64, limit: usize) -> Result<(Vec<Value>, i64, bool)> {
+        let scope = journal::activity_scope(db, &self.record);
+        let (rows, cursor, more) = journal::timeline_rows_before(
+            db,
+            self.journal(),
+            self.record["conversation_id"].as_str(),
+            &scope,
+            before,
+            limit,
+        )?;
+        let events = rows.iter().map(|row| row.event(&self.record)).collect::<Result<Vec<_>>>()?;
+        Ok((events, cursor, more))
+    }
 }
 
 /// The timeline of a tracked session; None for a session without a saved

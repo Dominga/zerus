@@ -31,6 +31,12 @@ export interface FollowRequest {
 export interface ActivityPort {
   follow(request: FollowRequest): Promise<void>;
   unfollow(computer: ComputerId, key: string): Promise<void>;
+  /**
+   * Asks for one page of the followed session's rows before journal seq
+   * `before`; the answer arrives as `older` outs. Resolves false when this
+   * source cannot page (the caller reads the old way).
+   */
+  older?(computer: ComputerId, key: string, before: number, limit: number): Promise<boolean>;
 }
 
 /**
@@ -46,6 +52,10 @@ export const TAIL = 100;
 const OLDER_SPAN = 200;
 /** A read that brings nothing older within this time counts as empty. */
 const OLDER_TIMEOUT_MS = 4000;
+/** The rows one older page asks for (the server allows 200). */
+export const OLDER_PAGE = 100;
+/** A page read that is not answered within this time ends without claiming the history is done. */
+export const OLDER_PAGE_TIMEOUT_MS = 15_000;
 
 /** A stable identity for an event: its journal seq, else its own keys. */
 export function eventKey(e: ActivityEvent): string {
@@ -108,6 +118,10 @@ export function createActivity(port: ActivityPort) {
   let span = OLDER_SPAN;
   let olderFrom: number | undefined;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The next `before` of a page read, from the last `older` answer. */
+  let olderCursor: number | undefined;
+  /** A token for the page read in flight; a retired read's late answers and timers are ignored. */
+  let paging: object | undefined;
   let subscribed: FollowTarget | undefined;
   /** Each follow and Retry is one read attempt: a retired one's late timers, failures and steps are ignored. */
   let attempt = 0;
@@ -146,6 +160,8 @@ export function createActivity(port: ActivityPort) {
     resuming = undefined;
     span = OLDER_SPAN;
     olderFrom = undefined;
+    olderCursor = undefined;
+    paging = undefined;
     clearTimeout(olderTimer);
     clearTimeout(firstPage);
     batch(() => {
@@ -191,6 +207,8 @@ export function createActivity(port: ActivityPort) {
         revs.clear();
         clearTimeout(olderTimer);
         olderFrom = undefined;
+        olderCursor = undefined;
+        paging = undefined;
         setSummary(undefined);
         setEnded(false);
         setLoadingOlder(false);
@@ -264,17 +282,42 @@ export function createActivity(port: ActivityPort) {
     setLoadingOlder(false);
   };
 
-  /** Reads events before the oldest one shown, resuming the subscription from further back. */
-  function loadOlder() {
-    const t = target();
-    const oldest = oldestSeq();
-    if (!t || subscribed !== t || loadingOlder() || olderDone() || oldest === undefined) return;
-    if (oldest <= 1) { setOlderDone(true); return; }
+  /** The previous way: resume the subscription from further back by a guessed span. */
+  function legacyOlder(t: FollowTarget, oldest: number) {
     olderFrom = oldest;
     setLoadingOlder(true);
     const after = Math.max(0, oldest - span);
     olderTimer = setTimeout(settleOlder, OLDER_TIMEOUT_MS);
     void port.follow(request(t, after)).catch(settleOlder);
+  }
+
+  /** Reads the rows before the oldest one shown: one page read when the server offers it, else the legacy way. */
+  function loadOlder() {
+    const t = target();
+    const oldest = oldestSeq();
+    if (!t || subscribed !== t || loadingOlder() || olderDone() || oldest === undefined) return;
+    if (oldest <= 1) { setOlderDone(true); return; }
+    if (!port.older) { legacyOlder(t, oldest); return; }
+    const token = {};
+    const mine = attempt;
+    paging = token;
+    setLoadingOlder(true);
+    const before = olderCursor !== undefined ? Math.min(olderCursor, oldest) : oldest;
+    const current = () => paging === token && target() === t && attempt === mine;
+    clearTimeout(olderTimer);
+    olderTimer = setTimeout(() => {
+      if (paging !== token) return;
+      paging = undefined;
+      setLoadingOlder(false);
+    }, OLDER_PAGE_TIMEOUT_MS);
+    const fallBack = () => {
+      if (!current()) return;
+      paging = undefined;
+      clearTimeout(olderTimer);
+      setLoadingOlder(false);
+      legacyOlder(t, oldest);
+    };
+    port.older(t.computer, t.key, before, OLDER_PAGE).then((sent) => { if (!sent) fallBack(); }, fallBack);
   }
 
   function applyActivity(outs: ActivityOut[]) {
@@ -299,6 +342,22 @@ export function createActivity(port: ActivityPort) {
             setLoaded(true);
             break;
           }
+          case "older": {
+            const p = (out.payload ?? {}) as { events?: ActivityEvent[]; cursor?: number; last?: boolean; more?: boolean };
+            for (const e of Array.isArray(p.events) ? p.events : []) {
+              if (keepWarmEvent(e)) continue;
+              byKey.set(eventKey(e), e);
+            }
+            changed = true;
+            if (typeof p.cursor === "number") olderCursor = p.cursor;
+            if (p.last === true && paging !== undefined) {
+              paging = undefined;
+              clearTimeout(olderTimer);
+              setLoadingOlder(false);
+              if (p.more !== true) setOlderDone(true);
+            }
+            break;
+          }
           case "replace": {
             const { events: all } = payloadEvents(out.payload);
             const list = all.filter((e) => !keepWarmEvent(e));
@@ -311,8 +370,12 @@ export function createActivity(port: ActivityPort) {
             } else byKey = incoming;
             changed = true;
             setLoaded(true);
-            // A replaced window has no older pages to read by seq.
-            if (oldestSeq() === undefined) setOlderDone(true);
+            // A replaced window has no older pages to read by seq. A journal
+            // window that replaced the shown one (a gap) starts its pages
+            // again from its own oldest row: the earlier cursor lies further
+            // back and would skip what the replacement dropped.
+            olderCursor = undefined;
+            setOlderDone(oldestSeq() === undefined);
             break;
           }
           case "event": {
@@ -357,6 +420,7 @@ export function createActivity(port: ActivityPort) {
               setLoaded(true);
               clearTimeout(olderTimer);
               olderFrom = undefined;
+              paging = undefined;
               setLoadingOlder(false);
             }
             break;

@@ -409,6 +409,12 @@ enum Input {
     Subscribe {
         key: String,
     },
+    /// One page of a followed session's rows before `before`.
+    Older {
+        key: String,
+        before: i64,
+        limit: u32,
+    },
     Unsubscribe {
         key: String,
         session: SessionRef,
@@ -562,6 +568,9 @@ pub struct StreamHandle {
     tasks: TaskFollows,
     /// The tasks follows the latest stream accepts.
     tasks_limit: Arc<AtomicUsize>,
+    /// The older-page size of the running greeted stream; 0 while none runs or
+    /// when it cannot page.
+    activity_older: Arc<AtomicUsize>,
     organization: Arc<AtomicBool>,
     organization_snapshot: OrganizationShared,
     stop: Arc<AtomicBool>,
@@ -653,6 +662,26 @@ impl StreamHandle {
             .send(Input::Subscribe { key: key.clone() })
             .map_err(|_| FollowError::Stopped)?;
         Ok(key)
+    }
+
+    /// Asks for one page of a followed session's rows before the journal
+    /// `seq` `before`, answered as `older` updates. Ok(false) when the key is
+    /// not followed or the running stream cannot page (the caller falls back
+    /// to re-following with `after`).
+    pub fn older(&self, key: &str, before: i64, limit: u32) -> Result<bool, FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !lock(&self.follows).contains_key(key) || self.activity_older.load(Ordering::Relaxed) == 0
+        {
+            return Ok(false);
+        }
+        let _ = self.tx.send(Input::Older {
+            key: key.to_owned(),
+            before,
+            limit,
+        });
+        Ok(true)
     }
 
     /// Stops following; false when the key was not followed.
@@ -974,6 +1003,7 @@ fn spawn_with(
     let processes_limit = Arc::new(AtomicUsize::new(PROCESSES_SUBSCRIPTIONS));
     let tasks = TaskFollows::default();
     let tasks_limit = Arc::new(AtomicUsize::new(TASKS_SUBSCRIPTIONS));
+    let activity_older = Arc::new(AtomicUsize::new(0));
     let organization = Arc::new(AtomicBool::new(false));
     let organization_snapshot = OrganizationShared::default();
     let stop = Arc::new(AtomicBool::new(false));
@@ -1003,6 +1033,7 @@ fn spawn_with(
         processes_limit: processes_limit.clone(),
         tasks: tasks.clone(),
         tasks_limit: tasks_limit.clone(),
+        activity_older: activity_older.clone(),
         organization_snapshot: organization_snapshot.clone(),
         poller: None,
         worker_fixed: None,
@@ -1037,6 +1068,7 @@ fn spawn_with(
         processes_limit,
         tasks,
         tasks_limit,
+        activity_older,
         organization,
         organization_snapshot,
         stop,
@@ -1070,6 +1102,7 @@ struct Supervisor {
     processes_limit: Arc<AtomicUsize>,
     tasks: TaskFollows,
     tasks_limit: Arc<AtomicUsize>,
+    activity_older: Arc<AtomicUsize>,
     organization_snapshot: OrganizationShared,
     /// Polls `swarm get` while no stream offers the organization.
     poller: Option<Poller>,
@@ -1107,6 +1140,8 @@ impl Supervisor {
             if self.stop.load(Ordering::Relaxed) {
                 break;
             }
+            // No greeted stream runs until the next hello: no older pages.
+            self.activity_older.store(0, Ordering::Relaxed);
             // A retry is in flight now; extra Refresh presses coalesce with it.
             self.retry.begin();
             self.state.begin();
@@ -1670,6 +1705,7 @@ impl Supervisor {
                     self.reconcile_git();
                 }
                 Ok(Input::Subscribe { key }) => self.subscribe(&key),
+                Ok(Input::Older { key, before, limit }) => self.older(&key, before, limit),
                 Ok(Input::Unsubscribe { key, session }) => {
                     self.state.unfollow(&key);
                     if self.greeted {
@@ -1758,6 +1794,8 @@ impl Supervisor {
         let changes = source_lifecycle(&mut self.state, &self.computer, &frame);
         if hello {
             self.greeted = true;
+            self.activity_older
+                .store(self.state.activity_older(), Ordering::Relaxed);
             self.connection = None;
             if let Some(source) = &self.source {
                 source.resnapshot.open(self.generation);
@@ -1843,6 +1881,8 @@ impl Supervisor {
         match &frame.body {
             Body::Hello(_) => {
                 self.greeted = true;
+                self.activity_older
+                    .store(self.state.activity_older(), Ordering::Relaxed);
                 let limit = self
                     .state
                     .processes_limit()
@@ -1917,6 +1957,29 @@ impl Supervisor {
             session: Some(follow.session),
             after,
             tail: after.is_none().then_some(follow.tail),
+            ..Subscription::default()
+        }));
+    }
+
+    /// Asks a greeted stream for one page of a followed session's rows before
+    /// `before`. The live subscription, its cursor and state stay as they are:
+    /// only the answer's `older` frames come back.
+    fn older(&mut self, key: &str, before: i64, limit: u32) {
+        if !self.greeted {
+            return;
+        }
+        let Some(follow) = lock(&self.follows).get(key).cloned() else {
+            return;
+        };
+        let server = u32::try_from(self.activity_older.load(Ordering::Relaxed)).unwrap_or(u32::MAX);
+        if server == 0 {
+            return;
+        }
+        self.write(&Control::Subscribe(Subscription {
+            topic: topic::ACTIVITY.into(),
+            session: Some(follow.session),
+            before: Some(before),
+            tail: Some(limit.min(server).max(1)),
             ..Subscription::default()
         }));
     }
@@ -2180,6 +2243,7 @@ impl Supervisor {
         }
         self.stdin = None;
         self.greeted = false;
+        self.activity_older.store(0, Ordering::Relaxed);
         if let Some(stop) = self.reader_stop.take() {
             stop.store(true, Ordering::Relaxed);
         }

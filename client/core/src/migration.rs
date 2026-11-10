@@ -5,13 +5,10 @@
 //! Consume each yielded Read stream before asking for another item. Metadata
 //! pages are body-free; only private snapshots hold source details. A record
 //! arrives once, after every source succeeds, and is always explicitly Staged.
-use serde::Serialize;
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    fmt,
-    io::{self, Cursor, Write},
-};
+#[cfg(test)]
+use std::io::Write;
+use std::{collections::BTreeMap, io::Cursor};
 use zerus_desktop_migration::{
     sha256, Evidence, ImportRecord, PageRef, SnapshotPage, SnapshotRef, SourceRecord,
     MAX_IMPORT_RECORD_BYTES, MAX_SNAPSHOT_BYTES, SOURCE, VERSION,
@@ -28,108 +25,9 @@ pub mod preload;
 pub mod sources;
 pub mod transport;
 
-/// Redacted failures; source payloads and filesystem paths never enter errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SourceError {
-    NotProduction,
-    InvalidMetadata,
-    UnsupportedSource,
-    SourceUnreadable,
-    SourceChanged,
-    TooLarge,
-}
-
-impl fmt::Display for SourceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotProduction => "only the live production switch may assemble import evidence",
-            Self::InvalidMetadata => "invalid import metadata",
-            Self::UnsupportedSource => "unsupported source schema; original source retained",
-            Self::SourceUnreadable => "source could not be read; original source retained",
-            Self::SourceChanged => "source identity or bytes changed during the read",
-            Self::TooLarge => "import exceeds its admitted byte or entry limit",
-        })
-    }
-}
-impl std::error::Error for SourceError {}
-
-pub type SourceResult<T> = Result<T, SourceError>;
-
-/// One existing decoder's paged values. The decoder must check its source
-/// schema and exact identity/hash, and yield an error on unknown/partial data.
-/// An individual value must already be bounded; do not load a whole journal.
-pub struct SourceStream {
-    identity: SourceRecord,
-    chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
-    rechecked: bool,
-}
-
-impl SourceStream {
-    pub fn new(
-        identity: SourceRecord,
-        chunks: impl Iterator<Item = SourceResult<Value>> + Send + 'static,
-    ) -> Self {
-        Self {
-            identity,
-            chunks: Box::new(chunks),
-            rechecked: false,
-        }
-    }
-
-    pub fn identity(&self) -> &SourceRecord {
-        &self.identity
-    }
-
-    /// Internal consumers may project already-bounded snapshot values. This
-    /// exposes data only, never a source drain or import-admission permit.
-    pub(crate) fn into_chunks(self) -> Box<dyn Iterator<Item = SourceResult<Value>> + Send> {
-        self.chunks
-    }
-
-    /// Recheck the exact source after its decoder finishes. The caller uses
-    /// the existing source reader under G1's current drain, checking path/file
-    /// identity there too. An error or changed hash prevents a final manifest.
-    /// The explicitly versioned `preload` creation archive is historical: its
-    /// recheck validates the durable original snapshot, not today's mutable
-    /// journal, and provides no current-source completeness/drain claim.
-    pub fn recheck(self, verify: impl FnOnce() -> SourceResult<String> + Send + 'static) -> Self {
-        struct Checked<F> {
-            chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
-            expected: String,
-            verify: Option<F>,
-            ended: bool,
-        }
-        impl<F: FnOnce() -> SourceResult<String>> Iterator for Checked<F> {
-            type Item = SourceResult<Value>;
-            fn next(&mut self) -> Option<Self::Item> {
-                if self.ended {
-                    return None;
-                }
-                if let Some(item) = self.chunks.next() {
-                    return Some(item);
-                }
-                self.ended = true;
-                let check = self.verify.take().unwrap()().and_then(|actual| {
-                    (actual == self.expected)
-                        .then_some(())
-                        .ok_or(SourceError::SourceChanged)
-                });
-                check.err().map(Err)
-            }
-        }
-        let chunks = Checked {
-            chunks: self.chunks,
-            expected: self.identity.sha256.clone(),
-            verify: Some(verify),
-            ended: false,
-        };
-        Self {
-            identity: self.identity,
-            chunks: Box::new(chunks),
-            rechecked: true,
-        }
-    }
-}
+// The stream type and its error live with the live Next-format readers.
+pub(crate) use crate::next_source::bounded_json;
+pub use crate::next_source::{SourceError, SourceResult, SourceStream};
 
 /// A private current body, a body-free metadata page, or the final manifest.
 /// No Debug implementation: formatting a stream must not disclose its bytes.
@@ -327,32 +225,6 @@ impl Iterator for Bundle {
             }
         }
     }
-}
-
-/// A hard allocation bound while serializing one already-bounded source item.
-fn bounded_json(value: &impl Serialize, limit: usize) -> SourceResult<Vec<u8>> {
-    struct Limited {
-        bytes: Vec<u8>,
-        limit: usize,
-    }
-    impl Write for Limited {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-                return Err(io::Error::other("bounded import item exceeded"));
-            }
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut output = Limited {
-        bytes: Vec::new(),
-        limit,
-    };
-    serde_json::to_writer(&mut output, value).map_err(|_| SourceError::TooLarge)?;
-    Ok(output.bytes)
 }
 
 #[cfg(test)]

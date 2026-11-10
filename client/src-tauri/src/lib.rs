@@ -236,6 +236,8 @@ pub mod git_status;
 #[doc(hidden)]
 pub mod window_theme;
 mod window_visibility;
+// Task #52: the WSL dialogs open files through the live client only.
+#[cfg(feature = "live")]
 mod wsl_mapping;
 // Task 102: Qt's presets and raised notices, read once at the first start.
 mod qt_first_start;
@@ -243,6 +245,7 @@ mod model_servers;
 // G1: the Windows session host that stays for other computers.
 mod resident_host;
 // Task 258: Team Waiting notices while the window is closed.
+#[cfg(feature = "live")]
 mod team_watch;
 #[cfg(any(windows, test))]
 mod windows_shell;

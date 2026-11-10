@@ -307,14 +307,35 @@ fn qt_installed_layout_hands_over_to_tauri_and_back() {
     stage(&mut tauri, 102, TAURI_2, &zips[2]);
     let script = root.join("tauri-helper-102.ps1");
     let command = tauri.start_install(&script, gone_pid(), &system_root(), &std::env::temp_dir()).unwrap();
-    assert_eq!(std::fs::read_to_string(&script).unwrap(), qt_helper(true), "the Tauri app writes the Qt helper");
+    // Task #52 (team ede724c4): the Tauri helper is the Qt one but for its
+    // clean-up, which keeps the new and the previous build by name: a junction
+    // that names its target by an 8.3 short path (a hosted runner's TEMP,
+    // C:\Users\RUNNER~1) never matched Get-ChildItem's long names, and the
+    // rollback copy went.
+    let tauri_helper = qt_helper(true).replace(
+        "Where-Object { $_.FullName -ne $Target -and $_.FullName -ne $previous }",
+        "Where-Object { $_.Name -ne (Split-Path -Leaf $Target) -and $_.Name -ne (Split-Path -Leaf $previous) }",
+    );
+    assert_ne!(tauri_helper, qt_helper(true), "the Qt helper still has its clean-up");
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), tauri_helper, "the Tauri app writes the Qt helper with its own clean-up");
     assert!(!command.args.iter().any(|arg| arg.eq_ignore_ascii_case("-Quiet")), "the updater never asks for quiet");
     let output = run_helper(&command.program, &command.args, &root);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(current(&root), "app-102");
     assert_eq!(fork_update::source_commit(&root.join("current")), TAURI_2);
-    assert!(root.join("app-101").join("hgs-tray.exe").is_file(), "the previous Tauri build is the rollback copy");
-    assert!(!root.join("app-100").exists(), "two builds are kept: the Qt build goes after the second Tauri update");
+    // Task #52 (team ede724c4): on the windows-2025 runner (CI #20, #21) the
+    // helper removed app-101 too; only this text says which folder it took
+    // for the previous build, so both assertions carry it.
+    let log = || {
+        let kept: Vec<String> = std::fs::read_dir(&root).map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        format!("folders {kept:?}
+update.log:
+{}", std::fs::read_to_string(root.join("update.log")).unwrap_or_default())
+    };
+    assert!(root.join("app-101").join("hgs-tray.exe").is_file(), "the previous Tauri build is the rollback copy
+{}", log());
+    assert!(!root.join("app-100").exists(), "two builds are kept: the Qt build goes after the second Tauri update
+{}", log());
     assert!(running(&root.join("app-102")).is_some());
     stop(&root.join("app-102"));
 

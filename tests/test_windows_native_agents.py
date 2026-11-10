@@ -397,11 +397,21 @@ class NativeAgent:
         finally:
             host.KERNEL32.CloseHandle(handle)
 
+    def stop_team_worker(self):
+        """Task #52 (team ede724c4): a case's `hgs team` command starts the team worker from the
+        case's portable hgs.exe, and the worker runs until no team runs. It is no session and no
+        host process, so nothing else stopped it, and it held portable\hgs.exe when the case's
+        folder went (CI #21: PermissionError [WinError 5] after the U54 team swap). It is asked to
+        end in the case's own state; a case that started no worker hears "no team worker runs"."""
+        if getattr(self, "hgs_exe", None) and self.hgs_exe.is_file():
+            self.hgs("team", "worker", "--stop", rc=None)
+
     def stop_host(self):
         """Kill the sessions and stop the host (HostCase), then wait for every agent and
         supervisor of the case, and for its executables to be released, before its
         folders go; end and report any process that stays."""
         try:
+            self.stop_team_worker()
             for name in self.names:
                 self.pin_session(name)
             super().stop_host()

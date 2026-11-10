@@ -45,7 +45,9 @@ pub fn sync_webview(window: &WebviewWindow) {
 
 fn report(app: &AppHandle, visible: bool) {
     if app.state::<Visibility>().changed(visible) {
-        // Task #10: a hidden window's Teams views read only Waiting.
+        // Task #10: a hidden window's Teams views read only Waiting (the
+        // Teams views exist only in the live client, task #52).
+        #[cfg(feature = "live")]
         if let Some(teams) = app.try_state::<crate::teams::Teams>() {
             teams.hidden(!visible);
         }

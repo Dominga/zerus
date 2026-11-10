@@ -3,7 +3,7 @@ import { withoutHeld } from "./held-message";
 import { tr } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
-import { activityPositionCursor, activityPositions, type ActivityPosition } from "./activity-position";
+import { activityAnchorSeq, activityNearestRow, activityPositionCursor, activityPositions, type ActivityPosition } from "./activity-position";
 import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
@@ -1052,8 +1052,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const savePosition = () => {
     if (!layoutTarget || !placed() || showingPreview) return;
     const anchors = activityReadingRows(scroller).visible();
-    activityPositions.set(layoutTarget, { following: end.active(), top: scroller.scrollTop,
-      anchors, after: activityPositionCursor(windowEvents, anchors), expanded, more });
+    activityPositions.set(layoutTarget, { following: end.active(), anchors,
+      after: activityPositionCursor(windowEvents, anchors), seq: activityAnchorSeq(windowEvents, anchors), expanded, more });
   };
   const resetTarget = () => {
     const target = displayTarget();
@@ -1098,14 +1098,28 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const target = displayTarget();
     const frame = requestAnimationFrame(() => {
       if (target !== displayTarget() || restoring() !== saved) return;
-      let top = saved.top;
+      let top: number | undefined, anchors = saved.anchors;
       for (const anchor of saved.anchors) {
         const offset = measuredOffset(anchor.key);
         if (offset !== undefined) { top = scroller.scrollTop + offset - anchor.offset; break; }
       }
+      if (top === undefined) {
+        // No saved row came back. The transcript around it changed, so never
+        // restore its old pixel offset: put the nearest surviving message at
+        // or before the saved top row at the top, still released. With none
+        // left (a cleared or fully expired transcript), follow Latest.
+        const key = activityNearestRow(windowEvents, view.items.map(item => `item-${item.id}`), saved.seq);
+        const offset = key === undefined ? undefined : measuredOffset(key);
+        if (key === undefined || offset === undefined) {
+          batch(() => { setRestoring(undefined); setFollowing(true); setUnseen(0); });
+          reading.reset(); end.pin();
+          return;
+        }
+        top = scroller.scrollTop + offset; anchors = [{ key, offset: 0 }];
+      }
       scroller.scrollTo({ top, behavior: "instant" });
       virtualizer.scrollOffset = scroller.scrollTop;
-      reading.restore(saved.anchors);
+      reading.restore(anchors);
       batch(() => { setRestoring(undefined); setPlaced(true); });
     });
     onCleanup(() => cancelAnimationFrame(frame));

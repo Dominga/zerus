@@ -63,14 +63,15 @@ function mount() {
   const [target, setTarget] = createSignal("first-" + serial);
   const [rows, setRows] = createSignal(events(1));
   const [loaded, setLoaded] = createSignal(true);
+  const [loadingOlder, setLoadingOlder] = createSignal(false);
   const loadOlder = vi.fn();
   const source: ActivitySource = {
     target: () => ({ id: target() }), events: rows, loaded, loadOlder,
-    summary: () => undefined, loadingOlder: () => false, olderDone: () => false, ended: () => false, error: () => undefined,
+    summary: () => undefined, loadingOlder, olderDone: () => false, ended: () => false, error: () => undefined,
   };
   const host = document.createElement("div"); document.body.append(host);
   dispose = render(() => createComponent(ActivityView, { source }), host);
-  return { scroller: host.querySelector<HTMLElement>(".act-scroll")!, source, target, setTarget, setRows, setLoaded, loadOlder };
+  return { scroller: host.querySelector<HTMLElement>(".act-scroll")!, source, target, setTarget, setRows, setLoaded, setLoadingOlder, loadOlder };
 }
 async function read(scroller: HTMLElement, top: number) {
   scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
@@ -148,4 +149,48 @@ it("an explicit Latest request cancels restoration while the first page is pendi
   expect(following()).toBe(true);
   expect(view.scroller.scrollTop).toBe(view.scroller.scrollHeight - 400);
   expect(view.loadOlder).not.toHaveBeenCalled();
+});
+
+it("reads an expired saved window once, then returns to Latest when no earlier message is left", async () => {
+  const view = mount(); await settle();
+  const first = view.target();
+  await read(view.scroller, 595);
+  batch(() => { view.setTarget("away-" + serial); view.setRows(events(100)); }); await settle();
+  view.loadOlder.mockImplementation(() => view.setLoadingOlder(true));
+  batch(() => { view.setTarget(first); view.setRows(events(1000)); }); await settle();
+  expect(view.loadOlder).toHaveBeenCalledExactlyOnceWith(5);
+  // The journal before the new tail expired: each settled read returns no rows.
+  for (let n = 0; n < 3; n++) { view.setLoadingOlder(false); await vi.advanceTimersByTimeAsync(10_000); await settle(); }
+  expect(view.loadOlder).toHaveBeenCalledTimes(1);
+  expect(following()).toBe(true);
+  expect(view.scroller.scrollTop).toBe(view.scroller.scrollHeight - 400);
+});
+
+it("places the nearest earlier surviving message at the top when no saved row returns, never the old pixel offset", async () => {
+  const view = mount(); await settle();
+  const first = view.target();
+  await read(view.scroller, 595);
+  batch(() => { view.setTarget("away-" + serial); view.setRows(events(100)); }); await settle();
+  // The saved rows s6 to s9 were pruned; s4 is the nearest earlier message.
+  batch(() => { view.setTarget(first); view.setRows([...events(1, 4), ...events(15, 10)]); }); await settle();
+  expect(view.loadOlder).not.toHaveBeenCalled();
+  expect(view.scroller.querySelector("#item-s4")!.getBoundingClientRect().top).toBe(0);
+  expect(view.scroller.scrollTop).toBe(3 * 110 + 40);
+  expect(following()).toBe(false);
+  view.setRows([...events(1, 4), ...events(15, 11)]); await settle();
+  expect(view.scroller.scrollTop).toBe(3 * 110 + 40);
+  expect(following()).toBe(false);
+});
+
+it("returns to Latest and follows when the saved session's transcript was cleared", async () => {
+  const view = mount(); await settle();
+  const first = view.target();
+  await read(view.scroller, 595);
+  batch(() => { view.setTarget("away-" + serial); view.setRows(events(100)); }); await settle();
+  batch(() => { view.setTarget(first); view.setRows([]); }); await settle();
+  expect(view.loadOlder).not.toHaveBeenCalled();
+  expect(following()).toBe(true);
+  view.setRows(events(30, 10)); await settle();
+  expect(following()).toBe(true);
+  expect(view.scroller.scrollTop).toBe(view.scroller.scrollHeight - 400);
 });

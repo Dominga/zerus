@@ -1646,8 +1646,13 @@ is kept for 64 recently visited Activity targets in this window, including child
 targets separately. It contains at most eight row anchors and bounded visible
 disclosure state per target, never transcripts or DOM. If a saved row has left
 the initial tail, Activity requests a window around that message once by its
-saved journal cursor. Missing or expired rows fall back to the saved scroll
-offset without repeatedly reading older pages.
+saved journal cursor, never repeatedly reading older pages. Activity never
+restores an absolute scroll offset, because the transcript around a saved row
+can change while it is away. If none of the saved rows return after that one
+read, the nearest surviving message by journal sequence at or before the saved
+top row is placed at the top of the view, which stays released from the end. If
+no such message remains (a cleared or fully expired transcript), Activity goes
+to Latest and follows the end.
 
 The synthetic `scripts/activity-position-smoke.html` fixture exercises this with
 the real virtualizer and Markdown; serve it with Vite and run it through

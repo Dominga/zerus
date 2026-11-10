@@ -151,6 +151,16 @@ nobody can answer, so the call goes ahead and the session note says the ask
 was skipped. Agents without a pre-tool subagent approval are not blocked;
 their status says the confirmation is not supported.
 
+A permission answer may carry its reason (task #37, team ede724c4). The
+top-level `text` of `hgs team answer` reaches the member as one note right
+after the decision: "Lead: denied write_file: <reason>", or "allowed" for an
+Allow, from the owner, the lead or the parent lead. On an approval card, which
+takes its outcome only (DeepSeek's Allow once or Reject refuses any text with
+the item), a reason written on the answer item becomes that note too and the
+outcome goes out alone. A free-text question keeps the text as its answer. The
+lead's inbox item shows the approval's answer command with the top-level
+`text`; empty sends no note.
+
 ## CLI sessions
 
 `hgs` starts a command in a named project tmux session and attaches locally or

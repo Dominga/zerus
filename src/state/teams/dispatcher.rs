@@ -10634,9 +10634,19 @@ pub(crate) fn denial_text(tool: &str, reason: &str) -> String {
     format!("[Zerus team \u{b7} from: Zerus \u{b7} permission denied]\nLead: denied {tool}: {reason}")
 }
 
-pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> anyhow::Result<()> {
-    match send(session, &uuid::Uuid::new_v4().to_string(), &denial_text(tool, reason)) {
-        Sent::Refused(error) => anyhow::bail!("the denial did not reach the member: {error}"),
+/// Task #37 (team ede724c4): the note an answered permission sends with its
+/// reason: a denial as before, an Allow as well, naming who decided.
+pub(crate) fn decision_text(tool: &str, deny: bool, speaker: &str, reason: &str) -> String {
+    if deny && speaker == "Lead" {
+        return denial_text(tool, reason);
+    }
+    let (title, verb) = if deny { ("permission denied", "denied") } else { ("permission allowed", "allowed") };
+    format!("[Zerus team \u{b7} from: Zerus \u{b7} {title}]\n{speaker}: {verb} {tool}: {reason}")
+}
+
+pub(crate) fn send_decision(session: &SessionRef, tool: &str, deny: bool, speaker: &str, reason: &str) -> anyhow::Result<()> {
+    match send(session, &uuid::Uuid::new_v4().to_string(), &decision_text(tool, deny, speaker, reason)) {
+        Sent::Refused(error) => anyhow::bail!("the reason did not reach the member: {error}"),
         _ => Ok(()),
     }
 }

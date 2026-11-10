@@ -3011,6 +3011,24 @@ pub(crate) fn hand_off_text_with(
     hand_off_text_rules(team, task, attempt, report_host, member_host, extra, &rules)
 }
 
+/// Task #25: whether `folder` has CodeLore's code map: a lore.toml whose
+/// `[atlas]` table turns it on. A folder on another computer reads as none.
+pub(crate) fn code_map_in(folder: &str) -> bool {
+    if folder.is_empty() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(Path::new(folder).join("lore.toml")) else { return false };
+    let mut in_atlas = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_atlas = line == "[atlas]";
+        } else if in_atlas && line.replace(' ', "").starts_with("enabled=true") {
+            return true;
+        }
+    }
+    false
+}
+
 fn hand_off_text_rules(
     team: &Team,
     task: &Task,
@@ -3179,6 +3197,16 @@ fn hand_off_text_rules(
             ids.join(", "),
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
         );
+    }
+    // Task #25: a member whose folder has CodeLore's code map is told to search
+    // the code and the docs through it, and the team's memory through Zerus.
+    let folder = team
+        .member(&attempt.member)
+        .map(|member| if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() })
+        .unwrap_or_default();
+    if code_map_in(&folder) {
+        text += "\nSearch the code and the docs with lore atlas search \"what it does\" in your folder, and the team's \
+                 memory with hgs team lore find, before opening files by guesswork (hgs guide code).\n";
     }
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
@@ -5684,22 +5712,44 @@ fn apply_model(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Resul
 /// under Saved; nothing is killed) and renamed to `<name>-replaced`, so the new
 /// session starts under the member's name. A remote one is left to its own
 /// computer. The note says what happened; an error names the old session.
-fn set_aside_replaced(member: &Member) -> anyhow::Result<Option<String>> {
+/// Task #17 (team ede724c4): what setting a replaced session aside gave.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SetAside {
+    /// Nothing runs in the member's folder any more (none was replaced, it
+    /// had stopped, or it was paused and renamed): the new session starts.
+    Done(Option<String>),
+    /// The replaced session still works or waits on a dialog: it is neither
+    /// renamed nor left beside a new one. It keeps the member's name and its
+    /// open attempt; the start waits for a later tick.
+    Busy(String),
+}
+
+/// Feedback 14: a swap's (or relaunch's) old session is set aside first, so
+/// the new one can take the member's name. Task #17 (team ede724c4): a
+/// replaced session that still works is never renamed and left running beside
+/// the new one in the same folder (dev1-replaced worked on task #1 for twenty
+/// minutes next to the new dev1): it is paused once its turn ends, and only
+/// then does the new session start.
+fn set_aside_replaced(member: &Member) -> anyhow::Result<SetAside> {
     let Some(old) = member.replaced.as_ref().filter(|old| old.host.is_empty() && !old.name.is_empty()) else {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     };
     #[cfg(test)]
     if let Some(stand_in) = test_set_aside() {
         return stand_in(&old.name);
     }
     let Ok(record) = crate::state::storage::read(&old.name) else {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     };
     // A different run under the old name is not the session the swap replaced.
     if !old.run_id.is_empty() && record["run_id"].as_str().is_some_and(|run| !run.is_empty() && run != old.run_id) {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     }
-    let paused = crate::state::lifecycle::pause_one_quiet(&record, None, true).is_ok();
+    let alive = crate::state::storage::process_alive(&record);
+    let paused = alive && crate::state::lifecycle::pause_one_quiet(&record, None, true).is_ok();
+    if alive && !paused {
+        return Ok(SetAside::Busy(old.name.clone()));
+    }
     let target = (1..=9)
         .map(|n| if n == 1 { format!("{}-replaced", old.name) } else { format!("{}-replaced-{n}", old.name) })
         .find(|name| crate::state::storage::read(name).is_err())
@@ -5707,25 +5757,25 @@ fn set_aside_replaced(member: &Member) -> anyhow::Result<Option<String>> {
     crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false).map_err(|error| {
         anyhow::anyhow!("the old session {} still holds the member's name and could not be renamed ({error}); close or rename it in Sessions, then hgs team relaunch", old.name)
     })?;
-    Ok(Some(if paused {
+    Ok(SetAside::Done(Some(if paused {
         format!("the replaced session was paused and saved as {target}")
     } else {
-        format!("the replaced session was busy or waiting on a dialog, so it was renamed to {target} and still runs; close it in Sessions when it is no longer needed")
-    }))
+        format!("the replaced session had stopped and was saved as {target}")
+    })))
 }
 
 #[cfg(test)]
-type SetAside = fn(&str) -> anyhow::Result<Option<String>>;
+type SetAsideStandIn = fn(&str) -> anyhow::Result<SetAside>;
 #[cfg(test)]
 thread_local! {
-    static TEST_SET_ASIDE: std::cell::Cell<Option<SetAside>> = const { std::cell::Cell::new(None) };
+    static TEST_SET_ASIDE: std::cell::Cell<Option<SetAsideStandIn>> = const { std::cell::Cell::new(None) };
 }
 #[cfg(test)]
-fn test_set_aside() -> Option<SetAside> {
+fn test_set_aside() -> Option<SetAsideStandIn> {
     TEST_SET_ASIDE.with(std::cell::Cell::get)
 }
 #[cfg(test)]
-pub(crate) fn set_test_set_aside(stand_in: Option<SetAside>) {
+pub(crate) fn set_test_set_aside(stand_in: Option<SetAsideStandIn>) {
     TEST_SET_ASIDE.with(|cell| cell.set(stand_in));
 }
 
@@ -5735,13 +5785,13 @@ mod set_aside_tests {
 
     #[test]
     fn only_a_local_replaced_session_is_set_aside() {
-        set_test_set_aside(Some(|name| Ok(Some(format!("set aside {name}")))));
+        set_test_set_aside(Some(|name| Ok(SetAside::Done(Some(format!("set aside {name}"))))));
         let mut member = Member { id: "dev".into(), ..Default::default() };
-        assert_eq!(set_aside_replaced(&member).unwrap(), None, "nothing was replaced");
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(None), "nothing was replaced");
         member.replaced = Some(SessionRef { host: "mac".into(), name: "codex/x/dev".into(), ..Default::default() });
-        assert_eq!(set_aside_replaced(&member).unwrap(), None, "a remote session is its computer's");
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(None), "a remote session is its computer's");
         member.replaced = Some(SessionRef { name: "codex/x/dev".into(), ..Default::default() });
-        assert_eq!(set_aside_replaced(&member).unwrap().as_deref(), Some("set aside codex/x/dev"));
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(Some("set aside codex/x/dev".into())));
         set_test_set_aside(None);
     }
 }
@@ -11622,20 +11672,33 @@ fn reserve_launch(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
 struct LaunchOutcome {
     checked_out: Option<String>,
     retired: Option<Option<String>>,
+    /// Task #17: the replaced session still works in the member's folder:
+    /// nothing was launched, the start is tried again on a later tick.
+    busy: Option<String>,
     result: anyhow::Result<()>,
 }
 
 fn start_member(team: &Team, found: &Member) -> LaunchOutcome {
     let mut checked_out = None;
     let mut retired = None;
+    let mut busy = None;
     let result = (|| -> anyhow::Result<()> {
         checked_out = prepare_member_branch(team, found)?;
         // Feedback 14: a swap's old session is set aside first, so the new
-        // one can take the member's name.
-        retired = Some(set_aside_replaced(found)?);
-        launch(team, found)
+        // one can take the member's name. Task #17: one that still works is
+        // waited for, never left beside the new one.
+        match set_aside_replaced(found)? {
+            SetAside::Busy(old) => {
+                busy = Some(old);
+                Ok(())
+            }
+            SetAside::Done(note) => {
+                retired = Some(note);
+                launch(team, found)
+            }
+        }
     })();
-    LaunchOutcome { checked_out, retired, result }
+    LaunchOutcome { checked_out, retired, busy, result }
 }
 
 fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, outcome: LaunchOutcome) -> anyhow::Result<()> {
@@ -11646,14 +11709,35 @@ fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, o
             Ok(())
         })?;
     }
+    if let Some(old) = outcome.busy {
+        // Task #17: no launch; the start is tried again each tick, said once.
+        change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            if let Some(record) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                record.launch_id.clear();
+                if !record.replaced_busy {
+                    record.replaced_busy = true;
+                    events.push(Event::new(
+                        "launch_waiting",
+                        json!({"member":role,"reason":format!(
+                            "the replaced session {old} still works in the member's folder; it keeps its task and is paused when its turn ends, then the new session starts (stop or answer it in Sessions to start sooner)"
+                        )}),
+                    ));
+                }
+            }
+            Ok(())
+        })?;
+        return Ok(());
+    }
     if let Some(note) = outcome.retired {
-        if note.is_some() || found.replaced.is_some() {
+        if note.is_some() || found.replaced.is_some() || found.replaced_busy {
             change(store, &team.id, |team, events| {
                 if let Some(note) = &note {
                     events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
                 }
                 if let Some(record) = team.members.iter_mut().find(|m| m.id == member) {
                     record.replaced = None;
+                    record.replaced_busy = false;
                 }
                 Ok(())
             })?;
@@ -11728,7 +11812,7 @@ fn run_launches(store: &mut Store, team: &Team, members: &[String]) {
     let outcomes: Vec<LaunchOutcome> = std::thread::scope(|scope| {
         let handles: Vec<_> = reserved.iter().map(|(_, (team, found))| scope.spawn(move || start_member(team, found))).collect();
         handles.into_iter().map(|handle| handle.join().unwrap_or_else(|_| LaunchOutcome {
-            checked_out: None, retired: None, result: Err(anyhow::anyhow!("the member's start panicked")),
+            checked_out: None, retired: None, busy: None, result: Err(anyhow::anyhow!("the member's start panicked")),
         })).collect()
     });
     for ((member, (fresh, found)), outcome) in reserved.iter().zip(outcomes) {

@@ -24,8 +24,8 @@ A task that can go on only after CI, an install or a card: never poll or sleep, 
 expect --json. Your pulse for the lead, each part at most 500 characters:
   {"attempt":"ATTEMPT","done":"...","next":"...","blocked":"..."} | hgs team note --json
 
-First: hgs team lore find. Builds and tests: hgs guide team-run and team-tests. Codex on
-Windows: team-run too. Leading a team: hgs guide team-lead.
+First: hgs team lore find; code and docs: hgs guide code. Builds and tests: hgs guide
+team-run, team-tests (Codex on Windows: team-run too). Leading a team: hgs guide team-lead.
 
 Scratch teams (the QA right). With the operate profile you run live checks in your own
 scratch teams: hgs team create --json from your session with a folder under the team's

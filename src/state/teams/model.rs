@@ -715,6 +715,13 @@ pub(crate) struct Member {
     /// relaunch clears it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub host_waits: u32,
+    /// Task #17 (team ede724c4): the start after a swap or relaunch waits
+    /// because the session it replaces still works in the member's folder.
+    /// The old session keeps the member's name and its open attempt until its
+    /// turn ends and it is paused; only then does the new one start. Set
+    /// while waiting, so the wait is said once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced_busy: bool,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,

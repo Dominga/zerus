@@ -555,6 +555,8 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "lead_changes": return tr("Lead's changes");
     // Task 304 (hgs #286): a task wait the lead left unresolved, escalated once.
     case "task_wait_escalated": return tr("Lead has not acted");
+    // Owner, 2026-11-11: a member's new session waits for the one it replaces.
+    case "replaced_waits": return tr("Not started");
     default: return item.kind;
   }
 }
@@ -612,6 +614,7 @@ export function waitingKindIcon(kind: string): string {
     case "lead_message_undelivered": return "message-square";
     case "lead_changes": return "pencil";
     case "task_wait_escalated": return "clock";
+    case "replaced_waits": return "clock";
     default: return "triangle-alert";
   }
 }

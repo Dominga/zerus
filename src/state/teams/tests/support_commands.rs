@@ -12,6 +12,20 @@ pub(crate) fn test_switch() -> Option<super::TestSwitch> {
 }
 
 thread_local! {
+    static TEST_ACCOUNTS: std::cell::Cell<Option<super::TestAccounts>> = const { std::cell::Cell::new(None) };
+}
+
+/// This computer's accounts for a command test; None leaves account names
+/// unchecked, as before the check existed.
+pub(crate) fn set_test_accounts(accounts: Option<super::TestAccounts>) {
+    TEST_ACCOUNTS.with(|slot| slot.set(accounts));
+}
+
+pub(crate) fn test_accounts() -> Option<super::TestAccounts> {
+    TEST_ACCOUNTS.with(std::cell::Cell::get)
+}
+
+thread_local! {
     pub(super) static SWITCH_CALLS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 

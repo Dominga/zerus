@@ -40,7 +40,18 @@ pub(crate) fn lead_relaunches(team: &Team, member_id: &str) -> bool {
     // A planned member that simply has not been started yet is Zerus's to
     // start, not a relaunch: only a recorded start failure (task #13's
     // Member::failed_to_start) or Zerus's stuck mark counts.
-    member.failed_to_start() || member.stuck.is_some()
+    // Owner, 2026-11-11 (team 86821caa): so does a member a swap or relaunch
+    // left without a session - its start after the swap has not happened, or
+    // waits for the session it replaces. The guides say the lead relaunches a
+    // member that did not start, and `hgs team relaunch` answered "The lead
+    // changes the roster only on your word" for exactly such a member.
+    member.failed_to_start() || member.stuck.is_some() || not_started_after_swap(member)
+}
+
+/// A member whose session a swap or relaunch took and whose new one has not
+/// started (it failed, is still to be launched, or waits for the old one).
+pub(crate) fn not_started_after_swap(member: &super::model::Member) -> bool {
+    member.session.is_none() && member.state != MemberState::Removed && (member.launch_after_swap || member.replaced_busy)
 }
 
 /// The lead's card for planning inside the approved goal is refused at the

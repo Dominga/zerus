@@ -197,6 +197,70 @@ fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
         .clone();
     Ok((profile, profile_home(config, id), false))
 }
+/// Owner, 2026-11-11 (team 86821caa): the accounts of `provider` on this
+/// computer a team member can name, as (id, label): the native account first,
+/// then the profiles that are not removed, in id order.
+pub(crate) fn team_accounts(config: &Config, provider: &str) -> Result<Vec<(String, String)>> {
+    let catalog = decode(&read(config)?)?;
+    let native = format!("native-{provider}");
+    let mut found = Vec::new();
+    if !catalog.hidden_profiles.contains(&native) {
+        let label = catalog.native_labels.get(&native).cloned().unwrap_or_else(|| default_label(provider).into());
+        found.push((native, label));
+    }
+    for (id, profile) in &catalog.profiles {
+        if profile.provider == provider && !catalog.hidden_profiles.contains(id) {
+            found.push((id.clone(), profile.label.clone()));
+        }
+    }
+    Ok(found)
+}
+
+/// Owner, 2026-11-11: the account a team request names, as its id. A request
+/// may name the id or the label the owner sees ("Additional"); a swap card
+/// with `"account":"additional"` was accepted, allowed by the owner and failed
+/// only at the launch ("Unknown account profile 'additional'"), after the old
+/// session had been stopped. An unknown or ambiguous name is refused with the
+/// accounts this computer has for the agent.
+pub(crate) fn resolve_team_account(config: &Config, provider: &str, name: &str) -> std::result::Result<String, String> {
+    let name = name.trim();
+    let accounts = team_accounts(config, provider).map_err(|error| error.message)?;
+    let listed = || {
+        if accounts.is_empty() {
+            format!("this computer has no {provider} account")
+        } else {
+            let names: Vec<String> = accounts.iter().map(|(id, label)| format!("{id} ({label})")).collect();
+            format!("{provider} accounts on {}: {}", config.host(), names.join(", "))
+        }
+    };
+    if let Some((id, _)) = accounts.iter().find(|(id, _)| id == name) {
+        return Ok(id.clone());
+    }
+    // An id of another agent's account says so, rather than "unknown".
+    if lookup(config, name).is_ok_and(|(profile, _, _)| profile.provider != provider) {
+        return Err(format!("Account {name} belongs to another agent, not {provider}; {}", listed()));
+    }
+    let by_label: Vec<&(String, String)> = accounts.iter().filter(|(_, label)| label.trim().eq_ignore_ascii_case(name)).collect();
+    match by_label.as_slice() {
+        [(id, _)] => Ok(id.clone()),
+        [] => Err(format!("Unknown account \"{name}\" for {provider}: name an account's id or its label; {}", listed())),
+        several => Err(format!(
+            "The label \"{name}\" names {} accounts ({}); name the id",
+            several.len(),
+            several.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The account id a launch of `provider` uses for a member's `account` (empty:
+/// this computer's default for the agent, else its native account).
+pub(crate) fn effective_team_account(config: &Config, provider: &str, account: &str) -> String {
+    if !account.trim().is_empty() {
+        return account.trim().to_owned();
+    }
+    default_account(config, provider).ok().flatten().filter(|id| !id.is_empty()).unwrap_or_else(|| format!("native-{provider}"))
+}
+
 /// Resolve a hook health target without inspecting credentials or running a provider.
 pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf)> {
     let (profile, path, _) = lookup(config, id)?;
@@ -1751,6 +1815,47 @@ mod permission_tests {
             "defaults": {"claude": "native-claude"}
         }).to_string()).unwrap();
         assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "a native default: the native config");
+    }
+    /// Owner, 2026-11-11 (team 86821caa): a team request names an account by
+    /// its id or by the label the owner sees; an unknown name is refused with
+    /// the accounts this computer has for the agent.
+    #[test]
+    fn a_team_account_is_named_by_id_or_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(), dir: dir.path().join("config"), state: dir.path().join("state"),
+            selves: vec!["msi".into()], peers: vec![], base_peers: vec![], peers_from_environment: false,
+            machines: BTreeMap::new(), tab: false, tab_colors: String::new(),
+        };
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(config.dir.join("accounts.json"), json!({
+            "profiles": {
+                "claude-58bd": {"provider": "claude", "label": "Additional"},
+                "claude-5758": {"provider": "claude", "label": "Default"},
+                "claude-twin": {"provider": "claude", "label": "default"},
+                "codex-work": {"provider": "codex", "label": "Work"}
+            },
+            "defaults": {"claude": "claude-58bd"}
+        }).to_string()).unwrap();
+        let resolve = |provider: &str, name: &str| resolve_team_account(&config, provider, name);
+        assert_eq!(resolve("claude", "claude-58bd").unwrap(), "claude-58bd");
+        assert_eq!(resolve("claude", "additional").unwrap(), "claude-58bd");
+        assert_eq!(resolve("claude", " Additional ").unwrap(), "claude-58bd");
+        assert_eq!(resolve("claude", "native-claude").unwrap(), "native-claude");
+        assert_eq!(resolve("claude", "Default account").unwrap(), "native-claude");
+        assert_eq!(resolve("codex", "work").unwrap(), "codex-work");
+        let unknown = resolve("claude", "spare").unwrap_err();
+        assert!(unknown.contains("Unknown account \"spare\" for claude"), "{unknown}");
+        assert!(unknown.contains("claude accounts on msi: native-claude (Default account), claude-5758 (Default), claude-58bd (Additional)"), "{unknown}");
+        let ambiguous = resolve("claude", "default").unwrap_err();
+        assert!(ambiguous.contains("names 2 accounts (claude-5758, claude-twin); name the id"), "{ambiguous}");
+        let other = resolve("claude", "codex-work").unwrap_err();
+        assert!(other.contains("belongs to another agent, not claude"), "{other}");
+        // A member without an account runs on this computer's default for its
+        // agent; with none set, on the native account.
+        assert_eq!(effective_team_account(&config, "claude", ""), "claude-58bd");
+        assert_eq!(effective_team_account(&config, "codex", ""), "native-codex");
+        assert_eq!(effective_team_account(&config, "claude", "claude-5758"), "claude-5758");
     }
     #[test]
     fn a_launch_home_is_the_profiles_or_the_native_one() {

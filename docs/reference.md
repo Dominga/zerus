@@ -2201,6 +2201,32 @@ session waits on a dialog. For a relaunch or a swap, the owner's word may name
 the members together ("перезапусти их", "relaunch them all"); it then pays for
 one change per member.
 
+An `account` in a swap or for a new member is an account's id or its label, as
+`hgs account ls` shows them (`"account":"additional"` names the profile
+labelled Additional); the request keeps the id. It is checked where the request
+is made, for members of this computer: a proposal with an unknown or ambiguous
+account is refused with the accounts the computer has for that agent, the
+owner's own `swap-member` and `add-member` likewise, and an allowed card is
+checked whole before its first member is touched, so no session is stopped for
+an account that cannot launch. A swap card that changes only the account, to
+the one the member already runs on (a member without an account runs on the
+computer's default for its agent), is refused: it would stop the session and
+change neither the credentials nor the usage limit; `"fresh": true` asks for a
+new session on the same account.
+
+A new session never starts beside the one it replaces. While the replaced
+session keeps its turn open, the member is not started
+(`launch_waiting`); the lead's inbox names it at once (`member_waits_replaced`)
+and, after five minutes, so does Waiting for you (`replaced_waits`, with
+**Open Terminal** on the replaced session). A session that waits for a usage
+limit keeps its turn open until the limit resets, so that wait ends only when
+the owner stops the session in Sessions; Zerus does not stop a session in the
+middle of its turn by itself.
+
+In a member's usage-limit request, an option that pays (usage credits, extra
+usage) is the owner's: the lead answers with a wait or stop option, and
+`hgs team answer` refuses a paying one from the lead.
+
 The build broker is offered only for a shared folder that builds: a project
 build file at its root, an Unreal project or the project's `build_broker`
 table. A decided proposal reaches the lead's inbox message once.
@@ -10677,8 +10703,10 @@ without a way through. What changed on that path:
   minutes (nothing was reserved); after that the member's error says Zerus
   starts it again on its next tick and that `hgs team relaunch` starts it now.
 - The lead relaunches a member whose session failed to start (no session and
-  a launch error) itself, with no card. A running member's relaunch is still
-  the owner's card.
+  a launch error) itself, with no card; so also a member a swap or relaunch
+  left without a session whose new one has not started yet. While that start
+  waits for the replaced session, the receipt's `waiting` says what holds it.
+  A running member's relaunch is still the owner's card.
 - `add-to-phase` by the lead of a running or paused team is the lead's own
   operation (task 162). The CLI no longer asks for the owner's word first,
   which `propose` refused as the lead's own operation: a loop with no way

@@ -5872,7 +5872,19 @@ fn set_aside_replaced(member: &Member) -> anyhow::Result<SetAside> {
         .map(|n| if n == 1 { format!("{}-replaced", old.name) } else { format!("{}-replaced-{n}", old.name) })
         .find(|name| crate::state::storage::read(name).is_err())
         .context("the old session's -replaced names are all taken; rename or close it in Sessions")?;
-    crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false).map_err(|error| {
+    // Owner, 2026-11-11 (team 86821caa): the rename right after the pause can
+    // meet the paused session's terminal still closing ("live pane does not
+    // match its saved binding"); the member was then left with its old session
+    // stopped and no new one. It is tried again for a few seconds first.
+    let mut renamed = crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false);
+    for _ in 0..6 {
+        if renamed.is_ok() || !paused {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        renamed = crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false);
+    }
+    renamed.map_err(|error| {
         anyhow::anyhow!("the old session {} still holds the member's name and could not be renamed ({error}); close or rename it in Sessions, then hgs team relaunch", old.name)
     })?;
     Ok(SetAside::Done(Some(if paused {
@@ -11881,6 +11893,7 @@ fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, o
                 record.launch_id.clear();
                 if !record.replaced_busy {
                     record.replaced_busy = true;
+                    record.replaced_since = Some(now());
                     events.push(Event::new(
                         "launch_waiting",
                         json!({"member":role,"reason":format!(
@@ -11902,6 +11915,7 @@ fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, o
                 if let Some(record) = team.members.iter_mut().find(|m| m.id == member) {
                     record.replaced = None;
                     record.replaced_busy = false;
+                    record.replaced_since = None;
                 }
                 Ok(())
             })?;

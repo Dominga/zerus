@@ -2225,6 +2225,9 @@ fn owner_change(store: &mut Store, op: &str, value: &Value) -> anyhow::Result<Va
     let team_id = text(value, "team").to_owned();
     let mut filled = value.clone();
     adopt_existing_sessions(store, &request, value, op, &mut filled)?;
+    if store.receipt(&request, value)?.is_none() {
+        resolve_member_accounts(store, value, op, &mut filled)?;
+    }
     let team = store.load(&team_id)?.context("Unknown team")?;
     let tree = tree_around(&team, &mut |id| store.load(id))?;
     ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
@@ -2394,6 +2397,18 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     let result = match kind.as_str() {
         "add-member" | "swap-member" => {
             let members: Vec<Value> = change["members"].as_array().cloned().unwrap_or_else(|| vec![member.clone()]);
+            // Owner, 2026-11-11: one card is checked whole before any member
+            // is touched. A card of three members stopped two working sessions
+            // for an account this computer did not have; a card stored before
+            // the proposal check, or one whose account has gone since, is
+            // refused here with every member still on its session.
+            if store.stored_receipt(&operation_request)?.is_none() {
+                for member in &members {
+                    let value = proposal_input(&team_id, &kind, member, "check")?;
+                    let mut probe = value.clone();
+                    resolve_member_accounts(store, &value, &kind, &mut probe)?;
+                }
+            }
             let mut applied = Vec::new();
             for (index, member) in members.into_iter().enumerate() {
                 let request = if index == 0 {
@@ -3231,6 +3246,28 @@ fn approval_reasons(card: &Value, answers: &Value) -> (Value, Vec<String>) {
     (answers, reasons)
 }
 
+/// Owner, 2026-11-11: the option of a usage-limit request that pays (usage
+/// credits, extra usage), when the answer selects one. Every label that names
+/// credits, extra usage or funds counts, so a new wording stays the owner's.
+pub(crate) fn paid_limit_choice(card: &Value, answers: &Value) -> Option<String> {
+    if !["claude_usage_limit", "codex_rate_limit"].contains(&card["source"].as_str().unwrap_or_default()) {
+        return None;
+    }
+    let selected: Vec<&str> = answers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    card["questions"].as_array().into_iter().flatten().flat_map(|item| item["options"].as_array().into_iter().flatten()).find_map(|option| {
+        let label = option["label"].as_str()?;
+        let lower = label.to_lowercase();
+        let pays = ["credit", "extra usage", "funds", "purchase", "buy", "upgrade"].iter().any(|word| lower.contains(word));
+        (pays && option["id"].as_str().is_some_and(|id| selected.contains(&id))).then(|| label.to_owned())
+    })
+}
+
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
     // Section 9.6: a sub-team's permission request may be answered one level
@@ -3277,6 +3314,16 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         !owner_only_trust(&card, &by),
         "This request is the owner's to answer in person; a team lead cannot answer it"
     );
+    // Owner, 2026-11-11 (team 86821caa): money is the owner's. Claude's
+    // usage-limit menu reached the lead as an ordinary request with "Switch to
+    // usage credits" among its options; the lead waits or stops, and only the
+    // owner picks an option that pays.
+    if let Some(label) = paid_limit_choice(&card, &input["answers"]) {
+        ensure!(
+            matches!(&by, Actor::Human),
+            "\"{label}\" spends money, and only the owner chooses it: answer with a wait or stop option, or leave this request to the owner"
+        );
+    }
     // Task #37 (team ede724c4): an approval takes its outcome only (DeepSeek's
     // Allow once or Reject refuses any text with "Choose an approval outcome").
     // A reason given on such an answer is the answer's reason: it leaves the
@@ -4792,6 +4839,147 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
         filled["folder"] = serde_json::to_value(if adopted.worktree { MemberFolder::Worktree } else { MemberFolder::Shared })?;
     }
     Ok(())
+}
+
+/// Owner, 2026-11-11 (team 86821caa): how a team request's account names are
+/// read on this computer: the id an id or a label names, and the account a
+/// launch uses for a member's `account`.
+pub(crate) struct AccountBook<'a> {
+    pub local: &'a dyn Fn(&str) -> bool,
+    pub resolve: &'a dyn Fn(&str, &str) -> std::result::Result<String, String>,
+    pub effective: &'a dyn Fn(&str, &str) -> String,
+}
+
+/// A test's stand-in for this computer's accounts: (resolve, effective).
+#[cfg(test)]
+pub(crate) type TestAccounts = (fn(&str, &str) -> std::result::Result<String, String>, fn(&str, &str) -> String);
+
+/// Owner, 2026-11-11: a swap or a new member names its account by id or by
+/// label, and the name is checked where the request is made - at the
+/// proposal, and again when the change is applied - never at the launch,
+/// after the old session was stopped. A swap card that changes only the
+/// account to the one the member already runs on is refused: it would stop a
+/// working session and change neither the credentials nor the limit. Members
+/// of another computer are left to it.
+fn resolve_member_accounts(store: &Store, input: &Value, op: &str, filled: &mut Value) -> anyhow::Result<()> {
+    if !matches!(op, "swap-member" | "add-member" | "propose") {
+        return Ok(());
+    }
+    let Ok(Some(team)) = store.load(text(input, "team")) else { return Ok(()) };
+    #[cfg(test)]
+    {
+        let Some((resolve, effective)) = support::test_accounts() else { return Ok(()) };
+        member_accounts(&team, op, filled, &AccountBook { local: &|computer| computer.is_empty(), resolve: &resolve, effective: &effective })
+    }
+    #[cfg(not(test))]
+    {
+        let config = crate::config::Config::load().map_err(|error| anyhow::anyhow!(error.message))?;
+        member_accounts(
+            &team,
+            op,
+            filled,
+            &AccountBook {
+                local: &|computer| computer.is_empty() || config.is_self(computer),
+                resolve: &|provider, name| crate::accounts::resolve_team_account(&config, provider, name),
+                effective: &|provider, account| crate::accounts::effective_team_account(&config, provider, account),
+            },
+        )
+    }
+}
+
+fn named<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// One swapped member's account, resolved in place. `card` is true for a
+/// proposal, where a swap that changes nothing is refused.
+fn swap_account(team: &Team, entry: &mut Value, id: &str, card: bool, book: &AccountBook) -> anyhow::Result<()> {
+    let Some(member) = team.member(id) else { return Ok(()) };
+    if !(book.local)(&member.computer) {
+        return Ok(());
+    }
+    let Some(name) = named(entry, "account").map(str::to_owned) else { return Ok(()) };
+    let provider = named(entry, "agent").unwrap_or(member.agent.as_str()).to_owned();
+    let account = (book.resolve)(&provider, &name).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"account\": {error}"))?;
+    let other = ["model", "effort", "session", "prompt"].iter().any(|key| match entry.get(*key) {
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Object(_)) => true,
+        _ => false,
+    });
+    if card
+        && !other
+        && provider == member.agent
+        && entry.get("fresh").and_then(Value::as_bool) != Some(true)
+        && member.session.is_some()
+        && (book.effective)(&provider, &member.account) == account
+    {
+        let shown = if name == account { account.clone() } else { format!("{account} (\"{name}\")") };
+        bail!(
+            "Member \"{id}\" already runs on account {shown}{}: this swap would stop its session and change neither its credentials nor its usage limit. Name another account, or say \"fresh\":true for a new session on the same account",
+            if member.account.trim().is_empty() { format!(", this computer's default for {provider}") } else { String::new() }
+        );
+    }
+    entry["account"] = json!(account);
+    Ok(())
+}
+
+/// A new member's account, resolved in place.
+fn new_member_account(entry: &mut Value, book: &AccountBook) -> anyhow::Result<()> {
+    let computer = named(entry, "computer").unwrap_or_default().to_owned();
+    if !(book.local)(&computer) {
+        return Ok(());
+    }
+    let (Some(name), Some(provider)) = (named(entry, "account").map(str::to_owned), named(entry, "agent").map(str::to_owned)) else {
+        return Ok(());
+    };
+    let id = named(entry, "id").unwrap_or("?").to_owned();
+    let account = (book.resolve)(&provider, &name).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"account\": {error}"))?;
+    entry["account"] = json!(account);
+    Ok(())
+}
+
+pub(crate) fn member_accounts(team: &Team, op: &str, filled: &mut Value, book: &AccountBook) -> anyhow::Result<()> {
+    let kind = if op == "propose" { text(filled, "kind").to_owned() } else { op.to_owned() };
+    let card = op == "propose";
+    match kind.as_str() {
+        "swap-member" => {
+            // A card's list of members, each with its own fields.
+            if let Some(entries) = filled.get_mut("members").and_then(Value::as_array_mut) {
+                for entry in entries.iter_mut().filter(|entry| entry.is_object()) {
+                    let id = named(entry, "id").unwrap_or_default().to_owned();
+                    swap_account(team, entry, &id, card, book)?;
+                }
+                return Ok(());
+            }
+            // One member: its id (or its object) and the new values beside it.
+            match filled.get("member").cloned() {
+                Some(Value::String(id)) => swap_account(team, filled, &id, card, book),
+                Some(Value::Object(_)) => {
+                    let id = named(&filled["member"], "id").unwrap_or_default().to_owned();
+                    if named(filled, "account").is_some() {
+                        swap_account(team, filled, &id, card, book)
+                    } else if let Some(entry) = filled.get_mut("member") {
+                        swap_account(team, entry, &id, card, book)
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Ok(()),
+            }
+        }
+        "add-member" => {
+            if let Some(entries) = filled.get_mut("members").and_then(Value::as_array_mut) {
+                for entry in entries.iter_mut().filter(|entry| entry.is_object()) {
+                    new_member_account(entry, book)?;
+                }
+            }
+            if let Some(entry) = filled.get_mut("member").filter(|entry| entry.is_object()) {
+                new_member_account(entry, book)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Checks and fills the members that name an existing session (F8).
@@ -6501,6 +6689,11 @@ fn mutation_command(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value
         // A retry returns here before any listing (L4).
         adopt_existing_sessions(&store, request, input, op, &mut filled)?;
     }
+    // Owner, 2026-11-11: an account is named by id or label and checked here,
+    // before anything is stopped; a card is checked when it is proposed.
+    if store.receipt(request, input)?.is_none() {
+        resolve_member_accounts(&store, input, op, &mut filled)?;
+    }
     // Section 9.2: a change that can bind a new session keeps the whole
     // tree within its master's budget (extend binds none, and is
     // checked for a tree already over it).
@@ -6876,6 +7069,10 @@ mod support;
 #[cfg(test)]
 #[path = "tests/commands_proposals.rs"]
 mod commands_proposals;
+
+#[cfg(test)]
+#[path = "tests/commands_swap_accounts.rs"]
+mod commands_swap_accounts;
 
 #[cfg(test)]
 #[path = "tests/commands_owner_word.rs"]

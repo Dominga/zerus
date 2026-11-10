@@ -28,7 +28,7 @@ A swap card changes agent, model, effort, account, prompt, session, or
   {"kind":"swap-member","reason":"...","members":[{"id":"dev",
    "account":"additional"},{"id":"qa","account":"additional"}]}
 Zerus pauses replaced sessions as <name>-replaced; new ones take their names.
-One owner sentence ("relaunch them all") may pay for each.
+account: an id or label of hgs account ls, checked at once.
 
 Your pulse for the lead (else Zerus sums up your turn's tools):
   {"attempt":"ATTEMPT","done":"...","next":"...","blocked":"..."} |

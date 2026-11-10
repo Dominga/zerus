@@ -169,16 +169,18 @@ mod tests {
     }
 
     /// U61, task 158: the lead protocol says an approved phase runs alongside,
-    /// what a task still waits for, how Auto accepts a draft, and keeps the
-    /// review rule; start ahead and work ahead are gone.
+    /// what a task still waits for, how Auto accepts a draft, and who approves
+    /// one otherwise; start ahead and work ahead are gone.
     #[test]
     fn the_lead_protocol_names_the_one_phase_start_model() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(has(lead, "Auto drafts (U61)"), "{lead}");
+        // Owner, 2026-11-11: Auto-accept drafts takes every clean draft,
+        // whatever approval the phase was planned with.
+        assert!(has(lead, "With Auto-accept on, Auto approves a clean one"), "{lead}");
         assert!(has(lead, "an approved phase runs alongside earlier ones"), "{lead}");
         assert!(has(lead, "files an open task writes"), "{lead}");
         assert!(!has(lead, "start-ahead") && !has(lead, "Work ahead"), "{lead}");
-        assert!(has(lead, "Review drafts") && has(lead, "need the owner"), "{lead}");
+        assert!(has(lead, "else the owner does"), "{lead}");
         // #740: a question to the owner is a proposal, never only prose.
         assert!(has(lead, "a question for the owner is a proposal, never only"), "{lead}");
         let propose = pages().into_iter().find(|(name, _)| *name == "team-propose").unwrap().1;

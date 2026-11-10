@@ -266,6 +266,17 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member"] = json!(member);
                 out.push(found);
             }
+            // Owner, 2026-11-11: a member's start waits for the session it
+            // replaces; its Terminal is where the owner stops that session.
+            "replaced_waits" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "replaced_waits", &member, summary, at, "open_terminal");
+                for key in ["member_id", "session", "minutes", "detail"] {
+                    found[key] = attention[key].clone();
+                }
+                found["member"] = json!(member);
+                out.push(found);
+            }
             // Task 277 (owner, 2026-11-08): your own urgent message to a member
             // that stayed unread; the button opens the team to see it.
             "urgent_message" => {

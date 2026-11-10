@@ -655,6 +655,30 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             detail: member.error.clone(),
         });
     }
+    // Owner, 2026-11-11 (team 86821caa): a member whose new session waits for
+    // the session it replaces is an item from the first tick, with the reason:
+    // it was a single feed event, and a member behind a session that waited
+    // for its usage limit stood unstarted with no word to anyone.
+    for member in team
+        .members
+        .iter()
+        .filter(|_| active)
+        .filter(|member| member.state != MemberState::Removed && member.session.is_none() && member.replaced_busy)
+    {
+        let role = team.name_of(&member.id);
+        let old = member.replaced.as_ref().map(|old| old.name.clone()).unwrap_or_default();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "member_waits_replaced",
+            key: format!("member_waits_replaced:{}", member.id),
+            task: None,
+            member: role.clone(),
+            since: member.replaced_since.unwrap_or_else(crate::state::now),
+            summary: summary(&format!("{role} is not started: the session it replaces ({old}) has not ended its turn")),
+            command: String::new(),
+            detail: replaced_wait_text(&role, &old),
+        });
+    }
     // Task 134: a member that does not read its team messages (two doorbells
     // and the bound again, or an urgent one its turn kept back) is one item for
     // the lead, with the member's state; the messages stay unread for it.
@@ -2179,6 +2203,18 @@ fn session_ended(member: &Member) -> bool {
     member.state == MemberState::Removed || member.seen.as_ref().is_some_and(|seen| !seen.live)
 }
 
+/// Owner, 2026-11-11: what holds a member whose new session waits for the one
+/// it replaces, and what ends the wait.
+pub(crate) fn replaced_wait_text(member: &str, old: &str) -> String {
+    format!(
+        "{member}'s new session starts once the session it replaces ({old}) ends its turn and is paused. A session that waits for a usage limit keeps its turn open until the limit resets, so it never ends by itself: stop {old} in Sessions (it is the owner's to stop), and the new session starts on the next tick."
+    )
+}
+
+/// How long a member's start waits for its replaced session before the owner
+/// hears of it; a turn usually ends within this.
+pub(crate) const REPLACED_WAIT_OWNER: f64 = 5.0 * 60.0;
+
 pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
@@ -2285,6 +2321,17 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
                         if team.settings.restart_crashed { "" } else { " (or turn on restart_crashed)" })}));
             }
         }
+    }
+    // Owner, 2026-11-11: a start that has waited for its replaced session past
+    // the bound waits for the owner: only a person stops a session mid-turn.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_none() && member.replaced_busy) {
+        let Some(since) = member.replaced_since.filter(|since| now - since >= REPLACED_WAIT_OWNER) else { continue };
+        let old = member.replaced.as_ref().map(|old| old.name.clone()).unwrap_or_default();
+        out.push(json!({"kind":"replaced_waits","member":team.role_of(&member.id),"member_id":member.id,"since":since,
+            "minutes":((now - since).max(0.0) / 60.0).round() as u64,"session":old,
+            "summary":format!("{} has not started for {} min: the session it replaces ({old}) keeps its turn open. Stop it in Sessions to start the new one",
+                team.name_of(&member.id), ((now - since).max(0.0) / 60.0).round() as u64),
+            "detail":replaced_wait_text(&team.name_of(&member.id), &old)}));
     }
     // Task 98: a composer that keeps refusing hand-outs waits for the owner
     // too: only a person decides what to do with a draft Zerus did not paste.

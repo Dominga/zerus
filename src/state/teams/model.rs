@@ -722,6 +722,13 @@ pub(crate) struct Member {
     /// while waiting, so the wait is said once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replaced_busy: bool,
+    /// Owner, 2026-11-11 (team 86821caa): since when the start waits for the
+    /// replaced session. The wait was one feed event and nothing else: the
+    /// member read `not_created` with no reason, and neither the lead nor the
+    /// owner was told while its task stood for hours. The lead's inbox and
+    /// Waiting for you name it from this moment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_since: Option<f64>,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,

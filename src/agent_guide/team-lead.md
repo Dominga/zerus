@@ -21,7 +21,7 @@ Run phases alongside. An approved phase runs alongside earlier ones; a task star
 deps are accepted, its barrier passes, no card holds it and the files an open task writes are
 free. Add the next stream:
   {"request_id":"U","team":"ID","phase_title":"Docs","tasks":[...]} | hgs team extend --json
-A new phase is a draft. Auto drafts (U61) approve a clean one; review drafts need the owner
+A new phase is a draft. With Auto-accept on, Auto approves a clean one; else the owner does
 and no draft runs before approval. "barrier":true waits for earlier phases. pause-phase
 {phase, reason} holds one. Accepted phase not started: return-to-draft re-approves it. A phase
 needing the owner's acceptance holds later ones until accept-phase (a card). A phase is

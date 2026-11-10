@@ -7970,7 +7970,16 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             ensure!(id != team.lead, "Relaunch the lead by swapping it (hgs team swap-member)");
             fresh_session(team, &id, "relaunch", events)?;
             events.push(Event::new("relaunch", json!({"by":by,"member":id,"fresh":true,"from":from})));
-            Ok(json!({"status":"relaunch","member":id,"fresh":true,"from":from}))
+            let mut receipt = json!({"status":"relaunch","member":id,"fresh":true,"from":from});
+            // Owner, 2026-11-11: a relaunch cannot start a member whose
+            // replaced session still holds its turn; the receipt says so and
+            // what ends the wait, instead of looking accepted and changing
+            // nothing.
+            if let Some(member) = team.member(&id).filter(|member| member.replaced_busy) {
+                let old = member.replaced.as_ref().map(|old| old.name.clone()).unwrap_or_default();
+                receipt["waiting"] = json!(super::inbox::replaced_wait_text(&team.name_of(&id), &old));
+            }
+            Ok(receipt)
         }
         "pause-member" | "resume-member" => {
             ensure!(human_or_lead, "Only the lead or you pause a member");
@@ -8360,6 +8369,10 @@ mod ops_phase_control;
 #[cfg(test)]
 #[path = "tests/ops_auto_barrier.rs"]
 mod ops_auto_barrier;
+
+#[cfg(test)]
+#[path = "tests/ops_swap_wait.rs"]
+mod ops_swap_wait;
 
 #[cfg(test)]
 #[path = "tests/ops_phase_modes.rs"]

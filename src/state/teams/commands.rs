@@ -4248,13 +4248,26 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
             bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str()), &phrase));
         }
     }
-    // Task 173: a lead message naming a task goes only to that task's holder
-    // and is bound to its attempt; otherwise it is refused with the hand-out.
+    // Task 173: a lead message is bound to the attempt of each task it names
+    // that its recipient holds. Task #30 (team ede724c4): a task its text only
+    // mentions is a reference; only its "task" naming a task the recipient
+    // does not hold is refused, with the hand-out.
+    let task = match &input["task"] {
+        Value::Null => None,
+        value => Some(value.as_u64().and_then(|id| u32::try_from(id).ok()).context("A message's task is a task number")?),
+    };
     let mut bindings = Vec::new();
+    let mut references: Vec<u32> = Vec::new();
     if by == team.lead {
         for recipient in recipients.iter().filter(|recipient| **recipient != team.lead) {
             let member = team.member(recipient).context("unknown member")?;
-            bindings.extend(super::shadow::check_lead_message(&team, member, &body)?);
+            let check = super::shadow::check_lead_message(&team, member, &body, task)?;
+            bindings.extend(check.bindings);
+            for id in check.references {
+                if !references.contains(&id) {
+                    references.push(id);
+                }
+            }
         }
     }
     let now = super::super::now();
@@ -4296,6 +4309,11 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
     // Task 184: a text that held a secret was stored redacted (11.9).
     if !redacted.is_empty() {
         answer["redacted"] = json!(redacted);
+    }
+    // Task #30: the tasks the text mentioned for reference only.
+    if let Some(note) = super::shadow::reference_note(&references) {
+        answer["references"] = json!(references);
+        answer["reference_note"] = json!(note);
     }
     Ok(answer)
 }

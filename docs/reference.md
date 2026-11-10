@@ -3035,11 +3035,14 @@ belongs to the attempt (or stage run) handed to it.
 - A lead's message to a member that names a task (`#N`, `task N`, `for N:`
   for one of the team's tasks) is bound to that task's attempt when the task is
   handed to that member (the attempt's `lead_messages`, at most 20, with a
-  `lead_message` event); otherwise it is refused, naming the task's state and
-  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
-  `hgs send` from the lead's own session to a member's session and for the
-  lead's `hgs team message` (a broadcast naming a task is refused). A message
-  naming no task goes through; it carries no work. Answers and decisions keep
+  `lead_message` event). Task #30 (2026-11-10): a task the text only mentions
+  and the member does not hold is a reference: the message goes, its answer
+  names it (`references`, `reference_note`). Only a message whose `"task"`
+  field names a task the member does not hold is refused, naming the task's
+  state and the hand-out to use (`hgs team retry`, `hgs team reassign`). This
+  holds for `hgs send` from the lead's own session to a member's session and
+  for the lead's `hgs team message`. A message naming no task goes through; it
+  carries no work. Answers and decisions keep
   their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
   owner's messages and Zerus's own sends are never checked.
 - A team member's `hgs run` needs its open attempt or stage run; it may name

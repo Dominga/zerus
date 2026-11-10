@@ -3,8 +3,8 @@ Work in an agent team (hgs guide team)
 A lead plans tasks and Zerus hands each ready task to a free member, on any agent and
 computer. Requests are JSON on stdin with a lowercase UUID "request_id"; reuse one to retry.
 A doorbell in your terminal means unread messages: {} | hgs team inbox --json.
-Work only on what hgs team current shows, else ask the lead. A message naming a task you
-do not hold is refused.
+Work only on what hgs team current shows, else ask the lead. A #N in a lead message
+for a task you do not hold is a reference, not work.
 
 Report once, when the task is done:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |

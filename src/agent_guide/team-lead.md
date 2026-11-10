@@ -80,9 +80,9 @@ Owner gates are cards (hgs guide team-propose); Never ask the owner to type a ph
 left 10 min is denied and queued for the owner; do everything else. A question for the owner
 is a proposal, never only prose. Never install a tool: a missing tool is a tool_missing inbox
 item - deny it (hgs team decide-tool) or ask on a card (propose, kind install-tool);
-only the owner allows an install. Hand work out, never message it: a message naming a task it
-lacks is refused. {"team":"ID","phase":N} | hgs team profile --json names the top three
-losses, roles[] and tokens per accepted task; unknown, never zero.
+only the owner allows an install. Hand work out, never message it: a message whose "task"
+it lacks is refused; #N in the text is a reference. {"team":"ID","phase":N} | hgs team profile
+--json names the top three losses, roles[] and tokens per accepted task; unknown, never zero.
 hgs team look MEMBER shows one. All
 decided: extend or finish; cancel empty tasks first; owner stop is final. Routine requests:
 hgs guide team-safe. Models, stages, scale: team-custom. Sub-teams: hgs guide

@@ -652,6 +652,11 @@ fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Opti
         // The delivery this tick already rings for everything unread.
         return None;
     }
+    // Task #42 (team ede724c4): an interrupt would abort the compaction or
+    // clear Zerus runs for the member's hand-out; it waits for that step.
+    if context_pending(team, member) {
+        return None;
+    }
     let found = found.filter(|found| found.live && !found.free && !found.asking)?;
     let turn = found.turn_started?;
     Some(Step::InterruptMessages {
@@ -744,6 +749,31 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
 /// the window those restarts are counted over.
 const RESTARTS_PER_HOUR: usize = 3;
 const RESTART_WINDOW: f64 = 3600.0;
+
+/// Task #42 (team ede724c4): whether Zerus runs a context action on `member`'s
+/// session for a hand-out now: the cold-context compaction before its next task
+/// (`context_compact` with a native request), a task hand-out waiting for its
+/// compact or clear (U46, the task's assignee), a stage hand-out's context
+/// action (#581) or the clear before a changed start prompt. A message sent
+/// meanwhile would end that action.
+pub(crate) fn context_pending(team: &Team, member: &Member) -> bool {
+    if member.context_compact.as_ref().is_some_and(|pending| !pending.request_id.is_empty()) {
+        return true;
+    }
+    if member.prompt_change.as_ref().is_some_and(|change| change.clear.is_some()) {
+        return true;
+    }
+    team.tasks.iter().any(|task| {
+        let handout = task.assignee == member.id
+            && task.waits.as_ref().is_some_and(|wait| wait.state == "waiting" && !wait.action.is_empty());
+        let stage = task
+            .pipeline_run
+            .as_ref()
+            .and_then(|pipeline| pipeline.open_run())
+            .is_some_and(|run| run.member == member.id && run.context.is_some());
+        handout || stage
+    })
+}
 
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
@@ -2250,6 +2280,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if given || !super::doorbell::due(member, now) {
             continue;
         }
+        // Task #42 (team ede724c4): never while Zerus compacts or clears the
+        // member's context for a hand-out. A DeepSeek host treats any message
+        // as consuming the compaction ("cancelled"): on 2026-11-10 a lead's
+        // message rang dsh2 20 s into the compaction before task 26, which then
+        // went out on the uncompacted cold context. The message rings once the
+        // context step is settled (the hand-out itself rings for it).
+        if context_pending(team, member) {
+            continue;
+        }
         if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {
             steps.push(Step::RingMessages { member: member.id.clone() });
         }
@@ -2622,7 +2661,10 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     if team.status == TeamStatus::Running {
         let landed = super::merge_queue::landed_by_ancestry(&team, now);
         if !landed.is_empty() {
-            change(store, team_id, |team, events| super::merge_queue::record_landed(team, &landed, now, events).map(|_| ()))?;
+            // Task #41: the accept's phase checks read Git before the lock.
+            super::plan::with_prerequisites_read(&team, "accept", &json!({}), || {
+                change(store, team_id, |team, events| super::merge_queue::record_landed(team, &landed, now, events).map(|_| ()))
+            })?;
             changed = true;
         }
     }
@@ -4844,9 +4886,12 @@ pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -
     impl Drop for Reset {
         fn drop(&mut self) {
             GIT_MEMO.with(|memo| *memo.borrow_mut() = None);
+            super::plan::prerequisite_memo(false);
         }
     }
     GIT_MEMO.with(|memo| *memo.borrow_mut() = Some(std::collections::HashMap::new()));
+    // Task #41: the phase checks' prerequisite reads are served the same way.
+    super::plan::prerequisite_memo(true);
     let _reset = Reset;
     prefetch();
     then()
@@ -10595,9 +10640,19 @@ pub(crate) fn denial_text(tool: &str, reason: &str) -> String {
     format!("[Zerus team \u{b7} from: Zerus \u{b7} permission denied]\nLead: denied {tool}: {reason}")
 }
 
-pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> anyhow::Result<()> {
-    match send(session, &uuid::Uuid::new_v4().to_string(), &denial_text(tool, reason)) {
-        Sent::Refused(error) => anyhow::bail!("the denial did not reach the member: {error}"),
+/// Task #37 (team ede724c4): the note an answered permission sends with its
+/// reason: a denial as before, an Allow as well, naming who decided.
+pub(crate) fn decision_text(tool: &str, deny: bool, speaker: &str, reason: &str) -> String {
+    if deny && speaker == "Lead" {
+        return denial_text(tool, reason);
+    }
+    let (title, verb) = if deny { ("permission denied", "denied") } else { ("permission allowed", "allowed") };
+    format!("[Zerus team \u{b7} from: Zerus \u{b7} {title}]\n{speaker}: {verb} {tool}: {reason}")
+}
+
+pub(crate) fn send_decision(session: &SessionRef, tool: &str, deny: bool, speaker: &str, reason: &str) -> anyhow::Result<()> {
+    match send(session, &uuid::Uuid::new_v4().to_string(), &decision_text(tool, deny, speaker, reason)) {
+        Sent::Refused(error) => anyhow::bail!("the reason did not reach the member: {error}"),
         _ => Ok(()),
     }
 }
@@ -13110,6 +13165,19 @@ fn ensure_worker_now() -> anyhow::Result<()> {
     // and the hgs calls it makes must carry no agent marker at all.
     for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
+    }
+    // Task #23 (team ede724c4): nor the agent's own Git configuration. An agent
+    // session that started the worker passed `GIT_CONFIG_PARAMETERS`
+    // ('safe.bareRepository=explicit' 'core.fsmonitor=') to every build, test
+    // and merge-queue suite the worker ran, and the test runner's bare mirror
+    // was refused in each of them.
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy();
+        if text == "GIT_CONFIG_PARAMETERS" || text == "GIT_CONFIG_COUNT" || text.starts_with("GIT_CONFIG_KEY_") || text.starts_with("GIT_CONFIG_VALUE_")
+            || text == "CLAUDECODE" || text.starts_with("CLAUDE_CODE_")
+        {
+            command.env_remove(&name);
+        }
     }
     crate::platform::spawn_detached(&mut command)?;
     Ok(())

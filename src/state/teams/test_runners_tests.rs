@@ -25,6 +25,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(dir)
+        // The fixture never depends on the agent shell's inherited settings.
+        .env_remove("GIT_CONFIG_PARAMETERS")
         .output()
         .unwrap();
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
@@ -130,6 +132,40 @@ fn a_runner_of_the_class_runs_the_exact_commit_isolated_and_the_result_comes_bac
     assert_eq!(calls[1].1["commit"], first);
     dispatch(&store, dir.path(), &[request("r2", &first, &["ok"])], &linux(), &fake, 101.0, &policy).unwrap();
     assert_eq!(fake.calls.borrow()[3].1["bundle"], "", "the runner had the commit");
+    drop(remote);
+}
+
+/// Task #38 (team ede724c4, 2026-11-10): an agent session's shell carries
+/// `GIT_CONFIG_PARAMETERS='safe.bareRepository=explicit'`, under which git
+/// refused the runner's bare mirror when it ran inside it. The runner names
+/// the mirror with `--git-dir`, so the run goes through.
+#[test]
+fn the_runner_works_under_an_inherited_safe_bare_repository_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = project(dir.path());
+    let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+    let (remote, fake) = fake(false);
+    let policy = Policy { retries: 0, ..Default::default() };
+    INHERITED_GIT_CONFIG.with(|inherited| *inherited.borrow_mut() = Some("'safe.bareRepository=explicit' 'core.fsmonitor='".into()));
+    let done = dispatch(&store, dir.path(), &[request("r1", &first, &["ok"])], &linux(), &fake, 100.0, &policy);
+    // A second commit is fetched into the existing mirror and found there.
+    let again = dispatch(&store, dir.path(), &[request("r2", &second, &["ok"])], &linux(), &fake, 101.0, &policy);
+    INHERITED_GIT_CONFIG.with(|inherited| *inherited.borrow_mut() = None);
+    for (done, marker) in [(done.unwrap(), "marker-one"), (again.unwrap(), "marker-two")] {
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].status, "passed", "{:?}", done[0]);
+        assert!(done[0].excerpt.contains(marker), "{}", done[0].excerpt);
+    }
+    // Without the explicit --git-dir git refuses this mirror under that setting.
+    let root = std::fs::read_dir(fake.state.join("test-runner")).unwrap().next().unwrap().unwrap().path();
+    let output = Command::new("git")
+        .args(["for-each-ref", "refs/zerus-runner"])
+        .current_dir(root.join("mirror.git"))
+        .env("GIT_CONFIG_PARAMETERS", "'safe.bareRepository=explicit'")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the setting refuses implicit discovery of a bare repository");
+    assert_eq!(mirror_git(&root.join("mirror.git"), &["for-each-ref", "--format=%(objectname)", "refs/zerus-runner"]).unwrap().lines().count(), 2);
     drop(remote);
 }
 

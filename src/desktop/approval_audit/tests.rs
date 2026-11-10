@@ -76,7 +76,7 @@ fn opening_the_writer_preserves_an_already_cached_reader_lock() {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         Self {
             reader: Reader {
                 root: temp.path().join("approval-audit"),
@@ -372,4 +372,21 @@ fn replacement_cannot_rebind_an_old_detail_id_or_cursor() {
             .unwrap(),
         2
     );
+}
+
+/// Task #23 (team ede724c4): Task #349 raised the journal to schema 2 by adding
+/// columns; this view reads that journal and one an older hgs left at 1, never
+/// an unknown schema (0 or a later one).
+#[test]
+fn the_journal_reads_at_schema_one_or_two_only() {
+    let mut f = Fixture::new();
+    let db = f.rows(1);
+    let version = |db: &Connection| db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(version(&db), 2, "the writer's current schema");
+    assert_eq!(f.send(&f.query())["accepted"], true);
+    for (schema, accepted) in [(1, true), (3, false)] {
+        db.execute_batch(&format!("PRAGMA user_version={schema}")).unwrap();
+        drop(f.reader.journal.take());
+        assert_eq!(f.send(&f.query())["accepted"], accepted, "schema {schema}");
+    }
 }

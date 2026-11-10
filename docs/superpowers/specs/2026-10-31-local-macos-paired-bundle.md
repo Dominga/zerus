@@ -76,7 +76,7 @@ below and must not silently change durable executable paths.
 
 ## Preparation and signing
 
-Add a headless preparation entry point shared by `tray/install.sh` and scratch
+Add a headless preparation entry point shared by `packaging/desktop/install.sh` and scratch
 qualification. Inputs are the built app, built CLI, previous installed app
 (read only), and a fresh output inside a caller-owned scratch prefix. Refuse
 overlapping input/output or an existing output, symlinked code, special files,
@@ -84,7 +84,7 @@ unexpected nested code, and an invalid app executable/layout before signing.
 The output keeps the `hgs-tray.app` basename. Failed preparation removes only
 its owned output and never publishes a candidate or changes an installed app.
 
-Extend `tray/sign-local-macos.py` with an explicit paired mode. Its existing
+Extend `packaging/desktop/sign-local-macos.py` with an explicit paired mode. Its existing
 single-executable mode remains the default for Qt and old direct callers.
 Paired mode requires exactly the two named regular Mach-O executables and
 continues refusing all other nested code and all links. It uses one existing
@@ -164,7 +164,7 @@ their current precedence and meaning.
 ## Install, update and rollback
 
 `mac-install.sh` remains a maintained remote entry point. The client branch of
-`tray/install.sh` builds/prepares the pair before any application replacement,
+`packaging/desktop/install.sh` builds/prepares the pair before any application replacement,
 LaunchAgent write or live update. Keep source transfer and clean-checkout Dev
 restrictions, and forward existing identity/version inputs as literal values.
 The CLI remains installed by root `install.sh`. Mobile connector updates are

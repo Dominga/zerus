@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / 'tray/linux-launcher.py'
+SOURCE = ROOT / 'packaging/desktop/linux-launcher.py'
 spec = importlib.util.spec_from_file_location('linux_launcher', SOURCE)
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)

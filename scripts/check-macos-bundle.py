@@ -209,7 +209,7 @@ def tauri_plist_findings(plist, version, release=None):
     # between Spaces. The client keeps its menu-bar mode at run time (zerus-v5ft5).
     if plist.get("LSUIElement"):
         findings.append("Info.plist sets LSUIElement; the switch bundle launches as a regular app")
-    # The raw build keeps the local identifier; tray/sign-local-macos.py promotes its signed copy.
+    # The raw build keeps the local identifier; packaging/desktop/sign-local-macos.py promotes its signed copy.
     if plist.get("CFBundleIdentifier") not in (BUNDLE_ID, BUNDLE_ID + ".local"):
         findings.append(f"Info.plist CFBundleIdentifier is {plist.get('CFBundleIdentifier')!r}, "
                         f"expected {BUNDLE_ID!r} or {BUNDLE_ID + '.local'!r}")
@@ -231,7 +231,7 @@ def tauri_bundle_findings(bundle, version, release=None):
         for name in sorted(names + files):
             path = Path(directory) / name
             label = str(path.relative_to(bundle))
-            # tray/sign-local-macos.py refuses links and nested code.
+            # packaging/desktop/sign-local-macos.py refuses links and nested code.
             if path.is_symlink():
                 findings.append(f"{label}: symbolic link")
                 continue

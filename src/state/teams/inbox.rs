@@ -103,7 +103,7 @@ pub(crate) fn notice(kind: &str) -> bool {
 /// records lore cannot write yet, accepted work waiting to land, refused
 /// queued calls, idle notices and recovered attempts. Every item whose
 /// command asks nothing ("no action", task #460) closes too.
-const INFORMATIONAL: [&str; 7] = [
+const INFORMATIONAL: [&str; 8] = [
     "test_result",
     "playbook",
     "lore_missing",
@@ -111,7 +111,29 @@ const INFORMATIONAL: [&str; 7] = [
     "refused_queued_call",
     "idle_with_ready_work",
     "attempt_recovered",
+    // Task #39: a member waiting for its own run.
+    "waits_for_own_job",
 ];
+
+/// Task #39 (team ede724c4): what the attempt's member waits for, in words
+/// ("its own Zerus build (perf baseline) since 14:05"), or None when it waits
+/// for nothing of its own. Its jobs come from the listing (`listed_jobs`: the
+/// build Zerus runs for it, hook-registered background jobs and Background
+/// work under a budget); the run the dispatcher remembers it waits on counts
+/// too, between two listings.
+fn own_job(team: &Team, attempt: &super::model::Attempt) -> Option<String> {
+    let member = team.member(&attempt.member)?;
+    // A session that stopped waits for nothing (its own item says it stopped;
+    // the remembered run is cleared only by a live session's settle).
+    if member.seen.is_some_and(|seen| !seen.live) {
+        return None;
+    }
+    let jobs: Vec<super::look::WaitJob> =
+        member.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect();
+    super::look::job_words(&jobs).or_else(|| {
+        (!attempt.awaited_run.is_empty()).then(|| format!("its own Zerus run {}", attempt.awaited_run))
+    })
+}
 
 /// Task #29: whether the lead or the owner may close this item. A decision (a
 /// report, question, permission, a card or anything else that waits for an
@@ -1445,6 +1467,28 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
         }
         let role = team.name_of(&attempt.member);
         let minutes = ((now - ended) / 60.0).round() as u64;
+        // Task #39 (team ede724c4): a member that waits for its own job - the
+        // Zerus run it started (hgs run, hgs team run), a background job its
+        // hooks registered, Background work under a budget, or the run the
+        // dispatcher remembers it waits on - is not done (the session-state
+        // contract: Building). Using its last reply ("still going, I'm waiting
+        // for its numbers") would close an unfinished task, so there is no No
+        // report: the item says what it waits on, and Zerus wakes it when the
+        // run settles.
+        if let Some(waits) = own_job(team, attempt) {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "waits_for_own_job",
+                key: format!("own_job:{}:{}", task.id, attempt.id),
+                task: Some(task.id),
+                member: role.clone(),
+                since: ended,
+                summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} and waits for {waits}", task.id)),
+                command: "no action: the member waits for its own run; Zerus wakes it when the run settles".into(),
+                detail: summary(&attempt.last_reply),
+            });
+            continue;
+        }
         items.push(Item {
             subagents: Value::Null,
             kind: "no_report",
@@ -1787,17 +1831,29 @@ impl PendingQuestion {
     /// The answer command for the lead: the exact id, hash and answers `hgs
     /// team answer` expects, with the option ids to replace.
     fn answer_command(&self, team: &Team, member: &str) -> String {
+        // Task #37 (team ede724c4): an approval takes its outcome only; its
+        // reason is the top-level text, which reaches the member as a note
+        // after the decision. A question's free answer stays on its item.
+        let approval = self.card["approval"] == true;
         let answers: Vec<Value> = self.card["questions"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|item| json!({"question_id":item["id"],"selected_option_ids":["<option id>"],"text":""}))
+            .map(|item| {
+                if approval && item["allow_other"] != true {
+                    json!({"question_id":item["id"],"selected_option_ids":["<option id>"]})
+                } else {
+                    json!({"question_id":item["id"],"selected_option_ids":["<option id>"],"text":""})
+                }
+            })
             .collect();
-        format!(
-            "{} | hgs team answer --json",
-            json!({"request_id":PLACEHOLDER,"team":team.id,"member":member,
-                "question_id":self.question_id,"expected_question_hash":self.question_hash,"answers":answers})
-        )
+        let mut request = json!({"request_id":PLACEHOLDER,"team":team.id,"member":member,
+            "question_id":self.question_id,"expected_question_hash":self.question_hash,"answers":answers});
+        if approval {
+            // Empty sends no note; a pasted placeholder would be sent as one.
+            request["text"] = json!("");
+        }
+        format!("{request} | hgs team answer --json")
     }
 }
 
@@ -2520,6 +2576,50 @@ mod tests {
             ..Default::default()
         });
         assert!(!items(&team).iter().any(|item| item.kind == "no_report"));
+    }
+
+    /// Task #39 (team ede724c4): a member that ended its turn while its own
+    /// Zerus run is pending is not done: no No report (whose one action would
+    /// close the task with "I'm waiting for its numbers"), but one informational
+    /// item naming the run. Once nothing of its own is pending, No report again.
+    #[test]
+    fn a_member_waiting_for_its_own_run_raises_no_no_report() {
+        use crate::state::teams::model::{MemberJob, MemberSeen};
+        let mut team = team();
+        delivered(&mut team, 1);
+        let now = crate::state::now();
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(now - 10_000.0);
+            attempt.last_reply = "The baseline perf run is still going. I'm waiting for its numbers".into();
+        }
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.seen = Some(MemberSeen { at: now, live: true });
+        dev.jobs = vec![MemberJob {
+            kind: "build".into(),
+            what: "its own Zerus build (perf baseline)".into(),
+            command: "cargo bench".into(),
+            since: now - 600.0,
+        }];
+        let list = items(&team);
+        assert!(!list.iter().any(|item| item.kind == "no_report"), "{list:?}");
+        let waits = list.iter().find(|item| item.kind == "waits_for_own_job").expect("the wait is named");
+        assert!(waits.summary.contains("waits for its own Zerus build (perf baseline) since"), "{}", waits.summary);
+        assert!(closable(waits) && !waits.command.contains("use-last-reply"), "{waits:?}");
+        // Between two listings the run the dispatcher remembers counts too.
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.jobs.clear();
+        team.task_mut(1).unwrap().attempts[0].awaited_run = "d2300000-0000-4000-8000-000000000001".into();
+        let list = items(&team);
+        assert!(!list.iter().any(|item| item.kind == "no_report"), "{list:?}");
+        assert!(list.iter().any(|item| item.kind == "waits_for_own_job" && item.summary.contains("its own Zerus run d2300000")));
+        // A stopped session waits for nothing; nothing pending: No report.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: now, live: false });
+        assert!(items(&team).iter().any(|item| item.kind == "no_report"));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: now, live: true });
+        team.task_mut(1).unwrap().attempts[0].awaited_run.clear();
+        let list = items(&team);
+        assert!(list.iter().any(|item| item.kind == "no_report") && !list.iter().any(|item| item.kind == "waits_for_own_job"));
     }
 
     #[test]

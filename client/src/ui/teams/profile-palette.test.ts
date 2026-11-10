@@ -16,19 +16,8 @@ const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
 const repo = new URL("../../../../", import.meta.url);
 // Every shipped skin, resolved as the app does (skin/runtime.ts).
 const skins = resolveSkins([zerusDark, zerusLight, fjord, paper] as SkinFile[]);
-const PATTERNS: Record<string, string> = {
-  SolidPattern: "solid", Dense5Pattern: "dots", TexturePattern: "sparse", BDiagPattern: "bdiag", FDiagPattern: "fdiag", DiagCrossPattern: "diagcross",
-  HorPattern: "hor", VerPattern: "ver", CrossPattern: "cross",
-};
 
 describe("the profile palette", () => {
-  it("is Qt's table, kind for kind", () => {
-    const qt = fs.readFileSync(new URL("tray/src/TeamProfile.cpp", repo), "utf8");
-    const rows = [...qt.matchAll(/\{"([a-z_]+)", "[a-z_]*", "[a-z]*", QColor\("(#[0-9a-f]{6})"\), QColor\("(#[0-9a-f]{6})"\), Qt::(\w+)\}/g)]
-      .map((m) => ({ key: m[1], dark: m[2], light: m[3], pattern: PATTERNS[m[4]] }));
-    expect(rows).toEqual(KIND_STYLES.map((style) => ({ ...style })));
-  });
-
   it("no two kinds share a colour in any shipped skin, light or dark", () => {
     expect(skins.length).toBeGreaterThan(0);
     // The Qt skins' lanes too (WorkspaceSkin designTokens card).

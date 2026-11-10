@@ -3,7 +3,7 @@
 //! per-user lock in turn; the running instance listens on a Unix socket and
 //! reads one line, `sessions` or `show`; a start that reaches it forwards its
 //! line and exits. The switch bundle uses Qt's names, so
-//! `tray/update-installed.py` finds the socket (a path ending in `/hgs-tray`)
+//! `packaging/desktop/update-installed.py` finds the socket (a path ending in `/hgs-tray`)
 //! and sends `sessions` to the new build.
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
@@ -446,7 +446,7 @@ pub struct Service {
     pub invocation: Option<u128>,
 }
 
-/// The login service's systemd unit on Linux (`tray/packaging/hgs-tray.service`).
+/// The login service's systemd unit on Linux (`packaging/desktop/hgs-tray.service`).
 pub const SYSTEMD_UNIT: &str = "hgs-tray.service";
 
 /// A systemd invocation ID: 32 hex digits, as `INVOCATION_ID` and

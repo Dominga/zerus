@@ -2153,8 +2153,10 @@ fn owner_change(store: &mut Store, op: &str, value: &Value) -> anyhow::Result<Va
     let team = store.load(&team_id)?.context("Unknown team")?;
     let tree = tree_around(&team, &mut |id| store.load(id))?;
     ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
-    store.mutate(Some((&request, value)), &team_id, None, |team, events| {
-        ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
+    super::plan::with_prerequisites_read(&team, op, &filled, || {
+        store.mutate(Some((&request, value)), &team_id, None, |team, events| {
+            ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
+        })
     })
 }
 
@@ -2377,11 +2379,14 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         }
         "cancel-tasks" => {
             let mut cancelled = 0;
+            let current = store.load(&team_id)?.context("Unknown team")?;
             for id in change["tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
                 let request = uuid::Uuid::new_v4().to_string();
                 let value = json!({"team":team_id,"request_id":request,"by":"human","task":id});
-                store.mutate(Some((&request, &value)), &team_id, None, |team, events| {
-                    super::ops::apply(team, "cancel", &value, &Actor::Human, &BTreeSet::new(), events)
+                super::plan::with_prerequisites_read(&current, "cancel", &value, || {
+                    store.mutate(Some((&request, &value)), &team_id, None, |team, events| {
+                        super::ops::apply(team, "cancel", &value, &Actor::Human, &BTreeSet::new(), events)
+                    })
                 })?;
                 cancelled += 1;
             }
@@ -2390,8 +2395,11 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "discard-phase" => {
             let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
             let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase});
-            store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
-                super::ops::apply(team, "discard-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+            let current = store.load(&team_id)?.context("Unknown team")?;
+            super::plan::with_prerequisites_read(&current, "discard-phase", &value, || {
+                store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                    super::ops::apply(team, "discard-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+                })
             })?
         }
         "next-goal" => {
@@ -3093,8 +3101,10 @@ pub(crate) fn apply_team_outbox(store: &mut Store, parent: &Team, member: &Membe
         .context("The queued team call is outside the member's own scratch scope")?;
     let request_id = request["request_id"].as_str().unwrap_or_default();
     let actor = Actor::Member(member.id.clone());
-    let value = store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
-        ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+    let value = super::plan::with_prerequisites_read(&child, op, input, || {
+        store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
+            ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+        })
     })?;
     Ok(value)
 }
@@ -3112,6 +3122,38 @@ pub(crate) fn denies(label: &str) -> bool {
 /// the owner's to answer in person, never a team lead's.
 fn owner_only_trust(card: &Value, by: &Actor) -> bool {
     card["trust_request"] == true && !matches!(by, Actor::Human)
+}
+
+/// Task #37 (team ede724c4): the answers to forward, and the reasons given on
+/// items of an approval card that take no free text. Such an item takes its
+/// outcome only (DeepSeek's Allow once or Reject refuses any text); the text
+/// leaves the forwarded answer and becomes the reason. Any other card keeps
+/// its text: a free answer is the answer.
+fn approval_reasons(card: &Value, answers: &Value) -> (Value, Vec<String>) {
+    let mut answers = answers.clone();
+    let mut reasons = Vec::new();
+    if card["approval"] != true {
+        return (answers, reasons);
+    }
+    for answer in answers.as_array_mut().into_iter().flatten() {
+        let free = card["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["id"] == answer["question_id"])
+            .is_some_and(|item| item["allow_other"] == true);
+        if free {
+            continue;
+        }
+        let given = answer["text"].as_str().map(str::trim).unwrap_or_default().to_owned();
+        if let Some(object) = answer.as_object_mut() {
+            object.remove("text");
+        }
+        if !given.is_empty() {
+            reasons.push(given);
+        }
+    }
+    (answers, reasons)
 }
 
 fn answer(input: &Value) -> anyhow::Result<Value> {
@@ -3160,6 +3202,14 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         !owner_only_trust(&card, &by),
         "This request is the owner's to answer in person; a team lead cannot answer it"
     );
+    // Task #37 (team ede724c4): an approval takes its outcome only (DeepSeek's
+    // Allow once or Reject refuses any text with "Choose an approval outcome").
+    // A reason given on such an answer is the answer's reason: it leaves the
+    // forwarded answer and reaches the member as one note after the decision,
+    // as a top-level `text` does.
+    let (answers, carried) = approval_reasons(&card, &input["answers"]);
+    let given = text(input, "text").trim();
+    let reason = if given.is_empty() { carried.join("; ") } else { given.to_owned() };
     let selected: Vec<&str> = input["answers"]
         .as_array()
         .into_iter()
@@ -3173,11 +3223,12 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
                 && option["label"].as_str().is_some_and(denies)
         })
     });
-    let tool = card["questions"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["header"].as_str())
-        .or_else(|| card["tool"].as_str())
+    // Task #37: the card's tool names the call (a DeepSeek approval's header is
+    // only "Approval required"); the first header otherwise.
+    let tool = card["tool"]
+        .as_str()
+        .filter(|tool| !tool.is_empty())
+        .or_else(|| card["questions"].as_array().and_then(|items| items.first()).and_then(|item| item["header"].as_str()))
         .unwrap_or_default()
         .to_owned();
     // Task #349 (owner, 2026-11-08): the approval journal is the one place for
@@ -3209,7 +3260,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
-        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
+        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":answers});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -3244,17 +3295,18 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     if let Some(id) = journal {
         let _ = crate::approval_log::settle(&journal_root, id, "approved", "");
     }
-    // B2: a denied permission's text reaches the member as one message, and
-    // B1: the lead's or owner's answer is recorded with its reason.
-    let reason = text(input, "text").trim().to_owned();
-    // N5: the answer is recorded even when the denial message cannot be sent.
-    let denial_error = if deny && !reason.is_empty() {
-        super::dispatcher::send_denial(&session, &tool, &reason).err()
-    } else {
-        None
-    };
+    // B2: the decision's reason reaches the member as one message (task #37:
+    // an Allow's too, not only a denial's), and B1: the lead's or owner's
+    // answer is recorded with its reason.
     let decision = if deny { "deny" } else { "allow" };
     let who = if matches!(&by, Actor::Human) { "owner" } else { "lead" };
+    // N5: the answer is recorded even when the reason's message cannot be sent.
+    let denial_error = if reason.is_empty() {
+        None
+    } else {
+        let speaker = if matches!(&by, Actor::Human) { "Owner" } else if parent_authority { "Parent lead" } else { "Lead" };
+        super::dispatcher::send_decision(&session, &tool, deny, speaker, &reason).err()
+    };
     let mut store = Store::open(true)?;
     store.mutate(None, &team.id, None, |team, events| {
         let member = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
@@ -3288,7 +3340,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         ));
         if let Some(error) = &denial_error {
             events.push(Event::new(
-                "permission_denial_failed",
+                if deny { "permission_denial_failed" } else { "permission_reason_failed" },
                 json!({"member":team.role_of(&member_id),"question_id":question,"error":error.to_string()}),
             ));
         }
@@ -6462,10 +6514,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Task 287: a report's git reads run before the store's lock and are
             // served inside it; task #362: a lead's use-last-reply reads the
             // member's folder the same way.
-            let reporting = if matches!(op, "report" | "use-last-reply") && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            // Task #41 (team ede724c4): an operation that runs the phase checks
+            // reads their Git prerequisites the same way.
+            let reporting = if (matches!(op, "report" | "use-last-reply") && !parent_lead) || ops::checks_phases(op) {
+                store.load(team_id).ok().flatten()
+            } else {
+                None
+            };
             let prefetch = || {
                 if let Some(team) = reporting.as_ref() {
-                    if let Ok(caller) = actor(team, op, &filled) {
+                    let caller = if parent_lead { Ok(Actor::ParentLead) } else { actor(team, op, &filled) };
+                    if let Ok(caller) = caller {
                         ops::prefetch_git(team, op, &filled, &caller);
                     }
                 }

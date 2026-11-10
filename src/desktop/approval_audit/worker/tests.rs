@@ -9,7 +9,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let state = temp.path().canonicalize().unwrap().join("state");
         let location = Location {
             root: state.join("desktop"),

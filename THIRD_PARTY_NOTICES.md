@@ -13,25 +13,11 @@ in each file; the original Apache-2.0 license is
 retained in `docs/licenses/codex-LICENSE.txt`, which is also shipped with packages.
 No native Codex executable is bundled.
 
-`tray/vendor/libvterm` contains libvterm 0.3.3 under MIT. Its original copyright
-notice and complete license are retained in `tray/vendor/libvterm/LICENSE`;
-source provenance, archive checksum and one local patch are in `UPSTREAM.md`
-beside it.
-
-`tray/vendor/md4c` contains the md4c 0.5.2 Markdown parser and entity table
-under MIT. Its original license is retained in `tray/vendor/md4c/LICENSE.md`;
-source provenance and archive checksum are in `UPSTREAM.md` beside it.
-
-`tray/vendor/qrcodegen` contains the Nayuki QR Code generator 1.8.0 (C++) under
-MIT, which draws the phone pairing code. Its license is retained in
-`tray/vendor/qrcodegen/LICENSE`; source provenance and file checksums are in
-`UPSTREAM.md` beside it.
-
 ## GitHub logo
 
 The About page uses the [GitHub mark from Primer Octicons](
 https://github.com/primer/octicons/blob/97825f832c98f817867f770d084c08e3edc6f78c/icons/mark-github-16.svg). Its complete MIT license and GitHub copyright notice are retained
-in `tray/resources/icons/github-mark.svg`.
+in `packaging/desktop/icons/github-mark.svg`.
 
 ## Agent logos (WhiteWh fork)
 

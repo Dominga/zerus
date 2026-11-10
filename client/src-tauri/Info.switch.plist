@@ -19,7 +19,7 @@
     <key>NSMicrophoneUsageDescription</key><string>Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.</string>
     <key>NSCameraUsageDescription</key><string>Zerus records video messages when you hold the video recording button.</string>
     <key>NSAppleEventsUsageDescription</key><string>Zerus opens your agent sessions in Terminal.</string>
-    <!-- tray/update-installed.py tells the clients apart by this key. -->
+    <!-- packaging/desktop/update-installed.py tells the clients apart by this key. -->
     <key>ZerusGUI</key>                  <string>tauri</string>
     <key>HGSDesktopNotificationHostABI</key> <string>desktop-notification-host-v1</string>
 </dict>

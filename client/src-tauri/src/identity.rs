@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 pub const SWITCH_ID: &str = "com.hgdev.hgs-tray";
-/// Qt's LaunchAgent label (`tray/packaging/com.hgdev.hgs-tray.plist`).
+/// Qt's LaunchAgent label (`packaging/desktop/com.hgdev.hgs-tray.plist`).
 pub const LAUNCHD_LABEL: &str = "com.hgdev.hgs-tray";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

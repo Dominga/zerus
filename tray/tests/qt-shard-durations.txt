@@ -1,3 +1,0 @@
-# Milliseconds per test function, or per data row of the functions that run as
-# rows, of the Qt suites that RunQtShard.cmake splits into shards: the largest
-# of the measured runs. Rebuild with scripts/ci/qt-shard-seed.py.

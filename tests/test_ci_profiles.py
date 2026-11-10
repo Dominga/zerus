@@ -37,9 +37,9 @@ class Coverage(unittest.TestCase):
     def test_paths_preserve_platform_specific_and_shared_coverage(self):
         for paths, expected in [
             (['docs/reference.md'], (False, False)), (['mobile/android/app/a.kt'], (False, False)),
-            (['tray/src/NewSessionDialog.cpp'], (True, False)),
+            (['packaging/desktop/update-installed.py'], (True, False)),
             (['mobile/ios/ZerusKit/a.swift'], (False, True)),
-            (['tray/src/A.cpp', 'mobile/ios/A.swift'], (True, True)),
+            (['packaging/desktop/install.sh', 'mobile/ios/A.swift'], (True, True)),
             (['src/state/input.rs'], (True, True)), (['services/mobile/relay/src/api.rs'], (True, True)),
             (['tests/fixtures/mobile-v1.json'], (True, True)), (['Cargo.lock'], (True, True)),
             (['.github/workflows/ci.yml'], (True, True)), (['new-build-system/config'], (True, True)),

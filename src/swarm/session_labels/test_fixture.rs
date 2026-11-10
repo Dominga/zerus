@@ -24,7 +24,7 @@ impl Drop for Fixture {
 }
 
 pub(super) fn fixture() -> (Fixture, Config) {
-    let home = tempfile::tempdir().unwrap();
+    let home = crate::host::staging::private_tempdir();
     let config = Config {
         home: home.path().to_str().unwrap().into(),
         dir: home.path().join("config"),

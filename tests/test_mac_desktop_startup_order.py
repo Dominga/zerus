@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('mac_startup_updater', ROOT / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('mac_startup_updater', ROOT / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 
@@ -103,13 +103,13 @@ class Step4ServiceOrder(unittest.TestCase):
         self.state = self.root / 'launchd-model.json'
         self.environment = dict(os.environ, HOME=str(self.home), TEST_PYTHON=sys.executable,
             TEST_DRIVER=str(self.driver), TEST_REPO=str(ROOT), TEST_ROOT=str(self.root),
-            SCRIPT_DIR=str(self.root / 'tray'), HGS_BIN=str(self.root / 'bin/hgs'),
+            SCRIPT_DIR=str(self.root / 'packaging/desktop'), REPO=str(self.root), HGS_BIN=str(self.root / 'bin/hgs'),
             APP_DEST=str(self.installed), BUILD_APP=str(self.root / 'build.app'),
             PLIST_DEST=str(self.home / 'Library/LaunchAgents/com.hgdev.hgs-tray.plist'),
             LABEL='com.hgdev.hgs-tray', RELOAD='0', RESTART_RUNNING='1', CHANGED='0')
 
     def step4(self, update):
-        script = (ROOT / 'tray/install.sh').read_text()
+        script = (ROOT / 'packaging/desktop/install.sh').read_text()
         begin = script.index('# --- 4. load ')
         end = script.index('\nHINT_SELFTEST=', begin)
         prefix = r'''set -euo pipefail

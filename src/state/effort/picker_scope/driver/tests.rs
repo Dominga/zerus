@@ -297,7 +297,9 @@ fn fixture() {
                 fs::write(temp, b"foreign stage").unwrap();
             }
             "destination-replaced" => {
-                crate::state::storage::atomic(&path, &original.to_string()).unwrap();
+                let replacement = path.with_extension("foreign");
+                fs::write(&replacement, original.to_string()).unwrap();
+                fs::rename(replacement, &path).unwrap();
             }
             "proof-replaced" => {
                 let proof = root()

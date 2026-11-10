@@ -2,16 +2,24 @@
 //! one owned ID input scope. Settings and legacy controllers remain separate.
 use super::*;
 
+pub(super) struct Pending {
+    pub(super) id: String,
+    pub(super) receipt: Original,
+    pub(super) value: Value,
+    pub(super) pending: Value,
+}
+
 pub(super) struct Reservation {
-    id: String,
-    digest: String,
-    run: String,
-    conversation: String,
-    kind: InputKind,
-    marker: Value,
-    prior: Option<Value>,
-    record_version: Value,
-    receipt: Original,
+    pub(super) id: String,
+    pub(super) digest: String,
+    pub(super) run: String,
+    pub(super) conversation: String,
+    pub(super) kind: InputKind,
+    pub(super) marker: Value,
+    pub(super) prior: Option<Value>,
+    pub(super) record_version: Value,
+    pub(super) receipt: Original,
+    pub(super) pending: Option<Pending>,
 }
 
 fn confirm(owner: &Arc<owner::Owner>, request: &Request, expected: &Settings) -> Result<()> {
@@ -115,6 +123,15 @@ pub(super) fn own_marker(record: &Value) -> Result<bool> {
         {
             return Err("Original Effort reservation receipt changed".into());
         }
+        if let Some(pending) = &reserved.pending {
+            if raw["pending_settings"] != pending.pending
+                || string(&pending.pending, "request_id") != pending.id
+                || pending.receipt.record(&scope.receipts)? != pending.value
+                || pending.value["status"] != "in_progress"
+            {
+                return Err("Original pending Settings reservation changed".into());
+            }
+        }
         Ok(true)
     })
 }
@@ -179,6 +196,7 @@ pub(super) fn execute(owner: &Arc<owner::Owner>) -> Result<Vec<u8>> {
         prior,
         record_version,
         receipt: original_receipt,
+        pending: None,
     });
     start_attempt();
     let result = if current.effort == request.effort {

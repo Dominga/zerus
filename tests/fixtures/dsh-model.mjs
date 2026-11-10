@@ -19,6 +19,7 @@ class Adapter extends LlmAdapter {
     return { provider,id:model,name:model,inputModalities: model === 'test-b' ? ['text'] : ['text','image'],
     reasoning:{efforts:[{id:'off',name:'Off'},{id:'high',name:'High'}],defaultEffort:'high'} }; }
   async *stream(options) {
+    if (this.holds) writeFileSync(join(this.holds, 'SETTINGS_MODEL_STREAMS'), '1\n', {flag:'a'});
     await new Promise(resolve => setTimeout(resolve, 120));
     const prompt = options.messages.filter(m => m.role === 'user' && m.source?.kind === 'user').at(-1);
     const text = prompt?.content?.filter(b => b.type === 'text').map(b => b.text).join('') ?? '';

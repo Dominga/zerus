@@ -784,6 +784,32 @@ class OpenCodeNative(unittest.TestCase):
                             for e in final['events']), final['events'])
         self.assert_private(data, final)
 
+    def test_05_id_settings_preserves_original_session_defaults_and_no_model_calls(self):
+        a, b = self.create('--effort', 'low'), self.create('--effort', 'low')
+        config = self.root / 'xdg-config/opencode/opencode.json'
+        defaults = config.read_bytes()
+        requests = len(self.model.requests)
+        original = self.session(a['conversation_id'])
+        uri = self.hgs(['reference', a['name'], '--json'])['uri']
+        self.assertTrue(uri.startswith('zerus://session?'))
+        for selector, model, effort in (([a['name'], '--session-id', a['session_id']], 'alternate', 'high'),
+                                        ([uri], 'local', 'low')):
+            with self.subTest(selector=selector):
+                request = self.payload(a, model='fixture/' + model, effort=effort)
+                applied = self.hgs(['settings', *selector, '--json'], request)
+                self.assertEqual((applied['status'], applied['model'], applied['effort']),
+                                 ('applied', 'fixture/' + model, effort))
+                current = self.hgs(['inspect', a['name'], '--session-id', a['session_id']])
+                self.assertEqual((current['session_id'], current['conversation_id'], current['run_id']),
+                                 (a['session_id'], a['conversation_id'], a['run_id']))
+                self.assertEqual(self.session(a['conversation_id'])['id'], original['id'])
+                self.assertEqual(self.session(a['conversation_id'])['model'],
+                                 {'providerID': 'fixture', 'id': model, 'variant': effort})
+                other = self.hgs(['inspect', b['name']])
+                self.assertEqual((other['settings_model'], other['effort']), ('fixture/local', 'low'))
+                self.assertEqual(config.read_bytes(), defaults)
+                self.assertEqual(len(self.model.requests), requests, 'Settings invoked the private model API')
+
     def test_05_model_effort_and_provider_error(self):
         b = self.create('--effort', 'low')
         name = b['name']

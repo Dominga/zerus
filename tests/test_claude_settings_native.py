@@ -221,6 +221,23 @@ class NativeClaudeSettings(unittest.TestCase):
         self.assertEqual(self.inspect()['effort'], 'low')
         self.assertEqual(self.settings_file.read_bytes(), before)
 
+    def test_id_settings_unprimed_model_and_effort_preserve_shared_defaults(self):
+        import native_effort_id as identity
+        import native_settings_id as settings_contract
+        before = self.settings_file.read_bytes()
+        self.assertFalse(self.transcript.exists(), 'the first model receipt must not be primed')
+        record, path, legacy = identity.moved_record(self, self.name, self.record)
+        self.record, self.record_path = record, path
+        attempts = identity.key_log(self, existing=self.root / 'sent-keys')
+        record = settings_contract.change_and_replay(self, self.name, record, path,
+                                                    'claude-sonnet-5-5', 'high', attempts)
+        self.assertTrue(self.transcript.exists(), '/model did not create its genuine transcript')
+        self.assertEqual(self.receipts(), ['<local-command-stdout>Set model to `Sonnet 5.5` for this session only with `high` effort</local-command-stdout>'])
+        self.assertEqual(self.keys()[0], ['-l', '/model'])
+        self.assertEqual(self.keys()[-1], ['s'])
+        self.assertEqual(self.settings_file.read_bytes(), before)
+        self.assertFalse(legacy.exists())
+
     def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
         import native_effort_id as contract
         before = self.settings_file.read_bytes()

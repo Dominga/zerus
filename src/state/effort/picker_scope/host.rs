@@ -1,21 +1,22 @@
 //! Fixed-entry operation owner, entered before Root acquisition.
 //!
-//! The existing ID Effort lane uses this keeper and original raw stdin.
-//! Settings remains explicitly unadmitted. Host lifetime controls substitute
-//! only their final operation; real Effort controls use the production CLI.
+//! Existing ID Effort and Settings lanes use this keeper and original raw stdin.
+//! Host lifetime controls substitute only their final operation; actual request
+//! controls use the production CLI.
 //! Source/image/frame/deadline/lifeline/acquisition/lifetime methods are shared.
 use super::*;
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{
     io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{net::UnixStream, process::CommandExt},
     },
-    panic::{catch_unwind, AssertUnwindSafe},
     process::{Child, Command, Stdio},
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 use zerus_client_core::run::custody::InheritedLock;
 pub(super) mod frame;
@@ -442,9 +443,7 @@ fn acquire(control: &Control) -> Result<Guard> {
 }
 
 pub(super) fn original_record(frame: &Frame) -> Result<Value> {
-    let record = if frame.operation == Operation::Effort
-        && string(&frame.binding, "session_id").is_empty()
-    {
+    let record = if string(&frame.binding, "session_id").is_empty() {
         crate::state::storage::read_metadata(string(&frame.binding, "name"))?
     } else {
         let state =
@@ -454,22 +453,15 @@ pub(super) fn original_record(frame: &Frame) -> Result<Value> {
         let original = Original::open(&sessions, name)?;
         original.record(&sessions)?
     };
-    let target = match frame.operation {
-        Operation::Effort => {
-            is_id_layout_record(&record, string(&record, "session_id"))
-                && (string(&frame.binding, "session_id").is_empty()
-                    || record["session_id"] == frame.binding["session_id"])
-                && string(&record, "name") == string(&frame.binding, "name")
-        }
-        Operation::Settings => same_target(&frame.binding, &record),
-    };
+    let target = is_id_layout_record(&record, string(&record, "session_id"))
+        && (string(&frame.binding, "session_id").is_empty()
+            || record["session_id"] == frame.binding["session_id"])
+        && string(&record, "name") == string(&frame.binding, "name");
     if !target {
         return Err("Original picker target changed before Root admission".into());
     }
-    if frame.operation == Operation::Effort {
-        frame.validate_public_selection(&record)?;
-        frame.validate_live_effort(&record)?;
-    }
+    frame.validate_public_selection(&record)?;
+    frame.validate_live_request(&record)?;
     Ok(record)
 }
 
@@ -519,25 +511,12 @@ fn original_receipt(frame: &Frame) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+#[cfg(test)]
 fn fixed_operation(frame: &Frame, scope: Scope<'static>, control: Arc<Control>) -> Result<Vec<u8>> {
-    #[cfg(test)]
-    {
-        tests::operation(frame, scope, control)
-    }
-    #[cfg(not(test))]
-    {
-        // Effort uses its original Root-first driver above this Scope-only
-        // seam. Settings remains withheld; neither branch decodes a command,
-        // callback or native key from the frame.
-        let _ = (scope, control);
-        match frame.operation {
-            Operation::Effort => Err("Effort requires its original Root-first driver".into()),
-            Operation::Settings => Err("Settings picker host runtime is not admitted".into()),
-        }
-    }
+    tests::operation(frame, scope, control)
 }
 
-/// Fixed private entry seam for the existing ID Effort controller.
+/// Fixed private entry seam for existing ID Effort and Settings controllers.
 /// The caller supplies only the exact literal entry; descriptors are inherited
 /// native objects, never a decoded executable, PID, callback or permission.
 pub(super) fn entry() -> Result<i32> {
@@ -585,7 +564,6 @@ pub(super) fn entry() -> Result<i32> {
     });
     control.check()?;
     let writer = acquire(&control)?;
-    let until = frame.deadline.instant()?;
     // Do NOT call ordinary writer recovery. Cached UUID lookup comes first;
     // the Effort driver then uses only its explicit original-owner Effects.
     // Host-only controls prepare already-recovered synthetic state.
@@ -608,7 +586,7 @@ pub(super) fn entry() -> Result<i32> {
         return Ok(outcome.code);
     }
     #[cfg(not(test))]
-    if frame.operation == Operation::Effort {
+    {
         let result = driver::run(writer, control.clone());
         let outcome = match result {
             Ok(bytes) => Outcome { code: 0, bytes },
@@ -626,49 +604,53 @@ pub(super) fn entry() -> Result<i32> {
             },
         };
         let _ = write_message(&control.stream, &outcome, deadline, RESPONSE_BYTES);
-        return Ok(outcome.code);
+        Ok(outcome.code)
     }
-    let record = original_record(&frame)?;
-    let receipts = match frame.operation {
-        Operation::Effort => Receipts::Effort,
-        Operation::Settings => Receipts::Settings,
-    };
-    let mut scope = Scope::owned(writer, &record, receipts, until)?;
-    let (complete, done) = mpsc::channel();
-    scope.host = Some(Hold {
-        control: control.clone(),
-        complete: Some(complete),
-    });
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        fixed_operation(&frame, scope, control.clone())
-    }));
-    // Logical error, expiry, EOF and panic do not substitute for the SAME
-    // scope's last-field completion. Lost wait keeps this owner alive.
-    loop {
-        match done.recv_timeout(Duration::from_millis(20)) {
-            Ok(()) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => loop {
-                std::thread::park_timeout(Duration::from_secs(1));
-            },
+    #[cfg(test)]
+    {
+        let until = frame.deadline.instant()?;
+        let record = original_record(&frame)?;
+        let receipts = match frame.operation {
+            Operation::Effort => Receipts::Effort,
+            Operation::Settings => Receipts::Settings,
+        };
+        let mut scope = Scope::owned(writer, &record, receipts, until)?;
+        let (complete, done) = mpsc::channel();
+        scope.host = Some(Hold {
+            control: control.clone(),
+            complete: Some(complete),
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            fixed_operation(&frame, scope, control.clone())
+        }));
+        // Logical error, expiry, EOF and panic do not substitute for the SAME
+        // scope's last-field completion. Lost wait keeps this owner alive.
+        loop {
+            match done.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => loop {
+                    std::thread::park_timeout(Duration::from_secs(1));
+                },
+            }
         }
+        let outcome = match result {
+            Ok(Ok(bytes)) => Outcome { code: 0, bytes },
+            Ok(Err(error)) => Outcome {
+                code: 1,
+                bytes: error.into_bytes(),
+            },
+            Err(_) => Outcome {
+                code: 1,
+                bytes: b"Original picker operation panicked; no replay".to_vec(),
+            },
+        };
+        // Only after original physical resources are gone can a broken frontend
+        // endpoint or result-write error let this private owner process return.
+        let code = outcome.code;
+        let _ = write_message(&control.stream, &outcome, deadline, RESPONSE_BYTES);
+        Ok(code)
     }
-    let outcome = match result {
-        Ok(Ok(bytes)) => Outcome { code: 0, bytes },
-        Ok(Err(error)) => Outcome {
-            code: 1,
-            bytes: error.into_bytes(),
-        },
-        Err(_) => Outcome {
-            code: 1,
-            bytes: b"Original picker operation panicked; no replay".to_vec(),
-        },
-    };
-    // Only after original physical resources are gone can a broken frontend
-    // endpoint or result-write error let this private owner process return.
-    let code = outcome.code;
-    let _ = write_message(&control.stream, &outcome, deadline, RESPONSE_BYTES);
-    Ok(code)
 }
 
 #[cfg(test)]

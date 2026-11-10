@@ -156,6 +156,10 @@ fn native_input(record: &Value) -> PathBuf {
 /// Held while Zerus itself drives a native picker in this session, such as the
 /// model picker before the first message. That picker is not a startup wait.
 pub(super) fn driving(record: &Value) -> Result<Guard> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        return effort::picker_refuse("The original picker keeper cannot reacquire native input".into());
+    }
     lock(Some(&native_input(record)))
 }
 

@@ -818,7 +818,7 @@ pub(crate) fn resolve_reference(reference: &crate::session_reference::Reference)
     Ok(string(first, "name").to_owned())
 }
 
-/// Effort resolves metadata before its keeper; ordinary reference resolution
+/// Effort and Settings resolve metadata before their keeper; ordinary reference resolution
 /// acquires Root and refreshes presentation data, so it is not this lane.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn resolve_effort_reference(
@@ -1390,7 +1390,7 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Fixed self-image owner, before any provider lookup or local writer. Its
     // inherited endpoint/frame are synchronization and cancellation only; the
-    // dormant Effort/Settings operation remains explicitly unadmitted.
+    // fixed Effort/Settings operation preserves its original native authority.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
         if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}

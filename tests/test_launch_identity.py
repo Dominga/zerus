@@ -30,6 +30,28 @@ class LaunchIdentity(test_fork.Base):
         finally:
             test_pause.AGENT = original
 
+    def pause_settled(self, name):
+        """Pause through pause's own retry contract.
+
+        A resumed run can still deliver a hook write while pause checks the
+        saved binding, and pause documents exactly that transient as
+        'activity changed while checking; retry pause'. The fixture's
+        legacy-helper selected as HGS_EXECUTABLE is not named hgs, so hgs
+        treats its hook entry as foreign and repeats it on every launch: a
+        resumed run then delivers more than one SessionStart write, the last
+        of which lands after the wait that confirmed the run (zerus-lvyta).
+        Only that documented refusal is retried; every other refusal fails at
+        once, and a session that never settles still fails after the bound."""
+        refused = None
+        for _ in range(10):
+            try:
+                return self.hgs('pause', name)
+            except AssertionError as error:
+                if 'activity changed while checking; retry pause' not in str(error):
+                    raise
+                refused = error
+        self.fail('pause did not settle after its documented retry: ' + str(refused))
+
     def use_required_helper(self, changed_run=False):
         """Observe actual production counts without rewriting the recipe."""
         helper = self.root / 'required-helper' / 'hgs'
@@ -178,16 +200,16 @@ os.execv(__HGS__,[__HGS__]+sys.argv[1:])
         name = record['name']
         self.assertNotIn('session_id', record)
         self.resume(name)
-        self.hgs('pause', name)
+        self.pause_settled(name)
         self.hgs('resume', name, '--fresh', '-d')
         self.wait(lambda: self.binding(name).get('activity') == 'idle'
                   and self.binding(name).get('conversation_id') not in (None, record['conversation_id']))
-        self.hgs('pause', name)
+        self.pause_settled(name)
         self.hgs('archive', name)
         archive = json.loads(next((self.root / 'state' / 'archives').glob('*.json')).read_text())
         self.hgs('resume', name, '--archive', archive['archive_id'], '-d')
         self.wait(lambda: self.binding(name).get('activity') == 'idle' and not self.binding(name).get('expected_id'))
-        self.hgs('pause', name)
+        self.pause_settled(name)
         sid, held = self.move_to_id_layout(name)
         before, history = held(), (self.root / 'argv.jsonl').read_bytes()
         seen = calls.read_bytes()

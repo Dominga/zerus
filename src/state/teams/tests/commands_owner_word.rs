@@ -262,10 +262,10 @@ fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
         say(now - 200.0, "please continue with the plan");
         say(now - 100.0, "Please add a task to the current phase: fix the login crash");
         lead();
-        // 1. No word: refused, nothing changes.
-        let error = request(json!({"phase":1,"tasks":task})).unwrap_err().to_string();
-        assert!(error.contains("your word"), "{error}");
-        // A sentence that does not ask to add a task is not the word.
+        // 1. Task #13 (team ede724c4): without a word the lead of a running
+        // team adds the task itself (task 162; the walk in commands_other
+        // covers it). A word the lead does send is still checked:
+        // a sentence that does not ask to add a task is not the word.
         let error = request(json!({"phase":1,"tasks":task,"owner_word":{"text":"please continue with the plan"}})).unwrap_err().to_string();
         assert!(error.contains("has not asked to add a task to phase 1"), "{error}");
         // 2. The request word alone changes nothing and returns the warning.
@@ -395,11 +395,14 @@ fn a_sentence_naming_them_all_relaunches_each_member() {
     assert!(super::super::owner_word::says_everyone("Relaunch them all"));
     assert!(!super::super::owner_word::says_everyone("перезапусти бэкендера"));
     let mut team = full_team();
-    for member in &mut team.members {
-        member.error = "start failed".into();
-    }
     let rule = roster_word_rule(&team, "relaunch", &json!({"member":"m1"}));
     assert!(rule.names.iter().any(|name| name == "их"), "{:?}", rule.names);
+    // Task #13 (team ede724c4): a member that failed to start needs no word.
+    for member in &mut team.members {
+        member.session = None;
+        member.error = "start failed".into();
+    }
+    assert!(!roster_word_rule(&team, "relaunch", &json!({"member":"m1"})).needed());
 }
 
 /// Task 162 (owner, 2026-11-07): the owner's typed word is no longer taken

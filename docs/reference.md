@@ -2112,6 +2112,13 @@ members, tasks, phases and plan mode). A draft update sets only the fields it na
 `members` is a list that replaces them all or an object of changes by member
 id, where null removes a member and a new id adds one. `plan_mode` is a draft
 field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+The owner's settings (`OWNER_SETTINGS`: `base_branch`, `branch_per_task`,
+`max_members`, `approval`, ...) work the same way in a draft (task #13): a
+lead's draft update that sets one is not refused; the owner's value stays, the
+lead's goes into the draft's `setting_offers` (the receipt names them in
+`note`), New team lists them under **The lead offers settings only you set**
+with **Apply**, and an offer goes when the owner applies it or sets that field
+to something else. Outside a draft these settings stay the owner's card.
 A draft's tasks keep their `phase` and its `phases` list phases 2..N
 (`{"n":2,"title":"...","barrier":true}`), as a plan's do; a phase a task names
 but the list leaves out is kept untitled. Create keeps them all as Draft phases
@@ -10377,6 +10384,30 @@ task/commit pairs and every accepted task's `unlanded` state and why (queued,
 testing, conflict with its `resolve` task, or no landing queued); the lead's
 inbox lists each with an `unlanded` item, and an accept answers with its
 `landing`.
+
+#### Nothing blocks creating a team (task #13)
+
+Owner, 2026-11-10: the path from New team to running members has no refusal
+without a way through. What changed on that path:
+
+- Members created at once share the repository's worktree lock, which
+  `worktrees create` waits for only five seconds. A member's creation refused
+  with "Another worktree operation is running" is tried again for up to five
+  minutes (nothing was reserved); after that the member's error says Zerus
+  starts it again on its next tick and that `hgs team relaunch` starts it now.
+- The lead relaunches a member whose session failed to start (no session and
+  a launch error) itself, with no card. A running member's relaunch is still
+  the owner's card.
+- `add-to-phase` by the lead of a running or paused team is the lead's own
+  operation (task 162). The CLI no longer asks for the owner's word first,
+  which `propose` refused as the lead's own operation: a loop with no way
+  through. A word the lead does send is still checked.
+- A lead's draft value for an owner's setting is an offer (above).
+- Create team with **Keep the settings as they are** (working mode `none`)
+  records the owner's Keep of the project's preset (task 336), so the playbook
+  and the working-mode block do not ask about the settings again.
+- A model or effort change the agent did not visibly confirm no longer blocks
+  sends or the planning brief: task #7 (settings evidence) covers it.
 
 #### The working mode follows the project (#270)
 

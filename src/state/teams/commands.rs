@@ -5006,9 +5006,12 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // U54: the lead relaunches a member's session on the owner's word.
             // #728: except a stuck member when the owner set lead_restarts_stuck;
             // that route is the lead's own decision.
+            // Task #13 (team ede724c4): and except a member whose session
+            // failed to start: starting it again is the lead's own step.
             let id = text(input, "member");
             if id.is_empty()
                 || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
+                || team.member(id).is_some_and(super::model::Member::failed_to_start)
             {
                 WordRule::default()
             } else {
@@ -5189,6 +5192,13 @@ fn check_phase_word(
     // A decline is the owner's alone and needs no word; the change refuses
     // anyone else.
     if !matches!(caller, Actor::Member(id) if *id == team.lead) || input["decline"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    // Task #13 (team ede724c4): inside the approved goal (a running or paused
+    // team) the lead adds to a running phase itself (task 162), and `propose`
+    // refuses that card; demanding the owner's word here was a loop with no
+    // way through. A word the lead does send is still checked.
+    if super::lead_plan::lead_plans(team, caller) && input.get("owner_word").is_none_or(|word| !word.is_object()) {
         return Ok(());
     }
     let phase = input["phase"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("A phase number is required")?;

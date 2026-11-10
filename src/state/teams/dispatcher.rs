@@ -5143,6 +5143,16 @@ fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     })
 }
 
+/// Task #13 (team ede724c4): how long a member's worktree creation waits for
+/// another creation in the same repository before it fails.
+const WORKTREE_BUSY_WAIT: Duration = Duration::from_secs(300);
+
+/// Task #13: `worktrees create` refused because another worktree operation
+/// holds the repository's lock (nothing was created).
+fn worktree_busy(stderr: &str) -> bool {
+    stderr.contains("Another worktree operation is running")
+}
+
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
@@ -5235,8 +5245,29 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     if member.agent == "dsh" {
         args.insert(2, "--sandbox");
     }
-    let output = run(&member.computer, &args)?;
-    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    // Task #13 (team ede724c4): members created at once share the
+    // repository's worktree lock, which `worktrees create` waits for only a
+    // few seconds. A creation refused because another one holds it is tried
+    // again until WORKTREE_BUSY_WAIT, never a failed member; the refusal
+    // reserved nothing, so trying again is safe.
+    let started = Instant::now();
+    let mut pause = Duration::from_secs(1);
+    let output = loop {
+        let output = run(&member.computer, &args)?;
+        let busy = !output.status.success() && worktree_busy(&String::from_utf8_lossy(&output.stderr));
+        if !busy || started.elapsed() >= WORKTREE_BUSY_WAIT {
+            break output;
+        }
+        std::thread::sleep(if cfg!(test) { Duration::from_millis(1) } else { pause });
+        pause = (pause * 2).min(Duration::from_secs(10));
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::ensure!(
+        output.status.success(),
+        "{}{}",
+        stderr.trim(),
+        if worktree_busy(&stderr) { "; Zerus starts the member again on its next tick (hgs team relaunch starts it now)" } else { "" }
+    );
     // F1.4: the new folder is the repository's (a clone by its origin), on the
     // member's branch. `worktrees create` confirmed this where it ran; a
     // member on this computer is checked here again.
@@ -10404,6 +10435,13 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+/// Tests outside the dispatcher (task #13's walk from New team to running
+/// members): one step as the worker runs it.
+#[cfg(test)]
+pub(crate) fn test_run_step(store: &mut Store, team: &Team, step: &Step) -> anyhow::Result<()> {
+    run_step(store, team, step, "")
 }
 
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {

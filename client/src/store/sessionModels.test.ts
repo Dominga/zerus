@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRoot } from "solid-js";
+import { createEffect, createRoot, untrack } from "solid-js";
 import { createSessionModels, type ModelsPort, type PendingRow } from "./sessionModels";
 import { effortChoices, modelChoices, settingsView, type ModelContext } from "../ui/sessions/session-model-settings";
 import { toSession } from "./catalog";
@@ -80,6 +80,81 @@ describe("session model settings", () => {
     expect(port.apply).toHaveBeenCalledExactlyOnceWith({ computer: "", name: "claude/sample-project/a", run_id: "r1", conversation_id: "c1" }, "model-b", "medium", undefined, false);
     store.setContext(fresh);
     expect([store.view()?.model, store.view()?.effort]).toEqual(["model-b", "medium"]);
+  });
+  it("one Apply on a Ready session sends the manual change while its queued key is observed", async () => {
+    const { store, port } = setup();
+    const fresh = context({ effort: "" }, "claude");
+    // session.ts wires view() and queuedKeys() to observe() in its own root. An
+    // Apply click runs outside any update, so publishing the new key runs this
+    // effect synchronously, before apply() sends.
+    const dispose = createRoot((dispose) => {
+      createEffect(() => {
+        store.view();
+        const rows = store.queuedKeys().map((key) => ({ key, row: key === fresh.row.key ? fresh.row : undefined, online: true, busy: false }));
+        untrack(() => store.observe(rows));
+      });
+      return dispose;
+    });
+    // hgs takes the pending path for any expected_pending_id and, with no
+    // pending settings, refuses it before writing a receipt.
+    const refused = vi.fn();
+    port.apply.mockImplementation(async (_target, model, effort, pending) => {
+      if (pending !== undefined) {
+        refused(pending);
+        return { outcome: "failed", detail: "hgs: pending settings target changed; refresh before applying" };
+      }
+      return { outcome: "done", cleanup: null, receipt: { status: "applied", request_id: "request-1", model, effort } };
+    });
+    store.setContext(fresh); store.open(); store.chooseModel("model-b"); store.chooseEffort("medium");
+    expect(store.canApply()).toBe(true);
+    await store.apply(); await tick();
+    expect(refused).not.toHaveBeenCalled();
+    expect(port.apply).toHaveBeenCalledExactlyOnceWith({ computer: "", name: "claude/sample-project/a", run_id: "r1", conversation_id: "c1" }, "model-b", "medium", undefined, false);
+    expect(port.notice).not.toHaveBeenCalled();
+    expect(store.opened()).toBe(false);
+    expect([store.view()?.model, store.view()?.effort]).toEqual(["model-b", "medium"]);
+    dispose();
+  });
+  it("a manual Apply goes first when another session's scheduled change turns Ready as its key is published", async () => {
+    const { store, port } = setup();
+    const a = context({ effort: "" }, "claude");
+    const bRow = toSession("", "run:r2", { name: "codex/sample-project/b", run_id: "r2", conversation_id: "c2", agent: "codex",
+      model: "model-a", effort: "high", state: "running", activity: "busy", phase: "working", process_state: "running" });
+    const b: ModelContext = { row: bRow, online: true, busy: false, details: { run_id: "r2", conversation_id: "c2", model: "model-a", effort: "high",
+      settings_change_supported: true, settings_apply_when: "ready", pending_model: "model-b", pending_effort: "medium",
+      pending_settings_id: "pending-b", model_options: a.details?.model_options } };
+    // The catalog rows session.ts's effect reads when it runs; not reactive.
+    const catalogRows = new Map([[a.row.key, a.row], [b.row.key, b.row]]);
+    const dispose = createRoot((dispose) => {
+      createEffect(() => {
+        store.view();
+        const rows = store.queuedKeys().map((key) => ({ key, row: catalogRows.get(key), online: true, busy: false }));
+        untrack(() => store.observe(rows));
+      });
+      return dispose;
+    });
+    let finishA: ((outcome: Outcome) => void) | undefined;
+    port.apply.mockImplementation((target, model, effort) => target.run_id === "r1"
+      ? new Promise<Outcome>((resolve) => { finishA = resolve; })
+      : Promise.resolve({ outcome: "done", cleanup: null, receipt: { status: "applied", request_id: "request-b", model, effort } }));
+    // B's host-scheduled change was queued while B was busy; then A is selected.
+    store.setContext(b); store.setContext(a);
+    expect(store.queuedKeys()).toEqual([b.row.key]);
+    store.open(); store.chooseModel("model-b"); store.chooseEffort("medium");
+    expect(port.apply).not.toHaveBeenCalled();
+    // B becomes Ready exactly when A's key is published.
+    catalogRows.set(b.row.key, { ...b.row, activity: "idle", phase: "idle" });
+    const applying = store.apply();
+    expect(port.apply).toHaveBeenCalledExactlyOnceWith({ computer: "", name: "claude/sample-project/a", run_id: "r1", conversation_id: "c1" }, "model-b", "medium", undefined, false);
+    await tick();
+    expect(port.apply).toHaveBeenCalledTimes(1);
+    finishA?.({ outcome: "done", cleanup: null, receipt: { status: "applied", request_id: "request-a", model: "model-b", effort: "medium" } });
+    await applying; await tick();
+    expect(port.apply).toHaveBeenCalledTimes(2);
+    expect(port.apply).toHaveBeenLastCalledWith({ computer: "", name: "codex/sample-project/b", run_id: "r2", conversation_id: "c2" }, "model-b", "medium", "pending-b", false);
+    expect(port.notice).not.toHaveBeenCalled();
+    expect([store.view()?.model, store.view()?.effort]).toEqual(["model-b", "medium"]);
+    dispose();
   });
   it("stages changes, cancels without a write, then applies once with exact identities", async () => {
     await createRoot(async (dispose) => {

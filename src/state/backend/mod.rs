@@ -19,6 +19,8 @@
 pub(crate) mod host;
 #[cfg(unix)]
 mod tmux;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) use tmux::{input_state_using, pane_info_args};
 
 use super::Result;
 use crate::cli::{Error, Result as CliResult};

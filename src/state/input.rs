@@ -761,6 +761,16 @@ fn checked_send_terminal(record: &Value) -> Result<()> {
 }
 
 fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
+    terminal_check_on(record, empty, sending, backend::current())
+}
+
+/// The same native floor using this operation's explicit owned backend.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn checked_terminal_on(record: &Value, empty: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
+    terminal_check_on(record, empty, false, terminal)
+}
+
+fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
     terminating::check_mutation(record)?;
     let pane = string(record, "pane");
     if !pane
@@ -769,7 +779,6 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     {
         return Err("invalid tracked pane".into());
     }
-    let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
         // The pane's session is the record's own terminal (P3b).

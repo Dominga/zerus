@@ -59,6 +59,10 @@ fn text(rows: &[&str]) -> String {
     lines.join("\n").trim().to_owned()
 }
 
+/// Pure recognition only, used to end startup observation at a manual choice.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn recognized(screen: &str) -> bool { parse(screen).is_some() }
+
 fn parse(screen: &str) -> Option<Choice> {
     let rows: Vec<&str> = screen.lines().map(str::trim_end).collect();
     let end = rows.iter().rposition(|row| !row.trim().is_empty())? + 1;
@@ -212,7 +216,11 @@ pub(super) fn current(record: &Value) -> Option<Value> {
         return None;
     }
     let record = kimi_tui_choice::identity(record).ok()?;
-    card(&record, &parse(&kimi_tui_choice::capture(&record).ok()?)?)
+    let screen = kimi_tui_choice::capture(&record).ok()?;
+    if let Some(theme) = claude_theme::card(&record, &screen) {
+        return Some(theme);
+    }
+    card(&record, &parse(&screen)?)
 }
 
 pub(super) fn detail(record: &Value, question: &Value) -> String {

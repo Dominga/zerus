@@ -2175,6 +2175,15 @@ Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
 Back cancels opening the folder without saving trust and keeps Codex running;
 Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
+For a new Claude run on Linux or macOS, the original `hgs` supervisor confirms
+the complete first-run text-style panel automatically when both the native focus
+and current-selection mark name **Auto (match terminal)** or **Dark mode**. It
+preserves that selection and sends Enter once after checking the stable panel
+and the original process. An uncertain result never causes another Enter.
+Recognized manual theme choices, including Light mode and Dark mode with ANSI
+colors, appear in Activity with **Open Terminal**. Windows and runs whose original
+supervisor predates this feature keep the read-only theme card. Login, workspace
+trust, auto-mode consent and permission questions still require an explicit choice.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
 Keychain notice. These notices do not change the request identity or appear in

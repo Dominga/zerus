@@ -1930,6 +1930,112 @@ pub(crate) fn assert_real_unconfirmed_stops(
     assert!(!row.can_check && !row.ready && !row.can_force);
 }
 
+/// zerus-1y897.9: a refused original normal stop, a refused cleanup of a
+/// Complete stop and a removal whose source went away keep their custody,
+/// lookup-only and watched, until the watcher's physical retirement.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_held_custody(
+    original: programs::Continuation,
+    complete: programs::Stopped,
+    removal: programs::Removal,
+) {
+    fn check(state: &TerminationCleanup) -> Result<View, String> {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("held custody was reviewed"),
+        )
+    }
+    fn held(state: &TerminationCleanup, live: bool, retirement: ProgramRetirement) {
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(live, "the held custody is not watched");
+        assert!(job.lookup_only);
+        assert!(!job.busy);
+        assert_eq!(job.program_retirement, Some(retirement));
+        let row = &model.view().rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force && !row.can_dismiss);
+    }
+    // The passive watcher's own passes; only physical retirement releases.
+    fn released(state: &TerminationCleanup) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match program_pipeline::watch_once(&state.0, "job", |_| {}) {
+                program_pipeline::Watch::Continue => {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "the held custody never retired"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                program_pipeline::Watch::Stop => break,
+                program_pipeline::Watch::Review(_) => panic!("held custody was reviewed"),
+            }
+        }
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired custody was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+    }
+
+    // Continuation::normal refused: the source went away before the stop.
+    let state = TerminationCleanup::default();
+    let mut job = stopping_job();
+    let live = program_pipeline::record_stop(
+        &mut job,
+        program_pipeline::stop_original(Box::new(original)),
+    );
+    assert!(
+        matches!(
+            job.programs,
+            Some(program_pipeline::ProgramJob::Original(_))
+        ),
+        "the refused original was released"
+    );
+    lock(&state.0.model).jobs.push_back(job);
+    held(&state, live, ProgramRetirement::StopUnconfirmed);
+    released(&state);
+
+    // A Complete stop whose cleanup is refused, then a removal that never
+    // settled: each source went away first.
+    let (complete_id, _, _) = complete.identity();
+    let (removal_id, _, _) = removal.identity();
+    for (request_id, removed) in [
+        (
+            complete_id,
+            program_pipeline::run_removal(Box::new(complete)),
+        ),
+        (
+            removal_id,
+            program_pipeline::settle_removal(Box::new(removal)),
+        ),
+    ] {
+        let state = TerminationCleanup::default();
+        let mut job = stopping_job();
+        job.phase = "removing";
+        let (gone, live) = program_pipeline::record_removal(&mut job, removed);
+        assert_eq!(
+            job.programs.as_ref().map(|program| program.identity().0),
+            Some(request_id),
+            "the refused removal released its custody"
+        );
+        assert!(!gone);
+        assert!(job
+            .cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.status == Some(Status::Unconfirmed)));
+        lock(&state.0.model).jobs.push_back(job);
+        held(&state, live, ProgramRetirement::CleanupUnconfirmed);
+        released(&state);
+    }
+}
+
 #[tauri::command]
 pub fn termination_cleanup_remove(
     app: AppHandle,

@@ -1166,6 +1166,30 @@ class WorkflowSecurityTests(unittest.TestCase):
             if "uses: actions/cache/" in step or "uses: actions/upload-artifact@" in step:
                 self.assertFalse([path for path in self.step_paths(step) if "conpty" in path.lower()], step)
 
+    def test_windows_encrypted_runtime_requires_setup_but_not_root_test_success(self):
+        selected = self.checks_steps('windows-tests')
+        root = next(step for step in selected if 'name: Root unit tests and pinned lints\n' in step)
+        encrypted = next(step for step in selected if 'name: Windows encrypted runtime contracts\n' in step)
+        logs = next(step for step in selected if 'name: Retain Windows unit and connector logs\n' in step)
+        self.assertIn('        id: root-tests\n', root)
+        expression = re.search(r'if: \$\{\{ (.*?) \}\}', encrypted)[1]
+        expression = expression.replace('&&', ' and ').replace('||', ' or ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r'\bsteps\.([\w-]+)\.', r"steps['\1'].", expression)
+        for cancelled, outcome in product((False, True), ('success', 'failure', 'skipped', 'cancelled', '')):
+            with self.subTest(cancelled=cancelled, root_outcome=outcome):
+                admitted = eval(expression, {'__builtins__': {}}, {
+                    'cancelled': lambda: cancelled,
+                    'steps': {'root-tests': SimpleNamespace(outcome=outcome)},
+                })
+                self.assertEqual(admitted, not cancelled and outcome in ('success', 'failure'))
+        self.assertIn('--locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib encrypted_runtime </dev/null', encrypted)
+        self.assertIn('artifacts/test-results/windows-encrypted-runtime.log', encrypted)
+        self.assertNotIn('continue-on-error', job((ROOT / '.github/workflows/checks.yml').read_text(), 'windows-tests'))
+        self.assertLess(selected.index(root), selected.index(encrypted))
+        self.assertLess(selected.index(encrypted), selected.index(logs))
+        self.assertIn('        if: always()\n', logs)
+
     def test_windows_real_agents_run_in_a_bounded_credential_free_job_of_their_own(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         host, desktop = job(checks, "windows-host"), job(checks, "windows-desktop")

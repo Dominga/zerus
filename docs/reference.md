@@ -2534,6 +2534,17 @@ it is no plan change, so it cannot be reverted. The command without an attempt
 uses the task's open attempt, and without `text` the CLI reads the attempt's
 kept reply (or the member's session, for an older record).
 
+Task #39 (team ede724c4): a member whose turn ended while it waits for its own
+job is not missing a report. Its own job is the Zerus run it started
+(`hgs run`, `hgs team run`), a background job its hooks registered, Background
+work under a budget, or the run the dispatcher remembers it waits on; by the
+session-state contract the session is Building. Its last reply ("still going,
+I'm waiting for its numbers") must not become the report, so the inbox lists no
+missing report. It shows the informational item `waits_for_own_job` instead,
+naming the job and its start ("waits for its own Zerus build (perf baseline)
+since 14:05"), with no action: Zerus wakes the member when the run settles.
+A member whose session stopped waits for nothing.
+
 ### The integration line: landing, cherry-picks and rejected attempts
 
 With an integration folder, accepted work lands on the line through the merge

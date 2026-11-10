@@ -11,7 +11,7 @@ hgs team run templates, typed like the others (values in your folder):
 On Windows they load Visual Studio; never wrap them in your own vcvars.
 A test run's answer carries "report": each test's name, status, time and
 first message, failures first. The exit code stays the verdict.
-qt-configure and qt-build are this repository's fixed CMake runs.
+Task #58: the Qt desktop's qt-configure, qt-build and qt-test are gone; use these.
 A project's .zerus/tests.toml may declare its own [[template]] entries with
 typed params; each runs only once the owner accepted its exact content.
 Anything else still asks the lead.

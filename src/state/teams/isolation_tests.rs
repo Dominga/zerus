@@ -41,7 +41,7 @@ fn every_platform_has_defaults_and_the_project_file_changes_them() {
     }
     let platform = if cfg!(windows) { ["APPDATA", "LOCALAPPDATA"] } else { ["TMPDIR", "XDG_RUNTIME_DIR"] };
     assert!(platform.iter().all(|name| defaults.env.contains_key(*name)), "{defaults:?}");
-    assert_eq!(defaults.templates, ["cargo-test", "qt-test", "android-test", "web-test"]);
+    assert_eq!(defaults.templates, ["cargo-test", "ctest", "android-test", "web-test"]);
     // A project names its own tests, adds and drops variables, per platform.
     let fixture = fixture(
         "[isolation]\ntemplates = [\"make-check\"]\nprefixes = [\"suite_\"]\nfiles = [\"~/app.ini\"]\n\
@@ -242,28 +242,6 @@ fn a_test_without_a_state_folder_never_registers_in_the_persons_registry() {
         let text = fs::read_to_string(&person).unwrap_or_default();
         assert!(!mentions(&text, &store), "{} names {}", person.display(), store.display());
     }
-}
-
-/// Task 53: a qt-test run's tail held nothing, so a failing suite showed only
-/// its exit code: QtTest logs to OutputDebugString when stderr has no console,
-/// and the worker has none. The suites run isolated, as the worker runs them,
-/// with Qt's switch to log to their stream, and the tail keeps what each
-/// suite printed, the failing test named.
-#[test]
-fn a_qt_test_run_keeps_each_suites_output_in_its_tail() {
-    let fixture = fixture("");
-    let mut suites = shell(
-        "qt-test",
-        "echo FAIL!  : TestTeams::feedLines() logging=%QT_FORCE_STDERR_LOGGING%& exit /b 1",
-        "echo \"FAIL!  : TestTeams::feedLines() logging=$QT_FORCE_STDERR_LOGGING\"; exit 1",
-    );
-    let second = shell("qt-test", "echo Totals: 3 passed, 0 failed", "echo 'Totals: 3 passed, 0 failed'");
-    suites.more = vec![(second.program.clone(), second.argv.clone())];
-    let outcome = run(&fixture, &suites);
-    assert_eq!(outcome.exit, Some(1), "{}", outcome.tail);
-    assert!(outcome.tail.contains("FAIL!  : TestTeams::feedLines() logging=1"), "{}", outcome.tail);
-    assert!(outcome.tail.contains("Totals: 3 passed, 0 failed"), "{}", outcome.tail);
-    assert!(outcome.failures.iter().any(|name| name.contains("feedLines")), "{:?}", outcome.failures);
 }
 
 

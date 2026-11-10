@@ -14,6 +14,7 @@ import type { ComputerId, TeamFindingItem, TeamPhaseView, TeamTaskView, TeamView
 import { noReportReply, remindMember } from "./noReport";
 import { acceptedUnstarted, buttonText, menuText, phaseHeader, type HeaderPhase, type PhaseButton, type PhaseMenuId } from "./phaseHeader";
 import { TextArea, TextInput } from "../lib/TextField";
+import { teamTaskRead } from "../../bridge";
 
 // Task 40: the team bar's actions and chips, and the task card's actions
 // (ui/teams/actions.ts holds what they are and what they send).
@@ -367,7 +368,10 @@ type EditTeam = ActTeam & { phases: TeamPhaseView[]; tasks: EditTask[] };
  * planning, the tasks of a draft or of an accepted phase that has not started
  * link and unlink through edit-draft (Qt linkDraft).
  */
-export function createPlanEditing(where: () => { computer: ComputerId; team: EditTeam }) {
+export function createPlanEditing(
+  where: () => { computer: ComputerId; team: EditTeam },
+  readTask: (computer: ComputerId, team: string, task: number) => Promise<{ task: EditTask }> = teamTaskRead,
+) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, where, changed));
   const read = () => (tick(), model);
   const [dialog, setDialog] = createSignal<{ task?: EditTask } | undefined>();
@@ -396,6 +400,7 @@ export function createPlanEditing(where: () => { computer: ComputerId; team: Edi
   const view = () => (
     <Show when={dialog()}>{(open) => (
       <PlanTaskDialog team={where().team} task={open().task} close={() => setDialog(undefined)}
+        load={open().task ? () => readTask(where().computer, where().team.id, open().task!.id).then((detail) => detail.task) : undefined}
         save={(fields) => void model.planEdit({ edit: "task", task: open().task ? { id: open().task!.id, ...fields } : fields })}
         remove={open().task ? () => {
           const id = open().task!.id;
@@ -417,6 +422,8 @@ export function createPlanEditing(where: () => { computer: ComputerId; team: Edi
 function PlanTaskDialog(props: {
   team: EditTeam; task?: EditTask; close: () => void;
   save: (fields: Record<string, unknown>) => void; remove?: () => void;
+  /** Task #57: the task's whole record; the polled plan clips a long description. */
+  load?: () => Promise<EditTask>;
 }) {
   let dialog!: HTMLDialogElement;
   const members = props.team.members.filter((member) => !member.lead);
@@ -425,10 +432,22 @@ function PlanTaskDialog(props: {
   const [phase, setPhase] = createSignal(String(props.task?.phase ?? 1));
   const [description, setDescription] = createSignal(props.task?.description ?? "");
   const [criteria, setCriteria] = createSignal((props.task?.criteria ?? []).join("\n"));
-  onMount(() => dialog.showModal());
+  // Task #57: an existing task's description and criteria come from its own
+  // read, never the polled plan's clipped copy, so a save never writes a clip
+  // back. Until the read answers they cannot be edited or saved.
+  const [reading, setReading] = createSignal(Boolean(props.load));
+  const [unread, setUnread] = createSignal(false);
+  onMount(() => {
+    dialog.showModal();
+    props.load?.().then((full) => {
+      setDescription(full.description ?? "");
+      setCriteria((full.criteria ?? []).join("\n"));
+      setReading(false);
+    }, () => { setUnread(true); setReading(false); });
+  });
   onCleanup(() => { if (dialog.open) dialog.close(); });
   const save = () => {
-    if (!title().trim()) return;
+    if (!title().trim() || reading() || unread()) return;
     const fields: Record<string, unknown> = {
       title: title().trim(),
       assignee: assignee(),
@@ -453,15 +472,17 @@ function PlanTaskDialog(props: {
         <label class="dim">{tr("Phase")}</label>
         <TextInput class="field" type="number" min={1} value={phase()} onInput={(event) => setPhase(event.currentTarget.value)} data-field="task-phase" />
         <label class="dim">{tr("Description")}</label>
-        <TextArea class="field" rows={4} value={description()} onInput={(event) => setDescription(event.currentTarget.value)} data-field="task-description" />
+        <TextArea class="field" rows={4} value={description()} disabled={reading() || unread()} onInput={(event) => setDescription(event.currentTarget.value)} data-field="task-description" />
         <label class="dim">{tr("Acceptance criteria, one per line")}</label>
-        <TextArea class="field" rows={3} value={criteria()} onInput={(event) => setCriteria(event.currentTarget.value)} data-field="task-criteria" />
+        <TextArea class="field" rows={3} value={criteria()} disabled={reading() || unread()} onInput={(event) => setCriteria(event.currentTarget.value)} data-field="task-criteria" />
+        <Show when={reading()}><p class="dim" data-field="task-reading">{tr("Reading the task…")}</p></Show>
+        <Show when={unread()}><p class="dim" data-field="task-unread">{tr("The task could not be read; close it and open it again.")}</p></Show>
       </div>
       <div class="dlg-foot">
         <Show when={props.remove}><button type="button" class="btn danger" onClick={() => { props.remove!(); props.close(); }}>{tr("Remove task")}</button></Show>
         <span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
-        <button type="button" class="btn primary" disabled={!title().trim()} onClick={save}>{tr("Save")}</button>
+        <button type="button" class="btn primary" disabled={!title().trim() || reading() || unread()} onClick={save}>{tr("Save")}</button>
       </div>
     </dialog>
   );

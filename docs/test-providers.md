@@ -30,14 +30,13 @@ Each item names its code so a reviewer can check it.
 `hgs test affected` (`affected.rs`) prints, for each run, a shell command
 string built from the provider's `command` or the kind's default. Only cargo
 and ctest runs also print `team_run`, a template request (`cargo-test` with
-filters and skips, `qt-test` with suites and functions).
+filters and skips, a CTest provider as `cmake-build` then `ctest`).
 
 **Team run templates.** `hgs team run` (`src/state/teams/templates.rs`) has ten fixed ids.
 
 | Template | What it runs |
 |---|---|
 | `cargo-build`, `cargo-test`, `cargo-clippy` | `cargo +{toolchain} … --package={package}` |
-| `qt-configure`, `qt-build`, `qt-test` | wired to `tray/` and `.ci-build/gui` |
 | `android-test` | wired to `mobile/android` |
 | `clean-build` | removes build folders by name |
 | `git-merge-lead`, `git-commit` | the Git operations |
@@ -47,7 +46,7 @@ filters and skips, `qt-test` with suites and functions).
 - The process tree is killed on timeout.
 - The owner's *project templates* (`state/teams/templates.json`) are fixed argv lists. They refuse every argument ("takes no placeholders").
 
-**Isolation.** Every template run gets its own `TEMP`/`TMP` under `<folder>/.zerus-team/tmp`, and `CARGO_TARGET_DIR` is removed. Templates listed in `[isolation].templates` (default cargo-test, qt-test, android-test) also get:
+**Isolation.** Every template run gets its own `TEMP`/`TMP` under `<folder>/.zerus-team/tmp`, and `CARGO_TARGET_DIR` is removed. Templates listed in `[isolation].templates` (default cargo-test, ctest, android-test, web-test) also get:
 - a run folder under `.zerus-team/runs/`;
 - their own `HOME`, `XDG_*`, `APPDATA` and `LOCALAPPDATA`;
 - kept `CARGO_HOME` and `RUSTUP_HOME`;
@@ -58,7 +57,7 @@ The build cache (`[build_cache]`) sets sccache or ccache variables.
 
 **Build broker.** `broker.rs`.
 - The key is sha256 of the tree hash, template, arguments and the toolchain's version lines: `rustc -vV` and `cargo -V` for cargo-*, `cmake --version` for qt-*, otherwise `template:<id>`.
-- Verdicts (cargo-test, cargo-clippy, qt-test) serve every member.
+- Verdicts (cargo-test, cargo-clippy, ctest, vstest) serve every member.
 - A root `*.uproject` selects the shared mode.
 
 **Results.** Each suite is one record (`test_queue::Record`: status, duration, excerpt). Failure names are scraped from text (`failures_in`: Qt `FAIL!`, cargo `FAILED`, pytest `FAILED`, CTest `(Failed)`, Gradle task failures). Durations come from cargo, CTest, QtTest, unittest and pytest closing lines. No JUnit XML is read anywhere.
@@ -304,7 +303,7 @@ Every kind is described under the same headings.
 - **Isolation:** section 3 (cmake).
 - **Broker key:** `cmake --version`, plus the C and C++ compiler id and version from the file-API toolchains reply (`CMAKE_CXX_COMPILER_ID`, `CMAKE_CXX_COMPILER_VERSION`), plus the generator.
 - **Runner class:** `platforms`, and the capability `msvc` on Windows.
-- **Qt in this repository:** the tray provider becomes `kind = "cmake"`, `root = "tray"`, `build_dir = ".ci-build/gui"`. `qt-configure`, `qt-build` and `qt-test` stay as fixed aliases of that provider's steps, with their current arguments and environment (`QT_QPA_PLATFORM`, fonts, Qt's bin on `PATH`). `kind = "ctest"` stays accepted as a cmake provider with only the test step.
+- **Qt in this repository:** gone with the Qt desktop (task #58); its `qt-configure`, `qt-build` and `qt-test` are refused with `cmake-configure`, `cmake-build` and `ctest` named instead.
 
 ### 5.3 MSBuild C++
 

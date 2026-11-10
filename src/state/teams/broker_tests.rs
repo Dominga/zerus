@@ -314,8 +314,8 @@ fn the_builds_view_shows_the_running_build_the_queue_the_timeline_and_who_change
 /// names the tools.
 #[test]
 fn a_build_result_serves_only_its_own_tree_and_a_verdict_serves_anyone() {
-    assert!(verdict("cargo-test") && verdict("qt-test") && verdict("cargo-clippy"));
-    assert!(!verdict("cargo-build") && !verdict("qt-configure") && !verdict("qt-build") && !verdict("build"));
+    assert!(verdict("cargo-test") && verdict("ctest") && verdict("cargo-clippy"));
+    assert!(!verdict("cargo-build") && !verdict("cmake-configure") && !verdict("cmake-build") && !verdict("build"));
     let args = json!({"files":["src/a.c"]});
     assert_eq!(request_key("h", "cargo-test", &args, "rustc 1"), request_key("h", "cargo-test", &json!({}), "rustc 1"), "named files are not the request");
     assert_ne!(request_key("h", "cargo-test", &args, "rustc 1"), request_key("h", "cargo-test", &args, "rustc 2"), "another toolchain is another result");
@@ -448,7 +448,7 @@ fn cmake_and_msbuild_templates_key_on_their_version_lines() {
     let cmake = toolchain("cmake-build", dir.path());
     assert!(!cmake.starts_with("template:"), "{cmake}");
     assert_eq!(toolchain("ctest", dir.path()), cmake, "ctest is CMake's");
-    assert_eq!(toolchain("cmake-configure", dir.path()), toolchain("qt-build", dir.path()));
+    assert_eq!(toolchain("cmake-configure", dir.path()), toolchain("cmake-build", dir.path()));
     let msbuild = toolchain("msbuild-build", dir.path());
     assert!(!msbuild.starts_with("template:"), "{msbuild}");
     assert_eq!(toolchain("vstest", dir.path()), msbuild);

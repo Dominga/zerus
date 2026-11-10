@@ -4,7 +4,6 @@ Zerus runs these built-in templates for a member, outside its sandbox, in the
 member's folder, with bounded time and output:
   cargo-build/test/clippy {package?, filter?, bin?, toolchain?}
                              cargo build/test/clippy --locked, typed filters
-  qt-configure/build/test {suite, functions?, shots?}
                              cmake in .ci-build/gui; offscreen shots there
   tauri-build/dev/launch {files?}  app build/dev/launch with 273's dev identity;
                              launch refuses a switch build outside the package

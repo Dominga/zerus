@@ -685,6 +685,59 @@ class SwarmAdoption(unittest.TestCase):
         self.assertEqual(self.tree('b'), before)
         self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
 
+    def redirected_primary(self, redirected=True):
+        """A valid primary causal edge from an old machine key to its canonical
+        new-machine child. Only the main catalog's redirect makes it valid."""
+        store_path = self.root / 'a/swarm/catalog.json'
+        store = json.loads(store_path.read_text())
+        node = store['node_id']
+        catalog = store['catalog']
+        clock = max(operation['clock'] for operation in catalog['operations'].values()) + 1
+        old_machine = str(uuid.uuid4())
+        if redirected:
+            redirect = str(uuid.uuid4())
+            catalog['operations'][redirect] = dict(
+                id=redirect, actor=node, clock=clock, parents=[],
+                key=dict(kind='machine', id=old_machine, field='redirect'), value=node)
+            store_path.write_text(json.dumps(store))
+        primary_path = self.root / 'a/swarm/session-id-memberships.json'
+        graph = json.loads(primary_path.read_text())
+        session = str(uuid.uuid4())
+        parent, child = str(uuid.uuid4()), str(uuid.uuid4())
+        graph['operations'][parent] = dict(
+            id=parent, actor=node, clock=1, parents=[],
+            key=dict(kind='session', machine=old_machine, session=session), value='shared')
+        graph['operations'][child] = dict(
+            id=child, actor=node, clock=2, parents=[parent],
+            key=dict(kind='session', machine=node, session=session), value='shared')
+        primary_path.write_text(json.dumps(graph))
+        return primary_path.read_bytes(), parent, child
+
+    def test_valid_redirected_primary_parent_adopts_with_the_main_context(self):
+        primary, parent, child = self.redirected_primary()
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        self.assertTrue(preview['eligible'], preview)
+        options = self.options(preview)
+        receipt = self.call('a', 'adopt', 'b', '--json', data=options)
+        self.assertEqual(receipt['phase'], 'settled', receipt)
+        destination = self.root / 'b/swarm/session-id-memberships.json'
+        self.assertEqual(json.loads(destination.read_text()), json.loads(primary))
+        source = self.root / 'a/swarm/session-id-memberships.json'
+        self.assertEqual(json.loads(destination.read_text()), json.loads(source.read_text()))
+        operations = json.loads(destination.read_text())['operations']
+        self.assertEqual(operations[child]['parents'], [parent])
+        self.assertIn(parent, operations)
+        self.assertEqual(json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers']['b']['node'],
+                         json.loads((self.root / 'b/swarm/catalog.json').read_text())['node_id'])
+
+    def test_unredirected_primary_parent_refuses_before_any_effect(self):
+        self.redirected_primary(redirected=False)
+        self.empty_destination(False)
+        source, destination = self.tree('a'), self.tree('b')
+        self.call('a', 'adoption-preview', 'b', '--json', ok=False)
+        self.assertEqual((self.tree('a'), self.tree('b')), (source, destination))
+
     def test_local_membership_failure_is_write_ahead_and_not_settled(self):
         self.empty_destination(False)
         preview = self.call('a', 'adoption-preview', 'b', '--json')

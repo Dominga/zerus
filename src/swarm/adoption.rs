@@ -342,6 +342,15 @@ struct Guard {
     request_raw_sha256: String,
 }
 
+/// Counts of the primary graph's own Session operations, taken from the view
+/// validated with the SAME main-catalog machine-redirect context. Raw history
+/// is unchanged; no contextless validation produces this value.
+#[derive(Clone, Copy, Debug)]
+struct ValidatedPrimaryMetrics {
+    operations: usize,
+    parent_edges: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CandidateMetrics {
     main_plus_primary_ops: usize,
@@ -1959,6 +1968,13 @@ fn complete_source_membership(
 }
 
 fn decode_primary(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponent> {
+    decode_primary_metrics(raw, catalog).map(|(component, _)| component)
+}
+
+fn decode_primary_metrics(
+    raw: Option<Vec<u8>>,
+    catalog: &Catalog,
+) -> Result<(RawComponent, ValidatedPrimaryMetrics)> {
     let read = match &raw {
         Some(bytes) => Ok(bytes.clone()),
         None => Err(Unread::Missing),
@@ -1967,7 +1983,9 @@ fn decode_primary(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponen
         unique_bytes(bytes, "primary ID membership graph")?;
     }
     let primary = Memberships::from_read(catalog, &read)?;
-    primary.view(catalog)?;
+    // The view carries the main catalog's machine redirects; a valid causal
+    // edge from an old machine key to its canonical child validates only here.
+    let view = primary.view(catalog)?;
     let canonical = primary.bytes()?;
     let count = match &raw {
         Some(bytes) => bounded::<Catalog>(bytes, "primary ID membership graph")?
@@ -1975,21 +1993,46 @@ fn decode_primary(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponen
             .len(),
         None => 0,
     };
-    Ok(RawComponent {
-        state: if count == 0 {
-            if raw.is_some() {
-                ComponentState::ValidEmpty
+    let mut metrics = ValidatedPrimaryMetrics {
+        operations: 0,
+        parent_edges: 0,
+    };
+    for operation in view
+        .operations
+        .values()
+        .filter(|operation| matches!(operation.key, Key::Session { .. }))
+    {
+        metrics.operations = metrics
+            .operations
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("primary operation count overflow"))?;
+        metrics.parent_edges = metrics
+            .parent_edges
+            .checked_add(operation.parents.len())
+            .ok_or_else(|| anyhow::anyhow!("parent edge count overflow"))?;
+    }
+    ensure!(
+        metrics.operations == count,
+        "validated primary operation count changed"
+    );
+    Ok((
+        RawComponent {
+            state: if count == 0 {
+                if raw.is_some() {
+                    ComponentState::ValidEmpty
+                } else {
+                    ComponentState::Missing
+                }
             } else {
-                ComponentState::Missing
-            }
-        } else {
-            ComponentState::Nonempty
+                ComponentState::Nonempty
+            },
+            swarm_id: catalog.swarm_id.clone(),
+            raw,
+            canonical,
+            count,
         },
-        swarm_id: catalog.swarm_id.clone(),
-        raw,
-        canonical,
-        count,
-    })
+        metrics,
+    ))
 }
 
 fn decode_twins(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponent> {
@@ -2121,7 +2164,7 @@ fn validate_source_candidate(
         request.source.capabilities == expected_capabilities,
         "source capability floor mismatch"
     );
-    let primary = decode_primary(
+    let (primary, primary_metrics) = decode_primary_metrics(
         request
             .source_primary_json
             .as_deref()
@@ -2145,7 +2188,7 @@ fn validate_source_candidate(
         twins.proof() == request.source.twins && twins.swarm_id == request.source.swarm_id,
         "source twins body/hash/swarm mismatch"
     );
-    let metrics = candidate_metrics(request, &catalog, encoded_request_bytes)?;
+    let metrics = candidate_metrics(request, &catalog, primary_metrics, encoded_request_bytes)?;
     ensure!(
         metrics.main_plus_primary_ops == catalog.operations.len() + primary.count
             && metrics.twins_entries == twins.count
@@ -2158,28 +2201,18 @@ fn validate_source_candidate(
 fn candidate_metrics(
     request: &AdoptionRequest,
     catalog: &Catalog,
+    primary: ValidatedPrimaryMetrics,
     encoded_request_bytes: usize,
 ) -> Result<CandidateMetrics> {
-    let primary_edges = match request.source_primary_json.as_deref() {
-        Some(raw) => {
-            let graph: Catalog = bounded(raw.as_bytes(), "primary ID membership graph")?;
-            graph.validate()?;
-            graph
-                .operations
-                .values()
-                .try_fold(0usize, |total, operation| {
-                    total
-                        .checked_add(operation.parents.len())
-                        .ok_or_else(|| anyhow::anyhow!("parent edge count overflow"))
-                })?
-        }
-        None => 0,
-    };
+    ensure!(
+        primary.operations == request.source.primary.count,
+        "validated primary metrics disagree with the original proof"
+    );
     let total_parent_edges =
         catalog
             .operations
             .values()
-            .try_fold(primary_edges, |total, operation| {
+            .try_fold(primary.parent_edges, |total, operation| {
                 total
                     .checked_add(operation.parents.len())
                     .ok_or_else(|| anyhow::anyhow!("parent edge count overflow"))
@@ -2188,7 +2221,7 @@ fn candidate_metrics(
         main_plus_primary_ops: catalog
             .operations
             .len()
-            .checked_add(request.source.primary.count)
+            .checked_add(primary.operations)
             .ok_or_else(|| anyhow::anyhow!("operation count overflow"))?,
         twins_entries: request.source.twins.count,
         total_parent_edges,

@@ -287,14 +287,45 @@ impl Continuation {
     pub(crate) fn close(&self) -> Result<(), String> {
         self.source.close()
     }
+    pub(crate) fn remaining_millis(&self) -> u64 {
+        self.source.remaining_millis()
+    }
+    pub(crate) fn holder_unavailable(&self) -> bool {
+        self.source.holder_unavailable()
+    }
+    /// Physical DATA only, for an original whose normal stop was refused
+    /// (zerus-1y897.9): the original call's own join, then the source owner's.
+    /// It never closes, observes, frames or renews anything.
+    pub(crate) fn physical_retirement(&self) -> run::Retirement {
+        let (completion, call_live) = match &self.done {
+            Done::Service(done) => (&done.completion, done.original_call.upgrade().is_some()),
+            Done::Native(done) => (&done.completion, done.call.upgrade().is_some()),
+        };
+        match completion.join() {
+            run::Retirement::Retired if call_live => run::Retirement::Pending,
+            run::Retirement::Retired => self.source.retirement(),
+            other => other,
+        }
+    }
     /// Moves the original live Remove continuation once. A historical Done
     /// receipt cannot construct this receiver or regain its Actions/Scope.
-    pub(crate) fn normal(self) -> Result<Stopped, String> {
+    /// Every refusal hands back the SAME continuation with its custody
+    /// (zerus-1y897.9); only physical retirement may release it.
+    pub(crate) fn normal(self: Box<Self>) -> Result<Stopped, RefusedOriginal> {
+        match self.normal_attempt() {
+            Ok(attempt) => Ok(Stopped {
+                continuation: *self,
+                attempt,
+            }),
+            Err(error) => Err((self, error)),
+        }
+    }
+    fn normal_attempt(&self) -> Result<StopAttempt, String> {
         if !self.current() || !self.original_call_joined() {
             return Err(UNCONFIRMED.into());
         }
-        let attempt = match &self.done {
-            Done::Service(done) => self.source.normal(done)?,
+        match &self.done {
+            Done::Service(done) => self.source.normal(done),
             Done::Native(done) => {
                 if self.source.service_selected().is_some() {
                     return Err(UNCONFIRMED.into());
@@ -308,13 +339,9 @@ impl Continuation {
                     original: done.original.clone(),
                     archive_id: done.archive.clone(),
                     stop: Kind::Normal,
-                })?
+                })
             }
-        };
-        Ok(Stopped {
-            continuation: self,
-            attempt,
-        })
+        }
     }
 }
 
@@ -453,23 +480,30 @@ impl Stopped {
     }
     /// Only the still-live original Remove continuation, after an exact Complete
     /// stop AND actual retirement, can open the distinct deletion phase once.
-    pub(crate) fn cleanup(mut self) -> Result<Removal, String> {
+    /// Every refusal hands back the SAME Complete stop with its custody
+    /// (zerus-1y897.9).
+    pub(crate) fn cleanup(mut self: Box<Self>) -> Result<Removal, RefusedCleanup> {
+        match self.cleanup_attempt() {
+            Ok(attempt) => Ok(Removal {
+                continuation: self.continuation,
+                attempt,
+            }),
+            Err(error) => Err((self, error)),
+        }
+    }
+    fn cleanup_attempt(&mut self) -> Result<super::source::CleanupAttempt, String> {
         if !self.current()
             || self.report().map_err(str::to_owned)?.state != State::Complete
             || !self.try_retire()?
         {
             return Err(UNCONFIRMED.into());
         }
-        let attempt = self.continuation.source.run_cleanup(
-            zerus_client_core::worktree_programs::cleanup::Input {
+        self.continuation
+            .source
+            .run_cleanup(zerus_client_core::worktree_programs::cleanup::Input {
                 request_id: uuid::Uuid::new_v4().to_string(),
-                stop: Box::new(self.attempt.input),
-            },
-        )?;
-        Ok(Removal {
-            continuation: self.continuation,
-            attempt,
-        })
+                stop: Box::new(self.attempt.input.clone()),
+            })
     }
     pub(crate) fn close(&self) -> Result<(), String> {
         self.continuation.close()
@@ -477,6 +511,10 @@ impl Stopped {
 }
 /// A refused Force offer: the unconsumed stop, still holding its custody.
 pub(crate) type RefusedOffer = (Box<Stopped>, String);
+/// A refused original normal stop: the unconsumed original continuation.
+pub(crate) type RefusedOriginal = (Box<Continuation>, String);
+/// A refused cleanup: the unconsumed Complete stop.
+pub(crate) type RefusedCleanup = (Box<Stopped>, String);
 /// A refused Force confirmation: the unconsumed offer and its previous stop.
 pub(crate) type RefusedConfirm = (Box<ForceOffer>, String);
 /// The host stores this behind a fresh opaque dialog handle. The renderer can
@@ -555,6 +593,27 @@ impl Removal {
     pub(crate) fn current(&self) -> bool {
         self.continuation.current()
     }
+    pub(crate) fn identity(&self) -> (String, String, Capture) {
+        (
+            self.attempt.input.request_id.clone(),
+            self.attempt.input.stop.binding(),
+            self.continuation.capture.clone(),
+        )
+    }
+    pub(crate) fn remaining_millis(&self) -> u64 {
+        self.continuation.remaining_millis()
+    }
+    pub(crate) fn holder_unavailable(&self) -> bool {
+        self.continuation.holder_unavailable()
+    }
+    /// Physical DATA only, for a removal that could not settle or close
+    /// (zerus-1y897.9): its own phase's drain, then its original's.
+    pub(crate) fn physical_retirement(&self) -> run::Retirement {
+        match self.attempt.mutation.drained() {
+            run::Retirement::Retired => self.continuation.physical_retirement(),
+            other => other,
+        }
+    }
     pub(crate) fn try_retire(&mut self) -> Result<bool, String> {
         self.attempt.mutation.try_retire()
     }
@@ -577,6 +636,29 @@ impl Removal {
     }
 }
 
+/// Fixture-only: a native original on the same source, with that call.
+#[cfg(test)]
+fn fixture_original(
+    like: &Continuation,
+    call: Weak<NativeCall>,
+    completion: Arc<run::Completion>,
+) -> Continuation {
+    Continuation {
+        source: like.source.clone(),
+        capture: like.capture.clone(),
+        done: Done::Native(NativeDone {
+            original: String::new(),
+            archive: String::new(),
+            confirmation: String::new(),
+            call,
+            completion,
+        }),
+        outcome: Outcome::Failed {
+            detail: "inert display fixture".into(),
+        },
+    }
+}
+
 /// Fixture-only: the offer force_offer holds, without its discovery frame.
 #[cfg(test)]
 pub(crate) fn fixture_force(previous: Stopped) -> ForceOffer {
@@ -593,7 +675,7 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
-    unarmed: [super::source::Mutation; 8],
+    unarmed: [super::source::Mutation; 10],
     // The last unarmed phase's extra loan and descendant lock, and a phase
     // that never ran.
     (loan, lock, never_ran): (
@@ -696,7 +778,30 @@ pub(super) fn assert_presentation_views(
         offer.current(),
         "a refused confirmation closed the original"
     );
-    let mut previous = offer.cancel();
+    let previous = offer.cancel();
+    // zerus-1y897.9: a refused normal stop hands back the SAME original and a
+    // refused cleanup the SAME stop, sources still current. This native
+    // original is refused because its source is service-selected; the stop
+    // is incomplete.
+    let original = Box::new(fixture_original(
+        &previous.continuation,
+        Weak::new(),
+        initial_completion.clone(),
+    ));
+    let Err((original, _)) = original.normal() else {
+        panic!("the original was stopped")
+    };
+    assert!(
+        original.current(),
+        "a refused normal stop closed the original"
+    );
+    drop(original);
+    let Err((returned, _)) = Box::new(previous).cleanup() else {
+        panic!("an incomplete stop was cleaned")
+    };
+    assert_eq!(returned.identity().0, request_id);
+    assert!(returned.current(), "a refused cleanup closed the original");
+    let mut previous = *returned;
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -735,7 +840,36 @@ pub(super) fn assert_presentation_views(
         "a live original call"
     );
     drop(call);
-    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held] = unarmed;
+    // zerus-1y897.9: a bare original reads its own call's join, then the
+    // source owner's: a live call is Pending, a failed one Failed.
+    let call = Arc::new(NativeCall {
+        _source: previous.continuation.source.clone(),
+    });
+    let bare = fixture_original(
+        &previous.continuation,
+        Arc::downgrade(&call),
+        initial_completion.clone(),
+    );
+    assert_eq!(
+        bare.physical_retirement(),
+        run::Retirement::Pending,
+        "a live original call"
+    );
+    drop(call);
+    assert_eq!(bare.physical_retirement(), run::Retirement::Retired);
+    let failed = fixture_original(
+        &previous.continuation,
+        Weak::new(),
+        Arc::new(run::Completion::new()),
+    );
+    assert_eq!(
+        failed.physical_retirement(),
+        run::Retirement::Failed,
+        "an original call whose I/O failed"
+    );
+    drop((bare, failed));
+    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held, mut ninth, tenth] =
+        unarmed;
     // An unsettled phase is read through its own physical drain (zerus-1y897.8).
     let settled = std::mem::replace(&mut previous.attempt.mutation, held);
     assert_eq!(
@@ -743,6 +877,30 @@ pub(super) fn assert_presentation_views(
         run::Retirement::Pending,
         "a phase whose loan is still held"
     );
+    // A removal reads its own phase's drain the same way (zerus-1y897.9).
+    let held = std::mem::replace(&mut previous.attempt.mutation, never_ran);
+    let removal = Removal {
+        continuation: fixture_original(
+            &previous.continuation,
+            Weak::new(),
+            initial_completion.clone(),
+        ),
+        attempt: super::source::CleanupAttempt {
+            input: zerus_client_core::worktree_programs::cleanup::Input {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                stop: Box::new(input.clone()),
+            },
+            result: Err("no removal reply".into()),
+            mutation: held,
+        },
+    };
+    assert_eq!(
+        removal.physical_retirement(),
+        run::Retirement::Pending,
+        "a removal whose loan is still held"
+    );
+    let Removal { attempt, .. } = removal;
+    let never_ran = std::mem::replace(&mut previous.attempt.mutation, attempt.mutation);
     drop(loan);
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(
@@ -772,27 +930,28 @@ pub(super) fn assert_presentation_views(
     // More unarmed phases with their own real children, pipes and loans, each
     // settled here, back the production watcher and Force offer controls.
     let until = std::time::Instant::now() + Duration::from_secs(10);
-    for mutation in [&mut first, &mut second, &mut third, &mut fourth, &mut fifth] {
+    for mutation in [
+        &mut first,
+        &mut second,
+        &mut third,
+        &mut fourth,
+        &mut fifth,
+        &mut ninth,
+    ] {
         while !mutation.try_retire().unwrap() {
             assert!(std::time::Instant::now() < until, "unarmed phase settled");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    let original = || {
+        fixture_original(
+            &previous.continuation,
+            Weak::new(),
+            initial_completion.clone(),
+        )
+    };
     let stop = |mutation, state| Stopped {
-        continuation: Continuation {
-            source: previous.continuation.source.clone(),
-            capture: previous.continuation.capture.clone(),
-            done: Done::Native(NativeDone {
-                original: String::new(),
-                archive: String::new(),
-                confirmation: String::new(),
-                call: Weak::new(),
-                completion: initial_completion.clone(),
-            }),
-            outcome: Outcome::Failed {
-                detail: "inert display fixture".into(),
-            },
-        },
+        continuation: original(),
         attempt: StopAttempt {
             input: input.clone(),
             result: Ok(report(state)),
@@ -814,6 +973,23 @@ pub(super) fn assert_presentation_views(
         stop(fifth, State::Incomplete),
         stop(sixth, State::Incomplete),
         stop(seventh, State::Refused),
+    );
+    // zerus-1y897.9: the original, a Complete stop and a removal, each with its
+    // source gone; the removal's own phase never settles here.
+    crate::termination_cleanup::assert_real_held_custody(
+        original(),
+        stop(ninth, State::Complete),
+        Removal {
+            continuation: original(),
+            attempt: super::source::CleanupAttempt {
+                input: zerus_client_core::worktree_programs::cleanup::Input {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    stop: Box::new(input.clone()),
+                },
+                result: Err("no removal reply".into()),
+                mutation: tenth,
+            },
+        },
     );
     let force = ForceOffer { previous, input };
     // Force must consult its complete ORIGINAL survivor manifest, never the

@@ -277,14 +277,22 @@ def functional(args, kind):
         duplicate = subprocess.run(command, env=fixture.env, input=raw, capture_output=True, timeout=5)
         assert duplicate.returncode == 0 and duplicate.stdout == result.stdout, duplicate.stderr
         different = subprocess.run(command, env=fixture.env, input=raw+b' ', capture_output=True, timeout=5)
-        assert different.returncode != 0 and fixture.received() == b'\x1b,'
+        assert different.returncode == 1 and different.stdout == b'' and b'already used' in different.stderr, different.stderr
+        assert fixture.received() == b'\x1b,'
         receipt_path = fixture.state/'effort_receipts'/f"{request['request_id']}.json"
         uncertain = dict(receipt, status='in_progress')
         receipt_path.write_text(json.dumps(uncertain))
         unknown = subprocess.run(command, env=fixture.env, input=raw, capture_output=True, timeout=5)
-        assert unknown.returncode != 0 and fixture.received() == b'\x1b,'
-        receipt_path.write_bytes(result.stdout.rstrip(b'\n'))
+        assert unknown.returncode == 1 and unknown.stdout == b'' and b'may already have reached' in unknown.stderr, unknown.stderr
+        assert fixture.received() == b'\x1b,'
         path.unlink()
+        label_command = [str(test_input.HGS), 'effort', fixture.name, '--json']
+        absent_unknown = subprocess.run(label_command, env=fixture.env, input=raw, capture_output=True, timeout=5)
+        assert absent_unknown.returncode == 1 and absent_unknown.stdout == b'' and b'may already have reached' in absent_unknown.stderr, absent_unknown.stderr
+        absent_conflict = subprocess.run(label_command, env=fixture.env, input=raw+b' ', capture_output=True, timeout=5)
+        assert absent_conflict.returncode == 1 and absent_conflict.stdout == b'' and b'already used' in absent_conflict.stderr, absent_conflict.stderr
+        assert fixture.received() == b'\x1b,'
+        receipt_path.write_bytes(result.stdout.rstrip(b'\n'))
         missing_id = subprocess.run(command, env=fixture.env, input=raw, capture_output=True, timeout=5)
         assert missing_id.returncode != 0
         label = subprocess.run([str(test_input.HGS), 'effort', fixture.name, '--json'],
@@ -296,6 +304,7 @@ def functional(args, kind):
             own_marker_cleared=True, cached_changed_binding_preserved=True,
             cache_does_not_require_native_scope_directory_floor=True,
             changed_raw_and_unknown_refused=True, explicit_missing_id_refused=True,
+            original_refusal_diagnostics_preserved_with_unavailable_target=True,
             label_cached_after_record_gone=True)
     finally:
         try:
@@ -335,7 +344,8 @@ def uncertain(args, kind):
         assert isinstance(marked['settings_unconfirmed_at'], (float, int))
         assert fixture.received() == b'\x1b,', fixture.received()
         duplicate = subprocess.run(command, env=fixture.env, input=raw, capture_output=True, timeout=5)
-        assert duplicate.returncode != 0 and fixture.received() == b'\x1b,'
+        assert duplicate.returncode == 1 and duplicate.stdout == b'' and b'may already have reached' in duplicate.stderr, duplicate.stderr
+        assert fixture.received() == b'\x1b,'
         other = fixture.payload('high')
         refused = subprocess.run(command, env=fixture.env, input=json.dumps(other).encode(), capture_output=True, timeout=5)
         assert refused.returncode != 0 and fixture.received() == b'\x1b,'

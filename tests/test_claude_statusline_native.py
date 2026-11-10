@@ -40,7 +40,8 @@ class NativeClaudeStatusLine(test_pause.Harness):
         project = str(self.project)
         trusted = dict(hasTrustDialogAccepted=True, hasCompletedProjectOnboarding=True)
         (self.root / '.claude.json').write_text(json.dumps(dict(
-            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark', customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]),
+            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True,
+            bypassPermissionsModeAccepted=True, theme='dark', customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]),
             projects={project: trusted, os.path.realpath(project): trusted})))
         catalog = self.root / '.claude/cache/model-catalog'
         catalog.mkdir(parents=True)

@@ -17,7 +17,7 @@ an exactly matching chooser. The clipped cases resize the private pane
 themselves. Not covered: an older unresolved request, repeated request IDs or
 an unfinished wire in a real Kimi; their refusals are unit-tested.
 """
-import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
+import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, tomllib, unittest, uuid
 from pathlib import Path
 from unittest import mock
 from kimi_release import admitted_version
@@ -404,6 +404,39 @@ def model_config(port, permission_mode):
             '[loop_control]\nmax_attempts_per_step = 1\n' % (permission_mode, port))
 
 
+def prepare_provider_permissions(case):
+    """These private cases exercise Kimi's manual/yolo policy, rather than
+    Zerus's intentional default bypass switch, which overrides native TOML."""
+    root, home = case.root.resolve(), case.home.resolve()
+    config = Path(case.env['HGS_CONFIG_DIR']).resolve()
+    case.assertTrue(home.is_relative_to(root), 'Kimi home must be private to this fixture')
+    case.assertTrue(config.is_relative_to(root), 'Account settings must be private to this fixture')
+    native = home / 'config.toml'
+    before = native.read_bytes()
+    mode = case.goal_mode or 'manual'
+    case.assertEqual(tomllib.loads(before.decode())['default_permission_mode'], mode)
+    command = ('account', 'permissions', 'native-kimi', '--mode', 'provider')
+    stdout = case.hgs(*command)
+    proof = dict(command=list(command), stdout=stdout, native_config=before.decode(),
+                 native_config_sha256=hashlib.sha256(before).hexdigest(), expected_mode=mode)
+    if EVIDENCE:
+        out = Path(EVIDENCE) / case._testMethodName
+        out.mkdir(parents=True, exist_ok=True)
+        (out / 'permission-preflight.json').write_text(json.dumps(proof, indent=2), encoding='utf-8')
+    rows = [row for row in json.loads(stdout)['profiles'] if row.get('id') == 'native-kimi']
+    case.assertEqual(len(rows), 1, rows)
+    row = rows[0]
+    case.assertEqual((row.get('provider'), row.get('native'), row.get('permission_mode'),
+                      row.get('permission_mode_source')), ('kimi', True, 'provider', 'zerus'))
+    case.assertEqual(Path(row['home']).resolve(), home)
+    case.assertEqual((row.get('effective_permission_mode'), row.get('permission_detail')),
+                     ('default' if mode == 'manual' else 'bypass', mode))
+    case.assertEqual(native.read_bytes(), before, 'Selecting provider mode must retain native policy')
+    print('ZERUS_KIMI_PERMISSION_PREFLIGHT=' + json.dumps(dict(
+        case=case.id(), account='native-kimi', permission_mode='provider', native_mode=mode,
+        native_config_sha256=proof['native_config_sha256'])), flush=True)
+
+
 class ApprovalCases:
     # -- cases -----------------------------------------------------------
     def test_approve_once_runs_the_command(self):
@@ -683,11 +716,12 @@ class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness
         (self.project / 'scratch-fixture').mkdir()
         server, home = self.server, self.home
         home.mkdir()
-        (home / 'config.toml').write_text(model_config(server.server_port, self.goal_mode or 'default'))
+        (home / 'config.toml').write_text(model_config(server.server_port, self.goal_mode or 'manual'))
         (home / 'tui.toml').write_text(tui_config(self._testMethodName))
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(),
                          (self.bin / 'kimi').resolve() if sys.platform == 'darwin' else self.image)
         self.name = 'kimi/p/approval'
+        prepare_provider_permissions(self)
         self.launch()
 
     # -- process proof ---------------------------------------------------
@@ -932,6 +966,68 @@ class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness
 
 class FixtureControls(unittest.TestCase):
     """The fixture's own guards, without hgs, tmux or Kimi."""
+
+    def permission_case(self, folder, mode):
+        case = NativeKimiApprovals('test_goal_manual_starts_in_manual')
+        case.root, case.home = Path(folder), Path(folder) / '.kimi-code'
+        case.home.mkdir()
+        case.goal_mode = mode
+        native_mode = mode or 'manual'
+        (case.home / 'config.toml').write_text(model_config(9, native_mode))
+        case.env = {'HGS_CONFIG_DIR': str(Path(folder) / 'config')}
+        row = dict(id='native-kimi', provider='kimi', native=True, home=str(case.home),
+                   permission_mode='provider', permission_mode_source='zerus',
+                   effective_permission_mode='default' if native_mode == 'manual' else 'bypass',
+                   permission_detail=native_mode)
+        case.hgs = mock.Mock(return_value=json.dumps(dict(profiles=[row])))
+        return case, row
+
+    def test_private_provider_preflight_preserves_manual_and_yolo_native_policies(self):
+        for mode in (None, 'manual', 'yolo'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder, mock.patch(__name__ + '.EVIDENCE', None):
+                case, _ = self.permission_case(folder, mode)
+                before = (case.home / 'config.toml').read_bytes()
+                prepare_provider_permissions(case)
+                case.hgs.assert_called_once_with('account', 'permissions', 'native-kimi', '--mode', 'provider')
+                self.assertEqual((case.home / 'config.toml').read_bytes(), before)
+
+    def test_private_provider_preflight_refuses_wrong_account_or_policy(self):
+        changes = ({'id': 'native-claude'}, {'provider': 'claude'}, {'native': False},
+                   {'permission_mode': 'bypass'}, {'permission_mode_source': 'default'},
+                   {'home': '/outside-fixture'}, {'effective_permission_mode': 'bypass'},
+                   {'permission_detail': 'auto'})
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder, mock.patch(__name__ + '.EVIDENCE', None):
+                case, row = self.permission_case(folder, None)
+                row.update(change)
+                case.hgs.return_value = json.dumps(dict(profiles=[row]))
+                with self.assertRaises(AssertionError):
+                    prepare_provider_permissions(case)
+
+    def test_private_provider_preflight_refuses_invalid_native_mode_or_nonprivate_account_store(self):
+        for invalid in ('native-mode', 'account-store'):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as folder, mock.patch(__name__ + '.EVIDENCE', None):
+                case, _ = self.permission_case(folder, None)
+                if invalid == 'native-mode':
+                    (case.home / 'config.toml').write_text(model_config(9, 'default'))
+                else:
+                    case.env['HGS_CONFIG_DIR'] = str(Path(folder).parent)
+                with self.assertRaises(AssertionError):
+                    prepare_provider_permissions(case)
+                case.hgs.assert_not_called()
+
+    def test_private_provider_preflight_retains_original_configuration_and_account_response(self):
+        with tempfile.TemporaryDirectory() as folder:
+            case, _ = self.permission_case(folder, 'yolo')
+            evidence = Path(folder) / 'evidence'
+            before = (case.home / 'config.toml').read_bytes()
+            with mock.patch(__name__ + '.EVIDENCE', str(evidence)):
+                prepare_provider_permissions(case)
+            proof = json.loads((evidence / case._testMethodName / 'permission-preflight.json').read_text())
+            self.assertEqual(proof['stdout'], case.hgs.return_value)
+            self.assertEqual(proof['native_config'], before.decode())
+            self.assertEqual(proof['native_config_sha256'], hashlib.sha256(before).hexdigest())
+            self.assertEqual(proof['expected_mode'], 'yolo')
 
     def goal_observation_case(self, events, mode='manual'):
         case = NativeKimiApprovals('test_goal_manual_starts_in_manual')

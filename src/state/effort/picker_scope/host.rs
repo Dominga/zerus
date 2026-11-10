@@ -504,14 +504,17 @@ fn original_receipt(frame: &Frame) -> Result<Option<Vec<u8>>> {
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let digest = format!("{:x}", Sha256::digest(&frame.raw));
     if value["name"] != frame.binding["name"] || value["digest"] != digest {
-        return Err("Original request UUID was already used for different content".into());
+        return Err("request ID was already used for different content".into());
     }
     let complete = match frame.operation {
         Operation::Effort => value["status"] == "confirmed",
         Operation::Settings => matches!(value["status"].as_str(), Some("applied" | "scheduled")),
     };
     if !complete {
-        return Err("Original picker request remains uncertain; no operation was replayed".into());
+        return Err(match frame.operation {
+            Operation::Effort => "effort change may already have reached the provider; inspect Terminal before retrying",
+            Operation::Settings => "settings change may already have reached the provider; inspect Terminal before retrying",
+        }.into());
     }
     Ok(Some(bytes))
 }
@@ -587,15 +590,22 @@ pub(super) fn entry() -> Result<i32> {
     // the Effort driver then uses only its explicit original-owner Effects.
     // Host-only controls prepare already-recovered synthetic state.
     control.check()?;
-    if let Some(bytes) = original_receipt(&frame)? {
+    let cached = match original_receipt(&frame) {
+        Ok(None) => None,
+        Ok(Some(bytes)) => Some(Outcome { code: 0, bytes }),
+        Err(error) => Some(Outcome {
+            code: 1,
+            bytes: error.into_bytes(),
+        }),
+    };
+    if let Some(outcome) = cached {
+        // This SAME Root lookup has physically settled, before any
+        // driver/helper/SID/reservation/key. Its original refusal must
+        // reach the frontend as data, not turn into an endpoint failure.
+        // A known cache error supplies no replay or no-start authority.
         drop(writer);
-        let _ = write_message(
-            &control.stream,
-            &Outcome { code: 0, bytes },
-            deadline,
-            RESPONSE_BYTES,
-        );
-        return Ok(0);
+        let _ = write_message(&control.stream, &outcome, deadline, RESPONSE_BYTES);
+        return Ok(outcome.code);
     }
     #[cfg(not(test))]
     if frame.operation == Operation::Effort {

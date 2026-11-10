@@ -242,6 +242,7 @@ wire_api="responses"
 
     def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
         import native_effort_id as contract
+        import test_clear_context
         models = [dict(slug='gpt-6.1-sol', display_name='GPT-6.1-Sol',
                        default_reasoning_level='medium',
                        supported_reasoning_levels=[dict(effort=e) for e in
@@ -250,6 +251,21 @@ wire_api="responses"
         self.record.update(model='gpt-6.1-sol', phase='idle', activity='idle', active_tools={})
         self.write_record()
         before = (self.native_home / 'config.toml').read_bytes()
+        # A resumed fixture can initially report the provider's literal
+        # "default", with no known reasoning level in its history. Establish
+        # the native condition through the real existing settings picker.
+        request = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id,
+                       model='gpt-6.1-sol', effort='high')
+        initial = subprocess.run([str(test_input.HGS), 'settings', self.name, '--json'],
+                                 input=json.dumps(request), env=self.env, text=True,
+                                 capture_output=True, timeout=30)
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        self.assertEqual(json.loads(initial.stdout)['status'], 'applied')
+        self.assertRegex(self.tmux('capture-pane', '-p', '-t', self.pane),
+                         r'(?m)^\s*GPT-6\.1-Sol\s+high\s+·')
+        self.record = json.loads(self.record_path.read_bytes())
+        self.assertEqual(test_clear_context.ClearContext.inspect(self)['effort'], 'high')
         record, path, legacy = contract.moved_record(self, self.name, self.record)
         self.record, self.record_path = record, path
         attempts = contract.key_log(self)
@@ -261,7 +277,11 @@ wire_api="responses"
             record = contract.change_and_replay(self, self.name, record, path, wanted, attempts)
             screen = self.tmux('capture-pane', '-p', '-t', self.pane)
             self.assertRegex(screen.lower(), r'\b' + wanted + r'\b')
-            self.assertTrue(any(row.startswith('»') for row in screen.splitlines()), screen)
+            cursor = self.tmux('display-message', '-p', '-t', self.pane,
+                               '#{cursor_y}:#{cursor_x}').strip()
+            row, column = map(int, cursor.split(':'))
+            self.assertEqual(screen.splitlines()[row].rstrip(), '› Ask Codex to do anything')
+            self.assertEqual(column, 2, 'the native composer is not empty')
             self.assertEqual(contract.inspect(self, self.name, record['session_id'])['effort'], wanted)
         self.assertEqual((self.native_home / 'config.toml').read_bytes(), before)
         self.assertFalse(legacy.exists(), 'a native update recreated the retired legacy record')

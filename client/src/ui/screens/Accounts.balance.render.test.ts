@@ -41,7 +41,10 @@ describe("DeepSeek API-key balance on Accounts", () => {
     const host = show(usageOf({ provider: "dsh", status: "configured", balances: DSH_BALANCE, balance_available: true,
       identity: { email: "", name: "", plan: "", organization: "", account_id: "api-key:abc", auth_method: "API key" } }));
     const row = host.querySelector(".acct-row");
-    expect(row?.querySelector(".acct-row-usage .um-summary")?.textContent).toBe("Balance: 6.20 USD");
+    const summary = row?.querySelector(".acct-row-usage .um-summary");
+    expect(summary?.querySelector("[aria-hidden='true']")?.textContent).toBe("$6.20");
+    expect(summary?.getAttribute("title")).toBe("Balance: 6.20 USD\nTopped up: 6.20 USD\nGranted: 0.00 USD");
+    expect(summary?.querySelector(".sr-only")?.textContent).toBe("Balance: 6.20 USD\nTopped up: 6.20 USD\nGranted: 0.00 USD");
     expect(row?.textContent).not.toContain("too low");
     const rows = [...host.querySelectorAll(".acct-usage .acct-balance")].map((r) => r.textContent);
     expect(rows).toEqual(["Total6.20 USD", "Topped up6.20 USD", "Granted0.00 USD"]);

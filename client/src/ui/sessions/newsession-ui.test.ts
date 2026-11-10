@@ -193,6 +193,13 @@ describe("account rows (updateAccounts 876-952)", () => {
     expect(row.tooltip).toBe("shared@example.invalid\n5h 17% used  7d 78% used");
     expect(row.accessible).toBe("Codex shared@example.invalid\n5h 17% used  7d 78% used");
     expect(row.tooltip).not.toContain("Reset in");
+    // A terse balance is named in full on hover and for assistive technology.
+    const funded = [account([member("native-dsh", "dsh", { native: true })], { provider: "dsh", status: "configured", balances: [
+      { kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }, { kind: "Granted", balance: "0.00", currency: "USD" }] })];
+    const dsh = accountRows(funded, choice({ agent: "dsh" })).rows[0];
+    expect(dsh.summary).toBe("$6.20");
+    expect(dsh.tooltip.split("\n").slice(1)).toEqual(["$6.20", "Balance: 6.20 USD", "Topped up: 6.20 USD", "Granted: 0.00 USD"]);
+    expect(dsh.accessible).toContain("Balance: 6.20 USD");
     const unknown = accountRows([account([member("work", "codex", { label: "" })])], choice()).rows[0];
     expect(unknown.tooltip).toBe("Account n/a\nlimits n/a");
     expect(accountRows([account([member("d", "codex", { label: "Default account" })])], choice()).rows[0].name).toBe("Account n/a");
@@ -215,8 +222,8 @@ describe("launchSummary (AccountUsage.h 130-142)", () => {
     expect(launchSummary(usageOf({ windows: [window(50, 300, { resets_at: NOW - 60 })] }), NOW)).toBe("limits n/a");
     expect(launchSummary(usageOf({ windows: [window(40, null, { label: "Monthly", resets_at: null })] }), NOW)).toBe("Monthly 40% used");
     expect(launchSummary(usageOf({ windows: [window(40, 300, { label: "Sonnet" })] }), NOW)).toBe("5h 40% used");
-    expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "12.50", currency: "USD" }, { kind: "", balance: "n/a", currency: "USD" }] }), NOW)).toBe("Balance: 12.50 USD");
-    expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "3", currency: "" }] }), NOW)).toBe("Balance: 3");
+    expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "12.50", currency: "USD" }, { kind: "", balance: "n/a", currency: "USD" }] }), NOW)).toBe("$12.50");
+    expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "3", currency: "" }] }), NOW)).toBe("3");
     expect(launchSummary(usageOf(), NOW)).toBe("limits n/a");
   });
 
@@ -224,7 +231,7 @@ describe("launchSummary (AccountUsage.h 130-142)", () => {
     const balances = [
       { kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }, { kind: "Granted", balance: "0.00", currency: "USD" },
     ];
-    expect(launchSummary(usageOf({ provider: "dsh", status: "configured", balances }), NOW)).toBe("Balance: 6.20 USD");
+    expect(launchSummary(usageOf({ provider: "dsh", status: "configured", balances }), NOW)).toBe("$6.20");
   });
 });
 

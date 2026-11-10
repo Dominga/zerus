@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountTooltip, balanceKind, balanceLow, balanceSummary, clock, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, headlineBalances, limitRecoveryNotice, pace, period, rateLimitNotice, remaining, severest, stateText, summaryText, usageChipPercent, usageRetryWaiting, windowText } from "./usage";
+import { accountTooltip, balanceAmount, balanceCompact, balanceKind, balanceLow, balanceTitle, clock, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, headlineBalances, limitRecoveryNotice, pace, period, rateLimitNotice, remaining, severest, stateText, summaryText, usageChipPercent, usageRetryWaiting, windowText } from "./usage";
 import { NOW, projected, usageOf } from "../../store/testing";
 
 describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
@@ -88,7 +88,8 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
   });
 
   it("summaries and states follow Qt", () => {
-    expect(summaryText(usageOf({ balances: [{ kind: "Topped up", balance: "18.40", currency: "USD" }] }))).toBe("18.40 USD");
+    expect(summaryText(usageOf({ balances: [{ kind: "Topped up", balance: "18.40", currency: "USD" }] }))).toBe("$18.40");
+    expect(summaryText(usageOf({ balances: [{ kind: "Topped up", balance: "n/a", currency: "USD" }] }))).toBe("n/a USD");
     expect(summaryText(usageOf({ status: "configured", provider: "dsh" }))).toBe("API key");
     expect(summaryText(usageOf({ status: "configured", provider: "opencode" }))).toBe("Configured");
     expect(summaryText(usageOf({ status: "signed_out" }))).toBe("Sign in required");
@@ -102,31 +103,50 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
       .toBe("DeepSeek account is signed out. API-key connections are configured separately in the native settings.");
   });
 
-  it("a DeepSeek API-key balance shows its Total in compact places and every part in the tooltip", () => {
+  it("a DeepSeek API-key balance shows its Total as a symbol amount, named in full on hover", () => {
     const balances = [
       { kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }, { kind: "Granted", balance: "0.00", currency: "USD" },
       { kind: "Total", balance: "110.00", currency: "CNY" }, { kind: "Topped up", balance: "100.00", currency: "CNY" }, { kind: "Granted", balance: "10.00", currency: "CNY" },
     ];
     const u = usageOf({ provider: "dsh", status: "configured", balances, balance_available: true });
     expect(headlineBalances(u).map((b) => b.balance)).toEqual(["6.20", "110.00"]);
-    expect(summaryText(u)).toBe("6.20 USD");
-    expect(balanceSummary(u)).toBe("Balance: 6.20 USD  Balance: 110.00 CNY");
+    expect(balanceCompact(u)).toBe("$6.20  ¥110.00");
+    expect(summaryText(u)).toBe("$6.20  ¥110.00");
+    expect(balanceTitle(u).split("\n")).toEqual([
+      "Balance: 6.20 USD", "Topped up: 6.20 USD", "Granted: 0.00 USD",
+      "Balance: 110.00 CNY", "Topped up: 100.00 CNY", "Granted: 10.00 CNY",
+    ]);
     expect(balanceLow(u)).toBe(false);
     const tooltip = accountTooltip(u, NOW).split("\n");
+    expect(tooltip).toContain("Balance: 6.20 USD");
     expect(tooltip).toContain("Topped up: 100.00 CNY");
     expect(tooltip).toContain("Granted: 10.00 CNY");
+    expect(tooltip).not.toContain("Total: 6.20 USD");
     expect(tooltip).not.toContain("DeepSeek reports the balance is too low for API calls.");
     const low = usageOf({ provider: "dsh", status: "configured", balances: balances.slice(0, 3), balance_available: false });
     expect(balanceLow(low)).toBe(true);
     expect(accountTooltip(low, NOW)).toContain("DeepSeek reports the balance is too low for API calls.");
-    // A DeepSeek account sign-in reports wallets without a Total: every one stays a headline.
+    // A DeepSeek account sign-in reports wallets without a Total: every one stays a headline under its own name.
     const wallets = usageOf({ provider: "dsh", status: "ok", balances: [{ kind: "Wallet", balance: "5", currency: "USD" }, { kind: "Bonus", balance: "1", currency: "USD" }] });
     expect(headlineBalances(wallets)).toHaveLength(2);
-    expect(balanceSummary(wallets)).toBe("Balance: 5 USD  Balance: 1 USD");
+    expect(balanceCompact(wallets)).toBe("$5  $1");
+    expect(balanceTitle(wallets)).toBe("Wallet: 5 USD\nBonus: 1 USD");
     // Older peers omit availability: no warning.
     expect(balanceLow(usageOf({ balances: balances.slice(0, 3) }))).toBe(false);
-    expect(balanceSummary(usageOf({ balances: [{ kind: "Total", balance: "n/a", currency: "USD" }] }))).toBe("");
+    expect(balanceCompact(usageOf({ balances: [{ kind: "Total", balance: "n/a", currency: "USD" }] }))).toBe("");
+    expect(balanceTitle(usageOf({ balances: [{ kind: "Total", balance: "n/a", currency: "USD" }] }))).toBe("");
+    expect(balanceTitle(usageOf())).toBe("");
     expect(stateText(usageOf({ provider: "dsh", status: "configured" }))).toBe("API key configured. Zerus could not read its DeepSeek balance; refresh to retry.");
+  });
+
+  it("writes USD and CNY with their symbols and keeps any other currency code", () => {
+    const amount = (balance: string, currency: string) => balanceAmount({ kind: "Total", balance, currency });
+    expect(amount("6.20", "USD")).toBe("$6.20");
+    expect(amount("110.00", "CNY")).toBe("¥110.00");
+    expect(amount("-0.03", "USD")).toBe("-$0.03");
+    expect(amount(" 6.20 ", "USD")).toBe("$6.20");
+    expect(amount("6.20", "EUR")).toBe("6.20 EUR");
+    expect(amount("3", "")).toBe("3");
   });
 
   it("names known balance kinds in the interface language and keeps unknown ones", () => {

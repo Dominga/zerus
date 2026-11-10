@@ -40,3 +40,19 @@ describe("dashboard account reset countdowns", () => {
     expect(text).not.toContain("2h 0m");
   });
 });
+
+describe("dashboard DeepSeek API-key balance", () => {
+  it("shows the Total as a symbol amount and names it in full on hover", () => {
+    const usage = usageOf({ provider: "dsh", status: "configured", balances: [
+      { kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }, { kind: "Granted", balance: "0.00", currency: "USD" }] });
+    const account: Account = { key: "dsh", label: "DeepSeek API", provider: "dsh", installed: true, machines: [], members: [],
+      usage, permission: { source: "Default" }, identity_lines: [], identity_note: null };
+    vi.spyOn(accounts, "accountsPage").mockReturnValue({ ...emptyAccounts(), snapshot: true, overview: [account] });
+    const host = document.createElement("div"); document.body.append(host);
+    dispose = render(() => createComponent(OverviewScreen, {}), host);
+    const summary = host.querySelector(".ov-acard .um-summary");
+    expect(summary?.querySelector("[aria-hidden='true']")?.textContent).toBe("$6.20");
+    expect(summary?.getAttribute("title")).toBe("Balance: 6.20 USD\nTopped up: 6.20 USD\nGranted: 0.00 USD");
+    expect(summary?.textContent).not.toContain("Total");
+  });
+});

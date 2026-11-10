@@ -5230,8 +5230,11 @@ cached or returned. Per currency (USD or CNY), the inspection reports a `Total`
 balance and its `Topped up` and `Granted` parts as `balances` rows, plus
 `balance_available: false` when DeepSeek says the balance no longer covers API
 calls. The status stays `configured`. Accounts, Overview, New session and the
-session footer show the Total. The account's usage panel lists all three amounts
-and warns about an insufficient balance. A key from the launch environment, an
+session footer show the Total as a bare amount such as `$6.20` (`¥` for CNY;
+another currency keeps its code). Its tooltip and accessible label name it in
+full, for example `Balance: 6.20 USD` with the Topped up and Granted parts. The
+account's usage panel lists all three amounts and warns about an insufficient
+balance. A key from the launch environment, an
 unreachable API or a rejected key leaves `configured` without a balance. A
 DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
 web host. DeepSeek publishes no usage or cost endpoint for API keys.

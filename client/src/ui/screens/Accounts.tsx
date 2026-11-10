@@ -16,7 +16,7 @@ import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccoun
 import { connectionOf, osOf } from "../../store/overview";
 import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
-import { balanceKind, balanceLow, balanceSummary, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
+import { balanceCompact, balanceKind, balanceLow, balanceTitle, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
@@ -75,8 +75,8 @@ function AccountRow(props: { a: Account; now: number; selected: boolean }) {
       </span>
       {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%.
           An account without windows but with a balance (a DeepSeek API key) shows the balance there instead. */}
-      <Show when={props.a.usage.windows.length || balanceSummary(props.a.usage)}>
-        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceSummary(props.a.usage)} /></span>
+      <Show when={props.a.usage.windows.length || balanceCompact(props.a.usage)}>
+        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceCompact(props.a.usage)} summaryTitle={balanceTitle(props.a.usage)} /></span>
       </Show>
       <Show when={balanceLow(props.a.usage)}><span class="acct-balance-low">{tr("Balance too low for API calls")}</span></Show>
       <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>

@@ -5275,7 +5275,10 @@ session. The binding records the outcome as `account_defaults` with `status`
 lost, so it may have applied), and `hgs inspect SESSION` reports it. A failed or
 uncertain application never fails the launch or blocks the session: `hgs`
 reports it on standard error once and never retries it, and the session keeps
-the native default. Relaunching an existing name or resuming a session never
+the native default. The desktop marks such a session's model and effort
+selector with a warning sign and explains the outcome, the account's choice and
+the reason in its **Model and effort** dialog (zerus-fw3g5); an applied or still
+pending outcome shows nothing, and the dialog never re-applies the choice. Relaunching an existing name or resuming a session never
 applies account defaults, and the native profile default stays unchanged.
 Without an account choice, a new session starts on the native default
 including its configured effort; a session's own recorded selection still wins

@@ -497,6 +497,9 @@ pub(crate) enum Step {
     BlockedLate { task: u32 },
     /// The member started working again: its recorded turn end is cleared (A2).
     WorkResumed { task: u32 },
+    /// Task #49: a No report attempt whose member waits for its own job is no
+    /// No report any more.
+    OwnJobFound { task: u32 },
     /// The dispatcher saw a member's session live or stopped; status derives
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
@@ -997,6 +1000,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
             let found = team.member(&attempt.member).and_then(|m| session_of(m, seen));
             let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
+            // Task #49 (team ede724c4): a member that waits for a job of its
+            // own is not done, so its finished turn is no No report (task 39's
+            // rule for the inbox item, now for the attempt the plan's card
+            // reads), and a No report set before the wait was seen is cleared.
+            // The report clock is cleared once with it, so the timeout starts
+            // when nothing of its own runs any more (GateOpen), and nothing is
+            // written while the wait lasts.
+            let waits = waits_for_own_job(attempt, found);
+            if waits && (attempt.no_report || attempt.report_ready_at.is_some()) {
+                steps.push(Step::OwnJobFound { task: task.id });
+            }
             // A1: an attempt that shows the member working really started.
             if attempt.started_at.is_none() {
                 let working = found.is_some_and(|found| {
@@ -1052,6 +1066,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                         if let Some(at) = replied {
                             steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
                         } else if !attempt.no_report
+                            && !waits
                             && attempt.started_at.is_some()
                             && now - delivered >= team.settings.report_timeout_seconds as f64
                         {
@@ -1085,7 +1100,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             steps.push(no_report_or_claim(team, task, now));
                         }
                     } else if quiet {
-                        if attempt.report_ready_at.is_none() {
+                        if waits {
+                            // Task #49: its own job still runs (OwnJobFound
+                            // above cleared the clock); nothing is decided.
+                        } else if attempt.report_ready_at.is_none() {
                             // The gate was already open when this record was
                             // written; the timeout starts now (C2).
                             steps.push(Step::GateOpen { task: task.id });
@@ -11312,6 +11330,20 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::BlockedLate { task } => tell_lead_blocked(store, team, *task),
+        Step::OwnJobFound { task } => change(store, &team.id, |team, events| {
+            // Task #49 (team ede724c4): the member waits for its own job, so the
+            // turn it ended is no No report; the report timeout starts again
+            // once nothing of its own runs.
+            let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
+            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                if attempt.state == AttemptState::Delivered && attempt.no_report {
+                    attempt.no_report = false;
+                    attempt.report_ready_at = None;
+                    events.push(Event::new("no_report_cleared", json!({"member":role,"task":task,"attempt":attempt.n,"reason":"waits for its own job"})));
+                }
+            }
+            Ok(())
+        }),
         Step::WorkResumed { task } => change(store, &team.id, |team, _| {
             // A member that works again is not a finished turn any more (A2).
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -11953,6 +11985,7 @@ fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BT
     let fresh = store.load(&team.id).ok().flatten();
     let team = fresh.as_ref().unwrap_or(team);
     let started = Instant::now();
+    let sessions = &with_outbox_runs(team, sessions);
     let steps = pass_steps(steps_with(team, sessions, now(), Some(listed)), pass);
     // Owner, 2026-11-09: two or more member starts of this tick run together.
     let launches: Vec<String> = steps.iter().filter_map(|step| match step { Step::Launch { member } => Some(member.clone()), _ => None }).collect();
@@ -12044,6 +12077,66 @@ fn sample_member_usage(team: &Team, member_id: &str) {
 /// agrees with its live session. An adopted session's folder is its own, never
 /// a worktree name computed from it; a shared member may work in a subfolder of
 /// the team's checkout, where its sandbox writes.
+/// Task #49 (team ede724c4): whether the attempt's member waits for a job of
+/// its own, by task 39's rule: its listed jobs (its Zerus build, the background
+/// jobs its hooks registered - a shell job it reports as still running -, and
+/// Background work under a budget), its own Background work or build, or the
+/// run the dispatcher remembers it waits on. A session that is not live waits
+/// for nothing.
+pub(crate) fn waits_for_own_job(attempt: &Attempt, found: Option<&Seen>) -> bool {
+    found.is_some_and(|found| {
+        found.live && (found.building || found.background || !found.jobs.is_empty() || !attempt.awaited_run.is_empty())
+    })
+}
+
+/// Task #49 (team ede724c4): the member's own template runs that its listing
+/// cannot show: a request still queued in its outbox (the worker claims it on
+/// a later tick, or after the folder's current run) and a claim made after the
+/// listing was taken. They are its jobs as its Zerus build is. A claim in a
+/// folder another member shares has no owner on file, so it counts only in a
+/// folder of its own.
+fn with_outbox_runs(team: &Team, seen: &[Seen]) -> Vec<Seen> {
+    let mut sessions = seen.to_vec();
+    for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+        let Some(found) = session_of(member, seen).filter(|found| found.live && found.host.is_empty() && !found.cwd.is_empty()) else { continue };
+        let Some(index) = seen.iter().position(|other| std::ptr::eq(other, found)) else { continue };
+        let folder = outbox_folder(team, member, &found.cwd);
+        let mut jobs: Vec<SeenJob> = super::outbox::queued_runs(&folder, &member.id)
+            .into_iter()
+            .map(|(request, queued)| {
+                let template = request["template"].as_str().unwrap_or_default();
+                SeenJob {
+                    kind: "build".into(),
+                    what: format!("its own Zerus run ({}), queued", short(template, 80)),
+                    command: format!("{template} {}", request["request_id"].as_str().unwrap_or_default()),
+                    since: queued,
+                }
+            })
+            .collect();
+        let shared = team.members.iter().any(|other| {
+            other.id != member.id && session_of(other, seen).is_some_and(|other| other.host.is_empty() && same_path(&other.cwd, &found.cwd))
+        });
+        if !shared && !found.building {
+            for (_, marker) in super::outbox::running_all(&folder) {
+                let label = marker["label"].as_str().unwrap_or_default();
+                jobs.push(SeenJob {
+                    kind: "build".into(),
+                    what: format!("its own Zerus run ({})", short(label, 80)),
+                    command: marker["command"].as_str().unwrap_or_default().to_owned(),
+                    since: marker["started"].as_f64().unwrap_or(0.0),
+                });
+            }
+        }
+        let known = &mut sessions[index].jobs;
+        for job in jobs {
+            if !known.iter().any(|old| old.command == job.command) {
+                known.push(job);
+            }
+        }
+    }
+    sessions
+}
+
 fn outbox_folder(team: &Team, member: &Member, cwd: &str) -> PathBuf {
     match member_folder_path(team, member) {
         Ok(folder) if !folder.is_empty() && same_path(&folder, cwd) => PathBuf::from(folder),

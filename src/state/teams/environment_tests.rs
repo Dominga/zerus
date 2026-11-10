@@ -36,7 +36,7 @@ fn a_low_build_folder_with_an_ordinary_temp_is_one_environment_failure() {
     let text = preflight(&build, Some(&temp)).expect("an environment failure");
     assert!(text.starts_with(MARKER), "{text}");
     assert!(text.contains(&format!("{} carries Windows' Low integrity label", checkout.display())), "{text}");
-    assert!(text.contains(&format!("icacls \"{}\" /setintegritylevel (OI)(CI)M /T /C /Q", checkout.display())), "{text}");
+    assert!(text.contains(&format!("icacls \"{}\" /setintegritylevel \"(OI)(CI)M\" /T /C /Q", checkout.display())), "{text}");
     assert!(text.contains("Nothing ran"), "{text}");
     // The run folder inside the Low checkout is Low as well: no failure.
     assert_eq!(preflight(&build, Some(&checkout.join(".zerus-team").join("runs").join("x").join("temp"))), None);
@@ -111,8 +111,17 @@ fn a_real_low_label_is_found_and_the_owners_step_clears_it() {
         temp.join(name).is_dir()
     };
     assert!(!mkdir("refused"), "a program labeled Low runs at Low and is refused in a Medium folder");
-    // The owner's step from the message.
-    assert!(icacls(&checkout, "(OI)(CI)M"));
+    // Task #48: the owner's step exactly as the message prints it, run in
+    // Windows PowerShell. The old unquoted line was refused there ("The term
+    // 'OI' is not recognized") and changed nothing.
+    let step = owner_step(&checkout.display().to_string());
+    assert!(text.contains(&format!("run\n  {step}\n")), "{text}");
+    let unquoted = step.replace("\"(OI)(CI)M\"", "(OI)(CI)M");
+    let (ran, said) = run_in_powershell(&unquoted);
+    assert!(!ran && said.contains("OI"), "the unquoted step fails in PowerShell: {said}");
+    assert_eq!(crate::platform::integrity_label(&checkout).unwrap(), Some(0x1000), "and labels nothing");
+    let (ran, said) = run_in_powershell(&step);
+    assert!(ran, "the printed step runs in PowerShell: {said}");
     assert_eq!(preflight(std::slice::from_ref(&deps), Some(&temp)), None);
     assert!(mkdir("allowed"), "after the step the same program runs at Medium");
 }

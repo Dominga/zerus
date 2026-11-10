@@ -101,14 +101,21 @@ fn a_store_that_stays_refused_is_reported_with_its_fix_until_it_is_private() {
         assert!(stores[0]["reason"].as_str().unwrap().contains("outside Zerus's folders"));
         let fix = stores[0]["fix"].as_str().unwrap();
         #[cfg(windows)]
-        assert_eq!(fix, format!("icacls \"{}\" /inheritance:r /grant:r \"%USERNAME%:F\"", foreign.display()));
+        assert_eq!(fix, format!("icacls \"{0}\" /reset; icacls \"{0}\" /inheritance:r /grant:r \"{1}:F\"", foreign.display(), crate::private_stores::windows_user()));
         #[cfg(unix)]
         assert_eq!(fix, format!("chmod 600 '{}'", foreign.display()));
         // The same refusal again keeps its first record (a notice is raised once).
         let at = stores[0]["at"].clone();
         assert!(!ensure(&foreign, Private::File).unwrap());
         assert_eq!(refused()[0]["at"], at);
-        // Once the owner applies the fix, the next check clears it.
+        // Once the owner applies the fix, the next check clears it. Task #48:
+        // on Windows the printed line itself, run in Windows PowerShell.
+        #[cfg(windows)]
+        {
+            let (ran, said) = crate::state::teams::environment::run_in_powershell(fix);
+            assert!(ran, "the printed fix runs in PowerShell: {said}");
+        }
+        #[cfg(unix)]
         platform::owner_only_file(&foreign).unwrap();
         assert!(ensure(&foreign, Private::File).unwrap());
         assert!(refused().is_empty());

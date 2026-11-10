@@ -163,6 +163,17 @@ fn kind_name(kind: Private) -> &'static str {
     }
 }
 
+/// This user as icacls names it: `*<SID>`, or PowerShell's own user name.
+#[cfg(windows)]
+pub(crate) fn windows_user() -> String {
+    crate::platform::user_sid_string().map(|sid| format!("*{sid}")).unwrap_or_else(|| "${env:USERNAME}".to_owned())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn windows_user() -> String {
+    "${env:USERNAME}".to_owned()
+}
+
 /// The one line that makes the store private, for the reason given.
 pub(crate) fn fix(path: &Path, kind: Private, reason: &str) -> String {
     let shape = reason.contains("link") || reason.contains("not a") || reason.contains("is a folder");
@@ -171,9 +182,18 @@ pub(crate) fn fix(path: &Path, kind: Private, reason: &str) -> String {
         if shape {
             return format!("move \"{display}\" \"{display}.refused\"");
         }
-        let grant = if kind == Private::Directory { "%USERNAME%:(OI)(CI)F" } else { "%USERNAME%:F" };
-        let icacls = format!("icacls \"{display}\" /inheritance:r /grant:r \"{grant}\"");
-        if reason.contains("owned by") { format!("takeown /f \"{display}\" && {icacls}") } else { icacls }
+        // Task #48 (team ede724c4, 2026-11-10): the line runs as written in
+        // PowerShell, the owner's terminal: the user is its SID (PowerShell
+        // never expands %USERNAME%: "No mapping between account names and
+        // security IDs was done"), the grant is quoted, and the two commands
+        // are joined with `;` (Windows PowerShell 5.1 has no `&&`). `/reset`
+        // comes first: `/grant:r` replaces only this user's own entry, so the
+        // explicit grants a sandbox installer adds (Authenticated Users,
+        // BUILTIN\Users) stayed and the store was still refused after the fix.
+        let user = windows_user();
+        let grant = if kind == Private::Directory { format!("{user}:(OI)(CI)F") } else { format!("{user}:F") };
+        let icacls = format!("icacls \"{display}\" /reset; icacls \"{display}\" /inheritance:r /grant:r \"{grant}\"");
+        if reason.contains("owned by") { format!("takeown /f \"{display}\"; {icacls}") } else { icacls }
     } else {
         let quoted = format!("'{}'", display.to_string().replace('\'', "'\\''"));
         if shape {

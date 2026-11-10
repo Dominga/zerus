@@ -155,9 +155,37 @@ fn message(root: &Path, build: &Path, temp: Option<&Path>, ran: bool) -> String 
         "{MARKER} {root_text} carries Windows' Low integrity label, so every program built under it{built} starts at Low \
          integrity and Windows refuses it whenever it creates a file or folder outside that folder, such as in {temp} \
          (Access is denied, os error 5). A DeepSeek session that worked in {root_text} labels its folder this way. {what} \
-         Owner step: in a terminal (no administrator needed) run\n  icacls \"{root_text}\" /setintegritylevel (OI)(CI)M /T /C /Q\n\
-         and start DeepSeek sessions in their own worktree, never in {root_text}."
+         Owner step: in a terminal (no administrator needed) run\n  {}\n\
+         and start DeepSeek sessions in their own worktree, never in {root_text}.",
+        owner_step(&root_text)
     )
+}
+
+/// The owner's step that takes the Low label off `root` and everything below.
+/// Task #48 (team ede724c4, 2026-11-10): the level is quoted, because
+/// PowerShell reads an unquoted `(OI)(CI)M` as commands ("The term 'OI' is not
+/// recognized"); the quoted line runs as written in PowerShell and in cmd.
+pub(crate) fn owner_step(root: &str) -> String {
+    format!("icacls \"{root}\" /setintegritylevel \"(OI)(CI)M\" /T /C /Q")
+}
+
+/// Runs one printed owner step in Windows PowerShell exactly as written (no
+/// profile, the line passed encoded so no other shell parses it) and answers
+/// whether it succeeded, with what it printed. PowerShell's own refusal of the
+/// line (a parse or command error) and the program's exit code both count.
+#[cfg(all(test, windows))]
+pub(crate) fn run_in_powershell(line: &str) -> (bool, String) {
+    use base64::Engine;
+    let script = format!("$ErrorActionPreference = 'Stop'\n{line}\nexit $LASTEXITCODE");
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        .arg(base64::engine::general_purpose::STANDARD.encode(bytes))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("Windows PowerShell starts");
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), text)
 }
 
 /// Before a test run: an environment failure when the run would build in a
@@ -197,15 +225,16 @@ impl LowFolder {
         format!(
             "{} {root}{under} carries Windows' Low integrity label, so every program built there starts at Low and is refused \
              outside it (Access is denied, os error 5); a DeepSeek session that worked there set it. Owner step: in a terminal \
-             (no administrator needed) run\n  icacls \"{root}\" /setintegritylevel (OI)(CI)M /T /C /Q",
-            capitalized(&self.what)
+             (no administrator needed) run\n  {}",
+            capitalized(&self.what),
+            owner_step(&root)
         )
     }
 
     pub(crate) fn json(&self) -> serde_json::Value {
         let root = self.root.display().to_string();
         serde_json::json!({"folder": self.folder.display().to_string(), "labeled": root, "what": self.what, "text": self.text(),
-            "owner_step": format!("icacls \"{root}\" /setintegritylevel (OI)(CI)M /T /C /Q")})
+            "owner_step": owner_step(&root)})
     }
 }
 

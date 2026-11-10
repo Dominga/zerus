@@ -979,7 +979,14 @@ pub(crate) fn test_measure(path: &Path, bytes: u64, limit_gb: u64) -> anyhow::Re
 /// Task #364: what a member made for an attempt and left in place: extra build
 /// folders its runs named, worktrees it added, and its run temporary folders
 /// over a floor. `since` is when the attempt was handed out.
-pub(crate) fn report_leftovers(team: &str, member: &str, since: f64, folder: &str) -> Value {
+///
+/// A worktree the member added is a linked one that appeared since then. The
+/// repository's main checkout (git lists it first) is nobody's addition, and
+/// neither is the checkout the member works in or the folder of another
+/// member (`others`): a team whose folder is a subfolder of its repository
+/// told a member that it had added the repository itself and asked it to
+/// remove it, because the root was written to during the attempt.
+pub(crate) fn report_leftovers(team: &str, member: &str, since: f64, folder: &str, others: &[String]) -> Value {
     let registry = read_registry();
     let mut folders: Vec<Value> = Vec::new();
     for entry in registry.entries.iter().filter(|entry| entry.state != "removed" && entry.team == team && entry.member == member) {
@@ -989,8 +996,12 @@ pub(crate) fn report_leftovers(team: &str, member: &str, since: f64, folder: &st
     }
     if !folder.is_empty() {
         if let Some(list) = super::teams::dispatcher::git_at(folder, &["worktree", "list", "--porcelain"]) {
-            for path in list.lines().filter_map(|line| line.strip_prefix("worktree ")) {
-                if same(Path::new(path), Path::new(folder)) || !Path::new(path).exists() || !created_after(Path::new(path), since) {
+            for (index, path) in list.lines().filter_map(|line| line.strip_prefix("worktree ")).enumerate() {
+                let tree = Path::new(path);
+                let known = index == 0
+                    || Path::new(folder).ancestors().any(|up| same(up, tree))
+                    || others.iter().any(|other| Path::new(other).ancestors().any(|up| same(up, tree)));
+                if known || !tree.exists() || !created_after(tree, since) {
                     continue;
                 }
                 folders.push(json!({"kind":"worktree","path":path,"bytes":0,"why":"a worktree you added"}));

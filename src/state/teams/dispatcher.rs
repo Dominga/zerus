@@ -12090,9 +12090,9 @@ pub(crate) fn waits_for_own_job(attempt: &Attempt, found: Option<&Seen>) -> bool
 /// Task #49 (team ede724c4): the member's own template runs that its listing
 /// cannot show: a request still queued in its outbox (the worker claims it on
 /// a later tick, or after the folder's current run) and a claim made after the
-/// listing was taken. They are its jobs as its Zerus build is. A claim in a
-/// folder another member shares has no owner on file, so it counts only in a
-/// folder of its own.
+/// listing was taken. They are its jobs as its Zerus build is. A claim is the
+/// job of the member it names (`claim_of`); one that names nobody counts only
+/// in a folder of its own.
 fn with_outbox_runs(team: &Team, seen: &[Seen]) -> Vec<Seen> {
     let mut sessions = seen.to_vec();
     for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
@@ -12114,8 +12114,8 @@ fn with_outbox_runs(team: &Team, seen: &[Seen]) -> Vec<Seen> {
         let shared = team.members.iter().any(|other| {
             other.id != member.id && session_of(other, seen).is_some_and(|other| other.host.is_empty() && same_path(&other.cwd, &found.cwd))
         });
-        if !shared && !found.building {
-            for (_, marker) in super::outbox::running_all(&folder) {
+        if !found.building {
+            for (_, marker) in super::outbox::running_all(&folder).into_iter().filter(|(_, marker)| claim_of(marker, &member.id, shared)) {
                 let label = marker["label"].as_str().unwrap_or_default();
                 jobs.push(SeenJob {
                     kind: "build".into(),
@@ -12133,6 +12133,21 @@ fn with_outbox_runs(team: &Team, seen: &[Seen]) -> Vec<Seen> {
         }
     }
     sessions
+}
+
+/// Whether a run's claim is this member's. Members that may not have worktrees
+/// work in one folder and its claims lie side by side, so the claim names the
+/// member that asked for the run (`start_run`) and is nobody else's: a run one
+/// member started showed every member of the folder as Building, wrote a job
+/// for each of them, flagged the ones with no task as unassigned work and woke
+/// another member's attempt with a result that was not its own. A claim that
+/// names nobody (one written before claims named their member) is the
+/// member's only in a folder no other member works in.
+pub(crate) fn claim_of(claim: &Value, member: &str, shared: bool) -> bool {
+    match claim["member"].as_str().filter(|owner| !owner.is_empty()) {
+        Some(owner) => owner == member,
+        None => !shared,
+    }
 }
 
 fn outbox_folder(team: &Team, member: &Member, cwd: &str) -> PathBuf {
@@ -12536,10 +12551,12 @@ fn start_run(
         Ok(plan) => plan,
         Err(error) => return refuse(format!("{error:#}")),
     };
-    // U30: the label and command show the member's session as Building.
+    // U30: the label and command show the member's session as Building. The
+    // claim names the member and attempt that asked: members that share one
+    // folder share its claims too, and the run is the build of its asker only.
     let command = std::iter::once(plan.program.as_str()).chain(plan.argv.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
     let marker = json!({"request_id":id,"started":now(),"timeout_secs":super::templates::timeout_for(template),
-        "label":template,"command":command});
+        "label":template,"command":command,"member":member.id,"attempt":attempt});
     super::outbox::write_running(folder, &id, &marker)?;
     let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
     if let Err(error) = spawn(folder, request) {

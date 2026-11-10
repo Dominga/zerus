@@ -465,6 +465,16 @@ fn a_queued_or_freshly_claimed_run_is_the_members_own_job() {
     let seen = with_outbox_runs(&team, &[quiet.clone()]);
     assert_eq!(seen[0].jobs.len(), 1, "{:?}", seen[0].jobs);
     assert!(!no_report(&steps(&team, &seen, late)));
+    // A claim in this folder that names another member (members without
+    // worktrees share one folder) is that member's run, never dev's job.
+    super::super::outbox::write_running(dir.path(), "d2300000-0000-4000-8000-000000000004",
+        &json!({"request_id":"d2300000-0000-4000-8000-000000000004","started":61.0,"label":"cargo-build","command":"cargo build","member":"qa"})).unwrap();
+    let seen = with_outbox_runs(&team, &[quiet.clone()]);
+    assert_eq!(seen[0].jobs.len(), 1, "{:?}", seen[0].jobs);
+    assert!(seen[0].jobs[0].what.contains("cargo-test"), "{:?}", seen[0].jobs);
+    std::fs::remove_file(super::super::outbox::running_path(dir.path(), "d2300000-0000-4000-8000-000000000004")).unwrap();
+    assert!(claim_of(&json!({"member":"dev"}), "dev", true) && !claim_of(&json!({"member":"qa"}), "dev", false));
+    assert!(claim_of(&json!({}), "dev", false) && !claim_of(&json!({}), "dev", true));
     // Settled: nothing of its own, and No report again.
     std::fs::remove_file(super::super::outbox::running_path(dir.path(), "d2300000-0000-4000-8000-000000000003")).unwrap();
     let seen = with_outbox_runs(&team, &[quiet]);

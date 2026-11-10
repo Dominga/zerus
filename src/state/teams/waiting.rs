@@ -80,12 +80,23 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
 /// (the dispatcher settles it then, C1).
 const RUN_GRACE_SECONDS: f64 = 120.0;
 
-/// U30: the oldest template run still claimed in the member's own folder.
+/// U30: the oldest template run the member asked for that is still claimed in
+/// its folder. Members that may not have worktrees share one folder, where
+/// every member's claims lie: only the claim that names this member is its
+/// build (`dispatcher::claim_of`), or a run one member started would show all
+/// of them as Building.
 fn team_build(team: &Team, member: &Member, now: f64) -> Option<Value> {
     let folder = super::dispatcher::member_folder_path(team, member).ok()?;
+    let shared = team.members.iter().any(|other| {
+        other.id != member.id
+            && other.id != team.lead
+            && other.state != MemberState::Removed
+            && super::dispatcher::member_folder_path(team, other).is_ok_and(|other| super::dispatcher::same_path(&other, &folder))
+    });
     super::outbox::running_all(std::path::Path::new(&folder))
         .into_iter()
         .map(|(_, claim)| claim)
+        .filter(|claim| super::dispatcher::claim_of(claim, &member.id, shared))
         .filter(|claim| {
             let started = claim["started"].as_f64().unwrap_or(0.0);
             let bound = claim["timeout_secs"].as_f64().unwrap_or(1800.0);
@@ -470,5 +481,32 @@ mod tests {
         assert_eq!(of(&reasons(&[team.clone()], 900.0 + 600.0 + RUN_GRACE_SECONDS + 1.0), "dev").build, None);
         // The lead runs commands itself: it has no template runs.
         assert_eq!(of(&reasons(&[team], 1000.0), "lead").build, None);
+    }
+
+    /// Members that may not have worktrees work in one folder, where every
+    /// member's claims lie: a run is the build of the member that asked for it.
+    #[test]
+    fn a_run_in_a_shared_folder_is_the_build_of_the_member_that_asked() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut team = team(vec![]);
+        team.folder = folder.path().display().to_string();
+        let run = "22222222-2222-4222-8222-222222222222";
+        let claim = json!({"request_id":run,"started":900.0,"timeout_secs":600,"label":"ue-build","command":"ue build","member":"dev","attempt":"a"});
+        super::super::outbox::write_running(folder.path(), run, &claim).unwrap();
+        let found = reasons(&[team.clone()], 1000.0);
+        assert_eq!(of(&found, "dev").build.as_ref().unwrap()["request_id"], run);
+        assert_eq!(of(&found, "qa").build, None, "another member's run is not its build");
+        assert_eq!(of(&found, "lead").build, None);
+        // A claim that names nobody (written before claims named their member)
+        // is nobody's where several members work.
+        let unnamed = "33333333-3333-4333-8333-333333333333";
+        super::super::outbox::write_running(folder.path(), unnamed, &json!({"request_id":unnamed,"started":800.0,"timeout_secs":600,"label":"ue-test"})).unwrap();
+        let found = reasons(&[team.clone()], 1000.0);
+        assert_eq!(of(&found, "dev").build.as_ref().unwrap()["request_id"], run, "its own run, not the older unnamed one");
+        assert_eq!(of(&found, "qa").build, None);
+        // A member alone in the folder keeps such a claim as its build.
+        team.members[2].state = MemberState::Removed;
+        std::fs::remove_file(super::super::outbox::running_path(folder.path(), run)).unwrap();
+        assert_eq!(of(&reasons(&[team], 1000.0), "dev").build.as_ref().unwrap()["request_id"], unnamed);
     }
 }

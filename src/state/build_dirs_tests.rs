@@ -284,12 +284,27 @@ fn a_report_note_lists_a_leftover_worktree_and_an_extra_target() {
         cargo_target(&target);
         note(Use { path: target.clone(), kind: "cargo_target", origin: "hgs_run", team: "t1".into(), team_name: "T".into(),
             member: "dev".into(), ..Default::default() }).unwrap();
-        let found = report_leftovers("t1", "dev", since, repo.to_str().unwrap());
+        let found = report_leftovers("t1", "dev", since, repo.to_str().unwrap(), &[]);
         let paths: Vec<&str> = found["folders"].as_array().unwrap().iter().filter_map(|folder| folder["path"].as_str()).collect();
         assert!(paths.iter().any(|path| path.ends_with("wt")), "{found}");
         assert!(paths.iter().any(|path| path.ends_with("extra-target")), "{found}");
         let text = found["text"].as_str().unwrap();
         assert!(text.contains("Remove them") && text.contains("worktree you added") && text.contains("extra build folder"), "{text}");
+        // A team that works in a subfolder of its repository: the repository
+        // is no worktree the member added, though it was written to since.
+        let sub = repo.join("game");
+        fs::create_dir_all(&sub).unwrap();
+        let worktrees = |found: &Value| -> Vec<String> {
+            found["folders"].as_array().unwrap().iter().filter(|folder| folder["kind"] == "worktree")
+                .filter_map(|folder| folder["path"].as_str().map(str::to_owned)).collect()
+        };
+        let found = report_leftovers("t1", "dev", since, sub.to_str().unwrap(), &[]);
+        let listed = worktrees(&found);
+        assert!(listed.len() == 1 && listed[0].ends_with("wt"), "{found}");
+        // From the added worktree the main checkout is still nobody's addition,
+        // and another member's folder is that member's.
+        assert!(worktrees(&report_leftovers("t1", "dev", since, wt.to_str().unwrap(), &[])).is_empty());
+        assert!(worktrees(&report_leftovers("t1", "dev", since, sub.to_str().unwrap(), &[wt.display().to_string()])).is_empty());
     });
 }
 

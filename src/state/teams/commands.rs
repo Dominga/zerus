@@ -6648,7 +6648,16 @@ fn mutation_command(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value
             let found = team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| (found.member.clone(), found.sent_at));
             if let Some((member, since)) = found.filter(|(member, _)| !member.is_empty()) {
                 let folder = team.member(&member).and_then(|found| super::dispatcher::member_folder_path(&team, found).ok()).unwrap_or_default();
-                let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder);
+                // The other members' folders are theirs, whenever Zerus made them.
+                let others: Vec<String> = team
+                    .members
+                    .iter()
+                    .filter(|other| other.id != member && other.state != MemberState::Removed)
+                    .filter_map(|other| super::dispatcher::member_folder_path(&team, other).ok())
+                    .chain(std::iter::once(team.folder.clone()))
+                    .filter(|other| !other.is_empty())
+                    .collect();
+                let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder, &others);
                 if note["folders"].as_array().is_some_and(|folders| !folders.is_empty()) {
                     receipt["leftovers"] = note;
                 }

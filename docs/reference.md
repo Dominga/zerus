@@ -90,11 +90,23 @@ unknown reference field.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
-An agent obtains its own reference with `hgs self [--json]`. The caller must run
-inside a live tracked native agent: like an agent-originated send, the binding is
-proven through that agent's process ancestry, never through `HGS_SESSION` alone.
-The reply carries the current name after a rename, the `reference` fields and
-`provider`. It never routes to a peer and refuses `--dry-run`.
+An agent obtains its own reference with `hgs self [--json]`. Terminal agents are
+identified through their native process ancestry, never `HGS_SESSION` alone.
+DeepSeek and OpenCode tool shells already receive their native conversation ID
+as [`DSH_SESSION_ID`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/shell/shell-env/README.md)
+or [`OPENCODE_SESSION_ID`](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/shell.ts).
+Without a proven terminal caller, `self` resolves that claim against the native
+home and a live local binding. Its JSON reply distinguishes `identity_source`
+`process` from `claimed`, includes the durable `session_id`, and supplies
+`parent_identity` with the exact session, run and conversation for parent commands.
+The native lookup uses a derived index with authoritative rereads; its cold
+metadata scan is bounded to 5000 entries, 64 MiB and two seconds, and incomplete
+or ambiguous coverage refuses. A missing, stale, archived or unavailable native
+session refuses too. Current names follow renames. Native hosts need access to
+the same Zerus state/config paths; new OpenCode services retain only those two
+HGS path variables, never HGS session/run identity. `self` never routes to a peer
+and refuses `--dry-run`. Claimed identity never enters send/graph attribution,
+task ownership or permission proof.
 
 `hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
 agents that read, message, wait for, launch or stop other sessions. The text is
@@ -684,20 +696,29 @@ process exit. A live process without verified activity shows **Status unknown**;
 
 A new session that a live tracked agent launches on the same computer is
 that agent's child. Terminal-agent forks also record their launching caller. The launching `hgs` proves its caller by native process
-ancestry, exactly as `hgs self` does, and passes it to the new session as
+ancestry, as the process-proven mode of `hgs self` does, and passes it to the new session as
 `HGS_PARENT`; it always sets the variable, empty when no live agent owns the
 launch, so an inherited or typed value never reaches the record. The new
 session's first record keeps it as `parent`: the parent's machine UUID and
 durable `session_id`, its name, conversation and run as hints, `source`
-(`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
+(`launch`, `adopt`, `manual`, `claimed` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
 Codex, Kimi, DeepSeek and OpenCode sessions can be children and manually chosen
 parents. New DeepSeek and OpenCode bindings record the proven launcher directly,
 before native creation; they never trust an inherited `HGS_PARENT` value.
-DeepSeek and OpenCode agents cannot prove themselves as callers from their
-shared native host, so they cannot adopt sessions or record themselves as the
-parent of sessions they launch. Use an explicit `set` for those relationships.
+DeepSeek and OpenCode agents cannot prove process ownership from their shared
+host. They can explicitly claim a parent identity: `adopt` may also name
+`parent` with an exact `session_id`, `run_id` and `conversation_id` (optional
+name hint). The parent must freshly match a live session on this computer;
+the recorded source is `claimed`, distinct from process-proven `adopt`.
+The same choice is accepted by new `hgs claude/codex/kimi/dsh/opencode` launches
+as `--parent JSON`, for example `--parent "$(hgs self --json | jq -c .parent_identity)"`.
+This explicit choice overrides automatic launcher detection, must still match
+at launch, and never reparents an existing/resumed session. Use `hgs parent`
+for an existing session. The installed help marker is `claimed-parent-v1`;
+explicit peer launches require it. Claimed links are presentation/attention
+metadata like manual links and grant no operation or permission authority.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists

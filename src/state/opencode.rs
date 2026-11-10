@@ -383,7 +383,7 @@ pub(crate) fn launch(
         println!("Create native OpenCode session {name} in {cwd}");
         return Ok(());
     }
-    let parent = parent_link::launcher_link();
+    let parent = parent_link::launcher_link()?;
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
     if storage::label_taken(name) || live()?.contains_key(name) {
@@ -402,6 +402,7 @@ pub(crate) fn launch(
     }
     let existing = PROVIDER.existing_for_launch(name)?;
     let present = existing.is_some();
+    if present && parent_link::claimed_launch() { return Err("--parent applies only to new sessions; use hgs parent adopt for an existing session".into()); }
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }

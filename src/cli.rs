@@ -233,6 +233,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        session-keep-warm-v1
        session-parent-v1
        launch-parent-v1
+       claimed-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] path-info --path <path>   whether a path exists, its kind and size (JSON schema 1); reads no content
@@ -1282,7 +1283,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
                 tag = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
-            "--launch-id" | "--parent-link" => i += 1,
+            "--launch-id" | "--parent-link" | "--parent" => i += 1,
             option if option.starts_with('-') => {}
             name if project.is_empty() => project = name.into(),
             _ => {}
@@ -1889,6 +1890,8 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if matches!(command, "claude" | "codex" | "kimi" | "dsh" | "opencode") && args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*claimed-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to claim a launch parent' >&2; exit 1; fi", platform::join(&remote_args)))
     } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "dsh" | "opencode" | "fork") && machine.is_none())
         .then(state::parent_link::forwarded_argument)
         .flatten()
@@ -1919,6 +1922,7 @@ fn remote_via(
             "path-info" => vec![("hgs [@host] path-info --path", false)],
             "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],
             "guide" => vec![("hgs [@host] guide", false)],
+            "claude" | "codex" | "kimi" | "dsh" | "opencode" if args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") => vec![("claimed-parent-v1", true)],
             _ => vec![],
         };
         if let Some(selected) = selector_markers(command, &args)? {
@@ -2709,6 +2713,10 @@ impl LaunchOptions {
                     state::parent_link::accept_forwarded(link).map_err(|e| Error::new(1, e))?;
                     i += 1;
                 }
+                "--parent" => {
+                    state::parent_link::accept_claimed(require(args, i + 1, "--parent needs a JSON identity")?).map_err(|e| Error::new(1, e))?;
+                    i += 1;
+                }
                 "--launch-id" => {
                     let id =
                         uuid::Uuid::parse_str(require(args, i + 1, "--launch-id needs a UUID")?)
@@ -2923,6 +2931,9 @@ fn launch(
     let mut options = LaunchOptions::parse(args, global_dry)?;
     let (directory, project) = resolve_project(config, command, &options)?;
     let command_name = basename(command);
+    if state::parent_link::claimed_launch() && !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
+        return Err(Error::new(1, "--parent is available for Claude, Codex, Kimi, DeepSeek and OpenCode launches"));
+    }
     if command_name=="opencode" {
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
         if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
@@ -3028,6 +3039,9 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
+        return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
+    }
     if explicit_account
         && (existing || (!options.fresh && binding_exists(config, &session)?))
     {
@@ -3286,9 +3300,9 @@ fn launch(
             ),
             format!("HGS_STATE_DIR={}", config.state.display()),
             format!("HGS_EXECUTABLE={executable}"),
-            // The live agent that runs this launch, proven by its process
-            // ancestry; empty otherwise (zerus-sa9qn.2).
-            format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value()),
+            // An explicit live parent claim, otherwise the process-proven
+            // launcher; empty without either (zerus-sa9qn.2, zerus-cgl5w).
+            format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value().map_err(|e| Error::new(1, e))?),
             "HGS_RESUME_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),
             "HGS_ARCHIVE_ID=".into(),

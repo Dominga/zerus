@@ -474,9 +474,10 @@ pub(crate) fn launch(
         println!("Create official dsh session {name} in {cwd}");
         return Ok(());
     }
-    let parent = parent_link::launcher_link();
+    let parent = parent_link::launcher_link()?;
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
     if let Some(mut record) = PROVIDER.existing_for_launch(name)? {
+        if parent_link::claimed_launch() { return Err("--parent applies only to new sessions; use hgs parent adopt for an existing session".into()); }
         if new_only {
             return Err("This DeepSeek session name already exists".into());
         }
@@ -537,8 +538,11 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
 /// The host's existing list RPC and its generation semantics are unchanged.
 pub(super) fn snapshot(name: &str) -> Result<Value> {
     let record = binding(name)?;
-    let list = rpc(&record, "list", json!({})).unwrap_or(Value::Null);
-    Ok(snapshot_from(&record, &list))
+    snapshot_record(&record)
+}
+pub(super) fn snapshot_record(record: &Value) -> Result<Value> {
+    let list = rpc(record, "list", json!({})).unwrap_or(Value::Null);
+    Ok(snapshot_from(record, &list))
 }
 
 fn snapshot_from(record: &Value, list: &Value) -> Value {

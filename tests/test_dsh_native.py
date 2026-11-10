@@ -16,6 +16,7 @@ import time
 import unittest
 import uuid
 import signal
+import shlex
 import sys
 import urllib.request
 import http.cookiejar
@@ -153,6 +154,41 @@ class NativeHarness(unittest.TestCase):
     def payload(self, binding, **fields):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **fields}
+
+    def test_native_shell_self_and_explicit_child_parent_are_claimed(self):
+        parent = self.create(permissionMode='bypass')
+        tag = 'claimed-' + uuid.uuid4().hex[:8]
+        output = self.workspace / (tag + '.json')
+        script = ('import json,subprocess;from pathlib import Path;'
+                  f'identity=json.loads(subprocess.check_output({[str(HGS),"self","--json"]!r},text=True));'
+                  f'Path({str(output)!r}).write_text(json.dumps(identity));'
+                  f'subprocess.run({[str(HGS),"dsh",str(self.workspace),"--new","-n",tag,"-d","--parent"]!r}+'
+                  '[json.dumps(identity["parent_identity"])],check=True)')
+        command = shlex.join([sys.executable, '-c', script])
+        self.cli('send', parent, self.payload(parent,text='HGS_SELF_NATIVE_FIXTURE '+command))
+        def finished():
+            if not output.exists():
+                return None
+            return next((json.loads(p.read_text()) for p in (self.state/'dsh/bindings').glob('*.json')
+                         if json.loads(p.read_text())['name'].endswith('/'+tag)), None)
+        child = self.wait(finished,timeout=30)
+        identity = json.loads(output.read_text())
+        self.assertEqual(identity['provider'],'dsh')
+        self.assertEqual(identity['identity_source'],'claimed')
+        self.assertEqual(identity['session_id'],parent['session_id'])
+        self.assertEqual(identity['conversation_id'],parent['conversation_id'])
+        self.assertEqual(child['parent']['source'],'claimed')
+        self.assertEqual(child['parent']['session_id'],parent['session_id'])
+        expected = dict(expected_run_id=child['run_id'],expected_conversation_id=child['conversation_id'])
+        for action in ('clear','adopt'):
+            request = dict(expected,action=action)
+            if action=='adopt':
+                request['parent']=identity['parent_identity']
+            result = subprocess.run([str(HGS),'parent',child['name'],'--json'],env=self.env,input=json.dumps(request),
+                text=True,capture_output=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr)
+            if action=='adopt':
+                self.assertEqual(json.loads(result.stdout)['parent']['source'],'claimed')
 
     def test_new_launch_records_parent_and_resume_keeps_identity_without_readopting(self):
         # This entire host, native home, state and proven caller are fixture-owned.

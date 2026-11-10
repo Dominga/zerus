@@ -36,6 +36,13 @@ class Adapter extends LlmAdapter {
     }
     if (text.includes('PROVIDER_CAPACITY_FIXTURE')) throw Object.assign(new Error('Selected model is at capacity. Please try a different model.'), {code:'model_capacity'});
     const last = options.messages.at(-1);
+    if (text.startsWith('HGS_SELF_NATIVE_FIXTURE ') && last?.role !== 'tool') {
+      const args=JSON.stringify({command:text.slice('HGS_SELF_NATIVE_FIXTURE '.length),description:'Read fixture native identity and launch a child'});
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'tool-call-delta',index:0,id:'self-call',name:'bash',argumentsDelta:args};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'self-call',name:'bash',arguments:args}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};return;
+    }
     if ((text.includes('SHELL_BACKGROUND_FIXTURE') || text.includes('SHELL_FOREGROUND_FIXTURE')) && last?.role !== 'tool') {
       const background=text.includes('SHELL_BACKGROUND_FIXTURE');
       const args=JSON.stringify({command:background?"printf 'independent-output\\n'; sleep 30":"printf 'foreground-output\\n'; exit 7",description:'Shell process test',run_in_background:background});

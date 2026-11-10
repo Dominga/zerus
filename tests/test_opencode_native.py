@@ -21,6 +21,8 @@ import random
 import re
 import shutil
 import signal
+import shlex
+import sys
 import socket
 import string
 import subprocess
@@ -128,7 +130,9 @@ class Model(http.server.BaseHTTPRequestHandler):
         tool = None
         # Only an agent turn offers tools; a turn that just received a tool result replies.
         if tools and not any(m.get('role') == 'tool' for m in messages[-2:]):
-            if 'HOLD_NATIVE' in last_user:
+            if last_user.startswith('HGS_SELF_NATIVE_FIXTURE '):
+                tool = ('shell', {'command':last_user.removeprefix('HGS_SELF_NATIVE_FIXTURE '),'description':'Read fixture identity and launch a child'})
+            elif 'HOLD_NATIVE' in last_user:
                 self.server.holding.set()
                 self.server.release.wait(60)
             elif 'QUESTION_NATIVE' in last_user:
@@ -370,6 +374,44 @@ class OpenCodeNative(unittest.TestCase):
         tag = uuid.uuid4().hex[:10]
         self.launch(tag, '--model', 'fixture/local', *options)
         return self.hgs(['inspect', f'opencode/workspace/{tag}'])
+
+    def test_native_shell_self_and_explicit_child_parent_are_claimed(self):
+        parent = self.create()
+        tag = 'claimed-' + uuid.uuid4().hex[:8]
+        output = self.workspace / (tag + '.json')
+        script = ('import json,subprocess;from pathlib import Path;'
+                  f'identity=json.loads(subprocess.check_output({[str(HGS),"self","--json"]!r},text=True));'
+                  f'Path({str(output)!r}).write_text(json.dumps(identity));'
+                  f'subprocess.run({[str(HGS),"opencode",str(self.workspace),"--new","-n",tag,"-d","--parent"]!r}+'
+                  '[json.dumps(identity["parent_identity"])],check=True)')
+        self.hgs(['send',parent['name'],'--json'],self.payload(parent,text='HGS_SELF_NATIVE_FIXTURE '+shlex.join([sys.executable,'-c',script])))
+        pending = self.wait(parent['name'],lambda v:v['pending_questions'])
+        [card] = pending['pending_questions']
+        self.assertEqual(card['kind'],'opencode_permission')
+        self.hgs(['answer',parent['name'],'--json'],self.payload(parent,question_id=card['question_id'],
+            expected_question_hash=card['question_hash'],answers=[{'question_id':'permission','selected_option_ids':['once'],'text':''}]))
+        end = time.monotonic()+40
+        binding = self.binding_path(f'opencode/workspace/{tag}')
+        while time.monotonic()<end and not binding.exists():
+            time.sleep(.1)
+        if not binding.exists():
+            observed = self.hgs(['inspect', parent['name']])
+            trace = [{k:e.get(k) for k in ('type','tool','detail')} for e in observed.get('events',[])[-5:]]
+            self.fail('native shell did not create its fixture child: '+json.dumps({
+                'output_exists':output.exists(),'phase':observed.get('phase'),'events':trace,
+                'model_requests':self.model.requests[-2:]} )[:8000])
+        identity = json.loads(output.read_text())
+        self.assertEqual(identity['provider'],'opencode')
+        child = json.loads(binding.read_text())
+        self.assertEqual(identity['identity_source'],'claimed')
+        self.assertEqual(identity['session_id'],parent['session_id'])
+        self.assertEqual(identity['conversation_id'],parent['conversation_id'])
+        self.assertEqual(child['parent']['source'],'claimed')
+        self.assertEqual(child['parent']['session_id'],parent['session_id'])
+        expected = dict(expected_run_id=child['run_id'],expected_conversation_id=child['conversation_id'])
+        self.assertIsNone(self.hgs(['parent',child['name'],'--json'],dict(expected,action='clear'))['parent'])
+        adopted = self.hgs(['parent',child['name'],'--json'],dict(expected,action='adopt',parent=identity['parent_identity']))
+        self.assertEqual(adopted['parent']['source'],'claimed')
 
     def payload(self, binding, **extra):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],

@@ -998,3 +998,67 @@ fn context_writes_per_minute_over_a_scripted_hour() {
         assert!(saved.member("dev").unwrap().context.unwrap().percent >= 58, "dev's figure follows its growth");
     });
 }
+
+/// Task #3 (team ede724c4): four members due for a context read. Each read is
+/// an `hgs inspect` of up to 10 s; the tick starts them side by side on
+/// threads of their own and returns at once, and the next tick's sampling
+/// records what they read. Before, the tick ran them one after another.
+#[test]
+fn four_context_reads_run_side_by_side_and_the_tick_does_not_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.id = uuid::Uuid::new_v4().to_string();
+        with_context(&mut t, "dev", "");
+        with_context(&mut t, "qa", "");
+        let mut doc = t.member("dev").unwrap().clone();
+        doc.id = "doc".into();
+        doc.session = Some(SessionRef { name: "codex/x/doc".into(), run_id: "r1".into(), conversation_id: "c1".into(), ..Default::default() });
+        t.members.push(doc);
+        stored(&mut store, &t);
+        let (running, most, reads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (now_running, peak, count) = (running.clone(), most.clone(), reads.clone());
+        super::set_context_reader(&t.id, Some(Arc::new(move |_member: &Member, at: f64| {
+            let inside = now_running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(inside, Ordering::SeqCst);
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+            now_running.fetch_sub(1, Ordering::SeqCst);
+            Some(MemberContext::of(300_000, 1_000_000, at))
+        })));
+        let listed = vec![
+            session("claude/x/lead", "r0", true),
+            session("codex/x/dev", "r1", true),
+            session("codex/x/qa", "r1", true),
+            session("codex/x/doc", "r1", true),
+        ];
+        let teams = vec![store.load(&t.id).unwrap().unwrap()];
+        let at = crate::state::now();
+        let started = Instant::now();
+        super::sample_contexts(&mut store, &teams, &listed, at);
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(400), "the tick waited {took:?} for the reads");
+        // A sampling while they run starts no second read of the same member.
+        super::sample_contexts(&mut store, &teams, &listed, at + 1.0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ["lead", "dev", "qa", "doc"].iter().any(|member| super::context_in_flight(&t.id, member)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 4, "one read per member");
+        assert_eq!(most.load(Ordering::SeqCst), 4, "the four reads ran side by side, not in sequence");
+        // Nothing was recorded by the tick that started them ...
+        let before = store.load(&t.id).unwrap().unwrap();
+        assert!(before.members.iter().all(|member| member.context.is_none()), "recorded only by a later sampling");
+        // ... the next sampling records every reading and starts none again.
+        super::sample_contexts(&mut store, &teams, &listed, at + 3.0);
+        let after = store.load(&t.id).unwrap().unwrap();
+        for id in ["lead", "dev", "qa", "doc"] {
+            assert_eq!(after.member(id).unwrap().context.map(|context| context.percent), Some(30), "{id}");
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+        super::set_context_reader(&t.id, None);
+    });
+}

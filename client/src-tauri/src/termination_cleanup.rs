@@ -1511,7 +1511,6 @@ fn check_with_runtime(
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_json::Value {
     assert!(stopped.reviewable_refusal());
-    let program = program_pipeline::ProgramJob::Stopped(Box::new(stopped));
     let mut entry = Entry::terminated(
         "studio",
         "studio",
@@ -1522,24 +1521,29 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
     )
     .unwrap();
     entry.machine = "11111111-1111-4111-8111-111111111111".into();
-    entry.offline = true;
+    // Online: Check again really reviews the folder (zerus-1y897.3).
+    entry.offline = false;
     entry.status = Some(Status::Kept);
     let state = TerminationCleanup::default();
-    lock(&state.0.model).jobs.push_back(Job {
+    // The program path's own job, published through production record_stop
+    // (zerus-1y897.3): a known refusal must leave a retained cleanup.
+    let mut job = Job {
         id: "job".into(),
-        cleanup: Cleanup::retained(vec![entry]),
-        busy: false,
-        phase: "checking",
+        cleanup: Cleanup::after_termination(vec![entry]),
+        busy: true,
+        phase: "stopping",
         manual_review: false,
         dismissed: false,
-        program_review_pending: false,
+        program_review_pending: true,
         program_retirement: None,
         source: None,
         archive: None,
         restore_supported: true,
-        programs: Some(program),
+        programs: None,
         reservation: None,
-    });
+    };
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    lock(&state.0.model).jobs.push_back(job);
     let projection = lock(&state.0.model).view();
     assert!(projection.rows[0].can_check);
     assert!(!projection.rows[0].ready);
@@ -1556,11 +1560,14 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
                 } => {
                     let mut model = lock(&inner.model);
                     let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
-                    step = job.cleanup.reviewed(
-                        &host,
-                        &common_dir,
-                        Err("offline synthetic review".into()),
-                    );
+                    // A fresh review that finds the folder ready to remove.
+                    let review = json!({"state": "ok", "common_dir": "/home/example/repo/.git",
+                        "worktrees": [{"kind": "linked", "verdict": "ready", "path": "/home/example/repo-work-1",
+                        "fingerprint": "f1", "ownership_id": "owner-1", "zerus_owned": true,
+                        "archive_restore_ready": true, "reasons": [], "changes": 0, "untracked": 0,
+                        "disk_complete": true, "ignored_complete": true, "ignored_count": 0,
+                        "integration": {"kind": "ancestor", "base": "main"}, "merged": true}]});
+                    step = job.cleanup.reviewed(&host, &common_dir, Ok(&review));
                 }
                 Step::Remove { .. } => panic!("Check again must not remove"),
                 Step::Idle | Step::Done => {
@@ -1575,8 +1582,16 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
     assert!(!checked.rows[0].can_force);
     let settled = lock(&state.0.model).view();
     assert!(!settled.busy);
+    // No automatic removal is pending and the explicit one stays available.
+    let mut cleanup = lock(&state.0.model).jobs[0].cleanup.clone();
+    assert!(!cleanup.busy(), "Check again left the Core cleanup running");
+    assert!(
+        matches!(cleanup.remove(Default::default()), Step::Remove { .. }),
+        "explicit removal must stay available after the fresh review"
+    );
     assert!(settled.rows[0].can_check);
-    assert!(!settled.rows[0].ready);
+    // The ready folder is offered for the user's explicit Remove only.
+    assert!(settled.rows[0].ready);
     assert!(!settled.rows[0].can_force);
     serialized
 }

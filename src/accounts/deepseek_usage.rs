@@ -7,7 +7,7 @@
 //! than the window are dropped, so the index and its projection stay bounded.
 use super::*;
 use chrono::{Local, NaiveDate};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Days kept and projected, today included: always covers the current month.
 const WINDOW_DAYS: i64 = 31;
@@ -138,15 +138,42 @@ fn nanos(time: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
+/// What one refresh may still read. The identity head checks and the reader
+/// share it, so a first refresh of many logs stays within the stated bounds.
+struct Budget {
+    bytes: u64,
+    deadline: Instant,
+}
+
+impl Budget {
+    /// Takes `bytes` if they and the time remain.
+    fn take(&mut self, bytes: u64) -> bool {
+        if self.bytes < bytes || Instant::now() >= self.deadline {
+            return false;
+        }
+        self.bytes -= bytes;
+        true
+    }
+
+    fn millis_left(&self) -> u64 {
+        self.deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u64::MAX as u128) as u64
+    }
+}
+
 /// Brings `index` up to date with the logs on disk and returns the logs to read
-/// next, newest first. Logs last written before `window_start` are left out.
+/// next, newest first, and whether a log's identity check waits for a later
+/// refresh. Logs last written before `window_start` are left out. A log whose
+/// check is deferred keeps its previous counts; a new one is not yet indexed.
 fn plan(
     index: &mut Index,
     found: Vec<(String, PathBuf)>,
     window_start: SystemTime,
-) -> Vec<(String, PathBuf)> {
-    let mut files = BTreeMap::new();
-    let mut work = Vec::new();
+    budget: &mut Budget,
+) -> (Vec<(String, PathBuf)>, bool) {
+    let mut logs = Vec::new();
     for (key, path) in found {
         let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
@@ -154,34 +181,58 @@ fn plan(
         let Ok(modified) = meta.modified() else {
             continue;
         };
-        if !meta.is_file() || modified < window_start {
-            continue;
+        if meta.is_file() && modified >= window_start {
+            let (dev, ino) = identity(&meta);
+            logs.push((nanos(modified), meta.len(), dev, ino, key, path));
         }
-        let (dev, ino) = identity(&meta);
-        let (size, mtime) = (meta.len(), nanos(modified));
+    }
+    // The newest logs get the budget first.
+    logs.sort_by_key(|log| std::cmp::Reverse(log.0));
+    let mut files = BTreeMap::new();
+    let mut work = Vec::new();
+    let mut deferred = false;
+    for (mtime, size, dev, ino, key, path) in logs {
         let previous = index.files.remove(&key);
         let unchanged = previous
             .as_ref()
             .is_some_and(|e| e.dev == dev && e.ino == ino && e.size == size && e.mtime == mtime);
         let mut entry = match previous {
             Some(e) if unchanged => e,
-            // Grown in place: the same inode and the same first bytes.
-            Some(e)
-                if e.dev == dev
-                    && e.ino == ino
-                    && size >= e.offset
-                    && size >= e.head_len
-                    && head(&path, e.head_len).as_ref() == Some(&e.head) =>
-            {
-                e
+            previous => {
+                // Grown in place: the same inode and the same first bytes.
+                let same = previous.as_ref().filter(|e| {
+                    e.dev == dev && e.ino == ino && size >= e.offset && size >= e.head_len
+                });
+                let grown = match same {
+                    Some(e) if !budget.take(e.head_len) => {
+                        deferred = true;
+                        files.insert(key, e.clone());
+                        continue;
+                    }
+                    Some(e) => head(&path, e.head_len).as_ref() == Some(&e.head),
+                    None => false,
+                };
+                match previous {
+                    Some(e) if grown => e,
+                    previous => {
+                        let head_len = size.min(HEAD_BYTES);
+                        if !budget.take(head_len) {
+                            deferred = true;
+                            if let Some(e) = previous {
+                                files.insert(key, e);
+                            }
+                            continue;
+                        }
+                        Entry {
+                            dev,
+                            ino,
+                            head_len,
+                            head: head(&path, head_len).unwrap_or_default(),
+                            ..Entry::default()
+                        }
+                    }
+                }
             }
-            _ => Entry {
-                dev,
-                ino,
-                head_len: size.min(HEAD_BYTES),
-                head: head(&path, size.min(HEAD_BYTES)).unwrap_or_default(),
-                ..Entry::default()
-            },
         };
         if !unchanged {
             entry.size = size;
@@ -189,17 +240,13 @@ fn plan(
             entry.done = false;
             entry.failed = false;
         }
-        if !entry.done && !entry.failed {
-            work.push((mtime, key.clone(), path));
+        if !entry.done && !entry.failed && work.len() < BATCH_LIMIT {
+            work.push((key.clone(), path));
         }
         files.insert(key, entry);
     }
     index.files = files;
-    work.sort_by_key(|w| std::cmp::Reverse(w.0));
-    work.into_iter()
-        .take(BATCH_LIMIT)
-        .map(|(_, key, path)| (key, path))
-        .collect()
+    (work, deferred)
 }
 
 /// Applies the reader's results: appended counts add up, a fork's cut replaces
@@ -259,7 +306,10 @@ fn apply(index: &mut Index, results: &Value) {
 }
 
 /// Totals per day, newest first, with each day's busiest models.
-fn project(index: &Index, today: &str, since: &str, partial: bool) -> Value {
+/// `reading`: some logs wait for a later refresh, so totals may grow.
+/// Unreadable logs are set aside until they change; their requests are not counted.
+fn project(index: &Index, today: &str, since: &str, reading: bool) -> Value {
+    let unreadable = index.files.values().filter(|e| e.failed).count();
     let mut totals: BTreeMap<&str, BTreeMap<&str, Counts>> = BTreeMap::new();
     for entry in index.files.values() {
         for (day, models) in entry.days.range(since.to_owned()..) {
@@ -294,7 +344,7 @@ fn project(index: &Index, today: &str, since: &str, partial: bool) -> Value {
             json!({"day":day,"models":models})
         })
         .collect();
-    json!({"today":today,"partial":partial,"days":days})
+    json!({"today":today,"partial":reading || unreadable > 0,"reading":reading,"unreadable":unreadable,"days":days})
 }
 
 /// Refreshes the index of `home`'s session logs and returns the projection, or
@@ -303,7 +353,11 @@ pub(super) fn refresh(config: &Config, id: &str, home: &Path) -> Option<Value> {
     refresh_within(config, id, home, READ_BYTES)
 }
 
-fn refresh_within(config: &Config, id: &str, home: &Path, budget: u64) -> Option<Value> {
+fn refresh_within(config: &Config, id: &str, home: &Path, bytes: u64) -> Option<Value> {
+    let mut budget = Budget {
+        bytes,
+        deadline: Instant::now() + Duration::from_millis(READ_MS),
+    };
     let sessions = home.join("sessions");
     if !fs::symlink_metadata(&sessions).ok()?.is_dir() {
         return None;
@@ -338,24 +392,28 @@ fn refresh_within(config: &Config, id: &str, home: &Path, budget: u64) -> Option
     };
     let mut index = read(&path);
     let (found, truncated) = logs(&sessions);
-    let work = plan(&mut index, found, window_start);
-    if !work.is_empty() {
+    let (work, deferred) = plan(&mut index, found, window_start, &mut budget);
+    let millis = budget.millis_left();
+    if !work.is_empty() && budget.bytes > 0 && millis > 0 {
         let offsets: BTreeMap<&str, u64> = work
             .iter()
             .filter_map(|(key, _)| Some((key.as_str(), index.files.get(key)?.offset)))
             .collect();
-        apply(&mut index, &read_logs(&work, &offsets, &since, budget));
+        apply(
+            &mut index,
+            &read_logs(&work, &offsets, &since, budget.bytes, millis),
+        );
     }
     for entry in index.files.values_mut() {
         entry.days = entry.days.split_off(&since);
     }
     let _ = super::deepseek::write_private(&path, &index);
-    let partial = truncated || index.files.values().any(|e| !e.done && !e.failed);
+    let reading = truncated || deferred || index.files.values().any(|e| !e.done && !e.failed);
     Some(project(
         &index,
         &today.format("%Y-%m-%d").to_string(),
         &since,
-        partial,
+        reading,
     ))
 }
 
@@ -364,7 +422,8 @@ fn read_logs(
     work: &[(String, PathBuf)],
     offsets: &BTreeMap<&str, u64>,
     since: &str,
-    budget: u64,
+    bytes: u64,
+    millis: u64,
 ) -> Value {
     let files: Vec<Value> = work
         .iter()
@@ -376,7 +435,7 @@ fn read_logs(
         "-e",
         include_str!("../dsh/usage-read.mjs"),
     ]);
-    let request = json!({"files":files,"since_day":since,"max_bytes":budget,"max_ms":READ_MS});
+    let request = json!({"files":files,"since_day":since,"max_bytes":bytes,"max_ms":millis});
     super::inspection::capture(command, request.to_string().as_bytes(), 10)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -406,7 +465,11 @@ pub(super) fn public(value: &Value) -> Option<Value> {
             Some(json!({"day":date,"models":models}))
         })
         .collect();
-    Some(json!({"today":today,"partial":value["partial"].as_bool().unwrap_or(false),"days":days}))
+    let partial = value["partial"].as_bool().unwrap_or(false);
+    Some(
+        json!({"today":today,"partial":partial,"reading":value["reading"].as_bool().unwrap_or(partial),
+        "unreadable":value["unreadable"].as_u64().unwrap_or(0),"days":days}),
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -704,14 +767,121 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_log_is_set_aside_until_it_changes() {
+    fn a_malformed_log_is_set_aside_and_reported_until_it_changes() {
         let f = fixture();
         let log = f.log("p", "s", "session.v4.jsonl.zstd");
         append(&log, b"not a zstd frame at all");
         let projection = f.refresh();
+        // Not "still reading": nothing more will come. But the totals are incomplete.
         assert_eq!(
-            (projection["partial"].clone(), projection["days"].clone()),
-            (json!(false), json!([]))
+            (
+                &projection["partial"],
+                &projection["reading"],
+                &projection["unreadable"],
+                &projection["days"]
+            ),
+            (&json!(true), &json!(false), &json!(1), &json!([]))
+        );
+        assert_eq!(public(&projection).unwrap()["unreadable"], 1);
+        // Replaced by a valid log: read again, and no longer reported.
+        fs::remove_file(&log).unwrap();
+        append(
+            &log,
+            &frame(&(header(false) + &message(now_ms(), "deepseek-flash", 1, 1, 1))),
+        );
+        let fixed = f.refresh();
+        assert_eq!(
+            (&fixed["partial"], &fixed["unreadable"]),
+            (&json!(false), &json!(0))
+        );
+        assert_eq!(
+            counts(&fixed, &today(), "deepseek-flash"),
+            Some((1, 1, 1, 1))
+        );
+    }
+
+    #[test]
+    fn a_log_that_turns_malformed_keeps_what_was_read_and_is_reported() {
+        let f = fixture();
+        let log = f.log("p", "s", "session.v4.jsonl.zstd");
+        append(
+            &log,
+            &frame(&(header(false) + &message(now_ms(), "deepseek-flash", 1, 1, 1))),
+        );
+        assert_eq!(f.refresh()["unreadable"], 0);
+        let mut bad = frame(&message(now_ms(), "deepseek-flash", 9, 9, 9));
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff; // a wrong content checksum
+        append(&log, &bad);
+        let projection = f.refresh();
+        assert_eq!(
+            (&projection["partial"], &projection["unreadable"]),
+            (&json!(true), &json!(1))
+        );
+        assert_eq!(
+            counts(&projection, &today(), "deepseek-flash"),
+            Some((1, 1, 1, 1))
+        );
+    }
+
+    #[test]
+    fn identity_head_reads_share_the_refresh_budget() {
+        let f = fixture();
+        let older = f.log("p", "older", "session.v4.jsonl.zstd");
+        append(
+            &older,
+            &frame(&(header(false) + &message(now_ms(), "older-model", 1, 1, 1))),
+        );
+        fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        let newer = f.log("p", "newer", "session.v4.jsonl.zstd");
+        append(
+            &newer,
+            &frame(&(header(false) + &message(now_ms(), "newer-model", 1, 1, 1))),
+        );
+        let path =
+            super::super::deepseek::state_path(&f.config, "account-usage", "native-dsh", &f.home);
+        let index = || super::super::deepseek::read_private::<Index>(&path, INDEX_BYTES).unwrap();
+        // Exactly the newest log's identity check: no bytes remain for the older
+        // log's check or for reading, so the refresh stops there.
+        let budget = fs::metadata(&newer).unwrap().len();
+        let first = refresh_within(&f.config, "native-dsh", &f.home, budget).unwrap();
+        assert_eq!(
+            (&first["partial"], &first["reading"], &first["days"]),
+            (&json!(true), &json!(true), &json!([]))
+        );
+        assert_eq!(
+            index().files.keys().collect::<Vec<_>>(),
+            ["p/newer/session.v4.jsonl.zstd"]
+        );
+        let complete = refresh_within(&f.config, "native-dsh", &f.home, READ_BYTES).unwrap();
+        assert_eq!(
+            (&complete["partial"], &complete["reading"]),
+            (&json!(false), &json!(false))
+        );
+        assert_eq!(
+            counts(&complete, &today(), "older-model"),
+            Some((1, 1, 1, 1))
+        );
+        assert_eq!(
+            counts(&complete, &today(), "newer-model"),
+            Some((1, 1, 1, 1))
+        );
+        // A grown log whose check is deferred keeps its previous counts and says so.
+        append(&newer, &frame(&message(now_ms(), "newer-model", 1, 1, 1)));
+        let deferred = refresh_within(&f.config, "native-dsh", &f.home, 0).unwrap();
+        assert_eq!(deferred["reading"], true);
+        assert_eq!(
+            counts(&deferred, &today(), "newer-model"),
+            Some((1, 1, 1, 1))
+        );
+        assert_eq!(
+            counts(&f.refresh(), &today(), "newer-model"),
+            Some((2, 2, 2, 2))
         );
     }
 
@@ -734,7 +904,12 @@ mod tests {
             &newer,
             &frame(&(header(false) + &message(now_ms(), "newer-model", 1, 1, 1))),
         );
-        let budget = fs::metadata(&newer).unwrap().len();
+        // Both identity checks (each log is shorter than HEAD_BYTES), then the newest log's frames.
+        let (older_len, newer_len) = (
+            fs::metadata(&older).unwrap().len(),
+            fs::metadata(&newer).unwrap().len(),
+        );
+        let budget = older_len + 2 * newer_len;
         let first = refresh_within(&f.config, "native-dsh", &f.home, budget).unwrap();
         assert_eq!(first["partial"], true);
         assert!(counts(&first, &today(), "newer-model").is_some());

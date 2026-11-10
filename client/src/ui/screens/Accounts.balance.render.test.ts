@@ -72,7 +72,7 @@ describe("DeepSeek API-key balance on Accounts", () => {
       spend: { since: 1_792_900_000, today: "2026-11-10", periods: [
         { period: "today", amounts: [{ currency: "USD", spent: "0.14", granted: "0.00" }], top_up: false, gap_from: null },
         { period: "month", amounts: [{ currency: "USD", spent: "1.20", granted: "0.00" }], top_up: false, gap_from: null }] },
-      local_usage: { today: "2026-11-10", partial: true, days: [
+      local_usage: { today: "2026-11-10", partial: true, reading: true, unreadable: 1, days: [
         { day: "2026-11-10", models: [{ model: "deepseek-flash", requests: 172, cache_hit: 16_549_760, cache_miss: 327_667, output: 172_520 }] }] } }));
     const spend = host.querySelector(".acct-usage .acct-spend");
     expect([...spend!.querySelectorAll(".acct-balance")].map((r) => r.textContent)).toEqual(["Spent today$0.14", "Spent this month$1.20"]);
@@ -80,6 +80,7 @@ describe("DeepSeek API-key balance on Accounts", () => {
     const local = host.querySelector(".acct-usage .acct-local");
     expect(local!.querySelector("h4")?.textContent).toBe("This computer's DeepSeek sessions");
     expect(local!.textContent).toContain("Still reading session logs; totals may grow.");
+    expect(local!.textContent).toContain("1 session log(s) could not be read and are not counted.");
     const rows = [...local!.querySelectorAll(".acct-usage-table tbody tr")].map((r) => [...r.children].map((c) => c.textContent));
     expect(rows.slice(0, 4)).toEqual([
       ["Today"], ["deepseek-flash", "172", "16.5M", "327.7K", "172.5K"],

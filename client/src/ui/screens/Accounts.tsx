@@ -18,7 +18,7 @@ import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
 import { balanceCompact, balanceKind, balanceLow, balanceTitle, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
-import { compactCount, exactCount, localUsageGroups, spendNotes, spendRows } from "../lib/deepseek-usage";
+import { compactCount, exactCount, localUsageGroups, localUsageNotes, spendNotes, spendRows } from "../lib/deepseek-usage";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
@@ -165,7 +165,7 @@ function LocalUsageSection(props: { usage: LocalUsage }) {
     <div class="acct-local">
       <h4>{tr("This computer's DeepSeek sessions")}</h4>
       <p class="muted acct-note">{tr("Requests and tokens from session logs on this computer. Other computers and tools are not included.")}</p>
-      <Show when={props.usage.partial}><p class="muted acct-note">{tr("Still reading session logs; totals may grow.")}</p></Show>
+      <For each={localUsageNotes(props.usage)}>{(note) => <p class="muted acct-note">{note}</p>}</For>
       <Show when={groups().month.length} fallback={<p class="muted acct-note">{tr("No requests on this computer this month.")}</p>}>
         <table class="acct-usage-table">
           {head(tr("Model"))}

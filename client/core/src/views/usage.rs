@@ -119,8 +119,12 @@ pub struct DayUsage {
 pub struct LocalUsage {
     /// The computer's local date of "today".
     pub today: String,
-    /// Some session logs are still being read; totals may grow.
+    /// The totals are incomplete: logs wait to be read, or some could not be read.
     pub partial: bool,
+    /// Some session logs wait for a later refresh; totals may grow.
+    pub reading: bool,
+    /// Session logs that could not be read; their requests are not counted.
+    pub unreadable: u64,
     pub days: Vec<DayUsage>,
 }
 
@@ -156,9 +160,16 @@ fn spend(value: &Value) -> Option<Spend> {
 
 fn local_usage(value: &Value) -> Option<LocalUsage> {
     let usage = value.get("local_usage").filter(|u| u.is_object())?;
+    let partial = flag(usage, "partial");
     Some(LocalUsage {
         today: text(usage, "today"),
-        partial: flag(usage, "partial"),
+        partial,
+        // Before hgs reported unreadable logs separately, partial meant reading.
+        reading: usage
+            .get("reading")
+            .and_then(Value::as_bool)
+            .unwrap_or(partial),
+        unreadable: whole(usage, "unreadable").unwrap_or(0),
         days: items(usage, "days")
             .iter()
             .take(USAGE_DAYS)
@@ -516,7 +527,22 @@ mod tests {
             }
         );
         let local = u.local_usage.unwrap();
-        assert!(local.partial);
+        assert!(
+            local.partial && local.reading,
+            "an older hgs's partial means still reading"
+        );
+        assert_eq!(local.unreadable, 0);
+        let unreadable = usage(&json!({"local_usage": {"today": "2026-11-10", "partial": true, "reading": false, "unreadable": 2, "days": []}}))
+            .local_usage
+            .unwrap();
+        assert_eq!(
+            (
+                unreadable.partial,
+                unreadable.reading,
+                unreadable.unreadable
+            ),
+            (true, false, 2)
+        );
         assert_eq!(local.days.len(), USAGE_DAYS);
         assert_eq!(local.days[0].models.len(), USAGE_MODELS);
         assert_eq!(

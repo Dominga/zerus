@@ -558,7 +558,8 @@ export interface SpendPeriod { period: string; amounts: SpendAmount[]; top_up: b
 export interface Spend { since: number; today: string; periods: SpendPeriod[] }
 export interface ModelUsage { model: string; requests: number; cache_hit: number; cache_miss: number; output: number }
 export interface DayUsage { day: string; models: ModelUsage[] }
-export interface LocalUsage { today: string; partial: boolean; days: DayUsage[] }
+/** `partial`: the totals are incomplete. `reading`: logs wait for a later refresh. `unreadable`: logs set aside, not counted. */
+export interface LocalUsage { today: string; partial: boolean; reading: boolean; unreadable: number; days: DayUsage[] }
 export interface SessionUsageRef { host: ComputerId; name: string; run_id: string }
 export const emptyUsage = (provider = ""): Usage => ({
   status: "loading", provider, label: "", auth_status: "", checked_at: null, seeded: false,

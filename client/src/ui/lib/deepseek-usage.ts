@@ -46,6 +46,14 @@ const dateOf = (day: string) => {
   return new Date(y, (m || 1) - 1, d || 1);
 };
 
+/** Why the session totals may be incomplete: logs still to read, or logs that could not be read. */
+export function localUsageNotes(usage: LocalUsage) {
+  const notes: string[] = [];
+  if (usage.reading) notes.push(tr("Still reading session logs; totals may grow."));
+  if (usage.unreadable > 0) notes.push(tr("%n session log(s) could not be read and are not counted.", usage.unreadable));
+  return notes;
+}
+
 /** Today's and this month's per-model totals, and each recorded day's totals, newest first. */
 export function localUsageGroups(usage: LocalUsage) {
   const month = usage.today.slice(0, 7);

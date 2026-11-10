@@ -5260,8 +5260,12 @@ per model. It shows today, this month and each of the last 31 days, from this
 computer's native session logs (`DSH_HOME/sessions`). hgs only reads these logs:
 - A private index (`account-usage/`) remembers each log's identity, size,
   modification time and last complete Zstandard frame. A refresh reads only
-  appended frames, newest logs first, within 32 MiB and 2.5 seconds. The rest
-  follows on later refreshes, and meanwhile the panel says totals may grow.
+  appended frames, newest logs first, within 32 MiB and 2.5 seconds. That budget
+  also covers the identity check (up to 4 KiB per new or changed log). The rest
+  follows on later refreshes, and meanwhile the panel says totals may grow. A
+  log whose check waits keeps its previous counts.
+- A malformed or unreadable log is set aside until it changes. The panel says
+  how many logs could not be read and are not counted.
 - A forked session counts only after its inherited prefix (`session/end-seed`
   with `inherited: true`). Only each session's current format generation
   counts, and a replaced or shortened log is read again from its start.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactCount, exactCount, localUsageGroups, spendNotes, spendRows } from "./deepseek-usage";
+import { compactCount, exactCount, localUsageGroups, localUsageNotes, spendNotes, spendRows } from "./deepseek-usage";
 import { dayTime } from "./usage";
 import type { LocalUsage, Spend } from "../../types";
 
@@ -40,7 +40,7 @@ describe("DeepSeek spend from balance readings", () => {
 
 describe("this computer's DeepSeek session usage", () => {
   const usage: LocalUsage = {
-    today: "2026-11-10", partial: false,
+    today: "2026-11-10", partial: false, reading: false, unreadable: 0,
     days: [
       { day: "2026-11-10", models: [{ model: "deepseek-flash", requests: 172, cache_hit: 16_549_760, cache_miss: 327_667, output: 172_520 }] },
       { day: "2026-11-02", models: [{ model: "deepseek-v4-pro", requests: 200, cache_hit: 10, cache_miss: 2, output: 1 }, { model: "deepseek-flash", requests: 8, cache_hit: 40, cache_miss: 3, output: 2 }] },
@@ -57,6 +57,13 @@ describe("this computer's DeepSeek session usage", () => {
     ]);
     expect(groups.days.map((d) => [d.model, d.requests])).toEqual([["10 Nov", 172], ["2 Nov", 208], ["30 Oct", 1]]);
     expect(localUsageGroups({ ...usage, days: usage.days.slice(1) }).today).toEqual([]);
+  });
+
+  it("says when logs are still being read or could not be read", () => {
+    expect(localUsageNotes(usage)).toEqual([]);
+    expect(localUsageNotes({ ...usage, partial: true, reading: true })).toEqual(["Still reading session logs; totals may grow."]);
+    expect(localUsageNotes({ ...usage, partial: true, unreadable: 2 })).toEqual(["2 session log(s) could not be read and are not counted."]);
+    expect(localUsageNotes({ ...usage, partial: true, reading: true, unreadable: 1 })).toHaveLength(2);
   });
 
   it("writes large counts compactly and exactly", () => {

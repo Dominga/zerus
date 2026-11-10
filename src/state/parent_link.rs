@@ -367,22 +367,27 @@ fn claimed_parent(choice: &Choice) -> Result<Value> {
     Ok(current)
 }
 
+/// How long a claim check waits for a native host (zerus-p24ce): hgs self,
+/// adopt and --parent run in an agent's tool shell and must not stall there.
+pub(super) const CLAIM_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// A host that did not answer the claim check in time. Never treated as live.
+pub(super) const CLAIM_BUSY: &str = "The native host did not confirm the claimed parent within 2 seconds; it may be busy. Retry when it answers";
+
 fn require_live(record: &Value) -> Result<()> {
-    if !string(record, "archive_id").is_empty() || record["state"] == "archived" || record["rename_shadow"] == true {
+    if !string(record, "archive_id").is_empty()
+        || record["state"] == "archived"
+        || record["rename_shadow"] == true
+    {
         return Err("A claimed parent must be a live session on this computer".into());
     }
     let live = match string(record, "backend") {
-        "dsh" => {
-            let row = dsh::snapshot_record(record)?;
-            row["state"] == "running" && row["process_state"] == "running"
-        }
-        "opencode" => {
-            let (row, _) = opencode::notification_snapshot(record)?;
-            row["state"] == "running" && row["process_state"] == "running"
-        }
+        "dsh" => dsh::claim_live(record, CLAIM_WAIT)?,
+        "opencode" => opencode::claim_live(record, CLAIM_WAIT)?,
         _ => process_alive(record) && terminal_live(&live_sessions()?.0, record)?,
     };
-    if !live { return Err("A claimed parent must be a live session on this computer".into()); }
+    if !live {
+        return Err("A claimed parent must be a live session on this computer".into());
+    }
     Ok(())
 }
 
@@ -685,6 +690,176 @@ mod tests {
         // This fixture runs alone in its own process.
         std::env::set_var(ENV, link().to_string());
         assert!(launcher_link().unwrap().is_none());
+    }
+
+    fn isolated(fixture: &str) {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("state::parent_link::tests::{fixture}"),
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("HGS_CONFIG_DIR", state.path().join("config"))
+            .env("XDG_STATE_HOME", state.path().join("xdg"))
+            .env("ZERUS_CLAIMED_PARENT_FIXTURE", "1")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn claim_record(name: &str, conversation: &str, home: &Path) -> Value {
+        json!({"backend":"dsh","agent":"dsh","name":name,"session_id":uuid::Uuid::new_v4().to_string(),
+            "run_id":"run-claim","conversation_id":conversation,"agent_home":home})
+    }
+
+    #[test]
+    fn a_warm_native_identity_index_sees_bindings_written_outside_save() {
+        isolated("warm_index_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn warm_index_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-zww71: a warm native-identity index stays warm through hgs's
+        // own writes but never hides a binding written outside Provider::save.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("cache-home");
+        let native = "session-cache";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let ledger = || -> Value {
+            serde_json::from_slice(
+                &fs::read(root().join("native-identities/dsh-writes.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut other = claim_record("dsh/example/other", "session-other", &home);
+        {
+            // While the provider lock is held a cold scan is refused as busy,
+            // so these lookups prove the warm index answered.
+            let _held = lock(Some(&root().join("dsh").join("bindings.lock"))).unwrap();
+            let accounted = ledger();
+            provider.save(&mut other).unwrap();
+            // hgs accounts for its own write: nothing is left unaccounted.
+            assert_ne!(ledger()["stamp"], accounted["stamp"]);
+            assert_eq!(
+                (ledger()["epoch"].clone(), ledger()["dirty_since"].clone()),
+                (accounted["epoch"].clone(), Value::Null)
+            );
+            assert_eq!(
+                provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+                first["session_id"]
+            );
+        }
+        // An older hgs or a guarded rename writes a binding without noting it.
+        let foreign = claim_record("dsh/example/foreign", native, &home);
+        atomic(
+            &provider.label_path("dsh/example/foreign"),
+            &foreign.to_string(),
+        )
+        .unwrap();
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "a foreign duplicate is ambiguous, not the cached session"
+        );
+        // A later write of hgs's own does not account for the foreign one.
+        provider.save(&mut other).unwrap();
+        assert!(
+            ledger()["dirty_since"].is_u64(),
+            "the foreign write stays unaccounted"
+        );
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "still ambiguous after an own write"
+        );
+        fs::remove_file(provider.label_path("dsh/example/foreign")).unwrap();
+        // An unreadable unrelated binding holds no session: the warm index
+        // still answers, without a scan (the provider lock is held).
+        fs::write(provider.label_path("dsh/example/broken"), "{broken").unwrap();
+        let _held = lock(Some(&root().join("dsh").join("bindings.lock"))).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_native_host_refuses_a_claim_quickly() {
+        isolated("busy_host_fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn busy_host_fixture() {
+        use sha2::Digest;
+        use std::time::{Duration, Instant};
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-p24ce: a host that accepts the claim check but never answers
+        // is refused as busy within the claim bound, never treated as live.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("busy-home");
+        let mut parent = claim_record("dsh/example/parent", "session-parent", &home);
+        provider.save(&mut parent).unwrap();
+        let choice = Choice {
+            session_id: string(&parent, "session_id").into(),
+            name: string(&parent, "name").into(),
+            run_id: string(&parent, "run_id").into(),
+            conversation_id: string(&parent, "conversation_id").into(),
+        };
+        let hosts = root().join("dsh/hosts").join(
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(home.to_string_lossy().as_bytes())
+            )[..16],
+        );
+        fs::create_dir_all(&hosts).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(hosts.join("host.sock")).unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let started = Instant::now();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?} {error}",
+            started.elapsed()
+        );
+        assert!(error.contains("did not confirm"), "{error}");
+        // No host at all: definitively not live, at once.
+        fs::remove_file(hosts.join("host.sock")).unwrap();
+        let started = Instant::now();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(error.contains("must be a live session"), "{error}");
     }
 
     #[test]

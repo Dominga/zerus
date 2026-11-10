@@ -710,8 +710,14 @@ as `--parent JSON`, for example `--parent "$(hgs self --json | jq -c .parent_ide
 This explicit choice overrides automatic launcher detection, must still match
 at launch, and never reparents an existing/resumed session. Use `hgs parent`
 for an existing session. The installed help marker is `claimed-parent-v1`;
-explicit peer launches require it. Claimed links are presentation/attention
-metadata like manual links and grant no operation or permission authority.
+explicit peer launches require it. The selected computer checks the claim
+against its own sessions, so the claimed parent must be live there: a claim
+copied from an agent on another computer (`hgs @peer dsh … --parent "$(hgs self
+…)"`) is refused and nothing is recorded. `hgs self` never routes to a peer.
+A DeepSeek or OpenCode parent must confirm it is live within 2 seconds; a host
+that has not answered by then is refused as busy, never counted as live.
+Claimed links are presentation/attention metadata like manual links and grant
+no operation or permission authority.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists

@@ -540,9 +540,28 @@ pub(super) fn snapshot(name: &str) -> Result<Value> {
     let record = binding(name)?;
     snapshot_record(&record)
 }
-pub(super) fn snapshot_record(record: &Value) -> Result<Value> {
+fn snapshot_record(record: &Value) -> Result<Value> {
     let list = rpc(record, "list", json!({})).unwrap_or(Value::Null);
     Ok(snapshot_from(record, &list))
+}
+/// Whether a claimed parent runs now, asking the host for at most `limit`.
+/// No host is a definite no; a host that has not answered by then is busy,
+/// never live.
+#[cfg(unix)]
+pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
+    let started = std::time::Instant::now();
+    match rpc_within(record, "list", json!({}), limit) {
+        Ok(list) => {
+            let row = snapshot_from(record, &list);
+            Ok(row["state"] == "running" && row["process_state"] == "running")
+        }
+        Err(_) if started.elapsed() >= limit => Err(parent_link::CLAIM_BUSY.into()),
+        Err(_) => Ok(false),
+    }
+}
+#[cfg(not(unix))]
+pub(super) fn claim_live(_: &Value, _: std::time::Duration) -> Result<bool> {
+    Ok(false)
 }
 
 fn snapshot_from(record: &Value, list: &Value) -> Value {

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { Dropdown } from "../lib/Dropdown";
@@ -11,7 +11,7 @@ import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
 import { settings, settingsReady } from "../../store/settings";
 import { heatOf, taskHeat, type HeatMode, type TaskHeat } from "./heat";
-import { chain, externalBlocks, externalDeps, phaseNeedsApproval, phasePlans, phaseStatus, type PlanPhase } from "./plan";
+import { chain, externalBlocks, externalDeps, keptPlans, phaseNeedsApproval, phasePlans, phaseStatus, type PlanPhase } from "./plan";
 import { NODE_H, NODE_W, orthoPath, placePhase, routeEdges, type PhaseLayout, type Route } from "./planLayout";
 import {
   activityText, assigneeAgent, assigneeRole, boardColumn, boardKeys, boardTitle, matches, phaseFinished, statusIcon, taskState, taskTime,
@@ -169,6 +169,12 @@ export const planHover = {
 export const clearsSelection = (target: Element | null) =>
   !!target && !target.closest(".pt-card, .pt-phase, .pt-free-accepted, .pt-detail, button, a, input, select, textarea, [role='button']");
 
+
+/** Task #16: two lists of the same objects in the same order. */
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
 export function PlanView(props: PlanViewProps): JSX.Element {
   const now = () => props.now?.() ?? Date.now() / 1000;
   const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
@@ -227,21 +233,29 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
   const visibleTask = (task: TeamTaskView | undefined) =>
     !!task && (includeCancelled() || task.status !== "cancelled") && !(hideFinished() && task.status === "accepted");
-  const allPhases = createMemo(() => phasePlans(props.team, props.graph));
+  // Task #16 (team ede724c4): a phase whose tasks, nodes and links did not
+  // change keeps its plan object, so a task's status change rebuilds no phase
+  // row in any view (the <For>s are keyed by these objects).
+  let keptPhases = new Map<number, PlanPhase>();
+  const allPhases = createMemo(() => {
+    const plans = keptPlans(keptPhases, phasePlans(props.team, props.graph));
+    keptPhases = new Map(plans.map((plan) => [plan.n, plan]));
+    return plans;
+  });
   // U58 and owner 2026-10-30: cancelled tasks and the phases they emptied
   // stay out unless shown; Hide finished leaves out every decided phase.
   const phases = createMemo(() => allPhases().filter((phase) => {
     const tasks = phase.tasks.filter((task) => visibleTask(task));
     if (phase.tasks.length > 0 && tasks.length === 0) return false;
     return !(hideFinished() && phaseFinished(phase.tasks));
-  }));
+  }), undefined, { equals: sameItems });
   const finishedCount = createMemo(() => allPhases().filter((phase) => phaseFinished(phase.tasks)).length);
   // Task 316 (F6): the open free phase folds its accepted tasks into one row
   // (Qt's freeAcceptedFold), so the graph draws only the work still open.
   const [unfoldedAccepted, setUnfoldedAccepted] = createSignal<Set<string>>(new Set());
   const acceptedKey = (n: number) => `${props.team.id}/${n}`;
   const acceptedTasks = (phase: PlanPhase) => phase.tasks.filter((task) => visibleTask(task) && task.status === "accepted");
-  const acceptedFolded = (phase: PlanPhase) => props.team.free_phase === phase.phase.n && !unfoldedAccepted().has(acceptedKey(phase.phase.n));
+  const acceptedFolded = (phase: PlanPhase) => props.team.free_phase === phase.n && !unfoldedAccepted().has(acceptedKey(phase.n));
   const toggleAccepted = (n: number) => {
     const key = acceptedKey(n);
     const next = new Set(unfoldedAccepted());
@@ -249,17 +263,47 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     else next.add(key);
     setUnfoldedAccepted(next);
   };
-  const layouts = createMemo(() => new Map(phases().map((phase) => {
-    const folded = acceptedFolded(phase);
-    const nodes = phase.nodes.filter((placed) => visibleTask(placed.task) && !(folded && placed.task?.status === "accepted"));
-    const ids = new Set(nodes.map((placed) => placed.node.id));
-    const edges = phase.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to));
-    const layout = placePhase(nodes.map((placed) => ({ id: placed.node.id, layer: placed.node.layer })), edges, 320);
-    const origins = nodes
-      .map((placed) => ({ from: spawnedFrom(placed.node, placed.task) ?? 0, to: placed.node.id }))
-      .filter((link) => link.from > 0 && ids.has(link.from) && link.from !== link.to);
-    return [phase.phase.n, { layout, routes: routeEdges(layout, edges), originRoutes: routeEdges(layout, origins), edges }] as const;
-  })));
+  // Task #16: a phase's layout is kept while its visible nodes and links are
+  // the same; a status change that hides or folds no card keeps it.
+  type LayoutEntry = { layout: PhaseLayout; routes: Route[]; originRoutes: Route[]; edges: PlanPhase["edges"] };
+  type KeptLayout = { phase: PlanPhase; nodes: PlanPhase["nodes"]; origins: { from: number; to: number }[]; entry: LayoutEntry };
+  let keptLayouts = new Map<number, KeptLayout>();
+  const layouts = createMemo(() => {
+    const next = new Map<number, KeptLayout>();
+    const shown = new Map(phases().map((phase) => {
+      const folded = acceptedFolded(phase);
+      const nodes = phase.nodes.filter((placed) => visibleTask(placed.task) && !(folded && placed.task?.status === "accepted"));
+      const origins = nodes
+        .map((placed) => ({ from: spawnedFrom(placed.node, placed.task) ?? 0, to: placed.node.id }))
+        .filter((link) => link.from > 0 && link.from !== link.to);
+      const kept = keptLayouts.get(phase.n);
+      // The same phase plan with the same visible nodes and spawn links: its
+      // layout stands (the links follow the nodes and the plan).
+      let entry = kept && kept.phase === phase && sameItems(kept.nodes, nodes)
+        && kept.origins.length === origins.length && kept.origins.every((link, index) => link.from === origins[index].from && link.to === origins[index].to)
+        ? kept.entry : undefined;
+      if (!entry) {
+        const ids = new Set(nodes.map((placed) => placed.node.id));
+        const edges = phase.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to));
+        const layout = placePhase(nodes.map((placed) => ({ id: placed.node.id, layer: placed.node.layer })), edges, 320);
+        entry = { layout, routes: routeEdges(layout, edges), originRoutes: routeEdges(layout, origins.filter((link) => ids.has(link.from))), edges };
+      }
+      next.set(phase.n, { phase, nodes, origins, entry });
+      return [phase.n, entry] as const;
+    }));
+    keptLayouts = next;
+    return shown;
+  }, undefined, { equals: (a, b) => a.size === b.size && [...a].every(([n, entry]) => b.get(n) === entry) });
+  /** Task #16: what a task card shows from the task and the view's state. A
+   * card is rebuilt when this changes (its status, attempt, problem, the
+   * filter match, the selection, its heat), and only that card. */
+  const cardKey = (task: TeamTaskView) => {
+    const problem = problems().get(task.id);
+    const pipeline = task.pipeline_run as { open?: { kind?: string } } | undefined;
+    return ["card", task.status, task.attempt_state, task.attempts, task.decided_by, task.no_report ? 1 : 0, task.severity ?? "",
+      problem?.tone ?? "", problem?.text ?? "", matchesTask(task) ? 1 : 0, selected() === task.id ? 1 : 0,
+      heat(task.id)?.tint ?? "", pipeline?.open?.kind ?? ""].join("|");
+  };
   const selectedTask = createMemo(() => props.team.tasks.find((task) => task.id === selected()));
   const lit = createMemo(() => (hover() === null ? null : chain(props.team.tasks, hover()!)));
   const matchesTask = (task: TeamTaskView | undefined) => !!task && matches(task, filter(), problems(), member(), planning());
@@ -276,9 +320,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     else next.add(n);
     setCollapsed(next);
   };
-  const collapseAll = () => setCollapsed(new Set<number>(phases().map((phase) => phase.phase.n)));
+  const collapseAll = () => setCollapsed(new Set<number>(phases().map((phase) => phase.n)));
   const expandAll = () => setCollapsed(new Set<number>());
-  const allOpen = () => phases().every((phase) => !collapsed().has(phase.phase.n));
+  const allOpen = () => phases().every((phase) => !collapsed().has(phase.n));
   const open = (id: number) => {
     if (props.onOpenTask) props.onOpenTask(id);
     else setSelected(id);
@@ -289,9 +333,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   // scrolls (task 197 P1; the old rows drew one SVG per layer).
   let scroller: HTMLDivElement | undefined;
   const phaseHeight = (phase: PlanPhase) => {
-    if (isCollapsed(phase.phase.n)) return COLLAPSED_H + 8;
-    const layout = layouts().get(phase.phase.n)?.layout;
-    const fold = acceptedTasks(phase).length > 0 && props.team.free_phase === phase.phase.n ? 26 : 0;
+    if (isCollapsed(phase.n)) return COLLAPSED_H + 8;
+    const layout = layouts().get(phase.n)?.layout;
+    const fold = acceptedTasks(phase).length > 0 && props.team.free_phase === phase.n ? 26 : 0;
     return HEADER_H + fold + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
   };
   const virtualizer = createVirtualizer({
@@ -300,7 +344,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     },
     getScrollElement: () => (scroller?.isConnected ? scroller : null),
     estimateSize: (index) => (phases()[index] ? phaseHeight(phases()[index]) : HEADER_H),
-    getItemKey: (index) => phases()[index]?.phase.n ?? index,
+    getItemKey: (index) => phases()[index]?.n ?? index,
     overscan: 3,
   });
   createEffect(() => {
@@ -346,82 +390,89 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   /** Qt's phase header: title, chips, "Healthy N/M", the progress, and the
    * draft's decision. A collapsed phase is this one line with its tasks' titles. */
   const header = (phase: PlanPhase, collapsible = true, actions?: JSX.Element) => {
-    const status = phaseStatus(phase.phase);
-    // Task 196: Qt's header by state: its notes, the collapsed one-line summary and the lead's note.
-    const head = phaseHeader(props.team, phase.phase);
-    const note = phase.phase.note?.trim() ?? "";
-    const tasks = phase.tasks.filter((task) => visibleTask(task));
-    const total = tasks.length;
-    const done = tasks.filter((task) => task.status === "accepted").length;
-    const closed = collapsible && isCollapsed(phase.phase.n);
-    const healthy = tasks.filter((task) => !problems().has(task.id)).length;
-    const running = status.kind === "running" || status.kind === "approved" || status.kind === "open";
+    // Task #16 (team ede724c4): what the header shows, in one memo the JSX
+    // reads, so a status change updates its counts in place. The element stays
+    // (a rebuilt header made the row's :has() rules restyle its whole graph).
+    const view = createMemo(() => {
+      const record = phase.phase;
+      const status = phaseStatus(record);
+      // Task 196: Qt's header by state: its notes, the collapsed one-line summary and the lead's note.
+      const head = phaseHeader(props.team, record);
+      const note = record.note?.trim() ?? "";
+      const tasks = phase.tasks.filter((task) => visibleTask(task));
+      const total = tasks.length;
+      const done = tasks.filter((task) => task.status === "accepted").length;
+      const closed = collapsible && isCollapsed(phase.n);
+      const healthy = tasks.filter((task) => !problems().has(task.id)).length;
+      const running = status.kind === "running" || status.kind === "approved" || status.kind === "open";
+      return { record, status, head, note, total, done, closed, healthy, running };
+    });
     return (
       <div
         // Task 332: one class string. Solid's class and classList on one element
         // overwrite each other, which dropped pt-phase-closed: a folded card lost
         // its bottom border and its bottom corners.
-        class={`pt-phase pt-phase-${status.kind}${closed ? " pt-phase-closed" : ""}`}
+        class={`pt-phase pt-phase-${view().status.kind}${view().closed ? " pt-phase-closed" : ""}`}
         role={collapsible ? "button" : undefined}
         tabindex={collapsible ? "0" : undefined}
-        aria-label={tr("Phase %1", phase.phase.n)}
-        aria-expanded={collapsible ? !closed : undefined}
-        data-phase-head={phase.phase.n}
-        data-phase-kind={phase.phase.kind || undefined}
-        onClick={() => { if (collapsible) toggle(phase.phase.n); }}
+        aria-label={tr("Phase %1", phase.n)}
+        aria-expanded={collapsible ? !view().closed : undefined}
+        data-phase-head={phase.n}
+        data-phase-kind={view().record.kind || undefined}
+        onClick={() => { if (collapsible) toggle(phase.n); }}
         onKeyDown={(event) => {
           if (collapsible && (event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
-            toggle(phase.phase.n);
+            toggle(phase.n);
           }
         }}
       >
-        <Show when={collapsible}><Icon name={closed ? "chevron-right" : "chevron-down"} size={14} /></Show>
-        <span class="pt-pn">{phase.phase.n}</span>
-        <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
-        <Show when={phase.phase.archived}><span class="pt-badge">{tr("Archived")}</span></Show>
-        <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
-        <Show when={phase.phase.kind === "minor"}><span class="pt-chip pt-chip-minor" data-phase-kind="minor">{tr("Minor")}</span></Show>
-        <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
-        <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
-        <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
+        <Show when={collapsible}><Icon name={view().closed ? "chevron-right" : "chevron-down"} size={14} /></Show>
+        <span class="pt-pn">{phase.n}</span>
+        <b class="pt-phase-title">{view().record.title || tr("Phase %1", phase.n)}</b>
+        <Show when={view().record.archived}><span class="pt-badge">{tr("Archived")}</span></Show>
+        <span class={`pt-chip pt-chip-${view().status.kind}`}>{statusLabel(view().status.kind)}</span>
+        <Show when={view().record.kind === "minor"}><span class="pt-chip pt-chip-minor" data-phase-kind="minor">{tr("Minor")}</span></Show>
+        <Show when={view().record.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
+        <Show when={view().record.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
+        <Show when={view().record.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
         {/* Task 356: no acceptance label. The core's acceptance names who accepts the
             phase (lead or owner), which Qt shows only in the phase menu
             (Requires owner acceptance, checked), as this header's menu does. */}
-        <For each={head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
+        <For each={view().head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
           <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
         )}</For>
-        <Show when={closed && head.summary}>
-          <span class="pt-phase-summary" data-summary="1" title={head.summary.split(", #").join("\n#")}>{short(head.summary, 140)}</span>
+        <Show when={view().closed && view().head.summary}>
+          <span class="pt-phase-summary" data-summary="1" title={view().head.summary.split(", #").join("\n#")}>{short(view().head.summary, 140)}</span>
         </Show>
-        {actions ?? props.phaseActions?.(phase.phase.n)}
+        {actions ?? props.phaseActions?.(phase.n)}
         <span class="pt-grow" />
-        <Show when={running && total > 0 && status.kind !== "done"}>
-          <span class="pt-healthy" classList={{ warn: healthy < total }} data-healthy={`${healthy}/${total}`} title={phase.phase.health || undefined}>
-            {tr("Healthy %1/%2", healthy, total)}
+        <Show when={view().running && view().total > 0 && view().status.kind !== "done"}>
+          <span class="pt-healthy" classList={{ warn: view().healthy < view().total }} data-healthy={`${view().healthy}/${view().total}`} title={view().record.health || undefined}>
+            {tr("Healthy %1/%2", view().healthy, view().total)}
           </span>
         </Show>
-        <Show when={phase.phase.health && !running}><span class="pt-health">{short(phase.phase.health, 60)}</span></Show>
-        <Show when={total > 0}>
-          <span class="pt-progress" aria-label={tr("%1 of %2", done, total)}>
-            <For each={Array.from({ length: Math.min(12, total) }, (_, index) => index < Math.round((done / total) * Math.min(12, total)))}>
+        <Show when={view().record.health && !view().running}><span class="pt-health">{short(view().record.health, 60)}</span></Show>
+        <Show when={view().total > 0}>
+          <span class="pt-progress" aria-label={tr("%1 of %2", view().done, view().total)}>
+            <For each={Array.from({ length: Math.min(12, view().total) }, (_, index) => index < Math.round((view().done / view().total) * Math.min(12, view().total)))}>
               {(on) => <i class={on ? "on" : ""} />}
             </For>
           </span>
-          <span class="pt-count">{done}/{total}</span>
+          <span class="pt-count">{view().done}/{view().total}</span>
         </Show>
-        <Show when={!closed && note}>
-          <span class="pt-phase-lead-note" data-note="lead" title={note}>{tr("Lead's note: %1", short(note, 160))}</span>
+        <Show when={!view().closed && view().note}>
+          <span class="pt-phase-lead-note" data-note="lead" title={view().note}>{tr("Lead's note: %1", short(view().note, 160))}</span>
         </Show>
-        <Show when={phaseNeedsApproval(phase.phase) && !props.phaseActions}>
+        <Show when={phaseNeedsApproval(view().record) && !props.phaseActions}>
           <span class="pt-approval">{tr("Needs approval")}</span>
           <Show when={props.onApprovePhase}>
-            <button type="button" class="btn small" data-approve={phase.phase.n}
-              onClick={(event) => { event.stopPropagation(); props.onApprovePhase?.(phase.phase.n); }}>{tr("Approve")}</button>
+            <button type="button" class="btn small" data-approve={phase.n}
+              onClick={(event) => { event.stopPropagation(); props.onApprovePhase?.(phase.n); }}>{tr("Approve")}</button>
           </Show>
           <Show when={props.onDiscardPhase}>
             <button type="button" class="btn ghost small"
-              onClick={(event) => { event.stopPropagation(); props.onDiscardPhase?.(phase.phase.n); }}>{tr("Discard")}</button>
+              onClick={(event) => { event.stopPropagation(); props.onDiscardPhase?.(phase.n); }}>{tr("Discard")}</button>
           </Show>
         </Show>
       </div>
@@ -450,7 +501,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
 
   /** A graph node: Qt's Wide node, two lines. */
   const node = (task: TeamTaskView, phase: PlanPhase, rect: { x: number; y: number }) => {
-    const external = externalDeps(phase.phase.n, task, byId());
+    const external = externalDeps(phase.n, task, byId());
     const taskHeatNow = heat(task.id);
     const litNow = lit();
     const problem = problems().get(task.id);
@@ -527,9 +578,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const graphBody = (phase: PlanPhase, layout: PhaseLayout, routes: Route[], originRoutes: Route[]) => {
     const litNow = lit();
     const crit = new Set(phase.tasks.filter((task) => task.severity === "crit").map((task) => task.id));
-    const marker = `pt-origin-arrow-${props.team.id}-${phase.phase.n}`;
+    const marker = `pt-origin-arrow-${props.team.id}-${phase.n}`;
     return (
-      <PhaseScroll key={`graph/${props.team.id}/${phase.phase.n}`} class="pt-phase-body" style={{ height: `${Math.ceil(layout.height * zoom()) + SCROLLBAR}px` }}>
+      <PhaseScroll key={`graph/${props.team.id}/${phase.n}`} class="pt-phase-body" style={{ height: `${Math.ceil(layout.height * zoom()) + SCROLLBAR}px` }}>
         <div class="pt-phase-sizer" style={{ width: `${Math.ceil(layout.width * zoom())}px`, height: `${Math.ceil(layout.height * zoom())}px` }}>
           <div class="pt-phase-canvas" style={{ width: `${layout.width}px`, height: `${layout.height}px`, transform: `scale(${zoom()})` }}>
             {/* Qt's band layers: each layer's columns shaded, numbered inside the phase. */}
@@ -543,7 +594,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                 </>
               )}
             </For>
-            <svg class="pt-edges" width={layout.width} height={layout.height} aria-hidden="true" data-edges={phase.phase.n}>
+            <svg class="pt-edges" width={layout.width} height={layout.height} aria-hidden="true" data-edges={phase.n}>
               <defs>
                 <marker id={marker} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                   <path d="M 0 0 L 8 4 L 0 8" class="pt-origin-head" />
@@ -572,7 +623,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
               </For>
             </svg>
             <For each={phase.tasks.filter((task) => visibleTask(task) && layout.rects.has(task.id))}>
-              {(task) => node(task, phase, layout.rects.get(task.id)!)}
+              {(task) => <Show when={cardKey(task)} keyed>{(_shown) => node(task, phase, layout.rects.get(task.id)!)}</Show>}
             </For>
           </div>
         </div>
@@ -627,21 +678,23 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   /** Task 197 (P7): one phase's columns, the same in every phase so they
    * line up; the column titles stay pinned while the board scrolls. */
   const boardPhase = (phase: PlanPhase, keys: BoardKey[]) => {
-    const tasks = phase.tasks.filter((task) => visibleTask(task) && (!member() || task.assignee === member()));
-    const column = (key: BoardKey) => tasks.filter((task) => boardColumn(task, problems().has(task.id)) === key);
+    // Task #16: the columns follow the statuses in their own memos, so a
+    // status change moves one card and rebuilds nothing else of the phase.
+    const tasks = createMemo(() => phase.tasks.filter((task) => visibleTask(task) && (!member() || task.assignee === member())));
+    const column = (key: BoardKey) => tasks().filter((task) => boardColumn(task, problems().has(task.id)) === key);
     return (
-      <PhaseScroll key={`board/${props.team.id}/${phase.phase.n}`} class="pm-board-phase">
+      <PhaseScroll key={`board/${props.team.id}/${phase.n}`} class="pm-board-phase">
         <div class="pm-board" style={{ "grid-template-columns": `repeat(${keys.length}, minmax(190px, 1fr))` }}>
           <For each={keys}>
             {(key) => {
-              const shown = column(key);
+              const shown = createMemo(() => column(key));
               return (
-                <section class="pm-column" classList={{ empty: shown.length === 0, problems: key === "problems" && shown.length > 0 }} data-column={key} aria-label={boardTitle(key)}>
-                  <header class="pm-column-head"><b>{boardTitle(key).toUpperCase()}</b><span class="grow" /><span class="pm-count">{shown.length}</span></header>
+                <section class="pm-column" classList={{ empty: shown().length === 0, problems: key === "problems" && shown().length > 0 }} data-column={key} aria-label={boardTitle(key)}>
+                  <header class="pm-column-head"><b>{boardTitle(key).toUpperCase()}</b><span class="grow" /><span class="pm-count">{shown().length}</span></header>
                   <div class="pm-column-body">
-                    <For each={shown.slice(0, 200)}>{(task) => boardCard(task)}</For>
-                    <Show when={shown.length === 0}><span class="pm-empty-dash">-</span></Show>
-                    <Show when={shown.length > 200}><p class="pm-more">{tr("%1 more not shown", shown.length - 200)}</p></Show>
+                    <For each={shown().slice(0, 200)}>{(task) => <Show when={cardKey(task)} keyed>{(_shown) => boardCard(task)}</Show>}</For>
+                    <Show when={shown().length === 0}><span class="pm-empty-dash">-</span></Show>
+                    <Show when={shown().length > 200}><p class="pm-more">{tr("%1 more not shown", shown().length - 200)}</p></Show>
                   </div>
                 </section>
               );
@@ -656,19 +709,21 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const layersPhase = (phase: PlanPhase) => {
     // Qt's layer rows: the phase's own layers numbered from L1 (phaseLayers),
     // each row labelled, in layer then id order.
-    const all = phase.nodes.filter((placed) => visibleTask(placed.task));
-    const own = new Map([...new Set(all.map((placed) => placed.node.layer))].sort((a, b) => a - b).map((layer, index) => [layer, index] as const));
-    const nodes = all.filter((placed) => matchesTask(placed.task));
-    const layers = [...new Set(nodes.map((placed) => placed.node.layer))].sort((a, b) => a - b);
+    // Task #16: the rows follow the statuses in their own memos, so a status
+    // change rebuilds its one row.
+    const all = createMemo(() => phase.nodes.filter((placed) => visibleTask(placed.task)));
+    const own = createMemo(() => new Map([...new Set(all().map((placed) => placed.node.layer))].sort((a, b) => a - b).map((layer, index) => [layer, index] as const)));
+    const nodes = createMemo(() => all().filter((placed) => matchesTask(placed.task)));
+    const layers = createMemo(() => [...new Set(nodes().map((placed) => placed.node.layer))].sort((a, b) => a - b));
     return (
       <div class="pm-layers-phase">
-        <For each={layers}>
+        <For each={layers()}>
           {(layer) => {
-            const rows = nodes.filter((placed) => placed.node.layer === layer).sort((a, b) => a.node.id - b.node.id);
+            const rows = createMemo(() => nodes().filter((placed) => placed.node.layer === layer).sort((a, b) => a.node.id - b.node.id));
             return (
               <div class="pm-layer-group" data-layer={layer}>
-                <For each={rows}>
-                  {(placed) => {
+                <For each={rows()}>
+                  {(placed) => <Show when={cardKey(placed.task!)} keyed>{(_shown) => {
                     const task = placed.task!;
                     const problem = problems().get(task.id);
                     const time = taskTime(task, now());
@@ -679,7 +734,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         data-severity={task.severity || undefined}
                         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
                         title={[problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")} onClick={() => open(task.id)}>
-                        <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
+                        <span class="pm-layer-label">{tr("L%1", (own().get(layer) ?? 0) + 1)}</span>
                         <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
                         <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
@@ -696,13 +751,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <span class="pm-layer-agent"><Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show></span>
                       </button>
                     );
-                  }}
+                  }}</Show>}
                 </For>
               </div>
             );
           }}
         </For>
-        <Show when={layers.length === 0}><p class="pm-empty">{tr("No task matches")}</p></Show>
+        <Show when={layers().length === 0}><p class="pm-empty">{tr("No task matches")}</p></Show>
       </div>
     );
   };
@@ -727,7 +782,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-chip">{taskState(task).text}</span>
           <Show when={task.archived}><span class="pt-chip">{tr("Archived")}</span></Show>
           <span class="pt-chip">{short(task.status || "pending", 24)}</span>
-          <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
+          <span class="pt-chip">{tr("Phase %1", phase?.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
           <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? ` ${tr("from #%1", task.origin)}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">{tr("Minor")}</span></Show>
@@ -778,11 +833,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             </div>
           </div>
         </Show>
-        <Show when={externalBlocks(phase?.phase.n ?? task.phase, task.id, props.team.tasks).length > 0}>
+        <Show when={externalBlocks(phase?.n ?? task.phase, task.id, props.team.tasks).length > 0}>
           <div class="pt-detail-section">
             <span class="pt-detail-label">{tr("Other phases wait")}</span>
             <div class="pt-detail-links">
-              <For each={externalBlocks(phase?.phase.n ?? task.phase, task.id, props.team.tasks)}>
+              <For each={externalBlocks(phase?.n ?? task.phase, task.id, props.team.tasks)}>
                 {(id) => <button type="button" class="pt-link" onClick={() => open(id)}>#{id}</button>}
               </For>
             </div>
@@ -806,7 +861,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const onKey = (event: KeyboardEvent) => { if (event.key === "Escape" && member()) chooseMember(""); };
   onMount(() => window.addEventListener("keydown", onKey));
   onCleanup(() => window.removeEventListener("keydown", onKey));
-  const boardKeyList = createMemo(() => boardKeys(props.team, problems()));
+  // Task #16: the same columns are the same list, so a status change that
+  // keeps them rebuilds no board.
+  const boardKeyList = createMemo(() => boardKeys(props.team, problems()), undefined, {
+    equals: (a, b) => a.length === b.length && a.every((key, index) => key === b[index]),
+  });
   const autoAccept = () => props.team.settings?.auto_accept === true;
   const shownMode = () => mode() === "graph" || mode() === "board" || mode() === "layers";
 
@@ -913,25 +972,27 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}
             onClick={(event) => { if (clearsSelection(event.target as Element)) setSelected(null); }}>
             <div class="pt-plan-canvas" style={{ height: `${Math.max(virtualizer.getTotalSize(), ...windowed().map((item) => item.start + phaseHeight(phases()[item.index])))}px` }}>
-              <For each={windowed()}>
+              {/* Task #16: windowed by position; a row keeps its element while its
+                  phase object stays, and only its top follows a new start. */}
+              <Index each={windowed()}>
                 {(item) => {
-                  const phase = () => phases()[item.index];
+                  const phase = () => phases()[item().index];
                   return (
                     <Show when={phase()}>{(shown) => {
-                      const entry = () => layouts().get(shown().phase.n);
+                      const entry = createMemo(() => layouts().get(shown().n));
                       // Task 196: made once per row, so an open menu or dialog survives a poll.
-                      const actions = props.phaseActions?.(shown().phase.n);
+                      const actions = props.phaseActions?.(shown().n);
                       return (
-                        <div class="pt-row" style={{ top: `${item.start}px` }} data-phase={shown().phase.n}>
+                        <div class="pt-row" style={{ top: `${item().start}px` }} data-phase={shown().n}>
                           {header(shown(), true, actions)}
-                          <Show when={!isCollapsed(shown().phase.n) && entry()}>
-                            <Show when={acceptedTasks(shown()).length > 0 && props.team.free_phase === shown().phase.n}>
+                          <Show when={!isCollapsed(shown().n) && entry()}>
+                            <Show when={acceptedTasks(shown()).length > 0 && props.team.free_phase === shown().n}>
                               <div class="pt-free-accepted" data-accepted-fold={acceptedTasks(shown()).length}>
                                 <Icon name="check" size={12} />
                                 <b>{tr("%1 accepted", acceptedTasks(shown()).length)}</b>
                                 <span class="pt-free-accepted-ids">{acceptedTasks(shown()).slice(0, 12).map((task) => `#${task.id}`).join(" ")}{acceptedTasks(shown()).length > 12 ? ` ${tr("and %1 more", acceptedTasks(shown()).length - 12)}` : ""}</span>
                                 <button type="button" class="btn ghost small" data-accepted-toggle={acceptedFolded(shown()) ? "folded" : "open"}
-                                  onClick={() => toggleAccepted(shown().phase.n)}>{acceptedFolded(shown()) ? tr("Show") : tr("Hide")}</button>
+                                  onClick={() => toggleAccepted(shown().n)}>{acceptedFolded(shown()) ? tr("Show") : tr("Hide")}</button>
                               </div>
                             </Show>
                             {graphBody(shown(), entry()!.layout, entry()!.routes, entry()!.originRoutes)}
@@ -941,7 +1002,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                     }}</Show>
                   );
                 }}
-              </For>
+              </Index>
             </div>
           </div>
           {detail()}
@@ -952,9 +1013,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <div class="pt-plan-scroll pm-board-scroll">
             <For each={phases()}>
               {(phase) => (
-                <div class="pm-phase" data-phase={phase.phase.n}>
+                <div class="pm-phase" data-phase={phase.n}>
                   {header(phase)}
-                  <Show when={!isCollapsed(phase.phase.n)}>{boardPhase(phase, boardKeyList())}</Show>
+                  <Show when={!isCollapsed(phase.n)}>{boardPhase(phase, boardKeyList())}</Show>
                 </div>
               )}
             </For>
@@ -967,9 +1028,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <div class="pt-plan-scroll pm-layers-scroll">
             <For each={phases()}>
               {(phase) => (
-                <div class="pm-phase" data-phase={phase.phase.n}>
+                <div class="pm-phase" data-phase={phase.n}>
                   {header(phase)}
-                  <Show when={!isCollapsed(phase.phase.n)}>{layersPhase(phase)}</Show>
+                  <Show when={!isCollapsed(phase.n)}>{layersPhase(phase)}</Show>
                 </div>
               )}
             </For>

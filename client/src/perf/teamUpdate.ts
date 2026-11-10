@@ -70,7 +70,8 @@ function replacing(): Store {
 
 export type Way = "replace" | "reconcile";
 export type Scenario = "member" | "task";
-export interface Measured { way: Way; scenario: Scenario; mode: PlanMode; tasks: number; updates: number; cards: number; kept: number; median_ms: number; p90_ms: number; total_ms: number }
+/** `script_ms`: the median of the apply alone, before the forced layout (task #16). */
+export interface Measured { way: Way; scenario: Scenario; mode: PlanMode; tasks: number; updates: number; cards: number; kept: number; median_ms: number; p90_ms: number; total_ms: number; script_ms: number }
 
 const outs = (team: TeamView, graph: PlanGraph): TeamsOut[] => [
   { computer: "", key: `team:${team.id}`, kind: "team", payload: team }, { computer: "", key: `graph:${team.id}`, kind: "graph", payload: graph },
@@ -97,10 +98,12 @@ export function measureTeamUpdates(host: HTMLElement, way: Way, scenario: Scenar
   const cards = () => new Map([...host.querySelectorAll<HTMLElement>("[data-task]")].map((card) => [card.dataset.task!, card]));
   const before = cards();
   const times: number[] = [];
+  const scripts: number[] = [];
   for (let n = 1; n <= updates; n++) {
     const next = scenario === "member" ? team465(n, 0) : team465(0, n);
     const started = performance.now();
     store.apply(outs(next.team, next.graph));
+    scripts.push(performance.now() - started);
     void host.offsetHeight;
     times.push(performance.now() - started);
   }
@@ -111,8 +114,10 @@ export function measureTeamUpdates(host: HTMLElement, way: Way, scenario: Scenar
   host.replaceChildren();
   const sorted = [...times].sort((a, b) => a - b);
   const round = (ms: number) => Math.round(ms * 100) / 100;
+  const script = [...scripts].sort((a, b) => a - b)[Math.floor(scripts.length / 2)];
   return {
     way, scenario, mode, tasks: TASKS, updates, cards: before.size, kept,
     median_ms: round(sorted[Math.floor(sorted.length / 2)]), p90_ms: round(sorted[Math.floor(sorted.length * 0.9)]), total_ms: round(times.reduce((a, b) => a + b, 0)),
+    script_ms: round(script),
   };
 }

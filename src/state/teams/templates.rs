@@ -1385,7 +1385,12 @@ pub(crate) fn msbuild_path() -> String {
 fn web_test(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
     let project = one(template, args, "project", folder)?
         .map(|project| project.replace('\\', "/").trim_end_matches('/').to_owned())
-        .filter(|project| project != ".");
+        .filter(|project| project != ".")
+        // Task #16 (team ede724c4): the default the template's summary names:
+        // a folder without its own package.json runs `client/` when that is
+        // the web project (this repository). It refused "The web project has
+        // no package.json (<folder>)" instead.
+        .or_else(|| (!folder.join("package.json").is_file() && folder.join("client").join("package.json").is_file()).then(|| "client".to_owned()));
     let dir = project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
     if let Some(project) = &project {
         let real = std::fs::canonicalize(&dir).with_context(|| format!("The template's project {project} is not a folder in your folder"))?;
@@ -3216,6 +3221,10 @@ console.log(' FAIL  src/app.test.ts > fails');
         .unwrap();
         let first = plan("web-test", &json!({"project":"client","paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
         assert_eq!((first.program.as_str(), first.cwd.as_deref()), ("node", Some("client")), "{first:?}");
+        // Task #16 (team ede724c4): without a project the template runs the
+        // folder's client/ web project, as its summary says.
+        let default = plan("web-test", &json!({"paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
+        assert_eq!((default.program.as_str(), default.cwd.as_deref()), ("node", Some("client")), "{default:?}");
         let report = dir.path().join(".zerus-team").join("results").join("vitest.xml");
         assert!(first.argv.iter().any(|arg| arg == "--reporter=junit"), "{first:?}");
         assert!(first.argv.iter().any(|arg| *arg == format!("--outputFile.junit={}", report.display())), "{first:?}");

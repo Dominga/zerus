@@ -92,6 +92,30 @@ describe("team views update in place (task #9)", () => {
     [1, 2, 3, 4].forEach((id, index) => expect(card(id), `task ${id}`).toBe(before[index]));
   });
 
+  // Task #16: a task's status change keeps every phase row and every other
+  // card; only the changed card is rebuilt, with its new state, and the
+  // phase header's count follows.
+  it.each(["graph", "board", "layers"] as const)("rebuild only the changed card when one task's status changes (%s)", (mode) => {
+    const { read, card } = show(mode);
+    const host = card(1)!.closest(".pt-plan")!;
+    const rows = [...host.querySelectorAll<HTMLElement>("[data-phase]")];
+    const before = [1, 2, 3, 4, 5].map(card);
+    const changedClass = card(2)!.className;
+    const next = payloads(40, "submitted");
+    read(next.team, next.graph);
+    [1, 3, 4, 5].forEach((id) => expect(card(id), `task ${id} keeps its card`).toBe(before[id - 1]));
+    expect(card(2)).toBeTruthy();
+    expect(card(2), "the changed card is rebuilt").not.toBe(before[1]);
+    expect([...host.querySelectorAll<HTMLElement>("[data-phase]")], "every phase row stays").toEqual(rows);
+    if (mode === "board") expect(card(2)!.closest<HTMLElement>("[data-column]")!.dataset.column).toBe("submitted");
+    else expect(card(2)!.className, "the card shows its new state").not.toBe(changedClass);
+    // Accepted: the phase's count follows the live record.
+    const accepted = payloads(40, "accepted");
+    read(accepted.team, accepted.graph);
+    expect(host.querySelector('[data-phase-head="1"] .pt-count')?.textContent).toBe("2/4");
+    [1, 3, 4, 5].forEach((id) => expect(card(id), `task ${id} still keeps its card`).toBe(before[id - 1]));
+  });
+
   it("shows a changed task's new status", () => {
     const { store, read, card } = show("board");
     const next = payloads(40, "submitted");

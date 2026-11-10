@@ -197,12 +197,15 @@ class KimiNativeCI(unittest.TestCase):
                 reservation = json.loads((output / 'evidence/reservation.json').read_text())
                 self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], len(ci.METHODS)))
                 self.assertIn('HGS_KIMI_TEST_RECORD', kwargs['env'])
+                self.assertEqual(kwargs['env']['ZERUS_PICKER_EFFORT_SEED_IMAGE'],'/fixture/private-seed')
+                self.assertEqual(kwargs['env']['ZERUS_PICKER_EFFORT_SEED_SHA256'],'c'*64)
                 ci.write(Path(argv[5]), dict(tests=len(ci.METHODS), started=list(ci.METHODS), completed=list(ci.METHODS),
                           failures=0, errors=0, skipped=0, expected_failures=0, unexpected_successes=0))
                 return object()
             with mock.patch.object(sys, 'argv', [str(ci.__file__), '--source-sha', sha, '--hgs', str(hgs),
                        '--tmux', str(tmux), '--output', str(output)]), \
                     mock.patch.object(ci, 'hosted_paths'), mock.patch.object(ci, 'checked_methods'), \
+                    mock.patch.object(ci, 'seed_input',return_value=dict(image=dict(path='/fixture/private-seed',sha256='c'*64))), \
                     mock.patch.object(ci, 'target', return_value='linux-x64'), \
                     mock.patch.object(ci.tempfile, 'mkdtemp', return_value=str(runtime)), \
                     mock.patch.object(ci.subprocess, 'check_output', return_value=sha), \
@@ -259,6 +262,8 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
+        self.assertEqual(len(ci.METHODS),15)
+        self.assertEqual(ci.METHODS[-1],'test_kimi_native.NativeKimi.test_id_effort_preserves_raw_request_identity_and_shared_defaults')
 
     def test_the_only_redirect_is_one_exact_302_to_the_cdn(self):
         source = 'https://code.kimi.com/kimi-code/binaries/2.2.0/manifest.json'
@@ -365,11 +370,14 @@ class KimiNativeCI(unittest.TestCase):
 
     def test_owner_machine_and_nonprivate_build_paths_refuse_before_allocation(self):
         temporary = self.root()
-        args = SimpleNamespace(hgs=temporary / 'hgs', tmux=temporary / 'tmux',
+        args = SimpleNamespace(hgs=temporary / 'hgs', tmux=temporary / 'tmux',effort_seed_receipt=temporary/'hgs-effort-seed.json',
                                output=ci.ROOT / 'artifacts/test-results/kimi-native')
         env = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
                    RUNNER_TEMP=str(temporary), GITHUB_WORKSPACE=str(ci.ROOT))
         ci.hosted_paths(args, env)
+        args.effort_seed_receipt=ci.ROOT/'artifacts/private-seed.json'
+        with self.assertRaisesRegex(ValueError,'seed receipt'):ci.hosted_paths(args,env)
+        args.effort_seed_receipt=temporary/'hgs-effort-seed.json'
         for changes in (dict(GITHUB_ACTIONS=''), dict(RUNNER_ENVIRONMENT='self-hosted'),
                         dict(GITHUB_WORKSPACE=str(temporary))):
             with self.assertRaises(ValueError):

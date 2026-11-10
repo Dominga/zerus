@@ -1,9 +1,8 @@
-//! Dormant fixed-entry operation owner, entered before Root acquisition.
+//! Fixed-entry operation owner, entered before Root acquisition.
 //!
-//! Only the exact hidden state entry is wired; no ordinary picker caller uses
-//! this owner. The closed production operation
-//! shape is Effort/Settings with original raw stdin; their driver admission
-//! remains .4.10. Controls substitute only that final synthetic operation.
+//! The existing ID Effort lane uses this keeper and original raw stdin.
+//! Settings remains explicitly unadmitted. Host lifetime controls substitute
+//! only their final operation; real Effort controls use the production CLI.
 //! Source/image/frame/deadline/lifeline/acquisition/lifetime methods are shared.
 use super::*;
 use fs2::FileExt as _;
@@ -19,7 +18,7 @@ use std::{
     sync::{mpsc, Arc},
 };
 use zerus_client_core::run::custody::InheritedLock;
-mod frame;
+pub(super) mod frame;
 use frame::{Deadline, Frame, Image, Operation};
 
 pub(super) const ENTRY: &str = "native-picker-custodian-v1";
@@ -111,8 +110,8 @@ impl Slot {
     fn reserve() -> Result<Arc<InheritedLock>> {
         let root =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
-        if !root.private()? {
-            return Err("Picker host namespace is not private".into());
+        if !root.owner_controls_entries()? {
+            return Err("Picker host namespace entries are not owner-controlled".into());
         }
         let file = match root.read_private_optional(SLOT_FILE)? {
             Some(file) => file,
@@ -142,7 +141,7 @@ impl Slot {
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         let named = state.read_private(SLOT_FILE)?;
-        if !state.private()?
+        if !state.owner_controls_entries()?
             || crate::platform::FileIdentity::of(&named).map_err(|e| e.to_string())?
                 != self.identity
             || crate::platform::FileIdentity::of(&self.file).map_err(|e| e.to_string())?
@@ -174,8 +173,36 @@ pub(super) struct Control {
     stream: UnixStream,
     frame: Frame,
     slot: Slot,
+    caller: super::caller::Held,
 }
 impl Control {
+    #[cfg(test)]
+    pub(super) fn fixture(frame: Frame, stream: UnixStream) -> Result<Arc<Self>> {
+        let capacity = Slot::reserve()?;
+        let raw = unsafe { libc::fcntl(capacity.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let caller = frame.caller.hold()?;
+        let held = Arc::new(Self {
+            stream,
+            frame,
+            slot: Slot::adopt(raw)?,
+            caller,
+        });
+        held.check()?;
+        Ok(held)
+    }
+    /// Last commit boundary only: no backend callback, catalog refresh or
+    /// filesystem staging runs between this and the namespace syscall.
+    pub(super) fn commit_boundary(&self) -> Result<()> {
+        self.frame.deadline.remaining()?;
+        self.endpoint()
+    }
+    pub(super) fn frame(&self) -> &frame::Frame {
+        &self.frame
+    }
     fn endpoint(&self) -> Result<()> {
         let mut byte = 0u8;
         let read = unsafe {
@@ -198,6 +225,7 @@ impl Control {
         self.endpoint()?;
         self.frame.check_context()?;
         self.slot.check()?;
+        self.caller.check()?;
         self.frame.deadline.remaining()?;
         self.endpoint()
     }
@@ -207,16 +235,24 @@ impl Control {
 /// can send completion. No Scope::Drop or elapsed deadline manufactures it.
 pub(super) struct Hold {
     control: Arc<Control>,
-    complete: mpsc::Sender<()>,
+    complete: Option<mpsc::Sender<()>>,
 }
 impl Hold {
+    pub(super) fn barrier(control: Arc<Control>) -> Self {
+        Self {
+            control,
+            complete: None,
+        }
+    }
     pub(super) fn check(&self) -> Result<()> {
         self.control.check()
     }
 }
 impl Drop for Hold {
     fn drop(&mut self) {
-        let _ = self.complete.send(());
+        if let Some(complete) = &self.complete {
+            let _ = complete.send(());
+        }
     }
 }
 
@@ -302,6 +338,30 @@ impl Frontend {
     }
 }
 
+pub(super) fn request(frame: Frame) -> Result<Vec<u8>> {
+    let frontend = Frontend::launch(frame)?;
+    let outcome = frontend.receive()?;
+    if outcome.code == crate::state::session_id::AMBIGUOUS {
+        let value: Value = serde_json::from_slice(&outcome.bytes).map_err(|e| e.to_string())?;
+        let text = value["message"]
+            .as_str()
+            .ok_or("Invalid original ambiguity message")?
+            .to_owned();
+        if !value["report"].is_object() {
+            return Err("Invalid original ambiguity report".into());
+        }
+        return Err(crate::state::session_id::refuse((
+            text,
+            value["report"].clone(),
+        )));
+    }
+    if outcome.code == 0 {
+        Ok(outcome.bytes)
+    } else {
+        Err(String::from_utf8_lossy(&outcome.bytes).into_owned())
+    }
+}
+
 /// Capacity is already held. Keep all descriptor creation/inheritance in the
 /// existing spawn turn (including macOS's non-atomic pipe CLOEXEC setup). There
 /// is no native effect or request frame in this cold start.
@@ -381,24 +441,50 @@ fn acquire(control: &Control) -> Result<Guard> {
     }
 }
 
-fn original_record(frame: &Frame) -> Result<Value> {
-    let state = Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
-    let sessions = state.child("sessions")?;
-    let name = format!("{}.json", string(&frame.binding, "session_id"));
-    let original = Original::open(&sessions, name)?;
-    let record = original.record(&sessions)?;
-    if !same_target(&frame.binding, &record) {
+pub(super) fn original_record(frame: &Frame) -> Result<Value> {
+    let record = if frame.operation == Operation::Effort
+        && string(&frame.binding, "session_id").is_empty()
+    {
+        crate::state::storage::read_metadata(string(&frame.binding, "name"))?
+    } else {
+        let state =
+            Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
+        let sessions = state.child("sessions")?;
+        let name = format!("{}.json", string(&frame.binding, "session_id"));
+        let original = Original::open(&sessions, name)?;
+        original.record(&sessions)?
+    };
+    let target = match frame.operation {
+        Operation::Effort => {
+            is_id_layout_record(&record, string(&record, "session_id"))
+                && (string(&frame.binding, "session_id").is_empty()
+                    || record["session_id"] == frame.binding["session_id"])
+                && string(&record, "name") == string(&frame.binding, "name")
+        }
+        Operation::Settings => same_target(&frame.binding, &record),
+    };
+    if !target {
         return Err("Original picker target changed before Root admission".into());
+    }
+    if frame.operation == Operation::Effort {
+        frame.validate_public_selection(&record)?;
+        frame.validate_live_effort(&record)?;
     }
     Ok(record)
 }
 
 fn original_receipt(frame: &Frame) -> Result<Option<Vec<u8>>> {
     let state = Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
-    let receipts = state.child(match frame.operation {
+    let directory = match frame.operation {
         Operation::Effort => "effort_receipts",
         Operation::Settings => "settings_receipts",
-    })?;
+    };
+    if std::fs::symlink_metadata(state.path.join(directory))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
+    let receipts = state.child(directory)?;
     let name = format!("{}.json", frame.request_id);
     let Some(mut file) = receipts.read_private_optional(&name)? else {
         return Ok(None);
@@ -437,17 +523,18 @@ fn fixed_operation(frame: &Frame, scope: Scope<'static>, control: Arc<Control>) 
     }
     #[cfg(not(test))]
     {
-        // Fixed future dispatch shape ONLY. No decoded argv/callback/keys and
-        // no constructor of a runtime-admitted picker driver exists here.
+        // Effort uses its original Root-first driver above this Scope-only
+        // seam. Settings remains withheld; neither branch decodes a command,
+        // callback or native key from the frame.
         let _ = (scope, control);
         match frame.operation {
-            Operation::Effort => Err("Effort picker host runtime is not admitted".into()),
+            Operation::Effort => Err("Effort requires its original Root-first driver".into()),
             Operation::Settings => Err("Settings picker host runtime is not admitted".into()),
         }
     }
 }
 
-/// Fixed private entry seam. No ordinary picker controller invokes it.
+/// Fixed private entry seam for the existing ID Effort controller.
 /// The caller supplies only the exact literal entry; descriptors are inherited
 /// native objects, never a decoded executable, PID, callback or permission.
 pub(super) fn entry() -> Result<i32> {
@@ -491,15 +578,14 @@ pub(super) fn entry() -> Result<i32> {
         stream,
         frame: frame.clone(),
         slot,
+        caller: frame.caller.hold()?,
     });
     control.check()?;
     let writer = acquire(&control)?;
     let until = frame.deadline.instant()?;
-    // Deliberately do NOT call writer_until/recover_run_writer: their rename,
-    // legacy synchronization and worktree callbacks lack this lifeline's
-    // effect/commit barriers. Admitting the actual fixed driver requires an
-    // explicitly guarded recovery protocol as well. No operation is admitted
-    // here, and private controls prepare already-recovered synthetic state.
+    // Do NOT call ordinary writer recovery. Cached UUID lookup comes first;
+    // the Effort driver then uses only its explicit original-owner Effects.
+    // Host-only controls prepare already-recovered synthetic state.
     control.check()?;
     if let Some(bytes) = original_receipt(&frame)? {
         drop(writer);
@@ -511,6 +597,27 @@ pub(super) fn entry() -> Result<i32> {
         );
         return Ok(0);
     }
+    #[cfg(not(test))]
+    if frame.operation == Operation::Effort {
+        let result = driver::run(writer, control.clone());
+        let outcome = match result {
+            Ok(bytes) => Outcome { code: 0, bytes },
+            Err(error) => match crate::state::session_id::refused() {
+                Some((text, report)) => Outcome {
+                    code: crate::state::session_id::AMBIGUOUS,
+                    bytes: json!({"message":text,"report":report})
+                        .to_string()
+                        .into_bytes(),
+                },
+                None => Outcome {
+                    code: 1,
+                    bytes: error.into_bytes(),
+                },
+            },
+        };
+        let _ = write_message(&control.stream, &outcome, deadline, RESPONSE_BYTES);
+        return Ok(outcome.code);
+    }
     let record = original_record(&frame)?;
     let receipts = match frame.operation {
         Operation::Effort => Receipts::Effort,
@@ -520,7 +627,7 @@ pub(super) fn entry() -> Result<i32> {
     let (complete, done) = mpsc::channel();
     scope.host = Some(Hold {
         control: control.clone(),
-        complete,
+        complete: Some(complete),
     });
     let result = catch_unwind(AssertUnwindSafe(|| {
         fixed_operation(&frame, scope, control.clone())

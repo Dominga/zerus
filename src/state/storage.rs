@@ -295,6 +295,70 @@ pub(super) fn read_id(id: &str) -> Result<Value> {
 /// stay well under a megabyte; a larger file is not one of ours.
 pub(super) const ID_RECORD_BYTES: u64 = 16 << 20;
 
+/// Bounded authoritative metadata only. No native telemetry, transcript cache,
+/// SQLite view or process observation is refreshed before keeper admission.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn read_metadata(name: &str) -> Result<Value> {
+    let path = if let Some(path) = selected_id_path(name) {
+        path
+    } else {
+        let label = label_record_path(name);
+        match fs::symlink_metadata(&label) {
+            Ok(_) => label,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let candidates = labels::candidates_metadata(name)?;
+                match (candidates.first, candidates.by_id.as_slice()) {
+                    (false, [only]) => id_record_path(string(only, "session_id"))
+                        .ok_or("Invalid metadata session ID")?,
+                    (_, []) => label,
+                    _ => {
+                        return Err(format!(
+                            "{name}: choose an exact session ID before reading metadata"
+                        ))
+                    }
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    read_metadata_at(&path, name)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {
+    let bytes = record_bytes(path, Some(ID_RECORD_BYTES)).map_err(|e| not_found(name, e))?;
+    let record = verify_metadata_at(path, name, &bytes)?;
+    session_id::verify(&record)?;
+    Ok(record)
+}
+
+/// Structural proof for bytes retained by recovery's original read. Selection
+/// is checked by public metadata readers; it never leaks into a different
+/// historical transaction through ambient caller state.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn verify_metadata_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
+    let record: Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("{name}: invalid saved binding: {e}"))?;
+    if !record.is_object()
+        || record["version"] != 1
+        || string(&record, "name") != name
+        || !AGENTS.contains(&string(&record, "agent"))
+    {
+        return Err(format!("{name}: invalid saved binding"));
+    }
+    let by_id = in_sessions(path);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if (by_id && !is_id_layout_record(&record, stem)) || (!by_id && in_id_layout(&record)) {
+        return Err(format!(
+            "{name}: the saved binding's layout and location disagree"
+        ));
+    }
+    Ok(record)
+}
+
 /// Whether `path` is in the ID layout's own folder.
 fn in_sessions(path: &Path) -> bool {
     path.parent().is_some_and(|parent| parent == root().join("sessions"))
@@ -841,8 +905,15 @@ pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
 }
 
 pub(super) fn process_start(pid: u32) -> String {
-    crate::platform::process_start_time(pid)
-        .unwrap_or_else(|| crate::platform::process_start_fallback(pid).unwrap_or_default())
+    if let Some(start) = crate::platform::process_start_time(pid) { return start; }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        let args=["-p".into(),pid.to_string(),"-o".into(),"lstart=".into()];
+        return effort::picker_helper_read(effort::PickerRead::ProcessStart,&args)
+            .and_then(std::result::Result::ok).filter(|output|output.status.success())
+            .map(|output|String::from_utf8_lossy(&output.stdout).trim().to_owned()).unwrap_or_default();
+    }
+    crate::platform::process_start_fallback(pid).unwrap_or_default()
 }
 
 pub(super) fn process_alive(record: &Value) -> bool {

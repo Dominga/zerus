@@ -716,6 +716,11 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
                 "Mobile target identity changed; refresh computers"
             }));
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if args.get(guarded_at).is_some_and(|a|a=="effort")
+            || (args.get(guarded_at).is_some_and(|a|a=="__state")&&args.get(guarded_at+1).is_some_and(|a|a=="effort")) {
+            state::remember_picker_caller_machine(&config,expected);
+        }
         args.drain(..2);
         let command_at=if args.first().is_some_and(|a|a=="--client") {
             if args.get(1).is_none_or(|client|client.is_empty()) { return Err(Error::new(2,"--client needs a peer name")); }
@@ -822,8 +827,19 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             return Err(Error::new(1, "A local session reference cannot route to another computer"));
         }
         local_sessions()?;
-        let name = state::resolve_reference(&reference).map_err(|e| Error::new(1, e))?;
-        state::session_id::select_reference(&name, &reference.session, &reference.conversation, &reference.run);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if command=="effort" {state::remember_picker_caller_machine(&config,&reference.machine);}
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let effort_name=if command=="effort" {
+            Some(state::resolve_effort_reference(&reference).map_err(|e|Error::new(1,e))?)
+        } else {None};
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let effort_name:Option<String>=None;
+        let name=if let Some(name)=effort_name {name} else {
+            let name = state::resolve_reference(&reference).map_err(|e| Error::new(1, e))?;
+            state::session_id::select_reference(&name, &reference.session, &reference.conversation, &reference.run);
+            name
+        };
         let mut rest = vec![name];
         rest.extend_from_slice(&args[1..]);
         if !reference.archive.is_empty() {
@@ -1545,6 +1561,13 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
         return Ok(());
     };
     local_sessions()?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if command=="effort" {
+        return state::resolve_effort_label(name,label_guard(command,args)).map_err(|refusal| {
+            if let Some(value)=refusal.value.filter(|_|args.iter().any(|arg|arg=="--json")) {println!("{value}");}
+            Error::new(refusal.code,refusal.text)
+        });
+    }
     state::resolve_label(name, label_guard(command, args)).map_err(|refusal| {
         if let Some(value) = refusal.value.filter(|_| args.iter().any(|arg| arg == "--json")) {
             println!("{value}");
@@ -1557,6 +1580,8 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
 /// current name. A name given before the flag must be that name; arguments
 /// after it are the command's own (a message, a new name, a path).
 fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if command=="effort" {return select_effort_session(args);}
     let Some((at, id)) = session_id_flag(command, args)? else {
         return Ok(args.to_vec());
     };
@@ -1574,6 +1599,28 @@ fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
     // Resolution names the session; the command's own reads under its lock
     // must still find this ID on the record they act on.
     state::session_id::select(&name, &id);
+    let mut rest = args.to_vec();
+    rest.drain(at..at + 2);
+    match args[..at].iter().find(|arg| !arg.starts_with('-')) {
+        Some(given) if *given != name => Err(Error::new(
+            1,
+            format!("Session ID {id} is {name}, not {given}"),
+        )),
+        Some(_) => Ok(rest),
+        None => {
+            rest.insert(0, name);
+            Ok(rest)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn select_effort_session(args: &[String]) -> Result<Vec<String>> {
+    let Some((at, id)) = session_id_flag("effort", args)? else {
+        return Ok(args.to_vec());
+    };
+    let name =
+        state::resolve_effort_id(&id).map_err(|refusal| Error::new(refusal.code, refusal.text))?;
     let mut rest = args.to_vec();
     rest.drain(at..at + 2);
     match args[..at].iter().find(|arg| !arg.starts_with('-')) {

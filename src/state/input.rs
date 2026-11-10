@@ -416,6 +416,14 @@ fn checked_input(
 /// sent text it is not a first message, so a new session keeps its first
 /// message state; a later native event settles it.
 fn settings_unconfirmed(record: &Value) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        match effort::picker_own_marker(record) {
+            Ok(true) => return false,
+            Err(_) => return true,
+            Ok(false) => {},
+        }
+    }
     record["settings_unconfirmed_at"]
         .as_f64()
         .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)

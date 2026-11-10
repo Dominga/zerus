@@ -240,6 +240,32 @@ wire_api="responses"
         self.assertEqual(json.loads(self.record_path.read_text())['pid'],self.record['pid'])
         self.assertEqual((self.native_home/'config.toml').read_bytes(),before,'Session choices never save account defaults')
 
+    def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
+        import native_effort_id as contract
+        models = [dict(slug='gpt-6.1-sol', display_name='GPT-6.1-Sol',
+                       default_reasoning_level='medium',
+                       supported_reasoning_levels=[dict(effort=e) for e in
+                                                   ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']])]
+        (self.native_home / 'models_cache.json').write_text(json.dumps(dict(models=models)))
+        self.record.update(model='gpt-6.1-sol', phase='idle', activity='idle', active_tools={})
+        self.write_record()
+        before = (self.native_home / 'config.toml').read_bytes()
+        record, path, legacy = contract.moved_record(self, self.name, self.record)
+        self.record, self.record_path = record, path
+        attempts = contract.key_log(self)
+        observed = contract.inspect(self, self.name, record['session_id'])
+        self.assertTrue(observed['effort_change_supported'], observed['effort_change_reason'])
+        choices = ('low', 'high') if observed['effort'] == 'high' else ('high', 'low')
+        for wanted in choices:
+            self.assertIn(wanted, observed['effort_options'])
+            record = contract.change_and_replay(self, self.name, record, path, wanted, attempts)
+            screen = self.tmux('capture-pane', '-p', '-t', self.pane)
+            self.assertRegex(screen.lower(), r'\b' + wanted + r'\b')
+            self.assertTrue(any(row.startswith('»') for row in screen.splitlines()), screen)
+            self.assertEqual(contract.inspect(self, self.name, record['session_id'])['effort'], wanted)
+        self.assertEqual((self.native_home / 'config.toml').read_bytes(), before)
+        self.assertFalse(legacy.exists(), 'a native update recreated the retired legacy record')
+
     def test_clear_is_visible_before_the_deferred_native_hook(self):
         import test_clear_context
         before = test_clear_context.ClearContext.inspect(self)

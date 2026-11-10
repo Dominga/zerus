@@ -9,7 +9,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-// Dormant ID-input facade. Existing picker controllers do not call it.
+// Original ID Effort custody; the borrowed facade and Settings admission stay
+// separate. Legacy controllers keep their existing native behavior.
 #[cfg(unix)]
 #[allow(dead_code)]
 mod picker_scope;
@@ -18,6 +19,17 @@ mod picker_scope;
 pub(super) fn picker_custodian_entry() -> Result<i32> {
     picker_scope::custodian_entry()
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn remember_picker_caller_machine(config: &crate::config::Config, expected: &str) {
+    picker_scope::remember_caller_machine(config, expected);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use picker_scope::{
+    entered as picker_entered, helper_read as picker_helper_read, own_marker as picker_own_marker,
+    refuse as picker_refuse, ReadCall as PickerRead,
+};
 
 const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const LEVELS: &[&str] = &[
@@ -973,6 +985,8 @@ fn mark_unconfirmed(record: &mut Value) {
 }
 
 fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() { return picker_scope::native_checked(name, request, empty); }
     let record = input::checked_settings(
         name,
         &request.expected_run_id,
@@ -1001,6 +1015,8 @@ fn wait_until<T>(read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
 
 fn wait_until_for<T>(timeout: Duration, mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
     let deadline = Instant::now() + timeout;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let deadline = picker_scope::deadline(deadline)?;
     loop {
         if let Some(value) = read()? {
             reacted();
@@ -1484,6 +1500,8 @@ fn kimi_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> 
         }
         send_key(&record, if down { "Down" } else { "Up" })?;
         let deadline = Instant::now() + Duration::from_secs(2);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let deadline = picker_scope::deadline(deadline)?;
         let moved = loop {
             let r = checked(name, request, false)?;
             if kimi_model_row(&capture(&r)?).as_deref() != Some(row.as_str()) {
@@ -1751,12 +1769,16 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
         Err("Claude's effort selection did not settle; inspect Terminal".into())
     })();
     if let Err(error) = selected {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if picker_entered() { return picker_refuse(error); }
         claude_close_picker(name, request);
         return Err(error);
     }
     send_key(&checked(name, request, false)?, "s")?;
     let mut confirmed = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let deadline = picker_scope::deadline(deadline)?;
     loop {
         let record = checked(name, request, false)?;
         let screen = capture(&record)?;
@@ -1776,6 +1798,8 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
                 continue;
             }
             Some(ClaudeSwitch::Hook) => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if picker_entered() { return picker_refuse("a PreModelSwitch hook asks for confirmation; change the model in Terminal".into()); }
                 send_key(&record, "Escape")?;
                 let _ = wait_until(|| {
                     let record = checked(name, request, false)?;
@@ -1845,9 +1869,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let name = &args[0];
     let digest = format!("{:x}", Sha256::digest(&bytes));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(result) = picker_scope::front(name, &bytes) { return result; }
     let receipt_path = absolute_root()?
         .join("effort_receipts")
         .join(format!("{id}.json"));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let _guard = Guard::exclusive(storage::lock_file(&root().join(".lock"))?)
+        .map_err(|error|error.to_string())?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _guard = lock(None)?;
     if receipt_path.exists() {
         let text = fs::read_to_string(&receipt_path).map_err(|e| e.to_string())?;
@@ -1860,6 +1890,31 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
         println!("{text}");
         return Ok(0);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if session_id::selected().is_none() {
+            super::resolve_effort_label(name, super::LabelGuard::Given {
+                run:request.expected_run_id.clone(),conversation:request.expected_conversation_id.clone()
+            }).map_err(|error|error.text)?;
+        }
+        let original=storage::read_metadata(name)?;
+        if storage::in_id_layout(&original) {
+            return Err("Session moved into the ID layout; refresh before changing effort".into());
+        }
+        // Given metadata resolution already pinned the unique raw-guarded
+        // legacy route. Its old deferred report is now only informational;
+        // ordinary expect must not resolve the siblings again under that pin.
+        session_id::take_deferred(name);
+        // Only the verified old legacy route reaches its unchanged recovery
+        // and native controller. Cached UUID results above need none of it.
+        rename::recover_locked()?;
+        rename::sync_legacy_locked()?;
+        worktree_lock::recover_locked();
+        let current=storage::read_metadata(name)?;
+        if storage::in_id_layout(&current) || !picker_scope::same_target(&original,&current) {
+            return Err("Original legacy Effort target changed during recovery".into());
+        }
     }
     let mut record = checked(name, &request, true)?;
     let current = settings(&record, true);

@@ -1011,7 +1011,11 @@ jobs:
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Keyless latest Codex, Claude Code and OpenCode compatibility
-        run: python3 scripts/ci/agent-compatibility.py
+        run: |
+          python3 scripts/ci/native-effort-seed.py build --source-sha '${{ needs.source.outputs.commit }}' \
+            --hgs "$GITHUB_WORKSPACE/target/debug/hgs" --image "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed" \
+            --receipt "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed.json"
+          python3 scripts/ci/agent-compatibility.py
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1067,6 +1071,11 @@ jobs:
             cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Complete original unit, debug and fake-agent builds
         run: bash scripts/ci/cli.sh debug
+      - name: Seal the private same-source native Effort test image
+        run: |
+          python3 scripts/ci/native-effort-seed.py build --source-sha "$SOURCE_COMMIT" \
+            --hgs "$GITHUB_WORKSPACE/target/debug/hgs" --image "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed" \
+            --receipt "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed.json"
       - name: Seal the tested debug executables and their provenance
         id: seal
         run: python3 scripts/ci/macos-debug-artifact.py seal --directory artifacts/mac-cli-debug
@@ -1078,6 +1087,7 @@ jobs:
           path: |
             artifacts/mac-cli-debug/hgs
             artifacts/mac-cli-debug/fake_agent
+            artifacts/mac-cli-debug/effort_seed
             artifacts/mac-cli-debug/manifest.json
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}

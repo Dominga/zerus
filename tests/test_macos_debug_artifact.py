@@ -12,6 +12,7 @@ import struct
 import subprocess
 import tempfile
 import itertools
+from types import SimpleNamespace
 import test_ci_security as security
 import unittest
 from unittest.mock import patch
@@ -54,6 +55,19 @@ class Fixture:
 
 
 class ArtifactControls(unittest.TestCase):
+    def test_seed_provenance_is_admitted_before_any_debug_handoff_seal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f=Fixture(Path(folder));destination=f.root/'new-handoff'
+            helper=SimpleNamespace(verify=unittest.mock.Mock(side_effect=ValueError('seed source mismatch')))
+            args=['macos-debug-artifact.py','seal','--directory',str(destination)]
+            with patch.object(artifact,'ROOT',f.root),patch.object(artifact,'context',return_value=f.bound), \
+                 patch.object(artifact,'toolchain',return_value=f.compiler),patch.object(artifact,'seed_helper',return_value=helper), \
+                 patch.object(artifact,'seal') as seal,patch.object(artifact.sys,'argv',args):
+                with self.assertRaisesRegex(ValueError,'seed source mismatch'):artifact.main()
+                seal.assert_not_called()
+            helper.verify.assert_called_once_with(f.root,f.root/'target/debug/hgs-effort-seed.json',f.root/artifact.FILES['hgs'])
+            self.assertFalse(destination.exists())
+
     def test_read_only_cargo_hardlinks_become_exclusive_handoff_copies(self):
         with tempfile.TemporaryDirectory() as folder:
             f = Fixture(Path(folder))
@@ -73,8 +87,8 @@ class ArtifactControls(unittest.TestCase):
             f = Fixture(Path(folder))
             data = f.verify(bound={**f.bound, 'attempt': 3})
             self.assertEqual(data['producer_attempt'], 1)
-            self.assertEqual(set(p.name for p in f.directory.iterdir()), {'manifest.json', 'hgs', 'fake_agent'})
-            for name in ('hgs', 'fake_agent'):
+            self.assertEqual(set(p.name for p in f.directory.iterdir()), {'manifest.json', 'hgs', 'fake_agent','effort_seed'})
+            for name in ('hgs', 'fake_agent','effort_seed'):
                 self.assertEqual(data['files'][name]['sha256'], hashlib.sha256((f.directory / name).read_bytes()).hexdigest())
             self.assertEqual(data['toolchain'], f.compiler)
 
@@ -146,8 +160,11 @@ class ArtifactControls(unittest.TestCase):
                   '--manifest-sha256',f.sha,'--producer-attempt','1','--rust-release','1.99.1']
             with patch.object(artifact,'ROOT',f.root),patch.object(artifact,'context',return_value=current), \
                  patch.object(artifact,'prerequisites',return_value={'python':'fixture','node':'v24','tmux':'3.8'}), \
+                 patch.object(artifact,'seed_receipt') as seed_receipt, \
                  patch.dict(os.environ,GITHUB_RUN_ATTEMPT='2'),patch.object(artifact.sys,'argv',args):
                 artifact.main()
+            seed_receipt.assert_called_once()
+            self.assertEqual(seed_receipt.call_args.args[1]['files'],f.verify()['files'])
             record=json.loads((f.root/'artifacts/test-results/debug-input.json').read_text())
             self.assertEqual((record['producer_attempt'],record['consumer_attempt']),(1,2))
             self.assertEqual(record['artifact_id'],'123')
@@ -167,7 +184,8 @@ class ArtifactControls(unittest.TestCase):
             fake.unlink()
             with patch.object(artifact, 'toolchain', return_value=f.compiler):
                 artifact.install(f.root, f.directory, data, check_rust=True)
-            for relative in artifact.FILES.values(): self.assertEqual((f.root / relative).stat().st_mode & 0o777, 0o755)
+            for name,relative in artifact.FILES.items():
+                self.assertEqual((f.root / relative).stat().st_mode & 0o777,0o500 if name=='effort_seed' else 0o755)
 
 
 class CliPhases(unittest.TestCase):

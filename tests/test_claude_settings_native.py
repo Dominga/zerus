@@ -177,6 +177,23 @@ class NativeClaudeSettings(unittest.TestCase):
         self.assertEqual(self.inspect()['effort'], 'low')
         self.assertEqual(self.settings_file.read_bytes(), before)
 
+    def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
+        import native_effort_id as contract
+        before = self.settings_file.read_bytes()
+        record, path, legacy = contract.moved_record(self, self.name, self.record)
+        self.record, self.record_path = record, path
+        attempts = contract.key_log(self)
+        observed = contract.inspect(self, self.name, record['session_id'])
+        self.assertTrue(observed['effort_change_supported'], observed['effort_change_reason'])
+        choices = ('low', 'high') if observed['effort'] == 'high' else ('high', 'low')
+        for wanted in choices:
+            self.assertIn(wanted, observed['effort_options'])
+            record = contract.change_and_replay(self, self.name, record, path, wanted, attempts)
+            self.assertIn(('● high' if wanted == 'high' else '○ low') + ' · /effort', self.screen())
+            self.assertEqual(contract.inspect(self, self.name, record['session_id'])['effort'], wanted)
+        self.assertEqual(self.settings_file.read_bytes(), before)
+        self.assertFalse(legacy.exists(), 'a native hook recreated the retired legacy record')
+
     def test_terminal_model_change_reaches_hgs_through_its_hook(self):
         before = self.settings_file.read_bytes()
         # The person changes the model in Terminal, for this session only.

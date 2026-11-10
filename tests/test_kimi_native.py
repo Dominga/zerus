@@ -849,6 +849,48 @@ class NativeKimi(lifecycle.Harness):
                 found.append(content)
         return found.count(text)
 
+    def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
+        import native_effort_id as contract
+        config = self.home / 'config.toml'
+        text = config.read_text()
+        self.assertEqual(text.count('max_context_size = 32768\n'), 1)
+        config.write_text(text.replace('max_context_size = 32768\n',
+                                       'max_context_size = 32768\ncapabilities = ["thinking"]\n'))
+        name = self.launch()
+        initial_text = 'Establish the native ID effort fixture.'
+        initial = self.send(name, self.payload(name, initial_text))
+        self.until(lambda: settled_recorded_turn(self.inspect(name), initial, initial_text), name)
+        record = self.binding(name)
+        self.assertTrue(record['conversation_id'])
+        before = config.read_bytes()
+        record, path, legacy = contract.moved_record(self, name, record)
+        attempts = contract.key_log(self)
+        current = self.inspect(name)
+        self.assertTrue(current['effort_change_supported'], current['effort_change_reason'])
+        self.assertIn(current['effort'], ('on', 'off'), self.screen(name))
+        first = 'off' if current['effort'] == 'on' else 'on'
+        requests = len(self.requests)
+        for wanted in (first, 'on' if first == 'off' else 'off'):
+            self.assertIn(wanted, current['effort_options'])
+            record = contract.change_and_replay(self, name, record, path, wanted, attempts)
+            screen = self.screen(name).lower()
+            if wanted == 'on':
+                self.assertIn('fixture thinking', screen)
+            else:
+                self.assertNotIn('fixture thinking', screen)
+            self.assertEqual(self.inspect(name)['effort'], wanted)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(len(self.requests), requests, 'the picker sent a model request')
+        followup_text = 'Confirm the moved native session still receives its hooks.'
+        followup = self.send(name, self.payload(name, followup_text))
+        settled = self.until(lambda: settled_recorded_turn(self.inspect(name), followup, followup_text), name)
+        self.assertEqual(settled['conversation_id'], record['conversation_id'])
+        actual = json.loads(path.read_bytes())
+        for key in ('session_id', 'run_id', 'conversation_id', 'pid', 'supervisor'):
+            self.assertEqual(actual.get(key), record.get(key), key)
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse(legacy.exists(), 'a native hook recreated the retired legacy record')
+
     def test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume(self):
         name, text = 'kimi/p/initial', 'Initial launch message\\'
         launch = str(uuid.uuid4())

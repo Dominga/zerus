@@ -133,7 +133,11 @@ fn read_store(path: &Path) -> Result<Store> {
     let Some(bytes) = read_regular(path, MAX_FILE)? else {
         return Ok(Store::default());
     };
-    let store: Store = serde_json::from_slice(&bytes).map_err(|e| format!("invalid keep-warm settings: {e}"))?;
+    parse_store(&bytes)
+}
+
+fn parse_store(bytes: &[u8]) -> Result<Store> {
+    let store: Store = serde_json::from_slice(bytes).map_err(|e| format!("invalid keep-warm settings: {e}"))?;
     if store.version != 1
         || store.sessions.len() > MAX_ENTRIES + 1
         || store.sessions.values().filter(|entry| entry.enabled).count() > MAX_ENABLED
@@ -1067,6 +1071,61 @@ pub(super) fn rename(old: &str, new: &str) -> Result<()> {
     }
     if had_state {
         fs::remove_file(&from_state).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Preserve the normal carry order and its SAME auxiliary exclusion, while
+/// every data publication/removal retains the caller's original Root proofs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn rename_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    old: &str,
+    new: &str,
+) -> Result<()> {
+    let (from, to) = (storage::label_key(old), storage::label_key(new));
+    if from == to {
+        return Ok(());
+    }
+    let (Some(from_state), Some(to_state)) = (runtime_path(&from), runtime_path(&to)) else {
+        return Err("invalid keep-warm owner".into());
+    };
+    let _auxiliary = view.auxiliary(&lock_path())?;
+    let mut store = match view.read(&path(), MAX_FILE)? {
+        Some(bytes) => parse_store(&bytes)?,
+        None => Store::default(),
+    };
+    let moving = store.sessions.contains_key(&from);
+    let moved = !moving
+        && store
+            .sessions
+            .get(&to)
+            .is_some_and(|entry| entry.name == new);
+    if !moving && !moved {
+        return Ok(());
+    }
+    let from_bytes = view.read(&from_state, 64 * 1024)?;
+    let destination = view.read(&to_state, 64 * 1024)?;
+    if let Some(bytes) = from_bytes.as_ref() {
+        let carried = if moved && destination.is_some() {
+            carried_fence()
+        } else {
+            String::from_utf8(bytes.clone()).unwrap_or_else(|_| carried_fence())
+        };
+        view.atomic(&to_state, carried.as_bytes())?;
+    } else if moving && destination.is_some() {
+        view.remove(&to_state)?;
+    }
+    if moving {
+        rename_entry(&mut store, old, new);
+        let serialized = serde_json::to_string(&store).map_err(|e| e.to_string())?;
+        if serialized.len() as u64 >= MAX_FILE {
+            return Err("keep-warm settings exceed limits".into());
+        }
+        view.atomic(&path(), format!("{serialized}\n").as_bytes())?;
+    }
+    if from_bytes.is_some() {
+        view.remove(&from_state)?;
     }
     Ok(())
 }

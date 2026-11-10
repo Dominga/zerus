@@ -215,6 +215,10 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     super::super::iron_rules::validate(&json!(settings.iron_rules))?;
+    // Task #19: the manual line is a branch name Zerus passes to git as one word.
+    if !settings.manual_line.trim().is_empty() {
+        super::templates::check_branch(settings.manual_line.trim()).context("manual_line names the line's branch")?;
+    }
     if let Some(memory) = &settings.memory {
         ensure!(
             super::super::project_memory::MODES.contains(&memory.mode.as_str()) || memory.mode == super::super::project_memory::LEGACY_LORE,
@@ -7276,7 +7280,7 @@ fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     let commit = text(input, "commit").trim().to_owned();
     ensure!(!commit.is_empty(), "Name the integration line's commit: {{\"commit\":\"...\"}}");
     ensure!(team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted), "Only an accepted task is marked landed");
-    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on the integration line");
+    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on {}", super::merge_queue::line_name(team));
     let label = actor.label(team);
     if let Some(task) = team.task_mut(id) {
         task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });

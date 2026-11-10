@@ -104,6 +104,24 @@ fn commits(task: &Task) -> Vec<String> {
             }
         }
     }
+    // Task #19 (owner, 2026-11-10): a member that commits with git itself
+    // leaves no commit Zerus made; the landing's commit (a hand landing's
+    // `hgs team landed`, or the queue's) and the accepted report's commit
+    // are the task's commits then.
+    if found.is_empty() && task.status == TaskStatus::Accepted {
+        let landed = task.landed.as_ref().map(|landed| landed.commit.clone());
+        let reported = task
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+            .map(|attempt| attempt.folder_head.clone());
+        for sha in [reported, landed].into_iter().flatten() {
+            if sha.len() <= 64 && !found.contains(&sha) {
+                found.push(sha);
+            }
+        }
+    }
     let skip = found.len().saturating_sub(20);
     found.split_off(skip)
 }

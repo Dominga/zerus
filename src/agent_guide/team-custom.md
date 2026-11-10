@@ -24,6 +24,10 @@ land_allowed). Only the owner's catalog writes them; the plan picks the preset.
 branch_per_task {template} and base_branch are the owner's settings: with a
 template each task gets its own branch from base_branch (default: the lead's
 branch); without one a member keeps one branch. A dirty folder waits.
+Landing by hand: {"manual_line":"BRANCH"} | hgs team settings --json (the lead
+may set it). Accept then queues nothing and runs no suites; you merge into
+BRANCH and record it, {"task":N,"commit":"SHA"} | hgs team landed --json;
+members merge BRANCH (git-merge-lead) and start from it.
 
 Scale and drain are cards (hgs guide team-propose). restart_crashed (on) restarts a
 crashed member 3 times an hour - also one whose exit interrupted a held task, and one

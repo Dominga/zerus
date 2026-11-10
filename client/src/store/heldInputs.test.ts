@@ -133,11 +133,11 @@ describe("held message copies in the service status", () => {
   });
   it("names the paused large messages only when the limit is reached", () => {
     const some = serviceStatus(connected({ task_message_inputs: { review: 1, full: false } }));
-    expect(some).toMatchObject({ healthy: false, inputsReview: true, review: false, retry: false, label: "Held message copies" });
+    expect(some).toMatchObject({ healthy: false, inputsReview: true, retry: false, label: "Held message copies" });
     expect(some?.details).toBe("Some held task message copies need review.");
     const full = serviceStatus(connected({ task_message_inputs: { review: 3, full: true } }));
     expect(full?.details).toBe("Large task messages are paused: some held message copies need review.");
-    expect(full).toMatchObject({ inputsReview: true, review: false, retry: false });
+    expect(full).toMatchObject({ inputsReview: true, retry: false });
   });
   it("keeps a not-ready service's label and Retry, and names the copies without a review it cannot list", () => {
     const status = serviceStatus(connected({ code: "background_unready", task_message_inputs: { review: 1, full: false } }));

@@ -1,7 +1,0 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Zerus migration review regression (synthetic)</title></head>
-<body><div id="root"></div><script>
-for (const type of ["error", "unhandledrejection"]) window.addEventListener(type, (event) => {
-  window.webkit.messageHandlers.result.postMessage(JSON.stringify({failures: [String(event.error || event.reason || event.message)]}));
-});
-</script><script type="module" src="../src/perf/migrationReviewSmoke.tsx"></script></body></html>

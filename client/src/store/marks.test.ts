@@ -82,51 +82,6 @@ const REPLY = replyKey("", "claude", "conv-1");
 
 beforeEach(() => vi.restoreAllMocks());
 
-describe("local source readiness", () => {
-  it("refreshes local presentation without migrating or queuing a host read", async () => {
-    const port = fakePort(), storage = memoryStorage();
-    const store = createMarks(port, storage); await store.load();
-    const data = createCatalog(store);
-    data.applyBatch(batchOf({ replaces: [{ computer: "", rows: [rowOut()] }] }));
-    port.attentionMarks.mockResolvedValue({ marks: {}, replies: { [REPLY]: "r1" } });
-    port.pendingReadMarks.mockClear();
-    await store.reloadLocal();
-    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
-    expect(port.queueReadMarks).not.toHaveBeenCalled();
-    expect(port.pendingReadMarks).not.toHaveBeenCalled();
-    expect(storage.list).toEqual([]);
-  });
-  it("does not replace a newer user change with a late readiness snapshot", async () => {
-    const f = await setup([rowOut()], fakePort(), memoryStorage([""]));
-    const stale = deferred<AttentionSnapshot>();
-    f.port.attentionMarks.mockImplementationOnce(() => stale.promise);
-    const reload = f.marks.reloadLocal(); await flush();
-    f.marks.markNeedsAttention(snapshotOf(f.row()));
-    f.port.attentionMarks.mockResolvedValue({ marks: { [REPLY]: { review: true, acknowledged: "" } }, replies: {} });
-    stale.resolve({ marks: {}, replies: {} }); await reload;
-    expect(f.marks.readState(f.row()).reviewLater).toBe(true);
-    expect(f.port.updateAttentionMarks).toHaveBeenCalledTimes(1);
-    expect(f.port.queueReadMarks).not.toHaveBeenCalled();
-  });
-
-  it("finishes a paused initial read before reloading the actual native model and bounds repeat requests", async () => {
-    const first = deferred<AttentionSnapshot>();
-    const ready = { marks: { [replyKey("", "claude", "conv-1")]: { review: true, acknowledged: "original" } }, replies: {} };
-    const port = fakePort(ready);
-    port.attentionMarks.mockImplementationOnce(() => first.promise);
-    const store = createMarks(port, memoryStorage([""]));
-    const initial = store.load();
-    const reload = store.reloadLocal();
-    expect(store.reloadLocal()).toBe(reload);
-    expect(port.attentionMarks).toHaveBeenCalledTimes(1);
-    first.resolve({ marks: {}, replies: {} });
-    await initial; await reload;
-    expect(port.attentionMarks.mock.calls.length).toBeLessThanOrEqual(3);
-    expect(store.writeOrder().marks).toEqual(Object.keys(ready.marks));
-    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
-  });
-});
-
 describe("keys", () => {
   it("are Qt's: the reply key, else the name and created without a conversation", () => {
     expect(REPLY).toBe(JSON.stringify(["", "claude", "conv-1"]));

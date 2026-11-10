@@ -85,6 +85,10 @@ pub(super) struct View {
     pub running: bool,
     pub needs_resume: bool,
     pub code: String,
+    /// The refused native check's own words beside `code`, e.g. why the
+    /// pinned image could not be opened (task #59). Presentation only.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reason: String,
     pub review: Option<review::View>,
     pub automatic_blocked: bool,
     pub request_id: Option<String>,
@@ -166,7 +170,7 @@ impl Controller {
     pub(super) fn fixture_windows(&self, cli: Option<PathBuf>) {
         *self.windows_fixture.lock().unwrap() = cli;
     }
-    fn select_route(&self, ordinary: &std::path::Path) -> Result<Route, &'static str> {
+    fn select_route(&self, ordinary: &std::path::Path) -> Result<Route, Refusal> {
         #[cfg(all(test, target_os = "linux"))]
         if let Some(cli) = self.windows_fixture.lock().unwrap().clone() {
             let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(&cli)?);
@@ -296,8 +300,8 @@ impl Controller {
         }
         let route = match self.select_route(&ordinary) {
             Ok(route) => Arc::new(route),
-            Err(code) => {
-                self.failed(code);
+            Err(refusal) => {
+                self.refused(refusal);
                 return;
             }
         };
@@ -599,8 +603,19 @@ impl Controller {
     pub(super) fn platform_manual_for_test(&self) {
         self.failed("activation_platform_manual");
     }
+    /// A refused route keeps its code and the refused check's own words
+    /// (task #59), in the view and in the log.
+    fn refused(&self, refusal: Refusal) {
+        let code = refusal.logged();
+        self.failed(code);
+        if code != "activation_platform_manual" {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.view.reason = refusal.reason;
+        }
+    }
     fn failed(&self, code: &str) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.view.reason.clear();
         // Any failed read closes a first-choice offer until a checked status.
         state.first = None;
         if code == "activation_platform_manual" {
@@ -745,6 +760,47 @@ impl Controller {
     }
 }
 
+/// Why a route was refused: its stable code for the view and, where a native
+/// check refused it, that check's own words. Task #59 (ZERUS/T-8r0u7v): a
+/// bare "activation_helper_unavailable" hid why PinnedImage::open refused.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Refusal {
+    pub code: &'static str,
+    pub reason: String,
+}
+impl Refusal {
+    fn new(code: &'static str, reason: impl std::fmt::Display) -> Self {
+        Self {
+            code,
+            reason: reason.to_string(),
+        }
+    }
+    /// Logs the reason and returns the code, for callers that keep only it.
+    pub(super) fn logged(&self) -> &'static str {
+        if !self.reason.is_empty() {
+            eprintln!("zerus-client: mode transition route refused: {self}");
+        }
+        self.code
+    }
+}
+impl From<&'static str> for Refusal {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            reason: String::new(),
+        }
+    }
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.reason.is_empty() {
+            f.write_str(self.code)
+        } else {
+            write!(f, "{}: {}", self.code, self.reason)
+        }
+    }
+}
+
 /// Selected only from the native connection and its maintained installation.
 /// Renderer arguments and paths never enter this route.
 struct Route {
@@ -773,20 +829,25 @@ fn valid_status(status: &Value, configuration: &str) -> bool {
 }
 
 impl Route {
-    fn select(ordinary: &std::path::Path) -> Result<Self, &'static str> {
+    fn select(ordinary: &std::path::Path) -> Result<Self, Refusal> {
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let _ = ordinary;
-            Err("activation_platform_manual")
+            Err("activation_platform_manual".into())
         }
         #[cfg(windows)]
         {
             let relay = Arc::new(zerus_client_core::desktop::relay::Connection::select(
                 ordinary,
             )?);
-            let image =
-                zerus_client_core::desktop::windows::image::PinnedImage::open(relay.executable()?)
-                    .map_err(|_| "activation_helper_unavailable")?;
+            let executable = relay.executable()?;
+            let image = zerus_client_core::desktop::windows::image::PinnedImage::open(executable)
+                .map_err(|error| {
+                Refusal::new(
+                    "activation_helper_unavailable",
+                    format_args!("{} could not be pinned: {error}", executable.display()),
+                )
+            })?;
             Ok(Self {
                 cli: image.path().into(),
                 helper: image.path().into(),
@@ -821,7 +882,7 @@ impl Route {
         relay: Arc<zerus_client_core::desktop::relay::Connection>,
         cli: PathBuf,
         directory: PathBuf,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, Refusal> {
         #[cfg(target_os = "linux")]
         let name = "install-linux-desktop-service.py";
         #[cfg(target_os = "macos")]
@@ -837,14 +898,18 @@ impl Route {
         ] {
             let follow = path == &cli; // Maintained CLI/cask links retain their exact target object.
             let no_follow = if follow { 0 } else { libc::O_NOFOLLOW };
+            let unavailable = |why: &dyn std::fmt::Display| {
+                Refusal::new(
+                    "activation_helper_unavailable",
+                    format_args!("{}: {why}", path.display()),
+                )
+            };
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(no_follow | libc::O_NONBLOCK | libc::O_CLOEXEC)
                 .open(path)
-                .map_err(|_| "activation_helper_unavailable")?;
-            let meta = file
-                .metadata()
-                .map_err(|_| "activation_helper_unavailable")?;
+                .map_err(|error| unavailable(&error))?;
+            let meta = file.metadata().map_err(|error| unavailable(&error))?;
             let limit = if path == &cli { 512 << 20 } else { 1 << 20 };
             if !meta.is_file()
                 || (!follow && meta.nlink() != 1)
@@ -852,7 +917,13 @@ impl Route {
                 || meta.len() > limit
                 || (meta.uid() != unsafe { libc::geteuid() } && meta.uid() != 0)
             {
-                return Err("activation_helper_unavailable");
+                return Err(unavailable(&format_args!(
+                    "not a private plain file (mode {:o}, links {}, owner {}, {} bytes)",
+                    meta.mode() & 0o7777,
+                    meta.nlink(),
+                    meta.uid(),
+                    meta.len()
+                )));
             }
             files.push((file, path.to_owned(), meta, follow));
         }
@@ -1184,6 +1255,52 @@ mod tests;
 mod windows_pins {
     use super::*;
     #[test]
+    fn a_refused_pin_names_why_the_image_could_not_be_opened() {
+        // Task #59 (ZERUS/T-8r0u7v): the code stays, PinnedImage::open's own
+        // words come with it, in the refusal and in the published view.
+        let relative = Route::select(std::path::Path::new("hgs.exe"))
+            .err()
+            .unwrap();
+        assert_eq!(relative.code, "activation_helper_unavailable");
+        assert!(
+            relative.reason.contains("image selection must be absolute"),
+            "{relative}"
+        );
+        let root = std::env::temp_dir().join(format!("zerus-mode-pin-{}", uuid::Uuid::new_v4()));
+        let missing = Route::select(&root.join("hgs.exe")).err().unwrap();
+        assert_eq!(missing.code, "activation_helper_unavailable");
+        assert!(
+            missing.reason.contains("hgs.exe could not be pinned"),
+            "{missing}"
+        );
+        assert!(
+            missing
+                .to_string()
+                .starts_with("activation_helper_unavailable: "),
+            "{missing}"
+        );
+        let owner = Controller::new();
+        owner.refused(missing);
+        let view = owner.view();
+        assert_eq!(view.code, "activation_helper_unavailable");
+        assert!(
+            view.reason.contains("could not be pinned"),
+            "{}",
+            view.reason
+        );
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["reason"],
+            view.reason.as_str()
+        );
+        // A later failure without words never keeps the earlier ones.
+        owner.failed("activation_helper_changed");
+        assert!(owner.view().reason.is_empty());
+        assert!(serde_json::to_value(owner.view())
+            .unwrap()
+            .get("reason")
+            .is_none());
+    }
+    #[test]
     fn only_consuming_loans_pin_the_selected_image_and_its_ancestors() {
         // Native file-sharing control only: this is no caller, manager or
         // installed-GUI positive. The plain fixture need not be a PE image.
@@ -1192,7 +1309,7 @@ mod windows_pins {
         let cli = root.join("hgs.exe");
         let old = root.join("held.exe");
         std::fs::write(&cli, b"original selection").unwrap();
-        let route = Arc::new(Route::select(&cli).unwrap());
+        let route = Arc::new(Route::select(&cli).unwrap_or_else(|refusal| panic!("{refusal}")));
         std::fs::rename(&cli, &old).unwrap(); // An idle snapshot holds no pin.
         std::fs::rename(&old, &cli).unwrap();
         let held = RoutePin::new(route.clone()).unwrap();

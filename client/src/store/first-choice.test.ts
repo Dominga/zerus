@@ -25,15 +25,6 @@ describe("a first background choice in flight keeps independent reasons", async 
     expect(firstChoiceActions.request()).toBe(REQUEST);
     expect(firstChoicePending(inFlight())).toBe(true);
   });
-  it("keeps a drafts warning and its review link under the explicit change headline", () => {
-    const status = serviceStatus(inFlight((state) => {
-      state.retained_source_import = { required: true, complete: false, running: false, code: "capture_failed", phase: null,
-        drafts_capture: { code: "capture_failed", writes: false, paused: true, capture_id: null, manifests: 0 } };
-    }));
-    expect(status).toMatchObject({ label: "Turning on background mode", ownership: "check", retry: false, review: true });
-    expect(status?.details).toContain(HINT);
-    expect(status?.details).toContain("Drafts are not being saved");
-  });
   it("keeps a distinct unconfirmed access request", () => {
     const status = serviceStatus(inFlight((state) => { state.notification_ownership!.pending = true; }));
     expect(status).toMatchObject({ label: "Turning on background mode", ownership: "check", retry: false });

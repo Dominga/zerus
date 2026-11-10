@@ -8,7 +8,6 @@ import { Icon } from "../lib/icons";
 import { lazyView } from "../lazy-view";
 import { LazyBoundary } from "../lazy-boundary";
 // Opened on demand, outside the entry chunk (zerus-ycycu).
-const MigrationReportDialog = lazyView(() => import("./MigrationReportDialog"), (m) => m.MigrationReportDialog);
 const TaskMessageInputsDialog = lazyView(() => import("./TaskMessageInputsDialog"), (m) => m.TaskMessageInputsDialog);
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
@@ -85,7 +84,6 @@ export function PausedServiceDetail() {
 }
 
 export function DesktopServiceStatus(props: { counts?: boolean }) {
-  const [reviewOrigin, setReviewOrigin] = createSignal<HTMLElement>();
   const [inputsOrigin, setInputsOrigin] = createSignal<HTMLElement>();
   const [focused, setFocused] = createSignal(false);
   let summary: HTMLSpanElement | undefined;
@@ -93,7 +91,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
   const details = () => [status()?.details, props.counts ? `${tr("Shared host attention (excludes this device's review marks)")}: ${counts()?.attention ?? tr("Unknown")}${counts()?.complete ? "" : `; ${tr("Incomplete")}`}` : ""].filter(Boolean).join("\n");
   return <Show when={status()}>{(view) => <>
-    <Show when={props.counts || !view().healthy || view().review || view().inputsReview || view().ownership || view().manualRefresh || view().modeReview}>
+    <Show when={props.counts || !view().healthy || view().inputsReview || view().ownership || view().manualRefresh || view().modeReview}>
     <div class="desktop-service-status" role="status" classList={{ healthy: view().healthy }}>
       <span ref={summary} class="service-summary" title={details()} aria-label={details()} tabIndex={0}
         aria-describedby={focused() ? "service-status-details" : undefined}
@@ -101,9 +99,6 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
         onKeyDown={(event) => { if (event.key === "Escape") setFocused(false); }}>
         <span class="state-dot" classList={{ ready: view().healthy, attention: !view().healthy }} />{view().label}
       </span>
-      <Show when={view().review}>
-        <button type="button" class="btn small ghost" aria-label={tr("Review migration report")} onClick={(event) => setReviewOrigin(event.currentTarget)}>{tr("Review")}</button>
-      </Show>
       <Show when={view().inputsReview}>
         <button type="button" class="btn small ghost" onClick={(event) => setInputsOrigin(event.currentTarget)}>{tr("Review message copies")}</button>
       </Show>
@@ -128,7 +123,6 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
     </Show>
-    <Show when={reviewOrigin()}>{(origin) => <LazyBoundary floating><MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} /></LazyBoundary>}</Show>
     <Show when={inputsOrigin()}>{(origin) => <LazyBoundary floating><TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} /></LazyBoundary>}</Show>
   </>}</Show>;
 }

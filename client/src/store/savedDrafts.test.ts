@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
-import { createSavedDrafts, draftCaptureNotice, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
+import { createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
 import type { DraftSource, SavedDraftDetail, SavedDraftItem } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -327,18 +327,3 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
   });
 });
 
-describe("drafts capture notice", () => {
-  const status = (extra: object = {}) => ({ code: "draft_capture_captured", capture_id: null, manifests: 0, writes: true, paused: false, ...extra });
-  it("explains refused saves and a waiting import, in every mode, with nothing to say otherwise", () => {
-    expect(draftCaptureNotice(null)).toBeUndefined();
-    expect(draftCaptureNotice(status())).toBeUndefined();
-    // Not captured but the import already ran: nothing waits for Retry.
-    expect(draftCaptureNotice(status({ code: "draft_capture_too_large" }))).toBeUndefined();
-    const refused = draftCaptureNotice(status({ code: "draft_capture_private_slot", writes: false }))!;
-    expect(refused.text).toContain("Drafts are not being saved");
-    expect(refused.hint).toContain("Retry records the earlier drafts before any draft is saved");
-    const paused = draftCaptureNotice(status({ code: "draft_capture_unreadable", paused: true }))!;
-    expect(paused.text).toContain("Importing drafts from Qt is paused");
-    expect(paused.hint).toContain("Retry never records them later");
-  });
-});

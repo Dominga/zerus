@@ -43,6 +43,14 @@ describe("passive service", () => {
   ])("is not paused when %s", (_, state) => {
     expect(servicePaused(state)).toBeUndefined();
   });
+  it("names why the activation helper was refused beside its code (task #59)", () => {
+    const words = "C:\\Zerus\\hgs.exe could not be pinned: The process cannot access the file because it is being used by another process. (os error 32)";
+    const status = serviceStatus(passive({}, { activation: { ...activation, code: "activation_helper_unavailable", reason: words } }));
+    expect(status?.details).toContain("Background activation is unavailable.");
+    expect(status?.details).toContain(`Why: ${words}`);
+    const bare = serviceStatus(passive({}, { activation: { ...activation, code: "activation_helper_unavailable" } }));
+    expect(bare?.details).not.toContain("Why:");
+  });
   it("replaces the skeletons, Connecting and the empty detail only while paused without computers", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
@@ -108,7 +116,7 @@ describe("Windows passive service (the actual native projection)", () => {
   it("is paused with the Settings action, and the footer offers neither Retry nor Resume", () => {
     expect(servicePaused(windows())).toBe("settings");
     expect(serviceStatus(windows())).toEqual({ label: "Background access paused", details: SETTINGS_BODY, healthy: false,
-      retry: false, review: false, inputsReview: false, ownership: undefined, manualRefresh: false, modeReview: false });
+      retry: false, inputsReview: false, ownership: undefined, manualRefresh: false, modeReview: false });
   });
   it.each<[string, DesktopService]>([
     ["disconnected", windows({ connected: false })],
@@ -199,7 +207,7 @@ describe("Windows first background choice in flight", () => {
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
     const store = read("../../store/desktopService.ts");
     expect(store).toContain('return { label: tr("Turning on background mode"),');
-    expect(store).toContain('healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };');
+    expect(store).toContain('healthy: false, retry: false, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };');
     expect(store).toContain(`if (firstChoicePending(state)) return tr("${PENDING_BODY}");`);
     expect(read("./DesktopServiceStatus.tsx")).toContain('servicePaused(desktopService.state()) === "settings" || firstChoicePending(desktopService.state());');
     expect(read("./DesktopServiceStatus.tsx")).toContain('<h2>{firstChoicePending(desktopService.state()) ? tr("Turning on background mode") : tr("Background work is paused")}</h2>');
@@ -214,7 +222,7 @@ describe("Windows first background choice in flight", () => {
 describe("service status in the title bar (task 409)", () => {
   it("keeps healthy details available to About and offers no Retry", () => {
     expect(serviceStatus(undefined)).toBeUndefined();
-    expect(serviceStatus(healthy())).toMatchObject({ healthy: true, retry: false, review: false, ownership: undefined, label: "Background service", details: "Background service connected" });
+    expect(serviceStatus(healthy())).toMatchObject({ healthy: true, retry: false, ownership: undefined, label: "Background service", details: "Background service connected" });
   });
   it.each([
     { connected: false },
@@ -247,12 +255,12 @@ describe("service status in the title bar (task 409)", () => {
     expect(serviceStatus(healthy({ notification_ownership: recovery }))).toMatchObject({ healthy: false, ownership: "rearm" });
     expect(serviceStatus(healthy({ notification_ownership: { ...recovery, pending: true } }))).toMatchObject({ ownership: "check" });
   });
-  it("keeps report review and saved-read recovery visible together", () => {
-    const status = serviceStatus(healthy({ retained_source_import: { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null },
-      pending_read_import: { required: true, complete: false, running: false, through: 0, superseded: 0, delivered: false, code: "pending" } }));
-    expect(status).toMatchObject({ healthy: false, retry: true, review: true });
+  it("keeps saved-read recovery visible with its Retry", () => {
+    const status = serviceStatus(healthy({ pending_read_import: { required: true, complete: false, running: false, through: 0, superseded: 0, delivered: false, code: "pending" } }));
+    expect(status).toMatchObject({ healthy: false, retry: true, label: "Read marks need attention" });
     expect(status?.details).toContain("Saved read marks");
-    expect(status?.details).toContain("migration report needs review");
+    // Task #59: the G3 migration report review left with the Qt import.
+    expect(status).not.toHaveProperty("review");
   });
   it("presents a passive service as paused work with Resume, not as a fault to Retry", () => {
     const status = serviceStatus(passive());

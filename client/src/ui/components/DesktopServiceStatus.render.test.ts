@@ -8,7 +8,6 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
 vi.mock("../../store/catalog", () => ({ catalog: { computers: {} } }));
 vi.mock("../../store/ui", () => ({ toast: vi.fn() }));
 vi.mock("../../i18n", () => ({ tr: (s: string, ...args: unknown[]) => s.replace(/%(\d+)/g, (_, n) => String(args[Number(n) - 1])) }));
-vi.mock("./MigrationReportDialog", () => ({ MigrationReportDialog: () => "Migration review" }));
 vi.mock("./TaskMessageInputsDialog", () => ({ TaskMessageInputsDialog: () => "Message review" }));
 import { desktopService } from "../../store/desktopService";
 import { DesktopServiceStatus } from "./DesktopServiceStatus";
@@ -38,16 +37,6 @@ it("keeps healthy service details visible in Settings About", () => {
   expect(host.textContent).toBe("Background service");
   expect(host.querySelector(".service-summary")?.getAttribute("aria-label")).toContain("Shared host attention");
   expect(host.querySelector("button")).toBeNull(); expect(native.invoke).not.toHaveBeenCalled();
-});
-
-it("keeps reviewable migration results visible even while the service is online", async () => {
-  desktopService.apply(healthy({ retained_source_import: { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null } }));
-  const host = mount(); expect(host.textContent).toContain("Migration report");
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Review")!.click();
-  // The review dialog loads on first use, outside the entry chunk (zerus-ycycu).
-  await vi.waitFor(() => expect(host.textContent).toContain("Migration review"));
-  desktopService.apply(healthy()); expect(host.querySelector(".desktop-service-status")).toBeNull();
-  expect(host.textContent).toContain("Migration review"); expect(native.invoke).not.toHaveBeenCalled();
 });
 
 it("keeps paused and unconfirmed ownership actions rather than hiding them as online", () => {

@@ -211,7 +211,10 @@ impl Controller {
                         None
                     }
                 };
-                let route = retained.unwrap_or(Arc::new(owner.select_route(&ordinary)?));
+                let selected = owner
+                    .select_route(&ordinary)
+                    .map_err(|refusal| refusal.logged())?;
+                let route = retained.unwrap_or(Arc::new(selected));
                 if !route.windows {
                     return Err("refresh_platform_unsupported");
                 }

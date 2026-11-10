@@ -1021,6 +1021,7 @@ mod tests {
     use std::collections::BTreeMap;
     const MACHINE: &str = "00000000-0000-4000-8000-000000000020";
     const REQUEST: &str = "00000000-0000-4000-8000-000000000021";
+    const DISPATCH_CALLS: usize = if cfg!(windows) { 2 } else { 1 };
     #[derive(Default)]
     struct NativeFixture {
         calls: RefCell<Vec<Vec<String>>>,
@@ -1073,7 +1074,7 @@ mod tests {
                 };
             }
             Ok(Output::Json(
-                json!({"name":"codex/fixture/main","private":"private native output"}),
+                json!({"name":"codex/fixture/main","agent":"codex","private":"private native output"}),
             ))
         }
     }
@@ -1297,7 +1298,17 @@ mod tests {
     }
     #[tokio::test]
     async fn authenticated_native_dispatch_is_guarded_and_every_read_identity_is_permanent() {
+        assert_authenticated_native_dispatch(cfg!(windows)).await;
+    }
+    #[tokio::test]
+    async fn windows_gateway_authenticated_dispatch_checks_provider_before_execution() {
+        assert_authenticated_native_dispatch(true).await;
+    }
+    async fn assert_authenticated_native_dispatch(windows_gateway: bool) {
         let f = Fixture::new();
+        let mut flags = f.connector.flags.get();
+        flags.windows_gateway = windows_gateway;
+        f.connector.flags.set(flags);
         let engine = f.engine();
         let profile = workspace::load_active(&f.private_dir).unwrap();
         let route = &profile.identity.device.device_id;
@@ -1305,11 +1316,6 @@ mod tests {
         let value = serde_json::to_value(&envelope).unwrap();
         engine.receive(&profile, value.clone()).await.unwrap();
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
-        assert_eq!(
-            f.connector.native.calls.borrow()[0],
-            ["--expect-machine", MACHINE, "inspect", "codex/fixture/main"]
-        );
         let native = f
             .connector
             .journal
@@ -1318,6 +1324,23 @@ mod tests {
             .unwrap();
         let receipt: Value = serde_json::from_str(&native).unwrap();
         assert_eq!(receipt["state"], "completed");
+        let mut expected = Vec::new();
+        if windows_gateway {
+            expected.push(vec![
+                "--expect-machine",
+                MACHINE,
+                "inspect",
+                "codex/fixture/main",
+                "--skip-processes",
+            ]);
+        }
+        expected.push(vec![
+            "--expect-machine",
+            MACHINE,
+            "inspect",
+            "codex/fixture/main",
+        ]);
+        assert_eq!(*f.connector.native.calls.borrow(), expected);
         let ciphertext = engine
             .seal_receipt(&profile, &envelope.header, receipt)
             .unwrap();
@@ -1333,7 +1356,7 @@ mod tests {
             .receive(&profile, serde_json::to_value(changed).unwrap())
             .await
             .is_err());
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(*f.connector.native.calls.borrow(), expected);
     }
     #[tokio::test(start_paused = true)]
     async fn queued_authenticated_reads_claim_again_after_flush_without_a_success_sleep() {
@@ -1479,7 +1502,7 @@ mod tests {
         );
         assert_eq!(
             (claims, results, f.connector.native.calls.borrow().len()),
-            (4, 2, 2)
+            (4, 2, 2 * DISPATCH_CALLS)
         );
         assert_eq!(
             events,
@@ -1509,7 +1532,7 @@ mod tests {
             .await
             .expect("The same claimed request must resume after the local gate opens")
             .unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
         let receipt: Value = serde_json::from_str(
             &f.connector
                 .journal
@@ -1520,7 +1543,7 @@ mod tests {
         .unwrap();
         assert_eq!(receipt["state"], "completed");
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
     }
     #[tokio::test]
     async fn external_management_lock_retains_one_receive_and_rechecks_current_authorization() {
@@ -1548,7 +1571,7 @@ mod tests {
             .expect("The retained request must resume after management unlocks")
             .unwrap();
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
 
         let next_id = "00000000-0000-4000-8000-000000000022";
         let next = f.request(&profile, next_id, &profile.identity.device.device_id, "");
@@ -1594,7 +1617,7 @@ mod tests {
             .await
             .expect("Revoked authorization must fail after management unlocks")
             .is_err());
-        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
         assert!(f
             .connector
             .journal

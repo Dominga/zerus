@@ -1320,12 +1320,6 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
-/** This run's drafts capture status, `null` when the run never captures. */
-export const draftCaptureStatus = () => desktop<import("./types").DraftCaptureStatus | null>("draft_capture_status", {});
-/** Queues the draft store's Retry; a recorded outcome never changes. */
-export const draftCaptureRetry = () => desktop<void>("draft_capture_retry", {});
-/** `draft-capture-changed`: the capture's status changed; resolves with the stop once listening. */
-export const onDraftCaptureChanged = (listener: () => void) => onEvent<null>("draft-capture-changed", listener);
 
 /** Availability is a local folder stat; opening does a fresh identity/directory check. */
 export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });

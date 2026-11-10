@@ -1,7 +1,7 @@
 import { dayTime } from "../ui/lib/usage";
 import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { ConflictsPage, DraftCaptureStatus, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
+import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { folderOf } from "../ui/sessions/SessionCard";
 import { composer } from "./composer";
@@ -36,25 +36,6 @@ export const TEXTS = {
  * are left out.
  */
 export const replaceText = (key: string) => tr("Replace the unsent draft in %1 with the selected saved draft?", key.split("\n").filter(Boolean).join(" / "));
-
-/**
- * What Saved drafts says about the drafts capture (zerus-5wmh.66.5.2.1.2.1),
- * in service mode or not: refused saves, or a one-time import waiting for
- * Retry, each with what Retry does (the Migration report's own hints). Retry
- * never changes a recorded outcome.
- */
-export function draftCaptureNotice(status: DraftCaptureStatus | null | undefined): { text: string; hint: string } | undefined {
-  if (!status) return undefined;
-  if (!status.writes) return {
-    text: trNoop("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry."),
-    hint: trNoop("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved."),
-  };
-  if (status.paused) return {
-    text: trNoop("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved."),
-    hint: trNoop("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later."),
-  };
-  return undefined;
-}
 
 /** Why a button is off; each shows as its tooltip. */
 export const REASONS = {

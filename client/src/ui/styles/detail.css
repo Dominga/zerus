@@ -623,9 +623,6 @@
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }
-  .draft-capture-notice { display: flex; align-items: center; gap: 8px; }
-  .draft-capture-text { flex: 1; min-width: 0; }
-  .draft-capture-text p { margin: 0; }
   .confirm-body { font-size: var(--fs-sm); line-height: 1.5; margin-bottom: 12px; color: var(--z-color-text-2); }
   .confirm-body p { line-height: 1.5; }
 

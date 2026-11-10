@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createRoot, createSignal, onCleanup, onMount, untrack, type JSX } from "solid-js";
+import { For, Show, createEffect, createRoot, createSignal, untrack, type JSX } from "solid-js";
 import * as bridge from "../../bridge";
 import { Icon } from "../lib/icons";
 import { composer, draftKey } from "../../store/composer";
@@ -8,10 +8,10 @@ import { setSubagentOpen, toast } from "../../store/ui";
 import { AgentBadge, MachineBadge } from "./SessionCard";
 import { listedSessionIgnoringCollapse } from "./model";
 import {
-  createSavedDrafts, draftCaptureNotice, draftOwnerRow, draftPresentation, draftSubagent, focusMessageEditor, listStep, modifiedText, REASONS, replaceText, SECTIONS, TEXTS,
+  createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, focusMessageEditor, listStep, modifiedText, REASONS, replaceText, SECTIONS, TEXTS,
   type RestoreTarget, type SavedDrafts,
 } from "../../store/savedDrafts";
-import type { DraftCaptureStatus, SavedDraftItem } from "../../types";
+import type { SavedDraftItem } from "../../types";
 import type { Session } from "./types";
 import { tr, trNoop } from "../../i18n";
 
@@ -135,13 +135,6 @@ export function SavedDraftsDialog() {
   let focusList = false;
   /** The selected draft's session row, found when it is selected (Qt's canOpenDraftSession). */
   const [owner, setOwner] = createSignal<Session>();
-  /** The drafts capture's status, read again on every opening and change. */
-  const [capture, setCapture] = createSignal<DraftCaptureStatus | null>(null);
-  const readCapture = () => { void bridge.draftCaptureStatus().then(setCapture, () => setCapture(null)); };
-  onMount(() => {
-    const stop = bridge.onDraftCaptureChanged(() => { if (savedDrafts.open()) readCapture(); });
-    onCleanup(() => { void stop.then((unlisten) => unlisten()); });
-  });
   createEffect(() => {
     const item = savedDrafts.selected();
     setOwner(item ? untrack(() => draftOwnerRow(item, orderedRows())) : undefined);
@@ -160,7 +153,6 @@ export function SavedDraftsDialog() {
       return;
     }
     focusList = true;
-    readCapture();
     if (!el.open) el.showModal();
     queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
@@ -234,17 +226,6 @@ export function SavedDraftsDialog() {
       <div class="dlg-head"><Icon name="drafts" size={18} class="accent" /><h2 id="saved-drafts-title">{tr(TEXTS.title)}</h2></div>
       <div class="dlg-body saved-drafts-body">
         <p class="hint" id="saved-drafts-hint">{tr(savedDrafts.empty() ? TEXTS.empty : TEXTS.hint)}</p>
-        <Show when={draftCaptureNotice(capture())}>
-          {(notice) => (
-            <div class="draft-capture-notice" role="status">
-              <div class="draft-capture-text">
-                <p class="draft-message error">{tr(notice().text)}</p>
-                <p class="hint">{tr(notice().hint)}</p>
-              </div>
-              <button type="button" class="btn small" onClick={() => { void bridge.draftCaptureRetry().then(readCapture, readCapture); }}>{tr("Retry")}</button>
-            </div>
-          )}
-        </Show>
         <Show when={!savedDrafts.empty()}>
           <div class="draft-list" ref={list} role="listbox" tabindex="0" aria-label={tr(TEXTS.title)} aria-describedby="saved-drafts-hint"
             aria-activedescendant={savedDrafts.selected() ? rowId(savedDrafts.selected()!) : undefined} onKeyDown={onKey}>

@@ -36,13 +36,6 @@ export const MAX_TEXT_BYTES = 64 * 1024;
 /** Qt refuses a pasted image above this many pixels (MessageComposer.cpp:394; core `MAX_IMAGE_PIXELS`). */
 export const MAX_PIXELS = 32_000_000;
 export const TOO_LONG = trNoop("Message exceeds 64 KiB.");
-/**
- * The draft store's refused-save error, `drafts::NOT_RECORDED` in client
- * core: the one core status text shown translated, since it tells the user
- * what to do. Other core status text keeps its source form.
- */
-export const DRAFTS_NOT_RECORDED = trNoop("Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.");
-const coreText = (text: string) => (text === DRAFTS_NOT_RECORDED ? tr(DRAFTS_NOT_RECORDED) : text);
 const TOO_LARGE = trNoop("Image is too large. Use an image below 32 megapixels.");
 const UNREADABLE = trNoop("Could not read the pasted image.");
 /** How long the disabled Send's hint shows (Qt's QToolTip, MessageComposer.cpp:817). */
@@ -134,7 +127,7 @@ export function statusLine(v: ComposerView | undefined, own: string | undefined,
   if (own) return { text: own, error: true };
   if (!v) return tooLong ? { text: tr(TOO_LONG), error: true } : { text: "", error: false };
   const below = v.status === "" || v.status === TOO_LONG || v.status === v.session_status || v.status === v.unavailable_reason;
-  if (!below) return { text: coreText(v.status), error: v.status_error };
+  if (!below) return { text: v.status, error: v.status_error };
   if (tooLong) return { text: tr(TOO_LONG), error: true };
   // Rust's length check may still see older text: the next item then.
   const text = v.status === TOO_LONG ? v.session_status || v.unavailable_reason : v.status;

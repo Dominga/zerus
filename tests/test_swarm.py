@@ -185,17 +185,60 @@ class Swarm(unittest.TestCase):
         return subprocess.Popen([str(HGS), 'swarm', 'worker'], env=env, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, start_new_session=True)
 
+    def worker_group(self, pgid):
+        """(pid, state) of every process still in process group `pgid`, read
+        from /proc; None where /proc cannot answer (macOS)."""
+        proc = Path('/proc')
+        if not proc.is_dir():
+            return None
+        members = []
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                # stat: "pid (comm) state ppid pgrp ..."; comm may contain
+                # spaces and parentheses, so split after the last ") ".
+                fields = (entry / 'stat').read_text().rsplit(') ', 1)[1].split()
+                state, group = fields[0], int(fields[2])
+            except (OSError, IndexError, ValueError):
+                continue  # the process exited while it was read
+            if group == pgid:
+                members.append((int(entry.name), state))
+        return members
+
+    def reap_orphans(self):
+        """Reap orphaned descendants when this process is PID 1 of a private
+        PID namespace: they reparent here and nobody else reaps them, so an
+        unreaped zombie would keep the group alive forever (zerus-xkrwx)."""
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if not pid:
+                return
+
     def stop_worker(self, worker):
         """SIGTERM, as the worker's unit stops it, then wait for the helpers it
         leaves: a sync helper still runs and writes below this fixture after its
-        worker is gone, so the temporary directory must outlive every one."""
+        worker is gone, so the temporary directory must outlive every one. A
+        group whose remaining members are all dead zombies is settled even
+        though an unreaped zombie keeps `killpg(pgid, 0)` succeeding — as PID 1
+        of a private PID namespace the orphans reparent here and are reaped;
+        when an outside PID 1 or subreaper owns that, /proc says they are
+        zombies (zerus-xkrwx)."""
         worker.send_signal(signal.SIGTERM)
         worker.communicate(timeout=5)
         deadline = time.monotonic() + 10
         while True:
+            if os.getpid() == 1:
+                self.reap_orphans()
             try:
                 os.killpg(worker.pid, 0)
             except ProcessLookupError:
+                return
+            members = self.worker_group(worker.pid)
+            if members == [] or (members and all(state == 'Z' for _, state in members)):
                 return
             if time.monotonic() >= deadline:
                 # A helper that outlived the bound must not keep writing into

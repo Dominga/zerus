@@ -642,3 +642,98 @@ fn a_folder_with_the_code_map_gets_the_search_hint() {
     let text = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
     assert!(text.contains("lore atlas search") && text.contains("hgs team lore find") && text.contains("hgs guide code"), "{text}");
 }
+
+thread_local! {
+    /// Task #17's stand-in for the replaced session: busy until set false.
+    static OLD_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static SET_ASIDE_ASKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Task #17 (team ede724c4, 2026-11-10): dev1 was relaunched while it worked
+/// on task #1, and swapped to another account; its old session was renamed
+/// dev1-replaced while busy and kept working beside the new dev1 in the same
+/// worktree. Now a busy replaced session makes the start wait: it keeps the
+/// member's name, nothing new starts in its folder, the wait is said once,
+/// and only after it was paused does the one new session start.
+#[test]
+fn a_relaunch_and_a_swap_of_a_working_member_never_leave_two_sessions_in_its_folder() {
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || relaunch_and_swap_of_a_working_member(root.path()));
+}
+
+fn relaunch_and_swap_of_a_working_member(root: &std::path::Path) {
+    let folder = root.join("work");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut t = team();
+    t.folder = folder.to_string_lossy().into_owned();
+    let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.state = MemberState::Active;
+    dev.folder = MemberFolder::Shared;
+    delivered(&mut t);
+    let attempt = t.task(1).unwrap().open_attempt().unwrap().id.clone();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    // The owner relaunches dev, then swaps it to another account.
+    super::super::ops::apply(&mut t, "relaunch", &json!({"member":"dev"}), &super::super::ops::Actor::Human, &none, &mut events).unwrap();
+    super::super::ops::apply(&mut t, "swap-member", &json!({"member":"dev","account":"additional"}), &super::super::ops::Actor::Human, &none, &mut events).unwrap();
+    let dev = t.member("dev").unwrap();
+    assert!(dev.session.is_none() && dev.launch_after_swap, "a new session is due");
+    assert_eq!(dev.replaced.as_ref().map(|old| old.name.as_str()), Some("codex/x/dev"), "the working session is the one replaced");
+    // The swap hands the task on: its attempt is revoked, so a late report
+    // from the old session records nothing twice.
+    assert!(t.task(1).unwrap().open_attempt().is_none());
+    assert!(t.task(1).unwrap().attempts.iter().any(|found| found.id == attempt && found.state == AttemptState::Revoked));
+    assert_eq!(steps(&t, &[], 100.0).iter().filter(|step| matches!(step, Step::Launch { member } if member == "dev")).count(), 1);
+
+    let mut store = Store::open_at(&root.join("teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let launches = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let count = launches.clone();
+    set_fake_hgs(Some(Box::new(move |_, args, _| {
+        if args.contains(&"--launch-id") {
+            // A start while the old session still works would put two agents
+            // in one folder.
+            assert!(!OLD_BUSY.with(std::cell::Cell::get), "a new session started while the replaced one works: {args:?}");
+            count.set(count.get() + 1);
+        }
+        Ok(fake_output(0, "{}", ""))
+    })));
+    OLD_BUSY.with(|busy| busy.set(true));
+    SET_ASIDE_ASKED.with(|asked| asked.set(0));
+    super::set_test_set_aside(Some(|name| {
+        SET_ASIDE_ASKED.with(|asked| asked.set(asked.get() + 1));
+        Ok(if OLD_BUSY.with(std::cell::Cell::get) {
+            super::SetAside::Busy(name.to_owned())
+        } else {
+            super::SetAside::Done(Some(format!("the replaced session was paused and saved as {name}-replaced")))
+        })
+    }));
+    let launch = Step::Launch { member: "dev".into() };
+    // Two ticks while the old session works: nothing starts, the wait is said once.
+    for _ in 0..2 {
+        let team = store.load(&t.id).unwrap().unwrap();
+        assert!(steps(&team, &[], 100.0).contains(&launch), "the start is tried again each tick");
+        run_step(&mut store, &team, &launch, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let dev = saved.member("dev").unwrap();
+        assert!(dev.session.is_none() && dev.launch_id.is_empty() && dev.error.is_empty(), "{dev:?}");
+        assert!(dev.replaced.is_some() && dev.replaced_busy && dev.launch_after_swap);
+    }
+    assert_eq!(launches.get(), 0, "no second session while the first works");
+    let waits = store.events(&t.id, None, 50).unwrap().to_string();
+    assert_eq!(waits.matches("launch_waiting").count(), 1, "said once: {waits}");
+    assert!(!waits.contains("member_retired") && !waits.contains("launch_failed"), "{waits}");
+    // Its turn ends and it is paused: now the one new session starts.
+    OLD_BUSY.with(|busy| busy.set(false));
+    let team = store.load(&t.id).unwrap().unwrap();
+    run_step(&mut store, &team, &launch, "").unwrap();
+    super::set_test_set_aside(None);
+    set_fake_hgs(None);
+    assert_eq!(launches.get(), 1, "exactly one new session");
+    assert_eq!(SET_ASIDE_ASKED.with(std::cell::Cell::get), 3, "the old session was set aside before the start");
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let dev = saved.member("dev").unwrap();
+    assert!(dev.replaced.is_none() && !dev.replaced_busy && !dev.launch_id.is_empty(), "{dev:?}");
+    let feed = store.events(&t.id, None, 50).unwrap().to_string();
+    assert!(feed.contains("was paused and saved as codex/x/dev-replaced"), "{feed}");
+}

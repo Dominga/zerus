@@ -49,6 +49,11 @@ pub(super) fn native_checked(name: &str, request: &Request, empty: bool) -> Resu
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn close_claude_model(name: &str, request: &Request) -> Result<()> {
+    driver::close_claude_model(name, request)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) use driver::read::Call as ReadCall;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

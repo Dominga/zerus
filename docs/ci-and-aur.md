@@ -404,6 +404,11 @@ model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
+The served-catalog cases use a private TLS proxy that never forwards traffic,
+fixture credentials and a temporary process-local CA. They cover a hidden model
+under **More models**, full-name picker rows, ordinary and effort-only changes,
+failure cleanup and existing-ID cancellation without replay. Every settings or
+effort request checks that the complete account `settings.json` is unchanged.
 `tests/test_claude_statusline_native.py` starts the real TUI through a tracked
 `hgs claude` launch, with the private home, state folder and socket and the
 loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 and 2.1.308 coverage requires the

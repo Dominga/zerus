@@ -102,10 +102,49 @@ pub(super) fn invoke(owner: &Arc<owner::Owner>, call: Call, args: &[String]) -> 
         Ok(program) => program,
         Err(error) => return owner.refuse(error),
     };
+    invoke_admitted(owner, program, args, call == Call::Keys, call == Call::ProcessStart)
+}
+
+/// A fixed cancellation, separate from the picker key allow-list. Only the
+/// original request and a freshly recognized Claude model panel reach it.
+pub(super) fn close_claude_model(
+    owner: &Arc<owner::Owner>,
+    name: &str,
+    request: &Request,
+) -> Result<()> {
+    owner.actor()?;
+    let frame = owner.control.frame();
+    if name != string(&frame.binding, "name")
+        || !uuid::Uuid::parse_str(&request.request_id)
+            .is_ok_and(|id| id.to_string() == frame.request_id)
+    {
+        return owner.refuse("Model cancellation does not belong to the original request".into());
+    }
+    if string(&owner.snapshot()?.0, "agent") != "claude" {
+        return owner.refuse("Model cancellation requires the original Claude session".into());
+    }
+    let record = super::checked(name, request, false)?;
+    if string(&record, "agent") != "claude" {
+        return owner.refuse("Model cancellation requires the original Claude session".into());
+    }
+    if claude_model_panel(&capture(&record)?).is_none() {
+        return Ok(());
+    }
+    let args = ["send-keys", "-t", string(&record, "pane"), "Escape"].map(str::to_owned);
+    invoke_admitted(owner, "tmux", &args, true, false).map(drop)
+}
+
+fn invoke_admitted(
+    owner: &Arc<owner::Owner>,
+    program: &'static str,
+    args: &[String],
+    keys: bool,
+    process_start: bool,
+) -> Result<Output> {
     if let Err(error) = owner.check() {
         return owner.refuse(error);
     }
-    if call == Call::Keys {
+    if keys {
         if let Err(error) =
             transaction::key_ready(owner).and_then(|()| context::take_turn(owner).map(drop))
         {
@@ -126,7 +165,7 @@ pub(super) fn invoke(owner: &Arc<owner::Owner>, call: Call, args: &[String]) -> 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if call == Call::ProcessStart {
+    if process_start {
         command.env("LC_ALL", "C").env("TZ", "UTC");
     }
     let child = {
@@ -138,7 +177,7 @@ pub(super) fn invoke(owner: &Arc<owner::Owner>, call: Call, args: &[String]) -> 
         if let Err(error) = owner.check() {
             return owner.refuse(error);
         }
-        if call == Call::Keys {
+        if keys {
             owner.with_scope(|scope| {
                 scope.may_have_sent = true;
                 Ok(())

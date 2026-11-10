@@ -3141,6 +3141,20 @@ belongs to the attempt (or stage run) handed to it.
   records `team`, `task` and `attempt`. A sandboxed member's run is checked by
   the worker the same way, and `hgs team run`'s refusal says the same. The
   lead's own runs are not checked.
+- A template run (`hgs team run`) is the build of the member that asked for
+  it. Its claim in the member's folder names that member and attempt. Members
+  that may not have worktrees work in one folder and its claims lie side by
+  side, so a run there shows only its own member as Building, records
+  `job_started` and `job_ended` for that member alone, never flags another
+  member of the folder as unassigned work and never wakes another member's
+  attempt with its result (`run_settled_woken`). A claim that names nobody,
+  written by an older Zerus, counts only in a folder one member works in.
+- A submitted report's receipt lists what the member made for the attempt and
+  left in place (`leftovers`): extra build folders, worktrees it added and
+  large run temporary folders. A worktree counts only when it is a linked one
+  that appeared since the hand-out: the repository's main checkout, the
+  checkout the member works in (a team's folder may be a subfolder of its
+  repository) and the other members' folders are never listed.
 - A member session building with nothing handed to it, or working past two
   minutes in a turn that began after its last attempt ended, is flagged at
   once: the member's `unassigned` ({since, what}), an `unassigned_work` event

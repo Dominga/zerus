@@ -270,6 +270,10 @@ fn a_queued_template_run_is_claimed_off_the_tick_and_runs_in_the_runner() {
     assert_eq!(claims[0].1["request_id"], run_id);
     assert_eq!(claims[0].0, folder);
     assert!(super::super::outbox::running_path(&folder, run_id).exists(), "the claim is not recorded");
+    // The claim names who asked: in a folder several members share, the run is
+    // the build of that member only.
+    let claim = super::super::outbox::running(&folder, run_id).unwrap();
+    assert_eq!((claim["member"].as_str(), claim["attempt"].as_str(), claim["label"].as_str()), (Some("dev"), Some("A1"), Some("say")), "{claim}");
     assert!(!path.exists(), "the request left the queue");
     assert!(super::super::outbox::result(&folder, run_id).is_none(), "the tick ran the command");
     assert!(store.load(&t.id).unwrap().unwrap().task(id).unwrap().attempts.last().unwrap().runs.is_empty());

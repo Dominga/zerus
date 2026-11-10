@@ -5388,6 +5388,42 @@ unreachable API or a rejected key leaves `configured` without a balance. A
 DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
 web host. DeepSeek publishes no usage or cost endpoint for API keys.
 
+Each refresh with an API-key balance also records that reading in a private
+journal (`account-spend/` in the hgs configuration directory), kept per account
+profile and key identity. It makes no additional network requests. The usage
+panel shows **Spent today** and **Spent this month** across the whole account
+(every key, tool and computer), computed from balance decreases since the first
+reading:
+- An interval in which the topped-up balance rose contains a top-up, so it is
+  left out.
+- A decrease in the granted balance counts as spend but is named separately,
+  because an expiring grant looks the same.
+- An interval without readings is counted on the day it ends, and the panel
+  names the previous reading.
+
+The journal keeps the last reading and up to 400 days of daily totals. Days
+follow the computer's local time.
+
+The panel also lists requests and cache-read, uncached-input and output tokens
+per model. It shows today, this month and each of the last 31 days, from this
+computer's native session logs (`DSH_HOME/sessions`). hgs only reads these logs:
+- A private index (`account-usage/`) remembers each log's identity, size,
+  modification time and last complete Zstandard frame. A refresh reads only
+  appended frames, newest logs first, within 32 MiB and 2.5 seconds. That budget
+  also covers the identity check (up to 4 KiB per new or changed log). The rest
+  follows on later refreshes, and meanwhile the panel says totals may grow. A
+  log whose check waits keeps its previous counts.
+- A malformed or unreadable log is set aside until it changes. The panel says
+  how many logs could not be read and are not counted.
+- A forked session counts only after its inherited prefix (`session/end-seed`
+  with `inherited: true`). Only each session's current format generation
+  counts, and a replaced or shortened log is read again from its start.
+- Logs untouched for 31 days are not opened.
+
+Other computers and tools using the same key are not included. No cost is
+estimated from token counts, because peak hours, holidays and price changes make
+such estimates brittle; the balance journal records real spend.
+
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange
 supplies authentication, and ports/tunnels are discovered automatically. The

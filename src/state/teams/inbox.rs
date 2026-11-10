@@ -64,10 +64,15 @@ impl Item {
         // U18: every item says how long it has waited, so the desktop and the
         // lead see the stuck ones without reading timestamps.
         value["age"] = json!(age(crate::state::now(), self.since));
-        // Task #289: the lead knows a notice from a decision and how to mark it
-        // seen; the key is what `hgs team seen --json` takes.
-        value["notice"] = json!(notice(self.kind));
-        if notice(self.kind) {
+        // Task #289: the lead knows a notice from a decision. Task #29 (team
+        // ede724c4, owner 2026-11-10): every item carries its key; every
+        // informational one closes with `hgs team seen --json` and comes back
+        // only when its content changes (its signature). A decision is
+        // answered, never closed.
+        let closes = closable(self);
+        value["notice"] = json!(closes);
+        value["key"] = json!(self.key);
+        if closes {
             value["seen"] = json!(format!(
                 "{{\"request_id\":\"UUID\",\"team\":\"TEAM\",\"items\":[\"{}\"]}} | hgs team seen --json",
                 self.key
@@ -93,15 +98,51 @@ pub(crate) fn notice(kind: &str) -> bool {
     NOTICES.contains(&kind)
 }
 
-/// A notice's change signature: the same key marked seen comes back when its
-/// words, time, member or task change.
+/// Task #29 (team ede724c4; the lead's answer q11, 2026-11-10): information
+/// the lead may close besides the notices: test results, playbook items,
+/// records lore cannot write yet, accepted work waiting to land, refused
+/// queued calls, idle notices and recovered attempts. Every item whose
+/// command asks nothing ("no action", task #460) closes too.
+const INFORMATIONAL: [&str; 7] = [
+    "test_result",
+    "playbook",
+    "lore_missing",
+    "waiting_to_land",
+    "refused_queued_call",
+    "idle_with_ready_work",
+    "attempt_recovered",
+];
+
+/// Task #29: whether the lead or the owner may close this item. A decision (a
+/// report, question, permission, a card or anything else that waits for an
+/// accept, reject or answer) is not: it clears only by being decided.
+pub(crate) fn closable(item: &Item) -> bool {
+    notice(item.kind) || INFORMATIONAL.contains(&item.kind) || informational(item)
+}
+
+/// An item's change signature: the same key closed comes back when its words,
+/// member or task change. Task #29 (team ede724c4): it leaves out the clock.
+/// Playbook, member_error, drain_held and build_folders items are dated
+/// now() and waiting_to_land now minus its age, and summaries count minutes
+/// ("idle 12 min", "#1 (26 min)"), so a signature with them changed on every
+/// read and a closed item came straight back.
 pub(crate) fn signature(item: &Item) -> String {
     use sha2::{Digest, Sha256};
-    let text = format!("{}\n{}\n{}\n{}\n{}\n{:?}\n{:.0}", item.kind, item.key, item.summary, item.detail, item.member, item.task, item.since);
+    let text = format!("{}\n{}\n{}\n{}\n{}\n{:?}", item.kind, item.key, steady(&item.summary), steady(&item.detail), item.member, item.task);
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-/// Whether the lead marked this notice seen with exactly this content.
+/// Task #29: a text with its elapsed times blanked ("12 min" reads "N min"),
+/// so an item that only grew older keeps its signature.
+fn steady(text: &str) -> String {
+    static ELAPSED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    ELAPSED
+        .get_or_init(|| regex::Regex::new(r"\b\d+(?:\.\d+)?\s?(min|minutes?|s|sec|seconds?|h|hours?)\b").expect("a valid pattern"))
+        .replace_all(text, "N $1")
+        .into_owned()
+}
+
+/// Whether the lead or the owner closed this item with exactly this content.
 fn is_seen(team: &Team, item: &Item) -> bool {
     let signature = signature(item);
     team.seen_notices.iter().any(|seen| seen.key == item.key && seen.signature == signature)
@@ -153,6 +194,9 @@ pub(crate) fn captured_hold_note(team: &Team, member: &str) -> String {
 
 /// How many decided proposals the lead's inbox lists (C9), the latest first.
 const DECIDED_PROPOSALS: usize = 5;
+/// Task #29 (team ede724c4): how long a test result stays in the inbox when
+/// nothing settles it sooner.
+pub(crate) const TEST_RESULT_HOURS: f64 = 12.0;
 
 /// The items waiting for the lead, oldest first, at most `ITEM_LIMIT`: the
 /// team's own and those of its direct reports (spec 5.6).
@@ -166,8 +210,9 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
 pub(crate) fn items_for(team: &Team, reviewer: &str) -> Vec<Item> {
     let mut items = all_items(team);
     items.retain(|item| reviewer_of(team, item) == reviewer);
-    // Task #289: a notice the lead marked seen stays out until it changes.
-    items.retain(|item| !notice(item.kind) || !is_seen(team, item));
+    // Task #289, task #29: an informational item the lead or the owner
+    // closed stays out until it changes.
+    items.retain(|item| !closable(item) || !is_seen(team, item));
     items
 }
 
@@ -811,12 +856,17 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             None => by_task.push((task, vec![notice])),
         }
     }
+    // Task #29 (team ede724c4): results are information. A task's results
+    // clear once it is accepted and landed, and any result after
+    // TEST_RESULT_HOURS.
+    let fresh_after = crate::state::now() - TEST_RESULT_HOURS * 3600.0;
+    by_task.retain(|(task, list)| list[0].at >= fresh_after && !team.task(*task).is_some_and(|task| task.status == TaskStatus::Accepted && task.landed.is_some()));
     for (task, list) in by_task.iter().take(20) {
         items.push(test_results_item(team, *task, list));
     }
     // U62 (#717): a result for no task is one card linking its record - suite,
     // status, time, the submitter - never the log, which stays in the database.
-    for notice in team.test_notices.iter().rev().filter(|notice| notice.task.is_none()).take(20) {
+    for notice in team.test_notices.iter().rev().filter(|notice| notice.task.is_none() && notice.at >= fresh_after).take(20) {
         items.push(Item {
             subagents: Value::Null,
             kind: "test_result",
@@ -1462,7 +1512,9 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     // Task 128 (docs/lore.md 6.1): a record Zerus cannot write until a field
     // is known waits here, with the workspace to write it in.
     if let Some((workspace, true)) = super::lore_sync::workspace(team) {
-        for pending in &team.lore.pending {
+        // Task #29: the stored list is the last lore pass's; a task that has
+        // its commit since is not named while the next pass is still due.
+        for pending in team.lore.pending.iter().filter(|pending| super::lore_sync::still_pending(team, pending)) {
             items.push(Item {
                 subagents: Value::Null,
                 kind: "lore_missing",
@@ -2364,7 +2416,8 @@ mod tests {
             notice("r4", "hgs", "passed", 40.0, None),
             notice("r5", "client-core", "failed", 50.0, Some(8)),
         ];
-        let items = items(&team);
+        // Task #29: results clear after 12 h; read at this test's own clock.
+        let items = crate::state::with_test_now(100.0, || items(&team));
         let tests: Vec<&Item> = items.iter().filter(|item| item.kind == "test_result").collect();
         assert_eq!(tests.len(), 3, "#7, #8 and the result for no task: {tests:?}");
         let seven = tests.iter().find(|item| item.task == Some(7)).unwrap();
@@ -2377,7 +2430,7 @@ mod tests {
         assert!(tests.iter().any(|item| item.task.is_none() && item.key == "test_result:r4"));
         // A new result for #7: one item still, with a new key.
         team.test_notices.push(notice("r6", "client-web", "passed", 60.0, Some(7)));
-        let again = super::items(&team);
+        let again = crate::state::with_test_now(100.0, || super::items(&team));
         let seven: Vec<&Item> = again.iter().filter(|item| item.kind == "test_result" && item.task == Some(7)).collect();
         assert_eq!(seven.len(), 1);
         assert_eq!(seven[0].key, "test_results:7:r6");

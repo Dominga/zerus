@@ -16,7 +16,7 @@ import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coo
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
-import { NewTeamHowTo, PlanModeField, SettingOffers } from "./NewTeamGuide";
+import { NewTeamHowTo, NewTeamIntroHint, NewTeamIntroSteps, PlanModeField, SettingOffers } from "./NewTeamGuide";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
@@ -321,16 +321,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   // planning, memory) shows once the lead has started the draft.
   const intro = () => (
     <div class="nt-intro" data-new-team-intro>
-      <div class="nt-intro-guide">
-        <h3>{tr("How a team works")}</h3>
-        <ol>
-          <li>{tr("A lead plans the work: it reads your goal, drafts the members, their roles and the tasks, and asks you what it needs.")}</li>
-          <li>{tr("You decide: nothing runs until you approve the team and its plan.")}</li>
-          <li>{tr("Members work in their own folders or branches; reviewers check their work and mergers land it.")}</li>
-          <li>{tr("You follow it in the Team tab: progress, questions waiting for you, reports and the plan.")}</li>
-          <li>{tr("Everything stays editable: members, tasks and settings can change while the team works.")}</li>
-        </ol>
-      </div>
+      <NewTeamIntroSteps />
       <div class="nt-intro-lead">
         <div class="nt-field">
           <span>{tr("Folder")}</span>
@@ -343,7 +334,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         <button type="button" class="btn primary nt-intro-start" data-start-planning disabled={store.busy() || starting() || !!startWhy()} title={startWhy()} onClick={() => void start()}>
           <Show when={store.busy() || starting()}><Spinner size={14} /> </Show>{tr("Start working with a team")}
         </button>
-        <p class="nt-hint">{tr("This creates a draft and starts the lead; members, folders and tasks come only when you create the team.")}</p>
+        <NewTeamIntroHint />
         <Show when={store.error()}><p class="nt-error nt-block-error">{store.error()}</p></Show>
       </div>
     </div>

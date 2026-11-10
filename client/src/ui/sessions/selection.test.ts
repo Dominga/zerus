@@ -15,10 +15,10 @@ const binding = (extra: Partial<ViewRow> = {}) => row({ agent: "opencode", allow
 const WRITES: SelectionAction[] = ["pause", "resume", "archive", "forget", "terminate"];
 
 describe("selection texts", () => {
-  it("are Qt's selectionActionText in the bar's order", () => {
-    expect(SELECTION_ACTIONS).toEqual(["compact", "expand", "mark_read", "review_later", "mute", "unmute", "pause", "resume", "archive", "move", "forget", "terminate"]);
+  it("keep attention and mute before row presentation in the bar and menu", () => {
+    expect(SELECTION_ACTIONS).toEqual(["mark_read", "review_later", "mute", "unmute", "compact", "expand", "pause", "resume", "archive", "move", "forget", "terminate"]);
     expect(SELECTION_ACTIONS.map(selectionText)).toEqual([
-      "Compact session rows", "Expand session rows", "Mark as read", "Mark needs attention", "Mute notifications", "Unmute notifications", "Pause", "Resume / restore", "Move to archive",
+      "Mark as read", "Mark needs attention", "Mute notifications", "Unmute notifications", "Compact session rows", "Expand session rows", "Pause", "Resume / restore", "Move to archive",
       "Move to project", "Forget", "Terminate",
     ]);
     expect(MOVE_WAIT).toBe("Wait for the current action to finish.");

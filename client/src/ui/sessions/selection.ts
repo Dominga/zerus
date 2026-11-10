@@ -12,8 +12,8 @@ export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later
 /** The actions that write to a host, one session at a time. */
 export type WriteAction = Extract<SelectionAction, "pause" | "resume" | "archive" | "forget" | "terminate">;
 
-/** The bar's and the selection menu's order (SessionSelection.cpp 121-122). */
-export const SELECTION_ACTIONS: readonly SelectionAction[] = ["compact", "expand", "mark_read", "review_later", "mute", "unmute", "pause", "resume", "archive", "move", "forget", "terminate"];
+/** Match the single-session menu: attention and mute, then row presentation. */
+export const SELECTION_ACTIONS: readonly SelectionAction[] = ["mark_read", "review_later", "mute", "unmute", "compact", "expand", "pause", "resume", "archive", "move", "forget", "terminate"];
 
 /**
  * Move to project for a selection goes through the organization's Move dialog

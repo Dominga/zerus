@@ -16,7 +16,7 @@ export default function AccountDefaultsDialog(props:{prompt:AccountPrompt;close(
   let dialog!:HTMLDialogElement;
   onMount(()=>{dialog.showModal();queueMicrotask(()=>dialog.querySelector<HTMLElement>('[role="combobox"]')?.focus());});
   onCleanup(()=>{dialog.close();if(view.origin.isConnected)view.origin.focus();});
-  const state=()=>catalog ? accountModelView(catalog,model()) : undefined;
+  const state=()=>catalog ? accountModelView(catalog,model(),view.provider) : undefined;
   const choose=(value:string)=>{setModel(value);setEffort(catalog && value===catalog.defaults.model && accountModelView(catalog,value).efforts.includes(catalog.defaults.effort) ? catalog.defaults.effort : "");};
   const inherited=()=>catalog ? `${catalog.provider_defaults.model||tr("Provider model")}${catalog.provider_defaults.effort ? `, ${catalog.provider_defaults.effort} effort` : ""}` : "";
   const submit=(event:Event)=>{event.preventDefault();if(scope)props.confirm({mode:where()},view.handle);else if(permissions)props.confirm({mode:mode()},view.handle);else if(state()?.canSave)props.confirm({model:model(),effort:state()?.effortEnabled?effort():""},view.handle);};

@@ -4827,13 +4827,27 @@ conversations with the selected account. One account has one model and effort
 account, the selected one first, and lists where it saved and where it failed,
 such as an offline computer. When the computers differ, the account shows
 **Differs between computers** with **Use everywhere**, which saves the selected
-computer's choice on all of them. Codex and Claude offer
+computer's choice on all of them. Codex, Claude and DeepSeek offer
 only models and effort levels from the selected computer's native catalog; each
 other computer checks the choice against its own catalog. Open the agent
 once and refresh Accounts if its catalog is empty. **Provider settings** removes
 the Zerus override; the dialog also shows readable native account defaults.
 Kimi supports a launch model choice; its effort remains controlled by Kimi's
-native settings. OpenCode and DeepSeek continue to manage their defaults natively.
+native settings. OpenCode continues to manage its defaults natively.
+
+The native DeepSeek account (`native-dsh`, zerus-v7tqa) saves a native route
+`provider/model` with exactly one slash, such as
+`deepseek-official/deepseek-flash` (shown as **DeepSeek-V4.1-Flash
+(DeepSeek)**), and an effort of `off`, `low`, `high` or `max` that the chosen
+model's catalog entry offers. Its catalog and native default
+(`agent-default-model`) come from the running DeepSeek host's read-only catalog
+method; Accounts never starts a host, so start or resume a DeepSeek session and
+refresh when the list is empty. Zerus applies the choice to each session it
+creates, from `hgs dsh FOLDER --new` and from New session, as described in
+[Official DeepSeek Harness](#official-deepseek-harness). An older `hgs` refuses
+an account catalog that holds a DeepSeek choice ("Invalid account model
+defaults"), which stops its launches on that computer: clear the DeepSeek
+choice (`--model ''`) before installing an older CLI build.
 Existing conversations, saved resumes and forks keep their own choices. Explicit
 native launch options after `--` take precedence. Nothing rewrites native account
 configuration or changes a running agent.
@@ -5248,7 +5262,26 @@ by 0.2.0-rc.2 and cancelled before its first step stays listed with an empty
 view. A child without a valid identity reports native corruption. A
 child view shows the child's own model, which reading never changes. Request
 receipts prevent duplicate submission. Uncertain delivery requires inspection.
-Model changes do not replace profile defaults. A child keeps the model it
+Model changes do not replace profile defaults.
+
+Account launch defaults (zerus-v7tqa): when the DeepSeek account has a saved
+model and effort, Zerus applies them to a session it has just created, after
+creation and permission setup and before any message, through the same scoped
+`settings` method as a per-session change. It binds the exact session identity
+and host generation, so a resident host keeps its adapter and is never reloaded;
+a host that changed in between is not asked, because that call would resume the
+session. The binding records the outcome as `account_defaults` with `status`
+`applied`, `failed` (the host never applied it) or `uncertain` (the reply was
+lost, so it may have applied), and `hgs inspect SESSION` reports it. A failed or
+uncertain application never fails the launch or blocks the session: `hgs`
+reports it on standard error once and never retries it, and the session keeps
+the native default. Relaunching an existing name or resuming a session never
+applies account defaults, and the native profile default stays unchanged.
+Without an account choice, a new session starts on the native default
+including its configured effort; a session's own recorded selection still wins
+when it resumes. A settings change that resumes a paused session applies the
+account permission mode, as **Resume** does (hosts started by this version).
+A child keeps the model it
 inherits and takes messages only through its parent; the adapter refuses model
 changes, messages, compaction and interrupts addressed to the child itself.
 Stopping one session does not terminate neighboring agents or the shared host.

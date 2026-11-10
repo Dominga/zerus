@@ -25,14 +25,15 @@ export function accountModelChoices(catalog:AccountModelCatalog) {
   const saved=catalog.defaults.model;
   return saved && !options.some(m=>m.id===saved) ? [...options,{id:saved,label:`${saved} (currently unavailable)`,effort_options:[]}] : options;
 }
-export function accountModelView(catalog:AccountModelCatalog,model:string) {
+export function accountModelView(catalog:AccountModelCatalog,model:string,provider="") {
   const chosen=catalog.models.find(m=>m.id===model);
   return {
     efforts:catalog.effort_supported ? chosen?.effort_options??[] : [],
     effortEnabled:catalog.effort_supported && !!model && !!chosen?.effort_options.length,
     canSave:!model || !!chosen,
     hint:!catalog.effort_supported ? tr("Kimi manages effort in its native settings. This choice sets the model for new conversations.")
-      : !catalog.models.length ? tr("Open this account's agent once, then refresh to load its models.")
+      // DeepSeek's catalog comes from its running host, read without starting one.
+      : !catalog.models.length ? provider==="dsh" ? tr("Start or resume a DeepSeek session, then refresh to load its models.") : tr("Open this account's agent once, then refresh to load its models.")
       : model && !chosen ? tr("This model is absent from the current account catalog. Choose another model or Provider settings.")
       : tr("Choose the reasoning effort for the selected model, or keep its provider default."),
   };

@@ -363,7 +363,9 @@ fn permission_plan(record: &Value) -> Result<PermissionPlan> {
     Ok(plan)
 }
 
-fn create_session(record: &mut Value) -> Result<()> {
+/// Returns the host generation the session was created or resumed under and
+/// the account permission mode it used.
+fn create_session(record: &mut Value) -> Result<(Value, String)> {
     // Deterministic capability/account checks precede persistence; identities
     // still precede native creation so an uncertain reply cannot duplicate it.
     let plan = permission_plan(record)?;
@@ -384,7 +386,81 @@ fn create_session(record: &mut Value) -> Result<()> {
         }
     }
     record.as_object_mut().ok_or("Invalid DeepSeek binding")?.remove("permissions_pending");
-    save(record)
+    save(record)?;
+    Ok((plan.generation, plan.mode))
+}
+
+/// Whether an RPC error leaves the request possibly executed by the host.
+fn delivery_uncertain(error: &str) -> bool {
+    error.contains("delivery uncertain")
+}
+
+/// Account launch defaults (zerus-v7tqa) reach only the session this launch
+/// just created, through the host's existing scoped `settings` method and
+/// before any prompt, so a resident older bridge needs no reload. The binding
+/// records `pending` first, then `applied`, `failed` (never executed) or
+/// `uncertain` (may have executed). The launch still succeeds and nothing is
+/// retried; the returned text is the warning to report.
+fn apply_account_defaults_with(
+    record: &mut Value,
+    (generation, mode): (&Value, &str),
+    model: &str,
+    effort: &str,
+    mut call: impl FnMut(&str, Value) -> Result<Value>,
+    mut persist: impl FnMut(&mut Value) -> Result<()>,
+) -> Option<String> {
+    let mut outcome = json!({"model":model,"effort":effort,"status":"pending","at":now()});
+    record["account_defaults"] = outcome.clone();
+    if let Err(error) = persist(record) {
+        record["account_defaults"]["status"] = json!("failed");
+        record["account_defaults"]["detail"] = json!(error);
+        return Some(format!("DeepSeek session started with its native model; account defaults were not applied: {error}"));
+    }
+    let attempt = (|| -> std::result::Result<Value, (bool, String)> {
+        let (provider, id) = model
+            .split_once('/')
+            .ok_or((false, "Invalid account model default".to_owned()))?;
+        let ping = call("ping", json!({})).map_err(|e| (false, e))?;
+        if ping["generation"] != *generation {
+            return Err((false, "DeepSeek host changed after creating the session".into()));
+        }
+        // The mode matters only if the session was paused natively meanwhile:
+        // the method then resumes it, as a scoped resume would.
+        let mut params = json!({"sessionId":record["conversation_id"],"provider":provider,
+            "model":id,"generation":generation,"permissionMode":mode});
+        if !effort.is_empty() {
+            params["reasoningEffort"] = json!(effort);
+        }
+        let applied = call("settings", params).map_err(|e| (delivery_uncertain(&e), e))?;
+        if applied["scope"] != "session" {
+            return Err((true, "DeepSeek did not confirm the session selection".into()));
+        }
+        Ok(applied["selected"].clone())
+    })();
+    let warning = match attempt {
+        Ok(selected) => {
+            outcome["status"] = json!("applied");
+            outcome["selected"] = selected;
+            None
+        }
+        Err((uncertain, detail)) => {
+            outcome["status"] = json!(if uncertain { "uncertain" } else { "failed" });
+            outcome["detail"] = json!(detail);
+            Some(if uncertain {
+                format!("DeepSeek may have applied the account defaults; check this session's model and effort: {detail}")
+            } else {
+                format!("DeepSeek session started with its native model; account defaults were not applied: {detail}")
+            })
+        }
+    };
+    record["account_defaults"] = outcome;
+    match persist(record) {
+        Ok(()) => warning,
+        Err(error) => Some(warning.map_or_else(
+            || format!("DeepSeek applied the account defaults, but recording that failed: {error}"),
+            |w| format!("{w}; recording the outcome also failed: {error}"),
+        )),
+    }
 }
 
 pub(crate) fn launch(
@@ -411,11 +487,28 @@ pub(crate) fn launch(
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+    // Only a session created here takes the account defaults; relaunching an
+    // existing name above resumes it with its own stored selection.
+    let config = crate::config::Config::load().map_err(|e| e.message)?;
+    let defaults = crate::accounts::launch_selection(&config, "dsh").map_err(|e| e.message)?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});
     ensure_host(&record)?;
-    create_session(&mut record)?;
+    let (generation, mode) = create_session(&mut record)?;
+    if let Some((model, effort)) = defaults {
+        let host = record.clone();
+        if let Some(warning) = apply_account_defaults_with(
+            &mut record,
+            (&generation, &mode),
+            &model,
+            &effort,
+            |method, params| rpc(&host, method, params),
+            save,
+        ) {
+            eprintln!("hgs: {warning}");
+        }
+    }
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
@@ -1227,13 +1320,44 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
             string(&result, "model_provider"),
             string(&result, "model")
         ));
-        result["model_options"]=json!(catalog["groups"].as_array().into_iter().flatten().flat_map(|g|g["models"].as_array().into_iter().flatten().map(|m|json!({"id":format!("{}/{}",string(g,"id"),string(m,"id")),"label":format!("{} ({})",string(m,"name"),string(g,"name")),"effort_options":m["reasoning"]["efforts"].as_array().into_iter().flatten().map(|e|e["id"].clone()).collect::<Vec<_>>()}))).collect::<Vec<_>>());
+        result["model_options"] = json!(model_options(&catalog));
+    }
+    if agent_id.is_none() && record.get("account_defaults").is_some() {
+        result["account_defaults"] = record["account_defaults"].clone();
     }
     if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
     Ok(result)
 }
 
 /// Read-only resident host methods; never ensure_host or a lifecycle RPC.
+/// Native catalog choices as `provider/model`, labelled "Model (Provider)".
+fn model_options(catalog: &Value) -> Vec<Value> {
+    catalog["groups"].as_array().into_iter().flatten().flat_map(|g| {
+        g["models"].as_array().into_iter().flatten().map(move |m| json!({
+            "id":format!("{}/{}",string(g,"id"),string(m,"id")),
+            "label":format!("{} ({})",string(m,"name"),string(g,"name")),
+            "effort_options":m["reasoning"]["efforts"].as_array().into_iter().flatten().map(|e|e["id"].clone()).collect::<Vec<_>>()}))
+    }).collect()
+}
+
+/// Settings > Accounts: the resident host's catalog through its read-only
+/// `catalog` method. Never starts, restarts or reloads a host; without one
+/// the list is empty. The native default (agent-default-model) comes along.
+pub(crate) fn account_models(home: &Path) -> Value {
+    let catalog = rpc(&json!({"agent_home":home}), "catalog", json!({})).unwrap_or(Value::Null);
+    account_models_from(&catalog)
+}
+fn account_models_from(catalog: &Value) -> Value {
+    let models = model_options(catalog);
+    let default = &catalog["default"];
+    let model = match (string(default, "provider"), string(default, "model")) {
+        (provider, model) if !provider.is_empty() && !model.is_empty() => format!("{provider}/{model}"),
+        _ => String::new(),
+    };
+    json!({"models":models.iter().take(64).collect::<Vec<_>>(),"truncated":models.len()>64,
+        "provider_defaults":{"model":model,"effort":string(default,"reasoningEffort")}})
+}
+
 pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec<Value>>)> {
     notification_snapshot_with(record, |method, params| rpc(record, method, params))
 }
@@ -1548,7 +1672,9 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 let (provider, model) = selected
                     .split_once('/')
                     .ok_or("Choose a native provider and model")?;
-                let mut params = json!({"sessionId":record["conversation_id"],"provider":provider,"model":model});
+                // A paused session resumes under the account permission mode.
+                let mode = crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,"native-dsh","dsh").map_err(|e|e.message)?;
+                let mut params = json!({"sessionId":record["conversation_id"],"provider":provider,"model":model,"permissionMode":mode});
                 if !string(&request, "effort").is_empty() {
                     params["reasoningEffort"] = request["effort"].clone();
                 }
@@ -1697,6 +1823,80 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(all(test, unix))]
 mod provider_failure_tests {
     use super::*;
+    #[test]
+    fn account_defaults_reach_only_the_created_generation_once() {
+        type Calls = Vec<(String, Value)>;
+        let run = |answer: &dyn Fn(&str) -> Result<Value>, persist_ok: bool| {
+            let mut record = json!({"conversation_id":"session-fixture"});
+            let (mut calls, mut saved): (Calls, Vec<Value>) = (Vec::new(), Vec::new());
+            let warning = apply_account_defaults_with(
+                &mut record,
+                (&json!("generation-a"), "bypass"),
+                "route/model",
+                "max",
+                |method, params| {
+                    calls.push((method.into(), params));
+                    answer(method)
+                },
+                |r| {
+                    saved.push(r["account_defaults"]["status"].clone());
+                    if persist_ok { Ok(()) } else { Err("read-only binding".into()) }
+                },
+            );
+            (record, calls, saved, warning)
+        };
+        let selected = json!({"provider":"route","model":"model","reasoningEffort":"max"});
+        let applied = |method: &str| Ok(if method == "ping" { json!({"generation":"generation-a"}) }
+            else { json!({"scope":"session","selected":selected}) });
+        // Pending is durable before the one scoped settings call on the same generation.
+        let (record, calls, saved, warning) = run(&applied, true);
+        assert!(warning.is_none());
+        assert_eq!(saved, [json!("pending"), json!("applied")]);
+        assert_eq!(calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["ping", "settings"]);
+        assert_eq!(calls[1].1, json!({"sessionId":"session-fixture","provider":"route","model":"model",
+            "generation":"generation-a","permissionMode":"bypass","reasoningEffort":"max"}));
+        assert_eq!(record["account_defaults"]["selected"], selected);
+        // A replaced host never receives settings: that would resume the session.
+        let moved = |_: &str| Ok(json!({"generation":"generation-b"}));
+        let (record, calls, saved, warning) = run(&moved, true);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(saved, [json!("pending"), json!("failed")]);
+        assert!(warning.unwrap().contains("not applied"));
+        assert!(record["account_defaults"]["detail"].as_str().unwrap().contains("host changed"));
+        // A refusal is definite; a lost reply may have applied. Neither retries.
+        for (error, status) in [
+            ("This model is unavailable for the native account", "failed"),
+            (HOST_UNAVAILABLE, "failed"),
+            ("Native request delivery uncertain: timed out", "uncertain"),
+        ] {
+            let answer = |method: &str| if method == "ping" { Ok(json!({"generation":"generation-a"})) } else { Err(error.to_owned()) };
+            let (record, calls, saved, warning) = run(&answer, true);
+            assert_eq!(calls.len(), 2, "{error}");
+            assert_eq!(saved, [json!("pending"), json!(status)]);
+            assert_eq!(record["account_defaults"]["status"], status);
+            assert!(warning.is_some());
+        }
+        // Without a durable pending record nothing is sent.
+        let (_, calls, saved, warning) = run(&applied, false);
+        assert!(calls.is_empty());
+        assert_eq!(saved, [json!("pending")]);
+        assert!(warning.unwrap().contains("not applied"));
+    }
+
+    #[test]
+    fn account_catalog_lists_native_routes_and_the_native_default() {
+        let catalog = json!({"default":{"provider":"deepseek-official","model":"deepseek-flash"},
+            "groups":[{"id":"deepseek-official","name":"DeepSeek","models":[{"id":"deepseek-flash","name":"DeepSeek-V4.1-Flash",
+            "reasoning":{"efforts":[{"id":"off"},{"id":"low"},{"id":"high"},{"id":"max"}],"defaultEffort":"high"}}]}]});
+        let models = account_models_from(&catalog);
+        assert_eq!(models["models"], json!([{"id":"deepseek-official/deepseek-flash","label":"DeepSeek-V4.1-Flash (DeepSeek)",
+            "effort_options":["off","low","high","max"]}]));
+        assert_eq!(models["provider_defaults"], json!({"model":"deepseek-official/deepseek-flash","effort":""}));
+        let empty = account_models_from(&Value::Null);
+        assert_eq!(empty["models"], json!([]));
+        assert_eq!(empty["provider_defaults"], json!({"model":"","effort":""}));
+    }
+
     #[test]
     fn child_summaries_require_own_identity_and_one_host_generation() {
         let record=json!({"conversation_id":"parent"});

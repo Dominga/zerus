@@ -930,6 +930,7 @@
   "Start an agent in a project folder on this computer or on a connected machine.": "Запустите агента в папке проекта на этом или подключённом компьютере.",
   "Start fresh begins a new conversation with the same folder, account and model. Earlier messages stay readable in Activity.": "«Начать заново» начинает новый разговор в той же папке с той же учётной записью и моделью. Прежние сообщения остаются доступны для чтения в активности.",
   "Start new child sessions as compact rows": "Открывать новые дочерние сессии в компактном виде",
+  "Start or resume a DeepSeek session, then refresh to load its models.": "Запустите или возобновите сессию DeepSeek, затем обновите, чтобы загрузить её модели.",
   "Start record released": "Запись о запуске освобождена",
   "Start subagents, workflows and skills, and message other agents.": "Запуск субагентов, рабочих процессов и навыков, а также сообщения другим агентам.",
   "Start the session to send?": "Запустить сессию для отправки?",

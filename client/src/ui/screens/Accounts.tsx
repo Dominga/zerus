@@ -9,7 +9,7 @@ import { AccountMarkCircle, AgentBadge, AgentTile } from "../sessions/SessionCar
 import { accountAppearance, accountMark } from "../../store/accountMarks";
 import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
-import type { Account } from "../../types";
+import type { Account, LocalUsage, ModelUsage, Spend } from "../../types";
 import { agentKind, catalog } from "../../store/catalog";
 import { machineCards } from "../../store/machines";
 import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccountMachine, setRequestedProfile } from "../../store/accounts";
@@ -18,6 +18,7 @@ import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
 import { balanceCompact, balanceKind, balanceLow, balanceTitle, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
+import { compactCount, exactCount, localUsageGroups, spendNotes, spendRows } from "../lib/deepseek-usage";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
@@ -129,8 +130,63 @@ function UsagePanel(props: { a: Account }) {
           <span class="tabular">{`${b.balance} ${b.currency}`}</span>
         </div>
       )}</For>
+      <Show when={u().spend}>{(spend) => <SpendSection spend={spend()} />}</Show>
+      <Show when={u().local_usage}>{(usage) => <LocalUsageSection usage={usage()} />}</Show>
       <Show when={creditsText(u().credits)}>{(text) => <p>{text()}</p>}</Show>
     </section>
+  );
+}
+
+/** Account-wide spend from the DeepSeek balance readings. */
+function SpendSection(props: { spend: Spend }) {
+  return (
+    <div class="acct-spend">
+      <h4>{tr("Spending")}</h4>
+      <For each={spendRows(props.spend)}>{(row) => (
+        <div class="row acct-balance"><span>{row.label}</span><span class="grow" /><span class="tabular" title={row.title}>{row.value}</span></div>
+      )}</For>
+      <For each={spendNotes(props.spend)}>{(note) => <p class="muted acct-note">{note}</p>}</For>
+    </div>
+  );
+}
+
+function UsageRows(props: { rows: ModelUsage[] }) {
+  const cell = (n: number) => <td class="tabular" title={exactCount(n)}>{compactCount(n)}</td>;
+  return <For each={props.rows}>{(m) => <tr><th scope="row" class="ell" title={m.model}>{m.model}</th>{cell(m.requests)}{cell(m.cache_hit)}{cell(m.cache_miss)}{cell(m.output)}</tr>}</For>;
+}
+
+/** Requests and tokens of this computer's DeepSeek sessions, from their local logs. */
+function LocalUsageSection(props: { usage: LocalUsage }) {
+  const groups = createMemo(() => localUsageGroups(props.usage));
+  const head = (first: string) => (
+    <thead><tr><th scope="col">{first}</th><th scope="col">{tr("Requests")}</th><th scope="col">{tr("Cache read")}</th><th scope="col">{tr("Uncached input")}</th><th scope="col">{tr("Output")}</th></tr></thead>
+  );
+  return (
+    <div class="acct-local">
+      <h4>{tr("This computer's DeepSeek sessions")}</h4>
+      <p class="muted acct-note">{tr("Requests and tokens from session logs on this computer. Other computers and tools are not included.")}</p>
+      <Show when={props.usage.partial}><p class="muted acct-note">{tr("Still reading session logs; totals may grow.")}</p></Show>
+      <Show when={groups().month.length} fallback={<p class="muted acct-note">{tr("No requests on this computer this month.")}</p>}>
+        <table class="acct-usage-table">
+          {head(tr("Model"))}
+          <tbody>
+            <tr class="group"><th scope="colgroup" colSpan={5}>{tr("Today")}</th></tr>
+            <Show when={groups().today.length} fallback={<tr><td colSpan={5} class="muted">{tr("No requests today.")}</td></tr>}>
+              <UsageRows rows={groups().today} />
+            </Show>
+            <tr class="group"><th scope="colgroup" colSpan={5}>{tr("This month")}</th></tr>
+            <UsageRows rows={groups().month} />
+          </tbody>
+        </table>
+        <details class="acct-days">
+          <summary>{tr("By day")}</summary>
+          <table class="acct-usage-table">
+            {head(tr("Day"))}
+            <tbody><UsageRows rows={groups().days} /></tbody>
+          </table>
+        </details>
+      </Show>
+    </div>
   );
 }
 

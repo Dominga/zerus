@@ -640,6 +640,12 @@ pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &P
     if let Some(available) = data["balance_available"].as_bool() {
         status["balance_available"] = json!(available);
     }
+    if let Some(spend) = super::deepseek_spend::public(&data["spend"]) {
+        status["spend"] = spend;
+    }
+    if let Some(usage) = super::deepseek_usage::public(&data["local_usage"]) {
+        status["local_usage"] = usage;
+    }
     status
 }
 
@@ -719,6 +725,15 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
         };
         if profile.provider != "claude" {
             retain_cached_identity(&mut data, &cached, &signature);
+        }
+        // Both reuse this refresh: the balance it just read and local session logs.
+        if profile.provider == "dsh" {
+            if let Some(spend) = super::deepseek_spend::record(config, &id, &home, &data) {
+                data["spend"] = spend;
+            }
+            if let Some(usage) = super::deepseek_usage::refresh(config, &id, &home) {
+                data["local_usage"] = usage;
+            }
         }
         if data.get("checked_at").is_none() {
             data["checked_at"] = json!(now());

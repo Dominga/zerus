@@ -543,11 +543,22 @@ export interface Usage {
   balances: { kind: string; balance: string; currency: string }[];
   /** DeepSeek's API-key `is_available`: false once the balance no longer covers API calls; older peers omit it. */
   balance_available?: boolean | null;
+  /** DeepSeek API-key spend from balance readings; other accounts and older peers omit it. */
+  spend?: Spend | null;
+  /** This computer's DeepSeek session usage; other accounts and older peers omit it. */
+  local_usage?: LocalUsage | null;
   credits: { balance: string; unlimited: boolean } | null;
   refreshing: boolean;
   refresh_error: boolean;
   offline: boolean;
 }
+export interface SpendAmount { currency: string; spent: string; granted: string }
+/** `period` is `today` or `month`; `gap_from` names the previous balance check when the first counted interval began earlier. */
+export interface SpendPeriod { period: string; amounts: SpendAmount[]; top_up: boolean; gap_from: number | null }
+export interface Spend { since: number; today: string; periods: SpendPeriod[] }
+export interface ModelUsage { model: string; requests: number; cache_hit: number; cache_miss: number; output: number }
+export interface DayUsage { day: string; models: ModelUsage[] }
+export interface LocalUsage { today: string; partial: boolean; days: DayUsage[] }
 export interface SessionUsageRef { host: ComputerId; name: string; run_id: string }
 export const emptyUsage = (provider = ""): Usage => ({
   status: "loading", provider, label: "", auth_status: "", checked_at: null, seeded: false,

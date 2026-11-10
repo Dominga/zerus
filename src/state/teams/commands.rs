@@ -663,8 +663,19 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
 /// `hgs team status --task N`; the full lead changes are `hgs team
 /// lead-changes`, and a proposal's stored form is what the card shows.
 pub(crate) fn bound_status(value: &mut Value, team: &Team) {
+    bound_status_with(value, team, false);
+}
+
+/// Task #57: `full_tasks` keeps each unfinished task's entry whole (its
+/// description, criteria and attempts unclipped), for the desktop's plan edit,
+/// which sends the whole plan back from this read; the poll never asks for it.
+/// Every other list stays bounded.
+pub(crate) fn bound_status_with(value: &mut Value, team: &Team, full_tasks: bool) {
     const REPORT_TEXT: usize = 300;
     const TASK_TEXT: usize = 400;
+    const DESCRIPTION_TEXT: usize = 200;
+    const CRITERIA: usize = 3;
+    const CRITERION_TEXT: usize = 120;
     const RUN_TAIL: usize = 200;
     const PAGE: usize = 20;
     const STAGE_SPANS: usize = 5;
@@ -692,10 +703,53 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                 *value = super::model::task_stub(task);
                 continue;
             }
-            for field in ["description", "criteria", "decision_reason"] {
+            // Task #57: an archived stub's timing is in `archived` (the client
+            // reads it there first); the copy beside it, a null attempt list and
+            // an empty merge commit are dropped. A closed phase's tasks add up.
+            if let Some(object) = value.as_object_mut() {
+                if object.get("archived").is_some_and(Value::is_object) {
+                    if object.get("timing") == object["archived"].get("timing") {
+                        object.remove("timing");
+                    }
+                    if object.get("attempts").is_some_and(Value::is_null) {
+                        object.remove("attempts");
+                    }
+                    if let Some(archived) = object.get_mut("archived").and_then(Value::as_object_mut) {
+                        if archived.get("merge_commit").and_then(Value::as_str) == Some("") {
+                            archived.remove("merge_commit");
+                        }
+                        if let Some(timing) = archived.get_mut("timing").and_then(Value::as_object_mut) {
+                            if timing.get("running_since").is_some_and(Value::is_null) {
+                                timing.remove("running_since");
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            if full_tasks {
+                continue;
+            }
+            // Task #57: the Team tab's task dialog and card read the whole
+            // description and criteria by the task's own read; the poll keeps
+            // the start of the description and the first criteria, clipped,
+            // with their count (a criteria list was never clipped before).
+            for (field, limit) in [("description", DESCRIPTION_TEXT), ("decision_reason", TASK_TEXT)] {
                 if let Some(text) = value[field].as_str() {
-                    let clipped = clip(text, TASK_TEXT);
+                    let clipped = clip(text, limit);
                     value[field] = json!(clipped);
+                }
+            }
+            if let Some(criteria) = value.get_mut("criteria").and_then(Value::as_array_mut) {
+                let total = criteria.len();
+                criteria.truncate(CRITERIA);
+                for criterion in criteria.iter_mut() {
+                    if let Some(text) = criterion.as_str() {
+                        *criterion = json!(clip(text, CRITERION_TEXT));
+                    }
+                }
+                if total > CRITERIA {
+                    value["criteria_total"] = json!(total);
                 }
             }
             // The stage spans stay, in a bounded form: the newest few, each its
@@ -715,6 +769,26 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                 object.remove("prepare");
             }
             let Some(attempts) = value.get_mut("attempts").and_then(|attempts| attempts.as_array_mut()) else { continue };
+            // Task #57: the Team tab reads the attempt count and the last
+            // attempt; an earlier one is its number, id and state. Its report,
+            // runs and questions are in `hgs team status --task N`.
+            let earlier = attempts.len().saturating_sub(1);
+            for attempt in attempts.iter_mut().take(earlier) {
+                if let Some(object) = attempt.as_object_mut() {
+                    object.retain(|key, _| matches!(key.as_str(), "n" | "id" | "state"));
+                }
+            }
+            if let Some(last) = attempts.last_mut().and_then(Value::as_object_mut) {
+                // The member's last reply is the task card's on demand; an
+                // answered question is history.
+                last.remove("last_reply");
+                if let Some(questions) = last.get_mut("questions").and_then(Value::as_array_mut) {
+                    questions.retain(|question| {
+                        question["answer"].as_str().unwrap_or_default().is_empty()
+                            && question["answered_at"].as_f64().unwrap_or(0.0) <= 0.0
+                    });
+                }
+            }
             for attempt in attempts {
                 if let Some(report) = attempt.get_mut("report").and_then(|report| report.as_object_mut()) {
                     if let Some(text) = report.get("text").and_then(|text| text.as_str()) {
@@ -6277,8 +6351,9 @@ fn status_command(input: &Value) -> anyhow::Result<Value> {
     }
     phases.mark("broker");
     // Task #393: the polled status is bounded; `status --task N` above
-    // answers with the task's full record.
-    bound_status(&mut value, &team);
+    // answers with the task's full record. Task #57: a plan edit's read asks
+    // for whole task entries ("full_tasks"), as it sends them back.
+    bound_status_with(&mut value, &team, input["full_tasks"].as_bool() == Some(true));
     phases.mark("bound");
     #[cfg(test)]
     let slow = STATUS_SLOW_MS.with(std::cell::Cell::get).unwrap_or(crate::state::slow_calls::SLOW_MS);

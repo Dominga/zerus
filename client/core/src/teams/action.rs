@@ -2128,7 +2128,10 @@ fn read_status(hgs: &Path, call: &TeamCall) -> Result<Value, String> {
     args.extend(["team".to_owned(), "status".to_owned(), "--json".to_owned()]);
     let invocation = Invocation {
         args,
-        stdin: Some(json!({"team": call.team}).to_string().into_bytes()),
+        // Task #57: the plan is sent back whole, so its tasks are read whole:
+        // the polled status clips a description and keeps only the last
+        // attempt. An older hgs ignores the flag.
+        stdin: Some(json!({"team": call.team, "full_tasks": true}).to_string().into_bytes()),
         timeout: Duration::from_secs(if call.computer.is_empty() { 15 } else { 45 }),
         request_id: None,
     };

@@ -19,7 +19,8 @@ WORKER_ID = '33333333-3333-4333-8333-333333333333'
 @unittest.skipIf(os.name == 'nt', 'POSIX native-process ancestry fixture')
 class ParentLink(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='zerus-parent-')
+        # A short root keeps the dsh host socket under the macOS sun_path limit (104).
+        self.temp = tempfile.TemporaryDirectory(prefix='zp-', dir='/tmp')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.state = self.root / 'state'; self.state.mkdir()

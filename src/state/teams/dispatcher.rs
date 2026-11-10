@@ -12549,6 +12549,19 @@ fn ensure_worker_now() -> anyhow::Result<()> {
     for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
     }
+    // Task #23 (team ede724c4): nor the agent's own Git configuration. An agent
+    // session that started the worker passed `GIT_CONFIG_PARAMETERS`
+    // ('safe.bareRepository=explicit' 'core.fsmonitor=') to every build, test
+    // and merge-queue suite the worker ran, and the test runner's bare mirror
+    // was refused in each of them.
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy();
+        if text == "GIT_CONFIG_PARAMETERS" || text == "GIT_CONFIG_COUNT" || text.starts_with("GIT_CONFIG_KEY_") || text.starts_with("GIT_CONFIG_VALUE_")
+            || text == "CLAUDECODE" || text.starts_with("CLAUDE_CODE_")
+        {
+            command.env_remove(&name);
+        }
+    }
     crate::platform::spawn_detached(&mut command)?;
     Ok(())
 }

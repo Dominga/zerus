@@ -1931,16 +1931,20 @@ fn phase_task_prerequisites_use_phase_order_and_never_add_dependencies() {
     apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
 }
 
-#[test]
-fn phase_git_prerequisites_recheck_ancestry_on_approval() {
-    let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git").arg("-C").arg(dir.path()).args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", dir.path().join("no-global-config")).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    };
+/// Runs git in the prerequisite fixture's repository.
+fn fixture_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git").arg("-C").arg(dir).args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", dir.join("no-global-config")).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A repository whose main has `base` (also tagged tag-only) and whose branch
+/// prerequisite adds `required`, and a running team on it whose draft phase 2
+/// requires base, prerequisite, required and tag-only: three unresolved.
+/// Returns the team and `base`.
+fn prerequisite_fixture(dir: &std::path::Path) -> (Team, String) {
+    let git = |args: &[&str]| fixture_git(dir, args);
     git(&["init", "--initial-branch=main"]);
     git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "base"]);
     let base = git(&["rev-parse", "HEAD"]);
@@ -1950,16 +1954,31 @@ fn phase_git_prerequisites_recheck_ancestry_on_approval() {
     let required = git(&["rev-parse", "HEAD"]);
     git(&["checkout", "main"]);
     let mut team = running_team();
-    team.folder = dir.path().to_string_lossy().into_owned();
+    team.folder = dir.to_string_lossy().into_owned();
     team.settings.base_branch = "main".into();
     let mut events = Vec::new();
     apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Later","assignee":"dev","requires":[{"commit":base},{"branch":"prerequisite"},{"commit":required},{"branch":"tag-only"}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     assert_eq!(team.phases[0].checks.as_ref().unwrap().unresolved.len(), 3);
     assert!(team.phases[0].checks.as_ref().unwrap().unresolved.iter().any(|reason| reason.contains("tag-only")));
+    (team, base)
+}
+
+/// Resolves the fixture's prerequisites: tag-only becomes a branch and main
+/// takes the prerequisite branch.
+fn resolve_prerequisites(dir: &std::path::Path, base: &str) {
+    fixture_git(dir, &["branch", "tag-only", base]);
+    fixture_git(dir, &["merge", "--ff-only", "prerequisite"]);
+}
+
+#[test]
+fn phase_git_prerequisites_recheck_ancestry_on_approval() {
+    let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let (mut team, base) = prerequisite_fixture(dir.path());
+    let mut events = Vec::new();
     assert!(apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).is_err());
-    git(&["branch", "tag-only", &base]);
-    git(&["merge", "--ff-only", "prerequisite"]);
+    resolve_prerequisites(dir.path(), &base);
     // Six ancestry reads together exceed five seconds, but each has its own window.
     // Leave scheduling headroom for the injected delays under parallel test load.
     plan::PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
@@ -1973,6 +1992,65 @@ fn phase_git_prerequisites_recheck_ancestry_on_approval() {
     approved.unwrap();
     assert!(started.elapsed() >= std::time::Duration::from_secs(6));
     assert!(team.phases[0].checks.as_ref().unwrap().unresolved.is_empty());
+}
+
+/// Task #41 (team ede724c4): the phase checks' Git reads run before the team
+/// store's write lock and are served inside it: no git process starts while
+/// the lock is held, and the refusal and the approval are the same as with
+/// live reads.
+#[test]
+fn phase_checks_read_git_before_the_store_lock() {
+    use crate::state::teams::store::{take_lock_lines, Store};
+    let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let (team, base) = prerequisite_fixture(&repo);
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
+    let git_under_lock = || take_lock_lines().into_iter().filter(|line| line["process"] == "git").collect::<Vec<_>>();
+    let approve = |store: &mut Store, prefetch: bool| {
+        let input = json!({"phase":2});
+        let request = uuid::Uuid::new_v4().to_string();
+        let team = store.load(&team.id).unwrap().unwrap();
+        let change = |store: &mut Store| {
+            store.mutate(Some((&request, &input)), &team.id, None, |team, events| {
+                apply(team, "approve-phase", &input, &Actor::Human, &BTreeSet::new(), events)
+            })
+        };
+        if prefetch { plan::with_prerequisites_read(&team, "approve-phase", &input, || change(store)) } else { change(store) }
+    };
+    // Without the prefetch the checks read Git under the lock, and the lock log
+    // names every read: the guard this test relies on sees them.
+    take_lock_lines();
+    let refused = approve(&mut store, false).unwrap_err().to_string();
+    assert!(refused.contains("tag-only"), "{refused}");
+    assert!(!git_under_lock().is_empty(), "a live read under the lock is logged");
+    // With it, the same refusal and no git under the lock.
+    let refused = approve(&mut store, true).unwrap_err().to_string();
+    assert!(refused.contains("tag-only"), "{refused}");
+    assert_eq!(git_under_lock(), Vec::<Value>::new(), "no git ran while the write lock was held");
+    // The prefetch reads the repository as it is now: resolved, it approves.
+    resolve_prerequisites(&repo, &base);
+    approve(&mut store, true).unwrap();
+    assert_eq!(git_under_lock(), Vec::<Value>::new(), "no git ran while the write lock was held");
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let phase = saved.phases.iter().find(|phase| phase.n == 2).unwrap();
+    assert!(!phase.state.is_draft(), "phase 2 is approved: {:?}", phase.state);
+    // An extend through the store reads its new prerequisites before the lock
+    // too, here a commit only its input names.
+    let input = json!({"tasks":[{"id":4,"title":"Even later","assignee":"dev","requires":[{"commit":"0123456789abcdef0123456789abcdef01234567"}]}]});
+    let request = uuid::Uuid::new_v4().to_string();
+    plan::with_prerequisites_read(&saved, "extend", &input, || {
+        store.mutate(Some((&request, &input)), &saved.id, None, |team, events| {
+            apply(team, "extend", &input, &Actor::Human, &BTreeSet::new(), events)
+        })
+    })
+    .unwrap();
+    assert_eq!(git_under_lock(), Vec::<Value>::new(), "no git ran while the write lock was held");
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let draft = saved.phases.iter().find(|phase| phase.state.is_draft()).unwrap();
+    assert!(draft.checks.as_ref().unwrap().unresolved.iter().any(|reason| reason.contains("0123456789")), "{:?}", draft.checks);
 }
 
 #[test]

@@ -3,6 +3,7 @@
 //! planErrors) defines them. Edges run from a dependency to its dependent.
 use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhaseKind, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
+use serde_json::Value;
 use std::path::PathBuf;
 
 /// The tasks that depend on `id`, in id order.
@@ -1378,15 +1379,142 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// One prerequisite read's answer: the output, or the failure's exit code and
+/// detail (exit code 1 is "not an ancestor" or "no such ref").
+type PrerequisiteAnswer = Result<Vec<u8>, (Option<i32>, String)>;
+
+thread_local! {
+    /// Task #41 (team ede724c4): the prerequisite reads an operation's phase
+    /// checks make, read before the store's write lock (`prefetch_prerequisites`)
+    /// and served inside it, like task 287's report reads. Set and cleared by
+    /// `dispatcher::with_git_answers`; None outside it.
+    static PREREQUISITE_MEMO: std::cell::RefCell<Option<BTreeMap<(String, Vec<String>), PrerequisiteAnswer>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Task #41: opens (`true`) or drops (`false`) this thread's prerequisite memo.
+pub(crate) fn prerequisite_memo(open: bool) {
+    PREREQUISITE_MEMO.with(|memo| *memo.borrow_mut() = open.then(BTreeMap::new));
+}
+
 fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
     -> Result<Vec<u8>, super::super::worktrees::GitError>
 {
+    let key = (folder.display().to_string(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>());
+    let answered = PREREQUISITE_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned()));
+    if let Some(answer) = answered {
+        return answer.map_err(|(code, detail)| {
+            let mut error = super::super::worktrees::error("git_failed", detail);
+            error.code = code;
+            error
+        });
+    }
     let deadline = overall.min(std::time::Instant::now() + std::time::Duration::from_secs(5));
     #[cfg(test)]
     if let Some(delay) = BEFORE_PREREQUISITE_GIT.with(std::cell::Cell::get) {
         delay();
     }
-    super::super::worktrees::git(folder, args, deadline)
+    // A read the prefetch did not make runs here; under the store's write lock
+    // the lock log names it.
+    super::store::note_process("git", &key.1);
+    let result = super::super::worktrees::git(folder, args, deadline);
+    PREREQUISITE_MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            let answer = match &result {
+                Ok(bytes) => Ok(bytes.clone()),
+                Err(error) => Err((error.code, error.detail.clone())),
+            };
+            memo.insert(key, answer);
+        }
+    });
+    result
+}
+
+/// Task #41 (team ede724c4): `change`, a store change that applies `op` to the
+/// team read as `team`, with the Git reads of its phase checks made first and
+/// served inside it. A read the stored team needs that the prefetch did not
+/// make (another writer added a prerequisite meanwhile) still runs, and the
+/// lock log names it.
+pub(crate) fn with_prerequisites_read<T>(team: &Team, op: &str, input: &Value, change: impl FnOnce() -> T) -> T {
+    super::dispatcher::with_git_answers(
+        || {
+            if super::ops::checks_phases(op) {
+                prefetch_prerequisites(team, input);
+            }
+        },
+        change,
+    )
+}
+
+/// The base a prerequisite must be an ancestor of.
+fn prerequisite_base(settings: &super::model::Settings) -> &str {
+    if settings.base_branch.is_empty() { "HEAD" } else { &settings.base_branch }
+}
+
+/// Task #41 (team ede724c4): the Git reads the phase checks of `op` will make,
+/// made now, before the store's write lock, for the memo to serve inside it:
+/// every commit and branch prerequisite of the team as read and of the
+/// operation's input (a plan, extend or edit-draft adds tasks with their
+/// `requires`), against the team's base and a base the input sets.
+pub(crate) fn prefetch_prerequisites(team: &Team, input: &Value) {
+    use super::model::Prerequisite;
+    let enabled = team.settings.phase_checks.unresolved_prerequisites
+        || input.pointer("/settings/phase_checks/unresolved_prerequisites").and_then(Value::as_bool) == Some(true);
+    if !enabled || team.folder.trim().is_empty() {
+        return;
+    }
+    let mut wanted: BTreeSet<(bool, String)> = BTreeSet::new();
+    for task in &team.tasks {
+        for requirement in &task.requires {
+            match requirement {
+                Prerequisite::Commit { commit } => { wanted.insert((false, commit.clone())); }
+                Prerequisite::Branch { branch } => { wanted.insert((true, branch.clone())); }
+                Prerequisite::Task { .. } => {}
+            }
+        }
+    }
+    fn walk(value: &Value, wanted: &mut BTreeSet<(bool, String)>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Array(requires)) = map.get("requires") {
+                    for requirement in requires {
+                        if let Some(commit) = requirement.get("commit").and_then(Value::as_str) {
+                            wanted.insert((false, commit.to_owned()));
+                        }
+                        if let Some(branch) = requirement.get("branch").and_then(Value::as_str) {
+                            wanted.insert((true, branch.to_owned()));
+                        }
+                    }
+                }
+                map.values().for_each(|value| walk(value, wanted));
+            }
+            Value::Array(items) => items.iter().for_each(|value| walk(value, wanted)),
+            _ => {}
+        }
+    }
+    walk(input, &mut wanted);
+    let mut bases = vec![prerequisite_base(&team.settings).to_owned()];
+    if let Some(base) = input.pointer("/settings/base_branch").and_then(Value::as_str) {
+        let base = if base.is_empty() { "HEAD" } else { base };
+        if !bases.iter().any(|known| known == base) {
+            bases.push(base.to_owned());
+        }
+    }
+    let deadline = std::time::Instant::now() + PHASE_CHECK_TIMEOUT;
+    let folder = std::path::Path::new(&team.folder);
+    for (branch, name) in wanted {
+        let reference = if branch {
+            match prerequisite_branch(folder, &name, deadline) {
+                Ok(reference) => reference,
+                Err(_) => continue,
+            }
+        } else {
+            name
+        };
+        for base in &bases {
+            let _ = prerequisite_git(folder, &["merge-base", "--is-ancestor", &reference, base], deadline);
+        }
+    }
 }
 
 fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::time::Instant) -> Result<String, String> {
@@ -1448,7 +1576,7 @@ pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Inst
                                 Err(reason) => return Some(reason),
                             }
                         } else { commit.clone() };
-                        let base = if team.settings.base_branch.is_empty() { "HEAD" } else { &team.settings.base_branch };
+                        let base = prerequisite_base(&team.settings);
                         prerequisite_git(folder,
                             &["merge-base", "--is-ancestor", &reference, base], deadline)
                             .err().map(|error| if error.code == Some(1) {

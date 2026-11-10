@@ -1188,6 +1188,46 @@ fn a_phase_mode_switch_asks_first_then_sends_the_phase_and_its_mode() {
     }
 }
 
+/// Task #12: the team's own mode is the same `hgs team phase-mode`, without
+/// a phase; it asks first unless the owner already confirmed it.
+#[test]
+fn a_team_mode_switch_sends_the_mode_without_a_phase() {
+    let switch = |mode: &str| TeamAction::TeamMode {
+        mode: mode.into(),
+        reason: String::new(),
+    };
+    let Err(TeamOutcome::Confirm { confirmation }) = prepare(&TeamCall {
+        confirmed: false,
+        ..call(switch("free"))
+    }) else {
+        panic!("asks first")
+    };
+    assert_eq!(
+        (confirmation.name.as_str(), confirmation.action.as_str()),
+        ("teamModeConfirm", "Switch to free")
+    );
+    assert!(
+        confirmation.text.contains("own mode keeps it"),
+        "{}",
+        confirmation.text
+    );
+    let (invocation, request_id) = prepare(&call(switch("free"))).unwrap();
+    assert_eq!(invocation.args, ["team", "phase-mode", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        sent,
+        json!({"mode":"free","team":TEAM,"by":"human","request_id":request_id})
+    );
+    assert!(sent.get("phase").is_none());
+    assert!(matches!(
+        prepare(&call(switch("open"))),
+        Err(TeamOutcome::Failed { .. })
+    ));
+    let parsed: TeamAction =
+        serde_json::from_value(json!({"kind":"team_mode","mode":"standard"})).unwrap();
+    assert!(matches!(parsed, TeamAction::TeamMode { ref mode, .. } if mode == "standard"));
+}
+
 /// Task 88: the Tests settings read and check the team's test configuration;
 /// neither is a change (no confirmation), a candidate override goes as it is,
 /// and anything but an object or null is refused before anything runs.

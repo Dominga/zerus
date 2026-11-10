@@ -125,11 +125,11 @@ export interface PhaseModeState {
 export function phaseModeState(team: ActTeam, n: number, owner = true): PhaseModeState | undefined {
   const phase = team.phases.find((found) => found.n === n);
   if (!phase) return undefined;
-  const free = (team.free_phase ?? 0) === n || phase.mode === "free"
-    || (!phase.mode && !team.phase_modes_known && team.plan_mode === "free");
-  const mode: "free" | "standard" = free ? "free" : "standard";
+  const mode = effectivePhaseMode(team, n);
+  const free = mode === "free";
   const target: "free" | "standard" = free ? "standard" : "free";
   const draft = phase.state === "draft";
+  const planning = team.status === "planning";
   const proposal = team.proposals?.find((found) => {
     if (found.kind !== "switch-plan-mode") return false;
     const change = found.change && typeof found.change === "object" ? found.change as { phase?: number } : {};
@@ -142,6 +142,8 @@ export function phaseModeState(team: ActTeam, n: number, owner = true): PhaseMod
     + (proposed ? `\n${tr("The lead proposes %1", proposed === "free" ? tr("Free") : tr("Standard"))}` : "");
   let why = "";
   if (!owner) why = tr("Only the owner switches a phase's mode; the lead proposes it");
+  // Task #12: while the team plans, each phase's mode is the one it starts in.
+  else if (planning) why = "";
   else if (!["running", "paused"].includes(team.status)) why = tr("Only a running or paused team switches a phase's mode");
   else if (draft) why = mode === "free"
     ? tr("A draft phase starts free here; only an approved phase can open for tasks as they come")
@@ -152,6 +154,18 @@ export function phaseModeState(team: ActTeam, n: number, owner = true): PhaseMod
   else if (target === "free" && (team.free_phase ?? 0) > 0 && (team.free_phase ?? 0) !== n)
     why = tr("Phase %1 already takes tasks as they come; switch it to standard first", team.free_phase ?? 0);
   return { phase: n, mode, proposed, target, tip, why, canSwitch: !why, draft, readOnly: !owner };
+}
+
+/**
+ * Task #12 (owner, 2026-11-10): the mode phase `n` plans in, in every state:
+ * its own (status's `phase_modes`, which already falls back to the team's),
+ * else the team's `plan_mode`; the open free phase is free.
+ */
+export function effectivePhaseMode(team: ActTeam, n: number): "free" | "standard" {
+  if ((team.free_phase ?? 0) === n) return "free";
+  const own = team.phases.find((found) => found.n === n)?.mode;
+  if (own === "free" || own === "standard") return own;
+  return team.plan_mode === "free" ? "free" : "standard";
 }
 
 /** Task #59: the team bar's mode badge (Qt teamHeaderPlanMode), with the free phase it names. */
@@ -176,6 +190,15 @@ export function phaseModeConfirmation(team: ActTeam, n: number, mode: "free" | "
       text: tr("%1 stays open when its tasks are accepted: idle, not done. New tasks join it and run as they are added, with the same pipelines, reports and acceptance. The other phases keep their modes.", name) }
     : { name: "teamPhaseModeConfirm", title: tr("Switch %1 to standard planning?", name), action: tr("Switch to standard"),
       text: tr("%1 is locked: its tasks keep their state and run on. New work is planned in a new phase, approved by you; nothing joins this one without a plan edit. The other phases keep their modes.", name) };
+}
+
+/** Task #12: the team switch's question while the team runs; Cancel is focused. */
+export function teamModeConfirmation(team: ActTeam, mode: "free" | "standard"): TeamConfirmation {
+  return mode === "free"
+    ? { name: "teamModeConfirm", title: tr("Switch %1 to free planning?", team.name), action: tr("Switch to free"),
+      text: tr("Every phase without a mode of its own switches to free planning; a phase with its own mode keeps it.") }
+    : { name: "teamModeConfirm", title: tr("Switch %1 to standard planning?", team.name), action: tr("Switch to standard"),
+      text: tr("Every phase without a mode of its own switches to standard planning; a phase with its own mode keeps it.") };
 }
 
 /** A stage kind in words (Qt stageName). */
@@ -636,9 +659,25 @@ export class TeamActions {
   discard() { return this.run("discard", { kind: "discard" }, discardConfirmation(this.where().team)); }
   pause(impact: { teams: number; sessions: number }) { return this.run("pause", { kind: "pause" }, pauseConfirmation(this.where().team, impact)); }
   resume() { return this.run("resume", { kind: "resume" }); }
-  /** Task #58: one phase's mode, after the owner's confirmation. */
+  /**
+   * Task #58: one phase's mode, after the owner's confirmation. Task #12:
+   * while the team plans it is the mode the phase starts in, a choice
+   * before the approval, so it is stored without a question.
+   */
   phaseMode(phase: number, mode: "free" | "standard") {
-    return this.run(`phase-mode:${phase}`, { kind: "phase_mode", phase, mode }, phaseModeConfirmation(this.where().team, phase, mode));
+    const team = this.where().team;
+    if (team.status === "planning") return this.run(`phase-mode:${phase}`, { kind: "phase_mode", phase, mode }, undefined, true);
+    return this.run(`phase-mode:${phase}`, { kind: "phase_mode", phase, mode }, phaseModeConfirmation(team, phase, mode));
+  }
+  /**
+   * Task #12: the team's own mode, the default of every phase without its
+   * own. While the team plans it is stored at once (Approve starts in it);
+   * while it runs the owner confirms it first.
+   */
+  teamMode(mode: "free" | "standard") {
+    const team = this.where().team;
+    if (team.status === "planning") return this.run("team-mode", { kind: "team_mode", mode }, undefined, true);
+    return this.run("team-mode", { kind: "team_mode", mode }, teamModeConfirmation(team, mode));
   }
   stop(impact: { teams: number; sessions: number }) { return this.run("stop", { kind: "stop" }, stopConfirmation(this.where().team, impact)); }
   archive() { return this.run("archive", { kind: "archive" }); }

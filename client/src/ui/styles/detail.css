@@ -341,6 +341,15 @@
   .held-input-preview { flex: 0 1 220px; min-width: 0; color: var(--z-color-muted); }
   .terminal-draft-text { flex: 1 1 auto; min-width: 0; }
   .held-input .btn, .terminal-draft .btn { flex-shrink: 0; }
+  /* Task #7: a model or effort change the agent has not visibly taken. In the
+     composer it spans the editor's width; its texts wrap, its buttons stay. */
+  .composer .settings-check { width: auto; margin: 0 0 6px; }
+  .settings-check { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 10px; font-size: 12px;
+    border-left: 3px solid var(--z-color-warn); }
+  .settings-check > svg { color: var(--z-color-muted); flex-shrink: 0; }
+  .settings-check-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 240px; min-width: 0; }
+  .settings-check-confirm { display: flex; align-items: center; gap: 8px; flex: 1 1 100%; min-width: 0; }
+  .settings-check .btn { flex-shrink: 0; }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }

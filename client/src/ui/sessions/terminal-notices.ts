@@ -20,7 +20,7 @@ export interface TerminalNoticeRegion {
   at: number;
 }
 
-const HEADER = /^\s*\[Zerus team(?:\s*·|\])/;
+const HEADER = /^\s*\[Zerus team(?:\s*\u00b7|\])/;
 const PROMPT = /^\s*(?:[›❯>]\s?|[$#%]\s|PS [^>\n]*>|[\w.-]+@[\w.-]+:[^$#\n]*[$#])\s*/;
 
 const textLine = (term: XTerm, line: number): string => {
@@ -52,8 +52,8 @@ export function terminalNoticeRegions(lines: readonly string[], at = 0, only?: {
 /** The fold row's text: sender, kind, first line and time. */
 export function terminalNoticeLabel(region: Pick<TerminalNoticeRegion, "from" | "kind" | "line" | "at">): string {
   const time = new Date(region.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const head = [region.from, region.kind].filter(Boolean).join(" · ");
-  return `${head}${region.line ? `: ${region.line}` : ""} · ${time}`;
+  const head = [region.from, region.kind].filter(Boolean).join(", ");
+  return `${head}${region.line ? `: ${region.line}` : ""}, ${time}`;
 }
 
 interface Fold {

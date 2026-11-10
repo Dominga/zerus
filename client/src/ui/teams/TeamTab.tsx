@@ -381,7 +381,7 @@ export function LeadTitleBadge() {
     <Show when={team()}>
       {(summary) => (
         <button type="button" class="team-pill lead-title-pill" data-lead-title title={tr("Open team panel")} onClick={() => setDetailTab("team")}>
-          {tr("Lead")} · {summary().name}
+          <span>{tr("Lead")}</span><span class="ell">{summary().name}</span>
         </button>
       )}
     </Show>

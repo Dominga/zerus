@@ -3308,11 +3308,11 @@ pub(crate) fn switch_phase_mode(
             if let Some(open) = free_phase(team).filter(|open| *open != n) {
                 bail!("Phase {open} already takes tasks as they come; switch it to standard first");
             }
-            team.phase_modes.insert(n, PlanMode::Free);
+            set_phase_mode(team, n, PlanMode::Free);
         }
         PlanMode::Standard => {
             ensure!(state.is_accepted(), "Phase {n} is not accepted: a draft has no mode to lock");
-            team.phase_modes.insert(n, PlanMode::Standard);
+            set_phase_mode(team, n, PlanMode::Standard);
             build = team
                 .tasks
                 .iter()
@@ -3347,17 +3347,68 @@ pub(crate) fn apply_mode_proposal(
         let n = n.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("Not a phase number")?;
         return switch_phase_mode(team, n, wanted, "You", id, reason, events);
     }
-    // U59: the team's mode. The open phase follows it with every phase that
-    // has no mode of its own, so the switch reaches the running work.
-    team.plan_mode = wanted;
-    let open = open_phase(team);
-    team.phase_modes.remove(&open);
-    if wanted == PlanMode::Standard {
-        // Task #58: back to standard leaves no phase free.
-        team.phase_modes.retain(|_, mode| *mode != PlanMode::Free);
+    switch_team_mode(team, wanted, "You", id, reason, events)
+}
+
+/// U59/task #12: the team's own mode, the default of every phase without a
+/// mode of its own. While the team plans it is the mode its approval starts
+/// in (the owner's choice replaces the lead's offer). Planning or running,
+/// a phase with a mode of its own keeps it (owner, 2026-11-10); the phases
+/// that follow the team, the open one included when it has none, switch with
+/// it. Only one phase is free at a time: a free team whose open phase follows
+/// it cannot open while another phase is free by its own mode.
+pub(crate) fn switch_team_mode(
+    team: &mut Team,
+    wanted: PlanMode,
+    by: &str,
+    proposal: &str,
+    reason: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Value> {
+    let mode = if wanted == PlanMode::Free { "free" } else { "standard" };
+    match team.status {
+        TeamStatus::Planning => {
+            team.plan_mode = wanted;
+            team.plan_mode_offer = None;
+        }
+        TeamStatus::Running | TeamStatus::Paused => {
+            let open = open_phase(team);
+            if wanted == PlanMode::Free && !team.phase_modes.contains_key(&open) {
+                if let Some(other) = team.phase_modes.iter().find(|(n, mode)| **n != open && **mode == PlanMode::Free).map(|(n, _)| *n) {
+                    bail!("Phase {other} already takes tasks as they come; switch it to standard first");
+                }
+            }
+            team.plan_mode = wanted;
+        }
+        _ => bail!("Only a planning, running or paused team switches its plan mode"),
     }
-    events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":reason})));
-    Ok(json!({"status":"switched","plan_mode":mode}))
+    let proposal = (!proposal.is_empty()).then_some(proposal);
+    events.push(Event::new("plan_mode_switched", json!({"by":by,"mode":mode,"proposal":proposal,"reason":reason})));
+    Ok(json!({"status":"switched","plan_mode":mode,"phase_modes":phase_modes_view(team)}))
+}
+
+/// Task #12: phase `n`'s own mode. The team's own mode needs no entry: a
+/// phase set to it follows the team again, so a later switch of the team's
+/// mode reaches it, while a phase in the other mode keeps its own.
+fn set_phase_mode(team: &mut Team, n: u32, mode: PlanMode) {
+    if mode == team.plan_mode {
+        team.phase_modes.remove(&n);
+    } else {
+        team.phase_modes.insert(n, mode);
+    }
+}
+
+/// Task #12: while the team plans, the owner chooses the mode a phase starts
+/// in. The team's own mode needs no entry: a phase set to it follows the team
+/// again, so a later switch of the team's mode reaches it.
+fn plan_phase_mode(team: &mut Team, n: u32, mode: PlanMode, reason: &str, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let known = n == 1
+        || team.tasks.iter().any(|task| task.phase == n)
+        || team.phases.iter().any(|phase| phase.n == n && phase.state != PhaseState::Discarded);
+    ensure!(known, "Unknown phase {n}");
+    set_phase_mode(team, n, mode);
+    events.push(Event::new("phase_mode_switched", json!({"by":"You","phase":n,"mode":mode,"reason":reason,"planning":true})));
+    Ok(json!({"status":"switched","phase":n,"mode":mode,"phase_modes":phase_modes_view(team)}))
 }
 
 /// The accepted phases (phase 1 included) whose tasks are all finished.
@@ -7598,13 +7649,22 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
                 matches!(actor, Actor::Human),
                 "Only you switch a phase's mode; the lead proposes it (kind switch-plan-mode with its phase)"
             );
-            let n = phase_number(input)?;
             let mode = match text(input, "mode") {
                 "free" => PlanMode::Free,
                 "standard" => PlanMode::Standard,
                 _ => bail!("A phase's mode is free or standard"),
             };
             let reason = clean(text(input, "reason").trim(), 2000, "A reason")?;
+            // Task #12: without a phase it is the team's own mode, the default
+            // of every phase without a mode of its own; while the team plans,
+            // a phase's own mode is the one its draft starts in.
+            if input.get("phase").is_none_or(Value::is_null) {
+                return switch_team_mode(team, mode, "You", "", &reason, events);
+            }
+            let n = phase_number(input)?;
+            if team.status == TeamStatus::Planning {
+                return plan_phase_mode(team, n, mode, &reason, events);
+            }
             switch_phase_mode(team, n, mode, "You", "", &reason, events)
         }
         "close-phase" => {

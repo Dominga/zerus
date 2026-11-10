@@ -2,7 +2,7 @@
 //! the UI thread, one at a time, and hands every update to the client as a
 //! [`Change::Teams`]. Following, Load older, spans and the profile wake it.
 //! Dropping the poller stops it after the read in flight.
-use super::model::{TeamsFollow, TeamsModel, TeamsUpdate};
+use super::model::{Sent, TeamsFollow, TeamsModel, TeamsUpdate};
 use super::read::TeamRead;
 use crate::reads::ReadError;
 use crate::{Change, ComputerId};
@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Runs one read: `read::read` against `hgs`, or a fixture in tests.
 pub type Runner = Box<dyn Fn(&TeamRead) -> Result<Value, ReadError> + Send>;
@@ -23,6 +23,50 @@ struct State {
     /// Updates of a follow change, sent by the thread.
     outbox: Vec<(String, TeamsUpdate)>,
     stop: bool,
+    /// Task #10: where this computer's newest Waiting reply goes for the
+    /// always-on watcher, which then reads none of its own.
+    share: Option<WaitingShare>,
+}
+
+/// Task #10: the newest Waiting page a poller read, kept for the always-on
+/// Waiting watcher (src-tauri `team_watch`): while a window follows Waiting
+/// (and, hidden, at the watcher's own pace) the watcher reuses this reply
+/// instead of starting another `hgs team waiting`.
+#[derive(Clone, Default)]
+pub struct WaitingShare(Arc<Mutex<Option<(Instant, Value)>>>);
+
+impl WaitingShare {
+    fn lock(&self) -> MutexGuard<'_, Option<(Instant, Value)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps a successful first-page Waiting reply read at `at`.
+    pub fn put(&self, reply: &Value, at: Instant) {
+        *self.lock() = Some((at, reply.clone()));
+    }
+
+    /// The kept reply when it is at most `max_age` old at `now`.
+    pub fn fresh(&self, max_age: Duration, now: Instant) -> Option<Value> {
+        self.lock()
+            .as_ref()
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= max_age)
+            .map(|(_, reply)| reply.clone())
+    }
+
+    /// The kept reply when fresh, otherwise `read`'s, which is kept on success.
+    pub fn reply_or(
+        &self,
+        max_age: Duration,
+        read: impl FnOnce() -> Result<Value, ReadError>,
+    ) -> Result<Value, ReadError> {
+        let now = Instant::now();
+        if let Some(reply) = self.fresh(max_age, now) {
+            return Ok(reply);
+        }
+        let reply = read()?;
+        self.put(&reply, Instant::now());
+        Ok(reply)
+    }
 }
 
 struct Shared {
@@ -124,6 +168,20 @@ impl TeamsPoller {
         self.shared.lock().model.heads(heads, Instant::now());
         self.shared.wake.notify_all();
     }
+
+    /// Task #10: the window is hidden or minimized, or shown again. Hidden,
+    /// only Waiting is read, at the watcher's pace; shown, every followed
+    /// view is read again at once.
+    pub fn hidden(&self, hidden: bool) {
+        self.shared.lock().model.set_hidden(hidden, Instant::now());
+        self.shared.wake.notify_all();
+    }
+
+    /// Task #10: where its first-page Waiting replies go (this computer's
+    /// poller only), or None.
+    pub fn share_waiting(&self, share: Option<WaitingShare>) {
+        self.shared.lock().share = share;
+    }
 }
 
 impl Drop for TeamsPoller {
@@ -133,29 +191,31 @@ impl Drop for TeamsPoller {
     }
 }
 
-fn change(computer: &ComputerId, key: String, update: TeamsUpdate) -> Change {
+fn change(computer: &ComputerId, sent: Sent) -> Change {
     Change::Teams {
         computer: computer.clone(),
-        key,
-        update,
+        key: sent.key,
+        update: sent.update,
+        payload: sent.payload,
     }
 }
 
 fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
     loop {
-        let (read, outbox) = {
+        let (read, outbox, share) = {
             let mut state = shared.lock();
+            let share = state.share.clone();
             loop {
                 // The ends of a last follow go out before a stop.
                 if !state.outbox.is_empty() {
-                    break (None, std::mem::take(&mut state.outbox));
+                    break (None, std::mem::take(&mut state.outbox), share);
                 }
                 if state.stop {
                     return;
                 }
                 let now = Instant::now();
                 if let Some(read) = state.model.next(now) {
-                    break (Some(read), Vec::new());
+                    break (Some(read), Vec::new(), state.share.clone());
                 }
                 let wait = state.model.wait(now);
                 state = shared
@@ -166,19 +226,24 @@ fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
             }
         };
         for (key, update) in outbox {
-            emit(change(computer, key, update));
+            emit(change(computer, Sent::new(key, update)));
         }
         let Some(read) = read else { continue };
         let reply = runner(&read);
+        if let (Some(share), TeamRead::Waiting { before: None }, Ok(value)) =
+            (&share, &read, &reply)
+        {
+            share.put(value, Instant::now());
+        }
         let updates = {
             let mut state = shared.lock();
             if state.stop {
                 return;
             }
-            state.model.apply(&read, reply, Instant::now())
+            state.model.apply_sent(&read, reply, Instant::now())
         };
-        for (key, update) in updates {
-            emit(change(computer, key, update));
+        for sent in updates {
+            emit(change(computer, sent));
         }
     }
 }

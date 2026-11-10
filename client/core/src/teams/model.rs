@@ -31,6 +31,13 @@ pub const POLL: Duration = Duration::from_secs(3);
 pub const STREAM_POLL: Duration = Duration::from_secs(60);
 /// Feed events one watched team keeps; Load older stops there.
 pub const FEED_KEPT: usize = 500;
+/// Task #10: while the window is hidden or minimized only Waiting is read,
+/// at the always-on watcher's pace (src-tauri `team_watch::INTERVAL`), so its
+/// notices still arrive from this reply and nothing else is read.
+pub const HIDDEN_WAITING: Duration = Duration::from_secs(30);
+/// Task #10: with the stream's heads the watched team's inbox and feed wait
+/// for its revision to move; this only bounds a slot that is never woken.
+const PARKED: Duration = Duration::from_secs(24 * 3600);
 /// On-demand reads that may wait at once (older pages, spans, profile).
 const QUEUED: usize = 8;
 /// How long a read in flight keeps its slot from running again.
@@ -159,14 +166,59 @@ pub struct TeamsModel {
     heads: Option<std::sync::Arc<super::heads::Heads>>,
     /// Slots whose head moved while their read ran: due again at its reply.
     again: std::collections::BTreeSet<Slot>,
+    /// Task #10: the inbox and feed waiting for the watched team's revision
+    /// to move (with heads only); a move, losing the heads or a refresh
+    /// makes them due.
+    parked: std::collections::BTreeSet<Slot>,
+    /// Task #10: the window is hidden or minimized: only Waiting is read.
+    hidden: bool,
 }
 
-fn digest(update: &TeamsUpdate) -> u64 {
+/// An update as the model sends it (task #9): its payload is computed once
+/// per reply and serves both the digest and the client's batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sent {
+    pub key: String,
+    pub update: TeamsUpdate,
+    pub payload: Arc<Value>,
+}
+
+impl From<(String, TeamsUpdate)> for Sent {
+    fn from((key, update): (String, TeamsUpdate)) -> Self {
+        Self::new(key, update)
+    }
+}
+
+impl Sent {
+    /// An update whose payload is computed here (ends and follow changes).
+    pub fn new(key: String, update: TeamsUpdate) -> Self {
+        let payload = Arc::new(update.payload());
+        Self {
+            key,
+            update,
+            payload,
+        }
+    }
+}
+
+/// Feeds the serialized payload straight into the hasher, without a string.
+struct HashWriter<'a>(&'a mut DefaultHasher);
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn digest(kind: &str, payload: &Value) -> u64 {
     let mut hasher = DefaultHasher::new();
-    update.kind().hash(&mut hasher);
-    serde_json::to_string(&update.payload())
-        .unwrap_or_default()
-        .hash(&mut hasher);
+    kind.hash(&mut hasher);
+    let _ = serde_json::to_writer(HashWriter(&mut hasher), payload);
     hasher.finish()
 }
 
@@ -197,6 +249,7 @@ impl TeamsModel {
             self.queued.retain(|read| read.team().is_none());
             for slot in [Slot::Status, Slot::Inbox, Slot::Feed] {
                 self.due.remove(&slot);
+                self.parked.remove(&slot);
             }
         }
         let wanted = [
@@ -212,6 +265,7 @@ impl TeamsModel {
                 self.due.entry(slot).or_insert(now);
             } else {
                 self.due.remove(&slot);
+                self.parked.remove(&slot);
             }
         }
         if !self.follow.list {
@@ -227,9 +281,9 @@ impl TeamsModel {
         out
     }
 
-    fn end(&mut self, key: &str, out: &mut Vec<(String, TeamsUpdate)>) {
+    fn end<T: From<(String, TeamsUpdate)>>(&mut self, key: &str, out: &mut Vec<T>) {
         if self.shown.remove(key).is_some() {
-            out.push((key.to_owned(), TeamsUpdate::Ended));
+            out.push((key.to_owned(), TeamsUpdate::Ended).into());
         }
     }
 
@@ -291,11 +345,50 @@ impl TeamsModel {
     /// Reads every followed view again at once (after an action): each slot
     /// not in flight is due now.
     pub fn refresh(&mut self, now: Instant) {
+        for slot in std::mem::take(&mut self.parked) {
+            self.due.insert(slot, now);
+        }
         for due in self.due.values_mut() {
             if *due <= now + POLL {
                 *due = now;
             }
         }
+    }
+
+    /// Task #10: the window is hidden or minimized (`true`) or shown again.
+    /// Hidden, only Waiting is read, within [`HIDDEN_WAITING`]; shown again,
+    /// every followed read is due at once, so the views are current.
+    pub fn set_hidden(&mut self, hidden: bool, now: Instant) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        if hidden {
+            if let Some(due) = self.due.get_mut(&Slot::Waiting) {
+                // A read in flight keeps its slot; its reply sets the pace.
+                if *due <= now + STREAM_POLL {
+                    *due = (*due).min(now + HIDDEN_WAITING);
+                }
+            }
+        } else {
+            // Waiting leaves the hidden pace: due now, unless a read is in flight.
+            if let Some(due) = self.due.get_mut(&Slot::Waiting) {
+                if *due <= now + STREAM_POLL {
+                    *due = now;
+                }
+            }
+            self.refresh(now);
+        }
+    }
+
+    /// Whether the window is hidden (task #10).
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Whether a followed slot may be read now: hidden, only Waiting.
+    fn eligible(&self, slot: Slot) -> bool {
+        !self.hidden || slot == Slot::Waiting
     }
 
     /// The next read to run now, if any: an asked-for read first, then the
@@ -307,7 +400,7 @@ impl TeamsModel {
         let (slot, _) = self
             .due
             .iter()
-            .filter(|(_, due)| **due <= now)
+            .filter(|(slot, due)| **due <= now && self.eligible(**slot))
             .min_by_key(|(_, due)| **due)?;
         let slot = *slot;
         let team = self.watched().map(str::to_owned);
@@ -358,6 +451,10 @@ impl TeamsModel {
             ]),
         }
         for slot in moved {
+            if self.parked.remove(&slot) {
+                self.due.insert(slot, now);
+                continue;
+            }
             if let Some(due) = self.due.get_mut(&slot) {
                 // A read in flight holds its slot far beyond any interval:
                 // it is read again at its reply.
@@ -381,8 +478,9 @@ impl TeamsModel {
             return Duration::ZERO;
         }
         self.due
-            .values()
-            .map(|due| due.saturating_duration_since(now))
+            .iter()
+            .filter(|(slot, _)| self.eligible(**slot))
+            .map(|(_, due)| due.saturating_duration_since(now))
             .min()
             .unwrap_or(POLL)
             .min(POLL)
@@ -421,11 +519,16 @@ impl TeamsModel {
         }
     }
 
-    fn send(&mut self, key: String, update: TeamsUpdate, out: &mut Vec<(String, TeamsUpdate)>) {
-        let digest = digest(&update);
+    fn send(&mut self, key: String, update: TeamsUpdate, out: &mut Vec<Sent>) {
+        let payload = update.payload();
+        let digest = digest(update.kind(), &payload);
         if self.shown.get(&key) != Some(&digest) {
             self.shown.insert(key.clone(), digest);
-            out.push((key, update));
+            out.push(Sent {
+                key,
+                update,
+                payload: Arc::new(payload),
+            });
         }
     }
 
@@ -438,10 +541,32 @@ impl TeamsModel {
         reply: Result<Value, ReadError>,
         now: Instant,
     ) -> Vec<(String, TeamsUpdate)> {
+        self.apply_sent(read, reply, now)
+            .into_iter()
+            .map(|sent| (sent.key, sent.update))
+            .collect()
+    }
+
+    /// [`Self::apply`] with each update's payload, computed once (task #9).
+    pub fn apply_sent(
+        &mut self,
+        read: &TeamRead,
+        reply: Result<Value, ReadError>,
+        now: Instant,
+    ) -> Vec<Sent> {
         let mut out = Vec::new();
         if let Some(slot) = Self::slot(read) {
-            // With the stream's heads a slot waits for its revision to move.
-            let every = if self.heads.is_some() {
+            // With the stream's heads a slot waits for its revision to move;
+            // the watched team's inbox and feed only for that (task #10),
+            // the others at least every STREAM_POLL. Hidden, Waiting is read
+            // at the watcher's pace.
+            let streamed = self.heads.is_some();
+            let parks = streamed && matches!(slot, Slot::Inbox | Slot::Feed);
+            let every = if self.hidden && slot == Slot::Waiting {
+                HIDDEN_WAITING
+            } else if parks {
+                PARKED
+            } else if streamed {
                 STREAM_POLL
             } else {
                 POLL
@@ -449,6 +574,9 @@ impl TeamsModel {
             let again = self.again.remove(&slot);
             if let Some(due) = self.due.get_mut(&slot) {
                 *due = if again { now } else { now + every };
+                if parks && !again {
+                    self.parked.insert(slot);
+                }
             }
         }
         if read.team().is_some_and(|team| Some(team) != self.watched()) {

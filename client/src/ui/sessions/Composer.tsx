@@ -23,6 +23,7 @@ import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { ModelSettingsButton } from "./ModelSettings";
 import { AccountSwitchChip } from "./AccountSwitchChip";
+import { SettingsCheckBar } from "./SettingsCheckBar";
 import { DeliveryHistoryHint } from "./DeliveryHistoryHint";
 import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
@@ -286,6 +287,7 @@ export function Composer() {
   return (
     <div class="composer" ref={root} data-shortcut-context="composer" classList={{ blocked: !!v()?.session_blocks_input }}>
       <ResizeHandle hidden={!input()} />
+      <Show when={!child()}><SettingsCheckBar bar={v()?.settings_check} session={selected()} /></Show>
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
         <VoiceToolbar voice={voice} compact={compact()} />

@@ -312,10 +312,13 @@ pub enum Change {
         update: OrganizationUpdate,
     },
     /// A Teams view of the computer, keyed as [`teams::model`] says; see [`teams`].
+    /// `payload` is the update's batch payload, computed once by the model
+    /// for its digest (task #9); [`Change::teams`] computes it.
     Teams {
         computer: ComputerId,
         key: String,
         update: TeamsUpdate,
+        payload: std::sync::Arc<serde_json::Value>,
     },
     /// Task 8: the team revisions of the computer's watch stream (its `team`
     /// topic), or None while it gives none: the Teams poller of the computer
@@ -327,6 +330,17 @@ pub enum Change {
 }
 
 impl Change {
+    /// A Teams change whose payload is computed here.
+    pub fn teams(computer: ComputerId, key: String, update: TeamsUpdate) -> Self {
+        let payload = std::sync::Arc::new(update.payload());
+        Self::Teams {
+            computer,
+            key,
+            update,
+            payload,
+        }
+    }
+
     pub fn computer(&self) -> &ComputerId {
         match self {
             Self::Upsert { computer, .. }

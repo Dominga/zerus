@@ -1339,6 +1339,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
                 .clone(),
         );
         input::attention_message_summary(&record, &mut output, panes.is_some());
+        // Task #7: an unconfirmed model or effort change and the agent's own
+        // evidence for it, read again with each inspection.
+        output["settings_confirmation"] = effort::confirmation_summary(&record, panes.is_some());
     }
     phases.mark("message_summary");
     match questions::inspection(&record, panes.is_some()) {

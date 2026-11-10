@@ -18,6 +18,10 @@ use zerus_client_core::ComputerId;
 
 /// The background pace Qt uses (`TeamAttentionWatch::BackgroundMs`).
 pub const INTERVAL: Duration = Duration::from_secs(30);
+/// Task #10: how old a Waiting reply a window's poller read may be for this
+/// watcher to use it instead of reading: its interval and a little more, as
+/// a hidden window's poller reads at the same pace.
+pub const REUSE: Duration = Duration::from_secs(35);
 /// The shown items, as Qt's `teams/attentionNotified` (an old value from the
 /// window's watcher is read as it is).
 pub const SETTING: &str = "teams/attentionNotified";
@@ -46,11 +50,19 @@ fn tick(app: &AppHandle) {
     let Some(settings) = app.try_state::<crate::settings::Store>() else {
         return;
     };
-    let read = zerus_client_core::teams::read::read(
-        &zerus_client_core::default_hgs(),
-        &ComputerId::local(),
-        &TeamRead::Waiting { before: None },
-    );
+    let read = || {
+        zerus_client_core::teams::read::read(
+            &zerus_client_core::default_hgs(),
+            &ComputerId::local(),
+            &TeamRead::Waiting { before: None },
+        )
+    };
+    // Task #10: while a window follows Waiting its poller's reply serves;
+    // only without a fresh one does this watcher read.
+    let read = match app.try_state::<crate::teams::Teams>() {
+        Some(teams) => teams.waiting_share().reply_or(REUSE, read),
+        None => read(),
+    };
     let Ok(reply) = read else {
         return;
     };

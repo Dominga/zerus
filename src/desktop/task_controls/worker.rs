@@ -1,22 +1,25 @@
 //! One bounded native read worker; no SQLite connection, input or task writer.
 use super::{authority, wire::Envelope};
-use crate::{config::Config, state::task_controls::Captured, tasks::controls::wire::Command};
+use crate::{config::Config, state::task_controls::Capture, tasks::controls::wire::Command};
 use anyhow::{ensure, Result};
 use std::{thread, time::Instant};
 
 pub(super) struct Proof {
     pub actor: authority::Executor,
-    pub stops: Captured,
+    pub stops: Capture,
 }
 impl Proof {
     pub fn verify(&self, until: Instant) -> Result<()> {
         self.actor.current(until)?;
-        self.stops.verify().map_err(anyhow::Error::msg)?;
-        ensure!(
-            self.actor.executor() == self.stops.executor(),
-            "captured executor changed"
-        );
-        Ok(())
+        self.stops
+            .with_current(self.actor.executor(), |executor, _, check| {
+                if self.actor.executor() != executor {
+                    return Err("captured executor changed".into());
+                }
+                check()?;
+                self.actor.current(until).map_err(|error| error.to_string())
+            })
+            .map_err(anyhow::Error::msg)
     }
 }
 

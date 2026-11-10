@@ -396,6 +396,100 @@ fn an_existing_backup_requires_original_root_store_configuration_and_its_complet
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn a_fresh_or_already_35_windows_store_starts_without_inventing_a_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let location = location(&temp.path().canonicalize().unwrap().join("state/desktop"));
+    location.prepare().unwrap();
+    let owner = location.lock().unwrap();
+    let store = Store::open_owned(&location, &epoch(), &owner).unwrap();
+    assert_eq!(schema(&store.db), 35);
+    assert!(!location.root.join(BACKUP).exists());
+    drop(store);
+    let store = Store::open_owned(&location, &epoch(), &owner).unwrap();
+    assert_eq!(schema(&store.db), 35);
+    assert!(!location.root.join(BACKUP).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_crash_during_backup_keeps_schema_34_and_refuses_the_incomplete_copy() {
+    for phase in ["database", "manifest"] {
+        let temp = tempfile::tempdir().unwrap();
+        let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
+        // Establish literal DB/WAL absence/bytes before the read-only probe.
+        Connection::open(location.root.join(DATABASE))
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode=DELETE")
+            .unwrap();
+        let before = fs::read(location.root.join(DATABASE)).unwrap();
+        assert!(!location.root.join(WAL).exists());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "desktop::store::rollback_backup::tests::windows_backup_crash_probe",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("ZERUS_PRIVATE_BACKUP_CRASH", &location.root)
+            .env("ZERUS_PRIVATE_BACKUP_PHASE", phase);
+        let child = crate::platform::output_until(&mut command, Duration::from_secs(45)).unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(88),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert_eq!(fs::read(location.root.join(DATABASE)).unwrap(), before);
+        assert!(!location.root.join(WAL).exists());
+        let backup = backup_bytes(&location);
+        assert!(!location.root.join(BACKUP).join(MANIFEST).exists());
+        let owner = location.lock().unwrap();
+        let error = match Store::open_owned(&location, &epoch(), &owner) {
+            Ok(_) => panic!("an incomplete backup must not be repaired"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("docs/desktop-schema-35-rollback.md"));
+        assert_eq!(backup_bytes(&location), backup);
+        assert_eq!(fs::read(location.root.join(DATABASE)).unwrap(), before);
+        let db = Connection::open_with_flags(
+            location.root.join(DATABASE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(schema(&db), 34);
+        assert_eq!(
+            db.query_row::<String, _, _>("SELECT value FROM rollback_sentinel", [], |row| row
+                .get(0),)
+                .unwrap(),
+            "original row"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_backup_crash_probe() {
+    let Some(root) = std::env::var_os("ZERUS_PRIVATE_BACKUP_CRASH") else {
+        return;
+    };
+    let phase = match std::env::var("ZERUS_PRIVATE_BACKUP_PHASE")
+        .unwrap()
+        .as_str()
+    {
+        "database" => "database",
+        "manifest" => "manifest",
+        _ => panic!("unexpected private backup crash boundary"),
+    };
+    let location = location(Path::new(&root));
+    let owner = location.lock().unwrap();
+    BACKUP_CRASH.with(|slot| slot.set(Some(phase)));
+    let _ = Store::open_owned(&location, &epoch(), &owner);
+    panic!("backup did not reach its private crash boundary");
+}
 #[cfg(unix)]
 #[test]
 fn irregular_or_replaced_inputs_and_exclusions_refuse_before_migration() {

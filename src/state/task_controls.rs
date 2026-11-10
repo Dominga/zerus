@@ -3,6 +3,10 @@
 #![allow(dead_code)] // Removed as the runtime entry points are connected.
 pub(crate) mod observation;
 mod stop_facts;
+mod capture;
+pub(crate) use capture::Capture;
+#[cfg(windows)]
+pub(in crate::state) use stop_facts::{CaptureFailed, SelectedCapture};
 pub(crate) use stop_facts::{Captured, Fact, Source};
 pub(in crate::state) mod writer;
 
@@ -13,7 +17,7 @@ pub(crate) fn observe_and_capture(
     config: &crate::config::Config,
     expected: &zerus_desktop_ledger::task_controls::Executor,
     until: std::time::Instant,
-) -> Result<(observation::Observed, Captured), String> {
+) -> Result<(observation::Observed, Capture), String> {
     if !zerus_desktop_ledger::task_controls::TASK_CONTROLS {
         return Err("task_controls_inactive".into());
     }
@@ -27,11 +31,27 @@ pub(crate) fn observe_and_capture(
         observation::Conversation::Exact,
     )?
     .ok_or("task_controls_inactive")?;
-    let captured = capture_stops(original.root()?, original.guard()?, &observed.executor)?
-        .ok_or("task_controls_inactive")?;
-    original.verify()?;
-    drop(original);
-    captured.verify()?;
+    #[cfg(not(windows))]
+    let captured = {
+        let captured = capture_stops(original.root()?, original.guard()?, &observed.executor)?
+            .ok_or("task_controls_inactive")?;
+        original.verify()?;
+        drop(original);
+        Capture::legacy(captured)
+    };
+    #[cfg(windows)]
+    let captured = match capture_owned_stops(original, &observed.executor) {
+        Ok(captured) => Capture::owned(captured),
+        Err(failed) => {
+            // This worker offered no actor/native operation. Explicitly retire
+            // its retained failed custody before returning an error to the DB
+            // owner; no native Writer may cross that boundary.
+            let reason = format!("Owned Stop capture refused: {failed:?}");
+            failed.retire();
+            return Err(reason);
+        }
+    };
+    captured.with_current(&observed.executor, |_, _, check| check())?;
     Ok((observed, captured))
 }
 
@@ -45,4 +65,14 @@ pub(crate) fn capture_stops(
     stop_facts::open(root, writer, executor, false)?
         .map(stop_facts::Publisher::capture)
         .transpose()
+}
+
+/// Windows production capture consumes the same original native owner/deadline.
+/// Outside a typed current read scope, the result is data custody only.
+#[cfg(windows)]
+pub(in crate::state) fn capture_owned_stops(
+    owned: writer::Writer,
+    executor: &zerus_desktop_ledger::task_controls::Executor,
+) -> Result<SelectedCapture, CaptureFailed> {
+    stop_facts::capture_owned(owned, executor)
 }

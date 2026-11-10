@@ -38,14 +38,44 @@ D/schema-34-rollback/state.sqlite3-wal   # only when manifest.wal is non-null
 
 The manifest records the source schema, time, configuration and original native
 root/database identities, exact file sizes and SHA-256 values. The directory
-and each file are private, published without replacement, and synced. The
-manifest is published last. An incomplete directory cannot qualify: startup
+and each file are private and published without replacement. Files are flushed;
+Unix also syncs the directory and its parent. Windows uses the native publication
+contract and limits below. The manifest is published last. An incomplete
+directory cannot qualify: startup
 refuses before migration and retains it for inspection. An operator may preserve
 such an incomplete directory under another name **only after verifying the
 original store is still schema 34**; the service never repairs or overwrites it.
 An existing complete backup must validate its whole fixed roster, provenance,
 sizes and hashes before it can support migration. Later starts never overwrite
 the backup. Absence of a backup is not proof of no previous effects.
+
+### Windows publication and durability limits
+
+Windows publishes each file through the **same synchronous CREATE_NEW handle**
+that wrote it. A native same-parent rename uses NOREPLACE for backup files; the
+directory and ancestor handles continue denying write/delete sharing. No pathname
+rename reopens that parent, no sharing permission is relaxed, and no retry is
+introduced. The handle uses `FILE_FLAG_WRITE_THROUGH` and is flushed before and
+after publication. Database/WAL content copied through the retained handle is
+flushed again before validation; the manifest is still published last.
+
+This relies on the native handle flush/publication contract, **not** the Windows
+`platform::sync_dir` compatibility no-op. Microsoft documents [NTFS metadata
+flushing for write-through requests, including renames](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilea)
+and [file cache flushing](https://learn.microsoft.com/windows/win32/fileio/file-caching).
+It is not a Unix directory-fsync guarantee on arbitrary filesystems, network
+redirectors or hardware that does not honor flush/write-through. Native CI tests
+process interruption and validates the retained bytes/manifest; it does not
+simulate sudden power loss or certify every storage stack. Retain this residual
+when planning rollback, and validate the complete matched backup offline.
+
+An older failed Windows upgrade may already have left an incomplete
+`schema-34-rollback` directory. A later start keeps refusing that directory,
+including after the publication fix. **Do not delete or repair it automatically.**
+Follow the offline checks below, verify the original database remains schema 34,
+and retain the incomplete directory for review before an operator preserves it
+under another name. A fresh backup requires the same verified original store and
+exclusions; its absence never supplies historical effect evidence.
 
 ## Coordinator-operated rollback
 
@@ -71,7 +101,8 @@ perform it on an installed machine.
    single-link regular file. If `manifest.wal` is non-null, restore its matched
    `state.sqlite3-wal` beside it. If and only if the manifest positively records
    `wal:null`, remove the current WAL instead. Discard only the stale
-   `D/state.sqlite3-shm`; SQLite rebuilds it. Sync the restored files and `D`.
+   `D/state.sqlite3-shm`; SQLite rebuilds it. Flush the restored files and, on
+   Unix, sync `D`. Keep the Windows durability limits above when restoring there.
    Keep the backup untouched.
 5. Restore the previous `hgs` and GUI through the maintained installer/updater;
    never stage an application copy by hand. Start the desktop service with the

@@ -2,6 +2,14 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 
+#[cfg(windows)]
+#[path = "directory/windows_publication.rs"]
+mod windows_publication;
+
+#[cfg(windows)]
+#[path = "directory/stop_capture.rs"]
+pub(in crate::state) mod stop_capture;
+
 pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
@@ -19,7 +27,19 @@ pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
     SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }
 
+#[cfg(all(test, windows))]
+pub(in crate::state) type FaultMove<'a> = windows_publication::fault_move::Moved<'a>;
+
 impl Directory {
+    #[cfg(all(test, windows))]
+    pub(in crate::state) fn move_private_for_fault<'a>(
+        &'a self,
+        reader: &'a File,
+        source: &str,
+        destination: &str,
+    ) -> Result<FaultMove<'a>> {
+        windows_publication::fault_move::move_original(self, reader, source, destination)
+    }
     /// Namespace durability, rather than the platform's compatibility no-op.
     /// A caller requiring this proof must retain Unknown when unavailable.
     pub(in crate::state) fn sync(&self) -> Result<()> {
@@ -532,22 +552,7 @@ impl Directory {
     }
 
     fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
-        use std::io::Write;
-        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
-            return Err("Invalid file name".into());
-        }
-        self.verify()?;
-        let mut file = tempfile::Builder::new().prefix(".hgs-new-")
-            .tempfile_in(&self.path).map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-        file.as_file().sync_all().map_err(|e| e.to_string())?;
-        let file = if replace {
-            crate::platform::persist(file, self.path.join(name))
-        } else {
-            file.persist_noclobber(self.path.join(name))
-        }.map_err(|e| e.error.to_string())?;
-        self.verify()?;
-        Ok(file)
+        windows_publication::publish(self, name, bytes, replace)
     }
 
     pub fn open(path: &Path) -> Result<Self> {

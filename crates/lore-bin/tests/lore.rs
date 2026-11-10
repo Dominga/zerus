@@ -6,7 +6,7 @@ use std::process::Command;
 /// The SHA-256 of the secret-scan vectors (the file's LF form, so a CRLF checkout
 /// agrees). CodeLore's tests/secret_vectors.rs pins the same value: the vectors are
 /// changed in both repositories, with this constant, or neither test stays green.
-const VECTORS_SHA256: &str = "8afb2ee5536b5ec8f7aa4266695904070ea4abd610e8dee572b85c4c0aefdc0a";
+const VECTORS_SHA256: &str = "dc44e984cd0d507751339cec34a1b5eec32a7de0463c5bff75c82f56267d9cf3";
 
 #[test]
 fn zerus_secret_vectors_are_the_ones_codelore_pins() {

@@ -344,8 +344,8 @@ impl Keepalive {
             if s.notify.cmd == "claude" && !st.inspected {
                 st.inspected = true;
                 let inspection = format!("{host}\n{}", s.name);
-                if !self.inspections.contains_key(&inspection) {
-                    self.inspections.insert(inspection, key.clone());
+                if let std::collections::hash_map::Entry::Vacant(e) = self.inspections.entry(inspection) {
+                    e.insert(key.clone());
                     effects.push(Effect::Inspect { target: target() });
                 }
             }

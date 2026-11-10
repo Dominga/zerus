@@ -133,7 +133,7 @@ fn nothing_is_sent_for_a_session_that_was_not_turned_on() {
     let building = listed(json!({"session_state": "build", "build": {"since": 1.0}}));
     for now in [1000.0, 1250.0, 1300.0, 5000.0] {
         assert!(keepalive
-            .observe("", &[row.clone()], &Map::new(), now)
+            .observe("", std::slice::from_ref(&row), &Map::new(), now)
             .is_empty());
         let other = on(&listed(json!({"conversation_id": "another"})), 1);
         assert!(keepalive
@@ -144,11 +144,11 @@ fn nothing_is_sent_for_a_session_that_was_not_turned_on() {
     // Not running, or without a conversation: never warmed.
     let paused = listed(json!({"state": "paused"}));
     assert!(keepalive
-        .observe("", &[paused.clone()], &on(&paused, 1), 1250.0)
+        .observe("", std::slice::from_ref(&paused), &on(&paused, 1), 1250.0)
         .is_empty());
     let unbound = listed(json!({"conversation_id": ""}));
     assert!(keepalive
-        .observe("", &[unbound.clone()], &on(&unbound, 1), 1250.0)
+        .observe("", std::slice::from_ref(&unbound), &on(&unbound, 1), 1250.0)
         .is_empty());
     assert!(keepalive.is_empty());
 }
@@ -160,12 +160,12 @@ fn a_keepalive_goes_shortly_before_the_cache_expires() {
     let saved = on(&row, 1);
     // TTL 300, margin min(90, 100): the window opens at 1000 + 300 - 90.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1100.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1100.0)
         .is_empty());
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1209.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1209.0)
         .is_empty());
-    let effects = keepalive.observe("", &[row.clone()], &saved, 1210.0);
+    let effects = keepalive.observe("", std::slice::from_ref(&row), &saved, 1210.0);
     assert_eq!(
         effects,
         vec![Effect::Send {
@@ -182,17 +182,17 @@ fn a_keepalive_goes_shortly_before_the_cache_expires() {
     assert_eq!(keepalive.in_flight(), 1);
     // In flight: nothing more is sent.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1215.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1215.0)
         .is_empty());
     keepalive.sent(1);
     assert_eq!(keepalive.in_flight(), 0);
     // A short TTL takes a third of it as its margin.
     let mut short = Keepalive::new();
     let quick = listed(json!({"cmd": "codex"}));
-    short.observe("", &[quick.clone()], &saved, 1000.0);
+    short.observe("", std::slice::from_ref(&quick), &saved, 1000.0);
     short.states.get_mut(&id("", &quick).unwrap()).unwrap().ttl = 60.0;
     assert!(short
-        .observe("", &[quick.clone()], &saved, 1039.0)
+        .observe("", std::slice::from_ref(&quick), &saved, 1039.0)
         .is_empty());
     assert_eq!(sends(&short.observe("", &[quick], &saved, 1040.0)), vec![1]);
 }
@@ -203,23 +203,23 @@ fn an_unanswered_keepalive_counts_as_done_after_twenty_idle_seconds() {
     let row = listed(json!({"cmd": "codex"}));
     let saved = on(&row, 1);
     assert_eq!(
-        sends(&keepalive.observe("", &[row.clone()], &saved, 1210.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&row), &saved, 1210.0)),
         vec![1]
     );
     keepalive.sent(1);
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1229.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1229.0)
         .is_empty());
     assert!(keepalive.pending(&id("", &row).unwrap()));
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1230.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1230.0)
         .is_empty());
     assert!(!keepalive.pending(&id("", &row).unwrap()));
     assert_eq!(state(&keepalive, &row).warmed, 1210.0);
     assert!(!state(&keepalive, &row).cold);
     // The next one follows the new warming.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1419.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1419.0)
         .is_empty());
     assert_eq!(
         sends(&keepalive.observe("", &[row], &saved, 1420.0)),
@@ -233,17 +233,17 @@ fn an_unanswered_keepalive_marks_the_cache_cold_after_ten_minutes() {
     let row = listed(json!({"cmd": "codex"}));
     let saved = on(&row, 8);
     assert_eq!(
-        sends(&keepalive.observe("", &[row.clone()], &saved, 1210.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&row), &saved, 1210.0)),
         vec![1]
     );
     // Never idle again: a tool keeps running.
     let working = listed(json!({"cmd": "codex", "phase": "tool"}));
     assert!(keepalive
-        .observe("", &[working.clone()], &saved, 1500.0)
+        .observe("", std::slice::from_ref(&working), &saved, 1500.0)
         .is_empty());
     assert!(keepalive.pending(&id("", &row).unwrap()));
     assert!(keepalive
-        .observe("", &[working.clone()], &saved, 1810.0)
+        .observe("", std::slice::from_ref(&working), &saved, 1810.0)
         .is_empty());
     assert!(keepalive.pending(&id("", &row).unwrap()));
     assert!(keepalive.observe("", &[working], &saved, 1811.0).is_empty());
@@ -252,7 +252,7 @@ fn an_unanswered_keepalive_marks_the_cache_cold_after_ten_minutes() {
     // A cold cache is never revived without a real turn.
     for now in [1812.0, 2000.0, 3000.0] {
         assert!(keepalive
-            .observe("", &[row.clone()], &saved, now)
+            .observe("", std::slice::from_ref(&row), &saved, now)
             .is_empty());
     }
 }
@@ -263,7 +263,7 @@ fn a_failed_send_is_never_resent() {
     let row = listed(json!({"cmd": "codex"}));
     let saved = on(&row, 1);
     assert_eq!(
-        sends(&keepalive.observe("", &[row.clone()], &saved, 1210.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&row), &saved, 1210.0)),
         vec![1]
     );
     keepalive.failed(1);
@@ -271,7 +271,7 @@ fn a_failed_send_is_never_resent() {
     assert!(state(&keepalive, &row).cold);
     for now in [1211.0, 1250.0, 1290.0] {
         assert!(keepalive
-            .observe("", &[row.clone()], &saved, now)
+            .observe("", std::slice::from_ref(&row), &saved, now)
             .is_empty());
     }
     // A late or repeated failure of an older request changes nothing.
@@ -280,7 +280,7 @@ fn a_failed_send_is_never_resent() {
     // The next real turn starts again.
     let replied = listed(json!({"cmd": "codex", "reply_id": "reply-2", "reply_at": 2000.0}));
     assert!(keepalive
-        .observe("", &[replied.clone()], &saved, 2001.0)
+        .observe("", std::slice::from_ref(&replied), &saved, 2001.0)
         .is_empty());
     assert!(!state(&keepalive, &replied).cold);
     assert_eq!(
@@ -296,11 +296,11 @@ fn a_cache_past_its_lifetime_turns_cold_and_is_never_revived() {
     let saved = on(&row, 1);
     // First seen (turned on) after the cache expired.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1300.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1300.0)
         .is_empty());
     assert!(state(&keepalive, &row).cold);
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1301.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1301.0)
         .is_empty());
     // A turn in progress uses the cache again.
     let busy = listed(json!({"cmd": "codex", "activity": "busy", "phase": "tool"}));
@@ -319,7 +319,7 @@ fn warming_stops_after_the_chosen_hours_without_a_turn() {
         let mut keepalive = Keepalive::new();
         let row = listed(json!({"cmd": "codex"}));
         let saved = on(&row, limit);
-        keepalive.observe("", &[row.clone()], &saved, 1000.0);
+        keepalive.observe("", std::slice::from_ref(&row), &saved, 1000.0);
         // Warmed again and again, but the last real turn was at 1000.
         keepalive
             .states
@@ -340,12 +340,12 @@ fn a_reply_hgs_counts_while_a_keepalive_is_pending_is_marked_read() {
     let row = listed(json!({"cmd": "kimi"}));
     let saved = on(&row, 1);
     assert_eq!(
-        sends(&keepalive.observe("", &[row.clone()], &saved, 1210.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&row), &saved, 1210.0)),
         vec![1]
     );
     keepalive.sent(1);
     let answer = listed(json!({"cmd": "kimi", "reply_id": "reply-2", "reply_at": 1214.0}));
-    let effects = keepalive.observe("", &[answer.clone()], &saved, 1215.0);
+    let effects = keepalive.observe("", std::slice::from_ref(&answer), &saved, 1215.0);
     assert_eq!(
         effects,
         vec![Effect::Read(ReadMark {
@@ -362,10 +362,10 @@ fn a_reply_hgs_counts_while_a_keepalive_is_pending_is_marked_read() {
     assert_eq!(state(&keepalive, &answer).real, 1000.0, "not a real turn");
     // A reply from before the keepalive is a real turn, never consumed.
     let mut other = Keepalive::new();
-    other.observe("", &[row.clone()], &saved, 1210.0);
+    other.observe("", std::slice::from_ref(&row), &saved, 1210.0);
     let earlier = listed(json!({"cmd": "kimi", "reply_id": "reply-2", "reply_at": 1100.0}));
     assert!(other
-        .observe("", &[earlier.clone()], &saved, 1211.0)
+        .observe("", std::slice::from_ref(&earlier), &saved, 1211.0)
         .is_empty());
     assert_eq!(state(&other, &earlier).real, 1100.0);
 }
@@ -380,21 +380,21 @@ fn a_build_warms_every_thirty_minutes_whatever_the_hours() {
     let saved = on(&row, 1);
     // Far past the hours and the cache lifetime: the build still warms.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 6799.0)
+        .observe("", std::slice::from_ref(&row), &saved, 6799.0)
         .is_empty());
     assert!(!state(&keepalive, &row).cold);
     assert_eq!(
-        sends(&keepalive.observe("", &[row.clone()], &saved, 6800.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&row), &saved, 6800.0)),
         vec![1]
     );
     keepalive.sent(1);
     // Answered once idle (the build counts as idle) for 20 seconds.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 6820.0)
+        .observe("", std::slice::from_ref(&row), &saved, 6820.0)
         .is_empty());
     assert_eq!(state(&keepalive, &row).warmed, 6800.0);
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 8599.0)
+        .observe("", std::slice::from_ref(&row), &saved, 8599.0)
         .is_empty());
     assert_eq!(
         sends(&keepalive.observe("", &[row], &saved, 8600.0)),
@@ -407,11 +407,11 @@ fn a_build_warms_every_thirty_minutes_whatever_the_hours() {
         "reply_id": ""}),
     );
     assert!(fresh
-        .observe("", &[started.clone()], &saved, 9000.0)
+        .observe("", std::slice::from_ref(&started), &saved, 9000.0)
         .is_empty());
     assert_eq!(state(&fresh, &started).warmed, 9000.0);
     assert!(fresh
-        .observe("", &[started.clone()], &saved, 10799.0)
+        .observe("", std::slice::from_ref(&started), &saved, 10799.0)
         .is_empty());
     assert_eq!(
         sends(&fresh.observe("", &[started], &saved, 10800.0)),
@@ -441,7 +441,7 @@ fn a_session_that_is_not_idle_is_not_warmed() {
         for now in [1210.0, 1250.0] {
             assert!(
                 keepalive
-                    .observe("", &[row.clone()], &saved, now)
+                    .observe("", std::slice::from_ref(&row), &saved, now)
                     .is_empty(),
                 "{extra}"
             );
@@ -459,7 +459,7 @@ fn claudes_inspection_sets_the_ttl_and_the_last_cache_use() {
     let row = idle_row();
     // Two hours, so the hour-long cache below is still within them.
     let saved = on(&row, 2);
-    let effects = keepalive.observe("", &[row.clone()], &saved, 1100.0);
+    let effects = keepalive.observe("", std::slice::from_ref(&row), &saved, 1100.0);
     assert_eq!(
         effects,
         vec![Effect::Inspect {
@@ -473,7 +473,7 @@ fn claudes_inspection_sets_the_ttl_and_the_last_cache_use() {
     );
     // One inspection per real turn.
     assert!(keepalive
-        .observe("", &[row.clone()], &saved, 1101.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1101.0)
         .is_empty());
     // Another conversation's answer changes nothing.
     keepalive.inspected(
@@ -483,9 +483,9 @@ fn claudes_inspection_sets_the_ttl_and_the_last_cache_use() {
         "session_usage": {"prompt_cache": {"ttl_seconds": 3600}}}),
     );
     assert_eq!(state(&keepalive, &row).ttl, DEFAULT_TTL);
-    keepalive.observe("", &[row.clone()], &saved, 1102.0);
+    keepalive.observe("", std::slice::from_ref(&row), &saved, 1102.0);
     let mut inspected = Keepalive::new();
-    inspected.observe("", &[row.clone()], &saved, 1100.0);
+    inspected.observe("", std::slice::from_ref(&row), &saved, 1100.0);
     inspected.inspected(
         "",
         "claude/sample/review",
@@ -500,23 +500,23 @@ fn claudes_inspection_sets_the_ttl_and_the_last_cache_use() {
     );
     // The hour-long cache is warmed 90 s before it expires.
     assert!(inspected
-        .observe("", &[row.clone()], &saved, 4609.0)
+        .observe("", std::slice::from_ref(&row), &saved, 4609.0)
         .is_empty());
     assert_eq!(
-        sends(&inspected.observe("", &[row.clone()], &saved, 4610.0)),
+        sends(&inspected.observe("", std::slice::from_ref(&row), &saved, 4610.0)),
         vec![1]
     );
     // A failed inspection is not repeated before the next real turn.
     let mut failed = Keepalive::new();
-    failed.observe("", &[row.clone()], &saved, 1100.0);
+    failed.observe("", std::slice::from_ref(&row), &saved, 1100.0);
     failed.inspection_failed("", "claude/sample/review");
     assert!(failed
-        .observe("", &[row.clone()], &saved, 1101.0)
+        .observe("", std::slice::from_ref(&row), &saved, 1101.0)
         .is_empty());
     // Other agents keep the default TTL without an inspection.
     let codex = listed(json!({"cmd": "codex"}));
     assert!(Keepalive::new()
-        .observe("", &[codex.clone()], &on(&codex, 1), 1100.0)
+        .observe("", std::slice::from_ref(&codex), &on(&codex, 1), 1100.0)
         .is_empty());
 }
 
@@ -525,27 +525,27 @@ fn a_new_run_or_conversation_starts_over_and_unlisted_sessions_are_forgotten() {
     let mut keepalive = Keepalive::new();
     let row = listed(json!({"cmd": "codex"}));
     let saved = on(&row, 1);
-    keepalive.observe("", &[row.clone()], &saved, 1300.0);
+    keepalive.observe("", std::slice::from_ref(&row), &saved, 1300.0);
     assert!(state(&keepalive, &row).cold);
     // Resumed: the cache was last used by the last reply.
     let resumed = listed(json!({"cmd": "codex", "run_id": "run-2", "reply_at": 1250.0}));
     assert!(keepalive
-        .observe("", &[resumed.clone()], &saved, 1300.0)
+        .observe("", std::slice::from_ref(&resumed), &saved, 1300.0)
         .is_empty());
     assert!(!state(&keepalive, &resumed).cold);
     assert_eq!(state(&keepalive, &resumed).run, "run-2");
     assert_eq!(
-        sends(&keepalive.observe("", &[resumed.clone()], &saved, 1460.0)),
+        sends(&keepalive.observe("", std::slice::from_ref(&resumed), &saved, 1460.0)),
         vec![1]
     );
     // A peer's listing keeps this computer's states; this computer's drops it.
     let peer = listed(json!({"cmd": "codex", "name": "codex/peer/one"}));
-    keepalive.observe("peer", &[peer.clone()], &on(&peer, 1), 1500.0);
+    keepalive.observe("peer", std::slice::from_ref(&peer), &on(&peer, 1), 1500.0);
     assert!(keepalive.states.contains_key(&id("", &resumed).unwrap()));
     keepalive.observe("", &[], &saved, 1500.0);
     assert!(!keepalive.states.contains_key(&id("", &resumed).unwrap()));
     // Turning it off forgets the session as well.
-    keepalive.observe("", &[resumed.clone()], &saved, 1600.0);
-    keepalive.observe("", &[resumed.clone()], &on(&resumed, 0), 1601.0);
+    keepalive.observe("", std::slice::from_ref(&resumed), &saved, 1600.0);
+    keepalive.observe("", std::slice::from_ref(&resumed), &on(&resumed, 0), 1601.0);
     assert!(!keepalive.states.contains_key(&id("", &resumed).unwrap()));
 }

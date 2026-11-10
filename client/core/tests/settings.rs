@@ -28,12 +28,6 @@ impl Drop for Scratch {
     }
 }
 
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/settings")
-        .join(name)
-}
-
 const FLUSH: Duration = Duration::from_secs(5);
 
 #[test]

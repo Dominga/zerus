@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(parse(&json!({"confirm":true}), HgsSetting::SessionUploadBlock), None);
         assert_eq!(parse(&json!({"confirm":"yes"}), HgsSetting::SubagentsConfirm), None);
         assert_eq!(parse(&json!(["confirm"]), HgsSetting::SubagentsConfirm), None);
-        assert_eq!(HgsSetting::SubagentsConfirm.default_value(), true);
-        assert_eq!(HgsSetting::SessionUploadBlock.default_value(), true);
+        assert!(HgsSetting::SubagentsConfirm.default_value());
+        assert!(HgsSetting::SessionUploadBlock.default_value());
     }
 }

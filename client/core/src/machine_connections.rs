@@ -44,6 +44,7 @@ pub struct Connection {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)] // one change per edit, read from the UI and dropped
 pub enum Change {
     Set {
         connection: Connection,

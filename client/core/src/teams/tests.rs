@@ -1941,7 +1941,7 @@ fn task_196_the_phase_header_reads_the_phase_records() {
     assert_eq!(rejected.added_at, 1700000000.0);
     assert!(phase(4).start_ahead && !phase(4).accepted_by_auto);
     assert!(phase(1).note.is_empty() && !phase(1).accepted_by_auto);
-    let wire = serde_json::to_value(&phase(1)).unwrap();
+    let wire = serde_json::to_value(phase(1)).unwrap();
     assert!(wire.get("note").is_none() && wire.get("changes").is_none(), "empty details stay off the wire: {wire}");
     let task = |id: u64| view.tasks.iter().find(|task| task.id == id).unwrap().clone();
     assert_eq!((task(2).description.as_str(), task(2).criteria.clone()), ("Write docs", vec!["Readable".to_owned()]));

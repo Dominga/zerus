@@ -759,7 +759,7 @@ fn push_sessions(menu: &mut Vec<Entry>, computer: &str, state: &Computer) {
         menu.push(Entry::Session {
             computer: computer.to_owned(),
             key: (*key).clone(),
-            title: Text::verbatim(&escape(title)),
+            title: Text::verbatim(escape(title)),
         });
     }
     if rows.len() > SESSION_ROWS {

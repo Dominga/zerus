@@ -130,6 +130,7 @@ impl Host {
     }
 
     /// A Claude Code account whose every model slot names one Ollama model.
+    #[allow(clippy::too_many_arguments)] // each slot of the account form, as the UI sends it
     pub fn create_ollama(
         &self,
         hgs: &Path,

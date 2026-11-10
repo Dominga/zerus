@@ -71,6 +71,7 @@ impl GitFeed {
     }
 
     /// The next folder to read while fewer than [`CONCURRENCY`] are read (Qt pumpGitStatus).
+    #[allow(clippy::should_implement_trait)] // a pump step that also counts in-flight reads, not an iterator
     pub fn next(&mut self) -> Option<Folder> {
         if self.in_flight.len() >= CONCURRENCY {
             return None;

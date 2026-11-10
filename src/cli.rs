@@ -2801,6 +2801,32 @@ impl LaunchOptions {
         Ok(options)
     }
 }
+/// Whether Claude has saved a conversation for `directory`. Claude names its
+/// history folder after its own working directory as the system reports it
+/// (process.cwd(): symlinks resolved, so /var/... is /private/var/... on
+/// macOS), not after the configured path, so a project configured through a
+/// symlink is looked up under its physical path as well (zerus-ngeih).
+fn claude_history_exists(history_root: &Path, directory: &str) -> bool {
+    let has = |directory: &str| {
+        let escaped: String = directory
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        fs::read_dir(history_root.join(escaped))
+            .ok()
+            .is_some_and(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            })
+    };
+    has(directory)
+        || fs::canonicalize(directory)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+            .is_some_and(|physical| physical != directory && has(&physical))
+}
+
 fn resolve_project(
     config: &Config,
     command: &str,
@@ -3057,17 +3083,7 @@ fn launch(
                 .to_string_lossy()
                 .into_owned()
         });
-        let escaped: String = directory
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        auto = fs::read_dir(Path::new(&history_root).join(escaped))
-            .ok()
-            .is_some_and(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-            });
+        auto = claude_history_exists(Path::new(&history_root), &directory);
     }
     if !options.extra.is_empty() {
         match command_name.as_str() {
@@ -3300,6 +3316,36 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn claude_history_is_found_under_the_physical_path_of_a_symlinked_project() {
+        // zerus-ngeih: Claude names its folder after its physical cwd.
+        let root = tempfile::tempdir().unwrap();
+        let physical = root.path().join("real project");
+        std::fs::create_dir(&physical).unwrap();
+        let linked = root.path().join("linked");
+        std::os::unix::fs::symlink(&physical, &linked).unwrap();
+        let physical = std::fs::canonicalize(&physical).unwrap().to_string_lossy().into_owned();
+        let linked = linked.to_string_lossy().into_owned();
+        let history = root.path().join("projects");
+        let escape = |path: &str| path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        assert!(!super::claude_history_exists(&history, &linked));
+        let folder = history.join(escape(&physical));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "").unwrap();
+        assert!(!super::claude_history_exists(&history, &linked), "only a saved conversation counts");
+        std::fs::write(folder.join("old.jsonl"), "{}\n").unwrap();
+        assert!(super::claude_history_exists(&history, &linked));
+        assert!(super::claude_history_exists(&history, &physical));
+        // History recorded under the configured path itself still counts.
+        let other = tempfile::tempdir().unwrap();
+        let raw = other.path().to_string_lossy().into_owned();
+        let folder = history.join(escape(&raw));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("old.jsonl"), "{}\n").unwrap();
+        assert!(super::claude_history_exists(&history, &raw));
+        assert!(!super::claude_history_exists(&history, &root.path().join("missing").to_string_lossy()));
+    }
     #[cfg(unix)]
     #[test]
     fn a_bounded_archive_page_falls_back_on_a_peer_without_the_marker() {

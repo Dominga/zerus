@@ -3075,7 +3075,8 @@ impl OriginalResources {
             Instant::now() < deadline,
             "original adoption deadline expired"
         );
-        let remote = crate::remote_shell::hgs_within(config, alias, words, deadline)?;
+        // Discovery for the original call skips connection sharing too.
+        let remote = crate::remote_shell::hgs_within_unshared(config, alias, words, deadline)?;
         let mut command = original_command(config, alias, &remote)?;
         Self::start(
             &mut command,

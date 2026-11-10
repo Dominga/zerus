@@ -3115,7 +3115,9 @@ pipe keeps the call, and its native accounting, retained. A call whose exit
 cannot be confirmed stays pinned and admits no other call in that process. The
 adoption ssh passes `-o ControlPath=none` ahead of the configured connection
 options, so a user's `ControlMaster`/`ControlPersist` setting cannot start a
-background mux master that inherits stderr. The desktop runs the call beside
+background mux master that inherits stderr. Its uncached remote-shell discovery
+probe does the same. Every other remote operation's discovery probe keeps the
+configured connection sharing unchanged. The desktop runs the call beside
 its organization worker: other organization work continues, the dialog can be
 closed and reopened onto the same original, and after the original deadline it
 reports that the original is still settling with an unknown result. Only new

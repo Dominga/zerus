@@ -107,6 +107,13 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
+# Task #43 (team ede724c4): debug and test builds hash executables with an
+# optimized sha2. Unoptimized, hashing the 167 MB test binary that the
+# portable frontend tests bind ran past the record's 10 s deadline in a run
+# from an agent session ("pinned executable read deadline").
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 strip = true
 lto = "thin"

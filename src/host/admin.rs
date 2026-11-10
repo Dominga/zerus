@@ -535,7 +535,14 @@ mod native {
             eprintln!("hgs: the team recovery sweep after the install failed: {error}");
         }
         if json {
-            print_json(&install_json(&report, layout, VERSION));
+            let mut value = install_json(&report, layout, VERSION);
+            // Task #43: why the app beside this hgs was not bound.
+            if report.frontend.is_none() {
+                if let Some(reason) = crate::desktop::portable_frontend::last_refusal() {
+                    value["frontend_refusal"] = serde_json::json!(reason);
+                }
+            }
+            print_json(&value);
         } else {
             print!("{}", install_text(&report, layout, VERSION));
         }

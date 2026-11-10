@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use zerus_client_core::desktop::windows::{
     image::PinnedImage,
-    process::{Ancestry, Original},
+    process::{AgentDescended, Ancestry, Original},
 };
 
 /// The largest app whose digest is read.
@@ -494,12 +494,21 @@ pub(crate) fn record(
     layout: &Layout,
     publish: &mut staging::Publish<'_>,
 ) -> Result<Option<FrontendBinding>, staging::StageError> {
+    set_refusal(None);
     let until = Instant::now() + RECORD_TIME;
-    let Some((ancestry, gui, cli)) = prove_creation(layout, until) else {
-        return Ok(None);
+    let (ancestry, gui, cli) = match prove_creation(layout, until) {
+        Ok(proof) => proof,
+        Err(reason) => {
+            set_refusal(Some(reason));
+            return Ok(None);
+        }
     };
-    let Ok(digest) = gui.sha256(DIGEST_BYTES, until) else {
-        return Ok(None);
+    let digest = match gui.sha256(DIGEST_BYTES, until) {
+        Ok(digest) => digest,
+        Err(error) => {
+            set_refusal(Some(format!("the app's digest: {error}")));
+            return Ok(None);
+        }
     };
     let binding = FrontendBinding {
         schema: FRONTEND_SCHEMA,
@@ -512,38 +521,68 @@ pub(crate) fn record(
     let commit = || {
         #[cfg(test)]
         tests::barrier();
-        ancestry.validate(until).is_ok()
-            && ancestry
-                .ancestors()
-                .next()
-                .is_some_and(|parent| parent.current())
-            && gui.revalidate().is_ok()
-            && cli.revalidate().is_ok()
-            && Instant::now() < until
+        let refused = if let Err(error) = ancestry.validate(until) {
+            Some(format!("the last check: the ancestry: {error}"))
+        } else if !ancestry.ancestors().next().is_some_and(|parent| parent.current()) {
+            Some("the last check: the app that started this hgs is gone".to_owned())
+        } else if let Err(error) = gui.revalidate() {
+            Some(format!("the last check: the app's pin: {error}"))
+        } else if let Err(error) = cli.revalidate() {
+            Some(format!("the last check: the staged CLI's pin: {error}"))
+        } else if Instant::now() >= until {
+            Some(format!("the last check: past the record's {} s deadline", RECORD_TIME.as_secs()))
+        } else {
+            None
+        };
+        let ok = refused.is_none();
+        set_refusal(refused);
+        ok
     };
     let published = publish(&binding, &commit)?;
     Ok(published.then_some(binding))
 }
 
+/// Task #43 (team ede724c4, 2026-11-10): why the last `record` of this
+/// process bound no app (the proof or its last check), or None when it bound
+/// one or was not asked. `session-host install --json` shows it as
+/// `frontend_refusal`; the tests print it.
+#[cfg(windows)]
+static REFUSAL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn set_refusal(reason: Option<String>) {
+    *REFUSAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = reason;
+}
+
+#[cfg(windows)]
+pub(crate) fn last_refusal() -> Option<String> {
+    REFUSAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+}
+
 /// The app that started this process and the staged CLI, both pinned, with the
 /// ancestry that admitted them.
+/// A refusal names what failed: this CLI's image, the ancestry (with the hop
+/// and marker that refused it), the parent's image, or the staged CLI's pin.
 #[cfg(windows)]
-fn prove_creation(layout: &Layout, until: Instant) -> Option<(Ancestry, PinnedImage, PinnedImage)> {
-    let own = PinnedImage::for_process(&own_process()).ok()?;
-    let ancestry = Ancestry::inspect(std::process::id(), until).ok()?;
-    let parent = ancestry.ancestors().next()?;
-    let gui = PinnedImage::for_process(&parent.handle()).ok()?;
-    let beside = own.path().parent()?.join(staging::FRONTEND_IMAGE);
+fn prove_creation(layout: &Layout, until: Instant) -> Result<(Ancestry, PinnedImage, PinnedImage), String> {
+    let own = PinnedImage::for_process(&own_process()).map_err(|error| format!("this hgs's own image: {error}"))?;
+    let ancestry = Ancestry::inspect(std::process::id(), until).map_err(|error| match AgentDescended::detail(&error) {
+        Some(detail) => format!("the ancestry: {error}: {detail}"),
+        None => format!("the ancestry: {error}"),
+    })?;
+    let parent = ancestry.ancestors().next().ok_or("the ancestry: no parent process")?;
+    let gui = PinnedImage::for_process(&parent.handle()).map_err(|error| format!("the parent's image: {error}"))?;
+    let beside = own.path().parent().ok_or("this hgs's image has no folder")?.join(staging::FRONTEND_IMAGE);
     if !gui
         .path()
         .as_os_str()
         .eq_ignore_ascii_case(beside.as_os_str())
     {
-        return None;
+        return Err(format!("the parent's image {} is not the app beside this hgs ({})", gui.path().display(), beside.display()));
     }
-    ancestry.validate(until).ok()?;
-    let cli = PinnedImage::open(&layout.cli).ok()?;
-    Some((ancestry, gui, cli))
+    ancestry.validate(until).map_err(|error| format!("the ancestry: {error}"))?;
+    let cli = PinnedImage::open(&layout.cli).map_err(|error| format!("the staged CLI's pin ({}): {error}", layout.cli.display()))?;
+    Ok((ancestry, gui, cli))
 }
 
 #[cfg(windows)]

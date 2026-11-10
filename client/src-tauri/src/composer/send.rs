@@ -2284,11 +2284,18 @@ impl Composers {
         let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
         // The listed row's durable ID names its composer's draft key, as the
         // webview opened it (zerus-fsht5).
+        if let (Some(caller), Some(listed)) =
+            (session.session_id.as_deref(), row.session_id.as_deref())
+        {
+            if caller != listed {
+                return None;
+            }
+        }
         let session = SessionRef {
-            session_id: session
+            session_id: row
                 .session_id
                 .clone()
-                .or_else(|| row.session_id.clone()),
+                .or_else(|| session.session_id.clone()),
             ..session
         };
         let target = Target {
@@ -3629,7 +3636,9 @@ pub async fn clear_context(
 pub(crate) mod tests {
     use super::*;
     use crate::composer::tests::{dir, drafts, hold, session, until, Scratch, KEY};
-    use crate::composer::{lock, ComposerView, Composers, Config, Deps, Job, Spawn, SubagentRef};
+    use crate::composer::{
+        lock, ComposerView, Composers, Config, Deps, Job, Rows, Spawn, SubagentRef,
+    };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -3651,6 +3660,7 @@ pub(crate) mod tests {
         pub(crate) now: Mutex<f64>,
         pub(crate) inspected: Mutex<Option<Value>>,
         pub(crate) inspects: AtomicUsize,
+        pub(crate) inspected_targets: Mutex<Vec<Target>>,
         reconnects: Mutex<Vec<String>>,
         pub(crate) online: Mutex<bool>,
         pub(crate) write: Mutex<Option<WriteKind>>,
@@ -3684,13 +3694,14 @@ pub(crate) mod tests {
 
     /// `send_hub_on` with the test's own `spawn`.
     pub(crate) fn send_hub_with(store: &Arc<DraftStore>, spawn: Spawn) -> (Composers, Arc<Fake>) {
-        send_hub_reconnecting(store, spawn, None)
+        send_hub_reconnecting(store, spawn, None, None)
     }
 
     fn send_hub_reconnecting(
         store: &Arc<DraftStore>,
         spawn: Spawn,
         reconnect: Option<super::super::Reconnect>,
+        rows: Option<Rows>,
     ) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
             row: Mutex::new(row("claude/sample-project/review")),
@@ -3698,6 +3709,7 @@ pub(crate) mod tests {
             now: Mutex::new(1_793_000_100.0),
             inspected: Mutex::new(None),
             inspects: AtomicUsize::new(0),
+            inspected_targets: Mutex::new(Vec::new()),
             reconnects: Mutex::new(Vec::new()),
             online: Mutex::new(true),
             write: Mutex::new(None),
@@ -3719,12 +3731,14 @@ pub(crate) mod tests {
                 spawn,
                 notify: Arc::new(|| {}),
                 clock: Arc::new(move || *lock(&f1.now)),
-                rows: Arc::new(move |_, _, _| {
-                    if *lock(&f2.listed) {
-                        Some((lock(&f2.row).clone(), *lock(&f2.online)))
-                    } else {
-                        None
-                    }
+                rows: rows.unwrap_or_else(|| {
+                    Arc::new(move |_, _, _| {
+                        if *lock(&f2.listed) {
+                            Some((lock(&f2.row).clone(), *lock(&f2.online)))
+                        } else {
+                            None
+                        }
+                    })
                 }),
                 facts: Arc::new(move |_, _, _| *lock(&f4.write)),
                 reconnect: reconnect.unwrap_or_else(|| {
@@ -3732,8 +3746,9 @@ pub(crate) mod tests {
                         lock(&f6.reconnects).push(computer.to_owned());
                     })
                 }),
-                inspect: Arc::new(move |_, _, _| {
+                inspect: Arc::new(move |target, _, _| {
                     f3.inspects.fetch_add(1, Ordering::SeqCst);
+                    lock(&f3.inspected_targets).push(target.clone());
                     lock(&f3.inspected)
                         .clone()
                         .ok_or_else(|| "timed out".to_owned())
@@ -3753,6 +3768,17 @@ pub(crate) mod tests {
 
     pub(crate) fn send_hub(root: &Scratch) -> (Composers, Arc<Fake>) {
         send_hub_on(&drafts(root))
+    }
+
+    pub(crate) fn send_hub_on_rows(root: &Scratch, rows: Rows) -> (Composers, Arc<Fake>) {
+        send_hub_reconnecting(
+            &drafts(root),
+            Arc::new(|job: Job| {
+                std::thread::spawn(job);
+            }),
+            None,
+            Some(rows),
+        )
     }
 
     pub(crate) fn ready() -> Value {
@@ -4409,6 +4435,7 @@ pub(crate) mod tests {
                 entered.send(computer.to_owned()).unwrap();
                 lock(&held).recv_timeout(Duration::from_secs(2)).unwrap();
             })),
+            None,
         );
         *lock(&fake.online) = false;
         c.open(Some(session()));
@@ -6569,7 +6596,7 @@ pub(crate) mod tests {
 mod continuations {
     use super::tests::{
         ended, eventually, failed_send, held_spawn, next_job, opened, other_session, ready,
-        receipt, send_hub, send_hub_on, send_hub_with, state, Fake, Held,
+        receipt, row, send_hub, send_hub_on, send_hub_on_rows, send_hub_with, state, Fake, Held,
     };
     use super::*;
     use crate::composer::tests::{dir, drafts, hold, session, until, KEY};
@@ -8787,6 +8814,145 @@ mod continuations {
             "a sending composer disables its row's Clear"
         );
         c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+    }
+
+    #[test]
+    fn clear_control_refuses_a_caller_id_that_disagrees_with_the_listed_row() {
+        const ROW_ID: &str = "11111111-2222-4333-8444-555555555555";
+        const CALLER_ID: &str = "66666666-7777-4333-8444-888888888888";
+        let root = dir("clear-control-row-id");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).session_id = Some(ROW_ID.into());
+        *lock(&fake.inspected) = Some(ready());
+        assert!(c
+            .clear_control_for(SessionRef {
+                session_id: Some(CALLER_ID.into()),
+                ..session()
+            })
+            .is_none());
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn delayed_clear_of_a_renamed_row_uses_its_run_and_durable_draft_key() {
+        const ID: &str = "11111111-2222-4333-8444-555555555555";
+        let root = dir("clear-captured-renamed");
+        let listed = Arc::new(Mutex::new({
+            let mut row = row(&session().name);
+            row.session_id = Some(ID.into());
+            row
+        }));
+        let rows = Arc::clone(&listed);
+        let (c, fake) = send_hub_on_rows(
+            &root,
+            Arc::new(move |_, key, name| {
+                let row = lock(&rows).clone();
+                (key == format!("run:{}", row.run_id.as_deref().unwrap_or_default())
+                    || name == row.name)
+                    .then_some((row, true))
+            }),
+        );
+        let id_session = SessionRef {
+            session_id: Some(ID.into()),
+            ..session()
+        };
+        c.open(Some(id_session));
+        c.observe(&state(ready()));
+        until(&c, |v| v.loaded);
+        let open_key = c.lock().open_key.clone().unwrap();
+        assert!(open_key.contains(ID));
+        lock(&listed).name = "claude/sample-project/renamed".into();
+        *lock(&fake.inspected) = Some(ready());
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("cleared while sending")),
+            SendReply::Busy
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+        let mut clearing = None;
+        let reply = c.clear_captured_using(&captured, |target, action, _| {
+            assert_eq!(target, captured.target);
+            assert_eq!(action, captured.action);
+            clearing = c.lock().clearing.clone();
+            Ok(Outcome::Done {
+                receipt: json!({"status": "confirmed"}),
+                cleanup: None,
+            })
+        });
+        assert_eq!(
+            reply,
+            SendReply::Notice {
+                text: CLEARED.into(),
+                error: false
+            }
+        );
+        assert_eq!(clearing.as_deref(), Some(open_key.as_str()));
+        assert!(c.lock().clearing.is_none());
+        assert!(lock(&fake.inspected_targets)
+            .iter()
+            .all(|target| target.name == captured.target.name));
+    }
+
+    #[test]
+    fn delayed_clear_with_an_absent_run_does_not_touch_the_reused_name() {
+        const OTHER_ID: &str = "66666666-7777-4333-8444-888888888888";
+        let root = dir("clear-captured-absent-run");
+        let mut other_row = row(&session().name);
+        other_row.run_id = Some("run-2".into());
+        other_row.conversation_id = Some("conv-2".into());
+        other_row.session_id = Some(OTHER_ID.into());
+        let listed = other_row.clone();
+        let (c, fake) = send_hub_on_rows(
+            &root,
+            Arc::new(move |_, key, name| {
+                (key == "run:run-2" || (key == "run:run-1" && name == listed.name))
+                    .then_some((listed.clone(), true))
+            }),
+        );
+        c.open(Some(SessionRef {
+            key: "run:run-2".into(),
+            session_id: Some(OTHER_ID.into()),
+            ..session()
+        }));
+        let other_key = c.lock().open_key.clone().unwrap();
+        assert!(other_key.contains(OTHER_ID));
+        until(&c, |v| v.loaded);
+        let before = c.current().unwrap();
+        let mut details = ready();
+        details["run_id"] = json!("run-2");
+        details["conversation_id"] = json!("conv-2");
+        *lock(&fake.inspected) = Some(details);
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("reused name dispatched")),
+            SendReply::Busy
+        );
+        assert_eq!(c.current().unwrap(), before);
+        assert!(c.lock().clearing.is_none());
+        assert!(lock(&fake.calls).is_empty());
     }
 
     #[test]

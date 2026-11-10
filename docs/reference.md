@@ -1615,11 +1615,10 @@ computer shares it). The owner's `build_cache` object in the team templates
 file (Settings > Teams) overrides any of these keys. With it on, the
 `cargo-build`, `cargo-test` and `cargo-clippy` templates run rustc through
 `sccache` (`RUSTC_WRAPPER`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, and a server
-of the run's own on a free port that ends with the run), and `qt-configure`
-sets `ccache` as the C and C++ compiler launcher with `CCACHE_DIR`,
-`CCACHE_MAXSIZE` and `CCACHE_BASEDIR` (the member's folder, so worktrees hit
-each other's entries); `qt-build` sets the launcher first in a build folder
-configured without it. A tool not found on `PATH` (or in cargo's bin folder)
+of the run's own on a free port that ends with the run), and `cmake-configure`
+sets `ccache` as the C and C++ compiler launcher, `cmake-configure` and
+`cmake-build` with `CCACHE_DIR`, `CCACHE_MAXSIZE` and `CCACHE_BASEDIR` (the
+member's folder, so worktrees hit each other's entries). A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
 The owner's own shared sccache server is separate (task 261): when cargo builds
@@ -1649,7 +1648,7 @@ build once more; the run's output says so and the lead's inbox gets one line.
 process listening on the port, and `restricted` when that is Low.
 
 A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
-`qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
+`cmake-configure`, `cmake-build`, `ctest`, `msbuild-build`) that fails with MSVC's C1083 "Cannot open
 compiler generated file ... Permission denied" or D8050 "failed to get command
 line into debug records" runs once more. These are the failures real-time
 scanning (Microsoft Defender) gives a compiler in a folder it scans. The run's
@@ -1678,23 +1677,15 @@ provider, so a sandboxed member never runs `npx` itself.
 Every value is typed: a `source` or `build_dir` is a path inside the member's
 folder (it may not exist yet), a target or test name a plain word, a regex,
 generator, platform or filter one line of text. On Windows these templates load
-the Visual Studio environment as the Qt ones do, and the build cache and the
-scanning retry apply to them. `qt-configure` and `qt-build` are `cmake-configure`
-and `cmake-build` with this repository's fixed values; `qt-build`'s argv is
-unchanged.
+the Visual Studio environment, and the build cache and the scanning retry apply
+to them.
 
-`qt-configure` finds the installed Qt itself, so a fresh worktree needs no hand
-edit: it tries, in order, `QT_ROOT_DIR` and then `Qt6_DIR` from the environment;
-the project's `.zerus/tests.toml` `[tools] qt = "<install or lib/cmake/Qt6>"`
-(a literal string in single quotes keeps Windows backslashes; the per-computer
-`qt` of the templates settings file answers when the project names none); the
-`Qt6_DIR` of the folder's own or the main checkout's
-`.ci-build/gui/CMakeCache.txt`; and the known install roots (`D:/Tools/zerus-deps/Qt`,
-`C:/Qt`, the Qt online installer's and aqtinstall's folders in the person's
-home) for the version `tray/CMakeLists.txt` asks for, newest otherwise, trying
-`msvc2022_64` before the other kits. It passes the result as `-DQt6_DIR=<…>`.
-When nothing is found the run is refused with a line naming every place it
-searched and the version it wanted, so the missing piece is one setting away.
+Task #58 (owner, 2026-11-10: Qt goes from Zerus completely): the Qt desktop's
+own templates `qt-configure`, `qt-build` and `qt-test` are gone with it. A
+request, a team's stored run or a project's `.zerus/tests.toml` that still
+names one is refused with its replacement ("The qt-build template was removed
+with the Qt desktop: use cmake-build"): `cmake-configure`, `cmake-build` and
+`ctest`, which take the build folder, targets and tests as arguments.
 
 `ctest` and `vstest` read their report (CTest's JUnit XML, VSTest's TRX, under
 `.zerus-team/results` in the member's folder, removed before each run) into one
@@ -4151,7 +4142,7 @@ phase.
 
 ### Test isolation
 
-A test template that Zerus runs for a member (`cargo-test`, `qt-test`,
+A test template that Zerus runs for a member (`cargo-test`, `ctest`,
 `android-test` and `web-test` unless the project names others) runs in a run
 folder of the
 member's own folder, `.zerus-team/runs/<template>-<time>`, with its own
@@ -4231,7 +4222,7 @@ On, a build template of a member runs in that member's snapshot,
   `vstest`). A build
   of the same key still running is waited for through a marker taken
   atomically. A finished result serves a check template (`cargo-test`,
-  `cargo-clippy`, `qt-test`, `ctest`, `vstest`) as its verdict for any member; a build
+  `cargo-clippy`, `ctest`, `vstest`) as its verdict for any member; a build
   template's result serves only the member whose tree holds its outputs. The
   newest 64 results are kept in `.zerus-team/runs/broker-results.json`.
 - A failure in a file another member is changing is reported to both as an
@@ -4272,7 +4263,7 @@ build in its own build folder.
 enabled = true                 # false: the project vetoes the broker
 mode = "auto"                  # "shared", "snapshot"; auto: shared for Unreal
 ready_wait_s = 300             # shared mode: the wait for others' edits
-templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test",
+templates = ["cargo-build", "cargo-test", "cargo-clippy",
              "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
 assets = ["Content"]           # folders linked whole, never copied
 link = ["ThirdParty"]          # untracked folders the build needs, linked
@@ -10490,8 +10481,8 @@ and nothing is enforced: a team without a configuration keeps today's flow.
   far the snapshot lags is printed, and `--write` refreshes it on a computer
   with the configured build.
 - A CMake project's map comes from the build's file API reply, so it needs a
-  configured build: configure once (`hgs team run` with `cmake-configure` or
-  `qt-configure`), run `hgs test map --write`, then configure again so the next
+  configured build: configure once (`hgs team run` with `cmake-configure`),
+  run `hgs test map --write`, then configure again so the next
   reply covers the map's own test targets. Without the first configure there is
   no reply to read; without the second, a new test file waits until the next
   configure.
@@ -10501,15 +10492,10 @@ and nothing is enforced: a team without a configuration keeps today's flow.
   named, never skipped. `--full` prints the whole set and its time; the
   full-run policy (`[full]`) says who may start it. Each run also carries its
   `hgs team run` request where a template expresses it: `cargo-test` with
-  `bin`, `manifest` (another crate), `filters` and `skips` (up to 512 each),
-  `qt-test` with `suites` run one after another in the same run and
-  `functions` as `suite:function` (a plain name, or `function:datatag`, with
-  one suite). A Qt test runs with `QT_FORCE_STDERR_LOGGING=1`: without a
-  console QtTest would log to the debugger, and the run's tail keeps each
-  suite's own lines (`FAIL!`, `Totals`). `qt-test` is only for the Qt GUI's
-  build (`build_dir = ".ci-build/gui"`). Every other kind names its own
-  templates (task 137), with the build its tests need as `team_build`, sent
-  first:
+  `bin`, `manifest` (another crate), `filters` and `skips` (up to 512 each).
+  Every other kind names its own templates (task 137; the Qt GUI's `qt-test`
+  went with Qt, task #58), with the build its tests need as `team_build`,
+  sent first:
   - ctest: `cmake-build` (`build_dir`, the configuration a multi-config
     build's binary folder names, the chosen `targets`), then `ctest` with the
     chosen tests (`tests`, or an anchored `regex` for other names);

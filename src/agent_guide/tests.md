@@ -16,7 +16,7 @@ Without it Zerus only proposes detected tests and enforces nothing.
 
 Sources refresh the map; its snapshot covers unavailable builds. Only tracked
 files count: git add new tests. Each run line names its command and folder.
-Send printed hgs team run requests, build first: cargo-test, qt-test,
+Send printed hgs team run requests, build first: cargo-test,
 cmake-build/ctest, cython-build/py-test, msbuild-build/vstest, ue-build/ue-test.
 hgs run takes other kinds. QtTest function changes name binary:function.
 Unknown files run their whole area; files in no area are named, never skipped.

@@ -40,7 +40,7 @@ fn an_hgs_run_command_names_its_build_folders() {
     assert!(targets_of("git log -B", cwd).is_empty());
     assert!(targets_of("cargo build --target-dir $TARGET", cwd).is_empty());
     assert_eq!(template_folders("cargo-test", &json!({"manifest":["client/core/Cargo.toml"]}), cwd)[0].0, cwd.join("client/core").join("target"));
-    assert_eq!(template_folders("qt-build", &json!({}), cwd)[0].0, cwd.join(".ci-build").join("gui"));
+    assert_eq!(template_folders("cmake-build", &json!({"build_dir":".ci-build/gui"}), cwd)[0].0, cwd.join(".ci-build").join("gui"));
     assert!(template_folders("git-commit", &json!({}), cwd).is_empty());
 }
 

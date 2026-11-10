@@ -22,7 +22,7 @@ const MAX_FILES: usize = 200;
 const MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
 /// The command templates a test stage may run in the task's folder: builds and
 /// tests, which write only build output. Merges and commits change the task.
-const TEST_TEMPLATES: [&str; 6] = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"];
+const TEST_TEMPLATES: [&str; 6] = ["cargo-build", "cargo-test", "cargo-clippy", "cmake-configure", "cmake-build", "ctest"];
 
 /// The implementer's attempt the run checks.
 fn checked_attempt<'a>(task: &'a Task, run: &StageRun) -> Option<&'a Attempt> {

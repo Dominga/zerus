@@ -110,7 +110,23 @@ fn a_real_low_label_is_found_and_the_owners_step_clears_it() {
             .unwrap();
         temp.join(name).is_dir()
     };
-    assert!(!mkdir("refused"), "a program labeled Low runs at Low and is refused in a Medium folder");
+    // Task #58 (team ede724c4): Windows starts a Low-labeled program at Low only
+    // where integrity levels are enforced for its user. On the hosted runner
+    // the job runs as the built-in Administrator (SID ...-500, High) with UAC
+    // off, so the copy ran at High and made the folder. The program says which
+    // level it runs at (whoami /groups names the Low label S-1-16-4096); the
+    // refusal is checked only where it can happen.
+    let runs_low = Command::new(&program)
+        .args(["/d", "/c", "whoami", "/groups"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains("S-1-16-4096"))
+        .unwrap_or(false);
+    if runs_low {
+        assert!(!mkdir("refused"), "a program labeled Low runs at Low and is refused in a Medium folder");
+    } else {
+        eprintln!("this computer does not start a Low-labeled program at Low (integrity levels not enforced for this user): the refusal is not checked");
+    }
     // Task #48: the owner's step exactly as the message prints it, run in
     // Windows PowerShell. The old unquoted line was refused there ("The term
     // 'OI' is not recognized") and changed nothing.
@@ -123,5 +139,5 @@ fn a_real_low_label_is_found_and_the_owners_step_clears_it() {
     let (ran, said) = run_in_powershell(&step);
     assert!(ran, "the printed step runs in PowerShell: {said}");
     assert_eq!(preflight(std::slice::from_ref(&deps), Some(&temp)), None);
-    assert!(mkdir("allowed"), "after the step the same program runs at Medium");
+    assert!(!runs_low || mkdir("allowed"), "after the step the same program runs at Medium");
 }

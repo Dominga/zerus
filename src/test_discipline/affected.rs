@@ -51,7 +51,7 @@ pub struct Run {
     pub functions_command: String,
     /// #741: the same run as an `hgs team run` request's template and args,
     /// when a team template expresses it; task 137: each kind its own
-    /// (cargo-test, qt-test, ctest, py-test, vstest, ue-test).
+    /// (cargo-test, ctest, py-test, vstest, ue-test).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_run: Option<serde_json::Value>,
     /// Task 137: the build its tests need first, sent before `team_run`
@@ -185,11 +185,8 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
                         run.seconds = run.seconds.map(|seconds| seconds * run.functions.len() as f64 / target.tests as f64);
                     }
                     run.tests = run.functions.len();
-                    // Only the Qt build's test binaries take functions; ctest
-                    // runs a whole test.
-                    if qt_build(provider) {
-                        run.team_run = Some(serde_json::json!({"template": "qt-test", "args": {"suite": ids[0], "functions": run.functions}}));
-                    }
+                    // ctest runs a whole test; the functions name the binary's
+                    // own command (task #58: the Qt build's qt-test is gone).
                 }
             }
             selection.runs.push(run);
@@ -270,7 +267,6 @@ fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, 
     let all: Vec<String> = section.targets.keys().filter(|id| *id != ALL).cloned().collect();
     let (team_build, team_run) = match provider.kind {
         Kind::Cargo => (None, Some(cargo_team_run(provider, "", &[], &[]))),
-        Kind::Ctest if qt_build(provider) => (None, (!all.is_empty()).then(|| serde_json::json!({"template": "qt-test", "args": {"suites": all}}))),
         _ => team_steps(provider, section, None, &all, changed),
     };
     Run {
@@ -311,7 +307,6 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
             let (filters, skips) = cargo_filters(section, ids);
             (None, Some(cargo_team_run(provider, group, &filters, &skips)))
         }
-        Kind::Ctest if qt_build(provider) => (None, Some(serde_json::json!({"template": "qt-test", "args": {"suites": ids}}))),
         _ => team_steps(provider, section, Some(group), ids, changed),
     };
     Run {
@@ -329,14 +324,6 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
         team_run,
         team_build,
     }
-}
-
-/// This repository's Qt GUI build, whose suites the qt-test template runs;
-/// any other CTest provider uses cmake-build and ctest (task 137).
-pub const QT_BUILD_DIR: &str = ".ci-build/gui";
-
-fn qt_build(provider: &Provider) -> bool {
-    provider.kind == Kind::Ctest && provider.build_dir.trim_end_matches('/') == QT_BUILD_DIR
 }
 
 /// A name the templates take as an identifier: letters, digits, _ - . : + @.
@@ -951,13 +938,16 @@ affected = "all"
         assert_eq!(run.command, "ctest --test-dir .ci-build/gui -R \"^(teams-0|teams-1)$\"");
         assert_eq!(run.functions, vec!["opens"]);
         assert_eq!(run.functions_command, "build/gui/tests/test_teams opens");
-        assert_eq!(run.team_run, Some(serde_json::json!({"template":"qt-test","args":{"suite":"test_teams","functions":["opens"]}})));
+        // Task #58: a CTest provider runs through cmake-build and ctest (the
+        // Qt build's qt-test is gone); the functions name the binary's command.
+        assert_eq!(run.team_run.as_ref().map(|run| run["template"].clone()), Some(serde_json::json!("ctest")));
+        assert_eq!(run.team_build.as_ref().map(|build| build["template"].clone()), Some(serde_json::json!("cmake-build")));
         assert_eq!(run.seconds, Some(20.0));
         // A change in the class declaration is every function's.
         let outside = Hunks::from([("gui/tests/test_teams.cpp".to_owned(), vec![(4, 4)])]);
         let selection = select(root.path(), &config(), &map(), &durations(), &changed, &outside, false);
         assert!(selection.runs[0].functions.is_empty());
-        assert_eq!(selection.runs[0].team_run, Some(serde_json::json!({"template":"qt-test","args":{"suites":["test_teams"]}})));
+        assert_eq!(selection.runs[0].team_run.as_ref().map(|run| run["template"].clone()), Some(serde_json::json!("ctest")));
         assert_eq!(selection.runs[0].seconds, Some(40.0));
     }
 
@@ -968,7 +958,7 @@ affected = "all"
         assert_eq!(selection.runs.len(), 4);
         assert_eq!(selection.runs[1].command, "ctest --test-dir .ci-build/gui");
         assert_eq!(selection.runs[0].team_run, Some(serde_json::json!({"template":"cargo-test","args":{}})));
-        assert_eq!(selection.runs[1].team_run, Some(serde_json::json!({"template":"qt-test","args":{"suites":["test_teams"]}})));
+        assert_eq!(selection.runs[1].team_run.as_ref().map(|run| run["template"].clone()), Some(serde_json::json!("ctest")));
         // Python has no team template: hgs run runs its command.
         assert_eq!(selection.runs[2].team_run, None);
         assert_eq!(selection.runs[0].seconds, Some(60.0));

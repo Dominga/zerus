@@ -171,7 +171,7 @@ fn report_text(task: &Task) -> Option<String> {
 }
 
 fn test_template(template: &str) -> bool {
-    matches!(template, "cargo-test" | "qt-test" | "py-test" | "ctest" | "vstest" | "ue-test" | "android-test")
+    matches!(template, "cargo-test" | "py-test" | "ctest" | "vstest" | "ue-test" | "android-test")
 }
 
 /// The team's phases with their titles, in order: phase 1, the approved

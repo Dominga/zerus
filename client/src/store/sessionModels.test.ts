@@ -64,6 +64,23 @@ describe("session model settings presentation", () => {
 });
 
 describe("session model settings", () => {
+  it("keeps an unknown native effort unselected until an explicit choice, without a default-low write", async () => {
+    const { store, port } = setup();
+    const fresh = context({ effort: "" }, "claude");
+    store.setContext(fresh); store.open();
+    expect(store.effort()).toBe("");
+    expect(store.canApply()).toBe(false);
+    await store.apply(); expect(port.apply).not.toHaveBeenCalled();
+    store.chooseModel("model-b");
+    expect(store.effort()).toBe("");
+    expect(store.canApply()).toBe(false);
+    store.chooseEffort("medium"); expect(store.canApply()).toBe(true);
+    port.apply.mockResolvedValue(done());
+    await store.apply();
+    expect(port.apply).toHaveBeenCalledExactlyOnceWith({ computer: "", name: "claude/sample-project/a", run_id: "r1", conversation_id: "c1" }, "model-b", "medium", undefined, false);
+    store.setContext(fresh);
+    expect([store.view()?.model, store.view()?.effort]).toEqual(["model-b", "medium"]);
+  });
   it("stages changes, cancels without a write, then applies once with exact identities", async () => {
     await createRoot(async (dispose) => {
       const { store, port } = setup(); store.setContext(context());

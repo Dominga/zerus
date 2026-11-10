@@ -55,7 +55,7 @@ export function createSessionModels(port: ModelsPort) {
   const canApply = () => {
     const v = view(), i = input();
     return !!v?.enabled && !!i && !changing() && opened() && popupScope === scope(targetOf(i))
-      && options().some((m) => m.id === model()) && efforts().some((e) => e.value === effort())
+      && options().some((m) => m.id === model()) && efforts().some((e) => e.value === effort() && !e.disabled)
       && (model() !== v.intendedModel || effort() !== v.intendedEffort || (v.pending && v.applyWhen === "now"));
   };
 

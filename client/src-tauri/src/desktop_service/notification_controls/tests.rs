@@ -48,7 +48,18 @@ impl Fixture {
         fixture
     }
     fn configure(&self, config: Value) {
-        fs::write(self.0.join("fixture.json"), config.to_string()).unwrap();
+        self.replace("fixture.json", config.to_string().as_bytes());
+    }
+    /// A fixture child can start at any moment, such as the status read that a
+    /// settled edit queues or a focus refresh, and it reads its inputs first.
+    /// `fs::write` truncates before writing, so such a child could parse an
+    /// empty file and fail its call. A failed status read waits for the next
+    /// check, so the test's wait for a fresh status ran out (zerus-0ic7k).
+    /// Replace inputs atomically instead.
+    fn replace(&self, name: &str, bytes: &[u8]) {
+        let next = self.0.join(format!("{name}.next"));
+        fs::write(&next, bytes).unwrap();
+        fs::rename(next, self.0.join(name)).unwrap();
     }
     fn lines(&self, name: &str) -> Vec<Value> {
         fs::read_to_string(self.0.join(name))
@@ -507,11 +518,7 @@ fn unconfigured_initialization_is_once_and_historical_receipts_never_replace_cur
             durable: true,
             outcome: wire::Outcome::Saved,
         };
-        fs::write(
-            fixture.0.join("saved"),
-            serde_json::to_vec(&receipt).unwrap(),
-        )
-        .unwrap();
+        fixture.replace("saved", &serde_json::to_vec(&receipt).unwrap());
         fixture.configure(json!({"current_newer":true}));
         owner.check().unwrap();
         until(

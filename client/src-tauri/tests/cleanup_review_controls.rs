@@ -268,9 +268,11 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
 }
 
 fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
+    // Expiry is one-way. Retaining a UI row never keeps an Actions claim
+    // indefinitely or renews consent after source/authority loss.
     let weak = Arc::downgrade(inner);
     tauri::async_runtime::spawn_blocking(move || loop {
-        thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         let Some(inner) = weak.upgrade() else {
             return;
         };
@@ -289,6 +291,9 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
                 return;
             }
             if program.current() {
+                // A finished control worker is observable failure data, never a
+                // physical-drain proof. Keep the original resources/expiry exactly
+                // as before; only disable presentation of a usable Force offer.
                 if program.holder_unavailable() && job.program_retirement.is_none() {
                     job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
                     changed(&app, &mut m);
@@ -362,7 +367,20 @@ fn termination_cleanup_check(
     state: State<'_, TerminationCleanup>,
     id: String,
 ) -> Result<View, String> {
-    let mut m = lock(&state.0.model);
+    check_with_runtime(
+        &state.0,
+        id,
+        |model| changed(&app, model),
+        |inner, id, step| inner.drive(app.clone(), id, step, false),
+    )
+}
+fn check_with_runtime(
+    inner: &Arc<Inner>,
+    id: String,
+    emit: impl Fn(&mut Model) + Copy,
+    run_review: impl Fn(Arc<Inner>, String, Step) + Copy,
+) -> Result<View, String> {
+    let mut m = lock(&inner.model);
     if m.jobs
         .iter()
         .find(|j| j.id == id)
@@ -370,7 +388,9 @@ fn termination_cleanup_check(
     {
         return Err("An unknown result will not be retried.".into());
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let revision = m.revision.wrapping_add(1);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (step, program, reservation) = {
         let j = m
             .jobs
@@ -411,13 +431,31 @@ fn termination_cleanup_check(
         j.phase = "checking";
         (step, program, reservation)
     };
-    changed(&app, &mut m);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (step, program, reservation): (_, Option<()>, Option<()>) = {
+        let j = m
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or(STATE_CHANGED)?;
+        if j.busy || !j.cleanup.can_refresh() {
+            return Err("An unknown result will not be retried.".into());
+        }
+        j.manual_review = false;
+        j.cleanup.review_remaining();
+        let step = j.cleanup.step();
+        j.busy = true;
+        j.phase = "checking";
+        (step, None, None)
+    };
+    emit(&mut m);
     drop(m);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(program) = program {
         let reservation = reservation.expect("program reservation");
         let retired = program.retirement();
-        let (drive, view) = {
-            let mut m = lock(&state.0.model);
+        let (start_review, view) = {
+            let mut m = lock(&inner.model);
             let j = m
                 .jobs
                 .iter_mut()
@@ -431,11 +469,11 @@ fn termination_cleanup_check(
                     j.programs = Some(program);
                     j.busy = false;
                     j.program_review_pending = true;
-                    changed(&app, &mut m);
+                    emit(&mut m);
                 }
                 return Err(STATE_CHANGED.into());
             }
-            let drive = match retired {
+            let start_review = match retired {
                 run::Retirement::Retired => {
                     j.programs = None;
                     j.reservation = None;
@@ -455,16 +493,18 @@ fn termination_cleanup_check(
                     false
                 }
             };
-            changed(&app, &mut m);
+            emit(&mut m);
             let view = m.view();
-            (drive, view)
+            (start_review, view)
         };
-        if drive {
-            state.0.drive(app, id, step, false);
+        if start_review {
+            run_review(inner.clone(), id, step);
         }
         return Ok(view);
     }
-    let mut m = lock(&state.0.model);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (program, reservation);
+    let mut m = lock(&inner.model);
     let j = m
         .jobs
         .iter_mut()
@@ -473,7 +513,7 @@ fn termination_cleanup_check(
     j.manual_review = true;
     let view = m.view();
     drop(m);
-    state.0.drive(app, id, step, false);
+    run_review(inner.clone(), id, step);
     Ok(view)
 }
 
@@ -637,4 +677,59 @@ fn stale_reservation_never_clears_a_newer_operation() {
     assert_eq!(model.jobs[0].reservation.as_ref().unwrap().revision, 999);
     assert!(model.jobs[0].busy);
     assert_eq!(inner.drives.load(Ordering::Acquire), 0);
+}
+
+/// zerus-1y897.2: the controls above run copies of the production Check and
+/// passive watcher in a synthetic model. Bind them to the production source:
+/// a change there fails here until the copies and their controls are updated.
+#[test]
+fn the_controls_run_the_exact_production_check_and_watcher() {
+    let production = [
+        include_str!("../src/termination_cleanup.rs"),
+        include_str!("../src/termination_cleanup/program_pipeline.rs"),
+    ];
+    let controls = include_str!("cleanup_review_controls.rs");
+    for name in [
+        "termination_cleanup_check",
+        "check_with_runtime",
+        "watch_job",
+    ] {
+        let original = production
+            .iter()
+            .find_map(|source| function(source, name))
+            .unwrap_or_else(|| panic!("production {name} is missing"));
+        assert_eq!(
+            function(controls, name).as_deref(),
+            Some(original.as_str()),
+            "{name} differs from production"
+        );
+    }
+}
+
+/// The function's code from `fn name(` to its closing brace, with comment and
+/// blank lines dropped and indentation trimmed.
+fn function(source: &str, name: &str) -> Option<String> {
+    let start = source.find(&format!("fn {name}("))?;
+    let body = start + source[start..].find('{')?;
+    let mut depth = 0;
+    for (offset, c) in source[body..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let code = &source[start..=body + offset];
+                    return Some(
+                        code.lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

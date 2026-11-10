@@ -41,7 +41,14 @@ pub fn open(app: &tauri::AppHandle) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     append(&path, &line("open", "tray", None)).map_err(|error| error.to_string())?;
-    crate::external_open::path(app, &path)
+    // Task #52: a replay build (no live data source) opens no files.
+    #[cfg(feature = "live")]
+    return crate::external_open::path(app, &path);
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = app;
+        Err("This build opens no files.".to_owned())
+    }
 }
 
 fn line(outcome: &str, reason: &str, detail: Option<&str>) -> Vec<u8> {

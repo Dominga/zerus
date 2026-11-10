@@ -93,7 +93,14 @@ fn native_lower_integrity_server_never_forwards_or_claims_a_gui() {
                 } else if mode == "reply" {
                     assert!(matches!(claim, Claim::Untrusted));
                 } else {
-                    assert!(matches!(claim, Claim::Failed(ref error) if !error.is_empty()));
+                    // Task #52 (team ede724c4): since task 110 (4a72905e4) a held
+                    // activation pipe (ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY on its
+                    // first instance) is a Duplicate the start explains, not a bare
+                    // failure; it still claims, forwards and foregrounds nothing.
+                    assert!(
+                        matches!(claim, Claim::Duplicate("activation_pipe_held")),
+                        "{mode}: the held pipe is a duplicate"
+                    );
                 }
                 // An untrusted listener never grants second-instance ownership.
                 assert!(!matches!(claim, Claim::Claimed(_)));

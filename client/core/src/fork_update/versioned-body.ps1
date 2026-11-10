@@ -29,7 +29,7 @@ if (-not (Started $started)) {
 }
 Log "Updated: current is $Target, the previous build stays in $previous."
 Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem -LiteralPath $Root -Directory -Filter 'app-*' | Where-Object { $_.FullName -ne $Target -and $_.FullName -ne $previous } | ForEach-Object {
+Get-ChildItem -LiteralPath $Root -Directory -Filter 'app-*' | Where-Object { $_.Name -ne (Split-Path -Leaf $Target) -and $_.Name -ne (Split-Path -Leaf $previous) } | ForEach-Object {
     try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch { Log "Kept $($_.FullName): $_" }
 }
 if ($banner -and $banner.Visible) { Finish "Zerus build $Build is running." $false } elseif ($banner) { $banner.Close() }

@@ -4,7 +4,7 @@ import { afterEach,expect,it,vi } from "vitest";
 import { createComponent,createSignal } from "solid-js";
 import { render } from "solid-js/web";
 const f=vi.hoisted(()=>({count:(()=>0) as ()=>number,layout:(()=>"icons") as ()=>string}));
-vi.mock("../../store/ui",()=>({page:()=>"sessions",setPage:vi.fn(),counts:()=>({attention:f.count()}),setMenu:vi.fn(),logoMotion:()=>"spin"}));
+vi.mock("../../store/ui",()=>({page:()=>"sessions",setPage:vi.fn(),counts:()=>({attention:f.count()}),setMenu:vi.fn(),logoMotion:()=>"spin",selected:()=>undefined}));
 vi.mock("../../skin/runtime",()=>({skin:()=>({layout:{rail:f.layout()}})}));
 vi.mock("../../store/windowLayer",()=>({windowLayer:()=>({on:false,supported:true,hint:""}),setWindowLayer:vi.fn()}));
 vi.mock("../sessions/mark-entries",()=>({markAllEntry:()=>({label:"Mark all read"})}));

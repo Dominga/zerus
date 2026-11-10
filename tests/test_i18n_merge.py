@@ -1,9 +1,10 @@
 """Task 272: the Next catalog merge driver.
 
 `client/src/i18n.next-ru.json` merges as a key union (a key both sides changed
-differently stays a conflict with both values); `client/src/i18n.ru.json` is
-regenerated from the merged supplement instead of being merged. The cases run
-the real driver as Git invokes it, with three-way fixtures.
+differently stays a conflict with both values); `client/src/i18n.ru.json`, the
+catalog generated from it, merges the same way and is written sorted, as the
+generator writes it (task #22). The cases run the real driver as Git invokes
+it, with three-way fixtures, and one real `git merge`.
 """
 import importlib.util
 import json
@@ -87,14 +88,64 @@ class SupplementMergeTests(unittest.TestCase):
 
 
 class GeneratedCatalogTests(unittest.TestCase):
-    def test_the_generated_catalog_is_regenerated_from_the_supplement(self):
-        # The driver ignores both sides of i18n.ru.json and rebuilds it from the
-        # checked-in supplement and shared catalog.
-        stale = json.dumps({"stale": "must not survive"}, ensure_ascii=False, indent=2) + "\n"
-        result, text = driver((stale, stale, stale), path=GENERATED)
+    def test_the_generated_catalog_merges_both_sides_keys_sorted(self):
+        # Task #22 (team ede724c4): each side's catalog was generated from its
+        # own supplement; the merge keeps both sides' keys, sorted as the
+        # generator writes them.
+        base = {"a": "1", "m": "2"}
+        ours = {"a": "1", "m": "2", "z": "ours"}
+        theirs = {"a": "1", "b": "theirs", "m": "2"}
+        result, text = driver((base, ours, theirs), path=GENERATED)
         self.assertEqual(result.returncode, 0, result.stderr)
-        checked_in = (ROOT / GENERATED).read_text(encoding="utf-8")
-        self.assertEqual(text.replace("\r\n", "\n"), checked_in.replace("\r\n", "\n"))
+        self.assertEqual(text, json.dumps({"a": "1", "b": "theirs", "m": "2", "z": "ours"}, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        # A key both sides changed differently stays a conflict, never one side.
+        result, text = driver(({"k": "base"}, {"k": "ours"}, {"k": "theirs"}), path=GENERATED)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('"k": "ours"', text)
+        self.assertIn('"k": "theirs"', text)
+
+    def test_a_real_merge_keeps_the_strings_both_branches_added(self):
+        # The bug: the driver regenerated the catalog from the supplement in
+        # the working tree, which Git writes only after every driver ran, so
+        # the merged catalog lost the keys the other branch added (merge
+        # 276e77248 dropped task #7's strings).
+        with tempfile.TemporaryDirectory(prefix="zerus-i18n-repo-") as temporary:
+            repo = Path(temporary)
+
+            def git(*arguments):
+                done = subprocess.run(
+                    ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                     "-c", "commit.gpgsign=false", *arguments],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout
+
+            def write(relative, catalog):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+
+            git("init", "-q")
+            (repo / ".gitattributes").write_text(f"{SUPPLEMENT} merge=i18n\n{GENERATED} merge=i18n\n", encoding="utf-8")
+            write(SUPPLEMENT, {"base": "б"})
+            write(GENERATED, {"base": "б", "qt": "кт"})
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            main = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+            git("checkout", "-qb", "theirs")
+            write(SUPPLEMENT, {"base": "б", "theirs": "их"})
+            write(GENERATED, {"base": "б", "qt": "кт", "theirs": "их"})
+            git("commit", "-qam", "theirs")
+            git("checkout", "-q", main)
+            write(SUPPLEMENT, {"base": "б", "ours": "наши"})
+            write(GENERATED, {"base": "б", "ours": "наши", "qt": "кт"})
+            git("commit", "-qam", "ours")
+            command = f"{Path(sys.executable).as_posix()} {SCRIPT.as_posix()} %O %A %B %L %P"
+            git("-c", f"merge.i18n.driver={command}", "merge", "-q", "--no-edit", "theirs")
+            merged = json.loads((repo / GENERATED).read_text(encoding="utf-8"))
+            self.assertEqual(merged, {"base": "б", "ours": "наши", "qt": "кт", "theirs": "их"})
+            self.assertEqual(json.loads((repo / SUPPLEMENT).read_text(encoding="utf-8")),
+                             {"base": "б", "ours": "наши", "theirs": "их"})
 
     def test_regeneration_uses_a_merged_supplement(self):
         checked = merge.loaded(ROOT / SUPPLEMENT)

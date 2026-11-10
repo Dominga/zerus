@@ -8,9 +8,13 @@
   union; a key both sides changed differently stays a conflict with both
   values shown.
 - `client/src/i18n.ru.json` is generated from the supplement and the shared Qt
-  catalog, so it is never merged: it is regenerated from the merged supplement
-  (and the merged shared catalog when that merge is still open) with
-  `client/scripts/generate-i18n-catalog.py`.
+  catalog (sorted keys). Each side was generated from its own supplement, so
+  the same three-way key merge of its two sides is the catalog the merged
+  supplement generates; it is written sorted, as the generator writes it.
+  Task #22 (team ede724c4): it used to be regenerated from the supplement in
+  the working tree, but Git writes the merged files only after every driver
+  ran, so that read ours' supplement and dropped every key theirs added
+  (merge 276e77248 lost task #7's strings that way).
 
 Git runs the driver as
     python3 scripts/i18n-merge.py %O %A %B %L %P
@@ -28,14 +32,12 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPPLEMENT = "client/src/i18n.next-ru.json"
 GENERATED = "client/src/i18n.ru.json"
-SHARED = "client/i18n/shared/zerus_ru.ts"
 GENERATOR = "client/scripts/generate-i18n-catalog.py"
 DELETED = object()
 
@@ -143,81 +145,6 @@ def loaded(path):
     return value
 
 
-def loaded_stage(text, description):
-    try:
-        value = json.loads(text or "{}")
-    except ValueError as error:
-        raise ValueError(f"{description} is not JSON: {error}") from None
-    if not isinstance(value, dict):
-        raise ValueError(f"{description} is not a JSON object")
-    return value
-
-
-def git(arguments):
-    return subprocess.run(["git", "-C", str(ROOT), *arguments], capture_output=True, check=False)
-
-
-def stages(relative):
-    """The unmerged stages of `relative` (1 base, 2 ours, 3 theirs), or None.
-
-    None means Git has no open merge for the path: the working tree holds the
-    version the merge has made, and reading it is enough.
-    """
-    listed = git(["ls-files", "-u", "--", relative])
-    if listed.returncode != 0 or not listed.stdout.strip():
-        return None
-    found = {}
-    for line in listed.stdout.decode("utf-8", "replace").splitlines():
-        fields = line.split("\t", 1)
-        if len(fields) != 2:
-            continue
-        mode_stage, name = fields
-        try:
-            stage = int(mode_stage.split()[-1])
-        except ValueError:
-            continue
-        if name != relative:
-            continue
-        shown = git(["show", f":{stage}:{relative}"])
-        if shown.returncode == 0:
-            found[stage] = shown.stdout.decode("utf-8")
-    return found or None
-
-
-def supplement_now():
-    """The supplement the merge leaves, and conflict-rendered text when it conflicts."""
-    open_stages = stages(SUPPLEMENT)
-    if open_stages is None:
-        return loaded(ROOT / SUPPLEMENT), None
-    base = loaded_stage(open_stages.get(1), f"{SUPPLEMENT} (base)")
-    ours = loaded_stage(open_stages.get(2), f"{SUPPLEMENT} (ours)")
-    theirs = loaded_stage(open_stages.get(3), f"{SUPPLEMENT} (theirs)")
-    items, conflicts = merge_catalogs(base, ours, theirs)
-    if conflicts:
-        return None, render(items)
-    return {key: value for key, value in items}, None
-
-
-def shared_now():
-    """The shared catalog the merge leaves, and whether it conflicts."""
-    open_stages = stages(SHARED)
-    if open_stages is None:
-        path = ROOT / SHARED
-        return (path.read_text(encoding="utf-8") if path.is_file() else None), False
-    with tempfile.TemporaryDirectory(prefix="zerus-i18n-") as scratch:
-        files = {}
-        for number, side in ((2, "ours"), (1, "base"), (3, "theirs")):
-            path = Path(scratch) / f"{side}.ts"
-            write_text(path, open_stages.get(number) or "")
-            files[number] = path
-        merged = subprocess.run(
-            ["git", "merge-file", "-p", str(files[2]), str(files[1]), str(files[3])],
-            capture_output=True, check=False)
-        if merged.returncode != 0:
-            return None, True
-        return merged.stdout.decode("utf-8"), False
-
-
 def generator():
     spec = importlib.util.spec_from_file_location("zerus_i18n_generator", ROOT / GENERATOR)
     module = importlib.util.module_from_spec(spec)
@@ -256,26 +183,21 @@ def merge_supplement(base_path, ours_path, theirs_path):
     return 0
 
 
-def merge_generated(ours_path):
+def merge_generated(base_path, ours_path, theirs_path):
+    """The generated catalog: a three-way key merge of its two sides, sorted."""
     try:
-        supplement, conflict = supplement_now()
+        base, ours, theirs = loaded(base_path), loaded(ours_path), loaded(theirs_path)
     except ValueError as error:
         print(f"i18n-merge: {error}", file=sys.stderr)
         return 1
-    if conflict is not None:
-        print(f"i18n-merge: {SUPPLEMENT} conflicts; resolve it, then regenerate {GENERATED}",
-              file=sys.stderr)
+    items, conflicts = merge_catalogs(base, ours, theirs)
+    if conflicts:
+        write_text(ours_path, render(items))
+        print(f"i18n-merge: {conflicts} key(s) of {GENERATED} differ on both sides; resolve {SUPPLEMENT}, "
+              f"then run {GENERATOR}", file=sys.stderr)
         return 1
-    shared, conflict = shared_now()
-    if conflict:
-        print(f"i18n-merge: {SHARED} conflicts; resolve it, then regenerate {GENERATED}",
-              file=sys.stderr)
-        return 1
-    try:
-        write_text(ours_path, regenerate(supplement, shared))
-    except ValueError as error:
-        print(f"i18n-merge: {GENERATED} was not regenerated: {error}", file=sys.stderr)
-        return 1
+    merged = {item[0]: item[1] for item in items}
+    write_text(ours_path, json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return 0
 
 
@@ -291,7 +213,7 @@ def main():
     if relative == SUPPLEMENT:
         return merge_supplement(arguments.base, arguments.ours, arguments.theirs)
     if relative == GENERATED:
-        return merge_generated(arguments.ours)
+        return merge_generated(arguments.base, arguments.ours, arguments.theirs)
     print(f"i18n-merge: {arguments.path} has no i18n merge rule", file=sys.stderr)
     return 2
 

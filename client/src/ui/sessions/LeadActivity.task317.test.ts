@@ -39,7 +39,8 @@ describe("the lead's Activity (task 317)", () => {
 
   it("F13: the lead's session shows its team bar and strip above the tabs, except in the Team tab", async () => {
     const detail = await read("./SessionDetail.tsx");
-    const header = detail.indexOf('<Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>');
+    // Task #61: the header loads on first use, inside its LazyBoundary.
+    const header = detail.indexOf('<Show when={detailTab() !== "team"}><LazyBoundary><LeadTeamHeader /></LazyBoundary></Show>');
     expect(header).toBeGreaterThan(-1);
     expect(header).toBeLessThan(detail.indexOf('<div class="detail-tabs tabs" role="tablist">'));
     const tab = await read("../teams/TeamTab.tsx");

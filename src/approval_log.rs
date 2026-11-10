@@ -916,7 +916,9 @@ mod tests {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                1
+                // Task #61: task #349 raised the journal to schema 2 (a
+                // Unix-only test, so no Windows run saw it).
+                2
             );
             lock_tests::assert_lock(&path, true);
             drop(db);

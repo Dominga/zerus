@@ -28,13 +28,15 @@ fn entry_of(path: &Path) -> Entry {
 #[test]
 fn an_hgs_run_command_names_its_build_folders() {
     let cwd = Path::new(if cfg!(windows) { r"D:\work\repo" } else { "/work/repo" });
+    // Task #61: an absolute target on every system (D:/... is relative on Linux).
+    let absolute = if cfg!(windows) { "D:/Tools/zerus-build/core" } else { "/tools/zerus-build/core" };
     let found = targets_of(
-        r#"set CARGO_TARGET_DIR=D:/Tools/zerus-build/core&& cargo test --target-dir "../scratch target" && cmake -S tray -B .ci-build/gui && cmake --build .ci-build/gui"#,
+        &format!(r#"set CARGO_TARGET_DIR={absolute}&& cargo test --target-dir "../scratch target" && cmake -S tray -B .ci-build/gui && cmake --build .ci-build/gui"#),
         cwd,
     );
     let kinds: Vec<(String, &str)> = found.iter().map(|(path, kind)| (path.display().to_string().replace('\\', "/"), *kind)).collect();
     let root = if cfg!(windows) { "D:/work/repo" } else { "/work/repo" };
-    assert_eq!(kinds, [("D:/Tools/zerus-build/core".to_owned(), "cargo_target"), (format!("{root}/../scratch target"), "cargo_target"),
+    assert_eq!(kinds, [(absolute.to_owned(), "cargo_target"), (format!("{root}/../scratch target"), "cargo_target"),
         (format!("{root}/.ci-build/gui"), "cmake_build")]);
     // -B means a build folder only for cmake; variables are never guessed.
     assert!(targets_of("git log -B", cwd).is_empty());

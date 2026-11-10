@@ -5,16 +5,22 @@ use super::*;
 #[test]
 fn the_build_folders_come_from_the_folder_the_command_and_the_programs_it_ran() {
     let cwd = Path::new(if cfg!(windows) { r"D:\work\line" } else { "/work/line" });
-    let command = "set TMP=D:/work/line/.tmp-tests&& set CARGO_TARGET_DIR=D:/work/main/target&& cargo test --bin hgs -- one 2>&1";
-    let output = "     Running unittests src\\main.rs (D:/work/main/target\\debug\\deps\\hgs-290eb8275e13a9c3.exe)\n\
+    // Task #61: the run's paths are absolute on every system (D:/... is a
+    // relative path on Linux), each written as that system's tools write it.
+    let (main, native, sep) = if cfg!(windows) { ("D:/work/main", r"D:\work\main", r"\") } else { ("/work/main", "/work/main", "/") };
+    let line = if cfg!(windows) { "D:/work/line" } else { "/work/line" };
+    let command = format!("set TMP={line}/.tmp-tests&& set CARGO_TARGET_DIR={main}/target&& cargo test --bin hgs -- one 2>&1");
+    let program = format!("{main}/target{sep}debug{sep}deps{sep}hgs-290eb8275e13a9c3.exe");
+    let script = format!("{native}{sep}target{sep}debug{sep}build{sep}zerus-next-1{sep}build-script-build");
+    let output = format!("     Running unittests src{sep}main.rs ({program})\n\
                   error: failed to run custom build command for `zerus-next`\n\
-                  Caused by:\n  process didn't exit successfully: `D:\\work\\main\\target\\debug\\build\\zerus-next-1\\build-script-build` (exit code: 101)";
-    let folders = build_folders(cwd, command, output);
+                  Caused by:\n  process didn't exit successfully: `{script}` (exit code: 101)");
+    let folders = build_folders(cwd, &command, &output);
     assert_eq!(folders[0], cwd);
     assert_eq!(folders[1], cwd.join("target"));
-    assert!(folders.contains(&PathBuf::from("D:/work/main/target")), "{folders:?}");
-    assert!(folders.contains(&PathBuf::from("D:/work/main/target\\debug\\deps\\hgs-290eb8275e13a9c3.exe")), "{folders:?}");
-    assert!(folders.contains(&PathBuf::from("D:\\work\\main\\target\\debug\\build\\zerus-next-1\\build-script-build")), "{folders:?}");
+    assert!(folders.contains(&PathBuf::from(format!("{main}/target"))), "{folders:?}");
+    assert!(folders.contains(&PathBuf::from(&program)), "{folders:?}");
+    assert!(folders.contains(&PathBuf::from(&script)), "{folders:?}");
     let relative = build_folders(cwd, "cargo test --locked --target-dir ../../target/client-core x", "");
     assert!(relative.contains(&cwd.join("../../target/client-core")), "{relative:?}");
     let joined = build_folders(cwd, "cargo test --target-dir=out", "");

@@ -6,9 +6,6 @@ import { NativeUiTab } from "./NativeUi";
 import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
-import { LeadTeamHeader, LeadTitleBadge, TeamTab } from "../teams/TeamTab";
-import { NewTeamPage } from "../teams/NewTeamPage";
-import { WaitingBanner } from "../teams/Waiting";
 import { LeadProposals } from "../teams/ProposalCards";
 import { teamAnswers } from "../teams/leadTeam";
 import { selectedTeam } from "../../store/teams";
@@ -50,6 +47,15 @@ import { watchDetailRemoval } from "./detail-removal";
 import { lazyView } from "../lazy-view";
 import { LazyBoundary } from "../lazy-boundary";
 import { ComposerDialogsSlot, QuestionSlot } from "./lazy-slots";
+
+// Task #61 (team ede724c4; CI #22: the entry chunk was 559 KB of its 500 KB
+// budget, 324 KB of it the Teams UI): the Team tab, the lead's team header and
+// badge, the New team page and the waiting banner load on first use.
+const TeamTab = lazyView(() => import("../teams/TeamTab"), (m) => m.TeamTab);
+const LeadTeamHeader = lazyView(() => import("../teams/TeamTab"), (m) => m.LeadTeamHeader);
+const LeadTitleBadge = lazyView(() => import("../teams/TeamTab"), (m) => m.LeadTitleBadge);
+const NewTeamPage = lazyView(() => import("../teams/NewTeamPage"), (m) => m.NewTeamPage);
+const WaitingBanner = lazyView(() => import("../teams/Waiting"), (m) => m.WaitingBanner);
 // Opened on demand, outside the entry chunk and preloaded on idle (zerus-ycycu).
 const ProcessesTab = lazyView(() => import("./Processes"), (m) => m.ProcessesTab);
 const TerminalTab = lazyView(() => import("./Terminal"), (m) => m.TerminalTab);
@@ -138,7 +144,7 @@ function Header() {
     <header class="detail-head">
       <div class="dh-row1">
         <h1 class="ell" title={s().name}>{s().project} / {s().title}<Show when={subagentOpen()}> / {s().subagents?.find((k) => k.id === subagentOpen())?.name}</Show></h1>
-        <LeadTitleBadge />
+        <LazyBoundary><LeadTitleBadge /></LazyBoundary>
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title={tr("Waiting for the remote read")} /></Show>
         <span class="grow" />
         {/* Task 315 (F3): the host's state, as the card shows it (Qt's header pill). */}
@@ -392,7 +398,7 @@ export function SessionDetail() {
             <div class="work-main">
               {/* Task 317 (F13): the lead's session carries its team bar and strip as Qt's
                   lead header does; the Team tab has its own bar. */}
-              <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
+              <Show when={detailTab() !== "team"}><LazyBoundary><LeadTeamHeader /></LazyBoundary></Show>
               <SessionTabRow />
               <div class="tab-body">
                 <Switch>
@@ -402,7 +408,7 @@ export function SessionDetail() {
                           strip too (Qt's waitingBannerHost): every kind the team
                           feed has, each answered in its row as Waiting for you
                           answers it, and one click to its team or the full list. */}
-                      <WaitingBanner />
+                      <LazyBoundary><WaitingBanner /></LazyBoundary>
                       <Show when={goal().objective && !subagentOpen()}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
                       <ActivityView source={activitySourceFor(selected()!.key)} />
                       {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
@@ -420,9 +426,9 @@ export function SessionDetail() {
                   <Match when={detailTab() === "terminal"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><TerminalTab /></LazyBoundary></Match>
                   <Match when={detailTab() === "native"}><NativeUiTab /></Match>
                   <Match when={detailTab() === "processes"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><ProcessesTab /></LazyBoundary></Match>
-                  <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
-                  <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
-                  <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><NewTeamPage embedded /></Match>
+                  <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <LazyBoundary><NewTeamPage embedded draft={team().id} /></LazyBoundary>}</Match>
+                  <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <LazyBoundary><TeamTab computer={selected()!.computer} team={team().id} /></LazyBoundary>}</Match>
+                  <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><LazyBoundary><NewTeamPage embedded /></LazyBoundary></Match>
                 </Switch>
               </div>
             </div>

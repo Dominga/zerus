@@ -52,15 +52,17 @@ fn write_to(path: &Path, level: &str, message: &str) -> std::io::Result<()> {
 }
 
 /// The last line's message: the fields after the time and level.
-fn message_of(line: &str) -> String {
+/// Task #61 (team ede724c4): a line of only its time and level (an empty
+/// message) has no message; it read back as "1794... notice".
+fn message_of(line: &str) -> Option<String> {
     let mut fields = line.trim().splitn(3, ' ');
     let first = fields.next().unwrap_or("");
     if first.chars().all(|c| c.is_ascii_digit()) && !first.is_empty() {
-        if let (Some(_level), Some(message)) = (fields.next(), fields.next()) {
-            return message.trim().to_owned();
+        if fields.next().is_some() {
+            return fields.next().map(str::trim).filter(|message| !message.is_empty()).map(str::to_owned);
         }
     }
-    line.trim().to_owned()
+    Some(line.trim().to_owned()).filter(|message| !message.is_empty())
 }
 
 fn latest_from(path: &Path) -> Option<String> {
@@ -73,7 +75,7 @@ fn latest_from(path: &Path) -> Option<String> {
     file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let last = text.lines().rev().find(|line| !line.trim().is_empty())?;
-    Some(message_of(last))
+    message_of(last)
 }
 
 /// One line in the client log; a failure never reaches the UI.
@@ -143,7 +145,9 @@ mod tests {
         let dir = scratch("empty");
         let path = dir.join("hgs-tray.log");
         assert_eq!(latest_from(&path), None);
-        std::fs::write(&path, b"2026-11-09 07:00:00.000 notice \n").unwrap();
+        // Task #61: the writer's own form (unix milliseconds, then the level)
+        // with an empty message.
+        std::fs::write(&path, b"1794240000000 notice \n").unwrap();
         assert_eq!(latest_from(&path), None);
         std::fs::write(&path, b"not a numbered line\n").unwrap();
         assert_eq!(latest_from(&path).as_deref(), Some("not a numbered line"));

@@ -280,7 +280,12 @@ fn the_run_folder_is_private_inside_a_shared_member_folder() {
     let temp = run.env.iter().find(|(name, _)| name == "TEMP").map(|(_, value)| PathBuf::from(value)).unwrap();
     assert!(crate::platform::verify_private(&run.folder, crate::platform::Private::Directory).unwrap());
     assert!(crate::platform::verify_private(&temp, crate::platform::Private::Directory).unwrap());
-    let file = temp.join("store.sqlite3");
-    fs::write(&file, b"x").unwrap();
-    assert!(crate::platform::verify_private(&file, crate::platform::Private::File).unwrap(), "a test's file inherits the run folder's privacy");
+    // Windows: a test's file inherits the run folder's protected ACL. A Unix
+    // file takes its mode from the umask, never from its folder (task #61);
+    // the owner-only folders keep it closed there.
+    if cfg!(windows) {
+        let file = temp.join("store.sqlite3");
+        fs::write(&file, b"x").unwrap();
+        assert!(crate::platform::verify_private(&file, crate::platform::Private::File).unwrap(), "a test's file inherits the run folder's privacy");
+    }
 }

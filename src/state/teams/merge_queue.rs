@@ -69,8 +69,38 @@ fn release_conflicts(team: &mut Team) -> bool {
     !decided.is_empty()
 }
 
-/// Task #267: whether a commit is on the integration line.
+/// Task #19 (owner, 2026-11-10): the lead lands accepted work by hand on a
+/// named line (`manual_line`).
+pub(crate) fn manual(team: &Team) -> bool {
+    !team.settings.manual_line.trim().is_empty()
+}
+
+/// Task #19: the line a landing names, for messages.
+pub(crate) fn line_name(team: &Team) -> String {
+    if manual(team) {
+        format!("the line {}", team.settings.manual_line.trim())
+    } else {
+        "the integration line".into()
+    }
+}
+
+/// Task #19: a lead who lands by hand, or a team created with working mode
+/// "none": the queue's and the working mode's playbook rules (a), (b) and (h)
+/// say nothing.
+pub(crate) fn hand_landing(team: &Team) -> bool {
+    manual(team)
+        || team.working_mode.trim() == "none"
+        || team.mode_kept.as_ref().is_some_and(|kept| kept["by"] == "New team")
+}
+
+/// Task #267: whether a commit is on the integration line. Task #19: on the
+/// manual line's branch when the lead lands by hand, whatever the team
+/// folder has checked out (it may be on another team's detached line).
 pub(crate) fn landed(team: &Team, commit: &str) -> bool {
+    if manual(team) {
+        let line = format!("refs/heads/{}", team.settings.manual_line.trim());
+        return !commit.is_empty() && ancestry_at(team.integration_folder(), commit, &line) == Ancestry::Yes;
+    }
     !commit.is_empty() && ancestry(team.integration_folder(), commit) == Ancestry::Yes
 }
 
@@ -114,6 +144,9 @@ fn rejected_commits(team: &Team) -> Vec<String> {
 /// (no `integration_folder`, the owner's p92: a hand landing in the team's own
 /// folder).
 fn line_revision(team: &Team) -> String {
+    if manual(team) {
+        return format!("refs/heads/{}", team.settings.manual_line.trim());
+    }
     if team.settings.integration_folder.trim().is_empty() {
         return "HEAD".to_owned();
     }
@@ -501,7 +534,8 @@ const MERGE_RANGES: usize = 500;
 
 /// The project turned the queue on (the owner may override it in the team).
 pub(crate) fn enabled(team: &Team) -> bool {
-    if team.integration_folder().is_empty() {
+    // Task #19: a team whose lead lands by hand runs no queue.
+    if team.integration_folder().is_empty() || manual(team) {
         return false;
     }
     let root = Path::new(team.integration_folder());

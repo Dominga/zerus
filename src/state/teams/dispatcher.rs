@@ -7579,6 +7579,8 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
 /// names no line or it is not read.
 fn dependency_line(team: &Team, folder: &str) -> Option<(String, String)> {
     let base = match team.settings.base_branch.trim() {
+        // Task #19: a manual line is the team's line.
+        _ if super::merge_queue::manual(team) => team.settings.manual_line.trim().to_owned(),
         "" => lead_branch(team).ok()?,
         named => named.to_owned(),
     };
@@ -12000,6 +12002,10 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
 /// from the team's folder, never built into Zerus, so another project gets its
 /// own branch.
 fn lead_branch(team: &Team) -> anyhow::Result<String> {
+    // Task #19 (owner, 2026-11-10): a lead who lands by hand names its line.
+    if super::merge_queue::manual(team) {
+        return Ok(team.settings.manual_line.trim().to_owned());
+    }
     // Task 377 (owner, 2026-11-08): with an integration folder the line is a
     // named branch, never whatever the folder has checked out.
     if !team.settings.integration_folder.trim().is_empty() {
@@ -12013,6 +12019,20 @@ fn lead_branch(team: &Team) -> anyhow::Result<String> {
     let out = super::super::worktrees::git(Path::new(folder), &["rev-parse", "--abbrev-ref", "HEAD"], deadline)
         .map_err(|error| anyhow::anyhow!("the lead's branch was not read: {}", error.detail))?;
     let branch = String::from_utf8_lossy(&out).trim().to_owned();
+    // Task #19: a team folder on no branch (another team's detached line)
+    // merges the line the team names instead of refusing.
+    if branch == "HEAD" {
+        let named = [team.settings.base_branch.trim(), team.line_branch.trim()].into_iter().find(|name| !name.is_empty());
+        return match named {
+            Some(name) => {
+                super::templates::check_branch(name)?;
+                Ok(name.to_owned())
+            }
+            None => anyhow::bail!(
+                "The team folder {folder} is on no branch: the lead names the team's line, {{\"manual_line\":\"BRANCH\"}} | hgs team settings --json"
+            ),
+        };
+    }
     super::templates::check_branch(&branch)?;
     Ok(branch)
 }

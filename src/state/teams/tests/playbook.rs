@@ -249,3 +249,34 @@ fn the_brief_says_to_answer_the_owner_first_and_run_long_work_in_the_background(
         assert!(text.contains(rule), "no rule: {rule}");
     }
 }
+
+/// Task #19 (team ede724c4, owner 2026-11-10): a lead who lands by hand on a
+/// named line, or a team created with working mode "none", gets no (a), (b) or
+/// (h): every one of them used to fire for each accepted task.
+#[test]
+fn a_manual_line_and_working_mode_none_raise_no_a_b_or_h() {
+    let loud = |team: &Team| -> Vec<&'static str> {
+        breaches(team).iter().map(|breach| breach.rule).filter(|rule| matches!(*rule, "a" | "b" | "h")).collect()
+    };
+    let mut team = team();
+    // Settings off the mode (a), accepted work with a stale landing (b) and a
+    // task naming another base (h).
+    team.settings.branch_per_task = None;
+    let mut accepted = task(4, TaskStatus::Accepted);
+    accepted.merge = Some(MergeEntry { state: "queued".into(), commit: "abc".into(), ..Default::default() });
+    team.tasks.push(accepted);
+    team.tasks.push(Task { id: 6, phase: 1, title: "Wire the view".into(), description: "Start from base branch: release, then land on the line".into(), ..Default::default() });
+    let before = loud(&team);
+    assert!(before.contains(&"a") && before.contains(&"b") && before.contains(&"h"), "{before:?}");
+    let mut manual = team.clone();
+    manual.settings.manual_line = "team/ede724c4/line".into();
+    assert!(loud(&manual).is_empty(), "{:?}", loud(&manual));
+    let mut none = team.clone();
+    none.working_mode = "none".into();
+    assert!(loud(&none).is_empty(), "{:?}", loud(&none));
+    // A team New team created with "Keep the settings as they are" (task #13).
+    let mut kept = team.clone();
+    kept.working_mode.clear();
+    kept.mode_kept = Some(json!({"preset":"branch-pipeline","fingerprint":"f","at":1.0,"by":"New team"}));
+    assert!(loud(&kept).is_empty(), "{:?}", loud(&kept));
+}

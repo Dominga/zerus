@@ -334,8 +334,11 @@ impl Stopped {
                 .as_ref()
                 .is_ok_and(|report| report.state == State::Refused)
     }
+    /// A refusal is reviewable only once its own phase settled; an unsettled
+    /// one is unconfirmed (zerus-1y897.8).
     pub(crate) fn reviewable_refusal(&self) -> bool {
         self.normal_refusal()
+            && self.attempt.mutation.settled()
             && self
                 .report()
                 .is_ok_and(|report| report.valid(&self.attempt.input))
@@ -393,13 +396,17 @@ impl Stopped {
     }
     /// Physical DATA only, for a result that is not a reviewable refusal once
     /// its source is gone (zerus-1y897.5). It never closes, observes, frames or
-    /// renews anything: the original call and this mutation must already be
-    /// settled, and the source owner's own join decides Pending or Retired.
+    /// renews anything: the original call must already be joined, then this
+    /// mutation's own drain (zerus-1y897.8) and the source owner's join decide
+    /// Pending or Retired.
     pub(crate) fn physical_retirement(&self) -> run::Retirement {
-        if !self.continuation.original_call_joined() || !self.attempt.mutation.settled() {
+        if !self.continuation.original_call_joined() {
             return run::Retirement::Failed;
         }
-        self.continuation.source.retirement()
+        match self.attempt.mutation.drained() {
+            run::Retirement::Retired => self.continuation.source.retirement(),
+            other => other,
+        }
     }
     /// Read-only discovery is allowed only after the EXACT previous mutator,
     /// readers and loan have physically settled. It is not a Force permit.
@@ -470,6 +477,8 @@ impl Stopped {
 }
 /// A refused Force offer: the unconsumed stop, still holding its custody.
 pub(crate) type RefusedOffer = (Box<Stopped>, String);
+/// A refused Force confirmation: the unconsumed offer and its previous stop.
+pub(crate) type RefusedConfirm = (Box<ForceOffer>, String);
 /// The host stores this behind a fresh opaque dialog handle. The renderer can
 /// confirm that handle, not supply programs or rebuild this from stop status.
 pub(crate) struct ForceOffer {
@@ -499,7 +508,28 @@ impl ForceOffer {
     pub(crate) fn programs(&self) -> Vec<ProgramView> {
         view(&self.input.manifest)
     }
-    pub(crate) fn confirm(self) -> Result<Stopped, String> {
+    /// Every refusal, before or from the run, hands back the SAME unconsumed
+    /// offer with its previous stop's custody (zerus-1y897.8).
+    pub(crate) fn confirm(self: Box<Self>) -> Result<Stopped, RefusedConfirm> {
+        if let Err(error) = self.admit() {
+            return Err((self, error));
+        }
+        // Consuming this non-Clone native object is the separate Force choice.
+        // Root independently reserves the new UUID and checks the prior result.
+        match self
+            .previous
+            .continuation
+            .source
+            .run_stop(self.input.clone())
+        {
+            Ok(attempt) => Ok(Stopped {
+                continuation: self.previous.continuation,
+                attempt,
+            }),
+            Err(error) => Err((self, error)),
+        }
+    }
+    fn admit(&self) -> Result<(), String> {
         if !self.previous.current()
             || !self.input.follows(
                 &self.previous.attempt.input,
@@ -508,13 +538,7 @@ impl ForceOffer {
         {
             return Err(UNCONFIRMED.into());
         }
-        // Consuming this non-Clone native object is the separate Force choice.
-        // Root independently reserves the new UUID and checks the prior result.
-        let attempt = self.previous.continuation.source.run_stop(self.input)?;
-        Ok(Stopped {
-            continuation: self.previous.continuation,
-            attempt,
-        })
+        Ok(())
     }
     pub(crate) fn close(&self) -> Result<(), String> {
         self.previous.close()
@@ -569,7 +593,14 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
-    unarmed: [super::source::Mutation; 4],
+    unarmed: [super::source::Mutation; 8],
+    // The last unarmed phase's extra loan and descendant lock, and a phase
+    // that never ran.
+    (loan, lock, never_ran): (
+        Arc<dyn Send + Sync>,
+        Arc<dyn Send + Sync>,
+        super::source::Mutation,
+    ),
 ) {
     let binding = input.manifest.binding();
     let capture = input.manifest.capture.clone();
@@ -650,6 +681,22 @@ pub(super) fn assert_presentation_views(
     };
     let mut previous = refuse(previous);
     previous.attempt.input.stop = Kind::Normal;
+    // zerus-1y897.8: a refused confirmation hands back the SAME unconsumed
+    // offer, its source still current. This one's input does not follow.
+    previous.attempt.result = Ok(report(State::Incomplete));
+    let offer = Box::new(ForceOffer {
+        previous,
+        input: input.clone(),
+    });
+    let Err((offer, _)) = offer.confirm() else {
+        panic!("Force was confirmed")
+    };
+    assert_eq!(offer.identity().0, request_id);
+    assert!(
+        offer.current(),
+        "a refused confirmation closed the original"
+    );
+    let mut previous = offer.cancel();
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -666,7 +713,7 @@ pub(super) fn assert_presentation_views(
     assert_eq!(previous.retirement(), run::Retirement::Retired);
     assert_eq!(previous.retirement(), run::Retirement::Retired);
     // The source owner has retired. An unrefused result now retires only with
-    // a joined original call and a settled mutation (zerus-1y897.5).
+    // a joined original call and a drained mutation (zerus-1y897.5/.8).
     previous.attempt.result = Ok(report(State::Incomplete));
     assert_eq!(previous.physical_retirement(), run::Retirement::Retired);
     let offer = ForceOffer {
@@ -688,26 +735,50 @@ pub(super) fn assert_presentation_views(
         "a live original call"
     );
     drop(call);
-    let [mut first, mut second, mut third, mut fourth] = unarmed;
-    first = std::mem::replace(&mut previous.attempt.mutation, first);
+    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held] = unarmed;
+    // An unsettled phase is read through its own physical drain (zerus-1y897.8).
+    let settled = std::mem::replace(&mut previous.attempt.mutation, held);
+    assert_eq!(
+        previous.physical_retirement(),
+        run::Retirement::Pending,
+        "a phase whose loan is still held"
+    );
+    drop(loan);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        previous.physical_retirement(),
+        run::Retirement::Pending,
+        "a phase whose descendant lock is still held"
+    );
+    drop(lock);
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while previous.physical_retirement() != run::Retirement::Retired {
+        assert!(
+            std::time::Instant::now() < until,
+            "the drained phase retired"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!previous.attempt.mutation.settled(), "no frame settled it");
+    previous.attempt.mutation = never_ran;
     assert_eq!(
         previous.physical_retirement(),
         run::Retirement::Failed,
-        "an unsettled mutation"
+        "a phase that never ran"
     );
-    std::mem::swap(&mut previous.attempt.mutation, &mut first);
+    previous.attempt.mutation = settled;
     assert_eq!(previous.physical_retirement(), run::Retirement::Retired);
     previous.attempt.result = Ok(report(State::Refused));
     // More unarmed phases with their own real children, pipes and loans, each
     // settled here, back the production watcher and Force offer controls.
     let until = std::time::Instant::now() + Duration::from_secs(10);
-    for mutation in [&mut first, &mut second, &mut third, &mut fourth] {
+    for mutation in [&mut first, &mut second, &mut third, &mut fourth, &mut fifth] {
         while !mutation.try_retire().unwrap() {
             assert!(std::time::Instant::now() < until, "unarmed phase settled");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    let incomplete = |mutation| Stopped {
+    let stop = |mutation, state| Stopped {
         continuation: Continuation {
             source: previous.continuation.source.clone(),
             capture: previous.continuation.capture.clone(),
@@ -724,14 +795,26 @@ pub(super) fn assert_presentation_views(
         },
         attempt: StopAttempt {
             input: input.clone(),
-            result: Ok(report(State::Incomplete)),
+            result: Ok(report(state)),
             mutation,
         },
     };
     for (mutation, force) in [(first, false), (second, true)] {
-        crate::termination_cleanup::assert_real_expired_release(incomplete(mutation), force);
+        crate::termination_cleanup::assert_real_expired_release(
+            stop(mutation, State::Incomplete),
+            force,
+        );
     }
-    crate::termination_cleanup::assert_real_refused_offer(incomplete(third), incomplete(fourth));
+    crate::termination_cleanup::assert_real_refused_offer(
+        stop(third, State::Incomplete),
+        stop(fourth, State::Incomplete),
+    );
+    // zerus-1y897.8: the last two phases never settle here.
+    crate::termination_cleanup::assert_real_unconfirmed_stops(
+        stop(fifth, State::Incomplete),
+        stop(sixth, State::Incomplete),
+        stop(seventh, State::Refused),
+    );
     let force = ForceOffer { previous, input };
     // Force must consult its complete ORIGINAL survivor manifest, never the
     // Source's initial presentation projection, even for the selected pair.

@@ -726,6 +726,23 @@ impl Mutation {
     pub(super) fn settled(&self) -> bool {
         self.retired
     }
+    /// Physical DATA only (zerus-1y897.8): Retired once this phase settled, or
+    /// once its child I/O joined, its loan was released and its descendants
+    /// drained. No frame: the holder's joined ACK is not a drain witness and
+    /// cannot arrive once the source is gone.
+    pub(super) fn drained(&self) -> run::Retirement {
+        if self.retired {
+            return run::Retirement::Retired;
+        }
+        match self.completion.join() {
+            run::Retirement::Retired => {}
+            other => return other,
+        }
+        if self.resources.upgrade().is_some() || !self.descendants.drained() {
+            return run::Retirement::Pending;
+        }
+        run::Retirement::Retired
+    }
     pub(super) fn try_retire(&mut self) -> Result<bool, String> {
         if self.retired {
             return Ok(true);

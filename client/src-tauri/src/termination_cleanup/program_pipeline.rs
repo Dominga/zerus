@@ -184,7 +184,10 @@ pub(super) async fn confirm(
                 while continuation.current() && !continuation.original_call_joined() {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                let stopped = continuation.normal().and_then(settle);
+                let stopped = continuation
+                    .normal()
+                    .map_err(Unconfirmed::lost)
+                    .and_then(settle);
                 publish(worker_inner, app, id, stopped);
             });
         }
@@ -192,21 +195,36 @@ pub(super) async fn confirm(
     drop(reservation);
     Ok(outcome)
 }
-fn settle(mut stopped: programs::Stopped) -> Result<programs::Stopped, String> {
-    while stopped.current() {
-        if stopped.try_retire()? {
-            return Ok(stopped);
-        }
-        std::thread::sleep(Duration::from_millis(10));
+/// A stop that was not confirmed, with whatever custody its producer handed
+/// back (zerus-1y897.8).
+pub(super) struct Unconfirmed {
+    pub(super) held: Option<Box<programs::Stopped>>,
+}
+impl Unconfirmed {
+    fn lost(_: String) -> Self {
+        Self { held: None }
     }
-    let _ = stopped.close();
-    Err(crate::desktop_service::termination_outcome::UNCONFIRMED.into())
+}
+/// Waits for the stop's own phase to settle while its source is current. A
+/// stop that cannot settle is never closed or dropped here: it stays held,
+/// unconfirmed, until the watcher's physical_retirement() releases it.
+pub(super) fn settle(mut stopped: programs::Stopped) -> Result<programs::Stopped, Unconfirmed> {
+    while stopped.current() {
+        match stopped.try_retire() {
+            Ok(true) => return Ok(stopped),
+            Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
+    Err(Unconfirmed {
+        held: Some(Box::new(stopped)),
+    })
 }
 fn publish(
     inner: Arc<Inner>,
     app: AppHandle,
     id: String,
-    stopped: Result<programs::Stopped, String>,
+    stopped: Result<programs::Stopped, Unconfirmed>,
 ) {
     let stopped = match stopped {
         Ok(stopped)
@@ -234,7 +252,7 @@ fn publish(
 /// normal refusal becomes a retained, read-only cleanup that only Check again
 /// reviews (no automatic removal), every entry is Kept, and the result says
 /// whether a passive watcher must follow the retained original.
-pub(super) fn record_stop(job: &mut Job, stopped: Result<programs::Stopped, String>) -> bool {
+pub(super) fn record_stop(job: &mut Job, stopped: Result<programs::Stopped, Unconfirmed>) -> bool {
     job.busy = false;
     job.phase = "checking";
     let (detail, live) = match stopped {
@@ -253,13 +271,19 @@ pub(super) fn record_stop(job: &mut Job, stopped: Result<programs::Stopped, Stri
             job.programs = Some(ProgramJob::Stopped(Box::new(stopped)));
             (detail, true)
         }
-        Err(_) => {
+        Err(unconfirmed) => {
             job.program_retirement = Some(ProgramRetirement::StopUnconfirmed);
+            // An unconfirmed stop never offers Check again, Force or consent
+            // (zerus-1y897.8). Whatever custody its producer handed back stays
+            // held until the watcher's physical_retirement() releases it.
+            job.lookup_only = true;
+            let live = unconfirmed.held.is_some();
+            job.programs = unconfirmed.held.map(ProgramJob::Stopped);
             (
                 zerus_client_core::source!(
                     "The program stop is unconfirmed. Check the original result before continuing."
                 ),
-                false,
+                live,
             )
         }
     };
@@ -436,7 +460,7 @@ pub(super) async fn force_offer(
 }
 /// Force offer admission: takes the job's own incomplete normal stop.
 pub(super) fn take_force(job: &mut Job) -> Result<Box<programs::Stopped>, String> {
-    if job.busy || !job.programs.as_ref().is_some_and(ProgramJob::can_force) {
+    if job.busy || job.lookup_only || !job.programs.as_ref().is_some_and(ProgramJob::can_force) {
         return Err(STATE_CHANGED.into());
     }
     let Some(ProgramJob::Stopped(stopped)) = job.programs.take() else {
@@ -499,25 +523,46 @@ pub(super) async fn force_confirm(
             .iter_mut()
             .find(|job| job.id == id)
             .ok_or(STATE_CHANGED)?;
-        if job.busy
-            || !matches!(&job.programs, Some(ProgramJob::Force { id, .. }) if id == &confirmation)
-        {
-            return Err(STATE_CHANGED.into());
-        }
-        let Some(ProgramJob::Force { offer, .. }) = job.programs.take() else {
-            return Err(STATE_CHANGED.into());
-        };
-        job.busy = true;
-        job.phase = "stopping";
+        let offer = take_confirm(job, &confirmation)?;
         changed(&app, &mut m);
         offer
     };
     let copy = inner.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = (*offer).confirm().and_then(settle);
+        let result = confirm_force(offer);
         publish(copy, app, id, result);
     });
     Ok(lock(&inner.model).view())
+}
+/// Force confirmation admission: takes the job's own offer for that handle.
+pub(super) fn take_confirm(
+    job: &mut Job,
+    confirmation: &str,
+) -> Result<Box<programs::ForceOffer>, String> {
+    if job.busy
+        || !matches!(&job.programs, Some(ProgramJob::Force { id, .. }) if id == confirmation)
+    {
+        return Err(STATE_CHANGED.into());
+    }
+    let Some(ProgramJob::Force { offer, .. }) = job.programs.take() else {
+        return Err(STATE_CHANGED.into());
+    };
+    job.busy = true;
+    job.phase = "stopping";
+    Ok(offer)
+}
+/// The blocking half of force_confirm.
+pub(super) fn confirm_force(
+    offer: Box<programs::ForceOffer>,
+) -> Result<programs::Stopped, Unconfirmed> {
+    match offer.confirm() {
+        Ok(stopped) => settle(stopped),
+        // A refused confirmation keeps the previous stop's custody, as a
+        // stop: the offer itself is never confirmed again.
+        Err((offer, _)) => Err(Unconfirmed {
+            held: Some(Box::new(offer.cancel())),
+        }),
+    }
 }
 pub(super) fn force_cancel(
     inner: &Arc<Inner>,

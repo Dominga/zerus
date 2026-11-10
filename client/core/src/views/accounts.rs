@@ -405,6 +405,7 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.checked_at = cached.checked_at;
             u.windows = cached.windows;
             u.balances = cached.balances;
+            u.balance_available = cached.balance_available;
             u.credits = cached.credits;
             u.retry_at = cached.retry_at;
             if cached.status == "rate_limited" {
@@ -1833,6 +1834,26 @@ mod tests {
             better(&previous, &seeded),
             "a genuinely newer sample still wins"
         );
+    }
+
+    #[test]
+    fn cached_deepseek_api_key_balance_stands_in_before_inspect() {
+        let state = AccountsState::default();
+        let local = entry("", "live", 0);
+        let mut catalog = launch_catalog(&[("native-dsh", "dsh")]);
+        catalog["profiles"][0]["account_status"] = json!({"status":"configured","checked_at":100,
+            "identity":{"auth_method":"API key","account_id":"api-key:abc"},"windows":[],
+            "balances":[{"kind":"Total","balance":"0.00","currency":"USD"},
+                        {"kind":"Topped up","balance":"0.00","currency":"USD"},
+                        {"kind":"Granted","balance":"0.00","currency":"USD"}],
+            "balance_available":false});
+        let raw = &catalog["profiles"][0];
+        let reference = usage_ref(&local.computer, raw);
+        let seeded = profile_usage(&local, raw, &reference, &state);
+        assert!(seeded.seeded);
+        assert_eq!(seeded.balances.len(), 3);
+        assert_eq!(seeded.balances[0].kind, "Total");
+        assert_eq!(seeded.balance_available, Some(false));
     }
 
     fn ids(profiles: &[(Profile, Value)]) -> Vec<String> {

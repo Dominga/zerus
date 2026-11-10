@@ -219,6 +219,13 @@ describe("launchSummary (AccountUsage.h 130-142)", () => {
     expect(launchSummary(usageOf({ balances: [{ kind: "", balance: "3", currency: "" }] }), NOW)).toBe("Balance: 3");
     expect(launchSummary(usageOf(), NOW)).toBe("limits n/a");
   });
+
+  it("a DeepSeek API key lists each currency's Total once, not its parts", () => {
+    const balances = [
+      { kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }, { kind: "Granted", balance: "0.00", currency: "USD" },
+    ];
+    expect(launchSummary(usageOf({ provider: "dsh", status: "configured", balances }), NOW)).toBe("Balance: 6.20 USD");
+  });
 });
 
 describe("launchWindows (AccountUsage.h 117-129)", () => {

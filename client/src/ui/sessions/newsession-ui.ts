@@ -1,5 +1,5 @@
 import type { Account, FolderOut, HeaderOut, MachineMeta, PathStyle, Profile, Usage } from "../../types";
-import { current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
+import { balanceSummary, current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
 import { clean, leaf, native, same } from "./paths";
 import { trNoop, tr } from "../../i18n";
 
@@ -187,14 +187,12 @@ export function launchWindows(usage: Usage | undefined, now: number): UsageWindo
   return windows;
 }
 
-/** AccountUsage::launchSummary: each current window "{period} {n}% used", then balances, joined by two spaces; else "limits n/a". */
+/** AccountUsage::launchSummary: each current window "{period} {n}% used", then the headline balances, joined by two spaces; else "limits n/a". */
 export function launchSummary(usage: Usage, now: number): string {
   const limits: string[] = [];
   for (const window of launchWindows(usage, now)) limits.push(period(window) + tr(" %1% used", Math.round(window.used)));
-  for (const balance of usage.balances) {
-    const amount = balance.balance;
-    if (/^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/.test(amount) && Number.isFinite(Number(amount))) limits.push(tr("Balance: %1 %2", amount, balance.currency).trim());
-  }
+  const balances = balanceSummary(usage);
+  if (balances) limits.push(balances);
   return limits.length ? limits.join("  ") : tr("limits n/a");
 }
 

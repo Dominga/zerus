@@ -16,7 +16,7 @@ import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccoun
 import { connectionOf, osOf } from "../../store/overview";
 import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
-import { clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
+import { balanceKind, balanceLow, balanceSummary, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
@@ -73,10 +73,12 @@ function AccountRow(props: { a: Account; now: number; selected: boolean }) {
         <span class="grow" />
         <span class="acct-perm" classList={{ bypass: props.a.members.length > 0 && props.a.members.every((m) => m.permission === "bypass") }}>{trText(props.a.permission)}</span>
       </span>
-      {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%. */}
-      <Show when={props.a.usage.windows.length}>
-        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} /></span>
+      {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%.
+          An account without windows but with a balance (a DeepSeek API key) shows the balance there instead. */}
+      <Show when={props.a.usage.windows.length || balanceSummary(props.a.usage)}>
+        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceSummary(props.a.usage)} /></span>
       </Show>
+      <Show when={balanceLow(props.a.usage)}><span class="acct-balance-low">{tr("Balance too low for API calls")}</span></Show>
       <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>
     </button>
   );
@@ -119,7 +121,14 @@ function UsagePanel(props: { a: Account }) {
           </div>
         );
       }}</For>
-      <For each={u().balances}>{(b) => <p>{`${b.kind}: ${b.balance} ${b.currency}`}</p>}</For>
+      <Show when={balanceLow(u())}><Status kind="warn">{tr("DeepSeek reports the balance is too low for API calls.")}</Status></Show>
+      <For each={u().balances}>{(b) => (
+        <div class="row acct-balance" classList={{ total: b.kind === "Total" }}>
+          <span>{balanceKind(b.kind)}</span>
+          <span class="grow" />
+          <span class="tabular">{`${b.balance} ${b.currency}`}</span>
+        </div>
+      )}</For>
       <Show when={creditsText(u().credits)}>{(text) => <p>{text()}</p>}</Show>
     </section>
   );

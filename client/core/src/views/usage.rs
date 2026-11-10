@@ -86,6 +86,9 @@ pub struct Usage {
     pub identity: Identity,
     pub windows: Vec<Window>,
     pub balances: Vec<Balance>,
+    /// DeepSeek's `is_available` with an API-key balance: false when the
+    /// balance no longer covers API calls; None when the provider says nothing.
+    pub balance_available: Option<bool>,
     pub credits: Option<Credits>,
     /// An inspect runs; the values shown are the previous ones.
     pub refreshing: bool,
@@ -246,6 +249,7 @@ pub fn usage(value: &Value) -> Usage {
                 currency: text(b, "currency"),
             })
             .collect(),
+        balance_available: value.get("balance_available").and_then(Value::as_bool),
         credits: value
             .get("credits")
             .filter(|c| c.as_object().is_some_and(|o| !o.is_empty()))
@@ -363,5 +367,31 @@ mod tests {
         assert_eq!(value["windows"][1]["resets_at"], json!(null));
         assert_eq!(value["windows"][2]["minutes"], json!(null));
         assert_eq!(usage(&json!({"status": "ok", "credits": {}})).credits, None);
+    }
+
+    #[test]
+    fn deepseek_api_key_balance_keeps_its_availability() {
+        let reply = json!({"status": "configured", "provider": "dsh", "windows": [],
+            "identity": {"auth_method": "API key", "account_id": "api-key:abc"},
+            "balances": [{"kind": "Total", "balance": "6.20", "currency": "USD"},
+                         {"kind": "Topped up", "balance": "6.20", "currency": "USD"},
+                         {"kind": "Granted", "balance": "0.00", "currency": "USD"}],
+            "balance_available": false});
+        let u = usage(&reply);
+        assert_eq!(u.status, "configured");
+        assert_eq!(u.balances.len(), 3);
+        assert_eq!(u.balance_available, Some(false));
+        let value = serde_json::to_value(&u).unwrap();
+        assert_eq!(value["balance_available"], json!(false));
+        // Older peers and other providers report nothing: no claim either way.
+        assert_eq!(usage(&json!({"status": "ok"})).balance_available, None);
+        assert_eq!(
+            usage(&json!({"status": "ok", "balance_available": "no"})).balance_available,
+            None
+        );
+        assert_eq!(
+            serde_json::to_value(usage(&json!({"status": "ok"}))).unwrap()["balance_available"],
+            json!(null)
+        );
     }
 }

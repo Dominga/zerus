@@ -593,3 +593,72 @@ fn the_queued_mutation_barrier_refuses_drift_after_the_last_preflight() {
         drift_before_the_queued_mutation(computer, change);
     }
 }
+
+/// The stand-in transport's PID, once the fake CLI wrote it.
+fn orphan_pid(fake: &Fake) -> libc::pid_t {
+    let path = fake.dir.join("orphan-pid");
+    wait_until("the stand-in transport PID", || {
+        std::fs::read_to_string(&path).is_ok_and(|text| text.trim().parse::<i32>().is_ok())
+    });
+    std::fs::read_to_string(&path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Gone, not merely signalled: a reparented zombie is reaped by its new
+/// parent shortly after the group signal.
+fn transport_gone(pid: libc::pid_t) -> bool {
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+fn externally_killed_cli(holds_output: bool) {
+    let mut settings = config();
+    settings["adopt"] = json!([{
+        "orphan": "orphan-pid", "orphan_holds_output": holds_output, "sigkill": true,
+    }]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    let pid = orphan_pid(&fake);
+    wait_until("the killed original's disposition", || idle(&org));
+    wait_until("the original transport to be stopped", || {
+        transport_gone(pid)
+    });
+    assert!(org.lock().sync.busy(), "an unknown result keeps the ticket");
+    let current = view(&org, &id);
+    assert_eq!(current["error"], true);
+    assert_eq!(current["can_resume"], true);
+    assert_eq!(calls(&fake, "adopt").len(), 1, "no replay");
+    fake.finish(org);
+}
+
+#[test]
+fn an_externally_killed_cli_leaves_no_running_transport() {
+    externally_killed_cli(false);
+}
+
+#[test]
+fn a_killed_cli_whose_transport_holds_its_pipes_still_settles() {
+    externally_killed_cli(true);
+}
+
+#[test]
+fn only_the_three_fixed_adoption_calls_run_as_a_private_group() {
+    assert_eq!(
+        crate::organization::adoption_dialog::group_custody_for_tests(),
+        vec![
+            ("config", false),
+            ("preview-config", false),
+            ("preview", true),
+            ("adopt-config", false),
+            ("adopt-local", false),
+            ("mutation", true),
+            ("status", true),
+            ("fresh", false),
+        ]
+    );
+}

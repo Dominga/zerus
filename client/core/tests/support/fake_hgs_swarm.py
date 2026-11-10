@@ -115,6 +115,24 @@ while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
     subprocess.Popen([sys.executable, "-c", code, os.path.join(here, reply["hold_output"])],
                      stdin=subprocess.DEVNULL,
                      env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": here, "TMPDIR": here})
+if reply.get("orphan"):
+    # A stand-in for the CLI's ssh transport: same process group, private
+    # streams unless it is told to hold the CLI's own output pipes.
+    holds = reply.get("orphan_holds_output")
+    subprocess.Popen([sys.executable, "-c", "import os, sys, time\n"
+                      "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                      "time.sleep(30)\n", os.path.join(here, reply["orphan"])],
+                     stdin=subprocess.DEVNULL,
+                     stdout=None if holds else subprocess.DEVNULL,
+                     stderr=None if holds else subprocess.DEVNULL,
+                     env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": here, "TMPDIR": here})
+    deadline = time.time() + 10
+    while not os.path.exists(os.path.join(here, reply["orphan"])) and time.time() < deadline:
+        time.sleep(0.01)
+if reply.get("sigkill"):
+    import signal
+    sys.stdout.flush()
+    os.kill(os.getpid(), signal.SIGKILL)
 if reply.get("complete_adoption_receipt"):
     output = adoption_receipt(reply["complete_adoption_receipt"], json.loads(data),
                               settings["adoption-preview"][0]["stdout"])

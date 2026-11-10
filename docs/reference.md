@@ -3121,6 +3121,23 @@ closed and reopened onto the same original, and after the original deadline it
 reports that the original is still settling with an unknown result. Only new
 adoption actions wait, and no failure or timeout settles or replays it.
 
+The desktop runs only its three fixed adoption calls (`adoption-preview`,
+`adopt` and `adoption-status`) with the CLI as the leader of a private process
+group it creates for that one call; its local reads keep the ordinary runner.
+It observes the leader's exit with `waitid(WNOWAIT)`, so the unreaped leader pins
+the group, and only then, or on its own timeout, sends `SIGKILL` to that exact
+group and reaps the leader. It never signals after reaping, and a shared group,
+a process scan or a name or path match is never an authority to signal. So when
+anything kills the CLI, the original ssh and its in-group descendants (such as
+a ProxyCommand) are stopped and reaped before the dialog settles. The accounted
+resources stay held until the leader is reaped and both of its pipes reach EOF.
+The result stays unknown and status-only, the ticket stays held, and nothing is
+retried or continued. Windows keeps its per-child kill-on-close jobs.
+setsid-detached processes stay outside the group. Two boundaries remain: if the
+desktop has crashed, a later kill of the CLI is not accounted by anyone; and
+after a desktop restart the dialog cannot reopen the original (the organization
+read still discloses its request).
+
 Adoption-specific raw JSON rejects duplicate object keys recursively before a
 typed map is constructed. The source catalog and sidecars must match their
 declared source and source-node machine operation. The original destination is

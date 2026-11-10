@@ -31,6 +31,10 @@ pub const POLL: Duration = Duration::from_secs(3);
 pub const STREAM_POLL: Duration = Duration::from_secs(60);
 /// Feed events one watched team keeps; Load older stops there.
 pub const FEED_KEPT: usize = 500;
+/// Task #10: while the window is hidden or minimized only Waiting is read,
+/// at the always-on watcher's pace (src-tauri `team_watch::INTERVAL`), so its
+/// notices still arrive from this reply and nothing else is read.
+pub const HIDDEN_WAITING: Duration = Duration::from_secs(30);
 /// On-demand reads that may wait at once (older pages, spans, profile).
 const QUEUED: usize = 8;
 /// How long a read in flight keeps its slot from running again.
@@ -159,6 +163,8 @@ pub struct TeamsModel {
     heads: Option<std::sync::Arc<super::heads::Heads>>,
     /// Slots whose head moved while their read ran: due again at its reply.
     again: std::collections::BTreeSet<Slot>,
+    /// Task #10: the window is hidden or minimized: only Waiting is read.
+    hidden: bool,
 }
 
 /// An update as the model sends it (task #9): its payload is computed once
@@ -337,6 +343,42 @@ impl TeamsModel {
         }
     }
 
+    /// Task #10: the window is hidden or minimized (`true`) or shown again.
+    /// Hidden, only Waiting is read, within [`HIDDEN_WAITING`]; shown again,
+    /// every followed read is due at once, so the views are current.
+    pub fn set_hidden(&mut self, hidden: bool, now: Instant) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        if hidden {
+            if let Some(due) = self.due.get_mut(&Slot::Waiting) {
+                // A read in flight keeps its slot; its reply sets the pace.
+                if *due <= now + STREAM_POLL {
+                    *due = (*due).min(now + HIDDEN_WAITING);
+                }
+            }
+        } else {
+            // Waiting leaves the hidden pace: due now, unless a read is in flight.
+            if let Some(due) = self.due.get_mut(&Slot::Waiting) {
+                if *due <= now + STREAM_POLL {
+                    *due = now;
+                }
+            }
+            self.refresh(now);
+        }
+    }
+
+    /// Whether the window is hidden (task #10).
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Whether a followed slot may be read now: hidden, only Waiting.
+    fn eligible(&self, slot: Slot) -> bool {
+        !self.hidden || slot == Slot::Waiting
+    }
+
     /// The next read to run now, if any: an asked-for read first, then the
     /// followed read due longest. Its slot waits until its reply is applied.
     pub fn next(&mut self, now: Instant) -> Option<TeamRead> {
@@ -346,7 +388,7 @@ impl TeamsModel {
         let (slot, _) = self
             .due
             .iter()
-            .filter(|(_, due)| **due <= now)
+            .filter(|(slot, due)| **due <= now && self.eligible(**slot))
             .min_by_key(|(_, due)| **due)?;
         let slot = *slot;
         let team = self.watched().map(str::to_owned);
@@ -420,8 +462,9 @@ impl TeamsModel {
             return Duration::ZERO;
         }
         self.due
-            .values()
-            .map(|due| due.saturating_duration_since(now))
+            .iter()
+            .filter(|(slot, _)| self.eligible(**slot))
+            .map(|(_, due)| due.saturating_duration_since(now))
             .min()
             .unwrap_or(POLL)
             .min(POLL)
@@ -497,8 +540,13 @@ impl TeamsModel {
     ) -> Vec<Sent> {
         let mut out = Vec::new();
         if let Some(slot) = Self::slot(read) {
-            // With the stream's heads a slot waits for its revision to move.
-            let every = if self.heads.is_some() {
+            // With the stream's heads a slot waits for its revision to move,
+            // and at most STREAM_POLL: the inbox and feed too, whose messages
+            // and events are written without a revision bump (task #10,
+            // attempt 2). Hidden, Waiting is read at the watcher's pace.
+            let every = if self.hidden && slot == Slot::Waiting {
+                HIDDEN_WAITING
+            } else if self.heads.is_some() {
                 STREAM_POLL
             } else {
                 POLL

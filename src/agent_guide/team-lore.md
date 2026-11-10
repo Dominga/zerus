@@ -5,7 +5,7 @@ workspace. Zerus writes it for the team: each phase's plan and its tasks'
 outcomes, the owner's decisions, the faults of fixed findings and the
 newest test readings, as records CodeLore's rules accept.
 
-Search before you ask or diagnose:
+Search before you ask or diagnose (the code and docs themselves: hgs guide code):
   hgs team lore find WORDS [--team ID]   the workspace, the project's store
                                          and its team sub-stores; each hit
                                          names its store (project, team NAME)

@@ -17,6 +17,7 @@ const uiStore = "\0team-bar-ui";
 const memberCard = "\0team-bar-member-card";
 let server: ViteDevServer | undefined;
 let render: (team: TeamView, width: number) => string;
+let renderModes: (team: TeamView) => string[];
 
 function team(): TeamView {
   const now = Math.floor(Date.now() / 1000);
@@ -72,14 +73,18 @@ beforeAll(async () => {
           import {renderToString} from 'solid-js/web';
           import {TeamBar, compactFor} from '/src/ui/teams/team-bar.tsx';
           export const compact = compactFor;
+          import {PhaseModeControl} from '/src/ui/teams/TeamActions.tsx';
           export const render = (team, width) => renderToString(() => createComponent(TeamBar,
-            { computer: 'c1', team, state: 'running', problemTasks: new Set(), onPhase: () => {}, onSettings: () => {}, onCatalog: () => {}, width }));`;
+            { computer: 'c1', team, state: team.status === 'planning' ? 'planning' : 'running', problemTasks: new Set(), onPhase: () => {}, onSettings: () => {}, onCatalog: () => {}, width }));
+          export const renderModes = (team) => team.phases.map((phase) => renderToString(() => createComponent(PhaseModeControl,
+            { computer: 'c1', team, phase: phase.n, owner: true })));`;
         return undefined;
       },
     }, solid({ ssr: true })],
   });
   const module = await server.ssrLoadModule(entry);
   render = module.render;
+  renderModes = module.renderModes;
 });
 
 afterAll(async () => { await server?.close(); });
@@ -88,6 +93,42 @@ const has = (html: string, needle: string) => plain(html).includes(needle);
 
 /** Every action the running team's bar offers. */
 const ACTIONS = ["resumeLimits", "pause", "stop"];
+
+/** A planning team whose phases carry what core reads from status's `phase_modes`. */
+function planning(planMode: string, modes: Record<number, string>): TeamView {
+  const base = team();
+  const phase = (n: number, state: string) => ({ n, title: `Phase ${n}`, state, status: state, done: 0, total: 1, barrier: false, auto: false,
+    acceptance: "", paused: false, health: "", mode: modes[n] ?? "" });
+  return { ...base, status: "planning", plan_mode: planMode, phase_modes_known: true, free_phase: null, pending_phase: null,
+    phases: [phase(1, "draft"), phase(2, "draft"), phase(3, "draft")] } as unknown as TeamView;
+}
+const modeOf = (html: string) => /data-phase-mode="(\w+)"/.exec(html)?.[1];
+
+describe("the plan mode switch and each phase's toggle agree (task #12)", () => {
+  it("with the team's plan_mode free and no phase of its own, every phase toggle shows Free", () => {
+    // Core gives every phase its effective mode from phase_modes ...
+    expect(renderModes(planning("free", { 1: "free", 2: "free", 3: "free" })).map(modeOf)).toEqual(["free", "free", "free"]);
+    // ... and a phase without one (an older read) still shows the team's.
+    expect(renderModes(planning("free", {})).map(modeOf)).toEqual(["free", "free", "free"]);
+    // The planning bar's switch shows the same stored mode, not a local default.
+    const bar = plain(render(planning("free", {}), 1200));
+    expect(bar).toContain('data-plan-mode="free"');
+    expect(bar).toMatch(/<input type="checkbox"[^>]*checked/);
+  });
+
+  it("a phase with its own mode shows it, the others the team's", () => {
+    expect(renderModes(planning("free", { 1: "free", 2: "standard", 3: "free" })).map(modeOf)).toEqual(["free", "standard", "free"]);
+    expect(renderModes(planning("standard", { 2: "free" })).map(modeOf)).toEqual(["standard", "free", "standard"]);
+    const bar = plain(render(planning("standard", { 2: "free" }), 1200));
+    expect(bar).toContain('data-plan-mode="standard"');
+    expect(bar).not.toMatch(/<input type="checkbox"[^>]*checked/);
+  });
+
+  it("while the team plans each phase toggle can switch (it is the mode the phase starts in)", () => {
+    const html = renderModes(planning("free", {}))[1];
+    expect(html).toMatch(/data-mode="standard"(?![^>]*disabled)/);
+  });
+});
 
 describe("the lead session's team strip (task #427)", () => {
   it("at 1200 px keeps everything on one row: no More menu, every action inline", () => {

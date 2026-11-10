@@ -468,6 +468,37 @@ function PlanTaskDialog(props: {
 }
 
 /** Task #59: the team bar's mode (Qt teamHeaderPlanMode) and, for the free phase, its lock back to standard. */
+/**
+ * Task #12 (owner, 2026-11-10): the planning team's Free planning switch. It
+ * shows the team's stored mode (`plan_mode`, the default of every phase
+ * without its own) and stores a switch in hgs at once, so each phase's toggle
+ * follows it and both survive a reload; Approve starts in it. A choice on its
+ * way shows until the next read has it; a refusal shows why and the switch
+ * reads the stored mode again.
+ */
+export function PlanModeOption(props: { computer: ComputerId; team: ActTeam }) {
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const [pending, setPending] = createSignal<"free" | "standard" | null>(null);
+  const stored = (): "free" | "standard" => (props.team.plan_mode === "free" ? "free" : "standard");
+  createEffect(() => { if (pending() && pending() === stored()) setPending(null); });
+  const checked = () => (pending() ?? stored()) === "free";
+  const choose = async (free: boolean) => {
+    const mode = free ? "free" : "standard";
+    if (mode === stored() && !pending()) return;
+    setPending(mode);
+    const outcome = await model.teamMode(mode);
+    if (!outcome || outcome === "cancelled" || outcome.outcome !== "done") setPending(null);
+  };
+  return (
+    <label class="team-proposal-option" data-plan-mode={checked() ? "free" : "standard"} title={tr("One open phase that takes tasks as they come until you close it")}>
+      <input type="checkbox" checked={checked()} disabled={read().busy}
+        onChange={(event) => { const free = event.currentTarget.checked; event.currentTarget.checked = checked(); void choose(free); }} />{tr("Free planning")}
+      <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+    </label>
+  );
+}
+
 export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) {
   const badge = createMemo(() => teamModeBadge(props.team));
   const lock = createMemo(() => { const b = badge(); return b && b.phase > 0 ? phaseModeSwitch(props.team, b.phase) : undefined; });

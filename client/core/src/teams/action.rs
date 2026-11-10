@@ -226,6 +226,15 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// Task #12: the team's own plan mode, the default of every phase without
+    /// a mode of its own (`hgs team phase-mode` without a phase). While the
+    /// team plans it is the mode its approval starts in; while it runs, the
+    /// phases that follow the team switch with it.
+    TeamMode {
+        mode: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// Task 11: sends a phase back to the lead with the owner's comment.
     SendBackPhase {
         phase: u64,
@@ -695,7 +704,7 @@ impl TeamAction {
             Self::EditDraft { .. } => "edit-draft",
             Self::PlanEdit { .. } => "plan",
             Self::AcceptPhase { .. } => "accept-phase",
-            Self::PhaseMode { .. } => "phase-mode",
+            Self::PhaseMode { .. } | Self::TeamMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::DecideTool { .. } => "decide-tool",
             Self::Propose { .. } => "propose",
@@ -1064,6 +1073,12 @@ impl TeamAction {
                 if *phase == 0 || *phase > u64::from(u32::MAX) {
                     return Err("Not a phase number.".into());
                 }
+                if !matches!(mode.as_str(), "free" | "standard") {
+                    return Err("A plan mode is standard or free.".into());
+                }
+                plain(reason, "A reason", 2000)
+            }
+            Self::TeamMode { mode, reason } => {
                 if !matches!(mode.as_str(), "free" | "standard") {
                     return Err("A plan mode is standard or free.".into());
                 }
@@ -1526,6 +1541,12 @@ impl TeamAction {
                     put("reason", json!(reason.trim()));
                 }
             }
+            Self::TeamMode { mode, reason } => {
+                put("mode", json!(mode));
+                if !reason.trim().is_empty() {
+                    put("reason", json!(reason.trim()));
+                }
+            }
             Self::SendBackPhase { phase, comment } => {
                 put("phase", json!(phase));
                 put("comment", json!(comment));
@@ -1891,6 +1912,14 @@ impl TeamAction {
                     "Switch phase {phase} to free planning? It stays open when its tasks are accepted: new tasks join it and run as they are added. The other phases keep their modes."
                 ),
                 "Switch to free",
+            )),
+            Self::TeamMode { mode, .. } => Some(ask(
+                "teamModeConfirm",
+                if mode == "free" { "Switch the team to free planning?" } else { "Switch the team to standard planning?" },
+                format!(
+                    "Switch the team to {mode} planning? Every phase without a mode of its own switches with it; a phase with its own mode keeps it."
+                ),
+                if mode == "free" { "Switch to free" } else { "Switch to standard" },
             )),
             Self::PhaseMode { phase, .. } => Some(ask(
                 "teamPhaseModeConfirm",

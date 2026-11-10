@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TeamActions, allDecided, freeMode, phaseModeChip, phaseModeConfirmation, phaseModeState, phaseModeSwitch, teamModeBadge, type ActTeam } from "./actions";
+import { TeamActions, allDecided, effectivePhaseMode, freeMode, phaseModeChip, phaseModeConfirmation, phaseModeState, phaseModeSwitch, teamModeBadge, type ActTeam } from "./actions";
 import { proposalText } from "./decisions";
 import type { DecisionPort } from "./decisions";
 import type { TeamCall, TeamConfirmation, TeamProposalView } from "../../types";
@@ -92,6 +92,34 @@ describe("a phase's mode", () => {
     await new TeamActions(yes.port, () => ({ computer: "", team: t })).phaseMode(2, "standard");
     expect(yes.asked.map((asked) => asked.name)).toEqual(["teamPhaseModeConfirm"]);
     expect(yes.sent).toEqual([{ computer: "", team: "t1", team_name: "Checkout", confirmed: true, request_id: null, action: { kind: "phase_mode", phase: 2, mode: "standard" } }]);
+  });
+
+  it("task #12: each phase reads its effective mode, its own else the team's, in every state", () => {
+    const own = (mode: string) => (phase: ActTeam["phases"][number]) => (phase.n === 3 ? { ...phase, mode } : { ...phase, mode: "" });
+    const freeTeam = team({ plan_mode: "free", phases: team().phases.map(own("")) });
+    expect([1, 2, 3].map((n) => effectivePhaseMode(freeTeam, n))).toEqual(["free", "free", "free"]);
+    const withOwn = team({ plan_mode: "free", phases: team().phases.map(own("standard")) });
+    expect([1, 2, 3].map((n) => effectivePhaseMode(withOwn, n))).toEqual(["free", "free", "standard"]);
+    expect(phaseModeState(withOwn, 3, true)?.mode).toBe("standard");
+    expect(effectivePhaseMode(team({ free_phase: 2 }), 2)).toBe("free");
+  });
+
+  it("task #12: while the team plans, the team switch and each phase toggle are stored at once", async () => {
+    const plans = team({ status: "planning", phases: team().phases.map((phase) => ({ ...phase, state: "draft", status: "draft" })) });
+    expect(phaseModeState(plans, 2, true)).toMatchObject({ canSwitch: true, why: "" });
+    expect(phaseModeState(plans, 2, false)?.canSwitch).toBe(false);
+    const f = fake(false);
+    await new TeamActions(f.port, () => ({ computer: "", team: plans })).phaseMode(2, "free");
+    await new TeamActions(f.port, () => ({ computer: "", team: plans })).teamMode("free");
+    expect(f.asked).toEqual([]);
+    expect(f.sent.map((call) => call.action)).toEqual([{ kind: "phase_mode", phase: 2, mode: "free" }, { kind: "team_mode", mode: "free" }]);
+    expect(f.sent.every((call) => call.confirmed === true)).toBe(true);
+    // A running team's switch asks first; Cancel sends nothing.
+    const running = fake(false);
+    expect(await new TeamActions(running.port, () => ({ computer: "", team: team() })).teamMode("free")).toBe("cancelled");
+    expect(running.asked.map((ask) => ask.name)).toEqual(["teamModeConfirm"]);
+    expect(running.asked[0].text).toContain("a phase with its own mode keeps it");
+    expect(running.sent).toEqual([]);
   });
 
   it("the lead's card names the phase it switches", () => {

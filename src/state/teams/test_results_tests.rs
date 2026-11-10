@@ -76,7 +76,9 @@ fn a_failure_that_passes_on_its_retry_is_flaky_with_its_history_and_quarantine()
         }
     }
     assert_eq!(database.flaky_history("t", "gui", 0.0).unwrap().len(), 4);
-    let items = super::super::inbox::items(&team);
+    // Task #29: a test result clears after 12 h; read the inbox at this
+    // test's own clock, just after its records.
+    let items = crate::state::with_test_now(1000.0, || super::super::inbox::items(&team));
     let item = items.iter().find(|item| item.kind == "test_alert").expect("the lead's item");
     assert!(item.command.contains("\"action\":\"dismiss\"") && item.command.contains("\"suite\":\"gui\""), "{}", item.command);
     assert!(items.iter().any(|item| item.kind == "test_quarantine" && item.summary.contains("gui is quarantined as flaky (4 episode(s))")));
@@ -144,7 +146,9 @@ fn a_suite_grown_past_its_recorded_time_or_its_budget_is_flagged_for_the_lead() 
     assert_eq!(ran[0].recorded_ms, 200);
     let mut team = team();
     apply(&mut team, &ran, &database, &policy(), 100.0, (0.0, 0)).unwrap();
-    let card = super::super::inbox::items(&team).into_iter().find(|item| item.kind == "test_result").unwrap();
+    // Task #29: a test result clears after 12 h; read the inbox at this
+    // test's own clock, just after its records.
+    let card = crate::state::with_test_now(1000.0, || super::super::inbox::items(&team)).into_iter().find(|item| item.kind == "test_result").unwrap();
     assert!(card.summary.contains("slower than recorded") && card.summary.contains("recorded 0 s"), "{}", card.summary);
     // Within the share: no flag; growth off: no flag.
     grown.seconds = 60.0;
@@ -256,7 +260,9 @@ fn unchanged_inputs_reuse_the_last_green_result_and_rust_never_does() {
     assert_eq!(database.last_green("t", "py", &first).unwrap().unwrap().id, source.id);
     let mut team = team();
     apply(&mut team, std::slice::from_ref(&reused), &database, &policy(), 200.0, (0.0, 0)).unwrap();
-    let card = super::super::inbox::items(&team).into_iter().find(|item| item.kind == "test_result").unwrap();
+    // Task #29: a test result clears after 12 h; read the inbox at this
+    // test's own clock, just after its records.
+    let card = crate::state::with_test_now(1000.0, || super::super::inbox::items(&team)).into_iter().find(|item| item.kind == "test_result").unwrap();
     assert!(card.summary.contains(&format!("reused from record {}", source.id)) && card.summary.contains("due for re-measuring"), "{}", card.summary);
 }
 

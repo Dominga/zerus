@@ -1197,7 +1197,9 @@ mod tests {
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
-        let items = super::super::inbox::items(&team);
+        // Task #29: a test result clears after 12 h; read the inbox at this
+        // test's own clock, just after its records.
+        let items = crate::state::with_test_now(1000.0, || super::super::inbox::items(&team));
         let item = items.iter().find(|item| item.kind == "test_result").expect("a test result card");
         assert!(
             item.summary.contains("unit") && item.summary.contains("passed") && item.summary.contains("r1"),

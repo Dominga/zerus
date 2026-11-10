@@ -52,6 +52,13 @@ pub(crate) struct Draft {
     /// one is refused ("owner changed <field>").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owner_edited: Vec<String>,
+    /// Task #13 (team ede724c4): the owner's settings the lead set in the
+    /// draft (base_branch, branch_per_task, max_members, ...), by field: the
+    /// owner's values stay, the lead's are offers New team marks and applies
+    /// with one click. An offer goes when the owner applies it or sets the
+    /// field otherwise.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setting_offers: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -699,6 +706,13 @@ pub(crate) struct Member {
     /// relaunch clears it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub host_waits: u32,
+    /// Task #17 (team ede724c4): the start after a swap or relaunch waits
+    /// because the session it replaces still works in the member's folder.
+    /// The old session keeps the member's name and its open attempt until its
+    /// turn ends and it is paused; only then does the new one start. Set
+    /// while waiting, so the wait is said once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced_busy: bool,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
@@ -1329,6 +1343,13 @@ fn is_zero_usize(value: &usize) -> bool {
 }
 
 impl Member {
+    /// Task #13 (team ede724c4): the member's session could not start and the
+    /// dispatcher waits for a relaunch (`error` names why); the lead relaunches
+    /// it itself.
+    pub(crate) fn failed_to_start(&self) -> bool {
+        self.session.is_none() && !self.error.trim().is_empty() && self.state != MemberState::Removed
+    }
+
     /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
         self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())

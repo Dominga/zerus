@@ -782,7 +782,23 @@ struct AttentionState {
     closed: bool,
     /// Counts the changes, so a reader copies the maps only after one.
     version: u64,
+    /// Why the last write failed; None once a write succeeds. The change
+    /// stays dirty and the writer tries again after [`ATTENTION_RETRY`].
+    failure: Option<String>,
 }
+
+/// How long the attention writer waits before it writes a failed change
+/// again (task #21: a refused write was only logged and then lost). Each
+/// further failure doubles the wait, up to [`ATTENTION_RETRY_MAX`].
+const ATTENTION_RETRY: Duration = Duration::from_millis(500);
+const ATTENTION_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// A test's stand-in for the attention writer's file write, for one path.
+#[cfg(test)]
+type TestAttentionWrite =
+    Box<dyn FnMut(&zerus_client_core::marks::Contents) -> std::io::Result<()> + Send>;
+#[cfg(test)]
+static TEST_ATTENTION_WRITE: Mutex<Vec<(PathBuf, TestAttentionWrite)>> = Mutex::new(Vec::new());
 
 /// Both attention maps by key, and the version they were copied at.
 pub type MarkMaps = (u64, BTreeMap<String, Mark>, BTreeMap<String, String>);
@@ -914,7 +930,9 @@ impl Attention {
     /// Waits at most `limit` until the file holds every change made so far,
     /// and says whether it does. A write in progress is never interrupted: the
     /// writer saves to a temporary file and renames it, so a process that ends
-    /// mid-write leaves the old file whole.
+    /// mid-write leaves the old file whole. A failed write keeps its change
+    /// dirty, so this waits for the writer's next try and says false when
+    /// none succeeded within the limit.
     pub fn flush_within(&self, limit: Duration) -> bool {
         let state = self.shared.lock();
         let (state, _) = self
@@ -927,17 +945,25 @@ impl Attention {
         !(state.marks.is_none() || state.dirty || state.writing || state.source_paused)
     }
 
-    /// Waits until the file holds every change made so far.
+    /// Waits until the file holds every change made so far. A failed write
+    /// fails the test with its error (task #21: a refused write used to pass
+    /// this wait, and only the reload's empty maps showed it).
     #[cfg(test)]
     pub fn flush(&self) {
         let state = self.shared.lock();
-        let _state = self
+        let state = self
             .shared
             .signal
             .wait_while(state, |state| {
-                state.marks.is_none() || state.dirty || state.writing || state.source_paused
+                state.marks.is_none()
+                    || state.writing
+                    || state.source_paused
+                    || state.dirty && state.failure.is_none()
             })
             .unwrap_or_else(PoisonError::into_inner);
+        if let (true, Some(failure)) = (state.dirty, &state.failure) {
+            panic!("the attention marks were not saved: {failure}");
+        }
     }
 }
 
@@ -988,37 +1014,101 @@ impl AttentionShared {
 
     /// The writer thread: reads the file, then writes the latest state after
     /// each change (changes made meanwhile go into one write). A copy is taken
-    /// under the lock and written without it.
+    /// under the lock and written without it. A failed write keeps the change
+    /// dirty and is tried again after [`ATTENTION_RETRY`], doubled after each
+    /// further failure up to [`ATTENTION_RETRY_MAX`]; the first failure of a
+    /// run and the recovery are logged. The end with a failed change pending
+    /// gives up.
     fn write_changes(&self, path: PathBuf) {
         if let Some(capture) = &self.capture {
             self.write_captured(path, capture);
             return;
         }
+        #[cfg(test)]
+        let mut test_write = {
+            let mut hooks = TEST_ATTENTION_WRITE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            hooks
+                .iter()
+                .position(|(hooked, _)| *hooked == path)
+                .map(|at| hooks.remove(at).1)
+        };
         let loaded = AttentionMarks::load(path);
         self.lock().marks = Some(loaded);
         self.signal.notify_all();
+        let mut retry_at: Option<std::time::Instant> = None;
+        let mut retry = ATTENTION_RETRY;
         loop {
             let contents = {
-                let mut state = self
-                    .signal
-                    .wait_while(self.lock(), |state| !state.dirty && !state.closed)
-                    .unwrap_or_else(PoisonError::into_inner);
-                if !state.dirty {
-                    return;
+                let mut state = self.lock();
+                loop {
+                    if state.closed {
+                        if !state.dirty || retry_at.is_some() {
+                            return;
+                        }
+                        break;
+                    }
+                    if state.dirty {
+                        let now = std::time::Instant::now();
+                        match retry_at {
+                            Some(at) if at > now => {
+                                state = self
+                                    .signal
+                                    .wait_timeout(state, at - now)
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .0;
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                    state = self
+                        .signal
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
                 }
                 state.dirty = false;
                 state.writing = true;
                 state.marks.as_ref().map(AttentionMarks::contents)
             };
-            if let Some(contents) = contents {
-                if let Err(error) = contents.write() {
-                    eprintln!(
-                        "zerus-client: could not save attention marks to {}: {error}",
-                        contents.path().display()
+            let written = contents.as_ref().map(|contents| {
+                #[cfg(test)]
+                if let Some(write) = test_write.as_mut() {
+                    return write(contents);
+                }
+                contents.write()
+            });
+            let mut state = self.lock();
+            match written {
+                Some(Err(error)) => {
+                    let failure = format!(
+                        "could not save attention marks to {}: {error}",
+                        contents
+                            .as_ref()
+                            .map(|contents| contents.path().display().to_string())
+                            .unwrap_or_default()
                     );
+                    if state.failure.is_none() {
+                        eprintln!("zerus-client: {failure}; retrying");
+                    }
+                    state.failure = Some(failure);
+                    state.dirty = true;
+                    retry_at = Some(std::time::Instant::now() + retry);
+                    retry = (retry * 2).min(ATTENTION_RETRY_MAX);
+                }
+                _ => {
+                    if state.failure.take().is_some() {
+                        eprintln!(
+                            "zerus-client: the attention marks were saved after a failed write"
+                        );
+                    }
+                    retry_at = None;
+                    retry = ATTENTION_RETRY;
                 }
             }
-            self.lock().writing = false;
+            state.writing = false;
+            drop(state);
             self.signal.notify_all();
         }
     }
@@ -4769,6 +4859,97 @@ mod tests {
         attention.shared.signal.notify_all();
         assert!(attention.flush_within(std::time::Duration::from_secs(30)));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Task #21: the merge queue's attention_updates_merge_and_persist failed
+    /// because its write was refused (Access is denied: task 18's Low
+    /// integrity build folder) and the writer only logged it: flush passed
+    /// and the change was gone. A refused write now stays pending, flush_within
+    /// says it is not on file, and the writer's next try saves it.
+    #[test]
+    fn a_refused_write_stays_pending_and_is_saved_by_the_next_try() {
+        let path = attention_path("refused");
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        TEST_ATTENTION_WRITE.lock().unwrap().push((
+            path.clone(),
+            Box::new(move |contents: &zerus_client_core::marks::Contents| {
+                if counted.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(std::io::Error::from_raw_os_error(5))
+                } else {
+                    contents.write()
+                }
+            }),
+        ));
+        let key = r#"["mac","claude","conv-1"]"#.to_owned();
+        let attention = Attention::new(path.clone());
+        attention.update(
+            BTreeMap::new(),
+            BTreeMap::from([(key.clone(), Some("r1".to_owned()))]),
+        );
+        // The first try is refused: not on file, and not reported as saved.
+        let (state, _) = attention
+            .shared
+            .signal
+            .wait_timeout_while(
+                attention.shared.lock(),
+                std::time::Duration::from_secs(30),
+                |state| state.failure.is_none(),
+            )
+            .unwrap();
+        assert!(state
+            .failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not save attention marks"));
+        drop(state);
+        assert!(!attention.flush_within(std::time::Duration::ZERO));
+        assert!(!path.exists());
+        assert_eq!(
+            attention.snapshot().replies[&key],
+            "r1",
+            "memory keeps the change"
+        );
+        // The second try (after 500 ms) is refused too, the third (after
+        // 1 s more) saves it.
+        assert!(attention.flush_within(std::time::Duration::from_secs(30)));
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+        assert!(attention.shared.lock().failure.is_none());
+        assert_eq!(Attention::new(path.clone()).snapshot().replies[&key], "r1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Task #21: a refused write fails flush with its error, so a test's
+    /// failure names the cause instead of an empty reload.
+    #[test]
+    fn flush_names_a_refused_write() {
+        let path = attention_path("refused-flush");
+        TEST_ATTENTION_WRITE.lock().unwrap().push((
+            path.clone(),
+            Box::new(|_: &zerus_client_core::marks::Contents| {
+                Err(std::io::Error::from_raw_os_error(5))
+            }),
+        ));
+        let attention = Attention::new(path.clone());
+        attention.update(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                r#"["mac","claude","conv-1"]"#.to_owned(),
+                Some("r1".to_owned()),
+            )]),
+        );
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| attention.flush()))
+            .expect_err("flush passed a refused write");
+        let text = failed.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            text.starts_with(
+                "the attention marks were not saved: could not save attention marks to "
+            ),
+            "{text}"
+        );
+        // The end gives up on the failed change and the writer stops.
+        drop(attention);
+        assert!(!path.exists());
     }
 
     #[test]

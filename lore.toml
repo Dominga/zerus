@@ -1,0 +1,36 @@
+# Task #25 (owner, 2026-11-10): code and documentation search through CodeLore.
+#
+# This file turns on lore's code map (`lore atlas`) for this checkout and lets
+# `lore find` add code and documentation places under its results. It holds no
+# records. The project's memory (the sliced documentation, decisions, faults,
+# readings) lives in the ZERUS project store under Zerus data, never here:
+#   hgs project config get --json        <<< '{"project":"<project id>"}'   the store's path
+#   lore -C <store> find "<query>"        the records, each with its source
+# The single area below refuses a `lore add` in the checkout and names where
+# records go instead.
+version = 1
+dir = "lore"
+areas = ["use-the-project-store"]
+
+[commit]
+mode = "none"
+branch = "main"
+push = false
+
+[embed]
+provider = "none"
+
+[atlas]
+enabled = true
+# Text, terms and symbols only: current on every command from git's blob ids,
+# with no embedding run to wait for (task #25 measured it).
+semantic = false
+# `lore find` adds the best code and documentation places under its records
+# (only when a record matched; for code alone use `lore atlas search`).
+find = true
+# The documentation is searched as text beside the code.
+include = [".md"]
+# Bounded: no vendored code, licence texts, validation evidence, design
+# prototypes or build output.
+exclude = ["design", "tray/vendor", "docs/licenses", "docs/validation", "**/node_modules", "**/target", "**/dist", "THIRD_PARTY_NOTICES.md"]
+max_kib = 512

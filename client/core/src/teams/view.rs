@@ -914,6 +914,9 @@ pub struct DraftView {
     pub revision: u64,
     pub unseen: Vec<String>,
     pub owner_edited: Vec<String>,
+    /// Task #13 (team ede724c4): the lead's values for the owner's settings,
+    /// by field (an object; empty when none), applied with one click.
+    pub setting_offers: Value,
 }
 
 /// `team status` for the Team tab.
@@ -1404,6 +1407,10 @@ pub fn team(value: &Value) -> TeamView {
                 revision: count(draft, "revision"),
                 unseen: lines(draft, "unseen", NAME_CHARS),
                 owner_edited: lines(draft, "owner_edited", NAME_CHARS),
+                setting_offers: match bounded(draft.get("setting_offers")) {
+                    offers @ Value::Object(_) => offers,
+                    _ => Value::Object(Map::new()),
+                },
             }),
         truncated: members.len() > MEMBERS_KEPT
             || tasks.len() > TASKS_KEPT

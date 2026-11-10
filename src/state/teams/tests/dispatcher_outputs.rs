@@ -256,3 +256,141 @@ fn a_dependent_task_starts_from_its_accepted_predecessors_commits() {
         assert!(!plan::ready(&saved).contains(&2), "never retried on its own");
     });
 }
+
+/// Task #15 (team ede724c4; lead of team 2b863c49, 2026-11-10): a team with a
+/// base branch and no integration folder. C1 and T03 both append to
+/// tools/check.py and the lead resolved them on svn-art: a dependent of both
+/// hands out from the line's head without a conflict and merges neither
+/// commit again. A predecessor not on the line (D1) is still merged, and one
+/// that really conflicts with the line (E1) still refuses with its files.
+#[test]
+fn a_hand_out_starts_from_the_line_head_not_commit_by_commit() {
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let (lead, dev) = stage_repo(root.path());
+        // The line: svn-art, with the file every task appends to.
+        git_in(&lead, &["checkout", "-q", "-b", "svn-art"]);
+        std::fs::create_dir_all(lead.join("tools")).unwrap();
+        std::fs::write(lead.join("tools/check.py"), "base\n").unwrap();
+        git_in(&lead, &["add", "-A"]);
+        git_in(&lead, &["commit", "-q", "-m", "check.py"]);
+        // dev2's clone: four accepted commits, each on its own branch from the line.
+        let other = root.path().join("dev2");
+        git_in(root.path(), &["clone", "-q", &lead.display().to_string(), &other.display().to_string()]);
+        git_in(&other, &["config", "user.name", "Zerus Test"]);
+        git_in(&other, &["config", "user.email", "test@example.com"]);
+        let commit = |branch: &str, file: &str, text: &str| -> String {
+            git_in(&other, &["checkout", "-q", "-b", branch, "origin/svn-art"]);
+            let path = other.join(file);
+            let old = std::fs::read_to_string(&path).unwrap_or_default();
+            std::fs::write(&path, format!("{old}{text}\n")).unwrap();
+            git_in(&other, &["add", "-A"]);
+            git_in(&other, &["commit", "-q", "-m", branch]);
+            git_in(&other, &["rev-parse", "HEAD"])
+        };
+        let c1 = commit("c1", "tools/check.py", "c1");
+        let t03 = commit("t03", "tools/check.py", "t03");
+        let d1 = commit("d1", "d1.txt", "d1");
+        let e1 = commit("e1", "tools/check.py", "e1");
+        // The lead merges C1 and T03 into svn-art and resolves their conflict once.
+        git_in(&lead, &["fetch", "-q", &other.display().to_string(), "c1", "t03"]);
+        git_in(&lead, &["merge", "-q", "--no-ff", "--no-edit", &c1]);
+        assert!(git_fails(&lead, &["merge", "-q", "--no-ff", "--no-edit", &t03]), "C1 and T03 conflict");
+        std::fs::write(lead.join("tools/check.py"), "base\nc1\nt03\n").unwrap();
+        git_in(&lead, &["add", "-A"]);
+        git_in(&lead, &["commit", "-q", "--no-edit"]);
+        let line = git_in(&lead, &["rev-parse", "HEAD"]);
+        let mut team = stage_team(&lead, &dev, "none", &|_| super::super::super::catalog::builtin());
+        team.settings.base_branch = "svn-art".into();
+        let mut dev2 = team.member("dev").unwrap().clone();
+        dev2.id = "dev2".into();
+        dev2.folder = MemberFolder::Clone;
+        dev2.directory = other.display().to_string();
+        dev2.session = Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r3".into(), ..Default::default() });
+        team.members.push(dev2);
+        let accepted = |id: u32, branch: &str, commit: &str| Task {
+            id,
+            title: branch.into(),
+            assignee: "dev2".into(),
+            status: TaskStatus::Accepted,
+            attempts: vec![Attempt { n: 1, member: "dev2".into(), state: AttemptState::Reported, folder_head: commit.into(), folder_branch: branch.into(), ..Default::default() }],
+            ..Default::default()
+        };
+        team.tasks.push(accepted(3, "c1", &c1));
+        team.tasks.push(accepted(4, "t03", &t03));
+        team.tasks.push(accepted(5, "d1", &d1));
+        team.tasks.push(accepted(6, "e1", &e1));
+        let hard = |task: u32| Dependency { task, kind: DependencyKind::Hard };
+        team.task_mut(1).unwrap().deps = vec![hard(3), hard(4)];
+        team.task_mut(2).unwrap().deps = vec![hard(5)];
+        team.tasks.push(Task { id: 8, title: "After E1".into(), assignee: "dev".into(), deps: vec![hard(6)], ..Default::default() });
+        // 1. Both resolved predecessors: the branch comes up to svn-art's head,
+        // with no conflict, and neither commit is merged again.
+        let step = prepare_dependencies(&team, 1, "dev").expect("a step");
+        assert_eq!(step.result, "done", "{step:?}");
+        assert!(step.reason.contains(&format!("the line svn-art ({})", &line[..9])), "{step:?}");
+        assert!(!step.reason.contains("#3 (") && !step.reason.contains("#4 ("), "on the line already, not merged again: {step:?}");
+        assert_eq!(std::fs::read_to_string(dev.join("tools/check.py")).unwrap().replace("\r\n", "\n"), "base\nc1\nt03\n");
+        assert!(!git_fails(&dev, &["merge-base", "--is-ancestor", &line, "HEAD"]));
+        assert_eq!(git_in(&dev, &["status", "--porcelain"]), "");
+        // Again: nothing to do.
+        assert_eq!(prepare_dependencies(&team, 1, "dev").unwrap().result, "skipped");
+        // 2. A predecessor the line does not hold yet is still merged.
+        let step = prepare_dependencies(&team, 2, "dev").expect("a step");
+        assert_eq!(step.result, "done", "{step:?}");
+        assert!(step.reason.contains(&format!("#5 ({})", &d1[..9])), "{step:?}");
+        assert!(dev.join("d1.txt").exists());
+        // 3. A real conflict with the line still refuses with its files and
+        // leaves the folder as it was.
+        let before = git_in(&dev, &["rev-parse", "HEAD"]);
+        let step = prepare_dependencies(&team, 8, "dev").expect("a step");
+        assert_eq!(step.result, "refused", "{step:?}");
+        assert!(step.reason.contains("#6's accepted commit") && step.reason.contains("conflicts in tools/check.py"), "{step:?}");
+        assert_eq!(git_in(&dev, &["rev-parse", "HEAD"]), before);
+        assert!(git_fails(&dev, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]), "no merge is left in progress");
+    });
+}
+
+/// Task #15: a predecessor the line holds as an equivalent commit (the lead
+/// cherry-picked it) is not merged again, and a member in a separate clone
+/// gets the line's head from the team folder.
+#[test]
+fn a_cherry_picked_predecessor_on_the_line_is_not_merged_again() {
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let (lead, dev) = stage_repo(root.path());
+        git_in(&lead, &["checkout", "-q", "-b", "line"]);
+        let other = root.path().join("dev2");
+        git_in(root.path(), &["clone", "-q", &lead.display().to_string(), &other.display().to_string()]);
+        git_in(&other, &["config", "user.name", "Zerus Test"]);
+        git_in(&other, &["config", "user.email", "test@example.com"]);
+        git_in(&other, &["checkout", "-q", "-b", "w1", "origin/line"]);
+        std::fs::write(other.join("w1.txt"), "w1\n").unwrap();
+        git_in(&other, &["add", "-A"]);
+        git_in(&other, &["commit", "-q", "-m", "w1"]);
+        let w1 = git_in(&other, &["rev-parse", "HEAD"]);
+        // The lead cherry-picks it: the line holds the change, not the commit.
+        git_in(&lead, &["fetch", "-q", &other.display().to_string(), "w1"]);
+        git_in(&lead, &["cherry-pick", &w1]);
+        let mut team = stage_team(&lead, &dev, "none", &|_| super::super::super::catalog::builtin());
+        team.settings.base_branch = "line".into();
+        let mut dev2 = team.member("dev").unwrap().clone();
+        dev2.id = "dev2".into();
+        dev2.folder = MemberFolder::Clone;
+        dev2.directory = other.display().to_string();
+        team.members.push(dev2);
+        team.tasks.push(Task {
+            id: 3,
+            title: "w1".into(),
+            assignee: "dev2".into(),
+            status: TaskStatus::Accepted,
+            attempts: vec![Attempt { n: 1, member: "dev2".into(), state: AttemptState::Reported, folder_head: w1.clone(), folder_branch: "w1".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        team.task_mut(1).unwrap().deps = vec![Dependency { task: 3, kind: DependencyKind::Hard }];
+        let step = prepare_dependencies(&team, 1, "dev").expect("a step");
+        assert!(matches!(step.result.as_str(), "done" | "skipped"), "{step:?}");
+        assert!(!step.reason.contains("#3 ("), "the cherry-picked commit is on the line: {step:?}");
+        assert!(dev.join("w1.txt").exists(), "the line brought the change");
+    });
+}

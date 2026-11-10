@@ -670,3 +670,28 @@ fn the_tick_reads_an_old_cached_profile_again() {
     assert!(!steps.iter().any(|step| matches!(step, Step::ModeCheck)), "{steps:?}");
 }
 
+
+/// Task #13 (team ede724c4, owner 2026-11-10): "Keep the settings as they
+/// are" (working mode none) at Create team is the owner's Keep: the playbook
+/// and the working-mode block do not ask about the settings again.
+#[test]
+fn create_with_working_mode_none_does_not_ask_again() {
+    let dir = binary_repository();
+    let (mut team, _) = ops::create(
+        "t270",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"}}),
+    )
+    .unwrap();
+    ops::apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(super::super::model::Draft { revision: 1, ..Default::default() });
+    ops::apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"working_mode":"none"}}), &Actor::Human, &BTreeSet::new(), &mut Vec::new())
+        .unwrap();
+    ops::apply(&mut team, "draft", &json!({"action":"create","approve":true}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert!(team.working_mode.is_empty(), "nothing is applied: {}", team.working_mode);
+    assert!(team.playbook.as_ref().is_none_or(|playbook| playbook["mode"] != "none"), "{:?}", team.playbook);
+    assert_eq!(kept(&team).and_then(|kept| kept["preset"].as_str()), Some(SHARED_FOLDER));
+    assert!(cached_disagreement(&team).is_none());
+    let breaches = super::super::playbook::breaches(&team);
+    assert!(!breaches.iter().any(|breach| breach.rule == "a"), "{:?}", breaches.iter().map(|breach| breach.title.clone()).collect::<Vec<_>>());
+}

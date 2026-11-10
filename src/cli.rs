@@ -717,8 +717,8 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             }));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if args.get(guarded_at).is_some_and(|a|a=="effort")
-            || (args.get(guarded_at).is_some_and(|a|a=="__state")&&args.get(guarded_at+1).is_some_and(|a|a=="effort")) {
+        if args.get(guarded_at).is_some_and(|a|a=="effort"||a=="settings")
+            || (args.get(guarded_at).is_some_and(|a|a=="__state")&&args.get(guarded_at+1).is_some_and(|a|a=="effort"||a=="settings")) {
             state::remember_picker_caller_machine(&config,expected);
         }
         args.drain(..2);
@@ -828,9 +828,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         }
         local_sessions()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if command=="effort" {state::remember_picker_caller_machine(&config,&reference.machine);}
+        if command=="effort"||command=="settings" {state::remember_picker_caller_machine(&config,&reference.machine);}
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let effort_name=if command=="effort" {
+        let effort_name=if command=="effort"||command=="settings" {
             Some(state::resolve_effort_reference(&reference).map_err(|e|Error::new(1,e))?)
         } else {None};
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1562,7 +1562,7 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
     };
     local_sessions()?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if command=="effort" {
+    if command=="effort"||command=="settings" {
         return state::resolve_effort_label(name,label_guard(command,args)).map_err(|refusal| {
             if let Some(value)=refusal.value.filter(|_|args.iter().any(|arg|arg=="--json")) {println!("{value}");}
             Error::new(refusal.code,refusal.text)
@@ -1581,7 +1581,7 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
 /// after it are the command's own (a message, a new name, a path).
 fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if command=="effort" {return select_effort_session(args);}
+    if command=="effort"||command=="settings" {return select_picker_session(command,args);}
     let Some((at, id)) = session_id_flag(command, args)? else {
         return Ok(args.to_vec());
     };
@@ -1615,8 +1615,8 @@ fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn select_effort_session(args: &[String]) -> Result<Vec<String>> {
-    let Some((at, id)) = session_id_flag("effort", args)? else {
+fn select_picker_session(command: &str, args: &[String]) -> Result<Vec<String>> {
+    let Some((at, id)) = session_id_flag(command, args)? else {
         return Ok(args.to_vec());
     };
     let name =

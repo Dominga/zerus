@@ -9,8 +9,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-// Original ID Effort custody; the borrowed facade and Settings admission stay
-// separate. Legacy controllers keep their existing native behavior.
+// Original ID Effort/Settings custody. The borrowed facade remains separate;
+// legacy controllers keep their existing native behavior.
 #[cfg(unix)]
 #[allow(dead_code)]
 mod picker_scope;
@@ -976,6 +976,11 @@ fn reacted() {
 /// the agent reacted to the last of them and is back at its empty prompt.
 /// Otherwise input stays blocked until a native event, as for sent text.
 fn mark_unconfirmed(record: &mut Value) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        let _ = picker_refuse::<()>("Legacy failure writes are forbidden in the original picker keeper".into());
+        return;
+    }
     let (sent, unread) = ATTEMPT_KEYS.with(|keys| keys.replace((false, false)));
     if !sent || (!unread && input::checked_terminal(record, true).is_ok()) {
         return;
@@ -1845,6 +1850,8 @@ fn claude_change(name: &str, request: &Request, current: &Settings) -> Result<()
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {return picker_refuse("A picker keeper cannot enter another public controller".into());}
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs effort <session> --json (JSON from stdin)".into());
     }
@@ -2033,6 +2040,10 @@ fn apply_settings(
     receipt_path: &Path,
     receipt: &mut Value,
 ) -> Result<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        return picker_refuse("Legacy Settings application is forbidden in the original picker keeper".into());
+    }
     // The lock is the session's own, keyed by its verified record (#1437
     // review); the record and its terminal are checked once it is held.
     let owner = input::checked_settings(name, &request.expected_run_id, &request.expected_conversation_id)?;
@@ -2111,6 +2122,8 @@ fn apply_settings(
 }
 
 pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {return picker_refuse("A picker keeper cannot enter another public controller".into());}
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs settings <session> --json (JSON from stdin)".into());
     }
@@ -2141,9 +2154,14 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
     }
     let name = &args[0];
     let digest = format!("{:x}", Sha256::digest(&bytes));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(result) = picker_scope::front_settings(name, &bytes) { return result; }
     let receipt_path = absolute_root()?
         .join("settings_receipts")
         .join(format!("{id}.json"));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let _guard = Guard::exclusive(storage::lock_file(&root().join(".lock"))?).map_err(|e|e.to_string())?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _guard = lock(None)?;
     if receipt_path.exists() {
         let text = fs::read_to_string(&receipt_path).map_err(|e| e.to_string())?;
@@ -2156,6 +2174,24 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         }
         println!("{text}");
         return Ok(0);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if session_id::selected().is_none() {
+            super::resolve_effort_label(name, super::LabelGuard::Given {
+                run:request.expected_run_id.clone(),conversation:request.expected_conversation_id.clone()
+            }).map_err(|error|error.text)?;
+        }
+        let original=storage::read_metadata(name)?;
+        if storage::in_id_layout(&original) {return Err("Session moved into the ID layout; refresh before changing settings".into());}
+        session_id::take_deferred(name);
+        rename::recover_locked()?;
+        rename::sync_legacy_locked()?;
+        worktree_lock::recover_locked();
+        let current=storage::read_metadata(name)?;
+        if storage::in_id_layout(&current) || !picker_scope::same_target(&original,&current) {
+            return Err("Original legacy Settings target changed during recovery".into());
+        }
     }
     // zerus-ucck P3c: the request's identities select among sessions that
     // share the label.
@@ -2265,6 +2301,10 @@ pub(super) fn pending_applies(record: &Value) -> bool {
 }
 
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        return picker_refuse("Legacy pending application is forbidden in the original picker keeper".into());
+    }
     terminating::check_mutation(&record)?;
     if !pending_applies(&record) {
         return Ok(record);

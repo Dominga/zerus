@@ -1,5 +1,5 @@
-//! The original ID input scope and its owned Effort controller. The borrowed
-//! facade retains its Cut A contract; Settings is still unadmitted here.
+//! The original ID input scope and its owned Effort/Settings controllers.
+//! The borrowed facade retains its Cut A contract.
 //!
 //! The fixed driver reuses the SAME native/process/pane/panel checks and raw
 //! request receipt rules. Borrowed callbacks remain trusted Rust call sites,
@@ -10,9 +10,9 @@ use super::*;
 use crate::state::{
     repositories::directory::Directory,
     storage::{
+        Guard, ID_RECORD_BYTES,
         native_domain::{Fresh, InputKind, KindProof},
         owner_transfer::input_domain::Input,
-        Guard, ID_RECORD_BYTES,
     },
 };
 use std::os::unix::fs::{FileExt, MetadataExt};
@@ -41,6 +41,11 @@ pub(super) fn custodian_entry() -> Result<i32> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn front(name: &str, raw: &[u8]) -> Option<Result<i32>> {
     driver::front(name, raw)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn front_settings(name: &str, raw: &[u8]) -> Option<Result<i32>> {
+    driver::front_settings(name, raw)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

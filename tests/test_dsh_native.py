@@ -843,6 +843,45 @@ class NativeHarness(unittest.TestCase):
             self.assertEqual(after['selection'], before['selection'])
             self.assertEqual(after['page']['records'], before['page']['records'])
 
+    def test_id_settings_preserves_original_session_default_and_no_model_calls(self):
+        calls = self.root / 'holds' / 'SETTINGS_MODEL_STREAMS'
+        before_control = calls.read_bytes() if calls.exists() else b''
+        control = self.create()
+        self.cli('send', control, self.payload(control, text='Settings stream counter positive control', attachments=[]))
+        self.wait(lambda: (value.get('reply_id') and value['phase'] == 'idle')
+                  if (value := self.cli('inspect', control)) else False)
+        self.assertGreater(len(calls.read_bytes()), len(before_control),
+                           'the no-model-call counter must observe a real inference stream')
+        a, b = self.create(), self.create()
+        defaults = self.rpc('catalog')['default']
+        original = self.rpc('inspect', {'sessionId': a['conversation_id']})
+        before = calls.read_bytes()
+        reference = subprocess.run([str(HGS), 'reference', a['name'], '--json'],
+                                   env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)
+        self.assertEqual(reference.returncode, 0, reference.stdout + reference.stderr)
+        uri = json.loads(reference.stdout)['uri']
+        self.assertTrue(uri.startswith('zerus://session?'))
+        for selector, model, effort in (([a['name'], '--session-id', a['session_id']], 'test-b', 'off'),
+                                        ([uri], 'test-a', 'high')):
+            with self.subTest(selector=selector):
+                request = self.payload(a, model='hgs-test/' + model, effort=effort)
+                result = subprocess.run([str(HGS), 'settings', *selector, '--json'],
+                                        input=json.dumps(request), env=self.env, cwd=REPO,
+                                        text=True, capture_output=True, timeout=35)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)['scope'], 'session')
+                selected = self.cli('inspect', a)
+                self.assertEqual((selected['session_id'], selected['conversation_id'], selected['run_id']),
+                                 (a['session_id'], a['conversation_id'], a['run_id']))
+                self.assertEqual((selected['model'], selected['effort']), (model, effort))
+                self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
+                self.assertEqual(self.rpc('catalog')['default'], defaults)
+                current = self.rpc('inspect', {'sessionId': a['conversation_id']})
+                self.assertEqual(current['generation'], original['generation'])
+                # Native selection events are legitimate; inference is forbidden.
+                self.assertEqual(calls.read_bytes(), before,
+                                 'Settings invoked the private model stream')
+
     def test_model_settings_do_not_change_default_or_other_session(self):
         a, b = self.create(), self.create()
         before = self.rpc('catalog')['default']

@@ -75,7 +75,18 @@ pub(super) fn cut_write() -> Result<()> {
     Ok(())
 }
 
+/// The fixed keeper already owns its original writer. Ordinary I/O here
+/// would reacquire it or bypass the post-staging source/lifeline fence.
+fn refuse_picker_io() -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        return effort::picker_refuse("Ordinary storage I/O is forbidden in the original picker keeper".into());
+    }
+    Ok(())
+}
+
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
+    refuse_picker_io()?;
     let parent = path.parent().ok_or("cannot write file without parent")?;
     cut_write()?;
     private_dir(parent)?;
@@ -93,6 +104,7 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
 pub(super) type Guard = crate::platform::FileLock;
 
 pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
+    refuse_picker_io()?;
     let default = root().join(".lock");
     let path = path.unwrap_or(&default);
     private_dir(path.parent().ok_or("invalid lock path")?)?;
@@ -546,6 +558,7 @@ pub(super) fn own_path(record: &Value) -> Result<PathBuf> {
 }
 
 pub(super) fn write(record: &mut Value) -> Result<()> {
+    refuse_picker_io()?;
     record["updated"] = json!(now());
     let (path, by_id) = write_path(record)?;
     atomic_record(&path, record)?;

@@ -33,6 +33,7 @@
 //! the I/O lock. Startup reads and all token checkpoints run off main. The exit
 //! path waits at most 500 ms before independently flushing draft and layout.
 
+pub mod adoption_dialog;
 pub mod clones;
 pub mod folders;
 mod legacy_projects;
@@ -148,6 +149,7 @@ struct Hub {
     recovery_seen: Option<(String, bool)>,
     recovery_due: Option<String>,
     presentation_due: bool,
+    adoption: Option<adoption_dialog::Context>,
     catalog: Option<swarm_dialog::Context>,
     legacy: Option<legacy_projects::Context>,
     legacy_report: Option<legacy_projects::Report>,
@@ -1366,6 +1368,9 @@ impl Organization {
             }
             return;
         }
+        if self.adoption_pass() {
+            return;
+        }
         if self.catalog_pass() {
             return;
         }
@@ -2098,6 +2103,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod adoption_dialog_cases;
     mod drive_folders;
     mod legacy_projects;
     mod remote_windows_folders;

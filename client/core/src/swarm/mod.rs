@@ -17,6 +17,7 @@
 //! Inbox and default markers against a concrete project, causal heads) is
 //! resolved by `hgs swarm apply` and the replica (src/swarm/model.rs:126-201,
 //! src/swarm/catalog.rs:369-394), never here.
+pub mod adoption;
 pub mod conflicts;
 pub mod connection;
 pub mod dialog;

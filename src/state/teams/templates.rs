@@ -2094,6 +2094,99 @@ pub(crate) struct Outcome {
     /// Task 85: one result per test from the run's report (CTest's JUnit,
     /// VSTest's TRX, a project template's declared report); None without one.
     pub report: Option<super::run_results::Report>,
+    /// Task #34 (team ede724c4): what a cargo test output said of its test
+    /// binaries, read from the whole output before the tail cut it; None for
+    /// an output with no cargo test line.
+    pub tests: Option<CargoTests>,
+}
+
+/// Task #34: a cargo test output's binaries and their results.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CargoTests {
+    /// "Running ..." and "Doc-tests ..." lines: the test binaries started.
+    pub binaries: usize,
+    /// "test result:" lines: the binaries that reported.
+    pub results: usize,
+    pub passed: u64,
+    pub failed: u64,
+    pub ignored: u64,
+    pub filtered: u64,
+    /// The last binary started, to name one that never reported.
+    pub last_binary: String,
+}
+
+impl CargoTests {
+    /// One line for the end of the tail, where a reader looks.
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "Tests: {} passed, {} failed, {} ignored, {} filtered out, from {} of {} test binaries",
+            self.passed, self.failed, self.ignored, self.filtered, self.results, self.binaries
+        )
+    }
+
+    /// Why a run that exited 0 did not test anything, if it did not: no test
+    /// matched (or ran), or a binary started and never reported (the output
+    /// was cut or the binary stopped).
+    pub(crate) fn no_success(&self) -> Option<String> {
+        if self.results < self.binaries {
+            let missing = self.binaries - self.results;
+            return Some(format!(
+                "{missing} of {} test binaries reported no result (the last started: {}): the output was cut or the binary stopped",
+                self.binaries,
+                if self.last_binary.is_empty() { "unknown" } else { self.last_binary.as_str() }
+            ));
+        }
+        if self.results == 0 {
+            return Some("the output ended before any test binary reported".into());
+        }
+        if self.passed + self.failed == 0 {
+            return Some(if self.filtered > 0 {
+                format!("no test matched the filter: 0 ran, {} filtered out", self.filtered)
+            } else {
+                format!("no test ran: 0 passed, 0 failed{}", if self.ignored > 0 { format!(", {} ignored", self.ignored) } else { String::new() })
+            });
+        }
+        None
+    }
+}
+
+/// Task #34: the cargo test lines of an output, or None when it has none.
+pub(crate) fn cargo_tests(output: &str) -> Option<CargoTests> {
+    let mut tests = CargoTests::default();
+    let mut seen = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(binary) = trimmed.strip_prefix("Running ").or_else(|| trimmed.strip_prefix("Doc-tests ")) {
+            // cargo's "Running unittests src\main.rs (target\debug\deps\hgs-....exe)".
+            if trimmed.starts_with("Doc-tests ") || (binary.ends_with(')') && binary.split_once(" (").is_some_and(|(_, path)| path.contains("deps"))) {
+                tests.binaries += 1;
+                tests.last_binary = binary.split(" (").next().unwrap_or(binary).trim().to_owned();
+                seen = true;
+            }
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("test result: ") else { continue };
+        seen = true;
+        tests.results += 1;
+        for part in rest.split(';') {
+            let words: Vec<&str> = part.split_whitespace().collect();
+            let number = |at: usize| words.get(at).and_then(|word| word.parse::<u64>().ok()).unwrap_or(0);
+            // "ok. 3 passed", " 0 failed", " 1 ignored", " 0 measured", " 9 filtered out"
+            let (count, label) = match words.as_slice() {
+                [_, _, label, ..] if words[0].ends_with('.') => (number(1), *label),
+                [_, label, ..] => (number(0), *label),
+                _ => continue,
+            };
+            match label {
+                "passed" => tests.passed += count,
+                "failed" => tests.failed += count,
+                "ignored" => tests.ignored += count,
+                "filtered" => tests.filtered += count,
+                _ => {}
+            }
+        }
+    }
+    seen.then_some(tests)
 }
 
 /// #717: the failing test names an output names, and a bounded excerpt around
@@ -2293,6 +2386,13 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, super::super::build_cache_server::RESTARTED_BEFORE_NOTE), TAIL_BYTES);
     }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // Task #34 (team ede724c4): a cargo test that exited 0 without one test
+    // binary started tested nothing either.
+    if plan.template == "cargo-test" && outcome.exit == Some(0) && !outcome.timed_out && outcome.tests.is_none() {
+        outcome.exit = Some(1);
+        outcome.error = "the output ended before any test binary ran: no test ran".into();
+        outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, outcome.error), TAIL_BYTES);
+    }
     if !cache.note.is_empty() {
         outcome.tail = last_chars(&format!("{}
 {}", cache.note, outcome.tail), TAIL_BYTES);
@@ -2486,15 +2586,40 @@ pub(crate) fn run_tree(command: &mut Command, timeout: Duration, stdin: Option<V
         tail.push_str(&stderr);
     }
     let (failures, excerpt) = failures_in(&tail);
+    let mut exit = status.and_then(|status| status.code()).filter(|_| !timed_out);
+    let mut error = if timed_out { format!("the command did not finish in {} s and was stopped", timeout.as_secs()) } else { String::new() };
+    // Task #34 (team ede724c4): a cargo test run is read whole, before the
+    // tail cuts it (stdout, where cargo prints the results, comes before
+    // stderr's warnings and "Running" lines, so a long build left only those).
+    // An exit 0 that tested nothing is a failure naming why, and the counts
+    // end the tail.
+    let tests = cargo_tests(&tail);
+    if let Some(found) = &tests {
+        if exit == Some(0) {
+            if let Some(why) = found.no_success() {
+                exit = Some(1);
+                error = why;
+            }
+        }
+        if !tail.is_empty() && !tail.ends_with('\n') {
+            tail.push('\n');
+        }
+        tail.push_str(&found.summary());
+        if !error.is_empty() && exit == Some(1) {
+            tail.push('\n');
+            tail.push_str(&error);
+        }
+    }
     Outcome {
-        exit: status.and_then(|status| status.code()).filter(|_| !timed_out),
+        exit,
         tail: last_chars(&tail, TAIL_BYTES),
         failures,
         excerpt,
         ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         timed_out,
-        error: if timed_out { format!("the command did not finish in {} s and was stopped", timeout.as_secs()) } else { String::new() },
+        error,
         report: None,
+        tests,
     }
 }
 
@@ -2998,6 +3123,85 @@ mod tests {
         Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new(), cwd: None }
     }
 
+    /// Task #34 (team ede724c4): a cargo test output is read whole. A filter
+    /// that matches no test, a binary that started and never reported, or no
+    /// result at all is no success, named; a run that tested is one.
+    #[test]
+    fn a_cargo_test_output_says_whether_it_tested_anything() {
+        let running = "     Running unittests src\\main.rs (target\\debug\\deps\\hgs-290eb8275e13a9c3.exe)\n";
+        let none = cargo_tests(&format!("{running}\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4363 filtered out; finished in 0.02s\n")).unwrap();
+        assert_eq!((none.binaries, none.results, none.filtered), (1, 1, 4363));
+        assert_eq!(none.no_success().as_deref(), Some("no test matched the filter: 0 ran, 4363 filtered out"));
+        let ran = cargo_tests(&format!("{running}test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 4360 filtered out; finished in 1.20s\n")).unwrap();
+        assert_eq!((ran.passed, ran.failed, ran.ignored, ran.filtered), (3, 0, 1, 4360));
+        assert_eq!(ran.no_success(), None);
+        assert_eq!(ran.summary(), "Tests: 3 passed, 0 failed, 1 ignored, 4360 filtered out, from 1 of 1 test binaries");
+        // Several binaries: the filter matched in one of them only.
+        let one_of_two = cargo_tests(&format!("{running}test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.1s\n     Running tests\\voice_recovery_fixture.rs (target\\debug\\deps\\voice_recovery_fixture-5317950c3d6d713d.exe)\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n")).unwrap();
+        assert_eq!(one_of_two.no_success(), None);
+        // The output ends after a binary started: cut, or the binary stopped.
+        let cut = cargo_tests(&format!("{running}test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n     Running tests\\voice_recovery_fixture.rs (target\\debug\\deps\\voice_recovery_fixture-5317950c3d6d713d.exe)\n")).unwrap();
+        assert_eq!(cut.no_success().as_deref(), Some("1 of 2 test binaries reported no result (the last started: tests\\voice_recovery_fixture.rs): the output was cut or the binary stopped"));
+        assert!(cargo_tests(running).unwrap().no_success().unwrap().starts_with("1 of 1 test binaries reported no result"));
+        // A failed run counts its tests too; other outputs are not cargo tests.
+        let failed = cargo_tests("test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2s\n").unwrap();
+        assert_eq!((failed.passed, failed.failed), (4, 1));
+        assert!(cargo_tests("   Compiling hgs v1.58.0\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3s\n").is_none());
+        assert!(cargo_tests("Running migration (step 2 of 3)\n").is_none(), "a program's own Running line is no test binary");
+    }
+
+    /// Task #34: through the run itself. cargo writes the results to stdout and
+    /// its "Running" lines to stderr; an exit 0 that tested nothing fails,
+    /// named, and the counts end the tail whatever the output before them.
+    #[test]
+    fn a_run_that_tested_nothing_fails_and_its_counts_end_the_tail() {
+        let run = |windows: &str, unix: &str| {
+            let plan = shell_plan(windows, unix);
+            run_tree(Command::new(&plan.program).args(&plan.argv), Duration::from_secs(60), None)
+        };
+        // A filter that matches no test (the lead's own "ok. 0 passed").
+        let none = run(
+            "echo running 0 tests&& echo test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4363 filtered out; finished in 0.01s&& echo      Running unittests src\\main.rs (target\\debug\\deps\\hgs-1.exe) 1>&2",
+            "echo 'running 0 tests'; echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4363 filtered out; finished in 0.01s'; echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2",
+        );
+        assert_eq!(none.exit, Some(1), "{none:?}");
+        assert_eq!(none.error, "no test matched the filter: 0 ran, 4363 filtered out");
+        assert!(none.tail.trim_end().ends_with("no test matched the filter: 0 ran, 4363 filtered out"), "{}", none.tail);
+        assert!(none.tail.contains("Tests: 0 passed, 0 failed, 0 ignored, 4363 filtered out, from 1 of 1 test binaries"), "{}", none.tail);
+        // The output ends after "Running": nothing reported (dev1's two runs).
+        let cut = run(
+            "echo      Running unittests src\\main.rs (target\\debug\\deps\\hgs-1.exe) 1>&2",
+            "echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2",
+        );
+        assert_eq!(cut.exit, Some(1), "{cut:?}");
+        assert!(cut.error.contains("reported no result") && cut.error.contains("src") && cut.error.contains("main.rs"), "{}", cut.error);
+        // A run that tested passes, with its counts at the end of the tail.
+        let ran = run(
+            "echo test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s&& echo      Running unittests src\\main.rs (target\\debug\\deps\\hgs-1.exe) 1>&2",
+            "echo 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s'; echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2",
+        );
+        assert_eq!(ran.exit, Some(0), "{ran:?}");
+        assert!(ran.tail.trim_end().ends_with("Tests: 2 passed, 0 failed, 0 ignored, 9 filtered out, from 1 of 1 test binaries"), "{}", ran.tail);
+        // Any other command is not judged.
+        let other = run("echo hello", "echo hello");
+        assert_eq!((other.exit, other.tests.is_none()), (Some(0), true));
+    }
+
+    /// Task #34: the cargo-test template that exited 0 with no test binary
+    /// started (the build's output only) fails, named.
+    #[test]
+    fn a_cargo_test_template_without_a_test_binary_fails() {
+        let dir = temp();
+        let mut plan = shell_plan("echo    Compiling hgs v1.58.0 1>&2", "echo '   Compiling hgs v1.58.0' >&2");
+        plan.template = "cargo-test".into();
+        let outcome = execute(&plan, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert_eq!(outcome.error, "the output ended before any test binary ran: no test ran");
+        let mut other = shell_plan("echo built", "echo built");
+        other.template = "cargo-build".into();
+        assert_eq!(execute(&other, dir.path(), Duration::from_secs(60), &[]).exit, Some(0), "another template is not judged");
+    }
+
     /// Task #35: team 33fbafeb's qt-build in a DeepSeek member's clone stopped
     /// with C1083 'Permission denied' on an object file while real-time
     /// scanning held it, and a cargo test with D8050. Such a build runs once
@@ -3024,7 +3228,18 @@ mod tests {
         assert!(outcome.tail.contains(&dir.path().display().to_string()), "the folder is named: {}", outcome.tail);
         std::fs::remove_file(dir.path().join("ran.txt")).unwrap();
         let d8050 = r"cl : Command line error D8050 : cannot execute 'C:\VC\c1.dll': failed to get command line into debug records";
-        let outcome = execute(&flaky("cargo-test", d8050), dir.path(), Duration::from_secs(60), &[]);
+        // Task #34: the passing cargo test reports its tests, as cargo does
+        // (results on stdout, "Running" on stderr); one that tests nothing fails.
+        let cargo = {
+            let (windows, unix) = (
+                format!("if exist ran.txt (echo test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out& echo      Running unittests src\\main.rs ^(target\\debug\\deps\\hgs-1.exe^) 1>&2 & exit 0) else (echo ran> ran.txt & echo {d8050} & exit 2)"),
+                format!("if [ -f ran.txt ]; then echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'; echo '     Running unittests src/main.rs (target/debug/deps/hgs-1)' >&2; exit 0; else echo ran > ran.txt; echo \"{d8050}\"; exit 2; fi"),
+            );
+            let mut plan = shell_plan(&windows, &unix);
+            plan.template = "cargo-test".into();
+            plan
+        };
+        let outcome = execute(&cargo, dir.path(), Duration::from_secs(60), &[]);
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(outcome.tail.contains("MSVC D8050"), "{}", outcome.tail);
         std::fs::remove_file(dir.path().join("ran.txt")).unwrap();

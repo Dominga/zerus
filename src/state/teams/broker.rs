@@ -851,6 +851,7 @@ fn outcome_of(value: &Value) -> super::templates::Outcome {
         failures: value["failures"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
         excerpt: value["excerpt"].as_str().unwrap_or_default().to_owned(),
         report: serde_json::from_value(value["report"].clone()).ok().flatten(),
+        tests: None,
     }
 }
 

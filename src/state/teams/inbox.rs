@@ -416,11 +416,18 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     if active {
         let ready = plan::dispatch_order(team, plan::ready(team));
         let outputs = InProgressOutputs::new(team);
+        let staged = super::stages::busy(team);
         for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
             let held = plan::held_ready(team, &member.id);
             let idle = member.starved_since.is_some()
                 || (!held.is_empty() && member.seen_activity == "idle" && member.session.is_some());
             if !idle {
+                continue;
+            }
+            // Task #24 (team ede724c4): the notice is current when it is sent.
+            // `starved_since` ends only on a later tick, so a member handed a
+            // task (or a stage) in this tick still carries it: it is not idle.
+            if has_open_work(team, &member.id) || staged.contains(&member.id.as_str()) {
                 continue;
             }
             let since = member
@@ -793,9 +800,23 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             ),
         });
     }
-    // U62 (#717): each test result is one card linking its record - suite,
+    // Task #24 (team ede724c4): a task's results are one item with its
+    // counts, the newest suite results and its records, not one per run; it
+    // is told again only when a new result arrives (the key names the newest).
+    let mut by_task: Vec<(u32, Vec<&TestNotice>)> = Vec::new();
+    for notice in team.test_notices.iter().rev() {
+        let Some(task) = notice.task else { continue };
+        match by_task.iter_mut().find(|(id, _)| *id == task) {
+            Some((_, list)) => list.push(notice),
+            None => by_task.push((task, vec![notice])),
+        }
+    }
+    for (task, list) in by_task.iter().take(20) {
+        items.push(test_results_item(team, *task, list));
+    }
+    // U62 (#717): a result for no task is one card linking its record - suite,
     // status, time, the submitter - never the log, which stays in the database.
-    for notice in team.test_notices.iter().rev().take(20) {
+    for notice in team.test_notices.iter().rev().filter(|notice| notice.task.is_none()).take(20) {
         items.push(Item {
             subagents: Value::Null,
             kind: "test_result",
@@ -1636,6 +1657,53 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
 
 /// What a Terminal-only request asks: its tool and title ("Edit: Apply these
 /// edits?").
+/// Task #24: whether `member` holds an open attempt now.
+fn has_open_work(team: &Team, member: &str) -> bool {
+    team.tasks.iter().any(|task| task.attempts.iter().any(|attempt| attempt.member == member && attempt.state.open()))
+}
+
+/// Task #24 (team ede724c4): one task's test results (newest first) as one
+/// item: how many runs passed and failed, each suite's newest status, and the
+/// records to read.
+fn test_results_item(team: &Team, task: u32, list: &[&TestNotice]) -> Item {
+    let newest = list[0];
+    let passed = list.iter().filter(|notice| notice.status == "passed").count();
+    let failed = list.iter().filter(|notice| notice.status == "failed").count();
+    let other = list.len() - passed - failed;
+    let mut suites: Vec<(&str, &str)> = Vec::new();
+    for notice in list {
+        if !suites.iter().any(|(suite, _)| *suite == notice.suite) {
+            suites.push((notice.suite.as_str(), notice.status.as_str()));
+        }
+    }
+    let counts = if other > 0 { format!("{passed} passed, {failed} failed, {other} other") } else { format!("{passed} passed, {failed} failed") };
+    let latest: Vec<String> = suites.iter().map(|(suite, status)| format!("{suite} {status}")).collect();
+    let title = team.task(task).map(|found| format!(" {}", found.title)).unwrap_or_default();
+    let records: Vec<String> = list
+        .iter()
+        .take(10)
+        .map(|notice| {
+            let flags = super::test_results::flag_text(&notice.flags, notice.recorded_seconds, notice.duration_ms);
+            let reused = if notice.reused_from.is_empty() { String::new() } else { format!(", reused from {}", notice.reused_from) };
+            let flags = if flags.is_empty() { String::new() } else { format!(": {flags}") };
+            format!("{} {} in {} s, record {}{reused}{flags}", notice.suite, notice.status, notice.duration_ms / 1000, notice.record)
+        })
+        .collect();
+    let more = if list.len() > records.len() { format!("\n{} older run(s) in the task's records.", list.len() - records.len()) } else { String::new() };
+    Item {
+        subagents: Value::Null,
+        kind: "test_result",
+        key: format!("test_results:{task}:{}", newest.record),
+        task: Some(task),
+        member: newest.asked_by.clone(),
+        since: newest.at,
+        summary: summary(&format!("#{task}{title}: {} test run(s), {counts}; newest per suite: {}", list.len(), latest.join(", "))),
+        command: format!("{} | hgs team test --json", json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results","task":task})),
+        detail: format!("Runs, newest first:\n{}{more}\nOne record with its log: {} | hgs team test --json",
+            records.join("\n"), json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results","record":newest.record})),
+    }
+}
+
 pub(crate) fn terminal_title(asked: &PendingQuestion) -> String {
     let question = &asked.card["questions"][0];
     let header = question["header"].as_str().unwrap_or_default();
@@ -1951,6 +2019,27 @@ pub(crate) fn mark_told(told: &mut Vec<String>, named: &[Item], open: &std::coll
     }
 }
 
+/// Task #24 (team ede724c4): `mark_told` for an inbox, remembering the told
+/// items that close for `CLOSED_MEMORY_SECONDS`, so one that opens again
+/// unchanged meanwhile is not told again; an item open again is listed as
+/// told once more.
+pub(crate) fn mark_told_inbox(inbox: &mut Inbox, named: &[Item], open: &std::collections::BTreeSet<String>, now: f64) {
+    for key in open {
+        if !inbox.told.contains(key) && inbox.closed.iter().any(|closed| &closed.key == key && now - closed.at < CLOSED_MEMORY_SECONDS) {
+            inbox.told.push(key.clone());
+        }
+    }
+    let before = inbox.told.clone();
+    mark_told(&mut inbox.told, named, open);
+    for key in before.into_iter().filter(|key| !inbox.told.contains(key) && !key.starts_with("remind:")) {
+        inbox.closed.retain(|closed| closed.key != key);
+        inbox.closed.push(ClosedItem { key, at: now });
+    }
+    inbox.closed.retain(|closed| now - closed.at < CLOSED_MEMORY_SECONDS && !inbox.told.contains(&closed.key));
+    let extra = inbox.closed.len().saturating_sub(500);
+    inbox.closed.drain(0..extra);
+}
+
 /// The reports the owner's attention list shows: undecided for at least
 /// `remind_owner_minutes` (C4); 0 turns the list off.
 /// "Phase N" or "Phase N · Title", as the feed and the prototype name it.
@@ -2255,6 +2344,72 @@ fn broker_detail(config: &super::broker::Config) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Task #24 (team ede724c4): a task's test results are one inbox item with
+    /// its counts, each suite's newest status and its records; a result for no
+    /// task keeps its own card. A new result changes the item's key (it is
+    /// told again); nothing new keeps it.
+    #[test]
+    fn a_tasks_test_results_are_one_item_with_counts() {
+        let mut team = Team { id: "t".into(), name: "T".into(), status: TeamStatus::Running, ..Default::default() };
+        team.tasks.push(Task { id: 7, title: "Composer".into(), status: TaskStatus::Accepted, ..Default::default() });
+        let notice = |record: &str, suite: &str, status: &str, at: f64, task: Option<u32>| TestNotice {
+            record: record.into(), suite: suite.into(), status: status.into(), duration_ms: 12_000, asked_by: "merge queue".into(), at, task,
+            ..Default::default()
+        };
+        team.test_notices = vec![
+            notice("r1", "client-core", "failed", 10.0, Some(7)),
+            notice("r2", "client-web", "failed", 20.0, Some(7)),
+            notice("r3", "client-core", "passed", 30.0, Some(7)),
+            notice("r4", "hgs", "passed", 40.0, None),
+            notice("r5", "client-core", "failed", 50.0, Some(8)),
+        ];
+        let items = items(&team);
+        let tests: Vec<&Item> = items.iter().filter(|item| item.kind == "test_result").collect();
+        assert_eq!(tests.len(), 3, "#7, #8 and the result for no task: {tests:?}");
+        let seven = tests.iter().find(|item| item.task == Some(7)).unwrap();
+        assert_eq!(seven.key, "test_results:7:r3");
+        assert!(seven.summary.contains("#7 Composer: 3 test run(s), 1 passed, 2 failed"), "{}", seven.summary);
+        assert!(seven.summary.contains("newest per suite: client-core passed, client-web failed"), "{}", seven.summary);
+        assert!(seven.command.contains("\"action\":\"results\"") && seven.command.contains("\"task\":7"), "{}", seven.command);
+        assert!(seven.detail.contains("record r1") && seven.detail.contains("record r3"), "{}", seven.detail);
+        assert_eq!(seven.since, 30.0);
+        assert!(tests.iter().any(|item| item.task.is_none() && item.key == "test_result:r4"));
+        // A new result for #7: one item still, with a new key.
+        team.test_notices.push(notice("r6", "client-web", "passed", 60.0, Some(7)));
+        let again = super::items(&team);
+        let seven: Vec<&Item> = again.iter().filter(|item| item.kind == "test_result" && item.task == Some(7)).collect();
+        assert_eq!(seven.len(), 1);
+        assert_eq!(seven[0].key, "test_results:7:r6");
+        assert!(seven[0].summary.contains("4 test run(s), 2 passed, 2 failed"), "{}", seven[0].summary);
+    }
+
+    /// Task #24: an item told before that closes and opens again unchanged
+    /// (a member between turns, a rework's member idle for a moment) is not
+    /// new: the inbox never repeats an unchanged list; after the memory it is.
+    #[test]
+    fn an_item_that_closes_and_opens_again_is_not_told_twice() {
+        let item = |key: &str| Item { subagents: Value::Null, kind: "rework_waits", key: key.into(), task: Some(3), member: "dev".into(), since: 1.0,
+            summary: "#3 waits for its member, 5 min".into(), command: "reassign".into(), detail: String::new() };
+        let mut inbox = Inbox::default();
+        let open: std::collections::BTreeSet<String> = ["rework_waits:3:1".to_owned()].into();
+        mark_told_inbox(&mut inbox, &[item("rework_waits:3:1")], &open, 100.0);
+        assert!(inbox.knows("rework_waits:3:1", 100.0));
+        // A later message while the item is closed (its member idle a moment).
+        mark_told_inbox(&mut inbox, &[item("report:9")], &["report:9".to_owned()].into(), 200.0);
+        assert!(!inbox.told.contains(&"rework_waits:3:1".to_owned()), "closed: no longer listed as told");
+        // It opens again unchanged: known, so the next list does not name it.
+        assert!(inbox.knows("rework_waits:3:1", 300.0));
+        let both: std::collections::BTreeSet<String> = ["rework_waits:3:1".to_owned(), "report:9".to_owned()].into();
+        mark_told_inbox(&mut inbox, &[], &both, 300.0);
+        assert!(inbox.told.contains(&"rework_waits:3:1".to_owned()) && inbox.closed.is_empty(), "{inbox:?}");
+        // Closed for longer than the memory: told again when it returns.
+        mark_told_inbox(&mut inbox, &[], &Default::default(), 400.0);
+        assert!(!inbox.knows("rework_waits:3:1", 400.0 + CLOSED_MEMORY_SECONDS));
+        assert!(inbox.knows("rework_waits:3:1", 400.0 + CLOSED_MEMORY_SECONDS - 1.0));
+        mark_told_inbox(&mut inbox, &[], &Default::default(), 400.0 + CLOSED_MEMORY_SECONDS);
+        assert!(inbox.closed.is_empty(), "the memory is bounded by time");
+    }
     use super::super::ops::{self, Actor};
     use super::*;
     use std::collections::BTreeSet;

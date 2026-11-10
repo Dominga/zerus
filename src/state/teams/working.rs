@@ -423,10 +423,13 @@ pub(crate) fn cleanup(tx: &Transaction, team: &str, now: f64) -> anyhow::Result<
 /// characters, never the text: who, `normal` or `URGENT`, the newest message's
 /// id, the count when several wait, and where to read them. `header` keeps a
 /// hand-out's own first-line fields (`from`, `task`, `attempt`), shortened
-/// first when the line would be longer.
-pub(crate) fn doorbell(header: &str, list: &[Message]) -> String {
+/// first when the line would be longer. Task #24 (team ede724c4): `urgent` is
+/// whether a message this doorbell rings for is urgent, never an older urgent
+/// one still unread: a normal inbox list said URGENT every 2 minutes while
+/// one urgent question waited unread.
+pub(crate) fn doorbell(header: &str, list: &[Message], urgent: bool) -> String {
     let newest = list.last();
-    let urgency = if list.iter().any(Message::urgent) { "URGENT" } else { "normal" };
+    let urgency = if urgent { "URGENT" } else { "normal" };
     let id = newest.map(|message| message.id.as_str()).unwrap_or_default();
     let count = if list.len() > 1 { format!(" \u{b7} {} messages", list.len()) } else { String::new() };
     let tail = format!(" \u{b7} {urgency} \u{b7} {id}{count}] read it with hgs team inbox");

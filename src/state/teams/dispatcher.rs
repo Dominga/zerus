@@ -1560,7 +1560,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let lead_working = !lead_ready && mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
     if lead_ready || lead_working {
         let items = inbox::items(team);
-        let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        let new = items.iter().filter(|item| !team.inbox.knows(&item.key, now)).count();
         // A permission or question the free lead left unanswered is told once
         // more (owner, 2026-11-05).
         let again = if lead_ready { inbox::overdue(&items, &team.inbox.told, now).len() } else { 0 };
@@ -1575,7 +1575,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // draft team starts its lead alone.
     if active {
         for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
-            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.knows(&item.key, now));
             if untold && launching.insert(sub.id.clone()) {
                 steps.push(Step::Launch { member: sub.id.clone() });
             }
@@ -1592,7 +1592,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if !session_of(sub, seen).is_some_and(can_take_a_message) {
             continue;
         }
-        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
+        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.knows(&item.key, now)).count();
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (sub.inbox.told_at == 0.0 || now - sub.inbox.told_at >= interval) {
             steps.push(Step::SubInbox { member: sub.id.clone() });
@@ -9567,7 +9567,9 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
     let team = &fresh;
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let items = inbox::items(team);
-    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
+    // Task #24 (team ede724c4): an item told before that closed and opened
+    // again unchanged is not new.
+    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.knows(&item.key, now())).cloned().collect();
     let again = inbox::overdue(&items, &team.inbox.told, now());
     // Task 112: what the tick saw may have been decided since (a report
     // accepted, a member back from its limit): nothing new now, nothing told.
@@ -9605,7 +9607,7 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
         for item in &again {
             team.inbox.told.push(format!("remind:{}", item.key));
         }
-        inbox::mark_told(&mut team.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut team.inbox, &new, &open, now());
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));
         Ok(())
@@ -9618,7 +9620,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
     let session = sub.session.clone().context("the sub-lead has no session")?;
     let new: Vec<inbox::Item> =
-        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).collect();
+        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.knows(&item.key, now())).collect();
     anyhow::ensure!(!new.is_empty(), "no new inbox items");
     let outcome = super::doorbell::post_and_ring(store, &team.id, member, &session, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus",
         inbox::urgency(new.iter()), &inbox::text(team, &new, now()));
@@ -9630,7 +9632,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
         let open: BTreeSet<String> = inbox::items_for(team, &member).into_iter().map(|item| item.key).collect();
         let role = team.role_of(&member);
         let Some(sub) = team.members.iter_mut().find(|found| found.id == member) else { return Ok(()) };
-        inbox::mark_told(&mut sub.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut sub.inbox, &new, &open, now());
         sub.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":new.len(),"member":role})));
         Ok(())

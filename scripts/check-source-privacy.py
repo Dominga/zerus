@@ -14,6 +14,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SYNTHETIC_USERS = {'example', 'user', 'test', 'test user', 'remote', 'alice', 'bob'}
 HOME_PATH = re.compile(r'/(?:Users|home)/([^/"\'`\n<>]+)(?:/|["\'`])')
 PRIVATE_KEY = re.compile(rb'-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----')
+# The secret scanners' shared vectors hold a PEM header as a whole JSON string,
+# with no key after it, so each scanner proves it finds one. CodeLore keeps a
+# copy pinned by hash. A header followed by anything else there still counts.
+SECRET_VECTORS = 'tests/fixtures/secret-scan-vectors.json'
+BARE_PEM_HEADER = re.compile(rb'"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"')
+
+
+def private_key_material(name, data):
+    """Whether these bytes hold private key material (a bare vector header is none)."""
+    found = len(PRIVATE_KEY.findall(data))
+    if name == SECRET_VECTORS:
+        found -= len(BARE_PEM_HEADER.findall(data))
+    return found > 0
 EMAIL = re.compile(r'(?<![\w.+-])[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,}')
 # The owner explicitly approved this public maintainer address for AUR/Git.
 PUBLIC_CONTACTS = {'ufna@ufna.dev'}
@@ -89,7 +102,7 @@ def main():
         if path.name in {'.env', 'id_rsa', 'id_ed25519', 'credentials.json', 'auth.json'}:
             problems.append((name, 0, 'credential filename'))
         data = path.read_bytes()
-        if PRIVATE_KEY.search(data):
+        if private_key_material(name, data):
             problems.append((name, 0, 'private key material'))
         # Compressed image bytes can accidentally resemble paths/email addresses.
         # Binary assets need a separate metadata/visual audit.

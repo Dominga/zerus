@@ -291,7 +291,7 @@ mod tests {
         )
         .unwrap();
         let request = json!({"schema_version":1,"request_id":"r","name":"opencode/p/s",
-            "conversation_id":"ses_1","directory":"/work/p","agent_home":"/home/u","preview":true});
+            "conversation_id":"ses_1","directory":"/work/p","agent_home":"/home/user","preview":true});
         let bind = h.bind_call(&request);
         assert_eq!(bind.args[3..], ["account", "bind-existing", "native-opencode", "--json"]);
         assert_eq!(bind.stdin.as_deref(), Some(request.to_string().as_bytes()));

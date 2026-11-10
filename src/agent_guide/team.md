@@ -31,9 +31,7 @@ Scratch teams (the QA right). With the operate profile you run live checks in yo
 scratch teams: hgs team create --json from your session with a folder under the team's
 scratch root (its scratch_root, or <team folder>/.qa-scratch). You lead it, its plan needs
 no card, the parent's caps apply. Outside the root, without the right, or before the
-owner's standing rule, a create is refused. Zerus stops it when the task you held then is
-decided.
+owner's standing rule, a create is refused. Zerus stops it when that task is decided.
 
-A performance run checks the machine first, and a comparison alternates the
-binaries in rounds (hgs guide team-tests).
-Tauri shows archive stubs; open a report to read that task only.
+A performance run checks the machine first; a comparison alternates binaries in rounds
+(hgs guide team-tests). Tauri shows archive stubs; open a report to read that task only.

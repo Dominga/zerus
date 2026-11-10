@@ -8,7 +8,7 @@ const DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 fn list(transport: &str) -> Value {
     json!({"local": MACHINE, "machines": [
         {"alias": "ubuntu", "connection": {"transport": transport, "enabled": true,
-            "wsl": {"distribution": "Ubuntu", "user": "dev", "hgs_path": "/home/dev/.local/bin/hgs"}}},
+            "wsl": {"distribution": "Ubuntu", "user": "dev", "hgs_path": "/home/test/.local/bin/hgs"}}},
         {"alias": "studio", "connection": {"transport": "ssh"}}]})
 }
 fn ok(value: &Value) -> Exit {
@@ -312,7 +312,7 @@ fn a_file_is_proved_verified_locally_and_opened_only_with_the_same_proof() {
     assert_eq!(sent[0]["selection"]["agent_id"], "child");
     assert_eq!(
         sent[0]["selection"]["connection"]["hgs_path"],
-        "/home/dev/.local/bin/hgs"
+        "/home/test/.local/bin/hgs"
     );
     dialog.remember(&presets).unwrap();
     assert_eq!(

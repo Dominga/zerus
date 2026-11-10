@@ -441,7 +441,7 @@ mod tests {
         let profile = WslProfile {
             distribution: "Ubuntu".into(),
             user: "dev".into(),
-            hgs_path: "/home/dev/.local/bin/hgs".into(),
+            hgs_path: "/home/test/.local/bin/hgs".into(),
         };
         let wsl = Connection {
             transport: "wsl-local".into(),
@@ -458,13 +458,13 @@ mod tests {
         let json = serde_json::to_value(&wsl).unwrap();
         assert_eq!(json["transport"], "wsl-local");
         assert_eq!(json["wsl"]["distribution"], "Ubuntu");
-        assert_eq!(json["wsl"]["hgs_path"], "/home/dev/.local/bin/hgs");
+        assert_eq!(json["wsl"]["hgs_path"], "/home/test/.local/bin/hgs");
         assert_eq!(json["test_runner"], "linux");
         assert!(json.get("hostname").is_some());
         assert_eq!(json["port"], Value::Null);
         assert!(validate(&Connection { hostname: "peer.invalid".into(), ..wsl.clone() }).is_err());
         assert!(validate(&Connection { wsl: None, ..wsl.clone() }).is_err());
-        for hgs_path in ["", "relative/hgs", "//server/hgs", "/home/../hgs", "/home\t/hgs"] {
+        for hgs_path in ["", "relative/hgs", "//server/hgs", "/opt/../hgs", "/opt\t/hgs"] {
             let bad = WslProfile { hgs_path: hgs_path.into(), ..profile.clone() };
             assert!(validate(&Connection { wsl: Some(bad), ..wsl.clone() }).is_err(), "{hgs_path:?}");
         }

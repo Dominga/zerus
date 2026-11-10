@@ -460,25 +460,25 @@ mod tests {
             "machines": [{
                 "alias": "ubuntu", "enabled": true, "source": "local", "inherited": false,
                 "connection": {"transport": "wsl-local", "enabled": true, "test_runner": "linux",
-                    "wsl": {"distribution": "Ubuntu", "user": "dev", "hgs_path": "/home/dev/.local/bin/hgs"}}
+                    "wsl": {"distribution": "Ubuntu", "user": "dev", "hgs_path": "/home/test/.local/bin/hgs"}}
             }]
         })));
         let row = &state.view().machines[0];
         assert_eq!((row.transport.as_str(), row.test_runner.as_str()), ("wsl-local", "linux"));
-        assert_eq!(row.wsl.as_ref().unwrap(), &WslProfile { distribution: "Ubuntu".into(), user: "dev".into(), hgs_path: "/home/dev/.local/bin/hgs".into() });
+        assert_eq!(row.wsl.as_ref().unwrap(), &WslProfile { distribution: "Ubuntu".into(), user: "dev".into(), hgs_path: "/home/test/.local/bin/hgs".into() });
         assert!(row.origin.starts_with("Local WSL uses the explicit distribution"));
         state.start_resolve("ubuntu");
         state.finish_resolve("ubuntu", Ok(serde_json::json!({
             "alias": "ubuntu",
             "effective": {"transport": "wsl-local", "distribution": "Ubuntu", "user": "dev",
-                "hgs_path": "/home/dev/.local/bin/hgs", "service_policy": "existing-only"}
+                "hgs_path": "/home/test/.local/bin/hgs", "service_policy": "existing-only"}
         })));
         let effective = state.view().effective.unwrap();
         assert_eq!(
             (effective.transport.as_str(), effective.distribution.as_str(), effective.user.as_str(), effective.hgs_path.as_str()),
-            ("wsl-local", "Ubuntu", "dev", "/home/dev/.local/bin/hgs")
+            ("wsl-local", "Ubuntu", "dev", "/home/test/.local/bin/hgs")
         );
-        assert_eq!(effective.text, "WSL: Ubuntu, user dev\nHGS: /home/dev/.local/bin/hgs\nOpenCode: existing-only");
+        assert_eq!(effective.text, "WSL: Ubuntu, user dev\nHGS: /home/test/.local/bin/hgs\nOpenCode: existing-only");
         state.start_check("ubuntu");
         state.finish_check("ubuntu", Ok(serde_json::json!({"transport": "wsl-local", "ok": true, "distribution": "Ubuntu", "user": "dev", "hgs": "hgs 1.56.0"})));
         let check = state.view().check.unwrap();

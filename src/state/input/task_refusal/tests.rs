@@ -137,7 +137,7 @@ fn a_complete_synced_negative_permanently_reserves_the_uuid_and_never_rewrites()
         );
         assert_eq!(fs::read(f.file()).unwrap(), bytes);
         assert!(matches!(
-            super::super::existing(&f.file(), &changed.digest, &changed.name),
+            super::super::existing(&f.file(), &changed.digest, &changed.name, false),
             super::super::Existing::Unknown(_)
         ));
     }
@@ -257,7 +257,7 @@ fn restart_and_old_mtime_never_expire_a_tombstone_or_scan_other_receipts() {
     let writer = writer::test_open(root.path(), Instant::now() + Duration::from_secs(2)).unwrap();
     assert_eq!(lookup_locked(&writer, &scope()).unwrap(), refused(true));
     assert!(matches!(
-        super::super::existing(&path, &scope().digest, &scope().name),
+        super::super::existing(&path, &scope().digest, &scope().name, false),
         super::super::Existing::Unknown(_)
     ));
     assert_eq!(fs::read(path).unwrap(), bytes);

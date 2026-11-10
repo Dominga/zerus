@@ -539,6 +539,8 @@ mod native {
             // Task #43: why the app beside this hgs was not bound.
             if report.frontend.is_none() {
                 if let Some(reason) = crate::desktop::portable_frontend::last_refusal() {
+                    // Task #53: its fixed code, which the app logs and names.
+                    value["frontend_refusal_code"] = serde_json::json!(crate::desktop::portable_frontend::refusal_code(&reason));
                     value["frontend_refusal"] = serde_json::json!(reason);
                 }
             }

@@ -76,49 +76,6 @@ impl AppState {
     ) {
         let _ = self.live.notification_controls.set(setup);
     }
-    pub(crate) fn set_retained_import_source(
-        &self,
-        inputs: crate::desktop_service::retained_import::Inputs,
-    ) {
-        let _ = self.live.retained_import_source.set(inputs);
-    }
-
-    pub(crate) fn creation_capture(
-        &self,
-    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
-        self.live
-            .retained_import_source
-            .get()
-            .map(|inputs| inputs.creations.clone())
-    }
-
-    pub(crate) fn worktree_cache_capture(
-        &self,
-    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
-        self.live
-            .retained_import_source
-            .get()
-            .map(|inputs| inputs.worktree_cache.clone())
-    }
-
-    pub(crate) fn local_read_capture(
-        &self,
-    ) -> Option<Arc<zerus_client_core::migration::preload::Capture>> {
-        self.live
-            .retained_import_source
-            .get()
-            .map(|inputs| inputs.local_reads.clone())
-    }
-
-    pub(crate) fn draft_capture(
-        &self,
-    ) -> Option<Arc<zerus_client_core::migration::draft_preload::Capture>> {
-        self.live
-            .retained_import_source
-            .get()
-            .map(|inputs| inputs.drafts.clone())
-    }
-
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub fn set_desktop_responder(&self, responder: Arc<zerus_client_core::desktop::Responder>) {
         let _ = self.live.desktop_responder.set(responder);
@@ -231,8 +188,6 @@ mod live {
         pub(super) desktop_responder: OnceLock<Arc<zerus_client_core::desktop::Responder>>,
         pub(super) pending_read_source: OnceLock<crate::actions::Actions>,
         pub(super) notification_controls: OnceLock<crate::desktop_notification_controls::Setup>,
-        pub(super) retained_import_source:
-            OnceLock<crate::desktop_service::retained_import::Inputs>,
         service_projections: Mutex<Vec<crate::desktop_service::Projection>>,
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         service_activation: OnceLock<crate::desktop_service::activation::Sink>,
@@ -253,7 +208,6 @@ mod live {
                 creations: OnceLock::new(),
                 desktop_responder: OnceLock::new(),
                 pending_read_source: OnceLock::new(),
-                retained_import_source: OnceLock::new(),
                 service_projections: Mutex::new(Vec::new()),
                 notification_controls: OnceLock::new(),
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -526,9 +480,6 @@ mod live {
                         #[cfg(all(test, target_os = "linux"))]
                         mode_helpers: None,
                         notification_controls: self.notification_controls.get().cloned(),
-                        retained_sources: self.retained_import_source.get().cloned().and_then(
-                            crate::desktop_service::retained_import::Inputs::for_runtime_report,
-                        ),
                         projections: self
                             .service_projections
                             .lock()

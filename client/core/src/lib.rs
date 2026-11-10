@@ -57,7 +57,6 @@ pub mod macos_notify;
 pub mod maintenance;
 pub mod marks;
 pub mod menubar;
-pub mod migration;
 pub mod mobile;
 pub mod native_notice;
 pub mod next_source;

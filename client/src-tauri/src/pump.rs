@@ -763,10 +763,6 @@ impl Pump {
         self.wake(inner);
     }
 
-    pub fn runs_seeded(&self) -> bool {
-        self.lock().grouping.runs_seeded()
-    }
-
     pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
         self.lock().grouping.presentation_seeded()
     }
@@ -814,14 +810,6 @@ impl Pump {
         inner.grouping.seed_presentation(seed)?;
         self.wake(inner);
         Ok(())
-    }
-
-    /// Qt was read and parsed on the seed worker; merge only its bounded
-    /// run memory, without replacing layout changes made during that read.
-    pub fn seed_runs(&self, groups: &serde_json::Map<String, Value>) {
-        let mut inner = self.lock();
-        inner.grouping.seed_runs(groups);
-        self.wake(inner);
     }
 
     /// Read-only project membership for a bounded public-content reply. Search

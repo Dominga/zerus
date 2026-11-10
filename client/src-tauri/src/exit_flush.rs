@@ -186,10 +186,6 @@ impl ExitFlush {
 /// All quits the client originates come here. Waiting never blocks the run loop.
 pub(crate) fn quit_with_flush(app: &AppHandle, code: i32) {
     #[cfg(feature = "live")]
-    if let Some(session) = app.try_state::<crate::newsession::NewSession>() {
-        session.close_capture();
-    }
-    #[cfg(feature = "live")]
     if let Some(delays) = app.try_state::<crate::action_delay::Delays>() {
         delays.cancel_all(true);
     }

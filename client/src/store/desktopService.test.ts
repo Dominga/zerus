@@ -480,6 +480,16 @@ describe("notification ownership presentation", () => {
     const notice = ownershipNotice(refused("frontend_binding_unavailable", "binding"));
     expect(notice).toContain("Zerus could not take over its sessions (App binding)");
     expect(notice).not.toContain("not ready");
+    // Task #53 (owner, 2026-11-10, build 175): a missing binding the install
+    // could not record says why and the one step that fixes it.
+    const started = takeoverRefusal(refused("frontend_parent_not_beside", "ancestry"))!;
+    expect(started.check).toBe("Process ancestry");
+    expect(started.reason).toContain("started by another program");
+    expect(started.next).toBe("Close Zerus and start it from the Start menu or Explorer.");
+    expect(ownershipNotice(refused("frontend_parent_not_beside", "ancestry"))).toContain("Start menu or Explorer");
+    expect(takeoverRefusal(refused("frontend_record_timed_out", "binding"))!.reason).toContain("took too long");
+    for (const code of ["frontend_parent_gone", "frontend_ancestry_unverified", "frontend_cli_pin_changed", "frontend_cli_image_unreadable", "frontend_app_unreadable", "frontend_record_refused"])
+      expect(takeoverRefusal(refused(code, "binding"))!.reason, code).not.toContain(code);
     expect(takeoverRefusal(view({ native_recovery: true }))).toBeUndefined();
     expect(ownershipNotice(view({ native_recovery: true, status: undefined }))).toContain("not ready");
     expect(takeoverRefusal(view({ native_recovery: false, native_recovery_reason: { code: "frontend_binding_unavailable", check: "binding" } }))).toBeUndefined();

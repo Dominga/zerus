@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
-use zerus_client_core::settings::{QtStore, Settings};
+use zerus_client_core::settings::Settings;
 
 /// The identity that replaces Qt at the switch: only it seeds from Qt's
 /// store, once. The dev identity never does.
@@ -22,14 +22,6 @@ pub const EXIT_FLUSH: Duration = Duration::from_millis(750);
 
 /// The app's one settings store.
 pub struct Store(pub Settings);
-
-/// Qt's store to seed from, for this app identity.
-pub fn seed_source(identifier: &str, replay: bool) -> Option<QtStore> {
-    crate::identity::Identity::new(identifier)
-        .seeds_qt(replay)
-        .then(QtStore::here)
-        .flatten()
-}
 
 pub fn file(replay: bool) -> &'static str {
     if replay {
@@ -46,16 +38,7 @@ pub const ALWAYS_ON_TOP: &str = "workspace/alwaysOnTop";
 /// `settings-changed` with its key and new value, and Keep Zerus above other
 /// windows applies to the main window at once.
 pub fn open(app: &AppHandle, dir: &Path, replay: bool) -> Store {
-    let settings = Settings::open(
-        dir.join(file(replay)),
-        seed_source(
-            &{
-                use tauri::Manager;
-                app.state::<crate::identity::Identity>().bundle_id.clone()
-            },
-            replay,
-        ),
-    );
+    let settings = Settings::open(dir.join(file(replay)), None);
     // Natively drawn text (tray, menu bar) follows the language saved at startup.
     crate::native_text::configure(&settings.text("workspace/language"));
     let handle = app.clone();
@@ -202,16 +185,6 @@ pub async fn settings_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_switch_identity_seeds_from_qt() {
-        assert!(seed_source("dev.zerus.next", false).is_none());
-        assert!(seed_source("dev.zerus.next.phase2", false).is_none());
-        assert!(seed_source(SWITCH_IDENTITY, true).is_none());
-        if std::env::var_os("HOME").is_some() || std::env::var_os("APPDATA").is_some() {
-            assert!(seed_source(SWITCH_IDENTITY, false).is_some());
-        }
-    }
 
     #[test]
     fn replay_settings_use_their_own_store() {

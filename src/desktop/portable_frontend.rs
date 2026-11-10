@@ -559,6 +559,31 @@ pub(crate) fn last_refusal() -> Option<String> {
     REFUSAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
 }
 
+/// Task #53 (team ede724c4): the fixed code of a refusal `record` gave, for
+/// the app to log and to name its next step (task 180: the app shows and logs
+/// fixed codes, never a child's text). The reasons are this file's own.
+pub(crate) fn refusal_code(reason: &str) -> &'static str {
+    if reason.contains("agent-descended") {
+        "agent_descended_frontend_refused"
+    } else if reason.contains("is not the app beside this hgs") || reason.contains("no parent process") {
+        "frontend_parent_not_beside"
+    } else if reason.contains("the app that started this hgs is gone") {
+        "frontend_parent_gone"
+    } else if reason.contains("past the record's") {
+        "frontend_record_timed_out"
+    } else if reason.contains("the staged CLI's pin") {
+        "frontend_cli_pin_changed"
+    } else if reason.contains("this hgs's own image") || reason.contains("this hgs's image has no folder") {
+        "frontend_cli_image_unreadable"
+    } else if reason.contains("the parent's image") || reason.contains("the app's pin") || reason.contains("the app's digest") {
+        "frontend_app_unreadable"
+    } else if reason.contains("the ancestry") {
+        "frontend_ancestry_unverified"
+    } else {
+        "frontend_record_refused"
+    }
+}
+
 /// The app that started this process and the staged CLI, both pinned, with the
 /// ancestry that admitted them.
 /// A refusal names what failed: this CLI's image, the ancestry (with the hop
@@ -636,6 +661,30 @@ pub(crate) fn status(layout: &Layout) -> Option<(PathBuf, bool, bool)> {
 
 #[cfg(all(test, windows))]
 mod tests;
+
+/// Task #53: each refusal `record` gives maps to the fixed code the app logs.
+#[cfg(test)]
+#[test]
+fn every_creation_refusal_has_its_fixed_code() {
+    for (reason, code) in [
+        ("the ancestry: agent-descended frontend request refused: hop 3 (pwsh.exe) has HGS_SESSION in its environment", "agent_descended_frontend_refused"),
+        ("the parent's image C:/x/powershell.exe is not the app beside this hgs (C:/y/hgs-tray.exe)", "frontend_parent_not_beside"),
+        ("the ancestry: no parent process", "frontend_parent_not_beside"),
+        ("the last check: the app that started this hgs is gone", "frontend_parent_gone"),
+        ("the last check: past the record's 10 s deadline", "frontend_record_timed_out"),
+        ("the last check: the staged CLI's pin: changed", "frontend_cli_pin_changed"),
+        ("the staged CLI's pin (C:/h/hgs.exe): denied", "frontend_cli_pin_changed"),
+        ("this hgs's own image: denied", "frontend_cli_image_unreadable"),
+        ("the parent's image: denied", "frontend_app_unreadable"),
+        ("the last check: the app's pin: changed", "frontend_app_unreadable"),
+        ("the app's digest: timed out", "frontend_app_unreadable"),
+        ("the ancestry: initial ancestor metadata: denied", "frontend_ancestry_unverified"),
+        ("the last check: the ancestry: changed", "frontend_ancestry_unverified"),
+        ("something new", "frontend_record_refused"),
+    ] {
+        assert_eq!(refusal_code(reason), code, "{reason}");
+    }
+}
 
 #[cfg(test)]
 mod layout_tests {

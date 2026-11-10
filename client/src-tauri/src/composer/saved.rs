@@ -622,31 +622,6 @@ impl Composers {
     }
 }
 
-/// This run's G3 drafts capture (zerus-5wmh.66.5.2.1.2.1): its status and
-/// Retry in Saved drafts, in service mode or not. `None` for an identity or a
-/// replay that never captures.
-pub struct DraftCapture(
-    pub Option<std::sync::Arc<zerus_client_core::migration::draft_preload::Capture>>,
-);
-
-/// The capture's status, `None` when this run has no capture.
-#[tauri::command]
-pub fn draft_capture_status(
-    state: State<'_, DraftCapture>,
-) -> Option<zerus_client_core::migration::draft_preload::Status> {
-    state.0.as_ref().map(|capture| capture.status())
-}
-
-/// Queues the draft store's Retry job: a run whose capture lineage was not
-/// durable captures again; otherwise the waiting one-time import runs. A
-/// recorded outcome never changes.
-#[tauri::command]
-pub fn draft_capture_retry(state: State<'_, DraftCapture>) {
-    if let Some(capture) = &state.0 {
-        capture.request_retry();
-    }
-}
-
 /// One page of a Saved drafts section; `before` is the previous page's `next`.
 #[tauri::command]
 pub async fn saved_drafts(

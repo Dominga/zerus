@@ -1260,7 +1260,7 @@ pub fn sandbox_folder_problem(path: &Path) -> io::Result<Option<String>> {
     };
     Ok(Some(format!(
         "the DeepSeek sandbox needs full control of {} (missing {}); fix it for this folder with:\n  \
-         icacls \"{}\" /grant *{}:(OI)(CI)F{owner}",
+         icacls \"{}\" /grant \"*{}:(OI)(CI)F\"{owner}",
         path.display(),
         missing.join(" and "),
         path.display(),

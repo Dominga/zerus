@@ -1344,7 +1344,7 @@ results = { format = \"junit\", path = \"out/junit.xml\" }
         assert_eq!(record.status, "failed");
         assert_eq!(record.flags, vec!["environment".to_owned()], "one environment failure, never retried");
         assert!(record.excerpt.contains(super::super::environment::MARKER), "{}", record.excerpt);
-        assert!(record.excerpt.contains(&format!("icacls \"{}\" /setintegritylevel (OI)(CI)M", project.display())), "{}", record.excerpt);
+        assert!(record.excerpt.contains(&format!("icacls \"{}\" /setintegritylevel \"(OI)(CI)M\"", project.display())), "{}", record.excerpt);
         assert!(!project.join("ran.txt").exists(), "nothing ran");
         assert!(store.result_of("low").unwrap().is_some());
     }

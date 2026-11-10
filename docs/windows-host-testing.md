@@ -261,8 +261,15 @@ inside a session; ...` when the host cannot name it). `fork` and `resume` withou
 tab`). A launch with `-d`, `fork -d` and `resume -d` start their sessions from
 there without touching the console. The new session starts from this process's
 environment without the caller's session variables (`SESSION_CONTEXT` in
-`src/state/backend/host.rs`, which also drops Claude Code's `CLAUDECODE` mark), and
-a launch never passes on the caller's account profile.
+`src/state/backend/host.rs`, which also drops what Claude Code tells the commands
+it runs about its own session: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`,
+`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SESSION_ATTENDED`,
+`CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`), and
+a launch never passes on the caller's account profile. A session that kept
+`CLAUDE_CODE_CHILD_SESSION` would run as a child of the launching conversation:
+Claude Code then saves no transcript for it, so it cannot be resumed and reports
+no usage. Claude Code settings such as `CLAUDE_CODE_PROMPT_CACHE_TTL` are kept.
 
 | Keys | What happens |
 |---|---|

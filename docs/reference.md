@@ -2950,7 +2950,14 @@ set by the owner) is compacted the same way before a hand-out and before a
 crashed attempt goes back to it; a warm session or a small context is
 delivered at once. A failed compaction for a cold cache still delivers the
 task and tells the lead (`context_compact_failed` with reason `cold`); at the
-95% threshold a failure still makes the task wait for the lead, as before. A
+95% threshold a failure still makes the task wait for the lead, as before.
+Task #42 (team ede724c4): while that compaction runs (or any compact or clear
+Zerus runs for a hand-out: a task's U46 context step, a stage's, the clear
+before a changed start prompt), the member's doorbell and urgent interrupt
+wait. A DeepSeek host takes any message as consuming the compaction
+("cancelled") and an interrupt aborts it; on 2026-11-10 a lead's message rang
+20 s into the compaction before task 26 and the task went out on the cold
+context. A
 crashed attempt is not given back to a paused team, a paused phase, a paused or
 draining member or a held task, by the tick or by the sweep after an update; it
 waits, unconfirmed, and goes back on the first tick after the pause ends.

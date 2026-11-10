@@ -652,6 +652,11 @@ fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Opti
         // The delivery this tick already rings for everything unread.
         return None;
     }
+    // Task #42 (team ede724c4): an interrupt would abort the compaction or
+    // clear Zerus runs for the member's hand-out; it waits for that step.
+    if context_pending(team, member) {
+        return None;
+    }
     let found = found.filter(|found| found.live && !found.free && !found.asking)?;
     let turn = found.turn_started?;
     Some(Step::InterruptMessages {
@@ -744,6 +749,31 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
 /// the window those restarts are counted over.
 const RESTARTS_PER_HOUR: usize = 3;
 const RESTART_WINDOW: f64 = 3600.0;
+
+/// Task #42 (team ede724c4): whether Zerus runs a context action on `member`'s
+/// session for a hand-out now: the cold-context compaction before its next task
+/// (`context_compact` with a native request), a task hand-out waiting for its
+/// compact or clear (U46, the task's assignee), a stage hand-out's context
+/// action (#581) or the clear before a changed start prompt. A message sent
+/// meanwhile would end that action.
+pub(crate) fn context_pending(team: &Team, member: &Member) -> bool {
+    if member.context_compact.as_ref().is_some_and(|pending| !pending.request_id.is_empty()) {
+        return true;
+    }
+    if member.prompt_change.as_ref().is_some_and(|change| change.clear.is_some()) {
+        return true;
+    }
+    team.tasks.iter().any(|task| {
+        let handout = task.assignee == member.id
+            && task.waits.as_ref().is_some_and(|wait| wait.state == "waiting" && !wait.action.is_empty());
+        let stage = task
+            .pipeline_run
+            .as_ref()
+            .and_then(|pipeline| pipeline.open_run())
+            .is_some_and(|run| run.member == member.id && run.context.is_some());
+        handout || stage
+    })
+}
 
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
@@ -2248,6 +2278,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             _ => false,
         });
         if given || !super::doorbell::due(member, now) {
+            continue;
+        }
+        // Task #42 (team ede724c4): never while Zerus compacts or clears the
+        // member's context for a hand-out. A DeepSeek host treats any message
+        // as consuming the compaction ("cancelled"): on 2026-11-10 a lead's
+        // message rang dsh2 20 s into the compaction before task 26, which then
+        // went out on the uncompacted cold context. The message rings once the
+        // context step is settled (the hand-out itself rings for it).
+        if context_pending(team, member) {
             continue;
         }
         if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {

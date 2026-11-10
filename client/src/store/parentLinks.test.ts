@@ -15,13 +15,29 @@ const session = (n: number, parent?: number, extra: Partial<ViewRow> = {}, compu
     ...extra });
 
 describe("parent links on the desktop (zerus-sa9qn.9)", () => {
-  it("accepts only identified Claude, Codex or Kimi sessions on one computer", () => {
+  it("accepts identified sessions of every supported agent in both directions", () => {
+    for (const child of ["claude", "codex", "kimi", "dsh", "opencode"]) {
+      for (const parent of ["claude", "codex", "kimi", "dsh", "opencode"]) {
+        expect(nestable(session(1, undefined, { agent: child }), session(2, undefined, { agent: parent }))).toBe(true);
+      }
+    }
+  });
+
+  it("requires complete identities, one computer and different unarchived sessions", () => {
     expect(nestable(session(1), session(2))).toBe(true);
     expect(nestable(session(1), session(1))).toBe(false);
     expect(nestable(session(1), session(2, undefined, {}, "peer"))).toBe(false);
     expect(nestable(session(1), session(2, undefined, { session_id: undefined }))).toBe(false);
-    expect(nestable(session(1), session(2, undefined, { agent: "dsh" }))).toBe(false);
+    expect(nestable(session(1), session(2, undefined, { agent: "sh" }))).toBe(false);
+    expect(nestable(session(1, undefined, { agent: "dsh", run_id: undefined }), session(2))).toBe(false);
+    expect(nestable(session(1), session(2, undefined, { agent: "opencode", conversation_id: undefined }))).toBe(false);
     expect(nestable(session(1), session(2, undefined, { state: "archived" }))).toBe(false);
+  });
+
+  it("excludes descendants through mixed native and terminal parents", () => {
+    const rows = [session(1, undefined, { agent: "dsh" }), session(2, 1, { agent: "opencode" }),
+      session(3, 2), session(4, undefined, { agent: "opencode" })];
+    expect(candidatesAmong(rows[0], rows, () => MACHINE).map((s) => s.sessionId)).toEqual([id(4)]);
   });
 
   it("never offers the child itself or its own descendants as its parent", () => {

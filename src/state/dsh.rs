@@ -474,6 +474,7 @@ pub(crate) fn launch(
         println!("Create official dsh session {name} in {cwd}");
         return Ok(());
     }
+    let parent = parent_link::launcher_link();
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
     if let Some(mut record) = PROVIDER.existing_for_launch(name)? {
         if new_only {
@@ -494,6 +495,7 @@ pub(crate) fn launch(
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});
+    if let Some(parent) = parent { record["parent"] = parent; }
     ensure_host(&record)?;
     let (generation, mode) = create_session(&mut record)?;
     if let Some((model, effort)) = defaults {
@@ -750,6 +752,7 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     if !string(record, "session_id").is_empty() {
         value["session_id"] = record["session_id"].clone();
     }
+    if let Some(parent) = parent_link::listed(record) { value["parent"] = parent; }
     if pending {
         // Native question IDs distinguish one request from the next for read
         // marks and notifications; their generation-bound hashes do not.

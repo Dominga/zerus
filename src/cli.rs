@@ -1889,7 +1889,7 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
-    } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "fork") && machine.is_none())
+    } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "dsh" | "opencode" | "fork") && machine.is_none())
         .then(state::parent_link::forwarded_argument)
         .flatten()
     {

@@ -154,6 +154,40 @@ class NativeHarness(unittest.TestCase):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **fields}
 
+    def test_new_launch_records_parent_and_resume_keeps_identity_without_readopting(self):
+        # This entire host, native home, state and proven caller are fixture-owned.
+        lead = dict(version=1, agent='claude', name='claude/test/lead', session_id=str(uuid.uuid4()),
+                    run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()), pid=os.getpid(),
+                    process_start=subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='],
+                        env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip())
+        path = self.state / (hashlib.sha256(lead['name'].encode()).hexdigest() + '.json')
+        path.write_text(json.dumps(lead))
+        env = dict(self.env, HGS_SESSION=lead['name'], HGS_RUN_ID=lead['run_id'])
+        try:
+            reference = subprocess.run([str(HGS), 'reference', lead['name'], '--json'], env=env,
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(reference.returncode, 0, reference.stderr)
+            tag = 'parent-' + uuid.uuid4().hex[:8]
+            def launch(new=False):
+                result = subprocess.run([str(HGS), 'dsh', str(self.workspace), '-n', tag, '-d', *(['--new'] if new else [])],
+                    env=env, cwd=REPO, text=True, capture_output=True, timeout=35)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return next(json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json')
+                            if json.loads(p.read_text())['name'].endswith('/' + tag))
+            child = launch(new=True)
+            self.assertEqual(child['parent']['session_id'], lead['session_id'])
+            self.assertEqual(self.cli('inspect', child)['parent']['session_id'], lead['session_id'])
+            request = dict(expected_run_id=child['run_id'], expected_conversation_id=child['conversation_id'], action='clear')
+            cleared = subprocess.run([str(HGS), 'parent', child['name'], '--json'], input=json.dumps(request),
+                env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(cleared.returncode, 0, cleared.stderr)
+            self.assertIsNone(json.loads(cleared.stdout)['parent'])
+            resumed = launch()
+            self.assertEqual((resumed['session_id'], resumed['conversation_id']), (child['session_id'], child['conversation_id']))
+            self.assertNotIn('parent', resumed)
+        finally:
+            path.unlink(missing_ok=True)
+
     def wait(self, predicate, timeout=15):
         until = time.monotonic() + timeout
         while time.monotonic() < until:

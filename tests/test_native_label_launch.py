@@ -32,6 +32,7 @@ class NativeLabelLaunch(unittest.TestCase):
         self.native.mkdir()
         self.name = "opencode/workspace/shared"
         self.posts = []
+        sessions = {}
         posts = self.posts
         class Service(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -41,11 +42,14 @@ class NativeLabelLaunch(unittest.TestCase):
                     self.reply({"version": "2.0.32"})
                 elif self.path == "/openapi.json":
                     self.reply(OPENAPI)
+                elif self.path.startswith("/api/session/") and self.path.removeprefix("/api/session/") in sessions:
+                    self.reply({"data": sessions[self.path.removeprefix("/api/session/")]})
                 else:
                     self.reply({"data": []})
             def do_POST(self):
                 value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 posts.append((self.path, value))
+                sessions[value['id']] = value
                 self.reply({"data": {"id": value["id"], "location": value["location"]}})
             def reply(self, value):
                 body = json.dumps(value).encode()
@@ -109,6 +113,37 @@ class NativeLabelLaunch(unittest.TestCase):
         self.refuse(False, damaged=True)
     def test_new_launch_refuses_unreadable_label_coverage(self):
         self.refuse(True, damaged=True)
+
+    def test_new_launch_records_proven_parent_and_reopen_keeps_detached_link(self):
+        lead = dict(version=1, agent='claude', name='claude/example/lead', session_id=str(uuid.uuid4()),
+                    run_id='run-lead', conversation_id='conversation-lead', pid=os.getpid(),
+                    process_start=subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='],
+                        env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True).strip())
+        path = self.state / (hashlib.sha256(lead['name'].encode()).hexdigest() + '.json')
+        path.write_text(json.dumps(lead))
+        reference = subprocess.run([str(HGS), 'reference', lead['name'], '--json'], env=self.env,
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(reference.returncode, 0, reference.stderr)
+        env = dict(self.env, HGS_SESSION=lead['name'], HGS_RUN_ID=lead['run_id'])
+        def launch(tag, env, new=False):
+            result = subprocess.run([str(HGS), 'opencode', str(self.workspace), '-n', tag, '-d', *(['--new'] if new else [])],
+                env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            binding = self.state / 'opencode/bindings' / (hashlib.sha256(f'opencode/workspace/{tag}'.encode()).hexdigest() + '.json')
+            return binding, json.loads(binding.read_text())
+        _, child = launch('linked', env, new=True)
+        self.assertEqual(child['parent']['session_id'], lead['session_id'])
+        self.assertEqual(child['parent']['source'], 'launch')
+        inherited = json.dumps(child['parent'])
+        request = dict(expected_run_id=child['run_id'], expected_conversation_id=child['conversation_id'], action='clear')
+        result = subprocess.run([str(HGS), 'parent', child['name'], '--json'], env=self.env,
+            input=json.dumps(request), capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, resumed = launch('linked', env)
+        self.assertNotIn('parent', resumed)
+        self.assertEqual((resumed['session_id'], resumed['conversation_id']), (child['session_id'], child['conversation_id']))
+        _, plain = launch('plain', dict(self.env, HGS_PARENT=inherited), new=True)
+        self.assertNotIn('parent', plain)
 
 
 if __name__ == "__main__":

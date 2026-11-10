@@ -3071,8 +3071,12 @@ under the destination catalog lock, with write-ahead phases and fresh-read
 receipts. The durable `adoption-pending.json` guard blocks capable ordinary
 loaders and savers after every partial phase, including before directory/lock
 creation. It is removed with a parent barrier only after all components verify;
-`remote_committed` follows that removal. A crash or unknown result before the
-terminal receipt remains partial/unknown and read-only. Older binaries are not
+`remote_committed` follows that removal. Ordinary loaders and savers also
+refuse a bounded registry whose role/phase pairs are invalid, whose unfinished
+request is not the active one, whose active entry is not in an active phase, or
+whose active request has no matching durable journal (one direct read by UUID).
+A crash or unknown result before the terminal receipt remains partial/unknown
+and read-only. Older binaries are not
 claimed to honor the guard.
 
 Exactly two continuations exist, and only within the original live CLI call: a

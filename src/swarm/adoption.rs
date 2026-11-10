@@ -811,6 +811,59 @@ fn journal_path(directory: &Path, request_id: &str) -> Result<PathBuf> {
         .join(format!("{request_id}.json")))
 }
 
+/// Phases each role ever records (Partial and Unknown are never recorded).
+fn supported_phase(role: Role, phase: Phase) -> bool {
+    match role {
+        Role::Source => matches!(
+            phase,
+            Phase::SourcePending
+                | Phase::RefusedNotStarted
+                | Phase::RemoteCommitted
+                | Phase::SourceMembershipStarted
+                | Phase::SourceMembershipCommitted
+                | Phase::Settled
+        ),
+        Role::Destination => matches!(
+            phase,
+            Phase::DestinationPending
+                | Phase::MainStarted
+                | Phase::MainCommitted
+                | Phase::PrimaryStarted
+                | Phase::PrimaryCommitted
+                | Phase::TwinsStarted
+                | Phase::TwinsCommitted
+                | Phase::ComponentsVerified
+                | Phase::GuardClearing
+                | Phase::GuardCleared
+                | Phase::RemoteCommitted
+                | Phase::RefusedNotStarted
+        ),
+    }
+}
+
+/// Phases written with the registry's `active` set to that request.
+fn active_phase(role: Role, phase: Phase) -> bool {
+    match role {
+        Role::Source => matches!(
+            phase,
+            Phase::SourcePending | Phase::RemoteCommitted | Phase::SourceMembershipStarted
+        ),
+        Role::Destination => {
+            supported_phase(role, phase)
+                && !matches!(phase, Phase::RemoteCommitted | Phase::RefusedNotStarted)
+        }
+    }
+}
+
+/// Phases that are never left behind without being the active request
+/// (another adoption is excluded while one of them is active).
+fn exclusive_phase(role: Role, phase: Phase) -> bool {
+    match role {
+        Role::Source => matches!(phase, Phase::SourcePending | Phase::SourceMembershipStarted),
+        Role::Destination => active_phase(role, phase),
+    }
+}
+
 fn load_registry(directory: &Path) -> Result<Registry> {
     match super::read_regular(&registry_path(directory), REGISTRY_BYTES) {
         Ok(bytes) => {
@@ -832,10 +885,25 @@ fn load_registry(directory: &Path) -> Result<Registry> {
                     );
                 }
             }
-            if let Some(active) = &registry.active {
+            for (request_id, entry) in &registry.entries {
                 ensure!(
-                    registry.entries.contains_key(active),
-                    "active adoption registry entry is missing"
+                    supported_phase(entry.role, entry.phase),
+                    "adoption registry phase is not valid for its role"
+                );
+                ensure!(
+                    !exclusive_phase(entry.role, entry.phase)
+                        || registry.active.as_ref() == Some(request_id),
+                    "an unfinished adoption is not the active registry entry"
+                );
+            }
+            if let Some(active) = &registry.active {
+                let entry = registry
+                    .entries
+                    .get(active)
+                    .ok_or_else(|| anyhow::anyhow!("active adoption registry entry is missing"))?;
+                ensure!(
+                    active_phase(entry.role, entry.phase),
+                    "the active adoption registry entry is not in an active phase"
                 );
             }
             Ok(registry)
@@ -924,9 +992,24 @@ pub(crate) fn guard_directory(directory: &Path) -> Result<()> {
             .entries
             .get(&active)
             .ok_or_else(|| anyhow::anyhow!("active adoption registry entry is missing"))?;
+        // Every active destination phase expects its guard.
         ensure!(
-            entry.role != Role::Destination || entry.phase == Phase::RemoteCommitted,
+            entry.role != Role::Destination,
             "an active adoption guard is missing; ordinary catalog writes are unavailable"
+        );
+        // One direct, bounded read of that request's durable journal. Its
+        // phase may lead the registry by one write; its identity may not.
+        let journal = load_journal(directory, &active)?
+            .ok_or_else(|| anyhow::anyhow!("the active adoption journal is missing"))?;
+        ensure!(
+            journal.schema == 1
+                && journal.role == entry.role
+                && supported_phase(journal.role, journal.phase)
+                && journal.original.request_id == active
+                && journal.original.request_sha256 == entry.request_sha256
+                && journal.original.binding_sha256 == entry.binding_sha256
+                && journal.original.lease_id == entry.lease_id,
+            "the active adoption journal does not match its registry entry"
         );
     }
     Ok(())
@@ -2704,17 +2787,38 @@ mod tests {
         };
         write_registry(temp.path(), &registry).unwrap();
         assert!(guard_directory(temp.path()).is_err());
+        let refused = |registry: &Registry| {
+            write_registry(temp.path(), registry).unwrap();
+            guard_directory(temp.path()).is_err()
+        };
+        // A destination never records remote_committed as active: a registry
+        // claiming it is an unknown state, not loader permission.
         registry.entries.insert(
             request.clone(),
             entry(Role::Destination, Phase::RemoteCommitted),
         );
-        write_registry(temp.path(), &registry).unwrap();
-        guard_directory(temp.path()).unwrap();
+        assert!(refused(&registry));
+        registry.active = None;
+        assert!(!refused(&registry));
+        // A source in an exclusive phase must be the active request, and an
+        // active source needs its matching durable journal.
         registry
             .entries
             .insert(request.clone(), entry(Role::Source, Phase::SourcePending));
-        write_registry(temp.path(), &registry).unwrap();
-        guard_directory(temp.path()).unwrap();
+        assert!(refused(&registry));
+        registry.active = Some(request.clone());
+        assert!(refused(&registry));
+        // A role never records another role's phase.
+        registry.active = None;
+        registry
+            .entries
+            .insert(request.clone(), entry(Role::Source, Phase::PrimaryStarted));
+        assert!(refused(&registry));
+        // An earlier committed source may stay behind a newer adoption.
+        registry
+            .entries
+            .insert(request.clone(), entry(Role::Source, Phase::RemoteCommitted));
+        assert!(!refused(&registry));
     }
 }
 

@@ -246,6 +246,18 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Task #23 (team ede724c4): git in the runner's bare mirror names it with
+/// `--git-dir`. Git refuses to discover a bare repository from its folder when
+/// `safe.bareRepository` is `explicit` (a setting Git recommends, and one an
+/// agent's environment carries), and every runner request failed with "cannot
+/// use bare repository".
+fn bare(mirror: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let dir = format!("--git-dir={}", mirror.display());
+    let mut full = vec![dir.as_str()];
+    full.extend_from_slice(args);
+    git(mirror, &full)
+}
+
 /// The exact commit as a base64 git bundle of what the runner lacks (empty
 /// when it has the commit already).
 fn bundle(project: &Path, commit: &str, tips: &[String]) -> anyhow::Result<String> {
@@ -309,7 +321,7 @@ fn serve_inner(input: &Value, person: &Person) -> anyhow::Result<Value> {
     }
     match input["action"].as_str().unwrap_or_default() {
         "have" => {
-            let listed = git(&mirror, &["for-each-ref", "--sort=-committerdate", "--count=50", "--format=%(objectname)", "refs/zerus-runner"]).unwrap_or_default();
+            let listed = bare(&mirror, &["for-each-ref", "--sort=-committerdate", "--count=50", "--format=%(objectname)", "refs/zerus-runner"]).unwrap_or_default();
             Ok(json!({"tips":listed.lines().collect::<Vec<_>>()}))
         }
         "run" => {
@@ -320,11 +332,11 @@ fn serve_inner(input: &Value, person: &Person) -> anyhow::Result<Value> {
                 let bytes = base64::engine::general_purpose::STANDARD.decode(bundle)?;
                 let file = root.join("incoming.bundle");
                 std::fs::write(&file, bytes)?;
-                let fetched = git(&mirror, &["fetch", "-q", &file.to_string_lossy(), "+refs/zerus-runner/*:refs/zerus-runner/*"]);
+                let fetched = bare(&mirror, &["fetch", "-q", &file.to_string_lossy(), "+refs/zerus-runner/*:refs/zerus-runner/*"]);
                 let _ = std::fs::remove_file(&file);
                 fetched?;
             }
-            git(&mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).map_err(|_| anyhow::anyhow!("the runner lacks commit {commit}"))?;
+            bare(&mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).map_err(|_| anyhow::anyhow!("the runner lacks commit {commit}"))?;
             let id: String = input["request"].as_str().unwrap_or("run").chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-').take(60).collect();
             let folder = root.join("runs").join(if id.is_empty() { "run".to_owned() } else { id });
             let _ = std::fs::remove_dir_all(&folder);

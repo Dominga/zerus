@@ -888,7 +888,7 @@ mod switch_tests {
 
     #[test]
     fn an_agent_inside_a_session_cannot_change_its_own_account() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let saved = std::env::var("HGS_SESSION").ok();
         std::env::set_var("HGS_SESSION", "claude/p/a");
         let args = ["claude/p/a", "--account", "second", "--request-id", REQUEST].map(String::from);
@@ -1058,7 +1058,7 @@ mod switch_tests {
         let root = tempfile::tempdir().unwrap();
         let config = accounts(root.path(), "codex");
         fs::remove_file(home(&config, "second").join("auth.json")).unwrap();
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let saved: Vec<_> = ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"].iter().map(|key| (*key, std::env::var(key).ok())).collect();
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"] {
             std::env::remove_var(key);

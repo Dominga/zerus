@@ -4135,7 +4135,7 @@ mod notification_tests {
     /// "may be active" instead of promising a block that host never got.
     #[test]
     fn a_host_started_without_the_block_marks_its_sessions() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());

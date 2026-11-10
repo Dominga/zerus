@@ -27,7 +27,7 @@ fn a_complete_testing_merge_does_not_read_the_machine_config() {
         let broken = dir.path().join("broken-config");
         std::fs::create_dir_all(broken.join("config")).unwrap();
         let old = std::env::var("HGS_CONFIG_DIR").ok();
-        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         std::env::set_var("HGS_CONFIG_DIR", &broken);
         let result = super::merge_queue_tick(&mut store, "t", 1.0);
         match &old {

@@ -191,34 +191,107 @@ pub(crate) fn preview_path(path: &str) -> bool {
         || lower.contains("/tests/fixtures/")
 }
 
-fn git(folder: &Path, args: &[&str]) -> Option<String> {
-    let deadline = Instant::now() + Duration::from_secs(GIT_SECONDS);
-    crate::state::worktrees::git(folder, args, deadline)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
+/// Task #32 (team ede724c4): why a project was not profiled. A slow Git is
+/// said, never read as "not a repository": on a busy machine the 10 s reads
+/// ran out and the working mode looked unprofilable, for a live team too.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ProfileError {
+    /// The folder is no Git repository of its own (or has no folder).
+    NotRepository,
+    /// Git answered with a failure (an unborn HEAD, an unreadable object).
+    Failed(String),
+    /// A read ran out of time twice: `read` is the Git subcommand.
+    Slow { read: String, seconds: u64 },
 }
 
-/// The profile of the project in `folder`, or None when it is not a Git
-/// repository of its own (a folder inside another repository is that
-/// repository's work, not a project Zerus profiles here).
-pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRepository => write!(f, "its folder is not a Git repository of its own"),
+            Self::Failed(detail) => write!(f, "Git could not read it: {detail}"),
+            Self::Slow { read, seconds } => write!(
+                f,
+                "Git was too slow to read it (git {read} took over {seconds} s twice; the computer is busy), so it is read again later"
+            ),
+        }
+    }
+}
+
+/// The second, longer window of a read that ran out of time once.
+const SLOW_GIT_SECONDS: u64 = 30;
+/// A profile Git was too slow to read is tried again this soon (not after the
+/// usual `MODE_CHECK_SECONDS`).
+pub(crate) const SLOW_RETRY_SECONDS: f64 = 120.0;
+
+/// Task #32: the cached proposal of a project Git was too slow to read: no
+/// preset, the reason, and a check time that brings the next read in
+/// `SLOW_RETRY_SECONDS`.
+pub(crate) fn slow_cache(error: &ProfileError, now: f64) -> Value {
+    let checked_at = now - super::dispatcher::MODE_CHECK_SECONDS + SLOW_RETRY_SECONDS;
+    json!({"preset":"","slow":error.to_string(),"checked_at":checked_at})
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Task #32: this test thread's Git reads run out of time (a stub of a
+    /// computer too busy to answer).
+    pub(crate) static SLOW_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// One Git read of the profile: its own window, and once more with a longer
+/// one when it ran out of time; a read that ran out twice is `Slow`.
+fn git(folder: &Path, args: &[&str]) -> Result<String, ProfileError> {
+    let read = args.iter().find(|arg| !arg.starts_with('-')).copied().unwrap_or("command").to_owned();
+    let mut seconds = GIT_SECONDS;
+    for round in 0..2 {
+        if round == 1 {
+            seconds = SLOW_GIT_SECONDS;
+        }
+        #[cfg(test)]
+        if SLOW_GIT.with(std::cell::Cell::get) {
+            continue;
+        }
+        let deadline = Instant::now() + crate::state::worktrees::read_window(seconds);
+        match crate::state::worktrees::git(folder, args, deadline) {
+            Ok(bytes) => return String::from_utf8(bytes).map_err(|_| ProfileError::Failed(format!("git {read} answered no text"))),
+            Err(error) if error.state == "timeout" => continue,
+            Err(error) if error.state == "not_repo" || error.detail.contains("not a git repository") => return Err(ProfileError::NotRepository),
+            Err(error) => return Err(ProfileError::Failed(error.detail.chars().take(200).collect())),
+        }
+    }
+    Err(ProfileError::Slow { read, seconds })
+}
+
+/// The profile of the project in `folder`; `NotRepository` when it is not a
+/// Git repository of its own (a folder inside another repository is that
+/// repository's work, not a project Zerus profiles here), `Slow` when Git did
+/// not answer in time.
+pub(crate) fn profile(folder: &Path) -> Result<ProjectProfile, ProfileError> {
     // Task #393: a team with no folder is no project; a blank path would start
     // `git -C "" rev-parse --show-toplevel` in the process's own folder.
     if folder.as_os_str().is_empty() || folder.to_str().is_some_and(|path| path.trim().is_empty()) {
-        return None;
+        return Err(ProfileError::NotRepository);
     }
     // A team's folder is the repository's root (a checkout or a worktree); a
     // plain subfolder of a repository is not a project of its own.
-    let top = git(folder, &["rev-parse", "--show-toplevel"])?;
+    let top = git(folder, &["rev-parse", "--show-toplevel"]).map_err(|error| match error {
+        ProfileError::Failed(_) => ProfileError::NotRepository,
+        other => other,
+    })?;
     let top = top.trim();
     let same = match (std::fs::canonicalize(folder), std::fs::canonicalize(top)) {
         (Ok(folder), Ok(top)) => folder == top,
         _ => false,
     };
     if !same {
-        return None;
+        return Err(ProfileError::NotRepository);
     }
-    let branch = git(folder, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_owned();
+    // An unborn HEAD has no branch name to abbreviate: no branch, as before.
+    let branch = match git(folder, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(branch) => branch.trim().to_owned(),
+        Err(ProfileError::Slow { read, seconds }) => return Err(ProfileError::Slow { read, seconds }),
+        Err(_) => String::new(),
+    };
     let listing = git(folder, &["ls-tree", "-r", "-l", "-z", "HEAD"])?;
     let mut profile = ProjectProfile { branch, ..Default::default() };
     for entry in listing.split('\0') {
@@ -277,7 +350,7 @@ pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
         profile.suites = loaded.config.providers.len() as u64;
         profile.merge_queue = loaded.config.merge_queue.enabled;
     }
-    Some(profile)
+    Ok(profile)
 }
 
 /// The preset a profile selects, its name for people, its reasons, and the
@@ -363,13 +436,13 @@ pub(crate) fn settings_for(preset: &str, profile: &ProjectProfile) -> Value {
     }
 }
 
-/// The proposal for the project in `folder`, or None when it is not a Git
-/// repository.
-pub(crate) fn propose(folder: &Path) -> Option<Proposal> {
+/// The proposal for the project in `folder`, or why there is none (task #32:
+/// a slow Git is `ProfileError::Slow`, never "not a repository").
+pub(crate) fn propose(folder: &Path) -> Result<Proposal, ProfileError> {
     let profile = profile(folder)?;
     let (preset, title, reasons, pipeline) = select(&profile);
     let settings = settings_for(&preset, &profile);
-    Some(Proposal { preset, title, reasons, settings, pipeline, profile })
+    Ok(Proposal { preset, title, reasons, settings, pipeline, profile })
 }
 
 /// Writes a preset into team settings; `base_branch` is the integration line
@@ -449,8 +522,10 @@ pub(crate) fn fingerprint(profile: &ProjectProfile) -> String {
 /// Task 336 (owner, 2026-11-08): the owner keeps the team's settings for the
 /// project's profile as it is now; nothing is written to the settings.
 pub(crate) fn keep(team: &mut Team, at: f64) -> anyhow::Result<Value> {
-    let proposal = propose(Path::new(team.folder.trim()))
-        .ok_or_else(|| anyhow::anyhow!("The working mode needs a Git repository to profile: {}", team.folder))?;
+    let proposal = propose(Path::new(team.folder.trim())).map_err(|error| match error {
+        ProfileError::Slow { .. } => anyhow::anyhow!("The project was not profiled: {error}. Keep it again in a moment."),
+        _ => anyhow::anyhow!("The working mode needs a Git repository to profile: {} ({error})", team.folder),
+    })?;
     let kept = json!({
         "preset": proposal.preset,
         "fingerprint": fingerprint(&proposal.profile),
@@ -495,7 +570,7 @@ pub(crate) fn disagreement(team: &Team) -> Option<(Proposal, Vec<String>)> {
     if team.folder.trim().is_empty() || matches!(team.status, TeamStatus::Done | TeamStatus::Archived) {
         return None;
     }
-    let proposal = propose(Path::new(team.folder.trim()))?;
+    let proposal = propose(Path::new(team.folder.trim())).ok()?;
     if kept_here(team, &proposal.preset, &fingerprint(&proposal.profile)) {
         return None;
     }

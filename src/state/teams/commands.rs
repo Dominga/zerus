@@ -1656,7 +1656,13 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     // Task 270 (owner, 2026-11-08): New team shows the working mode Zeros
     // proposes for the project, with its reasons, and the preset the owner
     // accepted so far (empty: the proposal).
-    let proposal = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    let profiled = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    // Task #32 (team ede724c4): a project Git was too slow to read says so.
+    let slow = match &profiled {
+        Err(error @ super::working_mode::ProfileError::Slow { .. }) => Some(error.to_string()),
+        _ => None,
+    };
+    let proposal = profiled.ok();
     // Owner, 2026-11-09: create applies the working mode before it validates
     // the plan (ops.rs, draft create), so the preflight checks the plan the
     // same way: a member folder the applied mode forbids showed only at create.
@@ -1681,6 +1687,10 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
         (None, Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":Value::Null}),
         (None, None) => json!({"accepted":"auto","preset":Value::Null,"proposal":Value::Null}),
     };
+    let mut working = working;
+    if let Some(slow) = slow {
+        working["slow"] = json!(slow);
+    }
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,

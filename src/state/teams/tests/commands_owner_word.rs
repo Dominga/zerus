@@ -153,7 +153,7 @@ fn scale_and_drain_need_the_owner_word_naming_them() {
 /// before anything changes.
 #[test]
 fn a_lead_scales_and_drains_only_through_the_word() {
-    let _env = crate::state::ENV_LOCK.lock().unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(dir.path(), || {
         let _worker = hold_worker_lock();
@@ -226,7 +226,7 @@ fn one_owner_word_is_spent_on_one_roster_change() {
 /// word twice, with the warning between the two words.
 #[test]
 fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
-    let _env = crate::state::ENV_LOCK.lock().unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(dir.path(), || {
         let _worker = hold_worker_lock();

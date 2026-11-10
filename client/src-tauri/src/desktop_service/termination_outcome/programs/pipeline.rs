@@ -391,6 +391,16 @@ impl Stopped {
         }
         self.continuation.source.retirement()
     }
+    /// Physical DATA only, for a result that is not a reviewable refusal once
+    /// its source is gone (zerus-1y897.5). It never closes, observes, frames or
+    /// renews anything: the original call and this mutation must already be
+    /// settled, and the source owner's own join decides Pending or Retired.
+    pub(crate) fn physical_retirement(&self) -> run::Retirement {
+        if !self.continuation.original_call_joined() || !self.attempt.mutation.settled() {
+            return run::Retirement::Failed;
+        }
+        self.continuation.source.retirement()
+    }
     /// Read-only discovery is allowed only after the EXACT previous mutator,
     /// readers and loan have physically settled. It is not a Force permit.
     pub(crate) fn offer_force(mut self) -> Result<ForceOffer, String> {
@@ -469,6 +479,10 @@ impl ForceOffer {
     pub(crate) fn cancel(self) -> Stopped {
         self.previous
     }
+    /// The unconfirmed offer holds only its previous stop's resources.
+    pub(crate) fn physical_retirement(&self) -> run::Retirement {
+        self.previous.physical_retirement()
+    }
     pub(crate) fn current(&self) -> bool {
         self.previous.current()
     }
@@ -529,6 +543,13 @@ impl Removal {
     }
 }
 
+/// Fixture-only: the offer force_offer holds, without its discovery frame.
+#[cfg(test)]
+pub(crate) fn fixture_force(previous: Stopped) -> ForceOffer {
+    let input = previous.attempt.input.clone();
+    ForceOffer { previous, input }
+}
+
 /// Fixture-only display and retirement control with settled mutator I/O. No
 /// stop, confirmation or removal is invoked; the inert outcome grants nothing.
 #[cfg(test)]
@@ -538,6 +559,7 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
+    unarmed: [super::source::Mutation; 2],
 ) {
     let binding = input.manifest.binding();
     let capture = input.manifest.capture.clone();
@@ -569,7 +591,7 @@ pub(super) fn assert_presentation_views(
                 archive: String::new(),
                 confirmation: String::new(),
                 call: Weak::new(),
-                completion: initial_completion,
+                completion: initial_completion.clone(),
             }),
             outcome: Outcome::Failed {
                 detail: "inert display fixture".into(),
@@ -585,6 +607,17 @@ pub(super) fn assert_presentation_views(
     assert_eq!(previous.retirement(), run::Retirement::Failed);
     previous.attempt.result = Ok(report(State::Incomplete));
     assert_eq!(previous.retirement(), run::Retirement::Failed);
+    // zerus-1y897.5: physical DATA only. While the source owner still runs, an
+    // incomplete stop and a Force offer over it stay Pending, and reading them
+    // closes or cancels nothing.
+    assert_eq!(previous.physical_retirement(), run::Retirement::Pending);
+    let offer = ForceOffer {
+        previous,
+        input: input.clone(),
+    };
+    assert_eq!(offer.physical_retirement(), run::Retirement::Pending);
+    let mut previous = offer.cancel();
+    assert!(previous.current(), "a physical read closed the original");
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -600,6 +633,72 @@ pub(super) fn assert_presentation_views(
     previous.attempt.input.stop = Kind::Normal;
     assert_eq!(previous.retirement(), run::Retirement::Retired);
     assert_eq!(previous.retirement(), run::Retirement::Retired);
+    // The source owner has retired. An unrefused result now retires only with
+    // a joined original call and a settled mutation (zerus-1y897.5).
+    previous.attempt.result = Ok(report(State::Incomplete));
+    assert_eq!(previous.physical_retirement(), run::Retirement::Retired);
+    let offer = ForceOffer {
+        previous,
+        input: input.clone(),
+    };
+    assert_eq!(offer.physical_retirement(), run::Retirement::Retired);
+    let mut previous = offer.cancel();
+    let call = Arc::new(NativeCall {
+        _source: previous.continuation.source.clone(),
+    });
+    let Done::Native(done) = &mut previous.continuation.done else {
+        panic!("native fixture")
+    };
+    done.call = Arc::downgrade(&call);
+    assert_eq!(
+        previous.physical_retirement(),
+        run::Retirement::Failed,
+        "a live original call"
+    );
+    drop(call);
+    let [mut first, mut second] = unarmed;
+    first = std::mem::replace(&mut previous.attempt.mutation, first);
+    assert_eq!(
+        previous.physical_retirement(),
+        run::Retirement::Failed,
+        "an unsettled mutation"
+    );
+    std::mem::swap(&mut previous.attempt.mutation, &mut first);
+    assert_eq!(previous.physical_retirement(), run::Retirement::Retired);
+    previous.attempt.result = Ok(report(State::Refused));
+    // Two more unarmed phases with their own real children, pipes and loans,
+    // each settled here, back the production watcher controls.
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    for mutation in [&mut first, &mut second] {
+        while !mutation.try_retire().unwrap() {
+            assert!(std::time::Instant::now() < until, "unarmed phase settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    for (mutation, force) in [(first, false), (second, true)] {
+        let stopped = Stopped {
+            continuation: Continuation {
+                source: previous.continuation.source.clone(),
+                capture: previous.continuation.capture.clone(),
+                done: Done::Native(NativeDone {
+                    original: String::new(),
+                    archive: String::new(),
+                    confirmation: String::new(),
+                    call: Weak::new(),
+                    completion: initial_completion.clone(),
+                }),
+                outcome: Outcome::Failed {
+                    detail: "inert display fixture".into(),
+                },
+            },
+            attempt: StopAttempt {
+                input: input.clone(),
+                result: Ok(report(State::Incomplete)),
+                mutation,
+            },
+        };
+        crate::termination_cleanup::assert_real_expired_release(stopped, force);
+    }
     let force = ForceOffer { previous, input };
     // Force must consult its complete ORIGINAL survivor manifest, never the
     // Source's initial presentation projection, even for the selected pair.

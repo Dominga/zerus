@@ -2,6 +2,7 @@ use super::*;
 use crate::organization::adoption_dialog::{Action, View};
 use sha2::Digest;
 use zerus_client_core::swarm::adoption::{CAPABILITY, DRIVE_UNSUPPORTED};
+use zerus_client_core::swarm::sync::EXTERNAL_CHANGED;
 
 const NODE: &str = "00000000-0000-4000-8000-000000000001";
 const PEER_NODE: &str = "00000000-0000-4000-8000-000000000002";
@@ -535,4 +536,60 @@ fn a_replaced_nested_terminal_original_retains_the_original_ticket() {
     assert_eq!(view(&org, &id)["can_resume"], true);
     assert_eq!(view(&org, &id)["error"], true);
     fake.finish(org);
+}
+
+/// Steps the worker: the AdoptLocal result queues the mutation, the hook
+/// parks the worker before that mutation's barrier, the test changes one
+/// native fact, then lets the worker continue.
+fn drift_before_the_queued_mutation(computer: &str, change: &str) {
+    let (fake, org, _) = fixture(config(), true);
+    let (entered_tx, entered) = std::sync::mpsc::sync_channel::<()>(1);
+    let (go, go_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let go_rx = Mutex::new(go_rx);
+    *org.0.adoption_queued.lock().unwrap() = Some(Box::new(move |queued_mutation| {
+        if queued_mutation {
+            let _ = entered_tx.try_send(());
+            let _ = go_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
+    }));
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
+        .unwrap();
+    entered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the AdoptLocal result queued the mutation");
+    assert!(calls(&fake, "adopt").is_empty());
+    drift_original_card(&org, computer, change);
+    go.send(()).unwrap();
+    wait_until("the barrier disposition", || idle(&org));
+    *org.0.adoption_queued.lock().unwrap() = None;
+    assert!(
+        calls(&fake, "adopt").is_empty(),
+        "the queued mutation ran after {computer}/{change}"
+    );
+    assert!(org.lock().sync.busy(), "the original ticket stays held");
+    if change != "stopped" {
+        let current = view(&org, &id);
+        assert_eq!(current["error"], true);
+        assert_eq!(current["can_resume"], true);
+        assert_eq!(current["status"], EXTERNAL_CHANGED);
+        // Sticky: the restored fact never revives the original.
+        if change == "offline" {
+            drift_original_card(&org, computer, "live");
+        }
+        org.adoption_settle_for_tests();
+        assert!(org.lock().sync.busy());
+    }
+    fake.finish(org);
+}
+
+#[test]
+fn the_queued_mutation_barrier_refuses_drift_after_the_last_preflight() {
+    for (computer, change) in DRIFTS {
+        drift_before_the_queued_mutation(computer, change);
+    }
 }

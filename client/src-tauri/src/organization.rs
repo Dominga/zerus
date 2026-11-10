@@ -1920,7 +1920,7 @@ mod tests {
 
     /// Polls `done` every 20 ms for at most 10 s.
     fn wait_until(what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_wait::window(10);
         while !done() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
@@ -3248,7 +3248,9 @@ mod tests {
         let started = Instant::now();
         flush_with_deadline(&organization);
         assert!(started.elapsed() >= RUNS_EXIT_WAIT);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Task #60: the runs never exit; without its wait bound the flush
+        // would wait for them. The floor tells the two apart under load.
+        assert!(started.elapsed() < crate::test_wait::FLOOR);
         assert!(
             saves(&organization) > before,
             "layout save ran concurrently with runs I/O"

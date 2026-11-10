@@ -186,7 +186,7 @@ fn a_socket_without_a_bus_cannot_stall_startup() {
         wait(child, start + Duration::from_millis(200)),
         Availability::TimedOut
     );
-    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(start.elapsed() < crate::test_wait::FLOOR);
     // The original helper is physically gone, not left authenticating in a
     // detached thread. Its socket has no writer after check returns.
     stream

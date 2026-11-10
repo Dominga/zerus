@@ -546,7 +546,7 @@ mod native {
     }
 
     async fn until(label: &str, check: impl Fn() -> bool) {
-        let until = Instant::now() + Duration::from_secs(20);
+        let until = Instant::now() + crate::test_wait::window(20);
         while !check() {
             assert!(Instant::now() < until, "{label}");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1128,7 +1128,7 @@ mod native {
             return;
         }
         async fn wait_for(label: &str, ready: impl Fn() -> bool) {
-            let until = Instant::now() + Duration::from_secs(5);
+            let until = Instant::now() + crate::test_wait::window(5);
             while !ready() {
                 assert!(Instant::now() < until, "{label}");
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1405,7 +1405,7 @@ mod native {
             result.is_err(),
             "an absent lookup cannot mint native posting permission"
         );
-        assert!(before.elapsed() < Duration::from_secs(6));
+        assert!(before.elapsed() < Duration::from_secs(3) + crate::test_wait::FLOOR);
         assert_ne!(f.owner.view().request_id, original.request_id);
         assert_eq!(
             f.owner

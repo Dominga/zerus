@@ -652,7 +652,7 @@ mod tests {
 
     #[cfg(feature = "live")]
     fn until(done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_wait::window(10);
         while !done() {
             assert!(Instant::now() < deadline, "timed out");
             std::thread::sleep(Duration::from_millis(2));

@@ -6,6 +6,9 @@
 
 #[cfg(feature = "live")]
 mod action_delay;
+// Task #60: the window a test waits in for work that runs beside it.
+#[cfg(test)]
+mod test_wait;
 #[cfg(feature = "live")]
 mod actions;
 #[cfg(feature = "live")]

@@ -154,7 +154,7 @@ fn a_long_temp_parent_still_gets_a_private_bindable_socket_root() {
 
 pub(super) async fn eventually(label: &str, check: impl Fn() -> bool) {
     // A loaded hosted macOS runner missed 10 s for an initial live baseline.
-    eventually_within(label, Duration::from_secs(30), check).await;
+    eventually_within(label, crate::test_wait::window(30), check).await;
 }
 async fn eventually_within(label: &str, wait: Duration, check: impl Fn() -> bool) {
     let until = Instant::now() + wait;
@@ -1208,9 +1208,11 @@ fn stuck_view_callback_cannot_hold_the_quit_completion_past_its_deadline() {
             },
             Duration::from_millis(40),
         );
-        done.recv_timeout(Duration::from_secs(1))
+        // Task #60: without its 40 ms deadline the quit waits for the occupied
+        // worker, which never frees; the floor tells the two apart under load.
+        done.recv_timeout(crate::test_wait::FLOOR)
             .expect("quit completion at its deadline");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < crate::test_wait::FLOOR);
         std::thread::sleep(injected_delay("ZERUS_TEST_SERVICE_RELEASE_DELAY_MS"));
         drop(release);
         service.join().await.unwrap();

@@ -120,7 +120,7 @@ fn client(bus: &Bus) -> KWin {
     .unwrap()
 }
 fn eventually(mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::test_wait::window(5);
     while !condition() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));

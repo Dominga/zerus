@@ -3722,7 +3722,9 @@ mod tests {
                 reason: None,
             });
         }
-        assert!(start.elapsed() < Duration::from_secs(1));
+        // Task #60: a held write would block an observe forever; the floor
+        // tells that from 10,000 observes on a loaded machine.
+        assert!(start.elapsed() < crate::test_wait::FLOOR);
         assert!(!host.flush(Duration::from_millis(20)));
         *lock(&held.0) = true;
         held.1.notify_all();

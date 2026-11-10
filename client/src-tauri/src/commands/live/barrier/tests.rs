@@ -7,7 +7,7 @@ use std::{
 };
 
 fn deadline() -> Instant {
-    Instant::now() + Duration::from_secs(5)
+    Instant::now() + crate::test_wait::window(5)
 }
 fn eventually(label: &str, test: impl Fn() -> bool) {
     let until = deadline();

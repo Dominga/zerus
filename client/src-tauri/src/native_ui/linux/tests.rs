@@ -50,7 +50,7 @@ fn child_guard_replaces_one_handler_and_preserves_the_primary_across_reload() {
     .unwrap();
     let done = stop.clone();
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + crate::test_wait::window(15);
         while !done.load(Ordering::Relaxed) && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut socket, _)) => {
@@ -117,7 +117,7 @@ fn child_guard_replaces_one_handler_and_preserves_the_primary_across_reload() {
     for pass in 1..=2 {
         primary.load_uri(launch.url().as_str());
         child.load_uri(launch.url().as_str());
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_wait::window(5);
         while ready.load(Ordering::Relaxed) < pass || main_calls.load(Ordering::Relaxed) < pass * 2
         {
             assert!(

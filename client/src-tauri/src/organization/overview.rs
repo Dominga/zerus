@@ -1271,7 +1271,7 @@ mod tests {
         json!({"worktrees":[{"path":format!("{}/linked",common.trim_end_matches("/.git")),"kind":"linked","available":true,"verdict":"ready","fingerprint":"original-fingerprint","ownership_id":owner,"changes":0,"untracked":0,"integration":{"kind":"ancestor","base":"main"}}]})
     }
     fn until(mut ready: impl FnMut() -> bool) {
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_wait::window(5);
         while !ready() {
             assert!(Instant::now() < end, "overview did not settle");
             std::thread::sleep(Duration::from_millis(2));

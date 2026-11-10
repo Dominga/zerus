@@ -403,7 +403,18 @@ impl Stopped {
     }
     /// Read-only discovery is allowed only after the EXACT previous mutator,
     /// readers and loan have physically settled. It is not a Force permit.
-    pub(crate) fn offer_force(mut self) -> Result<ForceOffer, String> {
+    /// Every refusal hands back the SAME unconsumed stop with its custody
+    /// (zerus-1y897.7); only physical retirement may release it.
+    pub(crate) fn offer_force(mut self: Box<Self>) -> Result<ForceOffer, RefusedOffer> {
+        match self.force_input() {
+            Ok(input) => Ok(ForceOffer {
+                previous: *self,
+                input,
+            }),
+            Err(error) => Err((self, error)),
+        }
+    }
+    fn force_input(&mut self) -> Result<Input, String> {
         let report = self.report().map_err(str::to_owned)?;
         if !self.current()
             || !matches!(self.attempt.input.stop, Kind::Normal)
@@ -431,10 +442,7 @@ impl Stopped {
         if !input.follows(&self.attempt.input, self.report().map_err(str::to_owned)?) {
             return Err(UNCONFIRMED.into());
         }
-        Ok(ForceOffer {
-            previous: self,
-            input,
-        })
+        Ok(input)
     }
     /// Only the still-live original Remove continuation, after an exact Complete
     /// stop AND actual retirement, can open the distinct deletion phase once.
@@ -460,6 +468,8 @@ impl Stopped {
         self.continuation.close()
     }
 }
+/// A refused Force offer: the unconsumed stop, still holding its custody.
+pub(crate) type RefusedOffer = (Box<Stopped>, String);
 /// The host stores this behind a fresh opaque dialog handle. The renderer can
 /// confirm that handle, not supply programs or rebuild this from stop status.
 pub(crate) struct ForceOffer {
@@ -559,7 +569,7 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
-    unarmed: [super::source::Mutation; 2],
+    unarmed: [super::source::Mutation; 4],
 ) {
     let binding = input.manifest.binding();
     let capture = input.manifest.capture.clone();
@@ -618,6 +628,28 @@ pub(super) fn assert_presentation_views(
     assert_eq!(offer.physical_retirement(), run::Retirement::Pending);
     let mut previous = offer.cancel();
     assert!(previous.current(), "a physical read closed the original");
+    // zerus-1y897.7: every refused Force offer hands back the SAME unconsumed
+    // stop, its source still current: nothing is closed or released.
+    let request_id = input.request_id.clone();
+    let refuse = |stopped: Stopped| {
+        let Err((returned, _)) = Box::new(stopped).offer_force() else {
+            panic!("Force was offered")
+        };
+        assert_eq!(returned.identity().0, request_id);
+        assert!(returned.current(), "a refused offer closed the original");
+        *returned
+    };
+    previous.attempt.result = Err("unknown original stop".into());
+    let mut previous = refuse(previous);
+    previous.attempt.result = Ok(report(State::Refused));
+    let mut previous = refuse(previous);
+    previous.attempt.result = Ok(report(State::Incomplete));
+    previous.attempt.input.stop = Kind::Force {
+        previous_request_id: input.request_id.clone(),
+        previous_binding: input.binding(),
+    };
+    let mut previous = refuse(previous);
+    previous.attempt.input.stop = Kind::Normal;
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -656,7 +688,7 @@ pub(super) fn assert_presentation_views(
         "a live original call"
     );
     drop(call);
-    let [mut first, mut second] = unarmed;
+    let [mut first, mut second, mut third, mut fourth] = unarmed;
     first = std::mem::replace(&mut previous.attempt.mutation, first);
     assert_eq!(
         previous.physical_retirement(),
@@ -666,39 +698,40 @@ pub(super) fn assert_presentation_views(
     std::mem::swap(&mut previous.attempt.mutation, &mut first);
     assert_eq!(previous.physical_retirement(), run::Retirement::Retired);
     previous.attempt.result = Ok(report(State::Refused));
-    // Two more unarmed phases with their own real children, pipes and loans,
-    // each settled here, back the production watcher controls.
+    // More unarmed phases with their own real children, pipes and loans, each
+    // settled here, back the production watcher and Force offer controls.
     let until = std::time::Instant::now() + Duration::from_secs(10);
-    for mutation in [&mut first, &mut second] {
+    for mutation in [&mut first, &mut second, &mut third, &mut fourth] {
         while !mutation.try_retire().unwrap() {
             assert!(std::time::Instant::now() < until, "unarmed phase settled");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    let incomplete = |mutation| Stopped {
+        continuation: Continuation {
+            source: previous.continuation.source.clone(),
+            capture: previous.continuation.capture.clone(),
+            done: Done::Native(NativeDone {
+                original: String::new(),
+                archive: String::new(),
+                confirmation: String::new(),
+                call: Weak::new(),
+                completion: initial_completion.clone(),
+            }),
+            outcome: Outcome::Failed {
+                detail: "inert display fixture".into(),
+            },
+        },
+        attempt: StopAttempt {
+            input: input.clone(),
+            result: Ok(report(State::Incomplete)),
+            mutation,
+        },
+    };
     for (mutation, force) in [(first, false), (second, true)] {
-        let stopped = Stopped {
-            continuation: Continuation {
-                source: previous.continuation.source.clone(),
-                capture: previous.continuation.capture.clone(),
-                done: Done::Native(NativeDone {
-                    original: String::new(),
-                    archive: String::new(),
-                    confirmation: String::new(),
-                    call: Weak::new(),
-                    completion: initial_completion.clone(),
-                }),
-                outcome: Outcome::Failed {
-                    detail: "inert display fixture".into(),
-                },
-            },
-            attempt: StopAttempt {
-                input: input.clone(),
-                result: Ok(report(State::Incomplete)),
-                mutation,
-            },
-        };
-        crate::termination_cleanup::assert_real_expired_release(stopped, force);
+        crate::termination_cleanup::assert_real_expired_release(incomplete(mutation), force);
     }
+    crate::termination_cleanup::assert_real_refused_offer(incomplete(third), incomplete(fourth));
     let force = ForceOffer { previous, input };
     // Force must consult its complete ORIGINAL survivor manifest, never the
     // Source's initial presentation projection, even for the selected pair.

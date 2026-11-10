@@ -1711,6 +1711,108 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
     }
 }
 
+/// The program path's own job after production record_stop published a real
+/// incomplete stop whose source is gone.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn published_incomplete(stopped: programs::Stopped) -> Job {
+    assert!(stopped.can_force());
+    assert!(!stopped.current());
+    let mut entry = Entry::terminated(
+        "studio",
+        "studio",
+        "/home/example/repo-work-1",
+        "/home/example/repo/.git",
+        "owner-1",
+        None,
+    )
+    .unwrap();
+    entry.machine = "11111111-1111-4111-8111-111111111111".into();
+    entry.offline = false;
+    let mut job = Job {
+        id: "job".into(),
+        cleanup: Cleanup::after_termination(vec![entry]),
+        busy: true,
+        phase: "stopping",
+        manual_review: false,
+        dismissed: false,
+        program_review_pending: true,
+        program_retirement: None,
+        lookup_only: false,
+        source: None,
+        archive: None,
+        restore_supported: true,
+        programs: None,
+        reservation: None,
+    };
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    job
+}
+
+/// zerus-1y897.7: a stale Force stop click after the source went away. The
+/// refused offer hands back the SAME stop with its custody; the native Check
+/// admission stays closed while it is held, and only the watcher's physical
+/// retirement releases it. `lost` is a blocking offer that never returned.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: programs::Stopped) {
+    let check = |state: &TerminationCleanup| {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("an unrefused stop was reviewed"),
+        )
+    };
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(stopped);
+    let (request_id, _, _) = job.programs.as_ref().unwrap().identity();
+    let taken = program_pipeline::take_force(&mut job).unwrap();
+    assert!(job.busy);
+    let offered = taken.offer_force();
+    assert!(program_pipeline::record_offer(&mut job, 1, Ok(offered)).is_err());
+    assert_eq!(
+        job.programs.as_ref().map(|program| program.identity().0),
+        Some(request_id),
+        "the refused offer released the stop"
+    );
+    assert!(!job.busy);
+    assert!(!job.lookup_only);
+    assert_eq!(
+        job.program_retirement,
+        Some(ProgramRetirement::OfferUnavailable)
+    );
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    assert!(lock(&state.0.model).jobs[0].programs.is_some());
+    assert!(matches!(
+        program_pipeline::watch_once(&state.0, "job", |_| {}),
+        program_pipeline::Watch::Stop
+    ));
+    assert!(check(&state).is_err());
+    {
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired stop was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+        assert!(!model.jobs[0].busy);
+    }
+
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(lost);
+    let taken = program_pipeline::take_force(&mut job).unwrap();
+    // The blocking task owned the stop and ended without handing it back.
+    drop(taken);
+    assert!(program_pipeline::record_offer(&mut job, 1, Err("offer task ended".into())).is_err());
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    let model = lock(&state.0.model);
+    assert!(!model.jobs[0].busy, "a lost offer left the row busy");
+    assert!(model.jobs[0].lookup_only);
+    let row = &model.view().rows[0];
+    assert!(!row.can_check && !row.ready && !row.can_force);
+}
+
 #[tauri::command]
 pub fn termination_cleanup_remove(
     app: AppHandle,

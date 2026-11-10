@@ -173,6 +173,46 @@ fn unread_messages_ring_only_at_an_idle_moment_twice_then_the_lead_hears() {
     });
 }
 
+/// Task #42 (team ede724c4): 2026-11-10, a lead's message rang dsh2 20 s into
+/// the cold-context compaction before task 26; the DeepSeek host took the
+/// message as consuming the compaction ("cancelled") and the task went out on
+/// the uncompacted context. While Zerus compacts or clears a member's context
+/// for a hand-out, its doorbell waits; once the step settles it rings.
+#[test]
+fn a_doorbell_waits_while_the_members_context_is_compacted_for_a_hand_out() {
+    use crate::state::teams::model::MemberCompact;
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let mut team = team();
+        delivered(&mut team);
+        let team_id = team.id.clone();
+        let mut store = stored_store(root.path(), team);
+        let at = crate::state::now();
+        store.mutate_working(&team_id, |tx, team, _| {
+            let new = working::NewMessage { request_id: "44444444-4444-4444-8444-444444444444", by: "lead", to: "dev", kind: "message",
+                urgency: working::Urgency::Normal, text: "This task is yours now" };
+            working::post(tx, &team_id, &new, at)?;
+            working::refresh(tx, team, "dev", at)
+        }).unwrap();
+        let mut team = store.load(&team_id).unwrap().unwrap();
+        let idle = vec![session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true)];
+        assert!(steps(&team, &idle, at).contains(&Step::RingMessages { member: "dev".into() }));
+        // The compaction before its next task runs: no ring, no context step lost.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().context_compact =
+            Some(MemberCompact { action: "compact".into(), request_id: "55555555-5555-4555-8555-555555555555".into(), started_at: at, ..Default::default() });
+        let dev = team.member("dev").unwrap().clone();
+        assert!(super::super::context_pending(&team, &dev));
+        assert!(!steps(&team, &idle, at).iter().any(|step| matches!(step, Step::RingMessages { .. })), "{:?}", steps(&team, &idle, at));
+        // A fresh conversation (no native request) has nothing to cancel.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().context_compact =
+            Some(MemberCompact { action: "fresh".into(), started_at: at, ..Default::default() });
+        assert!(!super::super::context_pending(&team, team.member("dev").unwrap()));
+        // Settled: it rings.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().context_compact = None;
+        assert!(steps(&team, &idle, at).contains(&Step::RingMessages { member: "dev".into() }));
+    });
+}
+
 #[test]
 fn the_leads_inbox_rings_urgent_for_a_question_and_its_text_is_stored() {
     let root = tempfile::tempdir().unwrap();

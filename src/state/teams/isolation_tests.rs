@@ -152,6 +152,50 @@ fn the_fingerprint_fails_a_run_that_writes_the_persons_paths() {
     assert!(!outcome.tail.contains("Isolation"), "{}", outcome.tail);
 }
 
+/// Task #38 (team ede724c4, 2026-11-10): other agent sessions stage their
+/// `hgs team` inputs in the person's shared %TEMP% (`hgs-merge2.json`) while a
+/// member's suite runs, and the check blamed the run for them. In that shared
+/// folder a new prefixed file is the run's only when it names the run folder;
+/// a new prefixed directory still is, and a watched project folder keeps the
+/// name rule.
+#[test]
+fn another_sessions_files_in_the_persons_temp_never_fail_the_run() {
+    let fixture = fixture("[isolation]\ntemplates = [\"probe\"]\nprefixes = [\"hgs-\", \"test_\"]\nfolders = [\"~/watched\"]\n");
+    let home = fixture.person.home.clone().unwrap();
+    fs::create_dir_all(home.join("watched")).unwrap();
+    let quote = |path: &Path| if cfg!(windows) { path.display().to_string().replace('/', "\\") } else { path.display().to_string() };
+    let agents = fixture.person.temp.join("hgs-merge2.json");
+    let report = fixture.person.temp.join("hgs-report74.txt");
+    // Written beside the run, as another session's hgs commands do.
+    let outcome = run(&fixture, &shell(
+        "probe",
+        &format!("echo {{team:t}}> {}& echo done> {}", quote(&agents), quote(&report)),
+        &format!("echo '{{\"team\":\"t\"}}' > '{}'; echo done > '{}'", quote(&agents), quote(&report)),
+    ));
+    assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+    assert!(!outcome.tail.contains("Isolation"), "{}", outcome.tail);
+    // A prefixed file that names the run folder is the run's.
+    let traced = fixture.person.temp.join("hgs-state.json");
+    let outcome = run(&fixture, &shell(
+        "probe",
+        &format!("echo root=%ZERUS_TEST_RUN%> {}", quote(&traced)),
+        &format!("echo \"root=$ZERUS_TEST_RUN\" > '{}'", quote(&traced)),
+    ));
+    assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+    assert!(outcome.tail.contains("hgs-state.json is new in"), "{}", outcome.tail);
+    // A prefixed temporary directory in the person's temp, and a prefixed file
+    // in a folder the project watches, still fail.
+    let folder = fixture.person.temp.join("test_teams-a1b2");
+    let watched = home.join("watched").join("hgs-cache.json");
+    let outcome = run(&fixture, &shell(
+        "probe",
+        &format!("mkdir {}& echo x> {}", quote(&folder), quote(&watched)),
+        &format!("mkdir '{}'; echo x > '{}'", quote(&folder), quote(&watched)),
+    ));
+    assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+    assert!(outcome.tail.contains("test_teams-a1b2 is new in") && outcome.tail.contains("hgs-cache.json is new in"), "{}", outcome.tail);
+}
+
 #[test]
 fn the_project_file_cannot_turn_the_second_line_off() {
     // A project that turns the isolated folders off still gets the check of the
@@ -232,4 +276,33 @@ fn a_fresh_run_folder_is_never_pruned() {
     assert!(!prunable(now, now));
     assert!(!prunable(now - Duration::from_secs(60), now));
     assert!(prunable(now - Duration::from_secs(KEEP_FRESH_SECS + 1), now));
+}
+/// Task #23 (team ede724c4): a run folder is owner-only even inside a member
+/// folder that every user may change (a folder on a second drive inherits
+/// Authenticated Users Modify), and what a test creates in its TEMP inherits
+/// that, so the stores that check their files are private accept them.
+#[test]
+fn the_run_folder_is_private_inside_a_shared_member_folder() {
+    let fixture = fixture("[isolation]\ntemplates = [\"cargo-test\"]\n");
+    #[cfg(windows)]
+    {
+        // Authenticated Users (S-1-5-11) may change the member's folder.
+        let granted = std::process::Command::new("icacls")
+            .arg(&fixture.folder)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{}", String::from_utf8_lossy(&granted.stderr));
+        let shared = fixture.folder.join("shared.txt");
+        fs::write(&shared, b"x").unwrap();
+        assert!(!crate::platform::verify_private(&shared, crate::platform::Private::File).unwrap(), "the member folder is shared");
+    }
+    let run = prepare("cargo-test", "cargo", &fixture.folder, &fixture.person).expect("a test template");
+    let temp = run.env.iter().find(|(name, _)| name == "TEMP").map(|(_, value)| PathBuf::from(value)).unwrap();
+    assert!(crate::platform::verify_private(&run.folder, crate::platform::Private::Directory).unwrap());
+    assert!(crate::platform::verify_private(&temp, crate::platform::Private::Directory).unwrap());
+    let file = temp.join("store.sqlite3");
+    fs::write(&file, b"x").unwrap();
+    assert!(crate::platform::verify_private(&file, crate::platform::Private::File).unwrap(), "a test's file inherits the run folder's privacy");
 }

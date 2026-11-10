@@ -56,7 +56,9 @@ enabled = true
 # own home, data, temporary and XDG folders (the defaults per platform).
 templates = ["cargo-test", "android-test"]
 # The test programs' and their temporary files' name prefixes: a new entry
-# with one in the person's %TEMP% or a watched folder fails the run.
+# with one in a watched folder fails the run. In the person's %TEMP%, which
+# other agent sessions share (their hgs-*.json inputs), a new directory with
+# one fails, and a new file only when it names the run folder.
 prefixes = ["test_", "hgs-", ".hgs-", "zerus-test"]
 # Zerus's own log: a line naming the run folder fails the run.
 logs = ["~/.local/state/hgs/zerus.log"]

@@ -15,6 +15,12 @@ use zerus_client_core::desktop::approval_audit::{self as wire, Request};
 
 pub(super) mod worker;
 
+/// Task #23 (team ede724c4): the journal schemas this read-only view reads.
+/// Task #349 (b9c83d03c) raised the journal to 2 by adding the source, team,
+/// member, command and answer columns; the columns read here are unchanged,
+/// and requiring 1 left the desktop's approval audit unavailable.
+const READABLE_SCHEMAS: [i64; 2] = [1, 2];
+
 struct Journal {
     identity: (u64, u64),
     token: String,
@@ -69,7 +75,7 @@ impl Journal {
             "PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; PRAGMA cache_size=-2048;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version == 1, "audit schema requires migration");
+        ensure!(READABLE_SCHEMAS.contains(&version), "audit schema requires migration");
         let result = Self {
             identity,
             token: uuid::Uuid::new_v4().to_string(),
@@ -93,7 +99,7 @@ impl Journal {
         );
         self.connection_current()?;
         let version: i64 = self.db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version == 1, "audit schema changed");
+        ensure!(READABLE_SCHEMAS.contains(&version), "audit schema changed");
         Ok(())
     }
     #[cfg(unix)]

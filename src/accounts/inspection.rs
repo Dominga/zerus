@@ -954,7 +954,7 @@ mod tests {
                 write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let sampled = now().saturating_sub(360);
         let first = claude_usage::get(dir.path(), "fixture", &Value::Null, || sampled, || claude_http(&url, "synthetic-token")).unwrap();
         let limited = claude_usage::get(dir.path(), "fixture", &Value::Null, now, || claude_http(&url, "synthetic-token")).unwrap();
@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn kimi_global_region_uses_its_active_scoped_credentials() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let home = dir.path();
         fs::create_dir_all(home.join("credentials")).unwrap();
         let config = r#"[providers."managed:kimi-code"]
@@ -1031,7 +1031,7 @@ oauth_host = "https://auth.kimi.ai"
 
     #[test]
     fn kimi_token_refresh_keeps_the_account_signature() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let home = dir.path();
         fs::create_dir_all(home.join("credentials")).unwrap();
         let sign_in = |user: &str, issued: u64| {
@@ -1083,7 +1083,7 @@ oauth_host = "https://auth.kimi.ai"
 
     #[test]
     fn kimi_login_abort_needs_a_new_grant_and_fresh_verified_identity() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let home = dir.path();
         fs::create_dir(home.join("credentials")).unwrap();
         assert_eq!(kimi_login_grant(home), None);
@@ -1151,7 +1151,7 @@ oauth_host = "https://auth.kimi.ai"
 
     #[test]
     fn claude_signature_follows_the_signed_in_account() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let home = dir.path();
         let settings = |account: &str, startups: u64| {
             let settings = json!({"numStartups":startups,"projects":{"/workspace/example":{"lastCost":startups}},

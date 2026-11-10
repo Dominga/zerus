@@ -460,6 +460,12 @@ fn agent_name(name: &str) -> io::Result<bool> {
 }
 
 fn agent(environment: &[u16]) -> io::Result<bool> {
+    agent_marker(environment).map(|marker| marker.is_some())
+}
+
+/// The variable that marks an environment as an agent's (or an injection),
+/// by its name: a refusal says which one it met.
+fn agent_marker(environment: &[u16]) -> io::Result<Option<String>> {
     require(environment.len() >= 2 && environment.ends_with(&[0, 0]))?;
     for entry in environment[..environment.len() - 1]
         .split(|c| *c == 0)
@@ -474,7 +480,7 @@ fn agent(environment: &[u16]) -> io::Result<bool> {
             || equal_windows(&key, "HGS_SESSION_ID")?
             || equal_windows(&key, "HGS_RUN_ID")?
         {
-            return Ok(true);
+            return Ok(Some(key));
         }
         // Search paths are ordinary configuration, not injection primitives.
         if entry.len() > equal + 1 {
@@ -485,12 +491,12 @@ fn agent(environment: &[u16]) -> io::Result<bool> {
                 "DYLD_FORCE_FLAT_NAMESPACE",
             ] {
                 if equal_windows(&key, injection)? {
-                    return Ok(true);
+                    return Ok(Some(key));
                 }
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 /// A minimal parent observation pins the kernel object. Creation identity is
 /// checked before SID/image/environment inspection so a reused PID is never
@@ -648,6 +654,28 @@ impl Boundary {
         require(Instant::now() < until)
     }
 }
+/// Why an ancestry was refused as agent-descended: the hop (0 is the
+/// inspected process), its image name and what marked it. It displays as the
+/// fixed line the desktop maps to a diagnostic code; `detail` says the rest.
+#[derive(Debug)]
+pub struct AgentDescended {
+    pub hop: usize,
+    pub image: String,
+    pub marked: String,
+}
+impl std::fmt::Display for AgentDescended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("agent-descended frontend request refused")
+    }
+}
+impl std::error::Error for AgentDescended {}
+impl AgentDescended {
+    /// The hop, image and marker of an agent-descended refusal in `error`.
+    pub fn detail(error: &io::Error) -> Option<String> {
+        let found = error.get_ref()?.downcast_ref::<Self>()?;
+        Some(format!("hop {} ({}) has {}", found.hop, found.image, found.marked))
+    }
+}
 pub struct Ancestry {
     chain: Vec<Arc<Original>>,
     boundary: Boundary,
@@ -680,10 +708,17 @@ impl Ancestry {
             let environment = current
                 .environment(until)
                 .map_err(|e| context(&format!("ancestor environment at hop {}", chain.len()), e))?;
-            if agent_name(name)? || agent(&environment)? {
+            // Task #43 (team ede724c4): the refusal carries the hop, its image
+            // and what marked it; its text stays the fixed line callers match.
+            let marked = if agent_name(name)? {
+                Some("an agent's image".to_owned())
+            } else {
+                agent_marker(&environment)?.map(|key| format!("{key} in its environment"))
+            };
+            if let Some(marked) = marked {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "agent-descended frontend request refused",
+                    AgentDescended { hop: chain.len(), image: name.to_owned(), marked },
                 ));
             }
             let candidate = parent(current.parent, current.birth, until)?;
@@ -770,6 +805,7 @@ mod tests {
                 .creation_flags(CREATE_NO_WINDOW)
                 .args(["/D", "/Q", "/C", "echo START& set /p HGS_TEST_WAIT="])
                 .env_remove("HGS_SESSION")
+                .env_remove("HGS_SESSION_ID")
                 .env_remove("HGS_RUN_ID")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -891,6 +927,7 @@ mod tests {
                 "--nocapture",
             ])
             .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
             .env_remove("HGS_RUN_ID")
             .env("ZERUS_ANCESTRY_FIXTURE", if named { "name" } else { "tag" })
             .stdin(Stdio::null())
@@ -1180,7 +1217,7 @@ mod tests {
         use std::{sync::mpsc, thread};
         let mut child=Held(Command::new("cmd.exe").creation_flags(CREATE_NO_WINDOW)
             .args(["/D","/Q","/C","echo START& set /p HGS_TEST_WAIT=& set HGS_RUN_ID=late-tag& echo READY& set /p HGS_TEST_WAIT="])
-            .env_remove("HGS_SESSION").env_remove("HGS_RUN_ID")
+            .env_remove("HGS_SESSION").env_remove("HGS_SESSION_ID").env_remove("HGS_RUN_ID")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
         let mut stdout = child.0.stdout.take().unwrap();
         let (send, receive) = mpsc::sync_channel(2);

@@ -265,6 +265,14 @@ fn build(config: Config, note: Option<String>, template: &str, program: &str, fo
         run_folder = runs.join(format!("{template}-{stamp}-{next}"));
         next += 1;
     }
+    // Task #23 (team ede724c4): the run folder is owner-only, and everything a
+    // test makes below it inherits that, as in the person's own profile. A
+    // member's folder on a second drive inherits Authenticated Users Modify,
+    // so every store that checks it is private (the task index, stop facts,
+    // account caches) refused the run's own files: about 65 of 91 failures in
+    // a full run. The folders the run makes inside keep inheriting it.
+    let _ = fs::create_dir_all(&runs);
+    let _ = crate::platform::owner_only_dir(&run_folder);
     let mut env = Vec::new();
     for (name, relative) in &config.env {
         let path = if relative == "." { run_folder.clone() } else { run_folder.join(relative) };
@@ -340,6 +348,9 @@ struct Watch {
     dumps: Option<PathBuf>,
     prefixes: Vec<String>,
     trace: Option<PathBuf>,
+    /// The person's temporary folder, which every program of the person
+    /// shares: there a new prefixed entry counts only when it is the run's.
+    temp: Option<PathBuf>,
 }
 
 impl Watch {
@@ -355,7 +366,7 @@ impl Watch {
                 prefixes.push(stem.to_owned());
             }
         }
-        Watch { files: expand(&config.files), logs, folders, dumps: person.dumps.clone(), prefixes, trace: None }
+        Watch { files: expand(&config.files), logs, folders, dumps: person.dumps.clone(), prefixes, trace: None, temp: Some(person.temp.clone()) }
     }
 }
 
@@ -420,11 +431,16 @@ impl Run {
             }
         }
         for (path, was) in &before.folders {
+            let shared = watch.temp.as_deref() == Some(path.as_path());
             for name in names(path).difference(was) {
                 let lower = name.to_lowercase();
-                if watch.prefixes.iter().any(|prefix| lower.starts_with(&prefix.to_lowercase())) {
-                    found.push(format!("{} is new in {}", name, path.display()));
+                if !watch.prefixes.iter().any(|prefix| lower.starts_with(&prefix.to_lowercase())) {
+                    continue;
                 }
+                if shared && !runs_entry(&path.join(name), watch.trace.as_deref()) {
+                    continue;
+                }
+                found.push(format!("{} is new in {}", name, path.display()));
             }
         }
         if let (Some(dumps), Some(was)) = (&watch.dumps, &before.dumps) {
@@ -441,6 +457,22 @@ impl Run {
         }
         found
     }
+}
+
+/// Whether a new prefixed entry of the person's shared temporary folder is
+/// the run's. Task #38 (team ede724c4, 2026-11-10): the check failed runs over
+/// files other agent sessions stage there while the run goes on
+/// (`hgs-merge2.json`, `hgs-report74.txt`: the inputs of their `hgs team`
+/// commands carry the project's `hgs-` prefix). The run's own temporary folder
+/// is in its run folder; a test's leftover temporary space is a directory (a
+/// `QTemporaryDir`, a `tempfile` folder), so a new prefixed directory still
+/// counts, and a new prefixed file only when it names the run folder.
+fn runs_entry(entry: &Path, trace: Option<&Path>) -> bool {
+    let Ok(meta) = fs::symlink_metadata(entry) else { return false };
+    if meta.is_dir() {
+        return true;
+    }
+    meta.is_file() && trace.is_some_and(|trace| mentions(&read_from(entry, 0), trace))
 }
 
 /// The text of `path` from byte `from`, at most `READ_BYTES`.

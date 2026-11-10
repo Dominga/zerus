@@ -652,6 +652,11 @@ fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Opti
         // The delivery this tick already rings for everything unread.
         return None;
     }
+    // Task #42 (team ede724c4): an interrupt would abort the compaction or
+    // clear Zerus runs for the member's hand-out; it waits for that step.
+    if context_pending(team, member) {
+        return None;
+    }
     let found = found.filter(|found| found.live && !found.free && !found.asking)?;
     let turn = found.turn_started?;
     Some(Step::InterruptMessages {
@@ -744,6 +749,31 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
 /// the window those restarts are counted over.
 const RESTARTS_PER_HOUR: usize = 3;
 const RESTART_WINDOW: f64 = 3600.0;
+
+/// Task #42 (team ede724c4): whether Zerus runs a context action on `member`'s
+/// session for a hand-out now: the cold-context compaction before its next task
+/// (`context_compact` with a native request), a task hand-out waiting for its
+/// compact or clear (U46, the task's assignee), a stage hand-out's context
+/// action (#581) or the clear before a changed start prompt. A message sent
+/// meanwhile would end that action.
+pub(crate) fn context_pending(team: &Team, member: &Member) -> bool {
+    if member.context_compact.as_ref().is_some_and(|pending| !pending.request_id.is_empty()) {
+        return true;
+    }
+    if member.prompt_change.as_ref().is_some_and(|change| change.clear.is_some()) {
+        return true;
+    }
+    team.tasks.iter().any(|task| {
+        let handout = task.assignee == member.id
+            && task.waits.as_ref().is_some_and(|wait| wait.state == "waiting" && !wait.action.is_empty());
+        let stage = task
+            .pipeline_run
+            .as_ref()
+            .and_then(|pipeline| pipeline.open_run())
+            .is_some_and(|run| run.member == member.id && run.context.is_some());
+        handout || stage
+    })
+}
 
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
@@ -2248,6 +2278,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             _ => false,
         });
         if given || !super::doorbell::due(member, now) {
+            continue;
+        }
+        // Task #42 (team ede724c4): never while Zerus compacts or clears the
+        // member's context for a hand-out. A DeepSeek host treats any message
+        // as consuming the compaction ("cancelled"): on 2026-11-10 a lead's
+        // message rang dsh2 20 s into the compaction before task 26, which then
+        // went out on the uncompacted cold context. The message rings once the
+        // context step is settled (the hand-out itself rings for it).
+        if context_pending(team, member) {
             continue;
         }
         if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {
@@ -4686,6 +4725,37 @@ pub(crate) fn profile_mode(agent: &str, profile: &str) -> Option<&'static str> {
 /// B4/F10: a sandboxed agent's folder is a clone (its `.git` is inside, so
 /// merge and fetch work there); other agents get a worktree. Used when a plan
 /// leaves the folder to the team (folder policy auto).
+/// Task #35 (team ede724c4, 2026-11-10): a DeepSeek (dsh) session's sandbox
+/// gives the folder it works in Windows' inheritable Low integrity label
+/// (Zerus grants it WRITE_OWNER there, which setting a label needs). Every
+/// program built there afterwards starts at Low and is refused outside it:
+/// a qa member of team 33fbafeb shared D:\Tools\Zerus, the owner's checkout
+/// and the team's integration folder, and 2047 tests, the lead's runs and the
+/// Tauri build script failed with Access denied. So a DeepSeek member works
+/// only in its own Zerus-made folder (its clone or worktree): never a shared
+/// folder, and never as the lead, who works in the team folder. A member that
+/// has a session (adopted, or started before) is not launched; the check is
+/// for the start Zerus makes. None when the member may start; else the
+/// refusal with the one action.
+pub(crate) fn deepseek_folder_problem(team: &Team, member: &Member) -> Option<String> {
+    if member.agent != "dsh" || member.state == MemberState::Removed || member.session.is_some() {
+        return None;
+    }
+    let folder = if member.directory.is_empty() { team.folder.as_str() } else { member.directory.as_str() };
+    const WHY: &str = "a DeepSeek (dsh) session's sandbox gives the folder it works in Windows' Low integrity label, and every program built there afterwards is refused outside it";
+    if member.id == team.lead {
+        return Some(format!("{}: the lead works in the team folder {folder}, and {WHY}. Choose another agent for the lead.", member.id));
+    }
+    if member.folder != MemberFolder::Shared {
+        return None;
+    }
+    Some(format!(
+        "{id}: {WHY}, so it may not share {folder}. Give it its own clone: {{\"team\":\"{team}\",\"members_update\":[{{\"id\":\"{id}\",\"folder\":\"clone\"}}],\"request_id\":\"UUID\"}} | hgs team settings --json (or choose another agent for it).",
+        id = member.id,
+        team = team.id
+    ))
+}
+
 pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     if agent == "dsh" {
         MemberFolder::Clone
@@ -5404,6 +5474,11 @@ fn worktree_busy(stderr: &str) -> bool {
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
+    // Task #35: a DeepSeek member starts only in its own Zerus-made folder;
+    // nothing is created, granted or launched otherwise.
+    if let Some(problem) = deepseek_folder_problem(team, member) {
+        anyhow::bail!("{problem}");
+    }
     let destination = member_folder_path(team, member)?;
     // C11: a member on another computer works in a folder there; this
     // computer can neither see nor check it, so the checks run there.
@@ -10565,9 +10640,19 @@ pub(crate) fn denial_text(tool: &str, reason: &str) -> String {
     format!("[Zerus team \u{b7} from: Zerus \u{b7} permission denied]\nLead: denied {tool}: {reason}")
 }
 
-pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> anyhow::Result<()> {
-    match send(session, &uuid::Uuid::new_v4().to_string(), &denial_text(tool, reason)) {
-        Sent::Refused(error) => anyhow::bail!("the denial did not reach the member: {error}"),
+/// Task #37 (team ede724c4): the note an answered permission sends with its
+/// reason: a denial as before, an Allow as well, naming who decided.
+pub(crate) fn decision_text(tool: &str, deny: bool, speaker: &str, reason: &str) -> String {
+    if deny && speaker == "Lead" {
+        return denial_text(tool, reason);
+    }
+    let (title, verb) = if deny { ("permission denied", "denied") } else { ("permission allowed", "allowed") };
+    format!("[Zerus team \u{b7} from: Zerus \u{b7} {title}]\n{speaker}: {verb} {tool}: {reason}")
+}
+
+pub(crate) fn send_decision(session: &SessionRef, tool: &str, deny: bool, speaker: &str, reason: &str) -> anyhow::Result<()> {
+    match send(session, &uuid::Uuid::new_v4().to_string(), &decision_text(tool, deny, speaker, reason)) {
+        Sent::Refused(error) => anyhow::bail!("the reason did not reach the member: {error}"),
         _ => Ok(()),
     }
 }
@@ -13080,6 +13165,19 @@ fn ensure_worker_now() -> anyhow::Result<()> {
     // and the hgs calls it makes must carry no agent marker at all.
     for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] {
         command.env_remove(name);
+    }
+    // Task #23 (team ede724c4): nor the agent's own Git configuration. An agent
+    // session that started the worker passed `GIT_CONFIG_PARAMETERS`
+    // ('safe.bareRepository=explicit' 'core.fsmonitor=') to every build, test
+    // and merge-queue suite the worker ran, and the test runner's bare mirror
+    // was refused in each of them.
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy();
+        if text == "GIT_CONFIG_PARAMETERS" || text == "GIT_CONFIG_COUNT" || text.starts_with("GIT_CONFIG_KEY_") || text.starts_with("GIT_CONFIG_VALUE_")
+            || text == "CLAUDECODE" || text.starts_with("CLAUDE_CODE_")
+        {
+            command.env_remove(&name);
+        }
     }
     crate::platform::spawn_detached(&mut command)?;
     Ok(())

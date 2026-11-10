@@ -3124,6 +3124,38 @@ fn owner_only_trust(card: &Value, by: &Actor) -> bool {
     card["trust_request"] == true && !matches!(by, Actor::Human)
 }
 
+/// Task #37 (team ede724c4): the answers to forward, and the reasons given on
+/// items of an approval card that take no free text. Such an item takes its
+/// outcome only (DeepSeek's Allow once or Reject refuses any text); the text
+/// leaves the forwarded answer and becomes the reason. Any other card keeps
+/// its text: a free answer is the answer.
+fn approval_reasons(card: &Value, answers: &Value) -> (Value, Vec<String>) {
+    let mut answers = answers.clone();
+    let mut reasons = Vec::new();
+    if card["approval"] != true {
+        return (answers, reasons);
+    }
+    for answer in answers.as_array_mut().into_iter().flatten() {
+        let free = card["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["id"] == answer["question_id"])
+            .is_some_and(|item| item["allow_other"] == true);
+        if free {
+            continue;
+        }
+        let given = answer["text"].as_str().map(str::trim).unwrap_or_default().to_owned();
+        if let Some(object) = answer.as_object_mut() {
+            object.remove("text");
+        }
+        if !given.is_empty() {
+            reasons.push(given);
+        }
+    }
+    (answers, reasons)
+}
+
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
     // Section 9.6: a sub-team's permission request may be answered one level
@@ -3170,6 +3202,14 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         !owner_only_trust(&card, &by),
         "This request is the owner's to answer in person; a team lead cannot answer it"
     );
+    // Task #37 (team ede724c4): an approval takes its outcome only (DeepSeek's
+    // Allow once or Reject refuses any text with "Choose an approval outcome").
+    // A reason given on such an answer is the answer's reason: it leaves the
+    // forwarded answer and reaches the member as one note after the decision,
+    // as a top-level `text` does.
+    let (answers, carried) = approval_reasons(&card, &input["answers"]);
+    let given = text(input, "text").trim();
+    let reason = if given.is_empty() { carried.join("; ") } else { given.to_owned() };
     let selected: Vec<&str> = input["answers"]
         .as_array()
         .into_iter()
@@ -3183,11 +3223,12 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
                 && option["label"].as_str().is_some_and(denies)
         })
     });
-    let tool = card["questions"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["header"].as_str())
-        .or_else(|| card["tool"].as_str())
+    // Task #37: the card's tool names the call (a DeepSeek approval's header is
+    // only "Approval required"); the first header otherwise.
+    let tool = card["tool"]
+        .as_str()
+        .filter(|tool| !tool.is_empty())
+        .or_else(|| card["questions"].as_array().and_then(|items| items.first()).and_then(|item| item["header"].as_str()))
         .unwrap_or_default()
         .to_owned();
     // Task #349 (owner, 2026-11-08): the approval journal is the one place for
@@ -3219,7 +3260,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
-        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
+        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":answers});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -3254,17 +3295,18 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     if let Some(id) = journal {
         let _ = crate::approval_log::settle(&journal_root, id, "approved", "");
     }
-    // B2: a denied permission's text reaches the member as one message, and
-    // B1: the lead's or owner's answer is recorded with its reason.
-    let reason = text(input, "text").trim().to_owned();
-    // N5: the answer is recorded even when the denial message cannot be sent.
-    let denial_error = if deny && !reason.is_empty() {
-        super::dispatcher::send_denial(&session, &tool, &reason).err()
-    } else {
-        None
-    };
+    // B2: the decision's reason reaches the member as one message (task #37:
+    // an Allow's too, not only a denial's), and B1: the lead's or owner's
+    // answer is recorded with its reason.
     let decision = if deny { "deny" } else { "allow" };
     let who = if matches!(&by, Actor::Human) { "owner" } else { "lead" };
+    // N5: the answer is recorded even when the reason's message cannot be sent.
+    let denial_error = if reason.is_empty() {
+        None
+    } else {
+        let speaker = if matches!(&by, Actor::Human) { "Owner" } else if parent_authority { "Parent lead" } else { "Lead" };
+        super::dispatcher::send_decision(&session, &tool, deny, speaker, &reason).err()
+    };
     let mut store = Store::open(true)?;
     store.mutate(None, &team.id, None, |team, events| {
         let member = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
@@ -3298,7 +3340,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         ));
         if let Some(error) = &denial_error {
             events.push(Event::new(
-                "permission_denial_failed",
+                if deny { "permission_denial_failed" } else { "permission_reason_failed" },
                 json!({"member":team.role_of(&member_id),"question_id":question,"error":error.to_string()}),
             ));
         }
@@ -6147,6 +6189,10 @@ fn status_command(input: &Value) -> anyhow::Result<Value> {
     // tick and the slowest recent one (bounded).
     value["worker_tick"] = super::tick_clock::status();
     phases.mark("worker_tick");
+    // Task #35: a shared or integration folder with a Low label, with
+    // the owner's step (labels read at most once a minute).
+    value["low_folders"] = json!(super::environment::low_shared_folders(&team).iter().map(super::environment::LowFolder::json).collect::<Vec<_>>());
+    phases.mark("low_folders");
     let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
     phases.mark("working_mode");
     value["working_mode"] = json!({
@@ -6766,6 +6812,9 @@ mod inbox_notices;
 #[cfg(test)]
 #[path = "tests/inbox_close.rs"]
 mod inbox_close;
+#[cfg(test)]
+#[path = "tests/low_folders.rs"]
+mod low_folders;
 
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]

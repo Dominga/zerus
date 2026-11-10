@@ -1206,7 +1206,21 @@ pub fn frontend_binding(images: &Path) -> Result<FrontendBinding, &'static str> 
 /// binding's chain checks then see only what a test sets itself.
 #[cfg(test)]
 pub(crate) fn private_tempdir() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    private(tempfile::tempdir().unwrap())
+}
+
+/// Task #23 (team ede724c4): `private_tempdir` below `base` (a test that
+/// compares canonical paths makes its root in the canonical temporary folder).
+/// The cargo-test template's TEMP sits in the member's worktree, which a data
+/// drive lets Authenticated Users change; every store that checks its files
+/// are private refused the test's own files there.
+#[cfg(test)]
+pub(crate) fn private_tempdir_in(base: &Path) -> tempfile::TempDir {
+    private(tempfile::tempdir_in(base).unwrap())
+}
+
+#[cfg(test)]
+fn private(dir: tempfile::TempDir) -> tempfile::TempDir {
     if let platform::PrivateRepair::Refused(why) = platform::repair_private(dir.path(), platform::Private::Directory).unwrap() {
         panic!("the test's temporary root could not be made private: {why}");
     }

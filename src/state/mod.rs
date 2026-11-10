@@ -354,6 +354,46 @@ thread_local! {
     static TEST_NOW: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
+/// Task #44 (team ede724c4): how long a fixed piece of CPU work takes on this
+/// machine right now (the fastest of three runs of two million SipHash
+/// rounds). A test bounds its own work as a multiple of it, never by a
+/// wall-clock figure a loaded machine exceeds.
+#[cfg(test)]
+pub(crate) fn reference_work() -> std::time::Duration {
+    use std::hash::{Hash, Hasher};
+    (0..3)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for n in 0..2_000_000u64 {
+                n.hash(&mut hasher);
+            }
+            std::hint::black_box(hasher.finish());
+            started.elapsed()
+        })
+        .min()
+        .unwrap_or_default()
+}
+
+/// Task #44: runs `work` and fails when it took more than `ratio` times the
+/// machine's reference work, measured right before and right after it (the
+/// slower of the two). Load slows the reference as much as the work, so only
+/// work that grew (a quadratic loop, a scan per item) exceeds the ratio.
+#[cfg(test)]
+pub(crate) fn within_reference<T>(ratio: u32, label: &str, work: impl FnOnce() -> T) -> T {
+    let before = reference_work();
+    let started = std::time::Instant::now();
+    let out = work();
+    let took = started.elapsed();
+    let reference = before.max(reference_work());
+    eprintln!("{label}: {took:?}, {:.1} times the reference work ({reference:?})", took.as_secs_f64() / reference.as_secs_f64().max(1e-9));
+    assert!(
+        took <= reference * ratio,
+        "{label}: {took:?} is more than {ratio} times this machine's reference work ({reference:?})"
+    );
+    out
+}
+
 /// Freeze protocol timestamps on this fixture thread, not monotonic wait budgets.
 #[cfg(test)]
 pub(super) fn with_test_now<T>(at: f64, run: impl FnOnce() -> T) -> T {

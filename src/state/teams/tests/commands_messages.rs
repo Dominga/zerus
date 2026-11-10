@@ -241,6 +241,10 @@ fn a_decision_is_recorded_listed_and_never_messaged() {
         as_lead(|| {
             let error = call("message", json!({"to":"dev","text":"The owner decided: no reqwest anywhere"})).unwrap_err().to_string();
             assert!(error.contains("hgs team decide --json"), "{error}");
+            // Task #36 (team ede724c4): a hand-off that quotes the owner and
+            // the binding decisions as context is delivered.
+            let sent = call("message", json!({"to":"dev","text":"Owner, 2026-11-10. Slice docs/reference.md into records, one per heading.\nDecisions that bind this task (the owner's; follow them):\n- d1 (owner, 2026-11-10): ureq or hyper"})).unwrap();
+            assert_eq!(sent["status"], "queued", "{sent}");
             // Without the owner's word the lead records nothing.
             let error = call("decide", json!({"question":"Q","choice":"C"})).unwrap_err().to_string();
             assert!(error.contains("owner_word"), "{error}");

@@ -151,6 +151,16 @@ nobody can answer, so the call goes ahead and the session note says the ask
 was skipped. Agents without a pre-tool subagent approval are not blocked;
 their status says the confirmation is not supported.
 
+A permission answer may carry its reason (task #37, team ede724c4). The
+top-level `text` of `hgs team answer` reaches the member as one note right
+after the decision: "Lead: denied write_file: <reason>", or "allowed" for an
+Allow, from the owner, the lead or the parent lead. On an approval card, which
+takes its outcome only (DeepSeek's Allow once or Reject refuses any text with
+the item), a reason written on the answer item becomes that note too and the
+outcome goes out alone. A free-text question keeps the text as its answer. The
+lead's inbox item shows the approval's answer command with the top-level
+`text`; empty sends no note.
+
 ## CLI sessions
 
 `hgs` starts a command in a named project tmux session and attaches locally or
@@ -1774,6 +1784,27 @@ refused this way, from programs built in such a folder (its folder, a
 ran), carries the same text in `error` (`hgs run` adds `"environment": true`).
 Zerus only reads labels; it never changes them.
 
+Task #35 (2026-11-10): so a DeepSeek (dsh) team member works only in its own
+Zerus-made folder, its clone or worktree. A DeepSeek member with the shared
+folder (the team folder, the integration folder, another member's folder) and a
+DeepSeek lead, who works in the team folder, are refused: by the plan preflight
+(so `approve` and `add-member` name it) and again at the start, before any
+folder is created, granted or launched. The refusal names one action:
+`{"team":"ID","members_update":[{"id":"qa","folder":"clone"}],"request_id":"UUID"} |
+hgs team settings --json`, or another agent. A DeepSeek member given no folder
+takes its own clone under every folder policy, unless the project leaves no own
+folder (the shared policy, or worktrees and clones forbidden). A member that
+already has a session (adopted) is not launched and not checked. The team
+folder, the integration folder and shared members' folders that already carry
+the Low label are named, with the owner's `icacls` step, as `low_folder`
+warnings in the preflight at team start and in `hgs team status --json` as
+`low_folders` (`folder`, `labeled`, `what`, `text`, `owner_step`; labels are
+read at most once a minute). A member's own clone or worktree is Low by design
+and is not named. Zerus sets a label only on its own team store folder in the
+hgs state directory, and grants full control only on a DeepSeek member's own
+new folder (`worktrees create --sandbox`) and on the cwd of a DeepSeek session
+it starts (U34).
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the
@@ -2534,6 +2565,17 @@ it is no plan change, so it cannot be reverted. The command without an attempt
 uses the task's open attempt, and without `text` the CLI reads the attempt's
 kept reply (or the member's session, for an older record).
 
+Task #39 (team ede724c4): a member whose turn ended while it waits for its own
+job is not missing a report. Its own job is the Zerus run it started
+(`hgs run`, `hgs team run`), a background job its hooks registered, Background
+work under a budget, or the run the dispatcher remembers it waits on; by the
+session-state contract the session is Building. Its last reply ("still going,
+I'm waiting for its numbers") must not become the report, so the inbox lists no
+missing report. It shows the informational item `waits_for_own_job` instead,
+naming the job and its start ("waits for its own Zerus build (perf baseline)
+since 14:05"), with no action: Zerus wakes the member when the run settles.
+A member whose session stopped waits for nothing.
+
 ### The integration line: landing, cherry-picks and rejected attempts
 
 With an integration folder, accepted work lands on the line through the merge
@@ -2939,7 +2981,14 @@ set by the owner) is compacted the same way before a hand-out and before a
 crashed attempt goes back to it; a warm session or a small context is
 delivered at once. A failed compaction for a cold cache still delivers the
 task and tells the lead (`context_compact_failed` with reason `cold`); at the
-95% threshold a failure still makes the task wait for the lead, as before. A
+95% threshold a failure still makes the task wait for the lead, as before.
+Task #42 (team ede724c4): while that compaction runs (or any compact or clear
+Zerus runs for a hand-out: a task's U46 context step, a stage's, the clear
+before a changed start prompt), the member's doorbell and urgent interrupt
+wait. A DeepSeek host takes any message as consuming the compaction
+("cancelled") and an interrupt aborts it; on 2026-11-10 a lead's message rang
+20 s into the compaction before task 26 and the task went out on the cold
+context. A
 crashed attempt is not given back to a paused team, a paused phase, a paused or
 draining member or a held task, by the tick or by the sweep after an update; it
 waits, unconfirmed, and goes back on the first tick after the pause ends.

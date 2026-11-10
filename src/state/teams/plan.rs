@@ -1312,6 +1312,18 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             format!("{count} members besides the lead — over the team limit of {} (the lead is not counted)", team.settings.max_members),
         ));
     }
+    // Task #35: a DeepSeek member only in its own folder. (A DeepSeek lead is
+    // refused when it is started, at Start planning, before any preflight.)
+    for member in team.members.iter().filter(|member| member.id != team.lead) {
+        if let Some(problem) = super::dispatcher::deepseek_folder_problem(team, member) {
+            found.errors.push(finding("folder", None, Some(&member.id), problem));
+        }
+    }
+    // Task #35: a shared folder that already carries the Low label, with the
+    // owner's step (Zerus never changes a label itself).
+    for low in super::environment::low_shared_folders(team) {
+        found.warnings.push(finding("low_folder", None, None, low.text()));
+    }
     // B3/B6 preflight: a member's folder against the folder policy and the
     // project's ban; a sandboxed agent cannot commit from a worktree.
     for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
@@ -1384,9 +1396,13 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// One prerequisite read's answer: the output, or the failure's state ("timeout"
-/// when Git was too slow), exit code and detail (exit code 1 is "not an
-/// ancestor" or "no such ref").
+/// Task #32 (team ede724c4): what a prerequisite Git was too slow to check says,
+/// instead of Git's bare "timed out".
+const SLOW_CHECK: &str = "Git was too slow to answer (the computer is busy); the check runs again at approval";
+
+/// One prerequisite read's answer: the output, or the failure's exit code and
+/// detail (exit code 1 is "not an ancestor" or "no such ref"), with its state,
+/// so a served timeout still reads as Git being slow (task #32's message).
 type PrerequisiteAnswer = Result<Vec<u8>, (&'static str, Option<i32>, String)>;
 
 thread_local! {
@@ -1402,10 +1418,6 @@ thread_local! {
 pub(crate) fn prerequisite_memo(open: bool) {
     PREREQUISITE_MEMO.with(|memo| *memo.borrow_mut() = open.then(BTreeMap::new));
 }
-
-/// Task #32 (team ede724c4): what a prerequisite Git was too slow to check says,
-/// instead of Git's bare "timed out".
-const SLOW_CHECK: &str = "Git was too slow to answer (the computer is busy); the check runs again at approval";
 
 fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
     -> Result<Vec<u8>, super::super::worktrees::GitError>

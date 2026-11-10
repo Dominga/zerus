@@ -845,6 +845,60 @@ class SwarmAdoption(unittest.TestCase):
         self.call('a', 'adoption-preview', 'b', '--json', ok=False)
         self.assertEqual((self.tree('a'), self.tree('b')), (source, destination))
 
+    def write_registry(self, node, active, entries):
+        directory = self.root / node / 'swarm'
+        directory.mkdir(parents=True, exist_ok=True)
+        registry = dict(schema=1, active=active, entries={
+            request: dict(role=role, phase=phase, request_sha256='a' * 64,
+                          binding_sha256='b' * 64, lease_id=str(uuid.uuid4()))
+            for request, (role, phase) in entries.items()})
+        (directory / 'adoption-registry.json').write_text(json.dumps(registry))
+
+    def test_inconsistent_registry_refuses_ordinary_loads_without_writes(self):
+        request = str(uuid.uuid4())
+        cases = {
+            'active destination claims remote_committed without a journal':
+                (request, {request: ('destination', 'remote_committed')}),
+            'nonterminal destination entry is not the active one':
+                (None, {request: ('destination', 'main_started')}),
+            'source entry carries a destination-only phase':
+                (None, {request: ('source', 'primary_started')}),
+            'active source entry has no matching journal':
+                (request, {request: ('source', 'source_pending')}),
+            'active entry is already settled':
+                (request, {request: ('source', 'settled')}),
+        }
+        for name, (active, entries) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.empty_destination(False)
+                self.write_registry('b', active, entries)
+                before = self.tree('b')
+                self.call('b', 'get', ok=False)
+                self.assertEqual(self.tree('b'), before, name)
+
+    def test_settled_request_forced_active_refuses_with_its_real_journal(self):
+        options = self.adopt(False)
+        path = self.root / 'a/swarm/adoption-registry.json'
+        registry = json.loads(path.read_text())
+        self.assertEqual(registry['entries'][options['request_id']]['phase'], 'settled')
+        self.assertTrue((self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')).exists())
+        registry['active'] = options['request_id']
+        path.write_text(json.dumps(registry))
+        before = self.tree('a')
+        self.call('a', 'get', ok=False)
+        self.assertEqual(self.tree('a'), before)
+
+    def test_consistent_terminal_registry_keeps_ordinary_loads(self):
+        options = self.adopt(False)
+        registry = json.loads((self.root / 'b/swarm/adoption-registry.json').read_text())
+        self.assertIsNone(registry['active'])
+        self.assertEqual(registry['entries'][options['request_id']]['phase'], 'remote_committed')
+        self.call('b', 'get')
+        source = json.loads((self.root / 'a/swarm/adoption-registry.json').read_text())
+        self.assertEqual(source['entries'][options['request_id']]['phase'], 'settled')
+        self.call('a', 'get')
+
     def test_local_membership_failure_is_write_ahead_and_not_settled(self):
         self.empty_destination(False)
         preview = self.call('a', 'adoption-preview', 'b', '--json')

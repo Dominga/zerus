@@ -676,10 +676,28 @@ impl Organization {
                             context.failed(error);
                         }
                     }
+                    #[cfg(test)]
+                    let queued_mutation = matches!(
+                        context.stage,
+                        Stage::Queued(Work {
+                            step: Step::Mutation,
+                            ..
+                        })
+                    );
                     hub.adoption = Some(context);
                     hub.shown = None;
                     self.publish(&mut hub);
                     self.release(hub);
+                    #[cfg(test)]
+                    if let Some(hook) = self
+                        .0
+                        .adoption_queued
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                    {
+                        hook(queued_mutation);
+                    }
                     self.adoption_settle_source();
                     return true;
                 }

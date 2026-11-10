@@ -207,7 +207,15 @@ struct Shared {
     /// Makes the worker's next pass panic, so a test can stop it.
     #[cfg(test)]
     fail: std::sync::atomic::AtomicBool,
+    /// Runs on the worker after an adoption result queued its next step,
+    /// outside every lock, so a test can act before that step's barrier.
+    #[cfg(test)]
+    adoption_queued: Mutex<Option<AdoptionQueuedHook>>,
 }
+
+/// Test-only: told whether the step just queued is the original mutation.
+#[cfg(test)]
+type AdoptionQueuedHook = Box<dyn Fn(bool) + Send>;
 
 /// The managed state of the organization commands; clones share it. The
 /// worker thread runs while a clone is left.
@@ -473,6 +481,8 @@ impl Organization {
             parked: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             fail: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            adoption_queued: Mutex::new(None),
         }));
         {
             let mut hub = organization.lock();

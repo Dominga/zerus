@@ -190,6 +190,10 @@ pub(crate) fn worker_status(config: &Config) -> Value {
 pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
     let mut snapshot = if first { bootstrap::read_snapshot(config)? } else { store::read_snapshot(config)? };
     snapshot["worker"] = service::status(config).json();
+    // A partial or unknown adoption is disclosed beside the main-only read.
+    if let Some(adoption) = adoption::availability(&config.dir.join("swarm")) {
+        snapshot["adoption"] = adoption;
+    }
     Ok(snapshot)
 }
 
@@ -198,6 +202,7 @@ pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
 pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {
     let mut files = store::snapshot_files(config);
     files.push(config.dir.join("swarm").join(service::MARKER));
+    files.extend(adoption::followed_files(&config.dir.join("swarm")));
     files
 }
 

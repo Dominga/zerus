@@ -12,6 +12,7 @@ pub(crate) mod baseline;
 pub(crate) mod estimates;
 pub(crate) mod handoff;
 pub(crate) mod inbox;
+pub(crate) mod environment;
 pub(crate) mod isolation;
 pub(crate) mod lead_stall;
 pub(crate) mod lead_plan;

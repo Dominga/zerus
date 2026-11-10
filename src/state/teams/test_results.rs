@@ -425,6 +425,9 @@ pub(crate) fn flag_text(flags: &[String], seconds_recorded: f64, duration_ms: u6
             "retried" => parts.push("passed only on its automatic retry (flaky)".to_owned()),
             "crash" => parts.push("crashed: never retried".to_owned()),
             "quarantined" => parts.push("quarantined as flaky".to_owned()),
+            // Task #18: one environment failure, not the tests'; the record's
+            // excerpt names the owner's step.
+            "environment" => parts.push("an environment failure, not the tests': the record names the owner's step".to_owned()),
             other => parts.push(other.to_owned()),
         }
     }

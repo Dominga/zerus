@@ -1888,3 +1888,15 @@ fn a_pipeline_returned_attempt_does_not_block_its_rework() {
     let entry = team.task(1).unwrap().merge.clone().unwrap();
     assert!(!entry.blocked, "{entry:?}");
 }
+/// Task #18: a suite Zerus found refused for Low integrity is an environment
+/// failure (the landing stays queued, the task is not reopened), and its whole
+/// text with the owner's step reaches the reason, not only its last line.
+#[test]
+fn a_low_integrity_refusal_is_an_environment_failure() {
+    let text = format!(
+        "test a ... FAILED\n{} D:\\Tools\\Zerus carries Windows' Low integrity label ...\n  icacls \"D:\\Tools\\Zerus\" /setintegritylevel (OI)(CI)M /T /C /Q\nand start DeepSeek sessions in their own worktree",
+        crate::state::teams::environment::MARKER
+    );
+    assert!(environment_excerpt(&text));
+    assert!(!environment_excerpt("test a ... FAILED\nassertion failed: left == right"));
+}

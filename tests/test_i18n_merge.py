@@ -49,6 +49,13 @@ class SupplementMergeTests(unittest.TestCase):
         self.assertEqual(list(json.loads(text)), ["shared", "one", "two"])
         self.assertEqual(text, json.dumps(json.loads(text), ensure_ascii=False, indent=2) + "\n")
 
+    def test_a_sorted_supplement_stays_sorted(self):
+        # Task #22 (team ede724c4): the checked-in supplement is sorted and the
+        # generator's --check requires it; theirs' new keys no longer trail.
+        result, text = driver(({"b": "2"}, {"b": "2", "c": "3"}, {"a": "1", "b": "2"}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(json.loads(text)), ["a", "b", "c"])
+
     def test_the_same_key_with_the_same_text_is_one_entry(self):
         result, text = driver(({}, {"new": "same"}, {"new": "same"}))
         self.assertEqual(result.returncode, 0, result.stderr)

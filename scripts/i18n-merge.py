@@ -175,6 +175,11 @@ def merge_supplement(base_path, ours_path, theirs_path):
         print(f"i18n-merge: {error}", file=sys.stderr)
         return 1
     items, conflicts = merge_catalogs(base, ours, theirs)
+    # Task #22 (team ede724c4): the checked-in supplement is sorted (the
+    # generator's --check requires it); a sorted side stays sorted, instead of
+    # theirs' new keys trailing after ours' and failing that check.
+    if list(ours) == sorted(ours):
+        items.sort(key=lambda item: item[0])
     write_text(ours_path, render(items))
     if conflicts:
         print(f"i18n-merge: {conflicts} key(s) differ on both sides; both values are in the file",

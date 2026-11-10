@@ -736,8 +736,16 @@ fn local_providers(root: &Path, config: &TestsConfig) -> anyhow::Result<std::col
     let mut command = std::process::Command::new("git");
     command.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"]).arg(root).args(["ls-files", "--error-unmatch", "--", LOCAL_FILE]);
     for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT"] { command.env_remove(key); }
+    // Task #44 (team ede724c4): ten seconds here; under tests at least a
+    // minute, which a machine busy with parallel builds fits (a loaded run
+    // stopped it: "Cannot verify local test configuration is untracked:
+    // Stopped"), as task #32's read_window does for the worktree reads.
+    #[cfg(test)]
+    let window = std::time::Duration::from_secs(60);
+    #[cfg(not(test))]
+    let window = std::time::Duration::from_secs(10);
     let (status, _, _) = crate::platform::run_bounded(&mut command, [4096, 4096],
-        std::time::Instant::now() + std::time::Duration::from_secs(10), &|| false)
+        std::time::Instant::now() + window, &|| false)
         .map_err(|error| anyhow::anyhow!("Cannot verify local test configuration is untracked: {error:?}"))?;
     anyhow::ensure!(!status.success(), "The local test configuration {LOCAL_FILE} must not be tracked");
     anyhow::ensure!(status.code() == Some(1), "Cannot verify local test configuration is untracked");

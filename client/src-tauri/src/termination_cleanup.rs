@@ -1717,6 +1717,14 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
 fn published_incomplete(stopped: programs::Stopped) -> Job {
     assert!(stopped.can_force());
     assert!(!stopped.current());
+    let mut job = stopping_job();
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    job
+}
+
+/// The program path's own job while its original stop runs.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn stopping_job() -> Job {
     let mut entry = Entry::terminated(
         "studio",
         "studio",
@@ -1728,7 +1736,7 @@ fn published_incomplete(stopped: programs::Stopped) -> Job {
     .unwrap();
     entry.machine = "11111111-1111-4111-8111-111111111111".into();
     entry.offline = false;
-    let mut job = Job {
+    Job {
         id: "job".into(),
         cleanup: Cleanup::after_termination(vec![entry]),
         busy: true,
@@ -1743,9 +1751,7 @@ fn published_incomplete(stopped: programs::Stopped) -> Job {
         restore_supported: true,
         programs: None,
         reservation: None,
-    };
-    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
-    job
+    }
 }
 
 /// zerus-1y897.7: a stale Force stop click after the source went away. The
@@ -1808,6 +1814,117 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
     assert!(check(&state).is_err());
     let model = lock(&state.0.model);
     assert!(!model.jobs[0].busy, "a lost offer left the row busy");
+    assert!(model.jobs[0].lookup_only);
+    let row = &model.view().rows[0];
+    assert!(!row.can_check && !row.ready && !row.can_force);
+}
+
+/// zerus-1y897.8: an unconfirmed stop is lookup-only and keeps whatever
+/// custody its producer handed back until the watcher's physical retirement:
+/// a stale Force confirmation (`offered`) and stops whose source went away
+/// before their phase settled (`incomplete`, `refused`).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_unconfirmed_stops(
+    offered: programs::Stopped,
+    incomplete: programs::Stopped,
+    refused: programs::Stopped,
+) {
+    fn check(state: &TerminationCleanup) -> Result<View, String> {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("an unconfirmed stop was reviewed"),
+        )
+    }
+    fn assert_held(state: &TerminationCleanup, request_id: String, live: bool) {
+        assert_eq!(
+            lock(&state.0.model).jobs[0]
+                .programs
+                .as_ref()
+                .map(|program| program.identity().0),
+            Some(request_id),
+            "the unconfirmed stop was released"
+        );
+        assert!(check(state).is_err());
+        {
+            let mut model = lock(&state.0.model);
+            let job = &mut model.jobs[0];
+            assert!(live, "the held stop is not watched");
+            assert!(
+                program_pipeline::take_force(job).is_err(),
+                "an unconfirmed stop offered Force"
+            );
+            assert!(job.lookup_only);
+            assert!(!job.busy);
+            assert_eq!(
+                job.program_retirement,
+                Some(ProgramRetirement::StopUnconfirmed)
+            );
+        }
+        // The passive watcher's own passes; only physical retirement releases.
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match program_pipeline::watch_once(&state.0, "job", |_| {}) {
+                program_pipeline::Watch::Continue => {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "the held stop never retired"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                program_pipeline::Watch::Stop => break,
+                program_pipeline::Watch::Review(_) => panic!("an unconfirmed stop was reviewed"),
+            }
+        }
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired stop was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+        let row = &model.view().rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force);
+    }
+
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(offered);
+    let (request_id, _, _) = job.programs.as_ref().unwrap().identity();
+    let Some(program_pipeline::ProgramJob::Stopped(stopped)) = job.programs.take() else {
+        panic!("published stop")
+    };
+    // The Force dialog that was still open when the source went away.
+    job.programs = Some(program_pipeline::ProgramJob::Force {
+        id: "force".into(),
+        revision: 1,
+        offer: Box::new(programs::fixture_force(*stopped)),
+    });
+    let offer = program_pipeline::take_confirm(&mut job, "force").unwrap();
+    assert!(job.busy);
+    let live = program_pipeline::record_stop(&mut job, program_pipeline::confirm_force(offer));
+    lock(&state.0.model).jobs.push_back(job);
+    assert_held(&state, request_id, live);
+
+    for stopped in [incomplete, refused] {
+        let state = TerminationCleanup::default();
+        let mut job = stopping_job();
+        let (request_id, _, _) = stopped.identity();
+        let live = program_pipeline::record_stop(&mut job, program_pipeline::settle(stopped));
+        lock(&state.0.model).jobs.push_back(job);
+        assert_held(&state, request_id, live);
+    }
+
+    // A refused original stop hands nothing back: only the lookup-only row.
+    let state = TerminationCleanup::default();
+    let mut job = stopping_job();
+    assert!(!program_pipeline::record_stop(
+        &mut job,
+        Err(program_pipeline::Unconfirmed { held: None }),
+    ));
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    let model = lock(&state.0.model);
     assert!(model.jobs[0].lookup_only);
     let row = &model.view().rows[0];
     assert!(!row.can_check && !row.ready && !row.can_force);

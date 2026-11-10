@@ -312,9 +312,17 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             .await;
             // zerus-1y897.5/.7: unarmed phases, each with its own real child,
             // pipes and loan; they stay unsettled until the control retires them.
-            let unarmed = [(); 4].map(|()| {
+            let mut loan: Option<Arc<dyn Send + Sync>> = None;
+            let mut lock: Option<Arc<dyn Send + Sync>> = None;
+            let unarmed = [0, 1, 2, 3, 4, 5, 6, 7].map(|index| {
                 let (unarmed, resources) = Mutation::new(source.clone(), &input);
                 unarmed.armed.store(false, Ordering::Release);
+                if index == 7 {
+                    // zerus-1y897.8: extra references to this phase's loan and to
+                    // its inherited descendant lock keep it undrained.
+                    loan = Some(resources.clone());
+                    lock = Some(resources.descendants.clone());
+                }
                 let inherited = resources.descendants.clone();
                 let exit = run::run_accounted_frozen_with_completion(
                     &f.0.join("mutator"),
@@ -332,6 +340,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 assert!(matches!(exit, Exit::Code { code: 0, .. }));
                 unarmed
             });
+            let (never_ran, _) = Mutation::new(source.clone(), &input);
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,
@@ -339,6 +348,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 initial_completion,
                 mutation,
                 unarmed,
+                (loan.unwrap(), lock.unwrap(), never_ran),
             );
             assert!(
                 !source.current(),

@@ -1831,17 +1831,29 @@ impl PendingQuestion {
     /// The answer command for the lead: the exact id, hash and answers `hgs
     /// team answer` expects, with the option ids to replace.
     fn answer_command(&self, team: &Team, member: &str) -> String {
+        // Task #37 (team ede724c4): an approval takes its outcome only; its
+        // reason is the top-level text, which reaches the member as a note
+        // after the decision. A question's free answer stays on its item.
+        let approval = self.card["approval"] == true;
         let answers: Vec<Value> = self.card["questions"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|item| json!({"question_id":item["id"],"selected_option_ids":["<option id>"],"text":""}))
+            .map(|item| {
+                if approval && item["allow_other"] != true {
+                    json!({"question_id":item["id"],"selected_option_ids":["<option id>"]})
+                } else {
+                    json!({"question_id":item["id"],"selected_option_ids":["<option id>"],"text":""})
+                }
+            })
             .collect();
-        format!(
-            "{} | hgs team answer --json",
-            json!({"request_id":PLACEHOLDER,"team":team.id,"member":member,
-                "question_id":self.question_id,"expected_question_hash":self.question_hash,"answers":answers})
-        )
+        let mut request = json!({"request_id":PLACEHOLDER,"team":team.id,"member":member,
+            "question_id":self.question_id,"expected_question_hash":self.question_hash,"answers":answers});
+        if approval {
+            // Empty sends no note; a pasted placeholder would be sent as one.
+            request["text"] = json!("");
+        }
+        format!("{request} | hgs team answer --json")
     }
 }
 

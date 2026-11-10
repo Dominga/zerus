@@ -3105,7 +3105,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                     labels.push(option["label"].clone());
                 }
                 if item["allow_other"] != true && !string(answer, "text").is_empty() {
-                    return Err("Choose an approval outcome".into());
+                    // Task #37 (team ede724c4): name the way through, not only the refusal.
+                    return Err("A DeepSeek approval takes Allow once or Reject only, no text. Send the reason as the answer's top-level \"text\" with hgs team answer: it reaches the agent as a note after the decision".into());
                 }
                 answers.push(json!({"id":answer["question_id"],"selected":labels,"custom":string(answer,"text")}));
             }

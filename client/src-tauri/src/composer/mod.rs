@@ -2257,7 +2257,7 @@ pub(crate) mod tests {
 
     /// The open composer's view once `done` holds, within five seconds.
     pub(crate) fn until(c: &Composers, done: impl Fn(&ComposerView) -> bool) -> ComposerView {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_wait::window(5);
         loop {
             let view = c.current().expect("a composer is open");
             if done(&view) {

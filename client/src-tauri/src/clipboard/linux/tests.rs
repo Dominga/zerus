@@ -215,5 +215,5 @@ fn missing_failed_and_timed_out_helpers_never_report_a_success() {
     )
     .unwrap_err()
     .contains("did not answer in 40 ms"));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < crate::test_wait::FLOOR);
 }

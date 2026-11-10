@@ -503,7 +503,7 @@ fn assert_service_parity(frames: &str, reasons: &[&str]) {
             out
         };
         for (index, expected) in &steps {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + crate::test_wait::window(15);
             loop {
                 let stale = native_removed
                     .iter()

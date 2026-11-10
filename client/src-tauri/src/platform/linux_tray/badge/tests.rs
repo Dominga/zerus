@@ -366,7 +366,8 @@ fn addressed_messages_between_match_preparations_cannot_block_the_second_ack() {
     let before = Instant::now();
     let second = ShellStream::prepare(&server, SHELLS[1], &scope).unwrap();
     assert!(
-        before.elapsed() < Duration::from_secs(2),
+        // Task #60: below zbus's 25 s method timeout, which a stall waits out.
+        before.elapsed() < Duration::from_secs(20),
         "AddMatch waited behind an unpolled raw receiver"
     );
     let streams = [first.activate(&server), second.activate(&server)];

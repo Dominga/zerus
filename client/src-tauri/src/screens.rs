@@ -3471,7 +3471,7 @@ mod tests {
     }
 
     fn eventually(what: &str, done: impl Fn() -> bool) {
-        let until = Instant::now() + Duration::from_secs(20);
+        let until = Instant::now() + crate::test_wait::window(20);
         while !done() {
             assert!(Instant::now() < until, "{what}");
             std::thread::sleep(Duration::from_millis(20));

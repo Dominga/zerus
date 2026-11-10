@@ -4772,8 +4772,9 @@ mod tests {
         let path = attention_path("within-clean");
         let attention = Attention::new(path.clone());
         let started = std::time::Instant::now();
-        assert!(attention.flush_within(std::time::Duration::from_secs(30)));
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // Task #60: at once means before the bound it was given.
+        assert!(attention.flush_within(crate::test_wait::FLOOR));
+        assert!(started.elapsed() < crate::test_wait::FLOOR);
         assert!(!path.exists());
     }
 

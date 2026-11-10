@@ -202,7 +202,7 @@ fn start(
     (service, rx)
 }
 async fn until(label: &str, check: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_wait::window(10);
     while !check() {
         assert!(Instant::now() < deadline, "{label}");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -216,7 +216,7 @@ fn waits(fixture: &Fixture) -> Vec<Value> {
         .collect()
 }
 async fn receive(rx: &mpsc::Receiver<Delivery>) -> Delivery {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::test_wait::window(10);
     loop {
         if let Ok(value) = rx.try_recv() {
             return value;
@@ -654,18 +654,42 @@ async fn passive_service(fixture: &Fixture) -> (Arc<Service>, String) {
     (service, epoch)
 }
 
-/// Holds the admission lock as a stalled catalog view callback does.
-fn hold_admission(service: &Arc<Service>, hold: Duration) -> std::thread::JoinHandle<()> {
+/// Holds the admission lock as a stalled catalog view callback does, until
+/// `release` (at most `crate::test_wait::FLOOR`). Task #60: a test asserts
+/// that its wait returned while the lock was still held, an order a loaded
+/// machine keeps, instead of a time under the hold.
+struct Holder {
+    release: mpsc::Sender<()>,
+    released: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Holder {
+    fn still_held(&self) -> bool {
+        !self.released.load(Ordering::Acquire)
+    }
+
+    fn release(self) {
+        let _ = self.release.send(());
+        self.thread.join().unwrap();
+    }
+}
+
+fn hold_admission(service: &Arc<Service>) -> Holder {
     let shared = service.shared.clone();
     let (held, holding) = mpsc::channel();
-    let holder = std::thread::spawn(move || {
+    let (release, released_rx) = mpsc::channel::<()>();
+    let released = Arc::new(AtomicBool::new(false));
+    let marker = released.clone();
+    let thread = std::thread::spawn(move || {
         let guard = shared.snapshot.lock();
         held.send(()).unwrap();
-        std::thread::sleep(hold);
+        let _ = released_rx.recv_timeout(crate::test_wait::FLOOR);
+        marker.store(true, Ordering::Release);
         drop(guard);
     });
     holding.recv().unwrap();
-    holder
+    Holder { release, released, thread }
 }
 
 #[test]
@@ -676,16 +700,14 @@ fn the_passive_wait_keeps_its_deadline_while_a_view_callback_holds_admission() {
         let fixture = Fixture::new(json!({"ready": false}));
         let (service, epoch) = passive_service(&fixture).await;
         *service.shared.activation_retry.lock().unwrap() = Some(Duration::from_millis(25));
-        let holder = hold_admission(&service, Duration::from_secs(3));
+        let holder = hold_admission(&service);
         let started = Instant::now();
         let reread = passive(&service.shared, &AtomicBool::new(false), &epoch).await;
         let elapsed = started.elapsed();
-        holder.join().unwrap();
+        let held = holder.still_held();
+        holder.release();
         assert!(reread, "the deadline schedules a fresh read");
-        assert!(
-            elapsed < Duration::from_millis(1500),
-            "waited {elapsed:?} for the admission lock"
-        );
+        assert!(held, "waited {elapsed:?}, until the admission lock was released");
         service.join().await.unwrap();
     });
 }
@@ -699,7 +721,7 @@ fn stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock() {
         let (service, epoch) = passive_service(&fixture).await;
         // The production minute: only the stop can end this wait early.
         assert!(service.shared.activation_retry.lock().unwrap().is_none());
-        let holder = hold_admission(&service, Duration::from_secs(3));
+        let holder = hold_admission(&service);
         let stop = Arc::new(AtomicBool::new(false));
         let stopper = {
             let stop = stop.clone();
@@ -711,13 +733,11 @@ fn stopping_the_passive_wait_does_not_wait_for_a_held_admission_lock() {
         let started = Instant::now();
         let reread = passive(&service.shared, &stop, &epoch).await;
         let elapsed = started.elapsed();
+        let held = holder.still_held();
         stopper.join().unwrap();
-        holder.join().unwrap();
+        holder.release();
         assert!(!reread, "a stopped wait never reads again");
-        assert!(
-            elapsed < Duration::from_millis(1500),
-            "stop waited {elapsed:?} for the admission lock"
-        );
+        assert!(held, "stop waited {elapsed:?}, until the admission lock was released");
         service.join().await.unwrap();
     });
 }
@@ -742,7 +762,7 @@ fn stopping_during_the_full_minute_backoff_does_not_wait_for_its_deadline() {
         assert!(service.shared.activation_retry.lock().unwrap().is_none());
         let stopped = Instant::now();
         service.join().await.unwrap();
-        assert!(stopped.elapsed() < Duration::from_secs(10));
+        assert!(stopped.elapsed() < crate::test_wait::FLOOR);
         assert_eq!(waits(&fixture).len(), 1);
     });
 }

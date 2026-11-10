@@ -118,7 +118,7 @@ fn status_is(c: &Composers, status: &str) -> QuestionView {
 }
 /// Ticks until `done` holds, advancing the hub clock by `step` each time.
 fn ticks(c: &Composers, fake: &Fake, step: f64, done: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_wait::window(5);
     while !done() {
         assert!(std::time::Instant::now() < deadline, "timed out");
         *lock(&fake.now) += step;

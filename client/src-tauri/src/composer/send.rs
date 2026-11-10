@@ -4220,7 +4220,7 @@ pub(crate) mod tests {
 
     /// Waits until `done` holds, within five seconds.
     pub(crate) fn eventually(done: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::test_wait::window(5);
         while !done() {
             assert!(std::time::Instant::now() < deadline, "timed out");
             std::thread::sleep(Duration::from_millis(5));

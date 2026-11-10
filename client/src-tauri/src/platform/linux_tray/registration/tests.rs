@@ -90,11 +90,12 @@ fn activate(
     let before = Instant::now();
     item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).unwrap();
     assert_eq!(
-        incoming.recv_timeout(Duration::from_secs(1)).unwrap(),
+        incoming.recv_timeout(Duration::from_secs(20)).unwrap(),
         MenuAction::Open
     );
     assert!(
-        before.elapsed() < Duration::from_secs(2),
+        // Task #60: below zbus's 25 s method timeout, which a stall waits out.
+        before.elapsed() < Duration::from_secs(20),
         "activation stalled behind registration timeout"
     );
 }

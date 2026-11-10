@@ -56,7 +56,7 @@ fn private_lock_case(case: &'static str) -> bool {
         child.env(key, &root);
     }
     let mut child = child.spawn().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + crate::test_wait::window(30);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success(), "private lock case {case}: {status}");

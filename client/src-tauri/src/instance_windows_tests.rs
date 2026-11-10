@@ -65,7 +65,7 @@ impl Fixture {
         )
     }
     fn wait_for(&self, suffix: &str, child: &mut Child) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + crate::test_wait::window(10);
         while !self.0.join(suffix).exists() {
             assert!(
                 child.0.try_wait().unwrap().is_none(),
@@ -111,7 +111,7 @@ fn launch_fixture() {
         }
     };
     fs::write(root.join(format!("{scope}.ready")), b"owner").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_wait::window(15);
     while !root.join(format!("{scope}.stop")).exists() {
         assert!(Instant::now() < deadline, "fixture exit deadline");
         if let Ok(activation) = claimed.activations.recv_timeout(Duration::from_millis(20)) {
@@ -126,7 +126,7 @@ fn launch_fixture() {
     );
     if control["hold_after_quit"] == true {
         fs::write(root.join(format!("{scope}.released")), b"").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + crate::test_wait::window(8);
         while !root.join(format!("{scope}.exit")).exists() {
             assert!(Instant::now() < deadline, "quit fixture exit deadline");
             std::thread::sleep(Duration::from_millis(10));

@@ -1186,7 +1186,7 @@ mod tests {
             assert!(claimed.activations.try_recv().is_err());
             let start = Instant::now();
             drop(claimed);
-            assert!(start.elapsed() < Duration::from_secs(2));
+            assert!(start.elapsed() < crate::test_wait::FLOOR);
             drop(client);
         }
         #[test]
@@ -1210,7 +1210,7 @@ mod tests {
                 assert!(claimed.activations.try_recv().is_err());
                 let start = Instant::now();
                 drop(claimed);
-                assert!(start.elapsed() < Duration::from_secs(2));
+                assert!(start.elapsed() < crate::test_wait::FLOOR);
             }
         }
         #[test]

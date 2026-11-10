@@ -80,15 +80,22 @@ fn ticks(
     step: f64,
     done: impl Fn(&ComposerView) -> bool,
 ) -> ComposerView {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_wait::window(5);
     loop {
         let view = c.current().unwrap();
         if done(&view) {
             return view;
         }
         assert!(std::time::Instant::now() < deadline, "timed out: {view:?}");
-        *lock(&fake.now) += step;
-        c.tick();
+        // Task #60 (team ede724c4): the clock moves only once the send has
+        // settled into its hold. A check whose answer arrives while the
+        // composer still sends is set aside and asked again (`checked`'s
+        // held test), so a tick before that made a second check on a loaded
+        // machine (a_panicking_check_ends_the_hold_with_allow_retry saw 2).
+        if !view.sending {
+            *lock(&fake.now) += step;
+            c.tick();
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }

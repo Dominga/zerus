@@ -488,7 +488,7 @@ pub(crate) mod native {
     }
     #[cfg(target_os = "linux")]
     async fn eventually(label: &str, check: impl Fn() -> bool) {
-        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        let until = tokio::time::Instant::now() + crate::test_wait::window(10);
         while !check() {
             assert!(tokio::time::Instant::now() < until, "{label}");
             tokio::time::sleep(Duration::from_millis(5)).await;

@@ -1815,8 +1815,9 @@ mod tests {
             tx.send(upsert("run:a", "claude/p/a")).unwrap();
         });
         let started = Instant::now();
-        let batch = pump.take(Duration::from_secs(5));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Task #60: the event ends the take, not its timeout (the floor).
+        let batch = pump.take(crate::test_wait::FLOOR);
+        assert!(started.elapsed() < crate::test_wait::FLOOR);
         assert_eq!(batch.upserts.len(), 1);
         sender.join().unwrap();
     }
@@ -1831,8 +1832,8 @@ mod tests {
             waker.poke();
         });
         let started = Instant::now();
-        let batch = pump.take(Duration::from_secs(5));
-        assert!(started.elapsed() < Duration::from_secs(2) && batch.is_empty());
+        let batch = pump.take(crate::test_wait::FLOOR);
+        assert!(started.elapsed() < crate::test_wait::FLOOR && batch.is_empty());
     }
 
     #[test]

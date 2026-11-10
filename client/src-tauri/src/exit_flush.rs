@@ -447,10 +447,12 @@ mod tests {
         std::thread::spawn(move || {
             done.send(worker.wait(&nonce)).unwrap();
         });
+        // Task #60: past EXIT_FLUSH the exit stops waiting; without it, it
+        // would wait for the held worker. The floor tells them apart.
         assert!(ended
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(crate::test_wait::FLOOR)
             .expect("exit exceeded its deadline"));
-        assert!(start.elapsed() >= EXIT_FLUSH && start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() >= EXIT_FLUSH && start.elapsed() < crate::test_wait::FLOOR);
         assert!(flush.consume(Some(17)));
     }
     #[test]

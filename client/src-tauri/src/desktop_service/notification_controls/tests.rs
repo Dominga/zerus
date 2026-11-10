@@ -94,7 +94,7 @@ impl Drop for Fixture {
     }
 }
 async fn until(label: &str, check: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + crate::test_wait::window(15);
     while !check() {
         assert!(Instant::now() < deadline, "{label}");
         tokio::time::sleep(Duration::from_millis(5)).await;

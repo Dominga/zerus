@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn wait_for(done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_wait::window(5);
         while !done() {
             assert!(Instant::now() < deadline, "timed out");
             std::thread::sleep(Duration::from_millis(10));

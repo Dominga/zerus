@@ -269,7 +269,7 @@ mod tests {
     use super::*;
 
     async fn until(check: impl Fn() -> bool) {
-        let until = tokio::time::Instant::now() + RPC_WAIT;
+        let until = tokio::time::Instant::now() + RPC_WAIT.max(crate::test_wait::window(0));
         while !check() {
             assert!(tokio::time::Instant::now() < until);
             tokio::time::sleep(Duration::from_millis(5)).await;

@@ -109,9 +109,11 @@ fn one_worker_child() {
         },
         Duration::from_millis(40),
     );
-    done.recv_timeout(Duration::from_secs(1))
+    // Task #60: without its 40 ms deadline the quit waits for the occupied
+    // worker, which never frees; the floor tells the two apart under load.
+    done.recv_timeout(crate::test_wait::FLOOR)
         .expect("quit completion at its deadline");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < crate::test_wait::FLOOR);
     assert!(
         !ran.load(Ordering::Acquire),
         "completed without any runtime worker"

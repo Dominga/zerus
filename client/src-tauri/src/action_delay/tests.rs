@@ -1,6 +1,5 @@
 use super::*;
 use crate::actions::Lane;
-use std::time::Duration;
 use zerus_client_core::end_action::UNDO_WINDOW;
 
 fn id() -> String {
@@ -319,7 +318,7 @@ fn native_wait_never_releases_early_or_restarts_when_the_webview_is_hidden() {
     // No webview timer or visibility state participates in this wait.
     assert!(delays.wait(&id));
     assert!(start.elapsed() >= UNDO_WINDOW);
-    assert!(start.elapsed() < Duration::from_secs(15));
+    assert!(start.elapsed() < UNDO_WINDOW + crate::test_wait::FLOOR);
     assert!(!delays.wait(&id));
 }
 

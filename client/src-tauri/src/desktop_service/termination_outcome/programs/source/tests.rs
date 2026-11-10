@@ -310,9 +310,9 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 initial_completion.join() == run::Retirement::Retired
             })
             .await;
-            // zerus-1y897.5: two unarmed phases, each with its own real child,
+            // zerus-1y897.5/.7: unarmed phases, each with its own real child,
             // pipes and loan; they stay unsettled until the control retires them.
-            let unarmed = [(); 2].map(|()| {
+            let unarmed = [(); 4].map(|()| {
                 let (unarmed, resources) = Mutation::new(source.clone(), &input);
                 unarmed.armed.store(false, Ordering::Release);
                 let inherited = resources.descendants.clone();

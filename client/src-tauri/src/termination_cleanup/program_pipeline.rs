@@ -411,19 +411,13 @@ pub(super) async fn force_offer(
             .iter_mut()
             .find(|job| job.id == id)
             .ok_or(STATE_CHANGED)?;
-        if job.busy || !job.programs.as_ref().is_some_and(ProgramJob::can_force) {
-            return Err(STATE_CHANGED.into());
-        }
-        let Some(ProgramJob::Stopped(stopped)) = job.programs.take() else {
-            return Err(STATE_CHANGED.into());
-        };
-        job.busy = true;
+        let stopped = take_force(job)?;
         changed(&app, &mut m);
         stopped
     };
     let offered = tauri::async_runtime::spawn_blocking(move || stopped.offer_force())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string());
     let mut m = lock(&inner.model);
     let revision = m.revision.wrapping_add(1);
     let job = m
@@ -431,9 +425,38 @@ pub(super) async fn force_offer(
         .iter_mut()
         .find(|job| job.id == id)
         .ok_or(STATE_CHANGED)?;
+    let result = record_offer(job, revision, offered);
+    let live = job.programs.is_some();
+    changed(&app, &mut m);
+    drop(m);
+    if live {
+        watch_job(&inner, app, id);
+    }
+    result
+}
+/// Force offer admission: takes the job's own incomplete normal stop.
+pub(super) fn take_force(job: &mut Job) -> Result<Box<programs::Stopped>, String> {
+    if job.busy || !job.programs.as_ref().is_some_and(ProgramJob::can_force) {
+        return Err(STATE_CHANGED.into());
+    }
+    let Some(ProgramJob::Stopped(stopped)) = job.programs.take() else {
+        return Err(STATE_CHANGED.into());
+    };
+    job.busy = true;
+    Ok(stopped)
+}
+/// Records the blocking offer's result on its job (zerus-1y897.7). A refused
+/// offer gives back the SAME stop, which keeps its custody until the watcher's
+/// physical_retirement() proves Retired; while it is held, has_programs()
+/// keeps the native Check admission closed.
+pub(super) fn record_offer(
+    job: &mut Job,
+    revision: u64,
+    offered: Result<Result<programs::ForceOffer, programs::RefusedOffer>, String>,
+) -> Result<super::ForceView, String> {
     job.busy = false;
-    let result = match offered {
-        Ok(offer) => {
+    match offered {
+        Ok(Ok(offer)) => {
             let confirmation = uuid::Uuid::new_v4().to_string();
             let programs = offer.programs();
             let remaining_millis = offer.remaining_millis();
@@ -449,17 +472,19 @@ pub(super) async fn force_offer(
                 revision,
             })
         }
-        Err(error) => {
+        Ok(Err((stopped, error))) => {
+            job.programs = Some(ProgramJob::Stopped(stopped));
             job.program_retirement = Some(ProgramRetirement::OfferUnavailable);
             Err(error)
         }
-    };
-    changed(&app, &mut m);
-    drop(m);
-    if result.is_ok() {
-        watch_job(&inner, app, id);
+        Err(error) => {
+            // The blocking task ended without handing the stop back, so its
+            // custody is gone: only a lookup-only row remains.
+            job.lookup_only = true;
+            job.program_retirement = Some(ProgramRetirement::OfferUnavailable);
+            Err(error)
+        }
     }
-    result
 }
 pub(super) async fn force_confirm(
     inner: Arc<Inner>,

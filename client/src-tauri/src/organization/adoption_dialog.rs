@@ -495,6 +495,28 @@ impl Context {
     }
 }
 
+/// Only the three fixed adoption calls run as a private helper group.
+fn group_custody(step: &Step) -> bool {
+    matches!(step, Step::Preview(_) | Step::Mutation | Step::Status)
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn group_custody_for_tests() -> Vec<(&'static str, bool)> {
+    [
+        ("config", Step::Config),
+        ("preview-config", Step::PreviewConfig("peer".into())),
+        ("preview", Step::Preview("peer".into())),
+        ("adopt-config", Step::AdoptConfig),
+        ("adopt-local", Step::AdoptLocal),
+        ("mutation", Step::Mutation),
+        ("status", Step::Status),
+        ("fresh", Step::Fresh),
+    ]
+    .into_iter()
+    .map(|(name, step)| (name, group_custody(&step)))
+    .collect()
+}
+
 fn preview_alias(context: &Context) -> Result<&str, String> {
     Ok(context.preview.as_ref().ok_or(EXTERNAL_CHANGED)?.alias())
 }
@@ -746,7 +768,18 @@ impl Organization {
     fn adoption_call(&self, work: Work) {
         let resources = Arc::new(Resources(Arc::downgrade(&self.0)));
         let weak = Arc::downgrade(&resources);
-        let result = zerus_client_core::run::run_accounted(
+        // Preview, Mutation and Status are the three fixed adoption calls
+        // (adoption-preview, adopt, adoption-status). Their CLI leads a
+        // private process group created for that call only; the runner
+        // signals that exact group while its leader is pinned unreaped, so
+        // the original ssh is stopped and reaped even if the CLI was killed.
+        // The dialog's local reads keep the ordinary runner.
+        let run = if group_custody(&work.step) {
+            zerus_client_core::run::run_accounted_group
+        } else {
+            zerus_client_core::run::run_accounted
+        };
+        let result = run(
             &self.0.hgs,
             &work.invocation,
             &[],

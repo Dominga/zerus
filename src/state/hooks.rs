@@ -67,6 +67,43 @@ fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
     }
 }
 
+thread_local! {
+    /// The program the running installation writes into hook entries.
+    static OWN_PROGRAM: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, entries that run `program` count as hgs's own, whatever its
+/// name: an `HGS_EXECUTABLE` wrapper writes them (zerus-s3wax).
+struct OwnProgram(Option<String>);
+
+impl OwnProgram {
+    fn scoped(program: &str) -> Self {
+        Self(OWN_PROGRAM.with(|own| own.replace(Some(program.to_owned()))))
+    }
+
+    /// The scope of an installation run by `executable`: its program as hook
+    /// entries name it (on Windows with forward slashes).
+    fn executable(executable: &str) -> Self {
+        #[cfg(windows)]
+        let program = windows::path(executable).unwrap_or_else(|_| executable.to_owned());
+        #[cfg(not(windows))]
+        let program = executable.to_owned();
+        Self::scoped(&program)
+    }
+}
+
+/// Whether `program` is the one the running installation writes.
+fn own_program(program: &str) -> bool {
+    OWN_PROGRAM.with(|own| own.borrow().as_deref() == Some(program))
+}
+
+impl Drop for OwnProgram {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        OWN_PROGRAM.with(|own| *own.borrow_mut() = previous);
+    }
+}
+
 fn owns_hook(command: &str) -> bool {
     let Ok(argv) = shell_words::split(command) else {
         return false;
@@ -81,12 +118,7 @@ fn owns_hook(command: &str) -> bool {
     {
         return true;
     }
-    argv[argv.len() - 2] == "__state"
-        && Path::new(&argv[argv.len() - 3])
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name == "hgs" || name == "hgs.exe")
-            .unwrap_or(false)
+    argv[argv.len() - 2] == "__state" && names_hgs(&argv[argv.len() - 3])
 }
 
 /// Whether `hook`, one item of a matcher group's `hooks`, is hgs's answer
@@ -255,10 +287,12 @@ impl Entry {
 const HOOK_ARGS: [&str; 2] = ["__state", "hook"];
 
 /// Whether `program` names hgs: `hgs` or `hgs.exe` (any case) after its last
-/// `/` or `\`.
+/// `/` or `\`, or exactly the program the running installation writes, which
+/// an `HGS_EXECUTABLE` wrapper may name otherwise. A look-alike for any other
+/// program stays the user's.
 fn names_hgs(program: &str) -> bool {
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    name == "hgs" || name.eq_ignore_ascii_case("hgs.exe")
+    name == "hgs" || name.eq_ignore_ascii_case("hgs.exe") || own_program(program)
 }
 
 /// The Kimi hook block's markers. On Windows each line may also end with CR LF
@@ -436,6 +470,33 @@ fn merge_json_mode(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or("hooks must be an object")?;
+    // Earlier launches that did not recognise their own entries (zerus-s3wax)
+    // left exact copies of hgs's groups: each delivered every event again.
+    // Keep the first; a group with any personal hook is never touched.
+    let mut changed = false;
+    for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
+        let mut kept: Vec<Value> = Vec::new();
+        let before = groups.len();
+        groups.retain(|group| {
+            let hgs_only = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|hooks| {
+                    !hooks.is_empty()
+                        && hooks
+                            .iter()
+                            .all(|hook| Entry::owned(hook, windows).is_some() || owns_channel(hook))
+                });
+            if hgs_only && kept.contains(group) {
+                return false;
+            }
+            if hgs_only {
+                kept.push(group.clone());
+            }
+            true
+        });
+        changed |= groups.len() != before;
+    }
     let mut entry = hooks
         .values()
         .filter_map(Value::as_array)
@@ -443,7 +504,6 @@ fn merge_json_mode(
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
         .find_map(|hook| Entry::owned(hook, windows));
-    let mut changed = false;
     // One version reading serves every versioned entry.
     let mut known = None;
     let mut version = || *known.get_or_insert_with(&mut *version);
@@ -685,6 +745,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         Err(error) => return Err(error.to_string()),
     };
     let executable = runner_executable()?;
+    let _own = OwnProgram::executable(&executable);
     let installed = Installed {
         program,
         agent: if agent == "claude" { "Claude Code" } else { agent },
@@ -793,6 +854,9 @@ pub(super) fn health_events(agent: &str) -> Vec<&'static str> {
 
 /// Content-free registration inventory. Native trust/policy is deliberately not inferred.
 pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u64, u64)>) -> Result<Value> {
+    let _own = runner_executable()
+        .ok()
+        .map(|executable| OwnProgram::executable(&executable));
     health_document_mode(original, agent, known, cfg!(windows))
 }
 
@@ -860,6 +924,7 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
 /// Explicit repair uses only a previously verified version. It never probes a provider.
 pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (u64,u64,u64)) -> Result<Option<String>> {
     let executable = runner_executable()?;
+    let _own = OwnProgram::executable(&executable);
     if agent == "kimi" {
         let health=health_document(original,agent,Some(known))?;
         if health["state"]=="configured" {
@@ -1685,6 +1750,164 @@ mod tests {
 
     fn kimi_merge(original: &str, crlf: bool, fresh: &str) -> Option<String> {
         merge_kimi(original, &path(), crlf, &mut || Ok(fresh.to_owned())).unwrap()
+    }
+
+    /// zerus-s3wax: a wrapper-named HGS_EXECUTABLE writes entries hgs must own.
+    #[cfg(unix)]
+    const WRAPPER: &str = "/opt/tools/hgs-wrapper";
+
+    #[cfg(unix)]
+    fn wrapper_entry() -> Entry {
+        Entry::shell(fresh_command(WRAPPER).unwrap())
+    }
+
+    /// Repeated launches: a merge that changes nothing returns `None`.
+    #[cfg(unix)]
+    fn launches(agent: &str, times: usize) -> (String, Vec<bool>) {
+        let _own = OwnProgram::scoped(WRAPPER);
+        let mut text = String::new();
+        let mut writes = Vec::new();
+        for _ in 0..times {
+            let merged = merge_json(
+                &text,
+                &path(),
+                agent,
+                false,
+                &mut || Ok(wrapper_entry()),
+                &mut || Some(CLAUDE_ANSWER_CHANNEL),
+            )
+            .unwrap();
+            writes.push(merged.is_some());
+            if let Some(merged) = merged {
+                text = merged;
+            }
+        }
+        (text, writes)
+    }
+
+    #[cfg(unix)]
+    fn wrapper_groups(text: &str, event: &str) -> usize {
+        let document: Value = serde_json::from_str(text).unwrap();
+        document["hooks"][event].as_array().map_or(0, |groups| {
+            groups
+                .iter()
+                .filter(|g| {
+                    g["hooks"].as_array().is_some_and(|hooks| {
+                        hooks
+                            .iter()
+                            .any(|h| h["command"].as_str().is_some_and(|c| c.contains(WRAPPER)))
+                    })
+                })
+                .count()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_named_executable_owns_its_claude_and_codex_entries_across_launches() {
+        for agent in ["claude", "codex"] {
+            let (text, writes) = launches(agent, 3);
+            assert_eq!(
+                writes,
+                [true, false, false],
+                "{agent}: only the first launch writes"
+            );
+            for event in events(agent) {
+                assert_eq!(
+                    wrapper_groups(&text, event),
+                    if event == "PermissionRequest" && agent == "claude" {
+                        2
+                    } else {
+                        1
+                    },
+                    "{agent} {event}"
+                );
+            }
+            if agent == "claude" {
+                assert_eq!(wrapper_groups(&text, "PostModelSwitch"), 1);
+                let _own = OwnProgram::scoped(WRAPPER);
+                let channels = hook_entries(&text, "PermissionRequest")
+                    .iter()
+                    .filter(|h| owns_channel(h))
+                    .count();
+                assert_eq!(channels, 1, "one answer channel");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_named_executable_owns_its_kimi_block_across_launches() {
+        let _own = OwnProgram::scoped(WRAPPER);
+        let first = kimi_merge("model = \"k\"\n", false, &fresh_command(WRAPPER).unwrap()).unwrap();
+        assert!(first.contains(WRAPPER));
+        assert_eq!(
+            kimi_merge(&first, false, "unused"),
+            None,
+            "a later launch keeps every byte"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_groups_hgs_wrote_collapse_and_personal_hooks_stay() {
+        let _own = OwnProgram::scoped(WRAPPER);
+        let ours = wrapper_entry().group();
+        let personal = json!({"hooks": [{"type": "command", "command": "notify-send done"}]});
+        let shared = json!({"matcher": "Bash", "hooks": [{"type": "command", "command": "audit"}, ours["hooks"][0].clone()]});
+        let foreign = json!({"hooks": [{"type": "command", "command": "/srv/other-tool __state hook", "timeout": 5}]});
+        let original = json!({"model": "keep", "hooks": {
+            "SessionStart": [ours.clone(), personal.clone(), ours.clone(), ours.clone(), foreign.clone(), foreign.clone()],
+            "Stop": [shared.clone(), ours.clone(), ours.clone()],
+        }}).to_string();
+        let merged = merge_json(
+            &original,
+            &path(),
+            "codex",
+            false,
+            &mut || Ok(wrapper_entry()),
+            &mut || None,
+        )
+        .unwrap()
+        .unwrap();
+        let document: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(document["model"], "keep");
+        // Later copies of hgs's own group go; the personal group, a group that
+        // also holds a personal hook, and a look-alike for another program stay.
+        assert_eq!(
+            document["hooks"]["SessionStart"],
+            json!([ours, personal, foreign, foreign])
+        );
+        assert_eq!(document["hooks"]["Stop"], json!([shared, ours]));
+        for event in events("codex") {
+            assert!(wrapper_groups(&merged, event) >= 1, "{event}");
+        }
+        assert!(merge_json(
+            &merged,
+            &path(),
+            "codex",
+            false,
+            &mut || panic!("reuses its entry"),
+            &mut || None
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn another_programs_state_hook_is_never_adopted_without_its_identity() {
+        // Not the current executable and not named hgs: a personal hook.
+        let foreign = json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "/srv/other-tool __state hook", "timeout": 5}]}]}}).to_string();
+        let _own = OwnProgram::scoped(WRAPPER);
+        let merged = json_merge(&foreign, "codex", false, wrapper_entry()).unwrap();
+        let start = hook_entries(&merged, "SessionStart");
+        assert_eq!(start.len(), 2);
+        assert_eq!(start[0]["command"], "/srv/other-tool __state hook");
+        assert!(start[1]["command"].as_str().unwrap().contains(WRAPPER));
+        drop(_own);
+        // Outside an installation's scope the wrapper is not hgs either.
+        assert!(!owns_hook(&fresh_command(WRAPPER).unwrap()));
     }
 
     fn hook_entries(text: &str, event: &str) -> Vec<Value> {

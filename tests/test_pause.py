@@ -4,6 +4,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
+import tomllib
 import os
 from pathlib import Path
 import pty
@@ -1879,6 +1880,70 @@ exec {tmux} "$@"
 
 
 class Lifecycle(Harness):
+    def wrapped_hooks(self, agent, wrapper):
+        """hgs's tracking entries per event, and answer channels, that run `wrapper`."""
+        if agent == "kimi":
+            hooks = tomllib.loads((self.root / ".kimi-code/config.toml").read_text())["hooks"]
+            pairs = [(h["event"], h["command"]) for h in hooks]
+        else:
+            path = self.root / (".claude/settings.json" if agent == "claude" else ".codex/hooks.json")
+            hooks = json.loads(path.read_text())["hooks"]
+            pairs = [(event, h["command"]) for event, groups in hooks.items() for g in groups for h in g["hooks"]]
+        counts = {}
+        for event, command in pairs:
+            if wrapper in command:
+                key = event + (" channel" if command.endswith("answer-channel") else "")
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def test_wrapper_named_hgs_executable_keeps_one_hook_entry_per_event(self):
+        # zerus-s3wax: an HGS_EXECUTABLE that is not named hgs (a wrapper) must
+        # still recognise its own entries, so a later launch adds none.
+        wrapper = self.bin / "hgs-wrapper"
+        log = self.root / "wrapper-hooks"
+        wrapper.write_text(f"""#!/usr/bin/env python3
+import json, os, subprocess, sys
+HGS = {str(HGS)!r}
+if sys.argv[1:] == ["__state", "hook"]:
+    data = sys.stdin.read()
+    try:
+        kind = json.loads(data).get("hook_event_name", "?")
+    except ValueError:
+        kind = "?"
+    with open({str(log)!r}, "a") as f:
+        f.write(os.environ.get("HGS_SESSION", "?") + " " + kind + "\\n")
+    sys.exit(subprocess.run([HGS, *sys.argv[1:]], input=data, text=True).returncode)
+os.execv(HGS, [HGS, *sys.argv[1:]])
+""")
+        wrapper.chmod(0o755)
+        log.write_text("")
+        self.env["HGS_EXECUTABLE"] = str(wrapper)
+        for agent in ("claude", "codex", "kimi"):
+            with self.subTest(agent=agent):
+                name = self.start(agent, "wrapped")
+                first = self.wrapped_hooks(agent, str(wrapper))
+                self.assertTrue(first and set(first.values()) == {1}, first)
+                for _ in range(2):
+                    self.hgs("pause", name)
+                    self.resume(name)
+                self.assertEqual(self.wrapped_hooks(agent, str(wrapper)), first)
+                self.hgs("pause", name)
+                self.assertEqual(log.read_text().splitlines().count(name + " SessionStart"), 3,
+                                 "one SessionStart delivery for each of three launches")
+        # Copies that earlier launches left behind collapse at the next launch,
+        # before the agent reads its settings; a personal hook stays.
+        name, settings = "claude/p/wrapped", self.root / ".claude/settings.json"
+        data = json.loads(settings.read_text())
+        ours = [g for g in data["hooks"]["SessionStart"] if str(wrapper) in json.dumps(g)]
+        personal = {"hooks": [{"type": "command", "command": "true"}]}
+        data["hooks"]["SessionStart"] = ours * 3 + [personal]
+        settings.write_text(json.dumps(data))
+        before = log.read_text().splitlines().count(name + " SessionStart")
+        self.resume(name)
+        self.assertEqual(json.loads(settings.read_text())["hooks"]["SessionStart"], ours + [personal])
+        self.hgs("pause", name)
+        self.assertEqual(log.read_text().splitlines().count(name + " SessionStart") - before, 1)
+
     def test_directory_browser(self):
         folder = self.root / "browse ' test"
         folder.mkdir()

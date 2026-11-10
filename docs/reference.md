@@ -1774,6 +1774,27 @@ refused this way, from programs built in such a folder (its folder, a
 ran), carries the same text in `error` (`hgs run` adds `"environment": true`).
 Zerus only reads labels; it never changes them.
 
+Task #35 (2026-11-10): so a DeepSeek (dsh) team member works only in its own
+Zerus-made folder, its clone or worktree. A DeepSeek member with the shared
+folder (the team folder, the integration folder, another member's folder) and a
+DeepSeek lead, who works in the team folder, are refused: by the plan preflight
+(so `approve` and `add-member` name it) and again at the start, before any
+folder is created, granted or launched. The refusal names one action:
+`{"team":"ID","members_update":[{"id":"qa","folder":"clone"}],"request_id":"UUID"} |
+hgs team settings --json`, or another agent. A DeepSeek member given no folder
+takes its own clone under every folder policy, unless the project leaves no own
+folder (the shared policy, or worktrees and clones forbidden). A member that
+already has a session (adopted) is not launched and not checked. The team
+folder, the integration folder and shared members' folders that already carry
+the Low label are named, with the owner's `icacls` step, as `low_folder`
+warnings in the preflight at team start and in `hgs team status --json` as
+`low_folders` (`folder`, `labeled`, `what`, `text`, `owner_step`; labels are
+read at most once a minute). A member's own clone or worktree is Low by design
+and is not named. Zerus sets a label only on its own team store folder in the
+hgs state directory, and grants full control only on a DeepSeek member's own
+new folder (`worktrees create --sandbox`) and on the cwd of a DeepSeek session
+it starts (U34).
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the

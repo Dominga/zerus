@@ -6034,6 +6034,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // tick and the slowest recent one (bounded).
             value["worker_tick"] = super::tick_clock::status();
             phases.mark("worker_tick");
+            // Task #35: a shared or integration folder with a Low label, with
+            // the owner's step (labels read at most once a minute).
+            value["low_folders"] = json!(super::environment::low_shared_folders(&team).iter().map(super::environment::LowFolder::json).collect::<Vec<_>>());
+            phases.mark("low_folders");
             let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
             phases.mark("working_mode");
             value["working_mode"] = json!({
@@ -6697,6 +6701,9 @@ mod inbox_notices;
 #[cfg(test)]
 #[path = "tests/inbox_close.rs"]
 mod inbox_close;
+#[cfg(test)]
+#[path = "tests/low_folders.rs"]
+mod low_folders;
 
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]

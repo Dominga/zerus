@@ -1311,6 +1311,18 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             format!("{count} members besides the lead — over the team limit of {} (the lead is not counted)", team.settings.max_members),
         ));
     }
+    // Task #35: a DeepSeek member only in its own folder. (A DeepSeek lead is
+    // refused when it is started, at Start planning, before any preflight.)
+    for member in team.members.iter().filter(|member| member.id != team.lead) {
+        if let Some(problem) = super::dispatcher::deepseek_folder_problem(team, member) {
+            found.errors.push(finding("folder", None, Some(&member.id), problem));
+        }
+    }
+    // Task #35: a shared folder that already carries the Low label, with the
+    // owner's step (Zerus never changes a label itself).
+    for low in super::environment::low_shared_folders(team) {
+        found.warnings.push(finding("low_folder", None, None, low.text()));
+    }
     // B3/B6 preflight: a member's folder against the folder policy and the
     // project's ban; a sandboxed agent cannot commit from a worktree.
     for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {

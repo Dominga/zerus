@@ -8,13 +8,18 @@
 //! `zerus_watch_protocol::decode`, and its stderr is drained. When the stream
 //! ends, fails, sends a fatal `error` or stays silent for 30 s, the computer is
 //! [`ComputerStatus::Reconnecting`] with its rows kept, and the next start
-//! follows after 5 s, 15 s, 60 s, then every 5 minutes (failures more than ten
-//! minutes apart start over). Followed sessions are subscribed again on every
+//! follows after the shared [`RestartDelays`] (by default 1 s, 2 s, 5 s, then
+//! every 10 s; failures more than ten minutes apart start over). Each wait is
+//! published as [`crate::Retry::Waiting`] with the deadline that ends it, before its
+//! status, and [`StreamHandle::reconnect`] ends it early. Followed sessions are
+//! subscribed again on every
 //! new stream, after their last cursor, and so are followed processes when the
 //! stream offers that topic. A followed organization comes from a stream that
 //! offers its topic; while none does, this computer's is polled with
 //! `hgs swarm get` every 5 s.
-use crate::{state::CatalogState, Change, ComputerId, ComputerStatus};
+use crate::{
+    state::CatalogState, Change, ComputerId, ComputerStatus, NextAttempt, Retry as Schedule,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -53,12 +58,95 @@ mod helper;
 mod legacy_source;
 mod resources;
 
+/// The default restart delays, in seconds, before restart 1, 2, 3 and every
+/// later one: a computer that comes up later is found within seconds.
+pub const RESTART_DEFAULT_SECS: [u64; 4] = [1, 2, 5, 10];
+/// The bounds of one configured restart delay, in seconds.
+pub const RESTART_MIN_SECS: u64 = 1;
+pub const RESTART_MAX_SECS: u64 = 3600;
+const INVALID_DELAYS: &str = "invalid_retry_delays";
+
+/// The restart delays the supervisors of one fleet share. A change applies to
+/// the next wait each one schedules; a wait already scheduled keeps its
+/// published deadline.
+#[derive(Clone)]
+pub struct RestartDelays(Arc<Mutex<[Duration; 4]>>);
+
+impl RestartDelays {
+    pub fn new(delays: [Duration; 4]) -> Self {
+        Self(Arc::new(Mutex::new(delays)))
+    }
+    pub fn get(&self) -> [Duration; 4] {
+        *lock(&self.0)
+    }
+    /// Replaces the delays of every supervisor sharing this schedule.
+    pub fn set(&self, delays: [Duration; 4]) {
+        *lock(&self.0) = delays;
+    }
+}
+
+impl From<[Duration; 4]> for RestartDelays {
+    fn from(delays: [Duration; 4]) -> Self {
+        Self::new(delays)
+    }
+}
+
+impl PartialEq for RestartDelays {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl std::fmt::Debug for RestartDelays {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+/// A restart schedule in whole seconds: exactly four delays, for the first,
+/// second, third and every later failure, each from 1 s to 1 h and never
+/// shorter than the one before.
+pub fn checked_restart_delays(seconds: &[u64]) -> Result<[Duration; 4], &'static str> {
+    let seconds = <[u64; 4]>::try_from(seconds).map_err(|_| INVALID_DELAYS)?;
+    if seconds
+        .iter()
+        .any(|delay| !(RESTART_MIN_SECS..=RESTART_MAX_SECS).contains(delay))
+        || seconds.windows(2).any(|pair| pair[1] < pair[0])
+    {
+        return Err(INVALID_DELAYS);
+    }
+    Ok(seconds.map(Duration::from_secs))
+}
+
+/// A saved or requested schedule: a JSON array of four whole seconds.
+pub fn restart_delays_from_value(value: &Value) -> Result<[Duration; 4], &'static str> {
+    let seconds = value
+        .as_array()
+        .ok_or(INVALID_DELAYS)?
+        .iter()
+        .map(|delay| delay.as_u64().ok_or(INVALID_DELAYS))
+        .collect::<Result<Vec<_>, _>>()?;
+    checked_restart_delays(&seconds)
+}
+
+/// The wait after `attempt` failures, scheduled at `now`. Its deadline both
+/// ends the supervisor's wait and is published. Pure, so tests pin the clock.
+pub(crate) fn schedule(delay: Duration, attempt: u32, serial: u64, now: Instant) -> NextAttempt {
+    NextAttempt {
+        serial,
+        attempt,
+        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        deadline: now + delay,
+    }
+}
+
 /// The delays and bounds of a stream. [`Timing::scaled`] shrinks the restart
 /// and re-probe delays for tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Timing {
-    /// The delay before restart 1, 2, 3 and every later one.
-    pub restart: [Duration; 4],
+    /// The delay before restart 1, 2, 3 and every later one, shared by every
+    /// supervisor this timing (or a clone of it) starts.
+    pub restart: RestartDelays,
     /// A stream without any frame for this long restarts.
     pub silence: Duration,
     /// How often a computer without the marker is probed again.
@@ -79,7 +167,7 @@ pub struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            restart: [5, 15, 60, 300].map(Duration::from_secs),
+            restart: RestartDelays::new(RESTART_DEFAULT_SECS.map(Duration::from_secs)),
             silence: Duration::from_secs(30),
             reprobe: Duration::from_secs(600),
             probe_timeout: Duration::from_secs(5),
@@ -97,7 +185,7 @@ impl Timing {
     pub fn scaled(factor: f64) -> Self {
         let default = Self::default();
         Self {
-            restart: default.restart.map(|delay| delay.mul_f64(factor)),
+            restart: RestartDelays::new(default.restart.get().map(|delay| delay.mul_f64(factor))),
             reprobe: default.reprobe.mul_f64(factor),
             organization_poll: default.organization_poll.mul_f64(factor),
             legacy: crate::legacy::Intervals {
@@ -112,7 +200,7 @@ impl Timing {
     /// The delay before the restart after `attempt` failures.
     pub fn restart_delay(&self, attempt: u32) -> Duration {
         let index = attempt.saturating_sub(1).min(3) as usize;
-        self.restart[index]
+        self.restart.get()[index]
     }
 
     fn probe_timeout(&self, computer: &ComputerId) -> Duration {
@@ -1021,6 +1109,8 @@ fn spawn_with(
         source_seq: None,
         replaced_restart: None,
         reader_stop: None,
+        schedule: std::cell::Cell::new(Schedule::Idle),
+        schedule_serial: 0,
     };
     let name = match computer.alias() {
         Some(alias) => format!("hgs-watch-{alias}"),
@@ -1098,6 +1188,10 @@ struct Supervisor {
     resources: Option<resources::Scope>,
     child_charge: Option<crate::run::ChildCharge>,
     primary: Option<Arc<dyn Send + Sync>>,
+    /// The restart schedule last published; see [`crate::Retry`].
+    schedule: std::cell::Cell<Schedule>,
+    /// The serial of the last wait this supervisor scheduled.
+    schedule_serial: u64,
 }
 
 impl Supervisor {
@@ -1209,19 +1303,52 @@ impl Supervisor {
     }
 
     fn emit(&self, change: Change) {
-        if let Change::Computer { status, .. } = &change {
-            if matches!(status, ComputerStatus::Reconnecting { .. }) {
+        let left = match &change {
+            Change::Computer {
+                status: ComputerStatus::Reconnecting { .. },
+                ..
+            } => {
                 self.retry.waiting();
-            } else {
-                self.retry.begin();
+                false
             }
+            Change::Computer { .. } => {
+                self.retry.begin();
+                true
+            }
+            _ => false,
+        };
+        // A computer that is not reconnecting has no restart waiting or
+        // running; clearing it first leaves nothing behind an ended computer.
+        if left {
+            self.publish(Schedule::Idle);
         }
+        self.forward(change);
+    }
+
+    fn forward(&self, change: Change) {
         if let Some(sink) = &self.sink {
             let _ = sink.send(StreamEvent::Change(change));
-        } else if let (Some(source), Change::Computer { status, .. }) = (&self.source, change) {
-            if !source.status(self.generation, status, &self.stop) {
+        } else if let Some(source) = &self.source {
+            let sent = match change {
+                Change::Computer { status, .. } => {
+                    source.status(self.generation, status, &self.stop)
+                }
+                Change::Retry { retry, .. } => source.retry(self.generation, retry, &self.stop),
+                _ => true,
+            };
+            if !sent {
                 self.stop.store(true, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Publishes a changed restart schedule; an unchanged one sends nothing.
+    fn publish(&self, schedule: Schedule) {
+        if self.schedule.replace(schedule) != schedule {
+            self.forward(Change::Retry {
+                computer: self.computer.clone(),
+                retry: schedule,
+            });
         }
     }
 
@@ -1233,20 +1360,46 @@ impl Supervisor {
     }
 
     /// Reports the failure of this attempt and waits out its delay; false
-    /// when the stream was stopped meanwhile.
+    /// when the stream was stopped meanwhile. The one deadline both ends the
+    /// wait and is published, before the status, as the next attempt; a
+    /// manual reconnect ends it early.
     fn fail(&mut self) -> bool {
         self.connection = None;
-        for change in self.state.end(&self.computer, Instant::now()) {
+        let changes = self.state.end(&self.computer, Instant::now());
+        let attempt = self.state.attempt();
+        self.schedule_serial += 1;
+        let next = schedule(
+            self.timing.restart_delay(attempt),
+            attempt,
+            self.schedule_serial,
+            Instant::now(),
+        );
+        self.publish(Schedule::Waiting(next));
+        for change in changes {
             self.emit(change);
         }
-        self.wait(self.timing.restart_delay(self.state.attempt()))
+        let again = self.wait_until(next.deadline);
+        self.publish(if again {
+            Schedule::Attempting {
+                serial: next.serial,
+                attempt,
+            }
+        } else {
+            Schedule::Idle
+        });
+        again
     }
 
     /// Waits without a stream, keeping follows current; false on stop.
     fn wait(&mut self, time: Duration) -> bool {
+        self.wait_until(Instant::now() + time)
+    }
+
+    /// [`Self::wait`] until `deadline`; true at the deadline or on a
+    /// requested reconnect.
+    fn wait_until(&mut self, deadline: Instant) -> bool {
         // No stream: a followed organization is polled meanwhile.
         self.sync_poller();
-        let deadline = Instant::now() + time;
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return false;
@@ -2351,18 +2504,84 @@ mod tests {
     }
 
     #[test]
-    fn restart_delays_are_5_15_60_then_300_seconds() {
+    fn restart_delays_default_to_1_2_5_then_every_10_seconds() {
         let timing = Timing::default();
         let delays: Vec<u64> = (0..7)
             .map(|attempt| timing.restart_delay(attempt).as_secs())
             .collect();
-        assert_eq!(delays, vec![5, 5, 15, 60, 300, 300, 300]);
+        assert_eq!(delays, vec![1, 1, 2, 5, 10, 10, 10]);
         let scaled = Timing::scaled(0.001);
-        assert_eq!(scaled.restart_delay(1), Duration::from_millis(5));
-        assert_eq!(scaled.restart_delay(4), Duration::from_millis(300));
+        assert_eq!(scaled.restart_delay(1), Duration::from_millis(1));
+        assert_eq!(scaled.restart_delay(4), Duration::from_millis(10));
         assert_eq!(scaled.reprobe, Duration::from_millis(600));
         assert_eq!(scaled.organization_poll, Duration::from_millis(5));
         assert_eq!(scaled.silence, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_restart_schedule_is_four_bounded_non_decreasing_seconds() {
+        let ok = checked_restart_delays(&[1, 2, 5, 10]).unwrap();
+        assert_eq!(ok, [1, 2, 5, 10].map(Duration::from_secs));
+        assert!(checked_restart_delays(&[3, 3, 3, 3]).is_ok());
+        assert!(checked_restart_delays(&[1, 1, 1, 3600]).is_ok());
+        for bad in [
+            &[][..],
+            &[1, 2, 5][..],
+            &[1, 2, 5, 10, 20][..],
+            &[0, 2, 5, 10][..],
+            &[1, 2, 5, 3601][..],
+            &[5, 2, 5, 10][..],
+            &[1, 2, 10, 5][..],
+        ] {
+            assert_eq!(checked_restart_delays(bad), Err(INVALID_DELAYS), "{bad:?}");
+        }
+        assert_eq!(
+            restart_delays_from_value(&serde_json::json!([2, 4, 8, 16])).unwrap(),
+            [2, 4, 8, 16].map(Duration::from_secs)
+        );
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!("1,2,5,10"),
+            serde_json::json!([1, 2, 5, "10"]),
+            serde_json::json!([1, 2, 5, 10.5]),
+            serde_json::json!([1, 2, 5, -10]),
+        ] {
+            assert!(restart_delays_from_value(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn clones_of_one_timing_share_their_restart_delays() {
+        let timing = Timing::default();
+        let supervisor = timing.clone();
+        let other = Timing::default();
+        timing.restart.set([3, 6, 9, 12].map(Duration::from_secs));
+        assert_eq!(supervisor.restart_delay(4), Duration::from_secs(12));
+        assert_eq!(supervisor.restart_delay(1), Duration::from_secs(3));
+        // A separate fleet keeps its own schedule.
+        assert_eq!(other.restart_delay(4), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_scheduled_wait_publishes_the_deadline_that_ends_it() {
+        let now = Instant::now();
+        let next = schedule(Duration::from_secs(5), 3, 7, now);
+        assert_eq!(
+            next,
+            NextAttempt {
+                serial: 7,
+                attempt: 3,
+                delay_ms: 5000,
+                deadline: now + Duration::from_secs(5),
+            }
+        );
+        // The remaining time follows the monotonic deadline only: the same
+        // wait read later has less left, never a restarted delay.
+        assert_eq!(next.remaining_ms(now), 5000);
+        assert_eq!(next.remaining_ms(now + Duration::from_millis(1250)), 3750);
+        assert_eq!(next.remaining_ms(now + Duration::from_secs(9)), 0);
+        assert_eq!(schedule(Duration::from_secs(5), 3, 7, now), next);
+        assert_eq!(schedule(Duration::from_millis(2), 1, 8, now).delay_ms, 2);
     }
 
     #[test]

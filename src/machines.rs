@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod retry_delays;
 mod source;
 
 fn yes() -> bool {
@@ -177,14 +178,7 @@ fn write_profile(
     expected: Option<&str>,
     create_only: bool,
 ) -> Result<()> {
-    fs::create_dir_all(&config.dir)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(config.dir.join("machines.lock"))?;
-    let _lock = platform::FileLock::exclusive(lock)?;
+    let _lock = lock(config)?;
     let bytes = read(&config.dir)?;
     if expected.is_some_and(|value| value != revision(&bytes)) {
         return Err(Error::new(
@@ -217,6 +211,17 @@ fn write_profile(
     platform::sync_dir(&config.dir)?;
     Ok(())
 }
+/// The one lock every local machine settings writer holds.
+fn lock(config: &Config) -> Result<platform::FileLock> {
+    fs::create_dir_all(&config.dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(config.dir.join("machines.lock"))?;
+    Ok(platform::FileLock::exclusive(lock)?)
+}
 fn list(config: &Config) -> Result<Value> {
     // Profile values and the optimistic-lock revision must describe one snapshot.
     let bytes = read(&config.dir)?;
@@ -234,7 +239,8 @@ fn list(config: &Config) -> Result<Value> {
         })
         .collect();
     Ok(
-        json!({"local":config.host(),"machines":rows,"revision":revision(&bytes),"environment_override":config.peers_from_environment}),
+        json!({"local":config.host(),"machines":rows,"revision":revision(&bytes),"environment_override":config.peers_from_environment,
+            "retry_delays":retry_delays::view(&config.dir)}),
     )
 }
 // `ssh -G` never opens a network connection, but a user's Match exec directive
@@ -345,13 +351,19 @@ fn check(config: &Config, alias: &str) -> Result<Value> {
         let version = crate::remote_shell::output(config, alias, &["--version"])?;
         let listing = crate::remote_shell::output(config, alias, &["ls", "--local", "--json"])?;
         let value: Value = serde_json::from_slice(&listing.stdout).unwrap_or(Value::Null);
-        let enabled = value["ok"] == true && value["sessions"].is_array()
+        let enabled = value["ok"] == true
+            && value["sessions"].is_array()
             && value.get("local_sessions").is_none_or(|v| v == true);
         let hgs = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-        let ready = version.status.success() && listing.status.success() && hgs.starts_with("hgs ") && enabled;
-        return Ok(json!({"alias":alias,"ok":ready,"ssh_ok":true,"os":"Windows","arch":"unknown","hgs":hgs,
+        let ready = version.status.success()
+            && listing.status.success()
+            && hgs.starts_with("hgs ")
+            && enabled;
+        return Ok(
+            json!({"alias":alias,"ok":ready,"ssh_ok":true,"os":"Windows","arch":"unknown","hgs":hgs,
             "local_sessions":enabled,"tmux":null,"cargo":null,
-            "error":if ready { "" } else { "Install Zerus and enable local sessions with hgs session-host install on that Windows account" }}));
+            "error":if ready { "" } else { "Install Zerus and enable local sessions with hgs session-host install on that Windows account" }}),
+        );
     }
     let out = platform::ssh_output(
         platform::ssh()
@@ -515,10 +527,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         println!("{}", list(config)?);
         return Ok(0);
     }
+    if command == "retry-delays" {
+        return retry_delays::dispatch(config, &args[1..], dry);
+    }
     let alias = args.get(1).ok_or_else(|| {
         Error::new(
             1,
-            "usage: hgs machine <set|remove|reset|resolve|check|ssh|setup> <alias>",
+            "usage: hgs machine <set|remove|reset|resolve|check|ssh|setup> <alias>, or hgs machine retry-delays [--set FIRST SECOND THIRD LATER | --reset]",
         )
     })?;
     validate_alias(alias)?;

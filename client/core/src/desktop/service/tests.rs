@@ -471,3 +471,97 @@ fn malformed_or_wrong_scope_connection_rosters_are_unknown() {
         );
     }
 }
+
+#[test]
+fn connection_rows_carry_the_supervisor_schedule_and_saved_delays() {
+    let mut value = status();
+    value["background_runtime"] = json!({"epoch":EPOCH,"state":"running",
+        "display_only":true,"authority":false,"connections":[
+            {"id":"","status":"live","attempt":0,"incarnation":1,"retry":{"phase":"idle"}},
+            {"id":"studio","status":"reconnecting","attempt":2,"incarnation":7,
+                "retry":{"phase":"waiting","serial":3,"attempt":2,"delay_ms":2000,"remaining_ms":1500}},
+            {"id":"build","status":"reconnecting","attempt":1,"incarnation":8,
+                "retry":{"phase":"attempting","serial":4,"attempt":1}},
+            // Schedules that do not check are unknown; their rows stay.
+            {"id":"late","status":"reconnecting","attempt":1,
+                "retry":{"phase":"waiting","serial":1,"delay_ms":1000,"remaining_ms":1001}},
+            {"id":"long","status":"reconnecting","attempt":1,
+                "retry":{"phase":"waiting","serial":1,"delay_ms":3600001,"remaining_ms":1}},
+            {"id":"odd","status":"reconnecting","attempt":1,"retry":{"phase":"soon"}},
+            {"id":"old","status":"probing","attempt":0}],
+        "retry_delays":{"delays_seconds":[1,2,5,10],"source":"kept",
+            "diagnostic":"reconnect.local.json is not valid."}});
+    let mut state = state();
+    state.status(&value).unwrap();
+    let rows = state.snapshot().fleet_computers.clone().unwrap();
+    assert_eq!(rows.len(), 7);
+    assert_eq!(rows[0].retry.as_ref().unwrap().phase, "idle");
+    let studio = rows[1].retry.as_ref().unwrap();
+    assert_eq!(rows[1].incarnation, Some(7));
+    assert_eq!(
+        (
+            studio.phase.as_str(),
+            studio.serial,
+            studio.delay_ms,
+            studio.remaining_ms
+        ),
+        ("waiting", 3, Some(2000), Some(1500))
+    );
+    assert_eq!(rows[2].retry.as_ref().unwrap().phase, "attempting");
+    for row in &rows[3..] {
+        assert!(row.retry.is_none(), "{}", row.id);
+    }
+    assert!(rows[6].incarnation.is_none());
+    let delays = state.snapshot().fleet_retry_delays.clone().unwrap();
+    assert_eq!(delays.delays_seconds, [1, 2, 5, 10]);
+    assert_eq!(delays.source, "kept");
+    assert!(delays.diagnostic.unwrap().contains("reconnect.local.json"));
+
+    for bad in [
+        json!({"delays_seconds":[1,2,5],"source":"file"}),
+        json!({"delays_seconds":[5,2,5,10],"source":"file"}),
+        json!({"delays_seconds":[1,2,5,10],"source":"guess"}),
+        json!({"delays_seconds":[1,2,5,10],"source":"file","diagnostic":7}),
+    ] {
+        assert!(checked_retry_delays(&bad).is_none(), "{bad}");
+    }
+}
+
+#[test]
+fn an_early_connection_frame_updates_only_the_display_roster() {
+    let mut state = state();
+    state.frame(&frame(0, "hello", status())).unwrap();
+    let before = state.snapshot().clone();
+    let early = json!({"epoch":EPOCH,"state":"running","display_only":true,"authority":false,
+        "connections":[{"id":"","status":"reconnecting","attempt":1,"incarnation":1,
+            "retry":{"phase":"waiting","serial":1,"attempt":1,"delay_ms":1000,"remaining_ms":900}}],
+        "retry_delays":{"delays_seconds":[1,2,5,10],"source":"default","diagnostic":null}});
+    assert_eq!(
+        state.frame(&frame(1, "fleet_connections", early)),
+        Ok(Update::Status)
+    );
+    let rows = state.snapshot().fleet_computers.clone().unwrap();
+    assert_eq!(rows[0].retry.as_ref().unwrap().remaining_ms, Some(900));
+    assert_eq!(
+        state.snapshot().fleet_retry_delays.as_ref().unwrap().source,
+        "default"
+    );
+    assert!(state.snapshot().connected);
+    assert_eq!(state.snapshot().background, before.background);
+    assert!(
+        state.sources().is_none(),
+        "no source identity from display rows"
+    );
+    // A presentation for another epoch is ignored, never a disconnect.
+    let other = json!({"epoch":REQUEST,"state":"running","display_only":true,"authority":false,
+        "connections":[{"id":"","status":"live","attempt":0}]});
+    assert_eq!(
+        state.frame(&frame(2, "fleet_connections", other)),
+        Ok(Update::Other)
+    );
+    assert!(state.snapshot().connected);
+    assert_eq!(
+        state.snapshot().fleet_computers.as_ref().unwrap()[0].status,
+        "reconnecting"
+    );
+}

@@ -357,3 +357,29 @@ describe("setDraftKeys", () => {
     });
   });
 });
+
+describe("restart schedules of this app's own supervisors", () => {
+  it("anchor once per wait, survive status updates and leave with an ended computer", () => {
+    createRoot((dispose) => {
+      const clock = vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { catalog, applyBatch } = createCatalog(createMarks());
+      const wait = (serial: number, remaining: number) => ({ computer: "studio", phase: "waiting", serial, attempt: 1, delay_ms: 2000, remaining_ms: remaining });
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "reconnecting", attempt: 1 }], retries: [wait(1, 2000)] }));
+      expect(catalog.computers.studio.retry).toMatchObject({ phase: "waiting", serial: 1, dueAt: 3000 });
+      // An unrelated status update and a replayed report of the same wait keep it.
+      clock.mockReturnValue(1500);
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "reconnecting", attempt: 1 }] }));
+      applyBatch(batchOf({ retries: [wait(1, 2000)] }));
+      expect(catalog.computers.studio.retry?.dueAt).toBe(3000);
+      applyBatch(batchOf({ retries: [{ computer: "studio", phase: "attempting", serial: 1, attempt: 1 }] }));
+      expect(catalog.computers.studio.retry?.phase).toBe("attempting");
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "ended", attempt: 0 }] }));
+      expect(catalog.computers.studio.retry).toBeUndefined();
+      // A schedule for a computer the catalog does not know adds nothing.
+      applyBatch(batchOf({ retries: [{ ...wait(2, 1000), computer: "other" }] }));
+      expect(catalog.computers.other).toBeUndefined();
+      clock.mockRestore();
+      dispose();
+    });
+  });
+});

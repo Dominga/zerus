@@ -47,6 +47,7 @@ fn live_smoke() {
                     *statuses.entry(status.name()).or_default() += 1;
                     "computer"
                 }
+                Change::Retry { .. } => "retry",
                 Change::Activity { .. } => "activity",
                 Change::Processes { .. } => "processes",
                 Change::Tasks { .. } => "tasks",

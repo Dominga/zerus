@@ -49,6 +49,14 @@
   .mach-preview { font-size: var(--fs-sm); }
   .mach-form-row { grid-template-columns: 150px minmax(0, 460px); margin: 4px 0; }
   .mach-port { width: 260px; }
+  .mach-retry { display: flex; flex-direction: column; gap: 6px; }
+  .mach-retry-status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: var(--fs-sm); min-height: 28px; }
+  .mach-retry-state { color: var(--z-color-text); font-weight: 500; }
+  .mach-retry-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px 12px; max-width: 600px; }
+  .mach-retry-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); color: var(--z-color-text-2); }
+  .mach-retry-field .row { align-items: center; gap: 6px; }
+  .mach-retry-field input { width: 80px; }
+  .mach-retry-defaults { font-size: var(--fs-xs); }
   .mach-effective { padding: 8px 10px; border-radius: var(--z-radius-md); background: var(--z-color-tile); border: 1px solid var(--z-color-card-border); font-size: var(--fs-sm); line-height: 1.5; color: var(--z-color-text-2); }
   .mach-log { margin: 0; padding: 10px 12px; max-height: 200px; overflow: auto; border-radius: var(--z-radius-md); background: var(--z-color-terminal-bg); color: var(--z-color-terminal-fg); font-family: var(--z-font-mono); font-size: var(--fs-xs); white-space: pre-wrap; }
   .mach-foot { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid var(--z-color-divider); }

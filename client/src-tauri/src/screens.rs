@@ -1107,6 +1107,45 @@ impl Screens {
         Ok(())
     }
 
+    /// One explicit reconnect timings write (`hgs machine retry-delays`,
+    /// under the CLI's machines lock): four seconds, or None to reset to the
+    /// defaults. Serialized with the page's other machine writes; the list is
+    /// read again afterwards either way. Returns the timings now saved.
+    pub fn change_retry_delays(
+        &self,
+        change: zerus_client_core::machine_connections::RetryDelaysChange,
+    ) -> Result<zerus_client_core::machine_connections::RetryDelays, String> {
+        use zerus_client_core::machine_connections;
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let call = machine_connections::retry_delays_call(Some(change))?;
+        {
+            let mut hub = self.lock();
+            if !hub.machines.start_write() {
+                return Err("A machine request is already running.".into());
+            }
+            hub.dirty.insert(Screen::Machines);
+        }
+        let _writing = MachineWork(self.clone());
+        self.publish();
+        let saved = zerus_client_core::run_limited(
+            &self.0.hgs,
+            &call,
+            &[],
+            machine_connections::RESPONSE_BYTES,
+        )
+        .map_err(|_| machine_connections::TIMINGS_UNCERTAIN.to_owned())
+        .and_then(|exit| machine_connections::retry_delays_checked(exit, Some(change)));
+        let reply = message(reads::read(
+            &self.0.hgs,
+            &ComputerId::local(),
+            &Read::Machines,
+        ));
+        self.lock().machines.finish_list(reply);
+        saved
+    }
+
     /// Open the saved alias in the configured terminal, including offline
     /// aliases whose host key or login needs manual repair. No remote probe.
     pub fn ssh_machine(
@@ -1485,6 +1524,41 @@ pub async fn machine_change(
     tauri::async_runtime::spawn_blocking(move || screens.change_machine(request))
         .await
         .map_err(|error| error.to_string())?
+}
+
+/// Machines > Reconnect schedule: saves four seconds (or resets with None),
+/// then applies the saved timings to the running connection supervisors:
+/// the background service re-reads them, an in-process fleet takes them.
+/// Returns the saved timings and, from the service, the ones it uses.
+#[tauri::command]
+pub async fn machine_retry_delays(
+    state: State<'_, Screens>,
+    app_state: State<'_, crate::commands::AppState>,
+    delays: Option<[u64; 4]>,
+) -> Result<serde_json::Value, String> {
+    let screens = state.inner().clone();
+    let saved = tauri::async_runtime::spawn_blocking(move || screens.change_retry_delays(delays))
+        .await
+        .map_err(|error| error.to_string())??;
+    let applied = app_state.apply_retry_delays(saved.delays()).await;
+    Ok(serde_json::json!({"saved":saved,"applied":applied}))
+}
+
+/// Machines > Reconnect now: ends the selected computer's restart wait in
+/// its existing connection supervisor (the background service's, or this
+/// app's own). Never starts, restarts or activates anything.
+#[tauri::command]
+pub async fn machine_reconnect(
+    app_state: State<'_, crate::commands::AppState>,
+    computer: String,
+    incarnation: Option<u64>,
+) -> Result<String, String> {
+    if computer.len() > 255
+        || (!computer.is_empty() && !zerus_client_core::fleet::valid_alias(&computer))
+    {
+        return Err("invalid_request".into());
+    }
+    app_state.reconnect_now(&computer, incarnation).await
 }
 
 /// Explicit Machines click: use the existing terminal/console host and hgs.

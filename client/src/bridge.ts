@@ -638,6 +638,24 @@ export async function machineChange(request: import("./types").MachineChangeRequ
   return invoke<void>("machine_change", { request });
 }
 
+/** What saving reconnect timings did: the saved timings, then who applies them (`app`, `service` or `none`). */
+export interface RetryDelaysOutcome {
+  saved: import("./types").RetryDelays;
+  applied: { by: "app" | "service" | "none"; retry_delays?: import("./types").FleetRetryDelays | null; error?: string };
+}
+
+/** Saves four seconds, or with null resets to the defaults; no retry after an unknown result. */
+export async function machineRetryDelays(delays: [number, number, number, number] | null): Promise<RetryDelaysOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<RetryDelaysOutcome>("machine_retry_delays", { delays });
+}
+
+/** Ends one computer's restart wait ("" is this computer); resolves to the supervisor's code. */
+export async function machineReconnect(computer: string, incarnation?: number): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<string>("machine_reconnect", { computer, incarnation: incarnation ?? null });
+}
+
 /** Uses the configured terminal and existing hgs machine ssh route. */
 export async function machineSsh(reference: import("./types").MachineReference): Promise<string | null> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);

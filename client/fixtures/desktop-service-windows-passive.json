@@ -76,5 +76,6 @@
   "reconnecting": false,
   "retained_source_import": null,
   "task_message_inputs": null,
-  "fleet_computers": null
+  "fleet_computers": null,
+  "fleet_retry_delays": null
 }

@@ -162,6 +162,24 @@ impl Fleet {
         false
     }
 
+    /// Replaces the restart delays of every stream of this fleet, including
+    /// streams started later. Each applies them to the next wait it
+    /// schedules; a published wait keeps its deadline.
+    pub fn set_restart_delays(&self, delays: [std::time::Duration; 4]) {
+        self.shared.timing.restart.set(delays);
+    }
+
+    /// The restart delays the next wait of this fleet's streams uses.
+    pub fn restart_delays(&self) -> [std::time::Duration; 4] {
+        self.shared.timing.restart.get()
+    }
+
+    /// The shared restart delays, for a reader that applies saved timings
+    /// later from another thread.
+    pub fn restart_handle(&self) -> crate::RestartDelays {
+        self.shared.timing.restart.clone()
+    }
+
     /// Follows this computer and the peers it lists through `hgs` (a path or
     /// a name on `PATH`, see [`crate::default_hgs`]); changes go to `sink`.
     pub fn start(hgs: PathBuf, sink: Sender<Change>) -> Self {

@@ -338,7 +338,7 @@ fn first_hello_and_increasing_sequences_are_required_before_projection() {
         );
         let (tx, rx) = source::channel(spawn);
         let mut timing = quick();
-        timing.restart = [Duration::from_secs(10); 4];
+        timing.restart = [Duration::from_secs(10); 4].into();
         let handle = tx
             .spawn(&fake.path(), &ComputerId::local(), timing)
             .unwrap();

@@ -1013,6 +1013,9 @@ type QuestionRows = HashMap<String, HashMap<String, HashMap<String, BTreeSet<Str
 struct Rows {
     archive_generation: u64,
     status: Option<ComputerStatus>,
+    /// The latest restart schedule, replayed after the status; an `ended`
+    /// status drops it.
+    retry: zerus_client_core::Retry,
     /// The latest card data; an `ended` status drops it.
     machine: Option<MachineMeta>,
     order: Vec<String>,
@@ -1199,7 +1202,11 @@ impl Mirror {
                     entry.notification_rows.clear();
                     entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
+                    entry.retry = zerus_client_core::Retry::Idle;
                 }
+            }
+            Change::Retry { computer, retry } => {
+                self.computers.entry(computer.0.clone()).or_default().retry = *retry;
             }
             Change::Machine { computer, machine } => {
                 self.computers
@@ -1222,6 +1229,12 @@ impl Mirror {
                 out.push(Change::Computer {
                     computer: ComputerId(computer.clone()),
                     status: *status,
+                });
+            }
+            if rows.retry != zerus_client_core::Retry::Idle {
+                out.push(Change::Retry {
+                    computer: ComputerId(computer.clone()),
+                    retry: rows.retry,
                 });
             }
             if let Some(machine) = &rows.machine {

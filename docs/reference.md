@@ -4727,6 +4727,32 @@ not change configuration; **Discard draft** removes the draft explicitly.
 Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
 
+**Connection status** shows the selected machine's connection and, while it is
+not connected, the time to its next automatic attempt. The time comes from the
+connection supervisor that actually waits (the background service's, or the
+app's own without it): each wait publishes the deadline that ends it, measured
+on that process's monotonic clock and anchored once per wait in the view, so
+status updates never restart or extend a countdown. **Reconnect now** ends only
+that machine's current wait in its existing supervisor; the catalog stays as
+last known, follows and source identity are kept, repeated clicks join the
+running attempt, and nothing restarts the background service, a source or an
+agent. Disabled and removed machines have no supervisor and no button.
+
+**Reconnect schedule** sets this computer's delays for every machine: the first,
+second and third retry, then every later one, each 1 to 3600 whole seconds and
+never shorter than the one before. The defaults are 1 s, 2 s, 5 s, then every
+10 s, so a computer that starts later is found within seconds. A change applies
+to each machine's next wait. `hgs machine retry-delays [--set FIRST SECOND THIRD
+LATER | --reset]` reads or writes `~/.config/hgs/reconnect.local.json`
+(`{"version":1,"delays_seconds":[...]}`) under the machines lock; `hgs machine
+ls` reports the same as `retry_delays`. A missing file means the defaults. An
+unreadable or invalid file is kept as it is and reported: readers use the
+defaults, a running background service keeps the last schedule it read (one
+that starts with such a file uses the defaults and keeps running), and only
+`--reset` replaces it. The background service reads the file when it starts and
+again on the desktop's request after a change, so the schedule stays in effect
+without the desktop.
+
 **Phones**, below the machines and in Settings → Mobile connection, lists the
 phones paired with every workspace this computer reaches: through its own mobile
 connection, or through one enabled peer that has one (one hop, like phones reach
@@ -6396,6 +6422,18 @@ fleet runtime. The actor applies its watch packets and publishes catalog/count
 updates through the same endpoint. It keeps each original event's ingress permit
 through the database transaction; UI-supplied feed packets cannot enter the owned
 observation path. Failed frames invalidate their exact source until resnapshot.
+Each connection row of its status (`background_runtime.connections`) carries the
+source `incarnation` and its supervisor's `retry` (`idle`, `waiting` with
+`delay_ms` and the `remaining_ms` measured from the supervisor's own deadline,
+or `attempting`), plus the `retry_delays` in use; a change also publishes an
+early `fleet_connections` frame (at most every 250 ms) between heartbeats.
+Display only: no source generation or writer authority. The `desktop request`
+operations `fleet_reconnect` (`computers`: 1 to 64 `{computer, incarnation?}`,
+answering `requested`, `pending`, `connected`, `not_configured`,
+`not_admitted`, `source_changed` or `stopping` for each) and
+`fleet_retry_delays_reload` end an existing supervisor's wait or re-read the
+saved reconnect timings; neither starts, restarts or activates anything, and a
+passive service answers `fleet_unavailable`.
 Plain `serve` and fresh registrations stay passive. On Linux and macOS, the maintained
 installer supports explicit `--mode background|passive` after the authenticated
 frontend handoff; see [Linux mode selection](linux-distribution.md#select-the-desktop-service-mode)
@@ -7133,8 +7171,8 @@ while the stream follows it; its remote's age keeps counting, so a remote shows
 verified for at most 60 s after its check. Refused folders, and all folders of
 a computer whose stream is not live, are polled as before. Listings are applied at most every
 2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
-restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
-meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
+restarts after the reconnect schedule (by default 1 s, 2 s, 5 s, then every
+10 s; see Machines and accounts), and the desktop polls meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
 keeps the desktop on polling.
 
 ## Validation

@@ -739,6 +739,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
     let mut heartbeat = Instant::now() + HEARTBEAT;
+    let mut fleet_publication = fleet::Publication::default();
     let mut collect_at = Instant::now();
     let mut failed = false;
     let mut background_blocked = false;
@@ -861,6 +862,20 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     change["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     fanout.publish(
                         protocol::encode(&frame(&epoch, seq, "catalog_changed", change))?.into(),
+                    );
+                }
+                // A changed connection status or restart schedule reaches the
+                // desktop within the loop's wake, not only with the heartbeat.
+                if fleet_publication.due(runtime.fleet_connections_revision(), Instant::now()) {
+                    seq += 1;
+                    fanout.publish(
+                        protocol::encode(&frame(
+                            &epoch,
+                            seq,
+                            "fleet_connections",
+                            runtime.fleet_connections(),
+                        ))?
+                        .into(),
                     );
                 }
             }
@@ -1245,6 +1260,23 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_required",
                             )
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("fleet_reconnect" | "fleet_retry_delays_reload")
+                            )
+                        }) {
+                            // Connection observation only: the existing
+                            // supervisors' waits and saved timings, never
+                            // activation, ownership or a restart.
+                            match &mut background {
+                                Some(runtime) => {
+                                    runtime.fleet_request(hello.request.as_ref().unwrap())
+                                }
+                                None => {
+                                    json!({"request_id":hello.request.as_ref().unwrap()["request_id"],"accepted":false,"code":"fleet_unavailable"})
+                                }
+                            }
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),

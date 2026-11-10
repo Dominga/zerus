@@ -10,6 +10,7 @@ import { keepWarmOf } from "../ui/sessions/keep-warm";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
 import { createGitProjection } from "./git";
+import { anchorRetry, type RetryState } from "./retry";
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -28,6 +29,8 @@ export interface ComputerState {
   status: string;
   /** Restart attempt while reconnecting. */
   attempt: number;
+  /** This app's own supervisor's restart schedule, anchored on arrival. */
+  retry?: RetryState;
 }
 
 export interface CatalogState {
@@ -308,7 +311,15 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // The core's order: computers, replaces, removes, upserts (Activity goes to its own store).
   function applyBatch(b: Batch) {
     batch(() => {
-      for (const c of b.computers) setCatalog("computers", c.computer, { id: c.computer, status: c.status, attempt: c.attempt ?? 0 });
+      for (const c of b.computers) {
+        const retry = c.status === "ended" ? undefined : catalog.computers[c.computer]?.retry;
+        setCatalog("computers", c.computer, { id: c.computer, status: c.status, attempt: c.attempt ?? 0, retry });
+      }
+      const arrived = performance.now();
+      for (const r of b.retries ?? []) {
+        if (!catalog.computers[r.computer]) continue;
+        setCatalog("computers", r.computer, "retry", anchorRetry(catalog.computers[r.computer].retry, r, arrived));
+      }
       onMachines?.(b);
       const fresh: string[] = [];
       const gone = new Set<string>();

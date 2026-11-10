@@ -31,27 +31,58 @@ fn call(hgs: &Path, args: &[&str], input: Value) -> Value {
 
 struct Real {
     dir: PathBuf,
+    /// The verified candidate CLI that every private wrapper runs.
+    binary: PathBuf,
     hgs: PathBuf,
     snapshot: Value,
     machine: String,
 }
 
+/// The actual non-test CLI under test: the caller builds it from this source
+/// and passes its exact path (zerus-h43u3). There is no repository fallback,
+/// so a stale or unrelated build never stands in for the candidate.
+fn candidate_cli() -> PathBuf {
+    let Some(value) = std::env::var_os("HGS_TEST_BIN") else {
+        panic!(
+            "set HGS_TEST_BIN to the hgs built from this source; scripts/ci/client-native.sh does"
+        );
+    };
+    let path = PathBuf::from(value);
+    assert!(
+        path.is_absolute(),
+        "HGS_TEST_BIN must be an absolute path: {}",
+        path.display()
+    );
+    let metadata = std::fs::metadata(&path)
+        .unwrap_or_else(|error| panic!("HGS_TEST_BIN {}: {error}", path.display()));
+    assert!(
+        metadata.is_file() && (metadata.permissions().mode() & 0o111) != 0,
+        "HGS_TEST_BIN is not an executable file: {}",
+        path.display()
+    );
+    path.canonicalize().unwrap()
+}
+
+/// One POSIX shell word, whatever the path contains.
+fn shell_word(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+}
+
 impl Real {
     fn new() -> Self {
+        let binary = candidate_cli();
         let dir = std::env::temp_dir().join(format!("zerus-native-drive-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/hgs");
-        assert!(binary.is_file(), "build the exact candidate CLI first");
         let hgs = dir.join("hgs-private");
         let script = format!(
-            "#!/bin/sh\nexport HOME='{0}'\nexport HGS_CONFIG_DIR='{1}'\nexport HGS_STATE_DIR='{2}'\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec '{3}' \"$@\"\n",
-            dir.display(),
-            dir.join("config").display(),
-            dir.join("state").display(),
-            binary.canonicalize().unwrap().display(),
+            "#!/bin/sh\nexport HOME={0}\nexport HGS_CONFIG_DIR={1}\nexport HGS_STATE_DIR={2}\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec {3} \"$@\"\n",
+            shell_word(&dir),
+            shell_word(&dir.join("config")),
+            shell_word(&dir.join("state")),
+            shell_word(&binary),
         );
-        std::fs::write(&hgs, script).unwrap();
-        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Never held open for writing here: parallel tests fork (zerus-0b9f).
+        crate::write_executable(&hgs, script);
         let organization = json!({"version":2,"default_project":"alpha","projects":[
             {"id":"alpha","name":"Alpha","color":"#123456","folders":[],"sessions":[]}
         ]});
@@ -75,6 +106,7 @@ impl Real {
             .to_owned();
         Self {
             dir,
+            binary,
             hgs,
             snapshot,
             machine,
@@ -226,18 +258,17 @@ impl Real {
     fn instrument_held_get(&self) -> (PathBuf, PathBuf) {
         let marker = self.dir.join("get-started");
         let calls = self.dir.join("calls.log");
-        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/hgs");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$*\" = 'swarm drive-folders get --json' ]; then\n  touch '{1}'\n  sleep 0.2\nfi\nexport HOME='{2}'\nexport HGS_CONFIG_DIR='{3}'\nexport HGS_STATE_DIR='{4}'\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec '{5}' \"$@\"\n",
-            calls.display(),
-            marker.display(),
-            self.dir.display(),
-            self.dir.join("config").display(),
-            self.dir.join("state").display(),
-            binary.canonicalize().unwrap().display(),
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {0}\nif [ \"$*\" = 'swarm drive-folders get --json' ]; then\n  touch {1}\n  sleep 0.2\nfi\nexport HOME={2}\nexport HGS_CONFIG_DIR={3}\nexport HGS_STATE_DIR={4}\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec {5} \"$@\"\n",
+            shell_word(&calls),
+            shell_word(&marker),
+            shell_word(&self.dir),
+            shell_word(&self.dir.join("config")),
+            shell_word(&self.dir.join("state")),
+            shell_word(&self.binary),
         );
-        std::fs::write(&self.hgs, script).unwrap();
-        std::fs::set_permissions(&self.hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Replaced, never written through, while parallel tests fork (zerus-0b9f).
+        crate::write_executable(&self.hgs, script);
         (marker, calls)
     }
 }

@@ -365,12 +365,57 @@ fn read(
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
-    fn fixture(script: &str) -> (tempfile::TempDir, Config, ScopedSsh) {
+    use std::process::Command;
+
+    #[cfg(target_os = "linux")]
+    fn write_executable(program: &std::path::Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
+        // A parallel fork can retain our writer until its exec. Only the side
+        // file is written here; the executable's sole writer is the waited cp.
+        let source = program.with_extension("source");
+        std::fs::write(&source, script).unwrap();
+        match std::fs::remove_file(program) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => panic!("{error}"),
+            _ => {}
+        }
+        assert!(Command::new("/bin/cp")
+            .arg(&source)
+            .arg(program)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixture_replaces_the_original_with_a_retained_writer_before_execution() {
+        use std::os::unix::fs::MetadataExt;
         let root = tempfile::tempdir().unwrap();
         let program = root.path().join("ssh");
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Models the same open-for-write kernel object a parallel child could
+        // inherit; the retained descriptor must not refer to the new image.
+        let retained = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&program)
+            .unwrap();
+        write_executable(&program, "#!/bin/sh\nprintf 'fixture-ready\\n'\n");
+        let output = Command::new(&program).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixture-ready\n");
+        assert_ne!(
+            retained.metadata().unwrap().ino(),
+            std::fs::metadata(&program).unwrap().ino()
+        );
+        assert_eq!(retained.metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture(script: &str) -> (tempfile::TempDir, Config, ScopedSsh) {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("ssh");
+        write_executable(&program, script);
         let previous = TEST_SSH.with(|value| value.replace(Some(program)));
         let config = Config {
             home: root.path().to_string_lossy().into_owned(),

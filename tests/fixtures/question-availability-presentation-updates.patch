@@ -1,0 +1,293 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+index 3544ed29e1a2623c5b873435a806a8093ac46221..283c8f46e9554b3b847865eae695ad5e7063873d 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+@@ -305,7 +305,9 @@ class MainActivity : ComponentActivity() {
+                         contentDescription = "Refresh"
+                         if (!conversationObscured) conversationLoad?.let { stateDescription = it.text }
+                     }) {
+-                    Icon(Icons.Default.Refresh, null)
++                    if(selected != null && conversationLoad?.spinner == true && !conversationObscured)
++                        CircularProgressIndicator(Modifier.size(20.dp),color = Mint,strokeWidth = 2.dp)
++                    else Icon(Icons.Default.Refresh, null)
+                 }
+                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
+                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
+@@ -334,7 +336,7 @@ class MainActivity : ComponentActivity() {
+             // the secondary tools return when editing ends, while refresh stays visible.
+             if (selected != null && WindowInsets.ime.getBottom(LocalDensity.current) == 0)
+                 SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
+-            if (selected != null) ConversationRefreshStatus(model, conversationLoad)
++            if (selected != null) ConversationReadTiming(model, conversationLoad)
+             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
+                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                     Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+@@ -792,42 +794,22 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+ }
+ 
+-@Composable private fun ConversationRefreshStatus(model: ZerusViewModel, status: ConversationLoadPresentation.Status?) {
+-    val banner = ConversationLoadPresentation.banner(status, model.conversationEvents.isNotEmpty(),
+-        model.activityVerified, model.historyComplete && model.readPositionReady, model.demo) ?: return
++@Composable private fun ConversationReadTiming(model: ZerusViewModel, status: ConversationLoadPresentation.Status?) {
+     if (BuildConfig.READ_TIMING_ENABLED) {
+         val stage = when {
+-            banner.text == "Latest activity checked" -> RelayReadTiming.Stage.VisibleChecked
+-            banner.spinner -> RelayReadTiming.Stage.VisibleChecking
++            status?.spinner == true -> RelayReadTiming.Stage.VisibleChecking
++            model.activityVerified -> RelayReadTiming.Stage.VisibleChecked
+             else -> null
+         }
+-        LaunchedEffect(model.selected?.target, stage, banner.detail) {
++        val historyReady = model.historyComplete && model.readPositionReady
++        LaunchedEffect(model.selected?.target, stage, historyReady) {
+             if (stage != null) withFrameNanos {
+                 RelayReadTiming.point(stage)
+-                if (stage == RelayReadTiming.Stage.VisibleChecked && banner.detail == "Message history loaded.")
++                if (stage == RelayReadTiming.Stage.VisibleChecked && historyReady)
+                     RelayReadTiming.point(RelayReadTiming.Stage.VisibleHistory)
+             }
+         }
+     }
+-    val compact = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+-    // Keep a stable slot across read phases. With the keyboard open, preserve
+-    // space for the request disclosure; its delivery detail remains accessible.
+-    Surface(color = Surface, modifier = Modifier.fillMaxWidth()) {
+-        Row(Modifier.padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 6.dp)
+-            .heightIn(min = if (compact) 24.dp else 40.dp),
+-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+-            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+-                if (banner.spinner) CircularProgressIndicator(Modifier.fillMaxSize(), color = Mint, strokeWidth = 2.dp)
+-            }
+-            Column(Modifier.weight(1f).semantics(mergeDescendants = true) {
+-                liveRegion = LiveRegionMode.Polite
+-                if (compact) stateDescription = banner.detail
+-            }) {
+-                Text(banner.text, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+-                if (!compact) Text(banner.detail, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+-            }
+-        }
+-    }
+ }
+ 
+ @Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,
+@@ -865,7 +847,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+     val unreadBoundary = model.firstUnreadEventId.takeIf { id -> events.any { it.id == id } }.orEmpty()
+     val savedViewport = model.conversationViewport(target)
+     val readReady = model.readPositionReady || model.demo
+-    val unread = UnreadPresentation.badge(model.unreadCount(target), model.loadedUnreadCount(target))
++    val unread = UnreadPresentation.conversationBadge(model.unreadCount(target), model.loadedUnreadCount(target))
+     var unavailableSaved by remember(target.key) { mutableStateOf(false) }
+     var latestPending by remember(target.key) { mutableStateOf(false) }
+     var searchNotice by remember(target.key) { mutableStateOf("") }
+@@ -875,18 +857,24 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+     } else if(model.conversationHistoryTruncated) "Showing recent activity. Older messages may be outside the available history." else ""
+     val conversationLoading = loadStatus?.initial == true
+     val context = LocalContext.current
+-    val keys = buildList {
+-        add("history:earlier")
+-        add("history:status")
+-        if (warning.isNotBlank()) add("history:warning")
+-        if (boundedNotice.isNotBlank()) add("history:bounded")
+-        add("history:missing-anchor")
+-        events.forEach { if(it.id == unreadBoundary) add("history:unread"); add("event:" + it.id) }
+-        if (events.isEmpty() && !conversationLoading) add("history:empty")
+-        add("history:newer")
+-        if (queueVisible) add("history:queue")
+-        if (questions.isNotEmpty()) add("history:questions")
+-        add("history:tail")
++    var previousRowKeys by remember(target.key) { mutableStateOf<ConversationRowKeys.State?>(null) }
++    val rowKeys = remember(target.key, events, model.conversationSupersededIds) {
++        ConversationRowKeys.reconcile(target.key, previousRowKeys, events, model.conversationSupersededIds)
++    }
++    SideEffect { previousRowKeys = rowKeys }
++    val keys = ConversationViewport.keys(events, unreadBoundary, warning.isNotBlank(), boundedNotice.isNotBlank(),
++        conversationLoading, queueVisible, questions.isNotEmpty(), eventKey = { rowKeys.key(it.id) })
++    val rowKeysHolder = remember(target.key) { mutableStateOf(rowKeys) }
++    val eventIdsHolder = remember(target.key) { mutableStateOf(events.mapTo(mutableSetOf()) { it.id }) }
++    SideEffect {
++        rowKeysHolder.value = rowKeys
++        eventIdsHolder.value = events.mapTo(mutableSetOf()) { it.id }
++    }
++    val currentRowKeys by rowKeysHolder
++    val currentEventIds by eventIdsHolder
++    fun displayedEventId(key: String): String? {
++        if (!key.startsWith("event:")) return null
++        return (currentRowKeys.eventIdByKey[key] ?: key.removePrefix("event:")).takeIf { it in currentEventIds }
+     }
+     val listState = rememberLazyListState()
+     val cardVisible by remember(listState) { derivedStateOf {
+@@ -933,8 +921,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         val match = ConversationSearch.resolve(events,request.eventId)
+         if(match == null) searchNotice = "That message is no longer in the loaded window. Search again or load its earlier page."
+         else {
+-            follow = follow.copy(opened = true,following = false,anchor = ConversationAnchor("event:" + match.id,0,false))
+-            jump(keys.indexOf("event:" + match.id))
++            follow = follow.copy(opened = true,following = false,anchor = ConversationAnchor(rowKeys.key(match.id),0,false))
++            jump(keys.indexOf(rowKeys.key(match.id)))
+         }
+         onJumpConsumed()
+     }
+@@ -978,13 +966,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         if (events.isEmpty() && questions.isEmpty() && raw == null && !model.demo) return@LaunchedEffect
+         val own = ConversationViewport.own(events, ownSendId)
+         // With no cards below the message, align its bottom to the composer.
+-        val ownKey = if (own == null) null else if (questions.isEmpty() && !queueVisible) "history:tail" else "event:" + own.id
++        val ownKey = if (own == null) null else if (questions.isEmpty() && !queueVisible) "history:tail" else rowKeys.key(own.id)
+         val explicitSend = ownSendId.isNotBlank() && ownSendId != follow.ownSendId && ownKey != null
+         val firstOpen = !follow.opened
+         // Ledger hydration must not cause a second jump after the reader deliberately scrolls.
+         if (firstOpen && !explicitSend && !readReady) return@LaunchedEffect
+         if (firstOpen && !explicitSend) {
+-            val opening = UnreadPresentation.opening(initialAnchor, savedViewport, unreadBoundary, keys)
++            val opening = UnreadPresentation.opening(initialAnchor, savedViewport, unreadBoundary, keys, rowKeys::key)
+             unavailableSaved = opening.unavailableSaved
+             follow = follow.copy(anchor = opening.anchor, following = opening.anchor?.following ?: true)
+         }
+@@ -1010,9 +998,18 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+             }
+         }
+     }
+-    LaunchedEffect(viewportHeight) {
+-        if (viewportHeight > 0 && follow.opened && follow.following && !listState.isScrollInProgress)
+-            jump(latestKeys.lastIndex)
++    // Follow actual newly measured content, rather than every refresh or
++    // verification transition. A no-op poll leaves the reader's pixels alone.
++    LaunchedEffect(listState, target.key) {
++        snapshotFlow {
++            val layout = listState.layoutInfo
++            val tail = layout.visibleItemsInfo.lastOrNull()
++            follow.opened && follow.following && !programmatic && !listState.isScrollInProgress &&
++                layout.visibleItemsInfo.isNotEmpty() && layout.totalItemsCount == latestKeys.size &&
++                (tail?.key != "history:tail" || tail.offset + tail.size > layout.viewportEndOffset + 2)
++        }.distinctUntilChanged().collect { needsTail ->
++            if (needsTail) jump(latestKeys.lastIndex)
++        }
+     }
+     val settledAtTail by remember(listState) { derivedStateOf {
+         val layout = listState.layoutInfo
+@@ -1041,8 +1038,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                 it.key.toString().startsWith("event:") && it.offset < layout.viewportEndOffset &&
+                     it.offset + it.size > layout.viewportStartOffset
+             }.let { rows ->
+-                val ids=rows.map { it.key.toString().removePrefix("event:") }.toSet()
+-                Triple(ids,rows.firstOrNull()?.let { it.key.toString().removePrefix("event:") to (-it.offset).coerceAtLeast(0) },
++                val ids=rows.mapNotNull { displayedEventId(it.key.toString()) }.toSet()
++                Triple(ids,rows.firstOrNull()?.let { row -> displayedEventId(row.key.toString())?.let { it to (-row.offset).coerceAtLeast(0) } },
+                     model.visibleReadEvidence(target,ids))
+             }
+         }.distinctUntilChanged().collectLatest { viewport ->
+@@ -1058,7 +1055,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+     DisposableEffect(target.key, listState) {
+         onDispose {
+             listState.layoutInfo.visibleItemsInfo.firstOrNull()?.let { item ->
+-                positions[target.key] = ConversationAnchor(item.key.toString(), listState.firstVisibleItemScrollOffset, follow.following)
++                val dataKey = displayedEventId(item.key.toString())?.let { "event:$it" } ?: item.key.toString()
++                positions[target.key] = ConversationAnchor(dataKey, listState.firstVisibleItemScrollOffset, follow.following)
+             }
+         }
+     }
+@@ -1066,7 +1064,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         if (unread != null || offeredQuestionCount > 0) {
+             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
++                Text(unread?.label.orEmpty(), Modifier.weight(1f),
+                     color = if (unread != null && SessionNotificationPreferences.parse(raw ?: session.raw,target)?.muted != true) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                 if (offeredQuestionCount > 0) TextButton(onClick = {
+                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
+@@ -1113,7 +1111,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                     if (event.inheritedFrom != inheritedSource) {
+                         val label = if (event.inheritedFrom.isNotBlank()) "Inherited from ${event.inheritedFrom}: the history this fork began from"
+                             else "Forked here: this session's own activity continues below"
+-                        item(key = "history:inherited:" + event.id) {
++                        item(key = ConversationViewport.inheritedKey(rowKeys.key(event.id))) {
+                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                 HorizontalDivider(Modifier.weight(1f), color = Muted.copy(alpha = .4f))
+                                 Text(label, Modifier.weight(3f, fill = false), color = Muted, style = MaterialTheme.typography.labelMedium)
+@@ -1129,7 +1127,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                             HorizontalDivider(Modifier.weight(1f), color = Mint.copy(alpha = .4f))
+                         }
+                     }
+-                    item(key = "event:" + event.id) {
++                    item(key = rowKeys.key(event.id)) {
+                     val provider = if (target.agentId.isNotBlank()) raw?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
+                     ConversationMessage(target, event, provider, outgoing.find { it.requestId == event.outgoingId },
+                         model, onReviewOutgoing)
+@@ -1162,13 +1160,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                 FilledTonalButton(onClick = ::requestLatest,enabled = !latestPending,
+                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).heightIn(min = 48.dp).semantics {
+                         contentDescription = "Jump to latest messages"
+-                        stateDescription = if(latestPending) "Loading latest messages" else unread?.description.orEmpty()
++                        stateDescription = UnreadPresentation.latest(latestPending).description
+                     }, shape = RoundedCornerShape(16.dp),
+                     colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF2D4142),contentColor = Mint,
+                         disabledContainerColor = Color(0xFF2D4142),disabledContentColor = Muted)) {
+                     if(latestPending) CircularProgressIndicator(Modifier.size(18.dp),color = Mint,strokeWidth = 2.dp)
+                     else Icon(Icons.Default.KeyboardArrowDown, null)
+-                    Text(if(latestPending) "Loading latest…" else unread?.let { "${it.text} unread" } ?: "Latest",
++                    Text(UnreadPresentation.latest(latestPending).text,
+                         Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
+                 }
+             }
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index cc76fd9b1462384493cd691a2b2368e0c51a7716..f187e775fc4e685a80be6345a7636c88caa02c79 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -360,7 +360,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         val record=indexedReadRecord(target)
+         if(!readTrackingReady) return null
+         if(record?.incomplete == true || readState.records.size >= 500 && record == null) return null
+-        return ConversationReadPolicies.lowerBound(record,loadedRows(target))
++        // A saved canonical head may overlap these inspection IDs without a
++        // proven alias. It is not a current count of the loaded messages.
++        return loadedRows(target)?.count { ConversationReadPolicies.unread(record,it) }
+     }
+     fun unreadCount(target:Target):Int? {
+         val record=indexedReadRecord(target) ?: return null
+@@ -443,7 +445,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
+         refreshReadAttention()
+     }
+-    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
++    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null,aliases:Map<String,String> = emptyMap()) {
+         // A page reaching the head shows the latest inspection's inbox rows, never an older copy.
+         val inspected=(frames[target.key] ?: activeFrame?.takeIf { it.target==target })?.inspectedEvents
+         val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
+@@ -460,7 +462,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+             historyComplete=complete;historyIndexing=indexing
+             return
+         }
+-        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
++        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary,supersededIds=aliases),activityVerified)
+     }
+     /** Projection responses are display evidence only: never call observeHistoryHead,
+      * readWriter.supersede, installFrame or the ordinary delivery-settling presentation path. */
+@@ -569,7 +571,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+                 }
+                 val old=historyWindows[target.key]
+                 val window=withContext(Dispatchers.Default) { if(mode in setOf("before","after") && old?.epoch==page.epoch) old.merge(page,mode) else HistoryWindow.from(page) }
+-                publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId]);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
++                publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId],aliases);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
+             } catch(e:CancellationException) { throw e }
+             catch(e:Exception) { if(selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
+             finally { if(!published && selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderLoading=false;if(pendingHistoryPosition!=target.key) readPositionReady=true } }
+@@ -858,7 +860,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+     var activityVerified by mutableStateOf(false); private set
+     var historyCached by mutableStateOf(false); private set
+     var conversationHistoryTruncated by mutableStateOf(false); private set
+-    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0)
++    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0,val supersededIds:Map<String,String> = emptyMap())
++    internal val conversationSupersededIds:Map<String,String> get() = activeFrame?.supersededIds.orEmpty()
+     private data class Presentation(val messages: List<OutgoingMessage>, val events: List<Event>, val questions: List<Question>)
+     private data class FrameInstall(val source: Frame, val frame: Frame, val guarded: HistoryWindow?, val changed: Boolean)
+     private data class FramePreparation(val install: FrameInstall, val state: MessageState,
+@@ -1171,7 +1174,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
+                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
+                     retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated") || raw.optBoolean("history_truncated") ||
+-                        raw.optBoolean("message_events_truncated") || raw.optBoolean("provider_messages_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos),retained.supersededIds,window)
++                        raw.optBoolean("message_events_truncated") || raw.optBoolean("provider_messages_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos,supersededIds=retained.supersededIds),retained.supersededIds,window)
+             }
+             // A page can publish during Default parsing. Rebase before mutating the
+             // window map, so the older inspection snapshot cannot erase that page.

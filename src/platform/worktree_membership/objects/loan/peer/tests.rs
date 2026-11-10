@@ -15,6 +15,89 @@ fn until() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
 
+/// Only the gated SAME-image child calls this. Never exit libtest's leader
+/// from the observing parent, or return through libtest after that leader dies.
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn exit_own_leader(_: libc::c_int) {
+    loop {
+        // SAFETY: raw thread exit is async-signal-safe and never exits the
+        // other thread. No allocator, Rust destructor, libc lock or unwind.
+        unsafe {
+            libc::syscall(libc::SYS_exit, 0);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn hold_after_own_leader_exit(socket: &UnixStream) -> ! {
+    assert!(std::env::var_os(FIXTURE).is_some());
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    assert_eq!(args, ["--exact", TEST, "--nocapture", "--test-threads=1"]);
+    let pid = std::process::id();
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+    assert_ne!(
+        pid, tid,
+        "only libtest's private worker may enter this branch"
+    );
+    assert_eq!(
+        credentials(socket).unwrap().pid as u32,
+        std::os::unix::process::parent_id()
+    );
+    assert_eq!(std::fs::read_dir("/proc/self/task").unwrap().count(), 2);
+    let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::sigemptyset(&mut blocked) }, 0);
+    assert_eq!(unsafe { libc::sigaddset(&mut blocked, libc::SIGUSR2) }, 0);
+    // The fixture worker cannot receive this signal, only its own leader.
+    assert_eq!(
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) },
+        0
+    );
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = exit_own_leader as *const () as usize;
+    assert_eq!(unsafe { libc::sigemptyset(&mut action.sa_mask) }, 0);
+    assert_eq!(
+        unsafe { libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut()) },
+        0
+    );
+    let mut socket = socket.as_raw_fd();
+    assert_eq!(
+        unsafe { libc::syscall(libc::SYS_tgkill, pid, pid, libc::SIGUSR2) },
+        0
+    );
+    // From here even a Rust stdio/allocator/libtest lock may belong to the
+    // exited leader. Only prepared raw fd syscalls run; all original received
+    // Scope objects remain on this worker's stack until LAST thread exit.
+    loop {
+        let mut byte = [0u8];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+        let code = if n == 0 || n == 1 && byte[0] == b'R' {
+            Some(0)
+        } else if n == 1 && byte[0] == b'A' && socket >= 0 {
+            let sent = unsafe { libc::write(socket, b"released".as_ptr().cast(), 8) };
+            if sent == 8 {
+                None
+            } else {
+                Some(92)
+            }
+        } else if n == 1 && byte[0] == b'C' && socket >= 0 {
+            unsafe {
+                libc::close(socket);
+            }
+            socket = -1;
+            None
+        } else {
+            Some(93)
+        };
+        if let Some(code) = code {
+            loop {
+                unsafe {
+                    libc::syscall(libc::SYS_exit, code);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn original_helper_fixture() {
     let Some(path) = std::env::var_os(FIXTURE) else {
@@ -31,7 +114,16 @@ fn original_helper_fixture() {
     .unwrap();
     let mut byte = [0];
     if std::io::stdin().read(&mut byte).unwrap() == 1 {
+        #[cfg(target_os = "linux")]
+        if byte == *b"X" {
+            hold_after_own_leader_exit(&socket);
+        }
         if byte == *b"E" {
+            #[cfg(target_os = "linux")]
+            assert_ne!(
+                unsafe { libc::syscall(libc::SYS_gettid) } as u32,
+                std::process::id()
+            );
             panic!(
                 "fixture exec refused: {}",
                 Command::new("/bin/sleep").arg("300").exec()
@@ -100,6 +192,10 @@ fn original_helper_fixture() {
         // Keep the actual received objects, not a path reconstruction, until
         // the original parent releases this synthetic read-only helper.
         std::io::stdin().read_exact(&mut byte).unwrap();
+        #[cfg(target_os = "linux")]
+        if byte == *b"X" {
+            hold_after_own_leader_exit(&socket);
+        }
         assert_eq!(byte, *b"R");
         original.current(until()).unwrap();
     }
@@ -118,20 +214,37 @@ impl std::ops::DerefMut for OwnedChild {
 }
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        #[cfg(target_os = "linux")]
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 }
 pub(crate) struct Fixture {
     pub(crate) child: OwnedChild,
     pub(crate) socket: UnixStream,
     pub(crate) audit: Option<[u32; 8]>,
+    #[cfg(target_os = "linux")]
+    worker: Option<(u32, String)>,
     _dir: tempfile::TempDir,
     pub(crate) listener: UnixListener,
     pub(crate) path: std::path::PathBuf,
 }
 impl Fixture {
     pub(crate) fn start(program: &str) -> Self {
+        Self::start_stdio(program, Stdio::null(), Stdio::inherit())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_output(stdout: Stdio, stderr: Stdio) -> Self {
+        Self::start_stdio("original", stdout, stderr)
+    }
+    fn start_stdio(program: &str, stdout: Stdio, stderr: Stdio) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("peer");
         let listener = UnixListener::bind(&path).unwrap();
@@ -150,8 +263,8 @@ impl Fixture {
         let mut child = OwnedChild(
             command
                 .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
+                .stdout(stdout)
+                .stderr(stderr)
                 .spawn()
                 .unwrap(),
         );
@@ -173,6 +286,38 @@ impl Fixture {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
+        #[cfg(target_os = "linux")]
+        let worker = if program == "original" {
+            // Capture the actual worker while the leader is still live.
+            // /proc/PID/task may become unavailable after leader exit;
+            // the native /proc/TID alias remains addressable (proc_pid_task(5)).
+            let tids: Vec<u32> = std::fs::read_dir(format!("/proc/{}/task", child.id()))
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .parse()
+                        .unwrap()
+                })
+                .filter(|tid| *tid != child.id())
+                .collect();
+            assert_eq!(tids.len(), 1);
+            let tid = tids[0];
+            let stat = std::fs::read_to_string(format!("/proc/{tid}/stat")).unwrap();
+            let birth = stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(19)
+                .unwrap()
+                .to_owned();
+            Some((tid, birth))
+        } else {
+            None
+        };
         #[cfg(target_os = "macos")]
         let audit = if program == "original" {
             let (bytes, fds) = super::super::transport::receive(&socket, until()).unwrap();
@@ -187,9 +332,89 @@ impl Fixture {
             child,
             socket,
             audit,
+            #[cfg(target_os = "linux")]
+            worker,
             _dir: dir,
             listener,
             path,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn exit_leader(&mut self) {
+        self.socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        self.child.stdin.as_mut().unwrap().write_all(b"X").unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            let path = format!("/proc/{}", self.child.id());
+            if let Ok(stat) = std::fs::read_to_string(format!("{path}/stat")) {
+                let fields: Vec<_> = stat
+                    .rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .collect();
+                if fields[0] == "Z" {
+                    let (tid, birth) = self.worker.as_ref().unwrap();
+                    let worker = std::fs::read_to_string(format!("/proc/{tid}/stat")).unwrap();
+                    let fields: Vec<_> = worker
+                        .rsplit_once(')')
+                        .unwrap()
+                        .1
+                        .split_whitespace()
+                        .collect();
+                    assert!(
+                        !matches!(fields[0], "Z" | "X"),
+                        "actual original worker remains live"
+                    );
+                    assert_eq!(fields[19], birth);
+                    let status = std::fs::read_to_string(format!("/proc/{tid}/status")).unwrap();
+                    assert_eq!(
+                        status
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Tgid:"))
+                            .unwrap()
+                            .trim()
+                            .parse::<u32>()
+                            .unwrap(),
+                        self.child.id()
+                    );
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < end,
+                "original leader did not exit with its worker alive"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wait_replacement(&self, peer: &Peer) {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                !peer.exited().unwrap(),
+                "nonleader exec is not physical completion"
+            );
+            if let Ok(current) = executable(self.child.id()).and_then(|file| image(&file)) {
+                if current != peer.image {
+                    if let Some(identity) = crate::platform::process_identity(self.child.id()) {
+                        assert_eq!(
+                            identity.birth, peer.original.birth,
+                            "Linux de_thread retains the leader birth"
+                        );
+                        assert!(peer.current(&self.socket, until()).is_err());
+                        return;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < end,
+                "replacement executing object was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     pub(crate) fn original(&self) -> Peer {
@@ -219,10 +444,13 @@ impl Fixture {
         input.write_all(&bytes).unwrap();
         input.flush().unwrap();
     }
-    pub(crate) fn release_loan(&mut self) {
+    pub(crate) fn loan_received(&mut self) {
         let (bytes, fds) = super::super::transport::receive(&self.socket, until()).unwrap();
         assert_eq!(bytes, b"original native objects received");
         assert!(fds.is_empty());
+    }
+    pub(crate) fn release_loan(&mut self) {
+        self.loan_received();
         self.child.stdin.as_mut().unwrap().write_all(b"R").unwrap();
         drop(self.child.stdin.take());
         assert!(self.child.wait().unwrap().success());
@@ -328,6 +556,8 @@ fn an_exec_or_closed_socket_is_not_a_retired_original_process() {
     // evidence must change, and this still does NOT establish physical exit.
     let watchdog = Instant::now() + Duration::from_secs(5);
     while peer.current(&fixture.socket, until()).is_ok() {
+        #[cfg(target_os = "linux")]
+        assert!(!peer.exited().unwrap());
         assert!(
             Instant::now() < watchdog,
             "fixture never executed its replacement"
@@ -335,6 +565,8 @@ fn an_exec_or_closed_socket_is_not_a_retired_original_process() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(!peer.exited().unwrap());
+    #[cfg(target_os = "linux")]
+    fixture.wait_replacement(&peer);
     drop(std::mem::replace(
         &mut fixture.socket,
         UnixStream::pair().unwrap().0,
@@ -343,4 +575,62 @@ fn an_exec_or_closed_socket_is_not_a_retired_original_process() {
     fixture.child.kill().unwrap();
     fixture.child.wait().unwrap();
     assert!(peer.exited().unwrap());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn an_exited_leader_is_not_a_retired_process_and_poll_never_consumes_the_owner_wait() {
+    let mut fixture = Fixture::start("original");
+    let peer = fixture.original();
+    fixture.exit_leader();
+    assert!(crate::platform::process_identity(fixture.child.id()).is_none());
+    assert_eq!(peer.pin.state().unwrap(), ProcessState::Exited);
+    assert!(peer.current(&fixture.socket, until()).is_err());
+    assert!(
+        !peer.exited().unwrap(),
+        "stable native leader Z must NOT retire its live worker"
+    );
+    fixture
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"A")
+        .unwrap();
+    let mut ack = [0; 8];
+    fixture.socket.read_exact(&mut ack).unwrap();
+    assert_eq!(&ack, b"released");
+    assert!(!peer.exited().unwrap());
+    fixture
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"C")
+        .unwrap();
+    assert_eq!(fixture.socket.read(&mut [0]).unwrap(), 0);
+    assert!(
+        !peer.exited().unwrap(),
+        "loan socket EOF is not process retirement"
+    );
+    fixture
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"R")
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(5);
+    while !peer.exited().unwrap() {
+        assert!(Instant::now() < end, "last original thread did not exit");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        fixture.child.wait().unwrap().success(),
+        "poll must leave actual wait to sole owner"
+    );
+    assert!(
+        peer.exited().unwrap(),
+        "same original pidfd remains ready after reap"
+    );
 }

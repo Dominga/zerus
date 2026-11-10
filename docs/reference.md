@@ -675,8 +675,8 @@ process exit. A live process without verified activity shows **Status unknown**;
 
 ### Child sessions
 
-A session that a live tracked agent launches, or forks, on the same computer is
-that agent's child. The launching `hgs` proves its caller by native process
+A new session that a live tracked agent launches on the same computer is
+that agent's child. Terminal-agent forks also record their launching caller. The launching `hgs` proves its caller by native process
 ancestry, exactly as `hgs self` does, and passes it to the new session as
 `HGS_PARENT`; it always sets the variable, empty when no live agent owns the
 launch, so an inherited or typed value never reaches the record. The new
@@ -685,7 +685,12 @@ durable `session_id`, its name, conversation and run as hints, `source`
 (`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
-Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
+Codex, Kimi, DeepSeek and OpenCode sessions can be children and manually chosen
+parents. New DeepSeek and OpenCode bindings record the proven launcher directly,
+before native creation; they never trust an inherited `HGS_PARENT` value.
+DeepSeek and OpenCode agents cannot prove themselves as callers from their
+shared native host, so they cannot adopt sessions or record themselves as the
+parent of sessions they launch. Use an explicit `set` for those relationships.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
@@ -717,8 +722,8 @@ answer, approval, stop or removal, and never change project membership.
 `hgs wait` dependencies, native subagents, names and folders never create one.
 
 On the desktop the session menu offers **Set parent…** (a searchable list of
-the computer's other Claude, Codex and Kimi sessions, never the session's own
-descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
+the computer's other Claude, Codex, Kimi, DeepSeek and OpenCode sessions, never
+the session's own descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
 onto the middle of another card on the same computer frames it and asks to
 make the dragged session its child; the upper and lower parts of a card still
 reorder. Every change is confirmed in a dialog, which names a parent it

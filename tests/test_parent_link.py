@@ -3,9 +3,11 @@ import hashlib
 import json
 import os
 import re
+import socket
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -45,12 +47,30 @@ class ParentLink(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def write(self, record):
-        path = self.state / (hashlib.sha256(record['name'].encode()).hexdigest() + '.json')
+        path = self.path(record)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record))
         return path
 
+    def path(self, record):
+        directory = self.state
+        if record.get('backend') in ('dsh', 'opencode'):
+            directory = directory / record['backend']
+            if record.get('layout') == 'id':
+                return directory / 'sessions' / (record['session_id'] + '.json')
+            directory = directory / 'bindings'
+        return directory / (hashlib.sha256(record['name'].encode()).hexdigest() + '.json')
+
     def read(self, record):
-        return json.loads((self.state / (hashlib.sha256(record['name'].encode()).hexdigest() + '.json')).read_text())
+        return json.loads(self.path(record).read_text())
+
+    def native(self, agent, number=1, **extra):
+        record = dict(backend=agent, agent=agent, name=f'{agent}/example/native{number}',
+                      session_id=f'77777777-7777-4777-8777-{number:012d}', run_id=f'run-{agent}-{number}',
+                      conversation_id=f'session-native{number}' if agent == 'dsh' else f'ses_native{number}',
+                      cwd=str(self.root), agent_home=str(self.home / agent), **extra)
+        self.write(record)
+        return record
 
     def parent(self, target, action, caller=None, success=True, **extra):
         env = dict(self.env)
@@ -111,7 +131,7 @@ class ParentLink(unittest.TestCase):
         ids = self.state / 'ids'
         ids.mkdir(mode=0o700, exist_ok=True)
         entry = ids / (record['session_id'] + '.json')
-        entry.write_text(json.dumps({'version': 1, 'name': record['name'], 'kind': 'record'}))
+        entry.write_text(json.dumps({'version': 1, 'name': record['name'], 'kind': record.get('backend', 'record')}))
         entry.chmod(0o600)
 
     def link_to(self, record):
@@ -209,6 +229,143 @@ class ParentLink(unittest.TestCase):
         self.assertIn('cycle', self.choose(self.worker, self.lead, success=False))
         self.assertNotIn('parent', self.read(self.worker))
 
+    def test_native_children_read_adopt_set_clear_and_exact_guards(self):
+        for agent in ('dsh', 'opencode'):
+            with self.subTest(agent=agent):
+                child = self.native(agent)
+                self.assertIsNone(self.parent(child, 'read')['parent'])
+                adopted = self.parent(child, 'adopt', caller=self.lead)['parent']
+                self.assertEqual(adopted['session_id'], LEAD_ID)
+                self.assertEqual(self.read(child)['parent'], adopted)
+                row = self.listed()[child['name']]
+                self.assertEqual(row['parent']['session_id'], LEAD_ID)
+                self.assertEqual(row['parent']['state'], 'saved')
+                for stale in (dict(child, run_id='old-run'), dict(child, conversation_id='old-conversation')):
+                    self.assertIn('changed', self.parent(stale, 'clear', success=False))
+                self.assertEqual(self.parent(child, 'read')['parent'], adopted)
+                self.assertIn('already has the parent', self.choose(child, self.worker, success=False))
+                self.assertEqual(self.choose(child, self.worker, replace=True)['previous'], adopted)
+                self.assertEqual(self.parent(child, 'clear')['previous']['session_id'], WORKER_ID)
+                self.assertNotIn('parent', self.read(child))
+                self.write(dict(child, state='archived'))
+                for action in ('read', 'adopt', 'clear'):
+                    self.assertIn('Archived sessions', self.parent(child, action, caller=self.lead, success=False))
+
+    def test_native_parents_in_both_directions_keep_cycles_and_caller_proof(self):
+        dsh = self.native('dsh', 1)
+        opencode = self.native('opencode', 2)
+        self.index(dsh)
+        self.index(opencode)
+        self.assertEqual(self.choose(self.worker, dsh)['parent']['conversation_id'], dsh['conversation_id'])
+        self.assertEqual(self.choose(dsh, opencode)['parent']['session_id'], opencode['session_id'])
+        self.assertIn('cycle', self.choose(opencode, self.worker, success=False))
+        # Dropping the derived index cannot hide native ancestors.
+        for record in (dsh, opencode):
+            (self.state / 'ids' / (record['session_id'] + '.json')).unlink()
+        self.assertIn('cycle', self.choose(opencode, self.worker, success=False))
+        for record in (dsh, opencode):
+            self.assertIn('no live Zerus session', self.parent(self.lead, 'adopt', caller=record, success=False))
+            self.assertIn('changed', self.choose(self.lead, dict(record, conversation_id='stale'), success=False))
+            self.assertIn('own parent', self.choose(record, record, success=False))
+        self.parent(dsh, 'clear')
+        self.write(dict(opencode, state='archived'))
+        self.assertIn('archived session cannot be a parent', self.choose(self.lead, opencode, success=False))
+
+    def test_native_chain_remains_bounded_and_unsafe_records_refuse(self):
+        chain = [self.native('dsh' if i % 2 else 'opencode', i) for i in range(1, 11)]
+        for child, parent in zip(chain, chain[1:]):
+            self.write(dict(child, parent=self.link_to(parent)))
+            self.index(child)
+        self.assertIn('deeper than 8', self.choose(self.worker, chain[0], success=False))
+        for record in chain:
+            entry = self.state / 'ids' / (record['session_id'] + '.json')
+            if entry.exists():
+                entry.unlink()
+        self.assertIn('deeper than 8', self.choose(self.worker, chain[0], success=False))
+        # A native FIFO or symlink must refuse promptly, with or without an index.
+        other = self.native('dsh', 20)
+        parent = self.native('opencode', 21, parent=self.link_to(other))
+        path = self.path(other)
+        path.unlink()
+        os.mkfifo(path, 0o600)
+        started = time.monotonic()
+        self.assertIn('cannot be read safely', self.choose(self.worker, parent, success=False))
+        self.assertLess(time.monotonic() - started, 5)
+        path.unlink()
+        path.symlink_to(self.path(self.lead))
+        self.assertIn('cannot be read safely', self.choose(self.worker, parent, success=False))
+
+    def test_native_id_layout_links_are_changed_in_place(self):
+        records = [self.native('dsh', 30, layout='id'), self.native('opencode', 31, layout='id')]
+        for record in records:
+            labels = self.state / 'labels'
+            labels.mkdir(exist_ok=True)
+            digest = hashlib.sha256(record['name'].encode()).hexdigest()
+            (labels / (digest + '.json')).write_text(json.dumps(dict(version=1, label=record['name'], ids=[record['session_id']])))
+            (labels / '.complete').unlink(missing_ok=True)
+        child, parent = records
+        linked = self.choose(child, parent)['parent']
+        self.assertEqual(linked['session_id'], parent['session_id'])
+        self.assertEqual(self.read(child)['parent'], linked)
+        self.assertEqual(self.choose(self.worker, child)['parent']['session_id'], child['session_id'])
+        self.assertIn('cycle', self.choose(parent, self.worker, success=False))
+        self.assertIsNone(self.parent(child, 'clear')['parent'])
+        self.assertEqual(self.parent(child, 'adopt', caller=self.lead)['parent']['session_id'], LEAD_ID)
+        for record in records:
+            legacy = self.state / record['backend'] / 'bindings' / (hashlib.sha256(record['name'].encode()).hexdigest() + '.json')
+            self.assertFalse(legacy.exists(), 'a parent edit must not recreate a label binding')
+
+    def test_new_dsh_launch_records_proven_parent_before_create_but_resume_does_not(self):
+        native_home = self.home / 'private-dsh'
+        host = self.state / 'dsh/hosts' / hashlib.sha256(str(native_home).encode()).hexdigest()[:16]
+        host.mkdir(parents=True)
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(host / 'host.sock'))
+        server.listen()
+        server.settimeout(.1)
+        stopped = threading.Event()
+        created = []
+        def serve():
+            while not stopped.is_set():
+                try:
+                    client, _ = server.accept()
+                except socket.timeout:
+                    continue
+                with client:
+                    request = json.loads(client.makefile().readline())
+                    if request['method'] == 'create':
+                        # Persistence, including parent identity, precedes admission.
+                        records = [json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json')]
+                        created.append(next(r for r in records if r['conversation_id'] == request['params']['sessionId']))
+                    value = {'version': '0.2.1-rc.2', 'protocol': 1, 'generation': 'private-fixture'}
+                    client.sendall((json.dumps({'ok': True, 'value': value}) + '\n').encode())
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            env = dict(self.env, DSH_HOME=str(native_home), HGS_SESSION=self.lead['name'],
+                       HGS_RUN_ID=self.lead['run_id'], HGS_PARENT=json.dumps(self.link_to(self.worker)))
+            def launch(tag, env, new=False):
+                result = subprocess.run([str(HGS), 'dsh', str(self.root), '-n', tag, '-d', *(['--new'] if new else [])],
+                                        env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return next(json.loads(p.read_text()) for p in (self.state / 'dsh/bindings').glob('*.json')
+                            if json.loads(p.read_text())['name'].endswith('/' + tag))
+            child = launch('linked', env, new=True)
+            self.assertEqual(child['parent']['session_id'], LEAD_ID)
+            self.assertEqual(child['parent']['source'], 'launch')
+            self.assertEqual(created[-1]['parent'], child['parent'])
+            self.parent(child, 'clear')
+            resumed = launch('linked', env)
+            self.assertNotIn('parent', resumed)
+            self.assertEqual((resumed['session_id'], resumed['conversation_id']), (child['session_id'], child['conversation_id']))
+            plain = launch('plain', dict(self.env, DSH_HOME=str(native_home), HGS_PARENT=env['HGS_PARENT']), new=True)
+            self.assertNotIn('parent', plain)
+        finally:
+            stopped.set()
+            thread.join(timeout=3)
+            server.close()
+            self.assertFalse(thread.is_alive())
+
     def test_a_remote_launch_forwards_the_proven_caller_behind_the_peer_marker(self):
         # zerus-sa9qn.7: the launch on a peer carries the caller as --parent-link,
         # and only a peer that lists launch-parent-v1 receives it.
@@ -224,6 +381,15 @@ class ParentLink(unittest.TestCase):
         plain = run(dict(self.env, HGS_PEERS='peer'))
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertNotIn('--parent-link', plain.stdout)
+
+    def test_native_remote_launches_forward_only_the_proven_caller(self):
+        for agent in ('dsh', 'opencode'):
+            env = dict(self.env, HGS_PEERS='peer', HGS_SESSION=self.lead['name'], HGS_RUN_ID=self.lead['run_id'])
+            result = subprocess.run([str(HGS), '--dry-run', '@peer', agent, '/work/example', '--new', '-n', 'kid', '-d'],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            link = json.loads(bytes.fromhex(re.search(r'--parent-link\W+([0-9a-f]+)', result.stdout).group(1)))
+            self.assertEqual((link['session_id'], link['source']), (LEAD_ID, 'launch'))
 
     def test_a_forwarded_parent_stays_missing_even_when_its_ids_match_here(self):
         # zerus-l4ehe: another computer's claim is never matched to a session here.

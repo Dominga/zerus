@@ -105,6 +105,12 @@ pub(crate) fn launcher_value() -> String {
     proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default()
 }
 
+/// The launcher of a new native-API session. Read the proven caller directly:
+/// these sessions have no new terminal in which to replace inherited ENV.
+pub(super) fn launcher_link() -> Option<Value> {
+    serde_json::from_str::<Value>(&launcher_value()).ok().filter(valid)
+}
+
 /// `--parent-link HEX` for a launch on a peer: the proven caller's link, hex
 /// encoded so no shell or SSH quoting can change it. None without a caller.
 pub(crate) fn forwarded_argument() -> Option<String> {
@@ -234,11 +240,37 @@ pub(super) fn human_request(session: &Value, questions: Option<&[Value]>) -> boo
 /// The session `id` without an index entry: its own ID layout record, or the
 /// record at the label a link names, each read bounded, regular, no-follow
 /// and nonblocking, and only when it carries that ID.
-fn unindexed(id: &str, name: &str) -> Option<Value> {
-    storage::read_id(id)
-        .ok()
-        .or_else(|| (!name.is_empty()).then(|| storage::read_label_bounded(name, storage::ID_RECORD_BYTES).ok()).flatten())
-        .filter(|record| string(record, "session_id") == id)
+fn unindexed(id: &str, name: &str) -> Result<Option<Value>> {
+    // The index is a cache. Try each fixed ID location, then the label hint;
+    // an unreadable existing file is never evidence that the chain ended.
+    let present = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("A session cannot be read safely; retry later".to_owned()),
+    };
+    if let Some(path) = storage::id_record_path(id) {
+        if present(&path)? {
+            return storage::read_id(id).map(Some);
+        }
+    }
+    for provider in [provider_binding::Provider::DeepSeek, provider_binding::Provider::OpenCode] {
+        if let Some(path) = provider.id_path(id) {
+            if present(&path)? {
+                return provider.read_id(id).map(Some);
+            }
+        }
+    }
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if let Some(provider) = provider_binding::Provider::named(name) {
+        if present(&provider.label_path(name))? {
+            return provider.read_label(name).map(Some);
+        }
+    } else if present(&storage::label_record_path(name))? {
+        return storage::read_label_bounded(name, storage::ID_RECORD_BYTES).map(Some);
+    }
+    Ok(None)
 }
 
 /// The parent a person chose on the desktop: a session on this computer, by
@@ -278,9 +310,11 @@ fn read_session(id: &str, name: &str) -> Result<Option<Value>> {
             Some(storage::read_label_bounded(&label, storage::ID_RECORD_BYTES).map_err(unsafe_read)?)
         }
         Some((_, session_index::Kind::IdRecord)) => Some(storage::read_id(id).map_err(unsafe_read)?),
-        // DeepSeek and OpenCode sessions carry no parent links.
-        Some(_) => None,
-        None => unindexed(id, name),
+        Some((name, session_index::Kind::DeepSeek)) => Some(provider_binding::Provider::DeepSeek.read_label(&name).map_err(unsafe_read)?),
+        Some((_, session_index::Kind::DeepSeekId)) => Some(dsh::read_id(id).map_err(unsafe_read)?),
+        Some((name, session_index::Kind::OpenCode)) => Some(provider_binding::Provider::OpenCode.read_label(&name).map_err(unsafe_read)?),
+        Some((_, session_index::Kind::OpenCodeId)) => Some(opencode::read_id(id).map_err(unsafe_read)?),
+        None => unindexed(id, name).map_err(unsafe_read)?,
     };
     match found {
         Some(record) if string(&record, "session_id") != id => Err("A session changed while it was read; retry".into()),
@@ -311,9 +345,6 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     {
         return Err(USAGE.into());
     }
-    if opencode::exists(name) || dsh::exists(name) {
-        return Err("Parent links are recorded for Claude, Codex and Kimi sessions".into());
-    }
     expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     // Prove the caller before taking the writer lock: its own record is read.
     let caller = if request.action == "adopt" {
@@ -328,7 +359,23 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         String::new()
     };
     let _writer = lock(None)?;
-    let mut record = read_bounded(name, storage::ID_RECORD_BYTES)?;
+    // Parent writers share the state lock for cycle checks, then the native
+    // provider's own lock so a metadata change cannot overwrite its updates.
+    let provider = provider_binding::Provider::named(name);
+    let _dsh = if matches!(provider, Some(provider_binding::Provider::DeepSeek)) {
+        Some(lock(Some(&root().join("dsh/bindings.lock")))?)
+    } else { None };
+    let _opencode = if matches!(provider, Some(provider_binding::Provider::OpenCode)) {
+        Some(opencode::lock_bindings()?)
+    } else { None };
+    let mut record = match provider {
+        Some(provider) => provider.read(name)?,
+        None => read_bounded(name, storage::ID_RECORD_BYTES)?,
+    };
+    let save = |record: &mut Value| match provider {
+        Some(provider) => provider.save(record),
+        None => write(record),
+    };
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {
@@ -342,7 +389,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         "read" => {}
         "clear" => {
             if record.as_object_mut().and_then(|o| o.remove("parent")).is_some() {
-                write(&mut record)?;
+                save(&mut record)?;
             }
         }
         _ => {
@@ -390,7 +437,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             let link = link_of(&chosen, &machine, config.host(), source)
                 .ok_or("The parent session has no complete identity yet; retry after it starts")?;
             record["parent"] = link;
-            write(&mut record)?;
+            save(&mut record)?;
         }
     }
     println!("{}", json!({"ok": true, "name": name, "parent": listed(&record), "previous": previous}));
@@ -419,25 +466,9 @@ fn ancestors(record: &Value) -> Result<Vec<String>> {
             return Err(format!("The caller's parents reach deeper than {DEPTH} sessions; adoption cannot rule out a cycle"));
         }
         found.push(id.clone());
-        let unsafe_read = |_| "A parent of the caller cannot be read safely; adoption cannot rule out a cycle".to_owned();
-        let next = match session_index::indexed(&id) {
-            Some((name, session_index::Kind::Record)) => {
-                storage::read_label_bounded(&name, storage::ID_RECORD_BYTES).map_err(unsafe_read)?
-            }
-            Some((_, session_index::Kind::IdRecord)) => storage::read_id(&id).map_err(unsafe_read)?,
-            // DeepSeek and OpenCode sessions carry no parent links.
-            Some(_) => return Ok(found),
-            // The index is a cache: without an entry, look where the session
-            // would be, its ID layout record or the label the link names, the
-            // same bounded way (zerus-lwz9t). Neither there: the chain ends.
-            None => match unindexed(&id, string(&link, "name")) {
-                Some(next) => next,
-                None => return Ok(found),
-            },
-        };
-        if string(&next, "session_id") != id {
-            return Err("A parent of the caller changed while it was read; retry".into());
-        }
+        let next = read_session(&id, string(&link, "name"))
+            .map_err(|_| "A parent of the caller cannot be read safely; adoption cannot rule out a cycle".to_owned())?;
+        let Some(next) = next else { return Ok(found); };
         current = next;
     }
 }
@@ -450,6 +481,73 @@ mod tests {
         json!({"schema":1,"machine":"11111111-1111-4111-8111-111111111111","host":"arch",
             "session_id":"22222222-2222-4222-8222-222222222222","name":"claude/p/lead",
             "conversation_id":"c","run_id":"r","source":"launch","at":1})
+    }
+
+    #[test]
+    fn native_conversation_ids_are_opaque_link_identity() {
+        for (agent, conversation) in [("dsh", "session-12345678-1234-4234-8234-123456789abc"), ("opencode", "ses_native")] {
+            let record = json!({"name":format!("{agent}/example/native"),"session_id":"33333333-3333-4333-8333-333333333333",
+                "run_id":"run-native","conversation_id":conversation});
+            let linked = link_of(&record, "11111111-1111-4111-8111-111111111111", "fixture", "manual").unwrap();
+            assert_eq!(linked["conversation_id"], conversation);
+            assert!(valid(&linked));
+        }
+    }
+
+    #[test]
+    fn native_parent_routes_and_chains_use_private_state() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::parent_link::tests::native_parent_fixture", "--ignored", "--test-threads=1"])
+            .env("HGS_STATE_DIR", state.path())
+            .env("HGS_CONFIG_DIR", state.path().join("config"))
+            .env("ZERUS_PARENT_FIXTURE", "1")
+            .env_remove("HGS_SESSION_ID").env_remove("HGS_SESSION").env_remove("HGS_RUN_ID")
+            .output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn native_parent_fixture() {
+        if std::env::var("ZERUS_PARENT_FIXTURE").as_deref() != Ok("1") { return; }
+        let mut prior: Option<Value> = None;
+        for (provider, agent, conversation) in [
+            (provider_binding::Provider::DeepSeek, "dsh", "session-native"),
+            (provider_binding::Provider::OpenCode, "opencode", "ses_native"),
+        ] {
+            for by_id in [false, true] {
+                let id = uuid::Uuid::new_v4().to_string();
+                let name = format!("{agent}/example/{by_id}");
+                let mut record = json!({"backend":agent,"agent":agent,"name":name,"session_id":id,
+                    "run_id":"run-native","conversation_id":conversation});
+                if let Some(parent) = prior.as_ref() { record["parent"] = parent.clone(); }
+                let path = if by_id {
+                    record["layout"] = json!("id");
+                    provider.id_path(&id).unwrap()
+                } else { provider.label_path(&name) };
+                atomic(&path, &record.to_string()).unwrap();
+                // A cache miss reads fixed ID locations or the link's exact label.
+                assert_eq!(read_session(&id, &name).unwrap(), Some(record.clone()));
+                let before = ancestors(&record).unwrap();
+                session_index::note(&record, provider.kind(&record));
+                assert_eq!(read_session(&id, &name).unwrap(), Some(record.clone()));
+                assert_eq!(ancestors(&record).unwrap(), before);
+                prior = link_of(&record, "11111111-1111-4111-8111-111111111111", "fixture", "manual");
+                let child = json!({"parent":prior});
+                assert!(ancestors(&child).unwrap().contains(&id));
+                // Unsafe indexed bindings never shorten a chain into success.
+                fs::write(&path, "{broken").unwrap();
+                assert!(ancestors(&child).is_err());
+                fs::remove_file(root().join("ids").join(format!("{id}.json"))).unwrap();
+                assert!(ancestors(&child).is_err());
+                atomic(&path, &record.to_string()).unwrap();
+            }
+        }
+        // Typed or inherited HGS_PARENT never establishes a native launcher.
+        // This fixture runs alone in its own process.
+        std::env::set_var(ENV, link().to_string());
+        assert!(launcher_link().is_none());
     }
 
     #[test]

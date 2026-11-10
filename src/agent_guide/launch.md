@@ -4,6 +4,9 @@ Start a session (hgs guide launch)
 
 - AGENT is claude, codex or kimi; DIRECTORY is an absolute path on that
   computer, or a project name from hgs [@h] project ls.
+- DeepSeek and OpenCode use `hgs [@h] dsh DIRECTORY --new -n TAG -d` or
+  `hgs [@h] opencode DIRECTORY --new -n TAG -d`, without a first prompt after
+  `--`. They print a ready message and open in Zerus, using their native account.
 - -d starts it detached and prints "hgs: started NAME". It never attaches or
   switches your terminal, so it works from inside your own session, where a
   launch without -d is refused. Without --new, an existing session of that
@@ -19,13 +22,18 @@ Start a session (hgs guide launch)
   ended_launches with its launch_id, exit code and last screen lines.
 - A folder the agent has not trusted yet stops at its trust prompt, which
   only the owner may confirm. inspect then shows the session needing attention.
-- A session you launch here, or fork, becomes your child: Zerus lists it
-  under you. Adopt one you direct but did not launch, on this computer:
+- A new session launched here by a proven live Claude, Codex or Kimi caller
+  becomes that caller's child, including DeepSeek and OpenCode launches.
+  Terminal-agent forks also record their launching caller. Adopt a session
+  you direct but did not launch, on this computer:
     jq -n --arg run RUN --arg conv CONVERSATION \
       '{expected_run_id:$run, expected_conversation_id:$conv, action:"adopt"}' |
       hgs parent SESSION --json
   RUN and CONVERSATION come from hgs inspect SESSION.
   "read" shows the link and "clear" removes it.
+  DeepSeek and OpenCode agents cannot prove themselves as callers through
+  their shared host, so they cannot adopt or record themselves as launch parents.
+  Choose those parents explicitly with `hgs parent` action "set" or on the desktop.
 
 Continue existing work instead of starting over:
   hgs [@h] resume SESSION -d          restore a Saved conversation

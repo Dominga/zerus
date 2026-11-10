@@ -31,7 +31,7 @@ export default function SettingsDialog(props: { anchor: () => HTMLButtonElement 
       : [{ id: models.model(), label: models.model(), effort_options: [], effort_labels: [] }, ...all];
   };
   const effortEnabled = () => v().enabled && models.options().some((m) => m.id === models.model())
-    && (v().openCode ? models.efforts().length > 1 : !!models.effort());
+    && (v().openCode ? models.efforts().length > 1 : models.efforts().some((e) => !!e.value && !e.disabled));
   const openTerminal = () => { models.close(); terminal.opened(); setDetailTab("terminal"); };
   return (
     <dialog ref={dialog} class="dlg cmp-settings-dialog" aria-labelledby="cmp-settings-title" onPointerDown={outside}
@@ -51,7 +51,7 @@ export default function SettingsDialog(props: { anchor: () => HTMLButtonElement 
           </Show></div>
           <div class="form-row"><label for="session-effort-choice">{tr("Reasoning effort")}</label>
             <Dropdown id="session-effort-choice" class="field" aria-label={tr("Reasoning effort")} value={models.effort()} disabled={!effortEnabled()}
-              onChange={(value) => models.chooseEffort(value)} options={[...((models.efforts()) ?? []).map((e) => ({ value: e.value, label: e.label }))]} />
+              onChange={(value) => models.chooseEffort(value)} options={[...((models.efforts()) ?? []).map((e) => ({ value: e.value, label: e.label, disabled: e.disabled }))]} />
           </div>
         </Show>
         <p class="cmp-settings-hint hint" role="status">{v().hint}<Show when={models.catalogError()}>{`\n${models.catalogError()}`}</Show></p>

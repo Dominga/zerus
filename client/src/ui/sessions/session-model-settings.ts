@@ -63,11 +63,14 @@ export function settingsView(input: ModelContext, changing = false) {
 /** Preserve the previous effort when offered; OpenCode's empty Default is explicit. */
 export function effortChoices(options: ModelChoice[], model: string, preferred: string, openCode: boolean, currentModel: string, currentEffort: string) {
   const option = options.find((m) => m.id === model);
-  const choices: { value: string; label: string }[] = openCode ? [{ value: "", label: "Default" }] : [];
+  const choices: { value: string; label: string; disabled?: boolean }[] = openCode ? [{ value: "", label: "Default" }] : [];
   option?.effort_options.forEach((effort, i) => {
     if ((!openCode || effortValid(effort)) && !choices.some((c) => c.value === effort)) choices.push({ value: effort, label: openCode ? option.effort_labels[i] || effort : effort });
   });
   if (openCode && model === currentModel && effortValid(currentEffort) && !choices.some((c) => c.value === currentEffort)) choices.push({ value: currentEffort, label: currentEffort });
+  // Missing native metadata is not the first catalog effort. Keep it
+  // unselected until the user explicitly chooses an available level.
+  if (!openCode && !preferred && choices.length) choices.unshift({ value: "", label: tr("Unknown"), disabled: true });
   if (!choices.length) choices.push({ value: "", label: tr("Provider default") });
   return { choices, value: choices.some((c) => c.value === preferred) ? preferred : choices[0].value };
 }

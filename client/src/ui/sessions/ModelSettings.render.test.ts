@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
-const port = vi.hoisted(() => ({ opened: (): boolean => false, open: () => {}, close: () => {}, model: (): string => "first", chooseModel: (_value: string) => {}, effort: () => "low", chooseEffort: (_value: string) => {}, apply: vi.fn() }));
+const port = vi.hoisted(() => ({ opened: (): boolean => false, open: () => {}, close: () => {}, model: (): string => "first", chooseModel: (_value: string) => {}, effort: (): string => "low", chooseEffort: (_value: string) => {}, apply: vi.fn() }));
 vi.mock("../../store/sessionModels", () => ({ sessionModels: {
   view: () => ({ accessible: "Model and effort", tooltip: "Private fixture", shownModel: "First", suffix: "", enabled: true, terminal: true, openCode: false, hint: "Private fixture", changeNotice: "", applyLabel: "Apply" }),
   opened: () => port.opened(), open: () => port.open(), close: () => port.close(), model: () => port.model(), chooseModel: (v: string) => port.chooseModel(v),
@@ -13,7 +13,7 @@ vi.mock("../../store/terminal", () => ({ terminal: { opened: vi.fn() } }));
 vi.mock("../../store/ui", () => ({ setDetailTab: vi.fn() }));
 import { ModelSettingsButton } from "./ModelSettings";
 let host: HTMLDivElement, dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.clearAllMocks(); });
+afterEach(() => { dispose?.(); document.body.replaceChildren(); vi.clearAllMocks(); port.effort = () => "low"; port.chooseEffort = () => {}; });
 function setup() {
   const [opened, setOpened] = createSignal(false), [model, setModel] = createSignal("first");
   port.opened = opened; port.open = () => setOpened(true); port.close = () => setOpened(false); port.model = model; port.chooseModel = setModel;
@@ -21,6 +21,16 @@ function setup() {
   return host.querySelector<HTMLButtonElement>(".cmp-model")!;
 }
 const flush = async () => { await vi.dynamicImportSettled(); for (let i = 0; i < 5; i++) await Promise.resolve(); };
+it("lets a fresh Claude session choose an effort while its current effort is unknown", async () => {
+  const [effort, setEffort] = createSignal(""); port.effort = effort; port.chooseEffort = setEffort;
+  const button = setup(); button.click(); await flush();
+  const dialog = host.querySelector<HTMLDialogElement>("dialog.cmp-settings-dialog")!;
+  const field = dialog.querySelector<HTMLButtonElement>("#session-effort-choice")!;
+  expect(field.disabled).toBe(false);
+  field.click(); await flush();
+  dialog.querySelector<HTMLButtonElement>('[role="option"][data-value="high"]')!.click();
+  expect(effort()).toBe("high"); expect(port.apply).not.toHaveBeenCalled();
+});
 it("Escape cancels the opening before the lazy dialog resolves, keeping the session control", async () => {
   const button = setup(); button.click(); expect(port.opened()).toBe(true);
   button.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));

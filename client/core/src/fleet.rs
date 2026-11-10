@@ -249,6 +249,21 @@ impl Fleet {
         handle.follow(session, after, tail).map(|_| ())
     }
 
+    /// Asks for one page of a followed session's rows before the journal `seq`
+    /// `before`, answered as `Older` updates; Ok(false) when the computer's
+    /// stream cannot page and the caller should read the old way.
+    pub fn older(
+        &self,
+        computer: &ComputerId,
+        key: &str,
+        before: i64,
+        limit: u32,
+    ) -> Result<bool, FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.older(key, before, limit)
+    }
+
     /// Stops following; false when it was not followed.
     pub fn unfollow(&self, computer: &ComputerId, key: &str) -> bool {
         guard(&self.shared.streams)

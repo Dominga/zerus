@@ -572,6 +572,43 @@ class WatchStream(unittest.TestCase):
         self.assertEqual(stream.next(lambda f: f['t'] == 'gap')['reason'], 'reset')
         self.assertEqual(stream.close(), 0)
 
+    def test_an_older_page_is_read_by_position_and_leaves_the_subscription_alone(self):
+        rows = []
+        for n in range(7):
+            rows.append(self.journal('Stop', detail=f'reply {n}'))
+            # Other sessions write between this one's rows: sequence numbers are shared.
+            for other in range(3):
+                self.journal('Stop', name='codex/other/session', detail=f'other {n} {other}')
+        stream, hello, *_ = self.start()
+        self.assertEqual(hello['limits']['activity_older'], 200)
+        stream.send(op='subscribe', topic='activity', session=self.session(), tail=2)
+        tail = stream.next(lambda f: f['t'] == 'events')
+        self.assertEqual([event['seq'] for event in tail['events']], rows[-2:])
+        stream.next(lambda f: f['t'] == 'state')
+        stream.send(op='subscribe', topic='activity', session=self.session(), before=rows[5], tail=3)
+        page = stream.next(lambda f: f['t'] == 'older')
+        self.assertEqual([event['seq'] for event in page['events']], rows[2:5])
+        self.assertEqual((page['topic'], page['key'], page['cursor'], page['last'], page['more']),
+                         ('activity', self.key(), rows[2], True, True))
+        stream.send(op='subscribe', topic='activity', session=self.session(), before=page['cursor'], tail=3)
+        first = stream.next(lambda f: f['t'] == 'older')
+        self.assertEqual([event['seq'] for event in first['events']], rows[:2])
+        self.assertEqual((first['cursor'], first['last'], first['more']), (rows[0], True, False))
+        stream.send(op='subscribe', topic='activity', session=self.session(), before=first['cursor'])
+        empty = stream.next(lambda f: f['t'] == 'older')
+        self.assertEqual((empty['events'], empty['cursor'], empty['last'], empty['more']), ([], rows[0], True, False))
+        # The subscription was neither replaced nor moved: no new tail or
+        # state came, and a new row follows the cursor it had.
+        self.assertEqual(sum(1 for f in stream.seen if f['t'] == 'events'), 1)
+        new = self.journal('Stop', detail='after the pages')
+        live = stream.next(lambda f: f['t'] == 'events')
+        self.assertEqual(([event['seq'] for event in live['events']], live['cursor']), ([new], new))
+        # A page belongs to a followed session.
+        stream.send(op='subscribe', topic='activity', session=dict(name='sh/unfollowed'), before=5)
+        error = stream.next(lambda f: f['t'] == 'error')
+        self.assertEqual((error['code'], error['key']), ('bad_request', 'name:sh/unfollowed'))
+        self.assertEqual(stream.close(), 0)
+
     def test_subscription_limit_unknown_topics_and_bad_requests_are_errors(self):
         stream, *_ = self.start()
         for index in range(16):

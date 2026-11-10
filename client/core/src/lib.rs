@@ -60,6 +60,7 @@ pub mod menubar;
 pub mod migration;
 pub mod mobile;
 pub mod native_notice;
+pub mod next_source;
 pub mod notification_preferences;
 pub mod operation_recovery;
 pub mod optional_questions;
@@ -231,6 +232,15 @@ impl ComputerStatus {
 pub enum ActivityUpdate {
     /// Events after the previous cursor, oldest first.
     Events { events: Vec<Value>, cursor: i64 },
+    /// One page of rows older than a `before` the view asked for. It never
+    /// moves the resume cursor; `cursor` is the next `before`, `more` says
+    /// older rows remain and `last` ends the read (a page may span frames).
+    Older {
+        events: Vec<Value>,
+        cursor: i64,
+        last: bool,
+        more: bool,
+    },
     /// A new event window that replaces what the view holds (a tail snapshot
     /// after a gap, or a DeepSeek or OpenCode window).
     Replace { events: Vec<Value>, cursor: i64 },

@@ -715,6 +715,31 @@ mod live {
             Ok(())
         }
 
+        /// Asks for one page of a followed session's rows before `before`;
+        /// Ok(false) when this source keeps the re-follow way (replay, service
+        /// or a stream that cannot page).
+        pub fn older(
+            &self,
+            computer: String,
+            key: String,
+            before: i64,
+            limit: u32,
+        ) -> Result<bool, String> {
+            let _admission = self.admit()?;
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet
+                    .older(&ComputerId(computer), &key, before, limit)
+                    .map_err(|error| error.to_string()),
+                Some(Source::Replay(_) | Source::Service(_)) => Ok(false),
+                None => Err("not started".into()),
+            }
+        }
+
         pub fn apply_notifications(
             &self,
             target: &zerus_client_core::actions::Target,
@@ -1080,6 +1105,32 @@ pub async fn follow(
             after,
             tail,
         );
+        Err(NO_LIVE.into())
+    }
+}
+
+/// Reads one page of a followed session's rows before the journal `seq`
+/// `before`; false when the caller must read the old way.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn activity_older(
+    state: State<'_, AppState>,
+    computer: String,
+    key: String,
+    before: i64,
+    limit: Option<u32>,
+) -> Result<bool, String> {
+    #[cfg(feature = "live")]
+    {
+        if before <= 0 {
+            return Ok(false);
+        }
+        let live = Arc::clone(&state.live);
+        let limit = limit.unwrap_or(100);
+        blocking(move || live.older(computer, key, before, limit)).await
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = (&state, computer, key, before, limit);
         Err(NO_LIVE.into())
     }
 }

@@ -466,6 +466,15 @@ fn claim_in(
     crate::startup_log::guard(&result);
     result
 }
+/// A measurement or test start (`ZERUS_CLIENT_PERF`): it may own a GUI, but
+/// never activates one it did not start (zerus-5a99f). Windows has no private
+/// guard root: such a start fails while the person's GUI runs.
+fn measurement_start() -> bool {
+    std::env::var_os("ZERUS_CLIENT_PERF").is_some_and(|mode| !mode.is_empty())
+}
+const NEVER_FORWARDS: &str =
+    "a measurement start (ZERUS_CLIENT_PERF) never forwards to a GUI it did not start";
+
 fn claim_inner(
     name: &str,
     activation: Activation,
@@ -473,12 +482,16 @@ fn claim_inner(
     canonical: Option<String>,
     admitted: impl FnOnce(),
 ) -> Claim {
+    let forwards = !measurement_start();
     let canonical = if let Some(pipe) = canonical {
-        match canonical_claim_observed(pipe, &activation, || {}) {
+        match canonical_claim_observed(pipe, &activation, forwards, || {}) {
             Ok(CanonicalClaim::Owner(guard)) => Some(guard),
             Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
             Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
             Ok(CanonicalClaim::Untrusted) => return Claim::Untrusted,
+            Ok(CanonicalClaim::Refused) => {
+                return Claim::Failed(format!("{NEVER_FORWARDS}: the canonical GUI is running"))
+            }
             Err(error) => return Claim::Failed(error.to_string()),
         }
     } else {
@@ -493,7 +506,9 @@ fn claim_inner(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.join("AppData/Local"))
         .join("hgdev/hgs-tray");
-    claim_guarded(&name, &directory, activation, reply, canonical, admitted)
+    claim_guarded(
+        &name, &directory, activation, reply, canonical, admitted, forwards,
+    )
 }
 
 enum CanonicalClaim {
@@ -501,16 +516,22 @@ enum CanonicalClaim {
     Forwarded,
     Busy,
     Untrusted,
+    /// Held by a GUI this measurement start did not start: nothing was sent.
+    Refused,
 }
 fn canonical_claim_observed(
     pipe: String,
     activation: &Activation,
+    forwards: bool,
     mut busy: impl FnMut(),
 ) -> io::Result<CanonicalClaim> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(guard) = Canonical::acquire(pipe.clone())? {
             return Ok(CanonicalClaim::Owner(guard));
+        }
+        if !forwards {
+            return Ok(CanonicalClaim::Refused);
         }
         busy();
         match forward(&pipe, activation) {
@@ -535,7 +556,7 @@ fn claim_with_reply_at(
     activation: Activation,
     reply: Option<Reply>,
 ) -> Claim {
-    claim_guarded(name, directory, activation, reply, None, || {})
+    claim_guarded(name, directory, activation, reply, None, || {}, true)
 }
 fn claim_guarded(
     name: &str,
@@ -544,12 +565,17 @@ fn claim_guarded(
     reply: Option<Reply>,
     canonical: Option<Canonical>,
     admitted: impl FnOnce(),
+    forwards: bool,
 ) -> Claim {
     // Also recognizes an already-running Qt GUI using this activation protocol.
-    match forward(name, &activation) {
-        Forward::Forwarded => return Claim::Forwarded,
-        Forward::Untrusted => return Claim::Untrusted,
-        Forward::Unavailable => {}
+    // A measurement start sends nothing: a running owner's pipe then makes
+    // its own pipe creation fail.
+    if forwards {
+        match forward(name, &activation) {
+            Forward::Forwarded => return Claim::Forwarded,
+            Forward::Untrusted => return Claim::Untrusted,
+            Forward::Unavailable => {}
+        }
     }
     if let Err(e) = std::fs::create_dir_all(directory) {
         return Claim::Failed(e.to_string());
@@ -564,6 +590,9 @@ fn claim_guarded(
     {
         Ok(lock) => lock,
         Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
+            if !forwards {
+                return Claim::Failed(format!("{NEVER_FORWARDS}: this profile's GUI is running"));
+            }
             return match forward(name, &activation) {
                 Forward::Forwarded => Claim::Forwarded,
                 Forward::Untrusted => Claim::Untrusted,

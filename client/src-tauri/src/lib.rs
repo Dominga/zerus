@@ -461,7 +461,8 @@ pub fn run() {
                     return;
                 }
                 instance::Claim::Duplicate(_) => return,
-                instance::Claim::Failed(_) => {
+                instance::Claim::Failed(why) => {
+                    eprintln!("zerus-client: {why}");
                     std::process::exit(3);
                 }
                 // Nothing was forwarded to that server; say so instead of exiting silently.

@@ -1,8 +1,9 @@
-//! Dormant per-effect facade, NOT a native driver or a receipt admission.
+//! The original ID input scope and its owned Effort controller. The borrowed
+//! facade retains its Cut A contract; Settings is still unadmitted here.
 //!
-//! No production controller calls this. A later caller must supply its SAME
-//! original native/process/pane/panel checks and original receipt rules. These
-//! callbacks are trusted Rust call sites, never decoded commands or permits.
+//! The fixed driver reuses the SAME native/process/pane/panel checks and raw
+//! request receipt rules. Borrowed callbacks remain trusted Rust call sites,
+//! never decoded commands or permits.
 //! The one logical deadline vetoes later effects; it cannot bound synchronous
 //! helper drain or justify releasing its original physical resources.
 use super::*;
@@ -22,8 +23,60 @@ mod helper;
 mod host;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod driver;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod caller;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn remember_caller_machine(config: &crate::config::Config, expected: &str) {
+    caller::remember(config, expected);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn custodian_entry() -> Result<i32> {
     host::entry()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn front(name: &str, raw: &[u8]) -> Option<Result<i32>> {
+    driver::front(name, raw)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn native_checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
+    driver::checked(name, request, empty)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) use driver::read::Call as ReadCall;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn helper_read(
+    call: ReadCall,
+    args: &[String],
+) -> Option<Result<std::process::Output>> {
+    driver::helper_read(call, args)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn entered() -> bool {
+    driver::entered()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn refuse<T>(error: String) -> Result<T> {
+    driver::refuse(error)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn own_marker(record: &Value) -> Result<bool> {
+    driver::own_marker(record)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn deadline(until: Instant) -> Result<Instant> {
+    driver::deadline(until)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +183,7 @@ const BINDING_FIELDS: &[&str] = &[
     "layout_transition",
 ];
 
-fn same_target(left: &Value, right: &Value) -> bool {
+pub(super) fn same_target(left: &Value, right: &Value) -> bool {
     BINDING_FIELDS
         .iter()
         .all(|key| left.get(*key) == right.get(*key))
@@ -330,7 +383,7 @@ impl<'a> Scope<'a> {
 
     /// Fresh original data and pinned target, never a stale admission snapshot.
     /// The callback remains responsible for its existing native write rules.
-    /// No production callback is installed by this leaf.
+    /// The owned driver uses typed staged commits outside the Scope mutex.
     pub(super) fn record_commit(
         &mut self,
         native: impl FnOnce(&Value) -> Result<()>,

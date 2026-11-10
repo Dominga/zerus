@@ -113,6 +113,17 @@ fn codex(record: &mut Value) -> bool {
             ((own && c["external"] != true) || (c["external"] == true && c["provider"] == "codex")))
         .map(|(id,c)| (id.clone(),c.clone())).collect();
     if children.is_empty() { return false; }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if own && effort::picker_entered() {
+        // SQLite's read-only open can still create native WAL/SHM files.
+        // This keeper has no source-side write authority. Keep the original
+        // child evidence and latch the same owner's refusal before any open;
+        // returning unchanged metadata must never authorize later input.
+        let _ = effort::picker_refuse::<()>(
+            "ID Effort cannot verify this Codex child catalog; use Terminal".into(),
+        );
+        return false;
+    }
     let home = if string(record,"agent_home").is_empty() { home().join(".codex") } else { PathBuf::from(string(record,"agent_home")) };
     let database = if own {
         Connection::open_with_flags(home.join("state_5.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()

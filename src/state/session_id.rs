@@ -69,6 +69,14 @@ pub(super) fn take_deferred(name: &str) -> Option<(String, Value)> {
     None
 }
 
+/// A soft frontend classification must not turn deferred informational
+/// ambiguity into the final refusal before the raw request selects a target.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn has_deferred(name: &str) -> bool {
+    DEFERRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref().is_some_and(|deferred|deferred.name==name)
+}
+
 /// Records `report` as this command's refusal and returns its text.
 pub(super) fn refuse(report: (String, Value)) -> String {
     let text = report.0.clone();

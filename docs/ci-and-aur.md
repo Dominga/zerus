@@ -865,6 +865,29 @@ Windows the runner's own version, help and schema probes also get a private
 profile: each case gives its hosts and agents a profile of its own, and Codex
 prints folders relative to the real one, which the suites place projects by.
 
+Default Unix Claude/Codex runs also require an exact-source Effort seed receipt.
+`scripts/ci/native-effort-seed.py` builds the production CLI and one Rust test
+image with the same toolchain and existing Cargo target directory. It locates
+the test image through Cargo's artifact output, lists the exact ignored seed
+method without executing it, then seals a private copy. The bounded receipt
+binds the clean commit/tree, Rust identity and both executable hashes. Runners
+check those bindings before and after native execution; `--effort-seed-receipt`
+selects a nondefault receipt. Only the maintained fixture invokes the seed,
+against its own original saved record, to perform a real LegacyMoved transfer
+without changing the native process, run or conversation. Actual Effort requests
+use the production CLI, check raw request identity and replay behavior, observe
+the native chooser and preserve account defaults. Kimi uses the same seed in its
+separate hosted-only runner, including a later native turn to check hooks after
+the transfer. These fixtures do not establish Fresh native publication or finish
+the global ID rollout. The keeper refuses Codex Effort when its internal child
+catalog needs reconciliation: SQLite's ordinary read-only open can still write
+native WAL/SHM files, and omitting reconciliation could hide current child work.
+Ordinary status reads retain their native reconciliation. Reading that catalog
+without source-side writes remains separate rollout work. Windows, OpenCode-only and historical agent-hint contracts
+retain their separate setup. The macOS debug handoff carries the private
+`hgs-effort-seed` beside its existing test executables under the same verified
+artifact/source manifest; it is never an installation or release asset.
+
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
 trust, resume, clear, compaction, session-only model settings, the status line
@@ -1010,15 +1033,24 @@ and 2.3.3 cover argument construction without running historical releases in CI.
 Declining trust also verifies cancellation without delivery and bounds the
 retained inspection preview independently of the full initial message size.
 
-To test the latest releases or inspect current upstream changes locally:
+To test the latest releases or inspect current upstream changes locally on Unix,
+start from the exact clean, committed source. The builder uses the existing Cargo
+target directory; these paths show its default location:
 
 ```sh
-cargo build --locked
+RUSTUP_TOOLCHAIN=1.99.1 python3 scripts/ci/native-effort-seed.py build \
+  --source-sha "$(git rev-parse HEAD)" --hgs target/debug/hgs \
+  --image target/debug/hgs-effort-seed --receipt target/debug/hgs-effort-seed.json
 python3 scripts/ci/agent-compatibility.py
 python3 scripts/ci/agent-compatibility.py --agent claude
 python3 scripts/ci/agent-compatibility.py --agent opencode
 python3 scripts/ci/agent-compatibility.py --latest
 ```
+
+For another existing target directory, set `CARGO_TARGET_DIR` for the builder
+and pass its CLI/image paths. Pass both `--hgs` for that CLI and
+`--effort-seed-receipt` for its receipt to the runner. An OpenCode-only run
+requires the production CLI but no Effort seed.
 
 The unshipped static coordination hint has a separately selected source candidate:
 `--contract agent-hint`. This historical, separately granted fixture consumes its

@@ -10,6 +10,9 @@ use std::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state::effort::picker_scope) mod helper;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod effort;
+
 fn control(case: &str) {
     let private = tempfile::tempdir().unwrap();
     let output = tempfile::tempfile().unwrap();

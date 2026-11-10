@@ -234,19 +234,21 @@ class ApprovalGateControls(unittest.TestCase):
                     for label in ('Approve once', 'Approve for this session', 'Reject')])
         card = dict(can_answer=True, answer_unavailable_reason='', answer_transport='kimi_tui', questions=[item])
         case.card = lambda: card
-        for folder, display in ((PureWindowsPath('D:/fixture/project with spaces'), 'D:/fixture/project with spaces'),
+        for folder, display in ((PureWindowsPath('D:/fixture/project with spaces'), r'D:\fixture\project with spaces'),
                                 (PurePosixPath('/fixture/project with spaces'), '/fixture/project with spaces')):
             with self.subTest(folder=folder):
                 case.project.resolve.return_value = folder
-                self.assertEqual(folder.as_posix(), display)
+                self.assertEqual(str(folder), display)
                 if isinstance(folder, PurePosixPath):
-                    self.assertEqual(str(folder), display, 'Unix display bytes stay unchanged')
+                    self.assertEqual(folder.as_posix(), display, 'Unix display bytes stay unchanged')
                 for body in ('cwd: ' + display + '\n$ printf approved', '$ printf approved\ncwd: ' + display):
                     item['body'] = body
                     self.assertIs(case.answerable(), card)
-                wrong = ['different/project', display + '-sibling', display + ' child']
+                wrong = ['different/project', display + '-sibling', display + ' child', display[:16] + '...']
                 if display.startswith('D:'):
-                    wrong.append(display.lower())
+                    wrong.extend((display.lower(), 'E:' + display[2:], folder.as_posix()))
+                else:
+                    wrong.append(display.replace('/', '\\'))
                 for other in wrong:
                     item['body'] = 'cwd: ' + other + '\n$ printf approved'
                     with self.subTest(other=other), self.assertRaises(AssertionError):

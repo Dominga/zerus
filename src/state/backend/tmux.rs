@@ -26,7 +26,36 @@ pub(crate) struct Tmux;
 /// `tmux ARGS` with captured output. With `check`, a failure becomes tmux's own
 /// message, or "tmux command failed" when it printed none.
 fn tmux(args: &[String], check: bool) -> Result<Output> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if crate::state::effort::picker_entered() {
+        return crate::state::effort::picker_refuse(
+            "Unowned tmux call refused in original Effort keeper".into(),
+        );
+    }
     checked(Command::new("tmux").args(args).output(), check)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn picker(call: crate::state::effort::PickerRead, args: &[String], check: bool) -> Result<Output> {
+    if let Some(output) = crate::state::effort::picker_helper_read(call, args) {
+        return output
+            .and_then(|output| checked(Ok(output), check))
+            .or_else(crate::state::effort::picker_refuse);
+    }
+    tmux(args, check)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn picker_ps(args: &[String]) -> Result<Output> {
+    if let Some(output) =
+        crate::state::effort::picker_helper_read(crate::state::effort::PickerRead::ProcessTty, args)
+    {
+        return output;
+    }
+    Command::new("ps")
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())
 }
 
 /// Run tmux `args`, a command that may start the server, with `run`. Where that
@@ -290,7 +319,11 @@ impl TerminalBackend for Tmux {
     }
     fn last_client_input(&self, name: &str) -> Option<Option<f64>> {
         let target = format!("={name}");
-        let output = tmux(&owned(&["list-clients", "-t", &target, "-F", "#{client_activity}"]), false).ok()?;
+        let output = tmux(
+            &owned(&["list-clients", "-t", &target, "-F", "#{client_activity}"]),
+            false,
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -317,7 +350,8 @@ impl TerminalBackend for Tmux {
         ))
     }
     fn panes(&self) -> Result<Vec<PaneRow>> {
-        let output = tmux(
+        let output = picker(
+            crate::state::effort::PickerRead::Panes,
             &owned(&[
                 "list-panes",
                 "-a",
@@ -369,7 +403,8 @@ impl TerminalBackend for Tmux {
         platform::silent("tmux", &["has-session", "-t", &format!("={name}")])
     }
     fn session_name(&self, id: &str) -> Result<Option<String>> {
-        let output = tmux(
+        let output = picker(
+            crate::state::effort::PickerRead::SessionName,
             &owned(&["display-message", "-p", "-t", id, "#{session_name}"]),
             false,
         )?;
@@ -379,13 +414,25 @@ impl TerminalBackend for Tmux {
             .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
     }
     fn pane_info(&self, target: Target, fields: &[PaneField]) -> Result<PaneInfo> {
-        let output = tmux(&pane_info_args(target, fields), true)?;
+        let output = picker(
+            crate::state::effort::PickerRead::PaneInfo,
+            &pane_info_args(target, fields),
+            true,
+        )?;
         Ok(PaneInfo::new(
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ))
     }
     fn probe(&self, target: Target, fields: &[PaneField]) -> Option<PaneInfo> {
         let arguments = pane_info_args(target, fields);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if crate::state::effort::picker_entered() {
+            let output = picker(crate::state::effort::PickerRead::Probe, &arguments, false).ok()?;
+            return output
+                .status
+                .success()
+                .then(|| PaneInfo::new(String::from_utf8_lossy(&output.stdout).trim().into()));
+        }
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
         platform::capture("tmux", &arguments).map(PaneInfo::new)
     }
@@ -459,10 +506,12 @@ impl TerminalBackend for Tmux {
             return Err("agent does not own an interactive input terminal; open Terminal".into());
         }
         // Ensure the pinned process is attached to this tty, not just a PID sharing a group.
-        let tty_output = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "tty=,pgid=,tpgid=,comm="])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let tty_output = picker_ps(&owned(&[
+            "-p",
+            &pid.to_string(),
+            "-o",
+            "tty=,pgid=,tpgid=,comm=",
+        ]))?;
         let tty_text = String::from_utf8_lossy(&tty_output.stdout);
         let process_fields: Vec<_> = tty_text.split_whitespace().collect();
         if process_fields.len() < 4
@@ -486,10 +535,7 @@ impl TerminalBackend for Tmux {
         })
     }
     fn on_terminal(&self, pid: &str, tty: &str) -> Result<bool> {
-        let output = Command::new("ps")
-            .args(["-p", pid, "-o", "tty="])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let output = picker_ps(&owned(&["-p", pid, "-o", "tty="]))?;
         Ok(output.status.success()
             && !tty.is_empty()
             && String::from_utf8_lossy(&output.stdout).trim() == tty.trim_start_matches("/dev/"))
@@ -499,7 +545,15 @@ impl TerminalBackend for Tmux {
             super::Capture::Plain => owned(&["capture-pane", "-p", "-t", pane]),
             super::Capture::Styled => owned(&["capture-pane", "-p", "-e", "-t", pane]),
         };
-        Ok(tmux(&arguments, true)?.stdout)
+        Ok(picker(
+            match mode {
+                super::Capture::Plain => crate::state::effort::PickerRead::CapturePlain,
+                super::Capture::Styled => crate::state::effort::PickerRead::CaptureStyled,
+            },
+            &arguments,
+            true,
+        )?
+        .stdout)
     }
     fn grow_unviewed(&self, pane: &str, rows: u16) -> Result<bool> {
         let size = tmux(
@@ -537,8 +591,14 @@ impl TerminalBackend for Tmux {
         resized.map(|_| true)
     }
     fn send(&self, pane: &str, keys: &[Key]) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if crate::state::effort::picker_entered() && keys.len() != 1 {
+            return crate::state::effort::picker_refuse(
+                "Effort key batch is not a single trusted choice".into(),
+            );
+        }
         for arguments in send_args(pane, keys) {
-            tmux(&arguments, true)?;
+            picker(crate::state::effort::PickerRead::Keys, &arguments, true)?;
         }
         Ok(())
     }
@@ -685,8 +745,9 @@ impl TerminalBackend for Tmux {
         // The session's whole environment: a listing that succeeds and lacks
         // the key proves it unset, which a failed lookup of the key alone
         // could not tell from an unreadable terminal.
-        let listing = platform::capture("tmux", &["show-environment", "-t", &format!("={name}")])
-            .ok_or_else(|| format!("{name}: the terminal's environment cannot be read"))?;
+        let listing =
+            platform::capture("tmux", &["show-environment", "-t", &format!("={name}")])
+                .ok_or_else(|| format!("{name}: the terminal's environment cannot be read"))?;
         let prefix = format!("{key}=");
         Ok(listing
             .lines()
@@ -884,7 +945,15 @@ mod tests {
                 "A=1",
                 "-e",
                 "B=two words",
-                "--", "/usr/bin/env", "--", "/bin/bash", "-lic", "exec \"$0\" --run \"$@\"", "/x/hgs", "0", "claude",
+                "--",
+                "/usr/bin/env",
+                "--",
+                "/bin/bash",
+                "-lic",
+                "exec \"$0\" --run \"$@\"",
+                "/x/hgs",
+                "0",
+                "claude",
             ]
         );
         assert_eq!(
@@ -904,7 +973,15 @@ mod tests {
                 "claude/p/t",
                 "-c",
                 "/tmp/a b",
-                "--", "/usr/bin/env", "--", "/bin/bash", "-lic", "exec \"$0\" --run \"$@\"", "/x/hgs", "0", "claude",
+                "--",
+                "/usr/bin/env",
+                "--",
+                "/bin/bash",
+                "-lic",
+                "exec \"$0\" --run \"$@\"",
+                "/x/hgs",
+                "0",
+                "claude",
             ]
         );
         assert_eq!(
@@ -921,9 +998,37 @@ mod tests {
 
     #[test]
     fn direct_argv_has_no_default_shell_and_keeps_literal_final_semicolons() {
-        let arguments = direct_command(owned(&["new-session", "-c", "/private/dir;", "-e", "A=x;"]),
-            &owned(&["/private/program", ";", "\\;", "words with space", "quote'", "$(not-a-command)", ""]));
-        assert_eq!(arguments, owned(&["new-session", "-c", "/private/dir\\;", "-e", "A=x\\;",
-            "--", "/usr/bin/env", "--", "/private/program", "\\;", "\\\\;", "words with space", "quote'", "$(not-a-command)", ""]));
+        let arguments = direct_command(
+            owned(&["new-session", "-c", "/private/dir;", "-e", "A=x;"]),
+            &owned(&[
+                "/private/program",
+                ";",
+                "\\;",
+                "words with space",
+                "quote'",
+                "$(not-a-command)",
+                "",
+            ]),
+        );
+        assert_eq!(
+            arguments,
+            owned(&[
+                "new-session",
+                "-c",
+                "/private/dir\\;",
+                "-e",
+                "A=x\\;",
+                "--",
+                "/usr/bin/env",
+                "--",
+                "/private/program",
+                "\\;",
+                "\\\\;",
+                "words with space",
+                "quote'",
+                "$(not-a-command)",
+                ""
+            ])
+        );
     }
 }

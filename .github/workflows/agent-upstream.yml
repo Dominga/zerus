@@ -31,7 +31,11 @@ jobs:
           bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
           echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
       - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - run: cargo build --locked
+      - name: Build the exact CLI and private native Effort test image
+        run: |
+          python3 scripts/ci/native-effort-seed.py build --source-sha "$GITHUB_SHA" \
+            --hgs "$GITHUB_WORKSPACE/target/debug/hgs" --image "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed" \
+            --receipt "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed.json"
       - name: Discover releases and capture latest Codex, Claude Code and OpenCode capabilities
         run: python3 scripts/ci/agent-compatibility.py --latest
       - name: Retain public compatibility evidence

@@ -161,7 +161,10 @@ pub(super) fn rename_job_in_place(record: &Value, new: &str) -> Result<()> {
 /// `owner`'s job for `run_id`, stopped as uncertain when a rename caught it
 /// during delivery; None when it has none for that run.
 fn renamed_job(owner: &str, run_id: &str) -> Option<Value> {
-    let mut job = load_job(owner);
+    renamed_job_value(load_job(owner), run_id)
+}
+
+fn renamed_job_value(mut job: Value, run_id: &str) -> Option<Value> {
     if !job.is_object() || job["identity"][0] != run_id {
         return None;
     }
@@ -174,6 +177,45 @@ fn renamed_job(owner: &str, run_id: &str) -> Option<Value> {
     }
     Some(job)
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn rename_job_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    old: &str,
+    new: &str,
+    run_id: &str,
+) -> Result<()> {
+    let (from, to) = (storage::label_key(old), storage::label_key(new));
+    let job = view
+        .read(&job_path(&from), storage::ID_RECORD_BYTES)?
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    let Some(mut job) = renamed_job_value(job, run_id) else {
+        return Ok(());
+    };
+    job["name"] = json!(new);
+    view.atomic(&job_path(&to), job.to_string().as_bytes())?;
+    view.remove(&job_path(&from))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn rename_job_in_place_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    record: &Value,
+    new: &str,
+) -> Result<()> {
+    let key = owner(record);
+    let job = view
+        .read(&job_path(&key), storage::ID_RECORD_BYTES)?
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    let Some(mut job) = renamed_job_value(job, string(record, "run_id")) else {
+        return Ok(());
+    };
+    job["name"] = json!(new);
+    view.atomic(&job_path(&key), job.to_string().as_bytes())
+}
+
 fn save_job(job: &Value, owner: &str) -> Result<()> {
     let previous = load_job(owner);
     let mut job = job.clone();

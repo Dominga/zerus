@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -96,8 +97,25 @@ class NativeClaudeSettings(unittest.TestCase):
             # The entry hgs registers for Claude Code 2.1.296, run as this run's hook.
             hook = dict(HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_STATE_DIR=str(self.state),
                         HGS_CONFIG_DIR=str(self.root / 'config'), PATH=self.env['PATH'])
+            self.hook_capture = self.root / 'post-model-switch.json'
+            observer = self.root / 'post-model-switch.py'
+            observer.write_text(
+                'import os,pathlib,sys,tempfile\n'
+                'raw=sys.stdin.buffer.read(65537)\n'
+                'assert len(raw)<=65536\n'
+                'capture=pathlib.Path(' + repr(str(self.hook_capture)) + ')\n'
+                'with tempfile.NamedTemporaryFile(dir=capture.parent,delete=False) as evidence:\n'
+                ' temporary=pathlib.Path(evidence.name)\n'
+                ' try:\n'
+                '  evidence.write(raw);evidence.flush();os.replace(temporary,capture)\n'
+                ' finally:temporary.unlink(missing_ok=True)\n'
+                'with tempfile.TemporaryFile() as original:\n'
+                ' original.write(raw);original.flush();original.seek(0)\n'
+                ' os.dup2(original.fileno(),0)\n'
+                ' os.execv(' + repr(str(fixtures.HGS)) + ',' +
+                repr([str(fixtures.HGS), '__state', 'hook']) + ')\n')
             command = ('env ' + ' '.join(shlex.quote(key + '=' + value) for key, value in hook.items()) + ' '
-                       + shlex.quote(str(fixtures.HGS)) + ' __state hook')
+                       + shlex.quote(sys.executable) + ' ' + shlex.quote(str(observer)))
             self.settings_file.write_text(json.dumps(dict(hooks=dict(PostModelSwitch=[
                 dict(hooks=[dict(type='command', command=command, timeout=5)])]))))
         launch = ['--resume', self.conversation_id] if resumed else ['--session-id', self.conversation_id]
@@ -177,6 +195,23 @@ class NativeClaudeSettings(unittest.TestCase):
         self.assertEqual(self.inspect()['effort'], 'low')
         self.assertEqual(self.settings_file.read_bytes(), before)
 
+    def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
+        import native_effort_id as contract
+        before = self.settings_file.read_bytes()
+        record, path, legacy = contract.moved_record(self, self.name, self.record)
+        self.record, self.record_path = record, path
+        attempts = contract.key_log(self, existing=self.root / 'sent-keys')
+        observed = contract.inspect(self, self.name, record['session_id'])
+        self.assertTrue(observed['effort_change_supported'], observed['effort_change_reason'])
+        choices = ('low', 'high') if observed['effort'] == 'high' else ('high', 'low')
+        for wanted in choices:
+            self.assertIn(wanted, observed['effort_options'])
+            record = contract.change_and_replay(self, self.name, record, path, wanted, attempts)
+            self.assertIn(('● high' if wanted == 'high' else '○ low') + ' · /effort', self.screen())
+            self.assertEqual(contract.inspect(self, self.name, record['session_id'])['effort'], wanted)
+        self.assertEqual(self.settings_file.read_bytes(), before)
+        self.assertFalse(legacy.exists(), 'a native hook recreated the retired legacy record')
+
     def test_terminal_model_change_reaches_hgs_through_its_hook(self):
         before = self.settings_file.read_bytes()
         # The person changes the model in Terminal, for this session only.
@@ -193,10 +228,20 @@ class NativeClaudeSettings(unittest.TestCase):
         self.assertIn('Fable', row, self.screen())
         self.tmux('send-keys', '-t', self.pane, 's')
         # Claude's PostModelSwitch names the exact ID, not the picker's display name.
+        self.wait_for(self.hook_capture.exists)
+        event = json.loads(self.hook_capture.read_bytes())
+        print('ZERUS_NATIVE_MODEL_SWITCH=' + json.dumps({
+            key: event.get(key) for key in ('hook_event_name', 'session_id', 'from_model', 'to_model')}))
+        self.assertEqual(event['hook_event_name'], 'PostModelSwitch')
+        self.assertEqual(event['session_id'], self.conversation_id)
+        self.assertEqual(event['from_model'], self.record['model'])
+        target = event['to_model']
+        self.assertRegex(target, r'^claude-fable-[A-Za-z0-9][A-Za-z0-9._-]*(?:\[1m\])?$')
+        self.assertNotEqual(target, event['from_model'])
         record = lambda: json.loads(self.record_path.read_text())
-        self.wait_for(lambda: record()['model'] == 'claude-fable-5-1')
+        self.wait_for(lambda: record()['model'] == target)
         self.assertEqual(record()['model_source_path'], str(self.transcript))
-        self.assertEqual(self.inspect()['model'], 'claude-fable-5-1')
+        self.assertEqual(self.inspect()['model'], target)
         self.assertEqual(self.settings_file.read_bytes(), before)
 
     def test_resumed_conversation_confirms_claudes_cache_notice(self):

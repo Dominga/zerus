@@ -314,7 +314,10 @@ fn load(path: &Path) -> Option<Intent> {
         .take(LOCK_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    intent_value(serde_json::from_slice(&bytes).ok()?)
+}
+
+fn intent_value(value: Value) -> Option<Intent> {
     let lock = PathBuf::from(value["lock"].as_str()?);
     let taken = PathBuf::from(value["taken"].as_str()?);
     let id = value["session_id"].as_str()?.to_owned();
@@ -350,6 +353,51 @@ pub(super) fn recover_locked() {
             let _ = archive::remove_synced(&path);
         }
     }
+}
+
+/// Same bounded best-effort inventory under an already-held original Root.
+/// Invalid intents remain; selected control/primitive refusal never falls
+/// through to the ordinary restore or removal lane.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn recover_guarded(effects: &dyn guarded_recovery::Effects) -> Result<()> {
+    let scan = guarded_recovery::View::new(effects);
+    scan.check()?;
+    let entries = match fs::read_dir(intents()) {
+        Ok(entries) => entries,
+        Err(_) => return scan.check(),
+    };
+    for entry in entries.take(INTENTS) {
+        scan.check()?;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if path.extension().is_none_or(|v| v != "json") {
+            continue;
+        }
+        let mut view = guarded_recovery::View::new(effects);
+        let Some(bytes) = view.read(&path, LOCK_BYTES)? else {
+            continue;
+        };
+        let Some(intent) = serde_json::from_slice(&bytes).ok().and_then(intent_value) else {
+            continue;
+        };
+        match view.restore(
+            &intent.lock,
+            &intent.taken,
+            &intent.id,
+            intent.original.as_ref(),
+        ) {
+            Ok(()) => view.remove(&path)?,
+            Err(error) => {
+                // A retained invalid/changed lock may stay just as before,
+                // but a latched EOF/deadline/source refusal must abort.
+                view.check()?;
+                let _ = error;
+            }
+        }
+    }
+    scan.check()
 }
 
 #[cfg(all(test, unix))]

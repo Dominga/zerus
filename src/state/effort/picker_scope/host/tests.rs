@@ -494,7 +494,7 @@ fn frame_controls(frame: Frame, writer: Guard) {
     let mut encoded = serde_json::to_value(&frame).unwrap();
     encoded["argv"] = json!(["unexpected"]);
     assert!(serde_json::from_value::<Frame>(encoded).is_err());
-    let receipts = Directory::open(&root())
+    let receipts = Directory::open(&crate::platform::canonical(root()).unwrap())
         .unwrap()
         .child("settings_receipts")
         .unwrap();

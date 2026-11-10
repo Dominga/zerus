@@ -2,6 +2,14 @@
 use super::*;
 use std::fs;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod guarded;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use guarded::{
+    mirror_legacy as mirror_legacy_guarded, recover_locked as recover_guarded,
+    sync_legacy_locked as sync_legacy_guarded,
+};
+
 fn remove(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid state path")?)

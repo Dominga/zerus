@@ -19,6 +19,13 @@ spec.loader.exec_module(compat)
 
 
 class AgentCompatibility(unittest.TestCase):
+    def setUp(self):
+        # Existing package/discovery controls substitute only the new compiler
+        # input admission. Its real source/hash/refusal controls are separate.
+        self.seed_admission=patch.object(compat,'seed_inputs',return_value=None)
+        self.seed_admission.start()
+        self.addCleanup(self.seed_admission.stop)
+
     def memory_runner(self, cases):
         """The actual runner with a supplied pure suite, never native discovery."""
         import os
@@ -647,7 +654,7 @@ class AgentCompatibility(unittest.TestCase):
                              for key in node.args[0].keys)]
         self.assertEqual(ast.literal_eval(settings), {'permissions': {'defaultMode': 'default'}})
 
-    def qualify_fixture(self, agent, target):
+    def qualify_fixture(self, agent, target, effort_seed=None):
         """Run qualify() with stand-ins for the package, the executable and the suite
         interpreter; returns the report row, the suite runs, the results folder and the
         profile each probe of the executable saw."""
@@ -686,8 +693,37 @@ class AgentCompatibility(unittest.TestCase):
                                                'XDG_STATE_HOME': '/fixture-live-state',
                                                'USERPROFILE': 'C:\\Users\\fixture-runner'}), \
                 patch('sys.stdout', io.StringIO()):
-            row = compat.qualify(agent, package, work, results, Path('hgs-under-test'))
+            row = compat.qualify(agent, package, work, results, Path('hgs-under-test'),effort_seed=effort_seed)
         return row, runs, results / agent / '1.2.3', profiles
+
+    def test_private_seed_is_bound_and_forwarded_to_all_original_codex_cases(self):
+        value=dict(receipt='/fixture/receipt',value=dict(image=dict(path='/fixture/private-seed',sha256='a'*64),source=dict(commit='b'*40)))
+        with patch.object(compat,'seed_inputs',return_value=value):
+            row,runs,_,_=self.qualify_fixture('codex','linux-x64',effort_seed=value)
+        self.assertEqual(row['status'],'passed',row.get('error'))
+        self.assertEqual(len(runs),4)
+        self.assertEqual(row['effort_seed'],value['value'])
+        self.assertEqual({(env['HGS_CODEX_TEST_SIZE'],env['HGS_CODEX_TEST_ANIMATIONS']) for _,env,_ in runs},
+                         {(size,mode) for size in ('95x47','110x35') for mode in ('true','false')})
+        for _,env,_ in runs:
+            self.assertEqual(env['ZERUS_PICKER_EFFORT_SEED_IMAGE'],'/fixture/private-seed')
+            self.assertEqual(env['ZERUS_PICKER_EFFORT_SEED_SHA256'],'a'*64)
+
+    def test_missing_standard_unix_seed_refuses_before_upstream_or_native_install(self):
+        with tempfile.TemporaryDirectory() as root,patch.object(compat,'seed_inputs',side_effect=ValueError('missing private seed')), \
+             patch.object(compat,'discover_upstream') as discover,patch.object(compat,'install_native') as install, \
+             patch.object(compat,'host_target',return_value='linux-x64'),patch('sys.stderr',io.StringIO()), \
+             patch.object(compat.sys,'argv',['agent-compatibility.py','--agent','claude','--results',root]):
+            with self.assertRaises(SystemExit) as refusal:compat.main()
+            self.assertEqual(refusal.exception.code,2)
+            discover.assert_not_called();install.assert_not_called()
+
+    def test_ambient_private_seed_overrides_are_not_inherited(self):
+        with tempfile.TemporaryDirectory() as root,patch.dict(compat.os.environ,
+                ZERUS_PICKER_EFFORT_SEED_IMAGE='/unreviewed/image',ZERUS_PICKER_EFFORT_SEED_SHA256='f'*64):
+            env=compat.fixture_environment(Path(root)/'home')
+        self.assertNotIn('ZERUS_PICKER_EFFORT_SEED_IMAGE',env)
+        self.assertNotIn('ZERUS_PICKER_EFFORT_SEED_SHA256',env)
 
     def test_windows_qualifies_each_agent_once_through_the_session_host(self):
         for agent, spec in compat.AGENTS.items():

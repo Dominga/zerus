@@ -1,0 +1,161 @@
+//! The fixed existing ID Effort lane. Its production and real-CLI controls use
+//! the same owner, raw request, recovery, native helpers and receipt commits.
+use super::*;
+use std::sync::Arc;
+
+pub(super) mod context;
+mod effects;
+mod owner;
+mod publication;
+pub(super) mod read;
+#[cfg(test)]
+mod tests;
+pub(super) mod transaction;
+
+pub(super) fn entered() -> bool {
+    context::entered()
+}
+pub(super) fn helper_read(
+    call: read::Call,
+    args: &[String],
+) -> Option<Result<std::process::Output>> {
+    read::route(call, args)
+}
+pub(super) fn refuse<T>(error: String) -> Result<T> {
+    match context::owner()? {
+        Some(owner) => owner.refuse(error),
+        None => Err(error),
+    }
+}
+pub(super) fn own_marker(record: &Value) -> Result<bool> {
+    transaction::own_marker(record).or_else(refuse)
+}
+pub(super) fn deadline(until: Instant) -> Result<Instant> {
+    match context::owner()? {
+        Some(owner) => {
+            owner.check()?;
+            Ok(until.min(owner.until))
+        }
+        None => Ok(until),
+    }
+}
+
+pub(super) fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
+    let observation =
+        context::Observation::begin()?.ok_or("Original Effort observation context missing")?;
+    let record = input::checked_settings(
+        name,
+        &request.expected_run_id,
+        &request.expected_conversation_id,
+    )?;
+    input::checked_terminal(&record, empty)?;
+    observation.complete(&record)?;
+    Ok(record)
+}
+
+pub(super) fn front(name: &str, raw: &[u8]) -> Option<Result<i32>> {
+    let record = if crate::state::session_id::has_deferred(name) {
+        Err("The original label is awaiting its raw request guard".into())
+    } else {
+        crate::state::storage::read_metadata(name)
+    };
+    if record
+        .as_ref()
+        .is_ok_and(|record| !crate::state::storage::in_id_layout(record))
+    {
+        return None;
+    }
+    // A mixed label may still name the existing legacy first holder. Only a
+    // unique metadata match of this exact raw request stays on that old lane;
+    // unknown/ID/error cases retain cache-first keeper lookup below.
+    if record.is_err() && crate::state::session_id::selected().is_none() {
+        if let (Ok(request), Ok(records)) = (
+            serde_json::from_slice::<Request>(raw),
+            crate::state::session_index::metadata_records_unrepaired(),
+        ) {
+            let matches: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    string(record, "name") == name
+                        && string(record, "run_id") == request.expected_run_id
+                        && string(record, "conversation_id") == request.expected_conversation_id
+                })
+                .collect();
+            if matches.as_slice().first().is_some_and(|record| {
+                matches.len() == 1 && !crate::state::storage::in_id_layout(record)
+            }) {
+                return None;
+            }
+        }
+    }
+    Some((|| {
+        let selector = record.unwrap_or_else(|_| json!({"name":name}));
+        let frame = host::frame::Frame::new(
+            host::frame::Operation::Effort,
+            raw.to_vec(),
+            &selector,
+            host::frame::Deadline::after(Duration::from_secs(15))?,
+        )?;
+        let bytes = host::request(frame)?;
+        println!("{}", String::from_utf8_lossy(&bytes));
+        Ok(0)
+    })())
+}
+
+pub(super) fn run(writer: Guard, control: Arc<host::Control>) -> Result<Vec<u8>> {
+    let (owner, done) = owner::Owner::new(writer, control)?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _entered = context::Entered::install(owner.clone())?;
+        let frame = owner.control.frame();
+        let effects = effects::Recovery(owner.clone());
+        crate::state::rename::recover_guarded(&effects)?;
+        crate::state::rename::sync_legacy_guarded(&effects)?;
+        crate::state::worktree_lock::recover_guarded(&effects)?;
+        owner.check()?;
+        if string(&frame.binding, "session_id").is_empty() {
+            let request: Request = serde_json::from_slice(&frame.raw).map_err(|e| e.to_string())?;
+            crate::state::resolve_effort_label(
+                string(&frame.binding, "name"),
+                crate::state::LabelGuard::Given {
+                    run: request.expected_run_id,
+                    conversation: request.expected_conversation_id,
+                },
+            )
+            .map_err(|error| match error.value {
+                Some(value) => crate::state::session_id::refuse((error.text, value)),
+                None => error.text,
+            })?;
+        }
+        let record = host::original_record(frame)?;
+        let receipt_path = root()
+            .join("effort_receipts")
+            .join(format!("{}.json", frame.request_id));
+        let absent = crate::state::guarded_recovery::Original::read_absent(&receipt_path)?;
+        effects::parent(&owner, &receipt_path, &[&absent])?;
+        crate::state::session_id::select_guarded_route(
+            string(&record, "name"),
+            string(&record, "session_id"),
+            string(&record, "run_id"),
+            string(&record, "conversation_id"),
+            true,
+        );
+        owner.open_scope(&record)?;
+        transaction::execute(&owner).or_else(|error| owner.refuse(error))
+    }));
+    drop(owner);
+    // Body failure/unwind does not release Root/SID while ANY exact exchange
+    // retains the original owner. Completion is its last field, after phase.
+    loop {
+        match done.recv_timeout(Duration::from_millis(20)) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => loop {
+                std::thread::park_timeout(Duration::from_secs(1));
+            },
+        }
+    }
+    match result {
+        Ok(result) => result,
+        Err(_) => Err("Original Effort operation panicked; no replay".into()),
+    }
+}

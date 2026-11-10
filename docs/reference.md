@@ -3135,7 +3135,8 @@ a ProxyCommand) are stopped and reaped before the dialog settles. The accounted
 resources stay held until the leader is reaped and both of its pipes reach EOF.
 The result stays unknown and status-only, the ticket stays held, and nothing is
 retried or continued. Windows keeps its per-child kill-on-close jobs.
-setsid-detached processes stay outside the group. Two boundaries remain: if the
+Processes that leave the group (setsid or a process group of their own) stay
+outside it and are never signalled by it. Two boundaries remain: if the
 desktop has crashed, a later kill of the CLI is not accounted by anyone; and
 after a desktop restart the dialog cannot reopen the original. It can still
 review it read-only: when the organization read discloses an adoption request

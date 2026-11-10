@@ -2029,6 +2029,68 @@ mod group_tests {
         .unwrap()
     }
 
+    /// The boundary: processes that left the private group (setsid or a
+    /// group of their own) are never signalled by it.
+    fn escaped_leader(directory: &Path, rest: &str, timeout: Duration) -> Invocation {
+        let code = format!(
+            "import os, subprocess, sys, time\n\
+             def start(path, **escape):\n\
+             \x20   child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+             \x20       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **escape)\n\
+             \x20   open(path, 'w').write(str(child.pid))\n\
+             start({inside:?})\n\
+             start({session:?}, start_new_session=True)\n\
+             start({group:?}, preexec_fn=os.setpgrp)\n\
+             {rest}\n",
+            inside = directory.join("inside").display().to_string(),
+            session = directory.join("session").display().to_string(),
+            group = directory.join("group").display().to_string(),
+        );
+        Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    /// Kills an escaped fixture process this test started (by its exact
+    /// recorded PID, while it is still alive), so nothing outlives the test.
+    fn clean_up(pid: libc::pid_t) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    #[test]
+    fn processes_outside_the_private_group_survive_its_signal() {
+        for (name, rest, timeout) in [
+            ("normal exit", "print('done')", Duration::from_secs(20)),
+            (
+                "external kill",
+                "import signal\nos.kill(os.getpid(), signal.SIGKILL)",
+                Duration::from_secs(20),
+            ),
+            ("timeout", "time.sleep(30)", Duration::from_millis(1500)),
+        ] {
+            let temp = Scratch::new();
+            let exit = run(&escaped_leader(&temp.0, rest, timeout), Arc::new(()));
+            let inside = stand_in(&temp.0.join("inside"));
+            let session = stand_in(&temp.0.join("session"));
+            let group = stand_in(&temp.0.join("group"));
+            assert!(
+                gone(inside),
+                "{name}: the in-group stand-in survived ({exit:?})"
+            );
+            let session_alive = unsafe { libc::kill(session, 0) } == 0;
+            let group_alive = unsafe { libc::kill(group, 0) } == 0;
+            clean_up(session);
+            clean_up(group);
+            assert!(session_alive, "{name}: a setsid process was signalled");
+            assert!(group_alive, "{name}: an own-group process was signalled");
+        }
+    }
+
     #[test]
     fn a_leader_that_exits_leaves_no_group_member_running() {
         let temp = Scratch::new();

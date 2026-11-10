@@ -1,4 +1,4 @@
-"""The updater's switch rules (tray/update-installed.py): GUI kinds, drafts
+"""The updater's switch rules (packaging/desktop/update-installed.py): GUI kinds, drafts
 roots, the rollback slot, the numbered Dev guard and the Qt settings check.
 Fake HOME, fake bundles (com.example.zerus-switch-test) and a fake `defaults`;
 nothing reaches an installed GUI, its LaunchAgent or a real settings domain."""
@@ -20,7 +20,7 @@ from unittest import mock
 from desktop_revoke_fixture import REVOCATION_CLI
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
+spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'packaging/desktop/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 # The real ones, for the cases that fail them from inside.
@@ -101,7 +101,7 @@ class Switch(Fixture):
         self.assertEqual(updater.gui_kind(updater.bundle_info(self.bundle('qt', 'qt'))), 'qt')
         self.assertEqual(updater.gui_kind(updater.bundle_info(self.bundle('client', 'tauri'))), 'tauri')
         self.assertEqual(updater.bundle_info(self.root / 'missing.app'), {})
-        script = [sys.executable, str(ROOT / 'tray/update-installed.py'), '--installed-gui']
+        script = [sys.executable, str(ROOT / 'packaging/desktop/update-installed.py'), '--installed-gui']
         for path, kind in ((self.bundle('cli', 'tauri'), 'tauri'), (self.root / 'none.app', 'none')):
             result = subprocess.run(script + [str(path)], capture_output=True, text=True, timeout=30,
                                     env=dict(os.environ, HOME=str(self.home)))
@@ -200,7 +200,7 @@ class Switch(Fixture):
         half = self.bundle('half', 'qt')
         (half / 'Contents/Info.plist').unlink()
         self.assertIsNone(updater.bundle_kind(half))
-        result = subprocess.run([sys.executable, str(ROOT / 'tray/update-installed.py'), '--installed-gui', str(half)],
+        result = subprocess.run([sys.executable, str(ROOT / 'packaging/desktop/update-installed.py'), '--installed-gui', str(half)],
                                 capture_output=True, text=True, timeout=30, env=dict(os.environ, HOME=str(self.home)))
         self.assertEqual((result.returncode, result.stdout.strip()), (0, 'none'), result.stderr)
         self.assertIsNone(updater.bundle_kind(self.root / 'missing.app'))

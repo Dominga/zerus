@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { APPROVALS_TITLE, APPROVALS_BODY, APPROVALS_CONFIRM, APPROVALS_WARNING, APPROVALS_HINT } from "./approval-opt-in";
 
-// Every text Settings shows for a Qt control is Qt's own: it appears in the
-// Qt source it comes from and in the section that shows it.
+// Every text Settings shows for a Qt control is Qt's own and appears in the
+// section that shows it. Task #28 (team ede724c4): the Qt sources are gone;
+// the texts, timings, shortcut titles and section order they gave are kept
+// here as the reference.
 
 // Read from disk, as styles/motion.test.ts does: the specifier is built so
 // TypeScript (no Node types here) leaves it alone.
@@ -13,17 +15,12 @@ const disk = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
 const fs = { readFileSync: (path: URL, encoding: "utf8") => disk.readFileSync(path, encoding).replace(/\r\n/g, "\n") };
 const here = new URL("./", import.meta.url);
 const repo = new URL("../../../../../", import.meta.url);
-const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const source = (file: string) => fs.readFileSync(new URL(file, here), "utf8");
-const layer = fs.readFileSync(new URL("tray/src/WindowLayer.cpp", repo), "utf8");
 // Since the shared Keep Above state (zerus-5wmh.24.2) the hints come from the
 // window layer: its store and the native layer that reports them.
 const clientLayer = [fs.readFileSync(new URL("../../../store/windowLayer.ts", here), "utf8"),
   fs.readFileSync(new URL("client/src-tauri/src/window_layer.rs", repo), "utf8")].join("\n");
-const keyboard = fs.readFileSync(new URL("tray/src/KeyboardSettings.cpp", repo), "utf8");
-const shortcuts = fs.readFileSync(new URL("tray/src/Shortcuts.cpp", repo), "utf8");
 const store = fs.readFileSync(new URL("../../../store/shortcuts.ts", here), "utf8");
-const speech = fs.readFileSync(new URL("tray/src/speech/SpeechSettings.cpp", repo), "utf8");
 const speechCore = fs.readFileSync(new URL("client/core/src/speech_settings.rs", repo), "utf8");
 
 const APPEARANCE = [
@@ -121,7 +118,6 @@ const VOICE_CORE_FILLED: [string, string][] = [
   ["Recognition service is not ready on %1. %2", "Recognition service is not ready on {computer}. {}"],
 ];
 
-const recoveryQt = fs.readFileSync(new URL("tray/src/RecoverySettings.h", repo), "utf8");
 const recoveryCore = fs.readFileSync(new URL("client/core/src/recovery_settings.rs", repo), "utf8");
 const RECOVERY = [
   "Automatic recovery", "Shared by all connected machines. Agents finish their own retries first; recovery continues the same task.",
@@ -140,8 +136,6 @@ const RECOVERY_CORE = [
   "this machine", "Use 1–16 values: delays from 1 to 86400 seconds; −1 or 0 may only be last, and 0 needs a preceding delay.",
 ];
 
-const filesQt = fs.readFileSync(new URL("tray/src/DownloadCacheSettings.cpp", repo), "utf8");
-const cacheQt = fs.readFileSync(new URL("tray/src/DownloadCache.cpp", repo), "utf8");
 const cacheCore = fs.readFileSync(new URL("client/core/src/download_cache.rs", repo), "utf8");
 const FILES = [
   "Files",
@@ -160,7 +154,6 @@ const FILES_CORE = [
   "Cannot find an unused name for the downloaded copy.",
 ];
 
-const analyticsQt = ["tray/src/AnalyticsSettings.cpp", "tray/src/AnalyticsClient.cpp"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const analyticsCore = ["client/core/src/analytics.rs", "client/core/src/analytics/page.rs", "client/src-tauri/src/analytics.rs"]
   .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const ANALYTICS = [
@@ -193,8 +186,6 @@ const ANALYTICS_CORE = [
   "Aggregate diagnostics saved locally.", "Could not save aggregate diagnostics.",
 ];
 
-const approvalsQt = ["tray/src/AutomaticApprovalSettings.cpp", "tray/src/HgsClient.cpp", "tray/src/SettingsPage.h"]
-  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const approvalsCore = fs.readFileSync(new URL("client/core/src/approvals.rs", repo), "utf8");
 const APPROVALS = [
   "Automatic approvals", "Automatically approve tool requests (dangerous)", "Approval journal",
@@ -209,7 +200,6 @@ const APPROVALS_CORE = [
   "Update the local hgs CLI to use automatic approvals and its journal.",
 ];
 
-const worktreesQt = fs.readFileSync(new URL("tray/src/WorktreeSettings.h", repo), "utf8");
 const worktreesCore = ["client/core/src/worktree_policy.rs", "client/core/src/worktree_policy/page.rs"]
   .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
 const WORKTREES = [
@@ -229,8 +219,6 @@ const WORKTREES_CORE = [
   "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",
 ];
 
-const mobileQt = ["tray/src/WorkspaceSettings.h", "tray/src/PhonePairing.cpp", "tray/src/MobileDeliverySettings.h", "tray/src/SettingsPage.h", "tray/src/HgsClient.cpp"]
-  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const mobileCore = ["client/core/src/mobile.rs", "client/core/src/mobile/page.rs"]
   .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
 const MOBILE = [
@@ -272,8 +260,6 @@ const PROCESSES = [
   "Off by default. When disabled, the tab is hidden and processes are not polled. Enable it to inspect running shells and background commands, read recorded output and stop selected processes. Only the selected session is inspected; opening Processes refreshes immediately. Output is read only while the tab is visible. Timings apply to this Zerus. Background refresh also controls session inspection while Terminal or Native UI is open; session overview and account limits refresh separately.",
 ];
 // The Processes tab and its session menu entry (ProcessView.cpp, SessionsWindow.cpp).
-const processView = fs.readFileSync(new URL("tray/src/ProcessView.cpp", repo), "utf8");
-const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
 const sessionsUi = (file: string) => fs.readFileSync(new URL(`../../sessions/${file}`, here), "utf8");
 const processStore = fs.readFileSync(new URL("../../../store/processes.ts", here), "utf8");
 const PROCESS_TAB = ["Command", "Agent", "State", "Duration", "Terminate", "Copy command", "Select a command to view its output."];
@@ -281,190 +267,135 @@ const PROCESS_MENU = ["Show running commands", "Follow this session's background
 
 describe("Settings texts", () => {
   it.each(PROCESSES)("Processes shows Qt's %s", (text) => {
-    expect(qt).toContain(`tr("${text}")`);
     expect(source("Processes.tsx")).toContain(text);
   });
   it("Processes keeps Qt's timing ranges", () => {
     const TIMINGS = [...source("Processes.tsx").matchAll(/\{ key: "([^"]+)", label: (?:trNoop\()?"([^"]+)"\)?, min: ([\d.]+), max: ([\d.]+) \}/g)]
       .map((m) => ({ key: m[1], label: m[2], min: Number(m[3]), max: Number(m[4]) }));
-    const qtTimings = [...qt.matchAll(/timing\("(\w+)",tr\("([^"]+)"\),ProcessSettings::\w+\(\),([\d.]+),([\d.]+)\)/g)]
-      .map((m) => ({ key: `processes/${m[1]}`, label: m[2], min: Number(m[3]), max: Number(m[4]) }));
+    const qtTimings = [{"key": "processes/activeSeconds", "label": "Open Processes tab", "min": 1, "max": 60}, {"key": "processes/backgroundSeconds", "label": "Background process count", "min": 5, "max": 600}, {"key": "processes/unknownSeconds", "label": "Unconfirmed process output", "min": 1, "max": 600}, {"key": "processes/loadingSeconds", "label": "Show loading indicator after", "min": 0, "max": 5}];
     expect(qtTimings.length).toBe(4);
     expect(TIMINGS.map((t) => ({ key: t.key, label: t.label, min: t.min, max: t.max }))).toEqual(qtTimings);
   });
   it.each(PROCESS_TAB)("the Processes tab shows Qt's %s", (text) => {
-    expect(processView).toContain(`tr("${text}`);
     expect(sessionsUi("Processes.tsx")).toContain(text);
   });
   it("the Processes tab fills in Qt's counts", () => {
-    expect(processView).toContain('tr("Terminate selected (%1)")');
     expect(sessionsUi("Processes.tsx")).toContain(`tr("Terminate selected (%1)", ids.length)`);
-    expect(sessionsWindow).toContain('tr("Processes (%1)")');
     expect(processStore).toContain('tr("Processes (%1)", count)');
   });
   it.each(PROCESS_MENU)("the session menu shows Qt's %s", (text) => {
-    expect(sessionsWindow).toContain(`tr("${text}")`);
     expect(processStore).toContain(text);
   });
 
   it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
-    expect(analyticsQt).toContain(`"${text}"`);
     expect(source("Analytics.tsx") + source("analytics-text.ts")).toContain(text);
   });
   it.each(ANALYTICS_CORE)("the analytics core says Qt's %s", (text) => {
-    expect(analyticsQt).toContain(`"${text}"`);
     expect(analyticsCore).toContain(`"${text}"`);
   });
   it("the analytics core counts the routes it reads as Qt does", () => {
-    expect(analyticsQt).toContain('"Reading %1 configured route(s)…"');
     expect(analyticsCore).toContain('"Reading {} configured route(s)…"');
   });
   it.each([APPROVALS_TITLE, APPROVALS_BODY, APPROVALS_CONFIRM, APPROVALS_WARNING, APPROVALS_HINT])("the dangerous opt-in uses Qt and the mockup's text: %s", (text) => {
     const mockup = fs.readFileSync(new URL("design/webui/src/screens/settings/Policies.tsx", repo), "utf8") + fs.readFileSync(new URL("design/webui/src/dialogs/SettingsDialogs.tsx", repo), "utf8");
-    expect(approvalsQt).toContain(text); expect(mockup).toContain(text);
+    expect(mockup).toContain(text);
   });
   it.each(APPROVALS)("Automatic approvals shows Qt's %s", (text) => {
-    expect(approvalsQt).toContain(`"${text}"`);
     expect(source("Approvals.tsx") + source("approvals-journal.ts")).toContain(text);
   });
   it.each(APPROVALS_CORE)("the approval journal says Qt's %s", (text) => {
-    expect(approvalsQt).toContain(`"${text}"`);
     expect(approvalsCore).toContain(`"${text}"`);
   });
   it("the approval journal fills in Qt's counts and answers", () => {
-    expect(approvalsQt).toContain('"%1 entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried."');
     expect(source("approvals-journal.ts")).toContain("${page.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
-    expect(approvalsQt).toContain('"Selected answer: %1"');
     expect(approvalsCore).toContain('"Selected answer: {}"');
   });
   it.each(WORKTREES)("Worktrees shows Qt's %s", (text) => {
-    expect(worktreesQt).toContain(`"${text}"`);
     expect(source("Worktrees.tsx")).toContain(text);
   });
   it.each(WORKTREES_CORE)("the cleanup policy says Qt's %s", (text) => {
-    expect(worktreesQt).toContain(`"${text}"`);
     expect(worktreesCore).toContain(`"${text}"`);
   });
   it.each(MOBILE)("Mobile connection shows Qt's %s", (text) => {
-    expect(mobileQt).toContain(`"${text}"`);
     expect(source("Mobile.tsx") + source("ComputerInvitations.tsx") + source("WorkspacePanel.tsx")).toContain(text);
   });
   it.each(MOBILE_CORE)("the mobile core says Qt's %s", (text) => {
-    expect(mobileQt.replaceAll("\\n", "\n")).toContain(text);
     expect(mobileCore).toContain(text);
   });
   it("Mobile connection shows Qt's Phones introduction, which Qt writes in two pieces", () => {
-    expect(mobileQt).toContain('"Phones paired with your computers. A phone can control every computer of its workspace; "\n                                "revoke one you no longer use."');
     expect(source("Mobile.tsx")).toContain("Phones paired with your computers. A phone can control every computer of its workspace; revoke one you no longer use.");
   });
   it("the mobile core fills in Qt's formats", () => {
-    expect(mobileQt).toContain('"Update Zerus on %1 to manage phones from here."');
     expect(mobileCore).toContain('"Update Zerus on {computer} to manage phones from here."');
-    expect(mobileQt).toContain('"Could not read the machine list: %1"');
     expect(mobileCore).toContain('"Could not read the machine list: {error}"');
-    expect(mobileQt).toContain('"%1 phones"');
     expect(mobileCore).toContain('"{count} phones"');
-    expect(mobileQt).toContain('"%1 (via %2)"');
     expect(source("Mobile.tsx")).toContain("(via ${list.host})");
-    expect(mobileQt).toContain('"Could not save: %1"');
     expect(mobileCore).toContain('"Could not save: {}"');
-    expect(mobileQt).toContain('"Could not read the shared setting: %1"');
     expect(mobileCore).toContain('"Could not read the shared setting: {}"');
-    expect(mobileQt).toContain('"Update Zerus on %1, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
     expect(mobileCore).toContain('"Update Zerus on {one}, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
-    expect(mobileQt).toContain('"Update Zerus on these computers this one synchronizes with directly: %1. Until then they keep syncing projects but do not receive this choice."');
     expect(mobileCore).toContain('"Update Zerus on these computers this one synchronizes with directly: {}. Until then they keep syncing projects but do not receive this choice."');
-    expect(mobileQt).toContain('"The sync service on this computer is outdated and must be restarted (%1, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
     expect(mobileCore).toContain('"The sync service on this computer is outdated and must be restarted ({}, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
   });
   it.each(FILES)("Files shows Qt's %s", (text) => {
-    expect(filesQt).toContain(`"${text}"`);
     expect(source("Files.tsx")).toContain(text);
   });
   it("Files fills in Qt's limit question", () => {
-    expect(filesQt).toContain('"Zerus will automatically delete its oldest downloaded copies when they exceed %1. Files you added or edited will be kept."');
     expect(source("Files.tsx")).toContain('tr("Zerus will automatically delete its oldest downloaded copies when they exceed %1. Files you added or edited will be kept.", formatDataSize(props.bytes))');
   });
   it.each(FILES_CORE)("the download cache says Qt's %s", (text) => {
-    expect(cacheQt).toContain(`"${text}"`);
     expect(cacheCore).toContain(`"${text}"`);
   });
   it.each(RECOVERY)("Automatic recovery shows Qt's %s", (text) => {
-    expect(recoveryQt).toContain(`"${text}"`);
     expect(source("Recovery.tsx")).toContain(text);
   });
   it.each(RECOVERY_CORE)("the recovery core says Qt's %s", (text) => {
-    expect(recoveryQt).toContain(`"${text}"`);
     expect(recoveryCore).toContain(`"${text}"`);
   });
   it.each(VOICE)("Voice input shows Qt's %s", (text) => {
-    expect(speech).toContain(`"${text}"`);
     expect(source("Voice.tsx")).toContain(text);
   });
   it.each(VOICE_CORE)("the Voice input core says Qt's %s", (text) => {
-    expect(speech).toContain(`"${text}"`);
     expect(speechCore).toContain(`"${text}"`);
   });
   it.each(VOICE_CORE_FILLED)("the Voice input core fills in Qt's %s", (template, shown) => {
-    expect(speech).toContain(`"${template}"`);
     expect(speechCore).toContain(shown);
   });
   it.each(ABOUT)("About shows Qt's %s", (text) => {
-    expect(qt).toContain(`"${text}"`);
     expect(source("About.tsx")).toContain(text);
   });
   it.each(ABOUT_FILLED)("About fills in Qt's %s", (template, shown) => {
-    expect(qt).toContain(`"${template}"`);
     // The name is built in about-version.ts since upstream's About rewrite.
     expect(source("About.tsx") + source("about-version.ts")).toContain(shown);
   });
   it("About names the build as UpdateController::installedVersion does", () => {
-    const updates = fs.readFileSync(new URL("tray/src/UpdateController.cpp", repo), "utf8");
-    expect(updates).toContain('tr("%1 (local changes %2)")');
     expect(source("about-version.ts")).toContain('tr("%1 (local changes %2)", version, source)');
-    expect(updates).toContain('QString("%1 (%2)")');
     expect(source("about-version.ts")).toContain("`${version} (${source})`");
   });
   it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
-    expect(keyboard).toContain(`"${text}"`);
     expect(source("Keyboard.tsx")).toContain(text);
   });
   it("uses Shortcuts.cpp's titles, groups, reasons and Terminal rules", () => {
-    const qtTexts = [...shortcuts.matchAll(/(?:QT_TRANSLATE_NOOP\("Shortcuts", |translate\("Shortcuts", )"((?:[^"\\]|\\.)+)"/g)].map((m) => m[1]);
+    const qtTexts: string[] = ["Go to", "Go to Overview", "Go to", "Go to Sessions", "Go to", "Go to Projects", "Go to", "Go to Machines", "Go to", "Go to Accounts", "Go to", "Open Settings", "Go to", "Go to…", "Go to", "Keyboard shortcuts", "Sessions", "Next session", "Sessions", "Previous session", "Sessions", "Next session that needs attention", "Sessions", "Previous session that needs attention", "Sessions", "New session", "Sessions", "Rename session", "Sessions", "Search sessions", "Sessions", "Refresh", "Session view", "Next tab", "Session view", "Previous tab", "Session view", "Switch between Activity and Terminal", "Session view", "Show or hide the side panel", "Session view", "Next area", "Session view", "Previous area", "Messages", "Send message", "Messages", "Send queued messages now", "Messages", "Send and push now", "Content scale", "Increase content scale", "Content scale", "Decrease content scale", "Content scale", "Reset content scale", "Press a key combination.", "Use one key combination or a sequence of two.", "Press a key together with the modifiers.", "This key opens context menus.", "Keys without ⌘, ⌃ or ⌥ are used for typing and navigation.", "Keys without Ctrl or Alt are used for typing and navigation.", "Terminal uses this key to copy and paste.", "Text fields use this key for editing.", "In Terminal, a command's chord reaches Zerus only when it uses ⌘ (except ⌘C and ⌘V) or is ⌃Tab, ⌃⇧Tab, ⌃` or ⌃⇧`. Every other ⌃ chord and every ⌥ chord goes to the agent, bound or not.", "In Terminal, a command's chord reaches Zerus only when it is Ctrl or Ctrl+Shift with a digit, Tab, Page Up, Page Down, backtick or comma, or Ctrl+Shift+Enter. Everything else goes to the agent, bound or not."];
     expect(qtTexts.length).toBeGreaterThan(40);
     for (const text of qtTexts) expect(store, text).toContain(`"${text}"`);
   });
   it.each(APPEARANCE)("Appearance shows Qt's %s", (text) => {
-    expect(qt).toContain(`"${text}"`);
     expect(source("Appearance.tsx")).toContain(text);
   });
   it.each(APPEARANCE_FILLED)("Appearance fills in Qt's %s", (template, shown) => {
-    expect(qt).toContain(`"${template}"`);
     expect(source("Appearance.tsx")).toContain(shown);
   });
   it.each(WINDOW_LAYER)("Keep Above shows WindowLayer's %s", (text) => {
-    expect(layer).toContain(`"${text}"`);
     expect(clientLayer).toContain(text);
   });
   it.each(SESSIONS)("Sessions shows Qt's %s", (text) => {
-    expect(qt).toContain(`"${text}"`);
     expect(source("Sessions.tsx")).toContain(text);
   });
   it("lists the sections in Qt's order", () => {
     const labels = [...source("sections.ts").matchAll(/label: (?:trNoop\()?"([^"]+)"/g)].map((m) => m[1]);
-    const nav = /nav->addItems\(\{([^}]*)\}\)/.exec(qt)![1];
-    const qtOrder = [...nav.matchAll(/tr\("([^"]+)"\)/g)].map((m) => m[1]);
-    // Worktrees goes in before Automatic approvals (SettingsPage.h:140).
-    qtOrder.splice(qtOrder.indexOf("Automatic approvals"), 0, "Worktrees");
-    // The fork's Extensions page (SettingsPage.h:146, 300) is in the nav list
-    // already, so the client shows it there too.
-    // The fork inserts Teams, Model servers and Build folders before Voice
-    // input (SessionsWindow.cpp:2235, 2269, 2273).
-    const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
-    const inserted = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)].map((match) => match[1]);
-    qtOrder.splice(qtOrder.indexOf("Voice input"), 0, ...inserted);
-    // Task #397: the fork's Memory page comes after Teams, before Model servers.
-    qtOrder.splice(qtOrder.indexOf("Model servers"), 0, "Memory");
+    // Qt's SettingsPage order, with the fork's Worktrees, Teams, Memory, Model
+    // servers and Build folders where the Qt build placed them.
+    const qtOrder = ["Appearance", "Sessions", "Automatic recovery", "Processes", "Updates", "Mobile connection", "Files", "Worktrees", "Automatic approvals", "Teams", "Memory", "Model servers", "Build folders", "Voice input", "Keyboard", "Private analytics", "Extensions", "About"];
     expect(labels).toEqual(qtOrder);
   });
 });

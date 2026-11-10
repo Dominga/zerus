@@ -124,7 +124,7 @@ pair record, present-but-broken helper, missing app or link still refuses.
 That repair preserves the owned service mode; it does not select passive mode
 or create a new background grant.
 Recovery, swarm and voice retain their existing installer/update rules.
-`tray/install.sh` preflights it before the GUI swap and retains an
+`packaging/desktop/install.sh` preflights it before the GUI swap and retains an
 unchanged active backend during GUI-only updates.
 
 ### Explicit desktop service mode
@@ -455,7 +455,7 @@ GUI is Zerus Next; Node/npm and Rust must be installed:
 export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
 export HGS_MOBILE_CONNECTOR=0
 bash install.sh
-bash tray/install.sh
+bash packaging/desktop/install.sh
 ```
 
 The CLI and GUI builds can overlap before installation. Keep the build and
@@ -480,8 +480,8 @@ a local evaluation build, not a public update channel or a main publication.
 Before returning the checkout to main, clear `ZERUS_LOCAL_PREVIEW_LABEL` and set
 the exact main CI sequence again. Build labels must never hide dirty sources.
 
-For Next, `tray/install.sh` prepares a disposable app/CLI pair through
-`tray/prepare-local-macos.py`, then signs it through `tray/sign-local-macos.py`
+For Next, `packaging/desktop/install.sh` prepares a disposable app/CLI pair through
+`packaging/desktop/prepare-local-macos.py`, then signs it through `packaging/desktop/sign-local-macos.py`
 before replacing or restarting
 the installed application. Only after selecting a compatible certificate does the helper promote
 the staged copy to the installed `com.hgdev.hgs-tray` identifier; failed preparation
@@ -626,12 +626,12 @@ On the owner's decision of 2026-10-28, the Tauri client (`client/`) replaces the
 
 `client/scripts/switch-config.py` writes `client/src-tauri/target/switch.conf.json` from `client/src-tauri/tauri.switch.conf.json` and `VERSION`, plus a generated Info.plist with `ZerusReleaseVersion`. `--release` selects the distribution release; local numbered Dev builds derive it from `DEV_VERSION` and `ZERUS_DEV_BUILD_NUMBER`. The source template stays unchanged. `tauri build --config` with it produces `Zerus.app`:
 
-- **Identity.** It has the executable `hgs-tray` and the build identifier `com.hgdev.hgs-tray.local`; `tray/sign-local-macos.py` promotes its signed copy to `com.hgdev.hgs-tray`, as for Qt's raw bundles.
+- **Identity.** It has the executable `hgs-tray` and the build identifier `com.hgdev.hgs-tray.local`; `packaging/desktop/sign-local-macos.py` promotes its signed copy to `com.hgdev.hgs-tray`, as for Qt's raw bundles.
 - **Info.plist.** `Info.switch.plist` adds Qt's keys:
   - `CFBundleName` Zerus, with `CFBundleDisplayName` hgs-tray and `en.lproj` naming it Zerus;
   - no `LSUIElement`: unlike Qt's bundle, it launches as a regular app, so Mission Control moves its window between desktop Spaces as for any other app (zerus-v5ft5). The menu-bar-only mode is the client's run-time policy instead: Accessory whenever no window is open, Regular while it is open. A start without a window, such as a login start, may show the Dock icon briefly before that policy applies;
   - Qt's icons and usage texts;
-  - `ZerusGUI = tauri`, which `tray/update-installed.py` uses to tell the clients apart.
+  - `ZerusGUI = tauri`, which `packaging/desktop/update-installed.py` uses to tell the clients apart.
 - **LaunchAgent template.** It ships in `Contents/Resources/setup/com.hgdev.hgs-tray.plist`. The installed agent is unchanged: `KeepAlive Crashed`, `ProcessType Interactive`, `--hgs` and the same label.
 
 The client behaves as Qt does at the points other tools rely on:
@@ -651,12 +651,12 @@ Numbered Dev installs need a clean checkout of the exact main commit, as for Qt:
 
 ```sh
 export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
-bash tray/install.sh
+bash packaging/desktop/install.sh
 ```
 
 - **The installer.** Fresh installs and upgrades build Next, including upgrades from Qt. `HGS_MAC_GUI=client` is the only GUI selection; Qt builds are retired. `mac-install.sh` forwards the same choice and source set. A numbered Dev build needs its clean Git checkout.
 - **The build.** It needs npm and Rust 1.99.1 on the Mac. With the `media` feature present, the build enables it. It always builds into `client/src-tauri/target`, whatever `CARGO_TARGET_DIR` says, since the installer takes the bundle from there, and the installer's job count bounds Cargo for the native Next build (`CARGO_BUILD_JOBS` overrides it).
-- **The updater at the switch.** `tray/update-installed.py`:
+- **The updater at the switch.** `packaging/desktop/update-installed.py`:
   1. quits Qt as its Quit action does, so Qt saves its drafts: SIGTERM, which current builds handle, or the quit Apple Event for an older one;
   2. snapshots Qt's drafts and the client's drafts root;
   3. exports Qt's settings with `defaults export com.hgdev.hgs-tray` to `~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`;
@@ -672,14 +672,14 @@ bash tray/install.sh
 ### Rollback
 
 ```sh
-python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
+python3 packaging/desktop/update-installed.py --rollback ~/Applications/hgs-tray.app
 ```
 
 The rollback reinstalls a verified previous Next build through the same quit, snapshot, start and verification steps. It refuses a Qt image. Displaced Qt images are retained in distinct `desktop-qt-legacy/qt-*` entries for manual recovery only; it is never offered as a rollback. The existing Qt settings export and both draft stores remain preserved. A retained image does not authorize starting Qt alongside service-owned background duties.
 
 ### Privacy identity
 
-TCC grants and the Notification Center entry belong to the bundle identifier and its designated requirement. The installed Qt is signed with a Developer ID Application certificate, without the hardened runtime. A switch bundle signed by `tray/sign-local-macos.py` with a Developer ID Application certificate of the same team satisfies Qt's requirement, so the grants carry over. An ad hoc or Apple Development signature would not, and the grants would be asked for again. Before the switch, compare the two requirements (the runbook below); `tray/sign-local-macos.py` already refuses an incompatible signature.
+TCC grants and the Notification Center entry belong to the bundle identifier and its designated requirement. The installed Qt is signed with a Developer ID Application certificate, without the hardened runtime. A switch bundle signed by `packaging/desktop/sign-local-macos.py` with a Developer ID Application certificate of the same team satisfies Qt's requirement, so the grants carry over. An ad hoc or Apple Development signature would not, and the grants would be asked for again. Before the switch, compare the two requirements (the runbook below); `packaging/desktop/sign-local-macos.py` already refuses an incompatible signature.
 
 ### Release signing
 
@@ -689,7 +689,7 @@ TCC grants and the Notification Center entry belong to the bundle identifier and
 
 The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to main and their main push has a CI sequence `N`. Steps marked **display** run only in a window the owner gives: the implementer tells the coordinator when the work reaches step 4, and step 8 is the coordinator's own, done with the owner. Nothing here touches the hgs CLI, `com.hgdev.hgs-recovery`, `com.hgdev.hgs-voice`, native agents, tmux or the mobile connector. Signing needs the login keychain, so signing steps run as a `.command` in Terminal, like other Dev rollouts.
 
-**Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `tray/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
+**Before the merge (Task 7).** The numbered Dev guard also refuses unnumbered `packaging/desktop/install.sh` and `mac-install.sh` runs over a numbered Dev install on arch and on the Mac, including `HGS_TRAY_RESTART=0`. Tell the events and menu-parity sessions before Task 7 reaches main: their ad hoc installs then need `ZERUS_DEV_BUILD_NUMBER` or a local preview label (`ZERUS_LOCAL_PREVIEW_LABEL`, `docs/reference.md`), both from a clean Git checkout. `mac-install.sh` ships a tarball without `.git`, so it can make neither; on a Mac with a numbered Dev install it then updates the CLI and stops at the GUI with the refusal.
 
 **What the switch carries over (coordinator rulings).** Settings are seeded once from Qt's, read-only, except the client's own `client/…` settings (defaults), the microphone (chosen again) and automatic approvals (off; Qt's choice is only recorded). Read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
@@ -699,7 +699,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    git fetch origin && git switch --detach SHA_OF_THAT_MAIN_PUSH
    export ZERUS_DEV_BUILD_NUMBER=N CLONE="$PWD" SHA="$(git rev-parse HEAD)"
    ```
-2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `CARGO_TARGET_DIR` set to the clone's own target, as `tray/install.sh` sets it, wins over any `build.target-dir` in the Cargo configuration, so the bundle lands where the next lines take it from:
+2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `CARGO_TARGET_DIR` set to the clone's own target, as `packaging/desktop/install.sh` sets it, wins over any `build.target-dir` in the Cargo configuration, so the bundle lands where the next lines take it from:
    ```sh
    cd "${CLONE:?}/client" && npm ci --no-audit --no-fund
    python3 scripts/switch-config.py src-tauri/target/switch.conf.json
@@ -708,7 +708,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    S="$(mktemp -d)"; ditto src-tauri/target/release/bundle/macos/Zerus.app "$S/hgs-tray.app"
    python3 ../scripts/check-macos-bundle.py --gui tauri --version "$(cat ../VERSION)" \
      --release "$(cat ../DEV_VERSION)-dev.$ZERUS_DEV_BUILD_NUMBER" --source-commit "$SHA" --selftest "$S/hgs-tray.app"
-   python3 ../tray/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
+   python3 ../packaging/desktop/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
    codesign -d -r- ~/Applications/hgs-tray.app 2>&1 | grep designated
    codesign -d -r- "$S/hgs-tray.app" 2>&1 | grep designated
    rm -rf "$S"; cd "${CLONE:?}"
@@ -778,7 +778,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
 6. **Switch** (Terminal). From the root of the clean clone, not the dev app's clone of step 4, with `ZERUS_DEV_BUILD_NUMBER`, `CLONE` and `SHA` still set, run only the GUI installer, not the CLI `install.sh`:
    ```sh
-   cd "${CLONE:?}" && HGS_MAC_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-switch.log
+   cd "${CLONE:?}" && HGS_MAC_GUI=client bash packaging/desktop/install.sh 2>&1 | tee ~/zerus-switch.log
    ```
    Expected lines:
    - quitting Zerus;
@@ -815,7 +815,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 9. **Later Dev rollouts.** Run the same maintained Next installer with the exact new Dev number. The replaced verified Next becomes the usable rollback; each displaced Qt image gets a unique `desktop-qt-legacy/qt-*` manual-recovery entry. Failed-upgrade restoration and the numbered Dev guard remain unchanged.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
-    cd "${CLONE:?}" && python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
+    cd "${CLONE:?}" && python3 packaging/desktop/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
     A verified previous Next build comes back with its drafts/process checks. Qt rollback and Qt installer selections are refused. The retained Qt image and settings export remain manual-recovery material; do not run its background duties alongside the service.
 

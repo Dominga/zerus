@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("local_sign", ROOT / "tray/sign-local-macos.py")
+spec = importlib.util.spec_from_file_location("local_sign", ROOT / "packaging/desktop/sign-local-macos.py")
 sign = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sign)
 DEVELOPER_ID = ("A" * 40, "Developer ID Application: Example (ABCDE12345)")
@@ -125,9 +125,10 @@ class LocalSigning(unittest.TestCase):
     def test_installer_stops_before_replacement_when_paired_preparation_fails(self):
         with tempfile.TemporaryDirectory(prefix="zerus-install-sign-") as temporary:
             root = Path(temporary)
-            tray, home, tools = root / "tray", root / "home", root / "bin"
+            # Task #28: the installer lives in packaging/desktop/; its repository is root.
+            tray, home, tools = root / "packaging/desktop", root / "home", root / "bin"
             for path in (tray, home, tools):
-                path.mkdir()
+                path.mkdir(parents=True)
             installed = home / "Applications/hgs-tray.app/Contents/MacOS/hgs-tray"
             installed.parent.mkdir(parents=True)
             installed.write_bytes(b"previous installed application")
@@ -137,7 +138,7 @@ class LocalSigning(unittest.TestCase):
             raw.write_bytes(original)
             stage_root = root / "temporary"
             stage_root.mkdir()
-            shutil.copy2(ROOT / "tray/install.sh", tray / "install.sh")
+            shutil.copy2(ROOT / "packaging/desktop/install.sh", tray / "install.sh")
             client_scripts = root / "client/scripts"; client_scripts.mkdir(parents=True)
             (client_scripts / "switch-config.py").write_text("# Private source-only config fixture\n")
             scripts = root / "scripts"; scripts.mkdir()

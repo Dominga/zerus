@@ -162,7 +162,7 @@ def regenerate(supplement, shared):
         write_text(supplement_path, serialized(supplement))
         module.SUPPLEMENT = supplement_path
         if shared is not None:
-            shared_path = Path(scratch) / "zerus_ru.ts"
+            shared_path = Path(scratch) / "zerus_ru.json"
             write_text(shared_path, shared)
             module.SOURCE = shared_path
         return module.generate()

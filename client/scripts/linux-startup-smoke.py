@@ -49,7 +49,7 @@ def worker(args):
         assert marker in help_result.stdout, 'real CLI lacks the required ABI'
     installed = Path(env['HOME']) / '.local/bin/hgs-tray'
     # Fresh private target: updater verifies the build and installs without start.
-    staged = subprocess.run([sys.executable, str(ROOT / 'tray/update-installed.py'),
+    staged = subprocess.run([sys.executable, str(ROOT / 'packaging/desktop/update-installed.py'),
                              str(args.app), str(installed)], env=env,
                             capture_output=True, timeout=30, check=True)
     (base / 'stage.log').write_bytes(staged.stdout + staged.stderr)
@@ -57,7 +57,7 @@ def worker(args):
     assert info['CFBundleIdentifier'] == 'com.hgdev.hgs-tray', 'use the canonical switch build'
     assert info['sourceDirty'] is False, 'native authentication requires a clean committed GUI build'
     if args.webkit_prefix:
-        launcher = load(ROOT / 'tray/linux-launcher.py', 'local_launcher')
+        launcher = load(ROOT / 'packaging/desktop/linux-launcher.py', 'local_launcher')
         assert launcher.available(args.webkit_prefix), 'incomplete private WebKit prefix'
         setting = installed.parent.parent / launcher.SETTING
         setting.parent.mkdir(parents=True)

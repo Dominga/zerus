@@ -23,20 +23,13 @@ describe("agent logos", () => {
     expect(logoSource("ollama")).toContain("Ollama");
   });
 
-  it("is the table of Qt's agentLogoIcon, entry by entry", () => {
-    const header = text("../../../../tray/src/WorkspaceIcons.h");
-    const body = /files\{([\s\S]*?)\};/.exec(header)?.[1] ?? "";
-    const qt = Object.fromEntries([...body.matchAll(/\{"([^"]+)",\s*"([^"]+)"\}/g)].map((m) => [m[1], m[2]]));
-    expect(Object.keys(qt).length).toBe(7);
-    expect(LOGO_FILES).toEqual(qt);
-  });
-
-  it("copies Qt's SVG files and the MIT notice unchanged", () => {
+  // Task #28 (team ede724c4): the Qt copies (tray/resources/agent-icons and
+  // WorkspaceIcons.h) are gone; these files and the table above are the source.
+  it("ships each mapped SVG file and the MIT notice", () => {
     for (const file of new Set(Object.values(LOGO_FILES))) {
-      expect(text(`../../assets/agent-icons/${file}.svg`), file).toBe(text(`../../../../tray/resources/agent-icons/${file}.svg`));
+      expect(text(`../../assets/agent-icons/${file}.svg`), file).toContain("<svg");
     }
     const license = text("../../assets/agent-icons/LICENSE");
-    expect(license).toBe(text("../../../../tray/resources/agent-icons/LICENSE"));
     expect(license).toContain("MIT License");
     expect(license).toContain("LobeHub");
     expect(text("../../../../THIRD_PARTY_NOTICES.md")).toContain("client/src/assets/agent-icons");

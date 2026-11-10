@@ -6,7 +6,7 @@
 //! A timer on the main thread records a beat every quarter of [`HANG_MS`]; a
 //! thread named `hgs-watchdog` checks every half. Once the main thread has not
 //! beaten for longer than [`HANG_MS`], it prints why and aborts, at most once:
-//! on macOS launchd (`KeepAlive Crashed`, `tray/packaging/com.hgdev.hgs-tray.plist`)
+//! on macOS launchd (`KeepAlive Crashed`, `packaging/desktop/com.hgdev.hgs-tray.plist`)
 //! starts the client again, and the crash report shows where the main thread
 //! stood; a plain exit would not be restarted. On Linux no unit supervises the
 //! client (`hgs-tray.service` runs the Qt GUI), so an abort only ends that run.

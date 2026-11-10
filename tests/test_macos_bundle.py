@@ -18,7 +18,7 @@ def strings(path):
 
 
 def installed_folder():
-    install = (ROOT / "tray/install.sh").read_text()
+    install = (ROOT / "packaging/desktop/install.sh").read_text()
     return re.search(r'^APP_DEST="\$\{HOME\}/Applications/(.+)\.app"$', install, re.M).group(1)
 
 

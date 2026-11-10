@@ -118,7 +118,7 @@ def main():
             install(ROOT / "scripts" / name, resources / "setup" / name)
     macos_service_payload.stage(ROOT, staged)
     install(ROOT / "hgs_state.py", resources / "setup/hgs_state.py")
-    install(ROOT / "tray/packaging/com.hgdev.hgs-tray.plist", resources / "setup/com.hgdev.hgs-tray.plist")
+    install(ROOT / "packaging/desktop/com.hgdev.hgs-tray.plist", resources / "setup/com.hgdev.hgs-tray.plist")
     install(ROOT / "README.md", resources / "doc/README.md")
     install(ROOT / "tmux.conf", resources / "doc/tmux.conf")
     licenses = resources / "licenses"

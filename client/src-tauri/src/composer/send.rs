@@ -2282,6 +2282,15 @@ impl Composers {
     /// inspectionReady). The identities must still match the listed row.
     pub fn clear_control_for(&self, session: SessionRef) -> Option<ClearControl> {
         let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        // The listed row's durable ID names its composer's draft key, as the
+        // webview opened it (zerus-fsht5).
+        let session = SessionRef {
+            session_id: session
+                .session_id
+                .clone()
+                .or_else(|| row.session_id.clone()),
+            ..session
+        };
         let target = Target {
             computer: session.computer.clone(),
             name: session.name.clone(),
@@ -2295,7 +2304,9 @@ impl Composers {
             return None;
         }
         let hub = self.lock();
-        let key = session.key.clone();
+        // The composer's draft key, the one `hub.clearing` and the sending
+        // check use; the catalog key never names a composer.
+        let key = super::session_draft_key(&session);
         let clearing = (self.0.deps.facts)(&session.computer, &session.name, &target.run_id)
             == Some(WriteKind::Clear)
             || hub.clearing.as_ref() == Some(&key);
@@ -3400,6 +3411,17 @@ impl Composers {
             key: format!("run:{}", captured.target.run_id),
             name: captured.target.name.clone(),
             ..SessionRef::default()
+        };
+        // The capture names no durable ID: take the listed row's, so the key
+        // is the open composer's own `id:` draft key, not its name key
+        // (zerus-fsht5). With the name key the sending check missed it, its
+        // view never showed the clear running, and the clear answered as if
+        // the session had closed.
+        let session_id = (self.0.deps.rows)(&session.computer, &session.key, &session.name)
+            .and_then(|(row, _)| row.session_id);
+        let session = SessionRef {
+            session_id,
+            ..session
         };
         let Some(control) = self.clear_control_for(session.clone()) else {
             return SendReply::Busy;
@@ -8681,6 +8703,90 @@ mod continuations {
             c.clear_captured_using(&captured, |_, _, _| panic!("concurrent reset dispatched")),
             SendReply::Busy
         );
+    }
+
+    /// zerus-fsht5: a confirmed Clear of the open session keyed by its durable
+    /// ID guards and answers that open composer, not a name key.
+    #[test]
+    fn confirmed_clear_of_the_open_id_keyed_session_answers_its_notice_and_guards_its_composer() {
+        const ID: &str = "11111111-2222-4333-8444-555555555555";
+        let root = dir("clear-captured-id");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).session_id = Some(ID.into());
+        let id_session = SessionRef {
+            session_id: Some(ID.into()),
+            ..session()
+        };
+        c.open(Some(id_session));
+        c.observe(&state(ready()));
+        until(&c, |v| v.loaded);
+        let open_key = c.lock().open_key.clone().unwrap();
+        assert!(open_key.contains(ID), "the webview opens the id key");
+        *lock(&fake.inspected) = Some(ready());
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        // The open composer of that session is sending: nothing is cleared.
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("cleared while sending")),
+            SendReply::Busy
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+        // Details read by inspection, so the refresh after the clear is visible.
+        c.lock().followed.streamed = false;
+        let before = fake.inspects.load(Ordering::SeqCst);
+        let mut clearing = None;
+        let reply = c.clear_captured_using(&captured, |_, _, _| {
+            clearing = c.lock().clearing.clone();
+            Ok(Outcome::Done {
+                receipt: json!({"status": "confirmed"}),
+                cleanup: None,
+            })
+        });
+        assert_eq!(
+            reply,
+            SendReply::Notice {
+                text: CLEARED.into(),
+                error: false
+            }
+        );
+        assert_eq!(clearing.as_deref(), Some(open_key.as_str()));
+        assert!(c.lock().clearing.is_none());
+        // One inspection checks the control, then one refresh reads the details again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while fake.inspects.load(Ordering::SeqCst) < before + 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        while c.lock().followed.inspecting.is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), before + 2);
+        // A row's own control (named without its ID) sees its composer's send
+        // under the same draft key: Clear stays disabled while it sends.
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        let control = c
+            .clear_control_for(SessionRef {
+                session_id: None,
+                ..session()
+            })
+            .unwrap();
+        assert!(
+            !control.enabled,
+            "a sending composer disables its row's Clear"
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
     }
 
     #[test]

@@ -16,6 +16,8 @@ use std::{
 
 #[cfg(unix)]
 mod host_identity;
+#[cfg(all(test, unix))]
+pub(super) use host_identity::record_running_for_test;
 
 #[cfg(unix)]
 // Resident bridge identity is independent of the installed harness release.
@@ -116,8 +118,17 @@ fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duratio
 }
 #[cfg(unix)]
 fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
-    let mut socket =
-        crate::platform::connect_unix(path, read_timeout).map_err(|_| HOST_UNAVAILABLE)?;
+    let socket = crate::platform::connect_unix(path, read_timeout).map_err(|_| HOST_UNAVAILABLE)?;
+    exchange(socket, method, params, read_timeout)
+}
+/// One request over a connected host socket.
+#[cfg(unix)]
+fn exchange(
+    mut socket: UnixStream,
+    method: &str,
+    params: Value,
+    read_timeout: Duration,
+) -> Result<Value> {
     // The request's last byte is its newline, and the compact JSON holds no
     // other, so a failed write never wrote it and the host never ran it.
     (|| -> io::Result<()> {
@@ -136,6 +147,50 @@ fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> R
         return Err(string(&response, "error").into());
     }
     Ok(response["value"].clone())
+}
+/// A refused connect is ECONNREFUSED, or ECONNRESET on some BSD paths: the
+/// host's socket is there but the connect was not queued (zerus-xt6re).
+#[cfg(unix)]
+fn refused(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+    )
+}
+/// The claim's connect, with a test-only refusal so the BSD full-queue answer
+/// (ECONNREFUSED at once) can be exercised on Linux (zerus-xt6re).
+#[cfg(unix)]
+fn claim_connect(path: &Path, limit: Duration) -> io::Result<UnixStream> {
+    #[cfg(test)]
+    if let Some(kind) = injected_refusal() {
+        return Err(io::Error::new(kind, "injected connect refusal"));
+    }
+    crate::platform::connect_unix(path, limit)
+}
+#[cfg(all(test, unix))]
+thread_local! {
+    static INJECTED_REFUSAL: std::cell::Cell<Option<io::ErrorKind>> =
+        const { std::cell::Cell::new(None) };
+}
+#[cfg(all(test, unix))]
+fn injected_refusal() -> Option<io::ErrorKind> {
+    INJECTED_REFUSAL.with(std::cell::Cell::get)
+}
+#[cfg(all(test, unix))]
+pub(super) fn refuse_connect_for_test(kind: io::ErrorKind) {
+    INJECTED_REFUSAL.with(|refused| refused.set(Some(kind)));
+}
+#[cfg(all(test, unix))]
+pub(super) fn allow_connect_for_test() {
+    INJECTED_REFUSAL.with(|refused| refused.set(None));
+}
+/// A socket path exists and its verified recorded owner process is alive:
+/// a refused connect to it means the host is saturated, not gone.
+#[cfg(unix)]
+fn live_owner_socket(dir: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::symlink_metadata(dir.join("host.sock")).is_ok_and(|meta| meta.file_type().is_socket())
+        && host_identity::owner_alive(dir)
 }
 #[cfg(unix)]
 fn ensure_host(record: &Value) -> Result<()> {
@@ -551,7 +606,25 @@ fn snapshot_record(record: &Value) -> Result<Value> {
 #[cfg(unix)]
 pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
     let started = std::time::Instant::now();
-    match rpc_within(record, "list", json!({}), limit) {
+    let dir = host_dir(record);
+    let socket = match claim_connect(&dir.join("host.sock"), limit) {
+        Ok(socket) => socket,
+        // BSD refuses a connect on a full listen queue at once (ECONNREFUSED,
+        // sometimes ECONNRESET). The recorded owner decides: while it is alive
+        // the host is saturated, not gone, so the claim is busy; a dead owner
+        // or a missing socket stays a definite no. A refusal is never live
+        // (zerus-xt6re).
+        Err(error) if refused(&error) => {
+            return if live_owner_socket(&dir) {
+                Err(parent_link::CLAIM_BUSY.into())
+            } else {
+                Ok(false)
+            };
+        }
+        Err(_) if started.elapsed() >= limit => return Err(parent_link::CLAIM_BUSY.into()),
+        Err(_) => return Ok(false),
+    };
+    match exchange(socket, "list", json!({}), limit) {
         Ok(list) => {
             let row = snapshot_from(record, &list);
             Ok(row["state"] == "running" && row["process_state"] == "running")

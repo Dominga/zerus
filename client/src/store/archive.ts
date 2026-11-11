@@ -213,6 +213,12 @@ export const archiveListed = (s: ArchivedSession, scope: ListScope) =>
   scope.includes(s.archivedAt) && inScope(s, scope) && (!scope.projects?.length || scope.projects.includes(s.group))
     && (scope.accepts?.(s) ?? true);
 
+/**
+ * The Archive date window [from, until) in seconds, as Android and iOS read
+ * ArchiveRange (session-filter-contract.json `archive_window`, zerus-sa9qn.19).
+ */
+export const archiveWindow = (from: number, until: number) => (at: number) => at >= from && at < until;
+
 /** The Archive filter's count: the rows archiveListRows lists. */
 export const archiveCountOf = (rows: readonly ArchivedSession[], scope: ListScope) =>
   rows.reduce((n, s) => n + (archiveListed(s, scope) ? 1 : 0), 0);
@@ -279,7 +285,7 @@ export function createArchive(deps: ArchiveDeps) {
   const held = new Map<ComputerId, Map<string, Pick<GroupOut, "group" | "rank">>>();
 
   const bounds = () => rangeBounds(range(), now());
-  const includes = (at: number) => { const [from, until] = bounds(); return at >= from && at < until; };
+  const includes = (at: number) => { const [from, until] = bounds(); return archiveWindow(from, until)(at); };
   const put = (computer: string, page: Page) => setPages((all) => ({ ...all, [computer]: page }));
   /** Drops every page; their answers in flight no longer match. */
   const dropPages = () => { held.clear(); setPages({}); };

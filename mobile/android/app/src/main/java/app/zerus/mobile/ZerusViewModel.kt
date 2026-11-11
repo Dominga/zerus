@@ -818,13 +818,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
     }
     private suspend fun sendSharedRead(request:SharedReadRequest) {
+        fun observed(failure:Throwable?,completed:Boolean,applied:Boolean,retryDue:Long?) {
+            val wall=System.currentTimeMillis()
+            val retryAt=retryDue?.let { wall+(it-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0) }
+            noteSharedRead(request.target,ConversationSyncStatus.sharedReadOutcome(wall,failure,completed,applied,retryAt))
+        }
         val receipt=try { api.markRead(request.connection,request.target,request.payload) }
-            catch(e:Exception) { sharedReadsSent.remove(request.key);if(e is CancellationException) throw e;return }
-        if(receipt.string("state")!="completed") { sharedReadsSent.remove(request.key);return }
-        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadRetries.applied(request.key);return }
+            catch(e:Exception) { sharedReadsSent.remove(request.key);if(e is CancellationException) throw e;observed(e,false,false,null);return }
+        if(receipt.string("state")!="completed") { sharedReadsSent.remove(request.key);observed(null,false,false,null);return }
+        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadRetries.applied(request.key);observed(null,true,true,null);return }
         // Completed without applying: the same mark may go again only after a delay, without holding Read all.
         // At capacity it stays sent, so nothing is ever resent beyond the bound.
-        if(sharedReadRetries.unapplied(request.key,request.target.connectionId,android.os.SystemClock.elapsedRealtime())!=null) scheduleSharedReadRetries()
+        val due=sharedReadRetries.unapplied(request.key,request.target.connectionId,android.os.SystemClock.elapsedRealtime())
+        observed(null,true,false,due)
+        if(due!=null) scheduleSharedReadRetries()
     }
     /**
      * The one owned timer: it wakes at the earliest due mark and lets exactly the released marks go again.
@@ -838,6 +845,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun shareRead(target:Target) {
         val request=sharedReadRequest(target,true) ?: return
         if(!sharedReadsSent.add(request.key)) return
+        noteSharedRead(request.target,SharedReadStatus.Pending(System.currentTimeMillis()))
         viewModelScope.launch { sendSharedRead(request) }
     }
     /** A reply read on another device advances this phone's watermark, using only a fresh exact head. */
@@ -859,6 +867,27 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var conversationOutgoing by mutableStateOf<List<OutgoingMessage>>(emptyList()); private set
     var activityVerified by mutableStateOf(false); private set
     var historyCached by mutableStateOf(false); private set
+    /** When the shown conversation's messages were observed (wall clock), null for a saved copy without a time (zerus-a4mub.10). */
+    var conversationObservedAt by mutableStateOf<Long?>(null); private set
+    /** The open conversation's own last read failed for a lost connection, not a refusal. */
+    private var detailReadOffline by mutableStateOf(false)
+    /** This conversation's own last read failure, while it is the shown error. Presentation only. */
+    fun conversationReadFailure(target: Target): String = error.takeIf { detailReadErrorOwner?.first == target }.orEmpty()
+    fun conversationReadOffline(target: Target): Boolean = conversationReadFailure(target).isNotBlank() && detailReadOffline
+    /** The session's computer is reported offline by the workspace. */
+    fun computerReportedOffline(target: Target): Boolean =
+        machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online == false
+    /** Observed shared read outcomes for the most recent conversations; presentation only (zerus-a4mub.10). */
+    private var sharedReadStatuses by mutableStateOf<Map<String, SharedReadStatus>>(emptyMap())
+    fun sharedReadStatus(target: Target): SharedReadStatus = sharedReadStatuses[target.key] ?: SharedReadStatus.None
+    /**
+     * The narrow seam for shared read acknowledgement status. The paths that decide and send
+     * `mark_read` (zerus-a4mub.9 owns that authority) report their observed outcome here; it is
+     * shown and never consulted to allow reading, answering or sending. Bounded to 64 conversations.
+     */
+    internal fun noteSharedRead(target: Target, status: SharedReadStatus) {
+        sharedReadStatuses = (sharedReadStatuses - target.key + (target.key to status)).entries.toList().takeLast(64).associate { it.toPair() }
+    }
     var conversationHistoryTruncated by mutableStateOf(false); private set
     private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0,val supersededIds:Map<String,String> = emptyMap())
     internal val conversationSupersededIds:Map<String,String> get() = activeFrame?.supersededIds.orEmpty()
@@ -1080,6 +1109,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 conversationEvents = prepared.events; conversationOutgoing = prepared.messages; conversationQuestions = prepared.questions
                 activity = frame.raw; activityVerified = verified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-install-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSTALL_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-install-presentation */; historyCached = !verified; conversationHistoryTruncated = frame.truncated
+                conversationObservedAt = frame.observedAt.takeIf { it > 0 }
                 publishPagingMetadata(frame)
                 captureUnreadBoundary(frame.target,prepared.events)
             }
@@ -1123,6 +1153,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if (conversationEvents != merged.events) conversationEvents = merged.events
                 if (conversationOutgoing != messages) conversationOutgoing = messages
                 activity = frame.raw; activityVerified = activeFrameVerified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.PREPARE_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; historyCached = !activeFrameVerified; conversationHistoryTruncated = frame.truncated
+                conversationObservedAt = frame.observedAt.takeIf { it > 0 }
                 publishPagingMetadata(frame)
                 if(pendingHistoryPosition==frame.target.key) { pendingHistoryPosition="";readPositionReady=true }
                 captureUnreadBoundary(frame.target,merged.events)
@@ -3115,7 +3146,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 detailGate.owns(operation.id) && navigationId == navigation && (!freshInspection || ownerCurrent()) &&
                     connections.any { it == connection } && (originalHere || publishedHere)
             if (invalidate) {
-                activeFrameVerified = false; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSPECT_FAILED) /* END QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) }
+                activeFrameVerified = false; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSPECT_FAILED) /* END QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;detailReadOffline=e is java.io.IOException;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) }
             }
         }
         finally {

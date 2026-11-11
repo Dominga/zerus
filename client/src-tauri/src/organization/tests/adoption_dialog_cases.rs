@@ -607,10 +607,29 @@ fn orphan_pid(fake: &Fake) -> libc::pid_t {
         .unwrap()
 }
 
-/// Gone, not merely signalled: a reparented zombie is reaped by its new
-/// parent shortly after the group signal.
+/// Stopped: the process no longer exists, or it has exited and waits as a
+/// zombie for its new parent. A container whose PID 1 never reaps (CI's
+/// `tail -f /dev/null`) keeps such zombies; a zombie runs no code, holds no
+/// pipes, and its PID cannot be reused while it stays unreaped.
 fn transport_gone(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) != 0 }
+    let missing = unsafe { libc::kill(pid, 0) } != 0;
+    missing || zombie(pid)
+}
+
+/// The kernel's state for `pid` is zombie (or dead), from /proc/PID/stat.
+#[cfg(target_os = "linux")]
+fn zombie(pid: libc::pid_t) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next())
+            .is_some_and(|state| matches!(state, 'Z' | 'X'))
+    })
+}
+
+/// macOS hands orphans to launchd, which reaps them.
+#[cfg(not(target_os = "linux"))]
+fn zombie(_pid: libc::pid_t) -> bool {
+    false
 }
 
 fn externally_killed_cli(holds_output: bool) {

@@ -2003,11 +2003,35 @@ mod group_tests {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
     }
 
-    /// Gone: reaped by its new parent after the group signal.
+    /// The kernel's state for `pid` is zombie (or dead), from /proc/PID/stat.
+    /// A container whose PID 1 never reaps (CI's `tail -f /dev/null`) keeps
+    /// such zombies: they run no code and hold no pipes.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: libc::pid_t) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        })
+    }
+
+    /// macOS hands orphans to launchd, which reaps them.
+    #[cfg(not(target_os = "linux"))]
+    fn zombie(_pid: libc::pid_t) -> bool {
+        false
+    }
+
+    /// Running: present and not a zombie.
+    fn running(pid: libc::pid_t) -> bool {
+        let present = unsafe { libc::kill(pid, 0) } == 0;
+        present && !zombie(pid)
+    }
+
+    /// Gone: stopped, whether already reaped or left as a zombie.
     fn gone(pid: libc::pid_t) -> bool {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if !running(pid) {
                 return true;
             }
             if Instant::now() >= until {
@@ -2082,8 +2106,8 @@ mod group_tests {
                 gone(inside),
                 "{name}: the in-group stand-in survived ({exit:?})"
             );
-            let session_alive = unsafe { libc::kill(session, 0) } == 0;
-            let group_alive = unsafe { libc::kill(group, 0) } == 0;
+            let session_alive = running(session);
+            let group_alive = running(group);
             clean_up(session);
             clean_up(group);
             assert!(session_alive, "{name}: a setsid process was signalled");

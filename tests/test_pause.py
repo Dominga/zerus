@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end lifecycle tests: private tmux socket, fake agents, no model calls."""
 import hashlib
+import hook_command_fixtures as shell_probes
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
@@ -1923,6 +1924,9 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                 name = self.start(agent, "wrapped")
                 first = self.wrapped_hooks(agent, str(wrapper))
                 self.assertTrue(first and set(first.values()) == {1}, first)
+                # zerus-b64dl: entries an older hgs wrote carry no record; a
+                # later launch that changes nothing records their program.
+                shutil.rmtree(Path(self.env["HGS_STATE_DIR"]) / "hook-owners")
                 for _ in range(2):
                     self.hgs("pause", name)
                     self.resume(name)
@@ -1930,6 +1934,30 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                 self.hgs("pause", name)
                 self.assertEqual(log.read_text().splitlines().count(name + " SessionStart"), 3,
                                  "one SessionStart delivery for each of three launches")
+                # zerus-b64dl: from a shell without the wrapper, health and
+                # repair still recognise the entries the wrapper wrote.
+                plain = {k: v for k, v in self.env.items() if k != "HGS_EXECUTABLE"}
+                account = "native-" + agent
+                hooks = lambda *extra, body="": subprocess.run(
+                    [str(HGS), "hooks", "--account", account, *extra, "--json"], env=plain, input=body,
+                    capture_output=True, text=True, timeout=20)
+                status = hooks()
+                self.assertEqual(status.returncode, 0, status.stderr)
+                status = json.loads(status.stdout)["configuration"]
+                self.assertEqual(status["state"], "configured", status)
+                self.assertFalse(status["unrecognised_tracking"])
+                if agent == "claude":
+                    settings = self.root / ".claude/settings.json"
+                    before = settings.read_bytes()
+                    request = json.dumps({"request_id": str(uuid.uuid4()), "expected_provider": agent,
+                                          "expected_account_id": account, "expected_config_sha256": status["sha256"],
+                                          "expected_path_id": status["path_id"]})
+                    self.env["HGS_EXECUTABLE"] = str(wrapper)
+                    plain["HGS_EXECUTABLE"] = str(wrapper)
+                    repaired = hooks("--repair", body=request)
+                    self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                    self.assertEqual(json.loads(repaired.stdout)["status"], "unchanged")
+                    self.assertEqual(settings.read_bytes(), before)
         # Copies that earlier launches left behind collapse at the next launch,
         # before the agent reads its settings; a personal hook stays.
         name, settings = "claude/p/wrapped", self.root / ".claude/settings.json"
@@ -1943,6 +1971,57 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
         self.assertEqual(json.loads(settings.read_text())["hooks"]["SessionStart"], ours + [personal])
         self.hgs("pause", name)
         self.assertEqual(log.read_text().splitlines().count(name + " SessionStart") - before, 1)
+
+    def test_launch_migrates_the_recorded_hook_runner(self):
+        a=self.bin/'runner A';b=self.bin/'runner B'
+        for wrapper in [a,b]:
+            wrapper.write_text('#!/bin/sh\nexec '+shlex.quote(str(HGS))+' "$@"\n');wrapper.chmod(0o755)
+        self.env['HGS_EXECUTABLE']=str(a)
+        for agent in ['claude','codex','kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE']=str(a)
+                path=self.root/('.kimi-code/config.toml' if agent=='kimi' else '.codex/hooks.json' if agent=='codex' else '.claude/settings.json')
+                path.parent.mkdir(exist_ok=True)
+                foreign=dict(type='command',command='true __state hook',custom=17)
+                if agent=='kimi':
+                    path.write_text('model = "keep"\n# personal comment\n[[hooks]]\nevent = "Stop"\ncommand = "true __state hook"\ncustom = 17\n')
+                else:
+                    path.write_text(json.dumps(dict(model='keep',hooks=dict(Stop=[dict(matcher='personal',hooks=[foreign])]))))
+                name=self.start(agent,'migrate')
+                first=self.wrapped_hooks(agent,str(a));self.assertTrue(first)
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(b)
+                self.resume(name)
+                self.assertEqual(self.wrapped_hooks(agent,str(a)),{})
+                self.assertEqual(self.wrapped_hooks(agent,str(b)),first)
+                if agent=='kimi':
+                    doc=tomllib.loads(path.read_text());self.assertIn('# personal comment',path.read_text())
+                    self.assertEqual(doc['hooks'][0],dict(event='Stop',command='true __state hook',custom=17))
+                else:
+                    doc=json.loads(path.read_text());self.assertEqual(doc['hooks']['Stop'][0],dict(matcher='personal',hooks=[foreign]))
+                self.assertEqual(doc['model'],'keep')
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(a)
+
+    def test_launch_preserves_composed_and_custom_quoted_recorded_hooks(self):
+        a = self.bin / 'hgs-wrapper'
+        b = self.bin / 'new runner'
+        for path in [a, b]:
+            shell_probes.runner(path, HGS)
+        for agent in ['claude', 'codex', 'kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE'] = str(a)
+                name = self.start(agent, 'composed')
+                self.hgs('pause', name)
+                path = self.root / ('.kimi-code/config.toml' if agent == 'kimi' else '.codex/hooks.json' if agent == 'codex' else '.claude/settings.json')
+                probes = shell_probes.composed(self.root, a)
+                shell_probes.preserves_and_runs(self, probes, [v for _, v in probes], self.env)
+                shell_probes.append(path, agent, probes)
+                self.env['HGS_EXECUTABLE'] = str(b)
+                self.resume(name)
+                actual = shell_probes.commands(path, agent, len(probes))
+                shell_probes.preserves_and_runs(self, probes, actual, self.env)
+                self.hgs('pause', name)
 
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

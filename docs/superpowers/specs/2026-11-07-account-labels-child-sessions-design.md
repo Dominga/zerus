@@ -201,9 +201,12 @@ is. A supervised child therefore treats its signals as **quiet** or **human**:
 * **Quiet** is the existing mute treatment: no system notification, no rail,
   tray or project-header count, neutral gray badges and edge mark, and a crossed
   bell replaced by the supervised mark. The session's actual state, Activity,
-  unread identity, questions and approvals are unchanged, and it stays in the
-  Active and Needs attention filters, exactly like a muted session. Nothing is
-  marked read.
+  unread identity, questions and approvals are unchanged. Nothing is marked
+  read. Unlike a muted session, a quiet child leaves the Needs attention filter,
+  and Active unless it is working, in Background, Scheduled or has a draft; only
+  the person's own Review later mark keeps it in both. Each status filter
+  lists exactly what its tab counts, through one predicate, and nesting never
+  adds a row that fails it (owner report, 2026-11-11, zerus-sa9qn.18).
 * **Human** behaves as for any session: badges, counts and notifications.
 
 Status captions do not change. A child still reads Ready, Needs input or

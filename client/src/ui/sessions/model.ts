@@ -6,11 +6,11 @@ import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/ca
 import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
-import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
+import { stateFilter, listedByFilter, type StateFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
 import { teamCollapsed } from "../../store/teamCollapse";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
-import { countedAttention, isWorking, quietAttention } from "../../store/attention";
+import { countedAttention, isWorking } from "../../store/attention";
 import { followedFor } from "../../store/actions";
 import { flag } from "../../store/settings";
 import { rosterFor } from "./subagents";
@@ -72,8 +72,13 @@ const scoped = createMemo(() => compileScopes(scopes()));
 /** The list's rows by project, from the row ids and the assignments only. */
 export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
 
-const matchesLiveFilters = (s: Session, f: Parameters<typeof matchesFilter>[1], hosts: readonly string[], q: string) =>
-  listedByFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && scoped()(s, projectOf(s)) && sessionMatchesSearch(s, q);
+/**
+ * A live row of state tab `f` before the text search: the one rule the list and
+ * every tab count share (zerus-sa9qn.18), so each tab lists exactly what its
+ * count counts. The machine scope is part of `scoped`.
+ */
+export const inStateTab = (s: Session, f: StateFilter) => listedByFilter(s, f) && scoped()(s, projectOf(s));
+const matchesLiveFilters = (s: Session, f: StateFilter, q: string) => inStateTab(s, f) && sessionMatchesSearch(s, q);
 
 /** Whether the filters list an owner once its collapsed project is revealed. */
 export function listedSessionIgnoringCollapse(id: string): boolean {
@@ -114,7 +119,7 @@ function listScope() {
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();
-  const visible = (s: Session) => matchesLiveFilters(s, f, hosts, q);
+  const visible = (s: Session) => matchesLiveFilters(s, f, q);
   return {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
@@ -162,21 +167,27 @@ export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
 
 export const shownSummary = createMemo(() => summarize(listRows(), online));
 
+/**
+ * Each state tab's count: the rows it lists before the text search, as
+ * inStateTab composes them (the scope, then listedByFilter), with the scope
+ * read once per row.
+ */
 export const filterCounts = createMemo(() => {
   let all = 0, active = 0, attention = 0, working = 0, paused = 0;
+  const inScope = scoped();
   for (const s of orderedRows()) {
-    if (!scoped()(s, projectOf(s))) continue;
-    all++;
-    if (matchesFilter(s, "active")) active++;
-    if (matchesFilter(s, "attention") && (!quietAttention(s) || (!s.muted && !!s.reviewLater))) attention++;
-    if (isWorking(s, online(s))) working++;
-    if (s.status === "paused") paused++;
+    if (!inScope(s, projectOf(s))) continue;
+    if (listedByFilter(s, "all")) all++;
+    if (listedByFilter(s, "active")) active++;
+    if (listedByFilter(s, "attention")) attention++;
+    if (listedByFilter(s, "all") && isWorking(s, online(s))) working++;
+    if (listedByFilter(s, "paused")) paused++;
   }
   return { all, active, attention, working, paused };
 });
 
 export const pickerCounts = createMemo(() => scopeCounts(stateFilter() === "archived" ? archive.rows() : orderedRows(), projectOf, scopes(),
-  (s) => stateFilter() === "archived" ? archive.includes((s as { archivedAt?: number }).archivedAt ?? 0) : matchesFilter(s, stateFilter())));
+  (s) => stateFilter() === "archived" ? archive.includes((s as { archivedAt?: number }).archivedAt ?? 0) : listedByFilter(s, stateFilter())));
 
 /** Machines with their session counts, in first-seen order (the machine filter's choices). */
 export const machineChoices = createMemo(() => {

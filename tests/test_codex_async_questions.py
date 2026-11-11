@@ -7,6 +7,7 @@ import subprocess
 import time
 import unittest
 import uuid
+import receipt_locator
 import test_input as fixtures
 
 FAKE = fixtures.SIGNAL_SAFE_READ + r'''
@@ -341,6 +342,9 @@ class CodexAsync(unittest.TestCase):
                 for directory in ['question_receipts','input_receipts']:
                     if (self.state/directory).exists():
                         for path in (self.state/directory).glob('*.json'):path.unlink()
+                # A locator that still lists deleted originals can never verify
+                # its coverage again; production never deletes them.
+                receipt_locator.reset(self.state)
                 self.configure(panel=panel);card=self.request();(self.root/'queue-answer').touch()
                 result,payload=self.answer(card);self.assertEqual(result.returncode,0,result.stderr)
                 receipt=json.loads(result.stdout);self.assertEqual(receipt['status'],'submitted');self.assertNotIn('answered_at',receipt)

@@ -244,13 +244,18 @@ struct ConversationView: View {
             applyContent(target: target, keys: keys, events: events, questions: questions, unreadBoundary: unreadBoundary, readReady: readReady)
         }
         .task(id: VisibilityKey(ids: visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling,
-                                following: follow.following && !model.hasNewer)) {
+                                following: follow.following && !model.hasNewer, current: model.currentReadKey(target),
+                                newest: model.newestDisplayedEventId(target))) {
             guard scenePhase == .active, follow.opened, readReady, !userScrolling, !app.demo else { return }
+            // The values and newest row this dwell observes; a change restarts it.
+            let current = model.currentReadKey(target), newest = model.newestDisplayedEventId(target)
             // A transient row during initial positioning or a fling is not a deliberate read.
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             let ids = Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
             model.visibleMessages(target, ids)
+            model.visibleCurrent(target, key: current, tailVisible: visible.contains("history:tail"),
+                                 newestVisible: !newest.isEmpty && ids.contains(newest), questionsVisible: visible.contains("history:questions"))
             if let first = visible.first(where: { $0.hasPrefix("event:") }) {
                 model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0, following: follow.following && !model.hasNewer)
             }
@@ -525,6 +530,9 @@ private struct VisibilityKey: Equatable {
     let ids: [String]
     let readable: Bool
     let following: Bool
+    /// The open inspection's current read values and newest displayed row (zerus-a4mub.9).
+    let current: String
+    let newest: String
 }
 
 /// Searches loaded messages only; results never advance read state.

@@ -461,7 +461,77 @@ public final class HistoryHeadScheduler {
 
 /// Read marks shared through the session's computer (`mark_read`). The computer applies a
 /// field only while it is current, so marks never hide newer work.
+/// An open conversation's `current_read` (`hgs inspect --current-read`): the reply and attention its computer would
+/// accept now, from the same inspection this phone displays (zerus-a4mub.9).
+public struct CurrentRead: Equatable, Sendable {
+    public let reply: String?
+    public let attention: String?
+    public let attentionComplete: Bool
+    public init(reply: String?, attention: String?, attentionComplete: Bool) {
+        self.reply = reply
+        self.attention = attention
+        self.attentionComplete = attentionComplete
+    }
+}
+
 public enum SharedReadPolicies {
+    private static let currentKeys: Set<String> = ["schema", "run_id", "conversation_id", "reply_id", "attention_signature", "attention_complete"]
+
+    private static func signature(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+    }
+
+    /// The verified open inspection's `current_read` when it names exactly `target`: schema 1, exactly the native
+    /// fields, and the target's and the inspection's own run and conversation. Nil for archives, subagents, cached
+    /// frames, older computers or anything malformed; nothing is repaired.
+    public static func current(_ raw: JSONObject?, target: Target, verified: Bool) -> CurrentRead? {
+        guard verified, let raw, target.archiveId.isEmpty, target.agentId.isEmpty, !target.run.isEmpty, !target.conversation.isEmpty,
+              raw["run_id"] == .string(target.run), raw["conversation_id"] == .string(target.conversation),
+              let value = raw.object("current_read"), Set(value.keys) == currentKeys, value["schema"] == .int(1),
+              value["run_id"] == .string(target.run), value["conversation_id"] == .string(target.conversation),
+              case .bool(let complete)? = value["attention_complete"] else { return nil }
+        let reply: String?
+        switch value["reply_id"] {
+        case .null?: reply = nil
+        case .string(let text)? where !text.isEmpty && text.utf16.count <= 256 && !text.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }):
+            reply = text
+        default: return nil
+        }
+        let attention: String?
+        switch value["attention_signature"] {
+        case .null?: attention = nil
+        case .string(let text)? where signature(text): attention = text
+        default: return nil
+        }
+        return CurrentRead(reply: reply, attention: attention, attentionComplete: complete)
+    }
+
+    /// What one settled viewport of the open conversation showed of its current inspection: the reply when it shows
+    /// the latest messages and the tail or the newest displayed row was visible; the attention when the listed
+    /// questions were visible or, without questions, when the reply was shown.
+    public static func currentShown(latest: Bool, tailVisible: Bool, newestVisible: Bool, questionsListed: Bool,
+                                    questionsVisible: Bool) -> (reply: Bool, attention: Bool) {
+        let reply = latest && (tailVisible || newestVisible)
+        return (reply, latest && (questionsListed ? questionsVisible : reply))
+    }
+
+    /// The `mark_read` the open conversation may send for `current`: its reply once the conversation's tail or newest
+    /// row stayed visible, its attention once complete and its presentation stayed visible. Values the computer already
+    /// has are left out; nil when nothing is new. This never moves the phone's private read position, which only
+    /// canonical history can advance.
+    public static func currentPayload(_ row: Session?, target: Target, current: CurrentRead, replyShown: Bool,
+                                      attentionShown: Bool) -> JSONObject? {
+        if let row, SessionFilters.archived(row) { return nil }
+        let read = row.flatMap(mark)
+        let reply = current.reply.flatMap { replyShown && read?.string("reply_id") != $0 ? $0 : nil }
+        let attention = current.attention.flatMap {
+            attentionShown && current.attentionComplete && read?.string("attention_signature") != $0 ? $0 : nil
+        }
+        if reply == nil && attention == nil { return nil }
+        return ["run_id": .string(target.run), "conversation_id": .string(target.conversation),
+                "reply_id": reply.map(JSON.string) ?? .null, "attention_signature": attention.map(JSON.string) ?? .null]
+    }
+
     public static func mark(_ row: Session) -> JSONObject? {
         guard let read = row.raw.object("read"), !row.target.conversation.isEmpty, read.string("conversation_id") == row.target.conversation else { return nil }
         return read

@@ -728,7 +728,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun markRead(target:Target,evidence:ReadAttentionEvidence) {
         if(evidence.target!=target || !readTrackingReady || captureReadAttention(target)!=evidence) { error="The displayed reply evidence changed. Review it before marking read.";return }
-        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();shareRead(target);flushDrafts()
+        readWriter?.let { readState=it.edit { state -> ReadAttentionPolicies.mark(state,evidence) } };refreshReadAttention();shareRead(target)
+        // The explicit choice covers what the open conversation's verified inspection names now.
+        currentRead(target)?.let { shareCurrent(target,it,replyShown=true,attentionShown=true) }
+        flushDrafts()
     }
     private fun readAllEvidence(target:Target):ReadAttentionEvidence? {
         if(!readTrackingReady || readWriter==null || demo || target.run.isBlank() || target.conversation.isBlank() ||
@@ -807,12 +810,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         selected?.target?.let { loaded[it]=conversationEvents }
     }
     private class SharedReadRequest(val connection:Connection,val target:Target,val payload:JSONObject,val key:String)
+    /** Whether this target's gateway and computer accept `mark_read` now. */
+    private fun sharedReadAvailable(target:Target)=!demo && readTrackingReady &&
+        "mark_read" in relayOperations[target.connectionId].orEmpty() &&
+        "mark_read" in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()
     /** The C4 `mark_read` this phone may send now; [acknowledge] also covers the current request. */
     private fun sharedReadRequest(target:Target,acknowledge:Boolean):SharedReadRequest? {
-        if(demo || !readTrackingReady) return null
+        if(!sharedReadAvailable(target)) return null
         val row=sessions.find { it.target==target } ?: return null
-        if("mark_read" !in relayOperations[target.connectionId].orEmpty() ||
-            "mark_read" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return null
         val payload=SharedReadPolicies.payload(row,readAllEvidence(target)?.authoritative==true,unreadCount(target),acknowledge) ?: return null
         val connection=connections.find { it.id==target.connectionId } ?: return null
         return SharedReadRequest(connection,target,payload,target.key+"\n"+payload)
@@ -841,12 +846,45 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         sharedReadRetryTimer?.cancel()
         sharedReadRetryTimer=viewModelScope.launch { sharedReadRetries.releaseWhenDue(android.os.SystemClock::elapsedRealtime) { sharedReadsSent.remove(it) } }
     }
-    /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
-    private fun shareRead(target:Target) {
-        val request=sharedReadRequest(target,true) ?: return
+    /** zerus-a4mub.9: what the open conversation's verified inspection lets this phone acknowledge now. */
+    private fun currentRead(target:Target):CurrentRead? =
+        if(selected?.target!=target || activeFrame?.target!=target) null else SharedReadPolicies.current(activity,target,activityVerified)
+    /** Changes with the current reply and attention values, so a visibility dwell restarts for new ones. */
+    fun currentReadKey(target:Target):String=currentRead(target)?.let(::currentReadKey).orEmpty()
+    private fun currentReadKey(current:CurrentRead)=JSONArray(listOf(current.reply,current.attention,current.attentionComplete)).toString()
+    /** The newest row the open conversation displays, while it shows the latest messages. */
+    fun newestDisplayedEventId(target:Target):String=
+        if(selected?.target!=target || activeFrame?.target!=target || hasNewer) "" else conversationEvents.lastOrNull()?.id.orEmpty()
+    /**
+     * After the settled visibility dwell, acknowledges what the open conversation showed of its current
+     * inspection: the reply once its tail or newest row was visible, the attention once its questions were
+     * (without questions, once the same tail or newest row was). [key] is [currentReadKey] as the dwell saw it.
+     */
+    fun visibleCurrent(target:Target,key:String,tailVisible:Boolean,newestVisible:Boolean,questionsVisible:Boolean) {
+        val current=currentRead(target) ?: return
+        if(key!=currentReadKey(current)) return
+        val (replyShown,attentionShown)=SharedReadPolicies.currentShown(!hasNewer,tailVisible,newestVisible,
+            conversationQuestions.isNotEmpty(),questionsVisible)
+        shareCurrent(target,current,replyShown,attentionShown)
+    }
+    private fun shareCurrent(target:Target,current:CurrentRead,replyShown:Boolean,attentionShown:Boolean) {
+        if(!sharedReadAvailable(target)) return
+        val payload=SharedReadPolicies.currentPayload(sessions.find { it.target==target },target,current,replyShown,attentionShown) ?: return
+        val connection=connections.find { it.id==target.connectionId } ?: return
+        launchSharedRead(SharedReadRequest(connection,target,payload,target.key+"\n"+payload))
+    }
+    /**
+     * Sends one prepared mark once. The canonical and current acknowledgements share this path, so their
+     * delivery, retries and observed status (zerus-a4mub.10) stay one.
+     */
+    private fun launchSharedRead(request:SharedReadRequest) {
         if(!sharedReadsSent.add(request.key)) return
         noteSharedRead(request.target,SharedReadStatus.Pending(System.currentTimeMillis()))
         viewModelScope.launch { sendSharedRead(request) }
+    }
+    /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
+    private fun shareRead(target:Target) {
+        sharedReadRequest(target,true)?.let(::launchSharedRead)
     }
     /** A reply read on another device advances this phone's watermark, using only a fresh exact head. */
     private fun adoptSharedReads() {

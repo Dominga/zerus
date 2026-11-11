@@ -199,10 +199,15 @@ impl Migration {
                     if !known && walk.covered {
                         // The unchanged directory was previously covered, but
                         // its row vanished without notification. Reject old
-                        // snapshot cursors before restoring the original.
+                        // snapshot cursors and withhold completeness until the
+                        // repair commits, then restore the original.
                         sql(self.catalog.db.execute(
                             "UPDATE receipt_meta SET value=? WHERE key='epoch'",
                             [uuid::Uuid::new_v4().to_string()],
+                        ))?;
+                        sql(self.catalog.db.execute(
+                            "UPDATE receipt_sources SET complete=0 WHERE source=?",
+                            [walk.source.key()],
                         ))?;
                     }
                     let loaded = read_original(&entry.path());
@@ -210,7 +215,7 @@ impl Migration {
                         Ok(value) => {
                             if self
                                 .catalog
-                                .remember(walk.source, filename, &value)
+                                .remember(walk.source, &entry.path(), &value)
                                 .is_err()
                             {
                                 self.catalog.error(walk.source, filename, "corrupt")?;
@@ -243,6 +248,10 @@ impl Migration {
                         "DELETE FROM receipt_errors WHERE source=? AND name IN('@source','@enumeration')",
                         [source.key()],
                     ))?;
+                    sql(self.catalog.db.execute(
+                        "INSERT INTO receipt_meta VALUES('verified_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [now().to_string()],
+                    ))?;
                     self.walk = None;
                 }
             }
@@ -251,6 +260,22 @@ impl Migration {
         Ok(false)
     }
 }
+/// Bounded discovery for the canonical history indexer. The detached worker
+/// stays the long-running owner; this only keeps a synchronous indexer from
+/// waiting on worker scheduling, one short budget at a time.
+pub(super) fn advance(state: &Path, budget: Duration) -> Result<bool> {
+    let deadline = Instant::now() + budget;
+    let mut migration = Migration::new(state)?;
+    loop {
+        if migration.step()? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
+}
+
 pub(super) fn worker(state: &Path) -> Result<i32> {
     let Some(_guard) = try_guard(&state.join("receipt-index-worker.lock"))? else {
         return Ok(0);

@@ -26,7 +26,8 @@ pub(super) const PAGE_LIMIT: usize = 100;
 const EXAMINE: usize = 256;
 const ORIGINAL_BYTES: u64 = 256 * 1024;
 const DATABASE: &str = "delivery-receipts-v1.sqlite3";
-const ROWSET_PROTOCOL: &str = "1";
+const ROWSET_PROTOCOL: &str = "2";
+const VERIFY_SECONDS: f64 = 600.0;
 
 // Coverage is sealed only after discovery. These guards invalidate that seal
 // if a cached locator disappears or moves without a matching original walk.
@@ -345,7 +346,7 @@ impl Catalog {
         if create {
             sql(db.execute_batch("CREATE TABLE IF NOT EXISTS receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,UNIQUE(source,request));
+                CREATE TABLE IF NOT EXISTS receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,stamp TEXT NOT NULL DEFAULT '',change INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request));
                 CREATE INDEX IF NOT EXISTS receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
                 CREATE INDEX IF NOT EXISTS receipt_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC);
                 CREATE INDEX IF NOT EXISTS receipt_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC);
@@ -354,6 +355,7 @@ impl Catalog {
                 CREATE TABLE IF NOT EXISTS receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(source,name));
                 CREATE TRIGGER IF NOT EXISTS receipt_row_count AFTER INSERT ON receipt_rows BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
                 CREATE TRIGGER IF NOT EXISTS receipt_error_count AFTER INSERT ON receipt_errors BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
+
                 CREATE TRIGGER IF NOT EXISTS receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;
                 CREATE TRIGGER IF NOT EXISTS receipt_row_removed AFTER DELETE ON receipt_rows BEGIN
                   UPDATE receipt_sources SET complete=0,indexed=MAX(0,indexed-1) WHERE source=OLD.source;
@@ -362,16 +364,134 @@ impl Catalog {
                   UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
                 END;
                 CREATE TRIGGER IF NOT EXISTS receipt_row_rebound AFTER UPDATE ON receipt_rows
-                WHEN OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
+                WHEN (OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
                   OR OLD.name IS NOT NEW.name OR OLD.run IS NOT NEW.run OR OLD.conversation IS NOT NEW.conversation
                   OR OLD.agent IS NOT NEW.agent OR OLD.first_message IS NOT NEW.first_message
-                  OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding
+                  OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding)
+                  -- The one-way first-prompt pin is not a rebind: an empty
+                  -- conversation resolving to its run's conversation keeps
+                  -- every other identity column and the row's coverage.
+                  AND NOT (OLD.conversation='' AND NEW.conversation<>''
+                    AND OLD.seq IS NEW.seq AND OLD.source IS NEW.source AND OLD.request IS NEW.request
+                    AND OLD.name IS NEW.name AND OLD.run IS NEW.run AND OLD.agent IS NEW.agent
+                    AND OLD.first_message IS NEW.first_message AND OLD.at IS NEW.at
+                    AND OLD.files IS NEW.files AND OLD.binding IS NEW.binding)
                 BEGIN
                   UPDATE receipt_sources SET complete=0 WHERE source IN(OLD.source,NEW.source);
                   INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_changed')
                     ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
                   UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
                 END;"))?;
+
+            // #2055 shipped without change tracking. A v1 database has neither
+            // column: add them (and seed their sequences) before any index
+            // mentions them. A cache that already has the row-set guards can
+            // still predate the change columns, and a persisted cut between
+            // ADD COLUMN and its seed leaves rows at change=0 without a
+            // published frontier. Repair both in one transaction, so a reader
+            // never sees a Complete frontier that does not cover its rows.
+            let columns: Vec<String> = sql(db.prepare("SELECT name FROM pragma_table_info('receipt_rows')"))?
+                .query_map([], |row| row.get(0))
+                .map_err(|_| "Receipt index is unavailable".to_owned())?
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| "Receipt index is unavailable".to_owned())?;
+            let has_stamp = columns.iter().any(|column| column == "stamp");
+            let has_change = columns.iter().any(|column| column == "change");
+            let unseeded = if has_change {
+                sql(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                ))?
+            } else {
+                true
+            };
+            let frontier_behind = if has_change {
+                let frontier: i64 = sql(db.query_row(
+                    "SELECT COALESCE(CAST((SELECT value FROM receipt_meta WHERE key='change_seq') AS INTEGER),0)",
+                    [],
+                    |row| row.get(0),
+                ))?;
+                let maximum: i64 = sql(db.query_row(
+                    "SELECT COALESCE(MAX(change),0) FROM receipt_rows",
+                    [],
+                    |row| row.get(0),
+                ))?;
+                frontier < maximum
+            } else {
+                false
+            };
+            let change_repair = !has_stamp || !has_change || unseeded || frontier_behind;
+            let schema_transaction = if upgrade.is_none() && change_repair {
+                Some(sql(db.unchecked_transaction())?)
+            } else {
+                None
+            };
+            if !has_stamp {
+                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';"))?;
+            }
+            if !has_change {
+                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0;"))?;
+            }
+            if change_repair {
+                // Seed every unseeded original once; later allocations
+                // continue from the committed high-water.
+                sql(db.execute_batch("UPDATE receipt_rows SET change=seq WHERE change=0;"))?;
+            }
+            sql(db.execute_batch(
+                "CREATE INDEX IF NOT EXISTS receipt_change ON receipt_rows(source,change);
+                 CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
+                 CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);",
+            ))?;
+
+            // The frontier must cover every seeded row, repairing a persisted
+            // cut where the column exists but its sequence was never published.
+            sql(db.execute(
+                "INSERT INTO receipt_meta VALUES('change_seq',COALESCE((SELECT MAX(change) FROM receipt_rows),0)) ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+                [],
+            ))?;
+            if change_repair {
+                // A consumer must not resume a cursor from before a repair:
+                // the sequence meaning changed, so old cursors restart.
+                sql(db.execute(
+                    "UPDATE receipt_meta SET value=? WHERE key='epoch'",
+                    [uuid::Uuid::new_v4().to_string()],
+                ))?;
+            }
+            if let Some(transaction) = schema_transaction {
+                sql(transaction.commit())?;
+            }
+            if !verified {
+                // Reissue the invalidation guards so a cache created with the
+                // earlier trigger definition also exempts the first-prompt pin.
+                sql(db.execute_batch(
+                    "DROP TRIGGER IF EXISTS receipt_row_removed;
+                     DROP TRIGGER IF EXISTS receipt_row_rebound;
+                     CREATE TRIGGER receipt_row_removed AFTER DELETE ON receipt_rows BEGIN
+                       UPDATE receipt_sources SET complete=0,indexed=MAX(0,indexed-1) WHERE source=OLD.source;
+                       INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_missing')
+                         ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                       UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                     END;
+                     CREATE TRIGGER receipt_row_rebound AFTER UPDATE ON receipt_rows
+                     WHEN (OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
+                       OR OLD.name IS NOT NEW.name OR OLD.run IS NOT NEW.run OR OLD.conversation IS NOT NEW.conversation
+                       OR OLD.agent IS NOT NEW.agent OR OLD.first_message IS NOT NEW.first_message
+                       OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding)
+                       AND NOT (OLD.conversation='' AND NEW.conversation<>''
+                         AND OLD.seq IS NEW.seq AND OLD.source IS NEW.source AND OLD.request IS NEW.request
+                         AND OLD.name IS NEW.name AND OLD.run IS NEW.run AND OLD.agent IS NEW.agent
+                         AND OLD.first_message IS NEW.first_message AND OLD.at IS NEW.at
+                         AND OLD.files IS NEW.files AND OLD.binding IS NEW.binding)
+                     BEGIN
+                       UPDATE receipt_sources SET complete=0 WHERE source IN(OLD.source,NEW.source);
+                       INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_changed')
+                         ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                       UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                     END;",
+                ))?;
+
+            }
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
                 [uuid::Uuid::new_v4().to_string()],
@@ -382,6 +502,10 @@ impl Catalog {
                     [source.key()],
                 ))?;
             }
+            sql(db.execute(
+                "INSERT OR IGNORE INTO receipt_meta VALUES('verified_at',?)",
+                [now().to_string()],
+            ))?;
         }
         if create {
             sql(db.execute(
@@ -411,32 +535,71 @@ impl Catalog {
             state: state.to_owned(),
         })
     }
-    fn remember(&self, source: Source, filename: &str, value: &Value) -> Result<()> {
+    fn remember(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
+        // Sequence allocation and the row write must be visible together: a
+        // reader that sees a higher change_seq must also see every lower row.
+        if self.db.is_autocommit() {
+            let transaction = sql(self.db.unchecked_transaction())?;
+            self.remember_row(source, path, value)?;
+            sql(transaction.commit())?;
+            Ok(())
+        } else {
+            self.remember_row(source, path, value)
+        }
+    }
+    fn remember_row(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Invalid receipt name")?;
         let binding = Binding::parse(source, value, filename)?;
-        let prior: Option<(String, String)> = sql(self
+        let stamp = file_stamp(path)?;
+        let prior: Option<(String, String, String)> = sql(self
             .db
             .query_row(
-                "SELECT binding,conversation FROM receipt_rows WHERE source=? AND request=?",
+                "SELECT binding,conversation,stamp FROM receipt_rows WHERE source=? AND request=?",
                 params![source.key(), binding.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional())?;
-        if let Some((original, conversation)) = prior {
+        if let Some((original, conversation, prior_stamp)) = prior {
             if original != binding.fingerprint
                 || (!conversation.is_empty() && conversation != binding.conversation)
             {
                 return self.error(source, filename, "binding_changed");
             }
-            // Only the existing one-way first-prompt resolution may move scope.
-            sql(self.db.execute("UPDATE receipt_rows SET conversation=? WHERE source=? AND request=? AND conversation=''",params![binding.conversation,source.key(),binding.id]))?;
+            // A content update keeps the immutable binding: the same original
+            // identity, a new file stamp and one change for consumers. Only the
+            // existing one-way first-prompt resolution may move scope.
+            let resolved = conversation.is_empty();
+            let conversation = if resolved {
+                binding.conversation.clone()
+            } else {
+                conversation
+            };
+            if resolved || prior_stamp != stamp {
+                let change = self.bump()?;
+                sql(self.db.execute(
+                    "UPDATE receipt_rows SET name=?,run=?,conversation=?,agent=?,first_message=?,at=?,files=?,stamp=?,change=? WHERE source=? AND request=?",
+                    params![binding.name, binding.run, conversation, binding.agent, binding.first, binding.at, binding.files, stamp, change, source.key(), binding.id],
+                ))?;
+            }
         } else {
-            sql(self.db.execute("INSERT INTO receipt_rows(source,request,name,run,conversation,agent,first_message,at,files,binding) VALUES(?,?,?,?,?,?,?,?,?,?)",params![source.key(),binding.id,binding.name,binding.run,binding.conversation,binding.agent,binding.first,binding.at,binding.files,binding.fingerprint]))?;
+            let change = self.bump()?;
+            sql(self.db.execute("INSERT INTO receipt_rows(source,request,name,run,conversation,agent,first_message,at,files,binding,stamp,change) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![source.key(),binding.id,binding.name,binding.run,binding.conversation,binding.agent,binding.first,binding.at,binding.files,binding.fingerprint,stamp,change]))?;
         }
         sql(self.db.execute(
             "DELETE FROM receipt_errors WHERE source=? AND name=?",
             params![source.key(), filename],
         ))?;
         Ok(())
+    }
+    fn bump(&self) -> Result<i64> {
+        sql(self.db.query_row(
+            "UPDATE receipt_meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='change_seq' RETURNING CAST(value AS INTEGER)",
+            [],
+            |r| r.get(0),
+        ))
     }
     fn error(&self, source: Source, name: &str, reason: &str) -> Result<()> {
         sql(self.db.execute("INSERT INTO receipt_errors VALUES(?,?,?) ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason",params![source.key(),name,reason]))?;
@@ -495,8 +658,9 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ))?;
         let current = migration::stamp(&self.state.join(scope.source.directory()));
+        let verified = self.coverage_verified();
         let protocol = rowset_protocol(&self.db);
-        let ready = protocol && complete && current.as_ref().is_ok_and(|v| *v == stamp);
+        let ready = verified && complete && current.as_ref().is_ok_and(|v| *v == stamp);
         let mut position = if cursor.is_empty() {
             Cursor {
                 version: 1,
@@ -655,6 +819,307 @@ impl Catalog {
     }
 }
 
+pub(super) const CURSOR_REJECTED: &str = "Receipt change cursor belongs to another target or index";
+
+/// One original whose indexed content stamp changed since the caller's
+/// frontier. The consumer validates [Catalog::original] before importing it.
+#[derive(Debug)]
+pub(super) struct ChangedRow {
+    pub(super) locator: Locator,
+    pub(super) stamp: String,
+    pub(super) change: i64,
+}
+
+/// A bounded changed-since page with a frozen upper change sequence. Changes
+/// committed while this chain is paged get a newer sequence and wait for the
+/// caller's next chain, so a resumed frontier is stable.
+#[derive(Debug)]
+pub(super) struct ChangedPage {
+    pub(super) rows: Vec<ChangedRow>,
+    pub(super) cursor: String,
+    pub(super) drained: bool,
+    pub(super) coverage: Coverage,
+    /// Discovery currently covers the directory ancestors of this page.
+    pub(super) ready: bool,
+    /// Changes committed beyond the frozen upper wait for the caller's next
+    /// chain, so a paging consumer never claims completion over them.
+    pub(super) pending: bool,
+    pub(super) restart_required: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeCursor {
+    version: u8,
+    epoch: String,
+    scope: String,
+    upper: i64,
+    after: i64,
+}
+
+impl Catalog {
+    /// A cheap structural and freshness check for a pinned read. Presence of
+    /// the invalidation guards, the trigger-maintained row witness and a
+    /// bounded verification age keep silent row loss and coarse-timestamp
+    /// originals from masquerading as complete coverage. It neither walks the
+    /// directory nor writes: the caller requests the background worker.
+    fn coverage_verified(&self) -> bool {
+        if !rowset_protocol(&self.db) {
+            return false;
+        }
+        let witness: bool = self
+            .db
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources WHERE indexed != (SELECT COUNT(*) FROM receipt_rows WHERE source=receipt_sources.source))",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !witness {
+            return false;
+        }
+        // A row without a sequence, or a frontier behind MAX(change), means a
+        // schema repair has not published its sequence yet. Never call that
+        // Complete: the cursor must restart after the writer's repair.
+        let consistent: bool = self
+            .db
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)
+                   AND COALESCE((SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'),0)
+                       >= COALESCE((SELECT MAX(change) FROM receipt_rows),0)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !consistent {
+            return false;
+        }
+        true
+    }
+    /// A stale-but-consistent locator stays complete: age only schedules the
+    /// background re-verification walk, which flips coverage when it finds a
+    /// discrepancy. No consumer waits on the 600 s timer by itself.
+    fn verification_due(&self) -> bool {
+        let verified_at = self
+            .db
+            .query_row(
+                "SELECT value FROM receipt_meta WHERE key='verified_at'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        now() - verified_at >= VERIFY_SECONDS
+    }
+    fn change_epoch(&self) -> Result<(String, String, i64)> {
+        let epoch: String = sql(self.db.query_row(
+            "SELECT value FROM receipt_meta WHERE key='epoch'",
+            [],
+            |r| r.get(0),
+        ))?;
+        let secret: String = sql(self.db.query_row(
+            "SELECT value FROM receipt_meta WHERE key='cursor_secret'",
+            [],
+            |r| r.get(0),
+        ))?;
+        let current: i64 = sql(self.db.query_row(
+            "SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'",
+            [],
+            |r| r.get(0),
+        ))?;
+        Ok((epoch, secret, current))
+    }
+    fn changed_page(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<ChangedPage> {
+        if !(1..=PAGE_LIMIT).contains(&limit) || cursor.len() > 2048 {
+            return Err("Invalid receipt change page".into());
+        }
+        // The frozen upper and the rows it covers come from one snapshot, so
+        // an upper can never pass a row that is not visible to this read.
+        let transaction = sql(self.db.unchecked_transaction())?;
+        let page = self.changed_page_snapshot(scope, cursor, limit, files)?;
+        sql(transaction.commit())?;
+        Ok(page)
+    }
+    fn changed_page_snapshot(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<ChangedPage> {
+        if scope.run.is_empty() && scope.conversation.is_empty() {
+            return Err("Invalid receipt change page".into());
+        }
+        if scope.run.is_empty() && scope.conversation.is_empty() {
+            return Err("Invalid receipt change page".into());
+        }
+        let (epoch, secret, current) = self.change_epoch()?;
+        let scope_hash = scope.hash(files);
+        let prior: Option<ChangeCursor> = if cursor.is_empty() {
+            None
+        } else {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(cursor.split_once('.').map_or(cursor, |(body, _)| body))
+                .map_err(|_| CURSOR_REJECTED)?;
+            let expected = cursor_mac(&secret, &bytes);
+            let signature = cursor.split_once('.').map(|(_, signature)| signature).unwrap_or("");
+            if signature.len() != expected.len()
+                || !signature.bytes().zip(expected.bytes()).fold(true, |same, (a, b)| same & (a == b))
+            {
+                return Err(CURSOR_REJECTED.into());
+            }
+            Some(serde_json::from_slice(&bytes).map_err(|_| CURSOR_REJECTED)?)
+        };
+        let (after, upper) = match prior {
+            Some(position)
+                if position.version == 1
+                    && position.epoch == epoch
+                    && position.scope == scope_hash
+                    && position.after >= 0
+                    && position.upper >= position.after =>
+            {
+                // A drained frontier opens a new frozen chain at the current
+                // sequence; a live one keeps its original upper bound.
+                if position.after == position.upper {
+                    (position.after, current)
+                } else {
+                    (position.after, position.upper)
+                }
+            }
+            Some(_) => return Err(CURSOR_REJECTED.into()),
+            None => (0, current),
+        };
+        let mut rows = Vec::new();
+        for initial in [false, true] {
+            if !initial && scope.conversation.is_empty() {
+                continue;
+            }
+            let index = match (files, initial) {
+                (true, true) => "receipt_change_initial",
+                (true, false) => "receipt_change_scope",
+                (false, true) => "receipt_change_initial",
+                (false, false) => "receipt_change_scope",
+            };
+            let extra = if initial {
+                "conversation='' AND first_message=1 AND run=?3"
+            } else {
+                "conversation=?3"
+            };
+            let query = format!(
+                "SELECT request,at,binding,stamp,change FROM receipt_rows INDEXED BY {index} WHERE source=?1 AND agent=?2 AND {extra} AND change>?4 AND change<=?5 ORDER BY change LIMIT ?6"
+            );
+            let mut statement = sql(self.db.prepare(&query))?;
+            let mapped = sql(statement.query_map(
+                params![
+                    scope.source.key(),
+                    scope.agent,
+                    if initial { &scope.run } else { &scope.conversation },
+                    after,
+                    upper,
+                    limit
+                ],
+                |r| {
+                    Ok(ChangedRow {
+                        locator: Locator {
+                            source: scope.source,
+                            id: r.get(0)?,
+                            sequence: r.get(4)?,
+                            at: r.get(1)?,
+                            fingerprint: r.get(2)?,
+                        },
+                        stamp: r.get(3)?,
+                        change: r.get(4)?,
+                    })
+                },
+            ))?;
+            for row in mapped {
+                rows.push(sql(row)?);
+            }
+        }
+        rows.sort_by_key(|row| row.change);
+        rows.truncate(limit);
+        let (stamp, complete, indexed, errors): (String, bool, i64, i64) = sql(self.db.query_row(
+            "SELECT stamp,complete,indexed,errors FROM receipt_sources WHERE source=?",
+            [scope.source.key()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ))?;
+        let current_directory = migration::stamp(&self.state.join(scope.source.directory()));
+        // The pinned changed page retains the row-set protocol check through
+        // coverage_verified(): a cache without its invalidation guards proves
+        // no coverage.
+        let verified = self.coverage_verified();
+        let ready = verified && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
+        let coverage = if ready && errors == 0 {
+            Coverage::Complete
+        } else if !ready && indexed > 0 && stamp == "absent" {
+            Coverage::Gap
+        } else if ready {
+            Coverage::Gap
+        } else {
+            Coverage::Partial
+        };
+        let last = rows.last().map(|row| row.change).unwrap_or(after);
+        let drained = rows.len() < limit || last >= upper;
+        let after_next = if drained { upper } else { last };
+        let next = ChangeCursor {
+            version: 1,
+            epoch,
+            scope: scope_hash,
+            upper,
+            after: after_next,
+        };
+        let bytes = serde_json::to_vec(&next).map_err(|_| "Invalid receipt change page")?;
+        let cursor = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&bytes),
+            cursor_mac(&secret, &bytes)
+        );
+        Ok(ChangedPage {
+            rows,
+            cursor,
+            drained,
+            coverage,
+            ready,
+            pending: current > upper,
+            restart_required: !ready && complete,
+        })
+    }
+}
+
+/// Some(record)'s bounded changed-since page. A missing or not-yet-migrated
+/// index is explicitly unavailable; callers request discovery and project
+/// indexing instead of absence.
+pub(super) fn changed(
+    record: &Value,
+    agent: &str,
+    cursor: &str,
+    limit: usize,
+    files: bool,
+) -> Result<(Catalog, ChangedPage)> {
+    let state = root();
+    let scope = Scope::new(record, agent);
+    let catalog = match Catalog::open(&state, false) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            // A fresh or not-yet-migrated locator is seeded by the canonical
+            // indexer in bounded slices; inspection paths keep their own rule.
+            let _ = migration::advance(&state, Duration::from_millis(200));
+            match Catalog::open(&state, false) {
+                Ok(catalog) => catalog,
+                Err(_) => return Err(error),
+            }
+        }
+    };
+    let page = catalog.changed_page(&scope, cursor, limit, files)?;
+    if page.coverage != Coverage::Complete {
+        let _ = migration::advance(&state, Duration::from_millis(200));
+        migration::request(&state);
+        let advanced = catalog.changed_page(&scope, cursor, limit, files)?;
+        return Ok((catalog, advanced));
+    }
+    if catalog.verification_due() {
+        migration::request(&state);
+    }
+    Ok((catalog, page))
+}
+
 fn read_original(path: &Path) -> std::result::Result<Value, &'static str> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -684,6 +1149,20 @@ fn read_original(path: &Path) -> std::result::Result<Value, &'static str> {
     serde_json::from_slice(&bytes).map_err(|_| "corrupt")
 }
 
+/// A receipt original's content stamp. A missing file still yields a locator
+/// change, and the consumer validates the original before importing it.
+fn file_stamp(path: &Path) -> Result<String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let (seconds, nanos) = crate::platform::modified(&metadata);
+            Ok(format!("{}:{seconds}:{nanos}", metadata.len()))
+        }
+        Ok(_) => Err("Receipt original is not a regular file".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok("missing".into()),
+        Err(_) => Err("Receipt original is unavailable".into()),
+    }
+}
+
 /// Projection is advisory. Missing index/original data is never proof of absence
 /// and this module is deliberately absent from every send/retry admission check.
 pub(super) fn page(
@@ -695,7 +1174,7 @@ pub(super) fn page(
     let state = root();
     let catalog = Catalog::open(&state, false)?;
     let page = catalog.page(&Scope::new(record, agent), cursor, limit, true)?;
-    if page.metadata["migration_complete"] != true {
+    if page.metadata["migration_complete"] != true || catalog.verification_due() {
         migration::request(&state);
     }
     Ok((catalog, page))
@@ -732,11 +1211,7 @@ pub(super) fn persist(path: &Path, value: &Value) -> Result<()> {
                 return Err("Foreign receipt directory".into());
             }
             let catalog = Catalog::open(&state, true)?;
-            let filename = path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .ok_or("Invalid receipt name")?;
-            catalog.remember(source, filename, value)?;
+            catalog.remember(source, path, value)?;
             // Only advance an already reconciled snapshot. A missed/legacy
             // writer leaves a mismatch, so inspection requests background work.
             if let (Some(before), Ok(after)) = (before, migration::stamp(parent)) {

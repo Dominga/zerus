@@ -242,14 +242,13 @@ pub(super) fn page_dispatch(args:&[String])->Result<i32> {
 
 /// Public history projection for one immutable receipt. Raw paths and native
 /// terminal-expanded attachment instructions never leave this local helper.
-pub(super) fn history_receipt(record:&Value,agent:&str,path:&Path)->Result<Option<(Value,String)>> {
-    let receipt=receipt(path)?;
-    if !belongs(&receipt,record,agent)||receipt["attachments"].as_array().is_none_or(Vec::is_empty){return Ok(None);}
-    let text=message_text(&receipt);
-    Ok(Some((json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":receipt["request_id"],"agent_id":"",
-        "at":receipt.get("submitted_at").unwrap_or(&receipt["at"]),"detail":text,"submitted_text":text,"attachments":public_files(&receipt)}),string(&receipt,"submitted_text").to_owned())))
-}
-pub(super) fn history_directory(record:&Value)->PathBuf {directory(record)
+/// The same projection from an already validated original. The canonical
+/// history imports what the binding-validated locator page returned.
+pub(super) fn history_receipt_value(record:&Value,agent:&str,receipt:&Value)->Option<(Value,String)> {
+    if !belongs(receipt,record,agent)||receipt["attachments"].as_array().is_none_or(Vec::is_empty){return None;}
+    let text=message_text(receipt);
+    Some((json!({"type":"UserPromptSubmit","source":"hgs_delivery","message_id":receipt["request_id"],"agent_id":"",
+        "at":receipt.get("submitted_at").unwrap_or(&receipt["at"]),"detail":text,"submitted_text":text,"attachments":public_files(receipt)}),string(receipt,"submitted_text").to_owned()))
 }
 
 /// Explicitly requested Graph evidence from one exact durable send. It does

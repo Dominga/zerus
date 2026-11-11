@@ -5358,13 +5358,22 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
 `0.2.1-rc.2`, `0.2.1-rc.5` and `0.2.2-rc.1`. Install a reviewed release on the agent host,
-sign in and choose **DeepSeek Harness** in New session:
+apply its reviewed security overrides, sign in and choose **DeepSeek Harness**
+in New session:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+npm pkg set --prefix "$(npm root -g)/@deepseek-ai/dsh" \
+  'overrides.@modelcontextprotocol/client=2.3.0' 'overrides.fflate=0.8.3'
+npm install --omit=dev --prefix "$(npm root -g)/@deepseek-ai/dsh"
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
+
+Current upstream still pins MCP client 2.2.0 and nested fflate 0.8.2. The two
+overrides fix their cross-origin redirect and malformed-ZIP64 issues without
+changing other agents in the npm prefix; a bare global install retains those
+risks. Other dependency advisories remain subject to normal review.
 
 Zerus launches the official native engine and its tools, access rules and history.
 A versioned adapter connects its Session Controller through a private Unix socket.

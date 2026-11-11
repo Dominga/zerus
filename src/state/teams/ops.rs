@@ -487,8 +487,16 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
         ensure!(path.chars().count() <= 1024, "An output path is too long");
         ensure!(!path.chars().any(char::is_control), "An output path contains control characters");
         let normalized = path.trim().replace('\\', "/");
+        // RogueDOD (2026-11-11): `lore:AREA`, the lore area the task writes.
+        if let Some(area) = normalized.strip_prefix(super::model::LORE_OUTPUT) {
+            let area = area.trim();
+            ensure!(!area.is_empty() && area.len() <= 64 && area.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "A lore output is lore:AREA, an area id of letters, digits, - and _");
+            *path = format!("{}{area}", super::model::LORE_OUTPUT);
+            continue;
+        }
         ensure!(!normalized.is_empty() && !normalized.starts_with('/') && !normalized.contains(':'),
-            "An output path must be repository-relative");
+            "An output path must be repository-relative, or lore:AREA for a lore area");
         let mut parts = Vec::new();
         for part in normalized.split('/') {
             ensure!(part != "..", "An output path cannot contain parent components");

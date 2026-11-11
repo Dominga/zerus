@@ -27,6 +27,9 @@ owner exports its faults, decisions and readings into the project's store,
 or, when the git root's lore.toml names real areas, into the repository
 through lore add (its checks and commit; AREA is one the repository names):
   hgs team lore export --team ID [--area AREA]
+A task that writes lore records names its area in its output, "lore:AREA":
+two open tasks with one area never run at once (the plan chains them), and
+the member is told which area is its own.
 Tasks live in Zerus (hgs task, the team's plan): never write lore plans by
 hand; lore keeps knowledge only: fault, decision, reading, topic, recipe.
 

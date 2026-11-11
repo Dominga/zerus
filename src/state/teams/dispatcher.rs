@@ -3276,6 +3276,16 @@ fn hand_off_text_rules(
             top.display()
         );
     }
+    // RogueDOD (2026-11-11): the lore areas this task holds as its output.
+    let areas = task.lore_areas();
+    if !areas.is_empty() {
+        text += &format!(
+            "\nYour lore records go only into the area{} {}: this task holds {}, and no other open task writes there now.\n",
+            if areas.len() == 1 { "" } else { "s" },
+            areas.join(", "),
+            if areas.len() == 1 { "it" } else { "them" }
+        );
+    }
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \

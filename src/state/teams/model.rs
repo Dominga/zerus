@@ -2861,6 +2861,9 @@ fn role_family(role: &str) -> String {
     role.split(|c: char| !c.is_alphanumeric()).find(|part| !part.is_empty()).unwrap_or_default().to_lowercase()
 }
 
+/// The output prefix of a lore area (`lore:AREA`).
+pub(crate) const LORE_OUTPUT: &str = "lore:";
+
 impl Task {
     pub(crate) fn requests_fresh_retry(&self) -> bool {
         self.fresh_retry && self.failed_by(&self.assignee)
@@ -2888,6 +2891,10 @@ impl Task {
     /// it would hold every task touching that area while it is open. Plan
     /// validation warns and asks for the files or module paths instead.
     pub(crate) fn broad_output(path: &str) -> bool {
+        // RogueDOD (2026-11-11): a lore area is one exact resource, never broad.
+        if Self::lore_area(path).is_some() {
+            return false;
+        }
         let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
         match parts.as_slice() {
             // `.` covers the whole repository: the broadest area there is.
@@ -2902,6 +2909,16 @@ impl Task {
     /// root file such as `Makefile` is excused in `broad_output`.
     fn folder_like(component: &str) -> bool {
         !component.rsplit_once('.').is_some_and(|(name, ext)| !name.is_empty() && !ext.is_empty())
+    }
+    /// RogueDOD (2026-11-11): `lore:AREA` names the lore area a task writes
+    /// records into. Two open tasks with the same area are held apart like two
+    /// that write one file, so parallel members never fill one area at once.
+    pub(crate) fn lore_area(path: &str) -> Option<&str> {
+        path.strip_prefix(LORE_OUTPUT)
+    }
+    /// The lore areas among the task's outputs.
+    pub(crate) fn lore_areas(&self) -> Vec<&str> {
+        self.output.iter().filter_map(|path| Self::lore_area(path)).collect()
     }
     /// The task's outputs that are files or module paths: the ones that hold.
     pub(crate) fn narrow_outputs(&self) -> impl Iterator<Item = &str> + '_ {

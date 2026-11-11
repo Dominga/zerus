@@ -171,3 +171,15 @@ fn a_stored_lead_changes_history_is_read_on_demand_by_a_revert() {
     let error = call(&mut store, "revert-lead-change", json!({"change":"lc3"}), Actor::Human).unwrap_err().to_string();
     assert!(error.contains("history could not be read"), "{error}");
 }
+
+/// RogueDOD (2026-11-11): a task's output may name a lore area, `lore:AREA`;
+/// any other colon is still refused as a path outside the repository.
+#[test]
+fn a_task_output_may_name_a_lore_area() {
+    let mut paths = vec![" lore: docs ".to_owned(), "lore:docs".to_owned(), r"Docs\a.md".to_owned()];
+    clean_output(&mut paths).unwrap();
+    assert_eq!(paths, ["lore:docs", "Docs/a.md"]);
+    for bad in ["lore:", "lore:a.b", "lore:x/y", "C:/x", "a:b"] {
+        assert!(clean_output(&mut vec![bad.to_owned()]).is_err(), "{bad}");
+    }
+}

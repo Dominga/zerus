@@ -307,6 +307,8 @@ A project may keep its records in its own repository instead (the owner of Rogue
 - The session start's digest and the pre-edit hook (section 6.2) come from the repository, each not at all when its own `.claude/settings.json`, `.claude/settings.local.json` or `.codex/hooks.json` already runs it.
 - `LORE_ROOTS` is not needed: lore checks refs in the repository that holds the store.
 
+- A task's `output` may name a lore area, `lore:AREA` (an area id: letters, digits, `-`, `_`). It is an exact resource like a file (task 155): two open tasks with the same area are never handed out at once, plan validation asks to chain them, and the member's hand-out names the area as its own. Lore's write lock keeps parallel writes from losing records; the area output keeps two members from filling one area with near-duplicates.
+
 A team's own workspace stays under Zerus data in this mode; the export is how its knowledge reaches the repository.
 
 ### 3.4 The home-computer model (the default, `sync = false`)

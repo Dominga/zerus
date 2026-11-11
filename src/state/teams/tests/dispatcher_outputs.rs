@@ -394,3 +394,20 @@ fn a_cherry_picked_predecessor_on_the_line_is_not_merged_again() {
         assert!(dev.join("w1.txt").exists(), "the line brought the change");
     });
 }
+
+/// RogueDOD (2026-11-11): `lore:AREA` is the lore area a task writes into. It
+/// is an exact resource (never folder-level), so two open tasks with one area
+/// are held apart and the plan asks to chain them; other areas run alongside.
+#[test]
+fn a_lore_area_output_holds_like_a_file() {
+    assert!(!Task::broad_output("lore:docs"));
+    assert_eq!(Task::lore_area("lore:docs"), Some("docs"));
+    assert_eq!(Task::lore_area("docs/lore.md"), None);
+    let mut team = team();
+    outputs(&mut team, 1, &["lore:docs"]);
+    outputs(&mut team, 2, &["lore:docs"]);
+    outputs(&mut team, 3, &["lore:game"]);
+    let found = overlap_errors(&team);
+    assert_eq!(found.iter().map(|finding| finding.tasks.clone()).collect::<Vec<_>>(), vec![vec![1, 2]], "{found:?}");
+    assert_eq!(team.task(3).unwrap().lore_areas(), ["game"]);
+}

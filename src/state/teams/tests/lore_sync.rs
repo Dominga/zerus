@@ -402,3 +402,32 @@ fn a_landed_task_gives_lore_its_commit() {
     assert_eq!(by_id(&records)["t33fbafeb-phase-1#6"]["commits"], json!(["beef456"]));
     assert!(!pending.iter().any(|item| item.id == "t33fbafeb-phase-1#6"), "{pending:?}");
 }
+
+/// RogueDOD (2026-11-11): a project that keeps its records in its repository
+/// gets the team's export there, never under Zerus data, and Zerus never edits
+/// the repository's lore.toml: the area must be one it names.
+#[test]
+fn an_export_into_a_repository_store_needs_an_area_the_repository_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("game");
+    std::fs::create_dir_all(repo.join("Sub")).unwrap();
+    let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success(), "{args:?}");
+    git(&["init", "-q", "-b", "develop"]);
+    let config = "version = 1\nareas = [\"game\", \"docs\"]\n\n[commit]\nmode = \"shared-tree\"\nbranch = \"develop\"\n";
+    std::fs::write(repo.join("lore.toml"), config).unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("lore")).unwrap();
+    std::fs::write(workspace.join("lore").join("faults.jsonl"), "{\"id\":\"t33fbafeb-finding-f1\",\"kind\":\"fault\",\"area\":\"team-33fbafeb\"}\n").unwrap();
+    let mut team = team(&workspace);
+    team.folder = repo.join("Sub").display().to_string();
+    let found = repo_of(&team).expect("the team folder's git root keeps the records");
+    assert!(found.join("lore.toml").is_file());
+    let refused = export(&team, None).unwrap_err().to_string();
+    assert!(refused.contains("has no area team-33fbafeb") && refused.contains("--area AREA") && refused.contains("game, docs"), "{refused}");
+    assert_eq!(std::fs::read_to_string(repo.join("lore.toml")).unwrap(), config, "the repository's lore.toml is never edited");
+    // A repository hit is marked as the repository's.
+    let mut value = json!({"results":[{"store":"."},{"store":"teams/x"}]});
+    label_hits(&mut value, "repository", &team);
+    assert_eq!(value["results"][0]["store"], "repository");
+    assert_eq!(value["results"][1]["store"], "repository teams/x");
+}

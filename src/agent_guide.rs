@@ -54,7 +54,35 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         _ => return Err(Error::new(1, USAGE)),
     };
     print!("{text}");
+    if matches!(args, [topic] if topic == "code" || topic == "team-lore") {
+        if let Some(line) = std::env::current_dir().ok().and_then(|folder| memory_line(&folder)) {
+            println!("
+{line}");
+        }
+    }
     Ok(0)
+}
+
+/// RogueDOD (2026-11-11): what the git root's lore.toml of `folder` says about
+/// where the project's records live, so the page never contradicts it.
+fn memory_line(folder: &std::path::Path) -> Option<String> {
+    use crate::state::project_memory::{areas_of, repo_store};
+    if let Some(top) = repo_store(folder) {
+        let text = std::fs::read_to_string(top.join("lore.toml")).unwrap_or_default();
+        let areas = areas_of(&text).unwrap_or_default();
+        return Some(format!(
+            "Your folder: the records live in this repository ({}, areas {}): lore -C {} find, for, show and add.",
+            top.join("lore.toml").display(),
+            areas.join(", "),
+            top.display()
+        ));
+    }
+    let top = std::process::Command::new("git").arg("-C").arg(folder).args(["rev-parse", "--show-toplevel"]).output().ok().filter(|output| output.status.success())?;
+    let top = std::path::PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
+    let text = std::fs::read_to_string(top.join("lore.toml")).ok()?;
+    areas_of(&text)?.iter().any(|area| area == crate::state::project_memory::PLACEHOLDER_AREA).then(|| {
+        "Your folder: its lore.toml keeps no records (use-the-project-store); they live in the project's store under Zerus data.".to_owned()
+    })
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   - A file is read again only when its size or mtime moved and its hash differs; a file that is gone is dropped, and another version rebuilds it.
   - When the cache cannot be written, the index goes to the repository's git directory (`.git/codelore`) and the command says so.
 - **Search:** hybrid, fused by RRF (k = 60, depth 50).
-  - The lists are BM25 words, BM25 terms and vectors. The vectors come from the built-in model (`nomic-embed-text` v1.5, run in the process on the CPU with candle; no Ollama and no ONNX runtime). They are optional: without the model, or with `embed.provider = "none"` or `--text-only`, the search runs on the first two lists and says so.
+  - The lists are BM25 words, BM25 terms and vectors. The vectors come from the built-in model, run in the process (no Ollama). A store Zerus makes names `model = "auto"`: bge-m3 with a GPU, multilingual-e5-base on the CPU, both multilingual (Russian included); the English-only `nomic-embed-text` remains selectable by name. They are optional: without the model, or with `embed.provider = "none"` or `--text-only`, the search runs on the first two lists and says so.
   - The weights (about 550 MB) are not in the binary and never fetched by a search: `lore model fetch` downloads them from Hugging Face at a pinned revision into the user cache (or an offline install gives `LORE_MODEL_DIR`), each file checked by size and SHA-256.
   - Records are embedded with the model's `search_document: ` prefix and queries with `search_query: `.
   - Phrase and signal bonuses apply.
@@ -298,6 +298,17 @@ A store may hold code facts and decisions from private repositories, so it is a 
 - A move that fails at any step leaves the old store in use and the copy in place, marked incomplete, and says which step failed. Nothing is lost.
 - **Moving to another computer** (changing `home`) is the same copy over `hgs @alias`, with the same checks. In a synced project (section 3.5) the `home` computer is the canonical exporter, not the only holder of the store: moving it copies the canonical history to the new home, and the project's replicas keep the records they already have.
 
+### 3.3a A store in the project's repository (2026-11-11)
+
+A project may keep its records in its own repository instead (the owner of RogueDOD chose this): the git root holds `lore.toml` with real areas, `lore/` is tracked, and `[commit] mode = "shared-tree"` commits into the working branch. CodeLore's root is always the git root (refs and the Atlas count from it; a `lore.toml` in a subfolder is not supported), so Zerus looks up from the project's folder, a team folder or a member's folder to the top of its working tree. That `lore.toml` is the repository store when it names an area other than the placeholder `use-the-project-store` and the tree is not a private store Zerus made. Then:
+- `hgs team lore find|show|plans` read it, beside a team's own workspace, and outside any running team from the caller's folder; each hit is marked `repository`.
+- `hgs team lore export --team ID [--area AREA]` writes the team's faults, decisions and readings there through `lore add` (lore's schema checks, duplicates, refs on HEAD, its commit mode and trailers). Zerus never edits the repository's `lore.toml`: the area is `--area`, or the team's area when the repository names it.
+- `hgs guide code` and `hgs guide team-lore` end with what the caller's `lore.toml` says, and a hand-out names `lore -C <git root>`.
+- The session start's digest and the pre-edit hook (section 6.2) come from the repository, each not at all when its own `.claude/settings.json`, `.claude/settings.local.json` or `.codex/hooks.json` already runs it.
+- `LORE_ROOTS` is not needed: lore checks refs in the repository that holds the store.
+
+A team's own workspace stays under Zerus data in this mode; the export is how its knowledge reaches the repository.
+
 ### 3.4 The home-computer model (the default, `sync = false`)
 
 This is answer 7's default: a store on one home computer, and writes wait for it.
@@ -460,6 +471,8 @@ All reads are bounded, and none blocks a hand-out: a slow or unreachable store a
 - **Guide:** `hgs guide lore` is RustCodeLore's `guide.md` with Zerus's addressing (`--project`, `--team`). The lead's brief and every hand-out name it in one line.
 - **Hand-out block "Project memory"** in `hand_off_text_rules`, after the rules block, when the mode has a store. It holds the top 5 of `lore for <the task's files>` and `lore find <the task's title>`, as titles and ids, at most 1.5 KiB — from the workspace in `team`, from both in `project`. The member runs `hgs lore show <id>` for more.
 - **Inbox digest:** records written since the lead's last inbox message, at most 10 lines, as one inbox item.
+- **Project memory at every start** (2026-11-11): the SessionStart hook's `additionalContext` of every own session start (`startup`, `clear`, `compact`, team or not) ends with `lore -C <store> digest` (faults and decisions in force, titles only, at most 2000 bytes), in the room the iron rules, the hint and a team's recall leave. The store is the repository's (section 3.3a), else the project's Zerus store when its memory is on. A missing or slow lore (2 seconds) adds nothing.
+- **Before an edit** (CodeLore 92a1c04): a Claude session's PreToolUse on Edit, Write, MultiEdit or NotebookEdit passes the event to `lore -C <store> hook pre-edit`, which names the records in force about that file, once per file and session, as the hook's `additionalContext` (at most 1.5 KB). The store is chosen once at the session's start (the same rule as the digest) and kept in its record; lore runs after the state lock is released, 2 seconds at most. Zerus calls both hooks itself, so it sets no `LORE_STORE` and a committed settings file names no machine's path; a repository whose own hooks already run `lore hook pre-edit` or `lore hook session-start`/`lore digest` gets neither from Zerus.
 - **Recall after compaction:** the SessionStart hook's `additionalContext` for a team session, sources `compact` and `clear`:
   - with a store (`team`, `project`, `read-only`), up to 2 KiB of the workspace's live plan state and the newest decisions and faults (plus the project's newest in `project`/`read-only`);
   - with `plain`, the team digest;

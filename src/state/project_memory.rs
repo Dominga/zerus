@@ -183,10 +183,11 @@ pub(crate) fn status(store: &Path) -> anyhow::Result<Status> {
     Ok(status)
 }
 
-/// `lore init`'s lore.toml (CodeLore's config::template) with no areas.
+/// `lore init`'s lore.toml (CodeLore's config::template) with no areas: the
+/// built-in multilingual embedder (`auto`), so Russian reads as well as English.
 fn lore_toml(mode: &str) -> String {
     format!(
-        "version = 1\ndir = \"lore\"\nareas = []\n\n[commit]\nmode = \"{mode}\"          # \"none\" | \"plain\" | \"shared-tree\"\nbranch = \"main\"\npush = false\n\n[embed]\nprovider = \"ollama\"     # \"ollama\" | \"none\"\nurl = \"http://127.0.0.1:11434\"\nmodel = \"nomic-embed-text\"\n"
+        "version = 1\ndir = \"lore\"\nareas = []\n\n[commit]\nmode = \"{mode}\"          # \"none\" | \"plain\" | \"shared-tree\"\nbranch = \"main\"\npush = false\n\n[embed]\nprovider = \"builtin\"    # \"builtin\" | \"none\"\nmodel = \"auto\"          # bge-m3 with a GPU, multilingual-e5-base on the CPU: both read Russian; or name one\n"
     )
 }
 
@@ -244,6 +245,34 @@ fn working_tree(folder: &Path) -> Option<PathBuf> {
 /// Whether `top` is a repository Zerus made for a store (its marker).
 fn is_private(top: &Path) -> bool {
     git(top, &["rev-parse", "--git-dir"]).is_ok_and(|dir| top.join(dir).join(STORE_MARKER).is_file())
+}
+
+/// The one area a checkout's lore.toml names when it holds no records of its
+/// own (this repository's: its records live in the Zerus project store).
+pub(crate) const PLACEHOLDER_AREA: &str = "use-the-project-store";
+
+/// The areas a lore.toml names; None when it does not parse.
+pub(crate) fn areas_of(text: &str) -> Option<Vec<String>> {
+    let document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    Some(document.get("areas").and_then(|item| item.as_array()).into_iter().flatten().filter_map(|value| value.as_str().map(str::to_owned)).collect())
+}
+
+/// RogueDOD (2026-11-11): a project whose records live in its own repository.
+/// CodeLore's root is the git root's lore.toml (refs and the Atlas count from
+/// the git root; a lore.toml in a subfolder is not supported), so a project
+/// registered on a subfolder looks up to the top of its working tree. That
+/// lore.toml is the project's store when it names a real area (not only the
+/// placeholder) and the tree is not a private store Zerus made.
+pub(crate) fn repo_store(folder: &Path) -> Option<PathBuf> {
+    let top = working_tree(folder)?;
+    let text = fs::read_to_string(top.join("lore.toml")).ok()?;
+    let areas = areas_of(&text)?;
+    (areas.iter().any(|area| area != PLACEHOLDER_AREA) && !is_private(&top)).then_some(top)
+}
+
+/// The repository store of the first folder that has one.
+pub(crate) fn repo_store_of<'a>(folders: impl IntoIterator<Item = &'a str>) -> Option<PathBuf> {
+    folders.into_iter().filter(|folder| !folder.is_empty()).find_map(|folder| repo_store(Path::new(folder)))
 }
 
 /// Sets `commit.mode` in every lore.toml of the store (its own and its team
@@ -657,6 +686,102 @@ fn lore_find(store: &Path, query: &str, limit: usize) -> anyhow::Result<(Value, 
         .or_else(|| notes.first().cloned())
         .unwrap_or_else(|| "lore refused the search".into());
     bail!("{reason}")
+}
+
+/// How long a session start or an edit waits for lore.
+const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What a repository's own agent hooks already run, so Zerus does not repeat
+/// it (RogueDOD, 2026-11-11): the session-start digest and the pre-edit hook.
+pub(crate) const START_HOOKS: [&str; 2] = ["lore digest", "lore hook session-start"];
+pub(crate) const EDIT_HOOKS: [&str; 1] = ["lore hook pre-edit"];
+
+/// Whether the repository's own hooks (`.claude/settings.json`,
+/// `.claude/settings.local.json`, `.codex/hooks.json`) run one of `commands`.
+pub(crate) fn repo_has_hook(top: &Path, commands: &[&str]) -> bool {
+    [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json"]
+        .iter()
+        .any(|file| fs::read_to_string(top.join(file)).is_ok_and(|text| commands.iter().any(|command| text.contains(command))))
+}
+
+/// `lore -C STORE ARGS` with `stdin`: its trimmed output, None when lore is
+/// missing, refuses, prints nothing or takes longer than `HOOK_TIMEOUT` (a
+/// session start or an edit never waits on it).
+fn run_hook_lore(store: &Path, args: &[&str], stdin: &[u8], limit: u64) -> Option<String> {
+    use std::io::{Read, Write};
+    let bin = crate::state::teams::lore_sync::lore_bin()?;
+    let mut command = std::process::Command::new(bin);
+    command.arg("-C").arg(store).args(args);
+    command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "LORE_STORE"] {
+        command.env_remove(name);
+    }
+    let mut child = command.spawn().ok()?;
+    if let Some(mut input) = child.stdin.take() {
+        let _ = input.write_all(stdin);
+    }
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = (&mut stdout).take(limit).read_to_string(&mut text);
+        text
+    });
+    let deadline = std::time::Instant::now() + HOOK_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let text = reader.join().ok()?;
+    let text = text.trim();
+    (status.success() && !text.is_empty()).then(|| text.to_owned())
+}
+
+/// `lore -C STORE digest --bytes N`: the titles of the pinned records, then
+/// the faults and decisions in force, newest first.
+pub(crate) fn digest_text(store: &Path, bytes: usize) -> Option<String> {
+    run_hook_lore(store, &["digest", "--bytes", &bytes.to_string()], b"", bytes as u64 + 1024)
+}
+
+/// The store a session's hooks read (docs/lore.md 6.2, RogueDOD 2026-11-11):
+/// the repository's (its git root's lore.toml with real areas), unless that
+/// repository's own hooks run one of `own`, else the project's Zerus store
+/// when its memory is on.
+pub(crate) fn session_store(folder: &Path, project: &str, own: &[&str]) -> Option<PathBuf> {
+    let store = match (!folder.as_os_str().is_empty()).then(|| repo_store(folder)).flatten() {
+        Some(top) if repo_has_hook(&top, own) => return None,
+        Some(top) => top,
+        None => {
+            let entry = (!project.is_empty()).then(|| entry(project).ok()).flatten().filter(|entry| entry.enabled)?;
+            entry.store_path(project)
+        }
+    };
+    store.join("lore.toml").is_file().then_some(store)
+}
+
+/// The project memory a session starts with: `lore digest` of its store.
+pub(crate) fn session_digest(folder: &Path, project: &str, bytes: usize) -> Option<String> {
+    let store = session_store(folder, project, &START_HOOKS)?;
+    let text = digest_text(&store, bytes)?;
+    Some(format!("Project memory (lore -C {} digest; lore show ID for one record, lore find WORDS to search):\n{text}", store.display()))
+}
+
+/// The tools whose file `lore hook pre-edit` speaks about.
+pub(crate) const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// `lore -C STORE hook pre-edit` with the PreToolUse event: what lore knows in
+/// force about the file about to change, once per file and session (lore keeps
+/// that), as the added context; None when it has nothing to say.
+pub(crate) fn pre_edit_context(store: &Path, event: &Value) -> Option<String> {
+    let text = run_hook_lore(store, &["hook", "pre-edit"], event.to_string().as_bytes(), 8 * 1024)?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value["hookSpecificOutput"]["additionalContext"].as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned)
 }
 
 /// `hgs project config get|set|move|find --json` (JSON stdin).

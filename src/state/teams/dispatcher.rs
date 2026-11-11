@@ -3268,6 +3268,14 @@ fn hand_off_text_rules(
         text += "\nSearch the code and the docs with lore atlas search \"what it does\" in your folder, and the team's \
                  memory with hgs team lore find, before opening files by guesswork (hgs guide code).\n";
     }
+    // RogueDOD (2026-11-11): the project's records live in its repository.
+    if let Some(top) = super::super::project_memory::repo_store(std::path::Path::new(&folder)) {
+        text += &format!(
+            "\nThe project's memory lives in its repository: lore -C {} find \"words\" and lore for FILE before you edit, \
+             lore add for what you learned (hgs guide code).\n",
+            top.display()
+        );
+    }
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \

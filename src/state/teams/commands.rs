@@ -4160,7 +4160,6 @@ fn lore_team(input: &Value) -> anyhow::Result<Team> {
 /// Task 128: `hgs team lore find|plans|show`: lore's answer from the team's
 /// workspace (and the project's store in project and read-only modes).
 fn lore_read(op: &str, input: &Value) -> anyhow::Result<Value> {
-    let team = lore_team(input)?;
     let (command, words): (&str, Vec<String>) = match op {
         "lore-find" => {
             let query = text(input, "query").trim().to_owned();
@@ -4177,6 +4176,19 @@ fn lore_read(op: &str, input: &Value) -> anyhow::Result<Value> {
             ensure!(!id.is_empty(), "Name the record: hgs team lore show <id>");
             ("show", vec![id])
         }
+    };
+    // RogueDOD (2026-11-11): outside a running team, the checkout's own
+    // repository store answers (its git root's lore.toml with real areas).
+    let team = match lore_team(input) {
+        Ok(team) => team,
+        Err(error) if text(input, "team").is_empty() => {
+            let repo = std::env::current_dir().ok().and_then(|folder| super::super::project_memory::repo_store(&folder));
+            let Some(repo) = repo else {
+                return Err(error.context("or run it in a checkout whose git root's lore.toml keeps the project's records"));
+            };
+            return super::lore_sync::read_repo(&repo, command, &words);
+        }
+        Err(error) => return Err(error),
     };
     // Plain memory has no store: its recall is the team digest.
     if command == "plans" && super::lore_sync::workspace(&team).is_none() {
@@ -6392,7 +6404,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let team = store.load(text(input, "team"))?.context("Unknown team")?;
             let caller = actor(&team, "settings", input)?;
             ensure!(matches!(caller, Actor::Human), "Only you export a team's memory into the project");
-            super::lore_sync::export(&team)
+            let area = text(input, "area");
+            super::lore_sync::export(&team, (!area.is_empty()).then_some(area))
         }
         "pulses" => {
             let store = Store::open(false)?;
@@ -6973,11 +6986,17 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     // Task 128: `hgs team lore find <words> | plans | show <id> | export [--team ID]`.
     if args.first().map(String::as_str) == Some("lore") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
         let mut team = String::new();
+        let mut area = String::new();
         let mut words: Vec<String> = Vec::new();
         let mut index = 2;
         while index < args.len() {
             if args[index] == "--team" {
                 team = args.get(index + 1).cloned().unwrap_or_default();
+                index += 2;
+                continue;
+            }
+            if args[index] == "--area" && args.get(1).map(String::as_str) == Some("export") {
+                area = args.get(index + 1).cloned().unwrap_or_default();
                 index += 2;
                 continue;
             }
@@ -6988,8 +7007,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
             Some("find") => ("lore-find", json!({"team":team,"query":words.join(" ")})),
             Some("plans") => ("lore-plans", json!({"team":team})),
             Some("show") => ("lore-show", json!({"team":team,"id":words.first().cloned().unwrap_or_default()})),
-            Some("export") => ("lore-export", json!({"team":team})),
-            _ => return Err("usage: hgs team lore find <words> | plans | show <id> | export [--team ID]".into()),
+            Some("export") => ("lore-export", json!({"team":team,"area":area})),
+            _ => return Err("usage: hgs team lore find <words> | plans | show <id> [--team ID] | export --team ID [--area AREA]".into()),
         };
         let result = run(op, &input, false).map_err(|e| e.to_string())?;
         println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());

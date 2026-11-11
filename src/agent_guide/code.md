@@ -16,13 +16,15 @@ not the whole file.
 Run them in your own folder (or with -C FOLDER). Search before you open files by
 guesswork; use grep only for an exact string the map did not find.
 
-The project's memory is not in the checkout. Its records (the documentation sliced
-into topics and decisions, faults, readings) live in the project's store under Zerus
-data. Search it with:
-  hgs team lore find WORDS [--team ID]       the team's workspace and the project store
-Each record cites its source as refs.links zerus:PATH#HEADING@COMMIT: open that file
-at that commit to check it.
-
-The checkout's lore.toml has one area, use-the-project-store: a lore add there is
-refused on purpose. Records go to the project store through Zerus, never into the
-repository.
+Where the project's memory lives depends on the git root's lore.toml (this page
+ends with what it says for your folder):
+- one area, use-the-project-store: the records (the documentation sliced into
+  topics and decisions, faults, readings) live in the project's store under Zerus
+  data, never in the repository; a lore add in the checkout is refused on purpose.
+  Search it with hgs team lore find WORDS [--team ID]. Each record cites its source
+  as refs.links zerus:PATH#HEADING@COMMIT: open that file at that commit to check it.
+- real areas: the records live in the repository, committed by lore itself. Use
+  lore -C GIT_ROOT find, for, show and add there (hgs team lore find reads them
+  too, also outside a team).
+Tasks live in Zerus (hgs task, the team's plan): never write lore plans by hand;
+lore keeps knowledge only: fault, decision, reading, topic, recipe.

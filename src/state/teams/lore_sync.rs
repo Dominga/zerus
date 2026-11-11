@@ -956,8 +956,38 @@ pub(crate) fn store_label(root: &str, relative: &str, team: &Team) -> String {
     relative.to_owned()
 }
 
+/// The repository store of the team's project (RogueDOD, 2026-11-11): the
+/// git root's lore.toml of the team folder or a member's own folder, when it
+/// names real areas. Its records live in the repository, not under Zerus data.
+pub(crate) fn repo_of(team: &Team) -> Option<PathBuf> {
+    let local = team.members.iter().filter(|member| member.computer.is_empty()).map(|member| member.directory.as_str());
+    super::super::project_memory::repo_store_of(std::iter::once(team.folder.as_str()).chain(local).take(20))
+}
+
+/// `hgs team lore find|plans|show` against a repository store alone: lore's
+/// own answer, marked `repository`; no running team is needed (RogueDOD).
+pub(crate) fn read_repo(store: &Path, command: &str, words: &[String]) -> anyhow::Result<Value> {
+    let bin = lore_bin().ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
+    let args = read_args(command, words);
+    let mut value = run_lore(&bin, store, &args, "", &[store.to_path_buf()], None).map_err(|error| anyhow::anyhow!("{error}"))?;
+    if command == "find" {
+        mark_hits(&mut value, "repository");
+    }
+    Ok(json!({"repository": store.display().to_string(), "command": command, "stores": {"repository": value}, "notes": []}))
+}
+
+fn mark_hits(value: &mut Value, label: &str) {
+    for hit in value["results"].as_array_mut().into_iter().flatten() {
+        let relative = hit["store"].as_str().unwrap_or(".").trim().trim_start_matches("./").to_owned();
+        hit["store"] = Value::String(if relative.is_empty() || relative == "." { label.to_owned() } else { format!("{label} {relative}") });
+    }
+}
+
 /// Names the store of every hit of `find --stores all` in one run.
 fn label_hits(value: &mut Value, root: &str, team: &Team) {
+    if root == "repository" {
+        return mark_hits(value, root);
+    }
     let Some(results) = value["results"].as_array_mut() else { return };
     for hit in results {
         let relative = hit["store"].as_str().unwrap_or(".").to_owned();
@@ -983,13 +1013,23 @@ pub(crate) fn read_args<'a>(command: &'a str, words: &'a [String]) -> Vec<&'a st
 /// whole project, the team's own sub-store included, so its hits are not
 /// returned twice.
 pub(crate) fn read(team: &Team, command: &str, words: &[String]) -> anyhow::Result<Value> {
-    let (workspace, _) = workspace(team).ok_or_else(|| anyhow::anyhow!("This team keeps plain memory: it has no lore workspace (memory mode {})",
-        team.settings.memory.as_ref().map_or("plain", |memory| memory.mode.as_str())))?;
+    // RogueDOD: the project's records in its repository are read beside the
+    // team's own; a team without a workspace reads the repository alone.
+    let repo = if command == "items" { None } else { repo_of(team) };
+    let Some((workspace, _)) = workspace(team) else {
+        if let Some(repo) = repo {
+            let mut value = read_repo(&repo, command, words)?;
+            value["team"] = json!(team.id);
+            return Ok(value);
+        }
+        anyhow::bail!("This team keeps plain memory: it has no lore workspace (memory mode {})",
+            team.settings.memory.as_ref().map_or("plain", |memory| memory.mode.as_str()));
+    };
     let bin = lore_bin().ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
     let memory = team.settings.memory.clone().unwrap_or_default();
     let find = command == "find";
     let project = matches!(memory.mode.as_str(), "project" | "read-only").then(|| PathBuf::from(&memory.store)).filter(|store| !memory.store.is_empty() && store != &workspace);
-    let stores: Vec<(&str, PathBuf)> = match (find, project.clone()) {
+    let mut stores: Vec<(&str, PathBuf)> = match (find, project.clone()) {
         // The project root's search answers for the whole project, its teams included.
         (true, Some(project)) => vec![("project", project)],
         (_, project) => {
@@ -1000,6 +1040,9 @@ pub(crate) fn read(team: &Team, command: &str, words: &[String]) -> anyhow::Resu
             stores
         }
     };
+    if let Some(repo) = repo.filter(|repo| !stores.iter().any(|(_, store)| store == repo)) {
+        stores.push(("repository", repo));
+    }
     let args = read_args(command, words);
     let roots = roots(team, &workspace);
     let mut answers = Map::new();
@@ -1034,14 +1077,37 @@ fn start_index(bin: &Path, store: &Path) {
 
 /// Task 128 (docs/lore.md 4.5): the owner's export of a team's knowledge
 /// records into the project store's team area, idempotent by id.
-pub(crate) fn export(team: &Team) -> anyhow::Result<Value> {
+///
+/// RogueDOD (2026-11-11): when the project keeps its records in its
+/// repository (`repo_of`), the export goes there instead, through lore itself:
+/// its schema checks, duplicates, refs on HEAD and its own commit mode (a
+/// `shared-tree` commit into the working branch, the lore.toml trailers).
+/// Zerus never edits a repository's lore.toml: the area is one it names
+/// (`--area`, or the team's area when the repository declares it).
+pub(crate) fn export(team: &Team, chosen_area: Option<&str>) -> anyhow::Result<Value> {
     let (workspace, _) = workspace(team).ok_or_else(|| anyhow::anyhow!("This team has no lore workspace to export"))?;
-    ensure_project(team)?;
-    let project = super::super::project_memory::entry(&team.project_id)?;
-    let store = project.store_path(&team.project_id);
-    let bin = lore_bin().ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
+    let repo = repo_of(team);
+    let store = match &repo {
+        Some(repo) => repo.clone(),
+        None => {
+            ensure_project(team)?;
+            super::super::project_memory::entry(&team.project_id)?.store_path(&team.project_id)
+        }
+    };
     let there = current(&store);
-    let area = area(team);
+    let area = chosen_area.map(str::trim).filter(|area| !area.is_empty()).map(str::to_owned).unwrap_or_else(|| area(team));
+    if repo.is_some() {
+        let text = std::fs::read_to_string(store.join("lore.toml")).unwrap_or_default();
+        let areas = super::super::project_memory::areas_of(&text).unwrap_or_default();
+        anyhow::ensure!(
+            areas.contains(&area),
+            "{} has no area {area}: export with --area AREA (one of {}), or add {area} to its areas and commit lore.toml",
+            store.join("lore.toml").display(),
+            areas.join(", ")
+        );
+    } else {
+        anyhow::ensure!(chosen_area.is_none_or(|chosen| chosen.trim().is_empty() || chosen.trim() == area), "--area is for a repository store; the project store keeps each team in its own area");
+    }
     let records: Vec<Value> = current(&workspace)
         .into_values()
         .filter(|record| super::super::project_memory::KNOWLEDGE_KINDS.contains(&record["kind"].as_str().unwrap_or_default()))
@@ -1059,12 +1125,16 @@ pub(crate) fn export(team: &Team) -> anyhow::Result<Value> {
     if records.is_empty() {
         return Ok(json!({"status":"nothing new","exported":0}));
     }
-    ensure_area(&store, &area).map_err(|error| anyhow::anyhow!(error))?;
+    let bin = lore_bin().ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
+    if repo.is_none() {
+        ensure_area(&store, &area).map_err(|error| anyhow::anyhow!(error))?;
+    }
     let roots = roots(team, &store);
     let subject = format!("Zerus-Team: {}", team.id);
     let answer = run_lore(&bin, &store, &["add", "any", "--stdin", "--new"], &Value::Array(records.clone()).to_string(), &roots, Some(&subject))
         .map_err(|error| anyhow::anyhow!("The export was refused, nothing was written: {error}"))?;
-    Ok(json!({"status":"exported","exported":records.len(),"area":area,"commit":answer["commit"]}))
+    Ok(json!({"status":"exported","exported":records.len(),"area":area,"store":if repo.is_some() { "repository" } else { "project" },
+        "path":store.display().to_string(),"commit":answer["commit"]}))
 }
 
 fn ensure_project(team: &Team) -> anyhow::Result<()> {

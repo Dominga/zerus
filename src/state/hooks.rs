@@ -1300,6 +1300,83 @@ fn with_team_recall(hint: Option<String>, tasks: Option<&Value>, record: &Value,
     })
 }
 
+/// docs/lore.md 6.2 (RogueDOD, 2026-11-11): every own session start (startup,
+/// clear, compact; team or not) gets the titles of the project's faults and
+/// decisions in force from `lore digest`, at most 2000 bytes and only in the
+/// room the start context has left, so the iron rules, the hint and a team's
+/// recall come first. The store is the repository's (its git root's lore.toml
+/// with real areas) unless its own hooks give the digest, else the project's
+/// Zerus store when its memory is on. A slow or missing lore adds nothing.
+fn with_lore_digest(hint: Option<String>, tasks: Option<&Value>, record: &Value, event: &Value, project: &str) -> Option<String> {
+    if string(event, "hook_event_name") != "SessionStart"
+        || !string(event, "agent_id").is_empty()
+        || !matches!(string(event, "source"), "startup" | "clear" | "compact")
+    {
+        return hint;
+    }
+    let used = hint.as_deref().map_or(0, |text| text.encode_utf16().count())
+        + tasks
+            .and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str())
+            .map_or(0, |text| text.encode_utf16().count())
+        + 4;
+    // UTF-8 bytes are never fewer than UTF-16 units: a digest of N bytes fits N units.
+    let room = super::iron_rules::MAX_START_CONTEXT.saturating_sub(used).min(2000 + 200);
+    if room < 600 {
+        return hint;
+    }
+    let project = lore_project(record, project);
+    let Some(digest) = super::project_memory::session_digest(Path::new(string(record, "launch_dir")), &project, room - 200) else { return hint };
+    Some(match hint {
+        Some(hint) if !hint.is_empty() => format!("{hint}
+
+{digest}"),
+        _ => digest,
+    })
+}
+
+/// The project a session's lore hooks read: the iron rules' project, else
+/// its team's.
+fn lore_project(record: &Value, project: &str) -> String {
+    if !project.is_empty() {
+        return project.to_owned();
+    }
+    let team = || -> Option<String> {
+        if !teams::store::path().exists() {
+            return None;
+        }
+        let (team, _) = teams::store::Store::open(false).ok()?.rules_member(record).ok()??;
+        Some(team.project_id)
+    };
+    team().unwrap_or_default()
+}
+
+/// CodeLore 92a1c04 (2026-11-11): the store `lore hook pre-edit` reads for a
+/// Claude session, chosen once at its own start and kept in its record, so an
+/// edit costs no project lookup; none when the repository's own hooks run it.
+fn remember_edit_store(record: &mut Value, project: &str) {
+    let project = lore_project(record, project);
+    let store = super::project_memory::session_store(Path::new(string(record, "launch_dir")), &project, &super::project_memory::EDIT_HOOKS);
+    match store {
+        Some(store) => record["lore_edit_store"] = json!(store.display().to_string()),
+        None => {
+            if let Some(map) = record.as_object_mut() {
+                map.remove("lore_edit_store");
+            }
+        }
+    }
+}
+
+/// The store whose `lore hook pre-edit` this event asks: a Claude Edit, Write,
+/// MultiEdit or NotebookEdit in a session that has one.
+fn edit_store(record: &Value, event: &Value, agent: &str) -> Option<PathBuf> {
+    (agent == "claude"
+        && string(event, "hook_event_name") == "PreToolUse"
+        && super::project_memory::EDIT_TOOLS.contains(&string(event, "tool_name")))
+    .then(|| string(record, "lore_edit_store"))
+    .filter(|store| !store.is_empty())
+    .map(PathBuf::from)
+}
+
 fn team_recall(record: &Value, room: usize) -> Option<String> {
     let store = teams::store::Store::open(false).ok()?;
     let (team, member) = store.rules_member(record).ok()??;
@@ -1613,6 +1690,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     // Task 135: a team session whose context was compacted or cleared starts
     // with the team's recall, the handoff brief built from its own record.
     let hint = with_team_recall(hint, tasks.as_ref(), &record, &event);
+    // docs/lore.md 6.2: the project's lore digest, after the recall.
+    let hint = with_lore_digest(hint, tasks.as_ref(), &record, &event, rules.as_ref().map_or("", |(project, _)| project.as_str()));
+    if own_start && agent == "claude" {
+        remember_edit_store(&mut record, rules.as_ref().map_or("", |(project, _)| project.as_str()));
+    }
     if let Some(context) = start_context(hint, tasks) {
         // A failed write or flush leaves only the early invalidation persisted.
         // Never expose a fresh conversation as started before this succeeds.
@@ -1642,11 +1724,21 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
             agent_hint::output_event(output, &context, "PostToolUse")?;
         }
     }
+    let edit_store = edit_store(&record, &event, &agent);
     // The ready conversation and its proof become visible in the same atomic
     // record update; hook() performs no later proof-only binding write.
     write(&mut record)?;
     if own_start {
         archive::confirm_restore(&mut record)?;
+    }
+    // CodeLore's pre-edit hook: what lore knows in force about the file about
+    // to change, once per file and session. It runs after the state lock is
+    // released, so a slow lore (2 seconds at most) holds no other session.
+    if let Some(store) = edit_store {
+        drop(_guard);
+        if let Some(context) = super::project_memory::pre_edit_context(&store, &event) {
+            agent_hint::output_event(output, &context, "PreToolUse")?;
+        }
     }
     Ok(0)
 }
@@ -2972,6 +3064,22 @@ mod tests {
         fs::remove_file(&claude).unwrap();
         assert_eq!(launch().registered_version(&program), None);
         assert_eq!(asked(), 4);
+    }
+
+    /// CodeLore's pre-edit hook runs only for a Claude file edit in a session
+    /// whose start chose a store.
+    #[test]
+    fn only_a_claude_file_edit_asks_lores_pre_edit_hook() {
+        let record = json!({"lore_edit_store":"D:/repo"});
+        let edit = json!({"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"D:/repo/a.rs"}});
+        assert_eq!(edit_store(&record, &edit, "claude"), Some(PathBuf::from("D:/repo")));
+        for tool in ["Write", "MultiEdit", "NotebookEdit"] {
+            assert!(edit_store(&record, &json!({"hook_event_name":"PreToolUse","tool_name":tool}), "claude").is_some(), "{tool}");
+        }
+        assert_eq!(edit_store(&record, &json!({"hook_event_name":"PreToolUse","tool_name":"Bash"}), "claude"), None);
+        assert_eq!(edit_store(&record, &json!({"hook_event_name":"PostToolUse","tool_name":"Edit"}), "claude"), None);
+        assert_eq!(edit_store(&record, &edit, "codex"), None);
+        assert_eq!(edit_store(&json!({}), &edit, "claude"), None);
     }
 
     /// Task 135: a team member's session that starts after a compaction or a

@@ -338,3 +338,76 @@ fn a_search_hit_names_its_store() {
     // Anything else keeps its own name.
     assert_eq!(find_store_label("elsewhere"), "elsewhere");
 }
+
+/// The template a new store gets: lore's built-in multilingual embedder, so
+/// Russian reads as well as English (no English-only nomic-embed-text).
+#[test]
+fn a_new_store_embeds_with_the_builtin_multilingual_model() {
+    let text = lore_toml("plain");
+    let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(document["embed"]["provider"].as_str(), Some("builtin"));
+    assert_eq!(document["embed"]["model"].as_str(), Some("auto"));
+    assert!(!text.contains("nomic") && !text.contains("ollama"), "{text}");
+    assert_eq!(areas_of(&text), Some(Vec::new()));
+}
+
+/// RogueDOD: a lore.toml with real areas at the git root is the project's
+/// store, found from a subfolder; the placeholder area, a subfolder's own
+/// lore.toml and a private Zerus store are not.
+#[test]
+fn a_repository_store_is_the_git_roots_lore_toml_with_real_areas() {
+    let dir = isolated();
+    let repo = project_repo(dir.path());
+    let sub = repo.join("Game").join("Docs");
+    fs::create_dir_all(&sub).unwrap();
+    assert_eq!(repo_store(&sub), None, "no lore.toml");
+    fs::write(repo.join("Game").join("lore.toml"), "version = 1\nareas = [\"game\"]\n").unwrap();
+    assert_eq!(repo_store(&sub), None, "a lore.toml in a subfolder is not a lore root");
+    fs::write(repo.join("lore.toml"), "version = 1\nareas = [\"use-the-project-store\"]\n").unwrap();
+    assert_eq!(repo_store(&sub), None, "the placeholder keeps no records");
+    fs::write(repo.join("lore.toml"), "version = 1\nareas = [\n  \"game\",\n  \"docs\",\n]\n\n[commit]\nmode = \"shared-tree\"\nbranch = \"develop\"\n").unwrap();
+    let found = repo_store(&sub).expect("real areas make it the store");
+    assert!(same(&found, &repo), "{} is {}", found.display(), repo.display());
+    assert_eq!(areas_of(&fs::read_to_string(repo.join("lore.toml")).unwrap()), Some(vec!["game".to_owned(), "docs".to_owned()]));
+    assert!(repo_store_of(["", sub.to_str().unwrap()]).is_some());
+    // A private store Zerus made is never a project's repository.
+    let private = dir.path().join("store");
+    init_store(&private).unwrap();
+    fs::write(private.join("lore.toml"), "version = 1\nareas = [\"team-x\"]\n").unwrap();
+    assert_eq!(repo_store(&private), None);
+}
+
+/// A repository whose own agent hooks run `lore digest` is not given a second one.
+#[test]
+fn a_repository_with_its_own_digest_hook_gets_no_second_digest() {
+    let dir = isolated();
+    let repo = project_repo(dir.path());
+    fs::write(repo.join("lore.toml"), "version = 1\nareas = [\"game\"]\n").unwrap();
+    assert!(!repo_has_hook(&repo, &START_HOOKS));
+    fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::write(repo.join(".claude/settings.json"), r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"lore digest"}]}]}}"#).unwrap();
+    assert!(repo_has_hook(&repo, &START_HOOKS) && !repo_has_hook(&repo, &EDIT_HOOKS));
+    assert_eq!(session_digest(&repo, "", 2000), None);
+    assert!(session_store(&repo, "", &EDIT_HOOKS).is_some(), "the edit hook is still Zerus's");
+}
+
+/// With a real lore (HGS_LORE or beside hgs or on PATH), the pre-edit hook
+/// names a live fault about the file once per session; without one it is
+/// silent. Skipped where no lore is installed.
+#[test]
+fn the_pre_edit_hook_names_a_live_fault_once_per_session() {
+    let Some(_) = crate::state::teams::lore_sync::lore_bin() else { return };
+    let dir = isolated();
+    let repo = project_repo(dir.path());
+    fs::write(repo.join("lore.toml"), "version = 1\ndir = \"lore\"\nareas = [\"game\"]\n\n[commit]\nmode = \"none\"\n\n[embed]\nprovider = \"none\"\n").unwrap();
+    let fault = r#"{"area":"game","title":"The import is blind to a nested name","symptom":"a nested name is lost","signals":["missing name"],"cause":"top level only","fix":"read nested names","check":"cargo test import","status":"live","refs":{"files":["README.md"]}}"#;
+    run_hook_lore(&repo, &["--text-only", "--by", "T", "add", "fault", "--json"], fault.as_bytes(), 64 * 1024).expect("lore adds the fault");
+    let session = format!("zerus-test-{}", std::process::id());
+    let event = json!({"hook_event_name":"PreToolUse","session_id":session,"tool_name":"Edit","cwd":repo.display().to_string(),
+        "tool_input":{"file_path":repo.join("README.md").display().to_string()}});
+    let Some(text) = pre_edit_context(&repo, &event) else { panic!("lore said nothing about README.md") };
+    assert!(text.contains("The import is blind") && text.contains("README.md"), "{text}");
+    assert_eq!(pre_edit_context(&repo, &event), None, "once per file and session");
+    let digest = digest_text(&repo, 2000).unwrap_or_default();
+    assert!(digest.contains("The import is blind"), "{digest}");
+}

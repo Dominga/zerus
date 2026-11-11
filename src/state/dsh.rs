@@ -666,7 +666,16 @@ fn snapshot_with(record: &Value, list: &Value, rpc: &mut dyn FnMut(&str, Value) 
             .find(|v| v["sessionId"] == record["conversation_id"])
     });
     let row = row.unwrap_or(&Value::Null);
-    let failure = idle_failure(record, row, &list["generation"], rpc);
+    let (failure, outline) = idle_failure(record, row, &list["generation"], rpc);
+    let mut outlined;
+    let row = match outline {
+        Some(outline) => {
+            outlined = row.clone();
+            outlined["projections"]["values"]["turnOutline"] = outline;
+            &outlined
+        }
+        None => row,
+    };
     let mut value = normalize(record, row, &json!({"provider_error":failure}));
     child_summaries(record, &mut value, list, &list["generation"]);
     if !list.is_null() {
@@ -677,9 +686,25 @@ fn snapshot_with(record: &Value, list: &Value, rpc: &mut dyn FnMut(&str, Value) 
 
 // A native turn can end unsuccessfully while the agent stays alive. Cache only
 // that terminal result; polling must not reload conversation pages every time.
-fn idle_failure(record: &Value, row: &Value, generation: &Value, rpc: &mut dyn FnMut(&str, Value) -> Result<Value>) -> Value {
-    if row["agentAvailable"] != true || row["running"] == true {
-        return Value::Null;
+//
+// The same idle inspection supplies the turn outline when the host's list
+// omits it: from dsh 0.2.2 `turnOutline` is a `summary: false` projection, so
+// a list row no longer carries the settled reply that `hgs read` and
+// `--current-read` name (zerus-a4mub.24). It comes from the session's full
+// projections in that one cached read, never from a separate request. A running
+// or stopped row keeps the outline last read for its run; a row whose list
+// still carries the outline is unchanged.
+fn idle_failure(
+    record: &Value,
+    row: &Value,
+    generation: &Value,
+    rpc: &mut dyn FnMut(&str, Value) -> Result<Value>,
+) -> (Value, Option<Value>) {
+    let summarized = !row["projections"]["values"].is_object()
+        || row["projections"]["values"].get("turnOutline").is_some();
+    let idle = row["agentAvailable"] == true && row["running"] != true;
+    if summarized && !idle {
+        return (Value::Null, None);
     }
     let key = format!(
         "{}:{}",
@@ -694,17 +719,34 @@ fn idle_failure(record: &Value, row: &Value, generation: &Value, rpc: &mut dyn F
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .unwrap_or(Value::Null);
-    if !row["updatedAt"].is_null() && cached["stamp"] == stamp {
-        return cached["error"].clone();
+    let cached_outline = || {
+        (!summarized && cached["stamp"][0] == record["run_id"] && cached["outline"].is_array())
+            .then(|| cached["outline"].clone())
+    };
+    if !idle {
+        return (Value::Null, cached_outline());
+    }
+    if !row["updatedAt"].is_null()
+        && cached["stamp"] == stamp
+        && (summarized || cached.get("outline").is_some())
+    {
+        return (cached["error"].clone(), cached_outline());
     }
     let Ok(inspected) = rpc("inspect", json!({"sessionId":record["conversation_id"]})) else {
-        return Value::Null;
+        return (Value::Null, None);
     };
     let error = latest_failure(&inspected["page"]["records"]);
+    let outline = inspected["baseline"]["values"]["turnOutline"].clone();
     if private_dir(path.parent().unwrap()).is_ok() {
-        let _ = atomic(&path, &json!({"stamp":stamp,"error":error}).to_string());
+        let _ = atomic(
+            &path,
+            &json!({"stamp":stamp,"error":error,"outline":outline}).to_string(),
+        );
     }
-    error
+    (
+        error,
+        (!summarized && outline.is_array()).then_some(outline),
+    )
 }
 fn turn_failure(event: &Value) -> Value {
     let reason = &event["data"]["reason"];
@@ -2172,6 +2214,65 @@ mod current_read_tests {
             assert_eq!(called[..4], ["capture:list", "capture:inspect", "inspect", "list"]);
             assert_eq!(shown.unwrap().get("current_read").is_some(), named);
         }
+
+        // zerus-a4mub.24 with dsh 0.2.2: `turnOutline` is a `summary: false` projection, so a list row no
+        // longer carries it. The idle row's one cached inspection supplies the outline: the capture and
+        // `hgs read` name the same settled reply, and a later running row keeps it without another read.
+        let summary_row = |running: bool, updated: f64| {
+            let mut row = row(&[], Some(&[]));
+            row["projections"]["values"]
+                .as_object_mut()
+                .unwrap()
+                .remove("turnOutline");
+            row["running"] = json!(running);
+            row["updatedAt"] = json!(updated);
+            row
+        };
+        let idle_summary = list("host-1", vec![summary_row(false, 4_000_000.0)]);
+        let (shown, called) = inspect_with(
+            true,
+            None,
+            BTreeMap::from([
+                ("list", vec![Ok(idle_summary.clone())]),
+                ("inspect", vec![Ok(page("host-1", &[3, 7], &[]))]),
+            ]),
+            BTreeMap::from([
+                ("list", vec![Ok(idle_summary.clone())]),
+                ("inspect", vec![Ok(page("host-1", &[3, 7], &[]))]),
+            ]),
+        );
+        assert_eq!(
+            called[..4],
+            ["capture:list", "capture:inspect", "inspect", "list"]
+        );
+        let shown = shown.unwrap();
+        let current = &shown["current_read"];
+        assert_eq!(current["reply_id"], "dsh-turn-7", "{shown}");
+        assert_eq!(shown["reply_id"], "dsh-turn-7");
+        let unasked =
+            |method: &str, _: Value| -> Result<Value> { Err(format!("{method} was not expected")) };
+        let view = snapshot_with(&record(), &idle_summary, &mut |m, p| unasked(m, p));
+        assert_eq!(view["reply_id"], "dsh-turn-7");
+        // Idle with nothing pending: the reply applies; a null signature acknowledges nothing.
+        assert!(current["attention_signature"].is_null());
+        assert_eq!(
+            read_marks::accepts(&view, Some(&[]), current),
+            (true, false)
+        );
+        let running = list("host-1", vec![summary_row(true, 5_000_000.0)]);
+        assert_eq!(
+            snapshot_with(&record(), &running, &mut |m, p| unasked(m, p))["reply_id"],
+            "dsh-turn-7"
+        );
+        // A list that still carries the outline is read as before: its own outline wins.
+        let mut carried = row(&[3], Some(&[]));
+        carried["running"] = json!(false);
+        carried["updatedAt"] = json!(4_000_000.0);
+        let carried = list("host-1", vec![carried]);
+        assert_eq!(
+            snapshot_with(&record(), &carried, &mut |m, p| unasked(m, p))["reply_id"],
+            "dsh-turn-3"
+        );
 
         // zerus-a4mub.32 end to end, through the production seams: a host that never answers the capture's
         // list (holding it past the ordinary read timeout) costs about the capture budget, and the inspection

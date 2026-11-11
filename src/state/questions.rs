@@ -282,23 +282,26 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
 
 /// Current normalized identities without availability checks (adapter guard API).
 pub(super) fn current(record: &Value) -> Result<Vec<Value>> {
-    Ok(collect(record, None, false)?.unwrap_or_default().0)
+    Ok(collect(record, None, false, true)?.unwrap_or_default().0)
 }
 
 /// Like `current`, but None when the Codex question index cannot be brought up
 /// to date by `deadline`; its progress is kept for the next call.
 pub(super) fn current_until(record: &Value, deadline: std::time::Instant) -> Result<Option<Vec<Value>>> {
-    Ok(collect(record, Some(deadline), false)?.map(|(cards, _)| cards))
+    Ok(collect(record, Some(deadline), false, false)?.map(|(cards, _)| cards))
 }
 
 /// The cards, and whether the Codex question index was complete by
 /// `deadline`. An incomplete index is None, unless `partial` keeps the other
 /// cards: then it adds no Codex question and nothing inferred from their
-/// absence (zerus-a4mub.8).
+/// absence (zerus-a4mub.8). `listing` marks a question listing (`current`
+/// and `inspection`): only a listing may fit a clipped Claude approval into
+/// its unviewed pane. A deadline alone never decides that.
 fn collect(
     record: &Value,
     deadline: Option<std::time::Instant>,
     partial: bool,
+    listing: bool,
 ) -> Result<Option<(Vec<Value>, bool)>> {
     let mut by_tool = BTreeMap::new();
     if let Some(pending) = record["pending_questions"].as_object() {
@@ -338,7 +341,7 @@ fn collect(
         },
     }
     // Only a listing may fit a clipped approval into its unviewed pane.
-    let approval=if deadline.is_none() {claude_approval::listed(record)} else {claude_approval::current(record)};
+    let approval=if listing {claude_approval::listed(record)} else {claude_approval::current(record)};
     if let Some(approval)=approval{cards.push(approval);}
     if let Some(mode) = claude_permission::current(record) {
         cards.push(mode);
@@ -534,7 +537,7 @@ pub(super) fn inspection(
         return Ok((json!([]), true));
     }
     kimi_trust::fit(record);
-    match collect(record, Some(deadline), true).map(Option::unwrap_or_default) {
+    match collect(record, Some(deadline), true, true).map(Option::unwrap_or_default) {
         Ok((mut pending, complete)) => {
             // The same complete index decides whether a Codex question is unique.
             let codex: Vec<Value> = pending

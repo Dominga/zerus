@@ -62,7 +62,8 @@ class OutgoingSendDeadlineTest {
                 failure = status to message
                 state = uncertain(state, message)
                 order.add("uncertain")
-            })
+            },
+            release = { fail("an enqueued send released its reservation") })
         try {
             send.run()
         } finally {
@@ -93,7 +94,8 @@ class OutgoingSendDeadlineTest {
             submit = { evidence -> posts += 1; evidence.enqueued(); JSONObject().put("request_id", request) },
             await = { _ -> delay(2_000); receipt() },
             settle = { settled = true },
-            failed = { status, message -> failure = status to message; state = uncertain(state, message) })
+            failed = { status, message -> failure = status to message; state = uncertain(state, message) },
+            release = { fail("an enqueued send released its reservation") })
         send.run()
         assertFalse("a timed-out receipt was settled", settled)
         assertEquals("uncertain", failure?.first)
@@ -109,7 +111,8 @@ class OutgoingSendDeadlineTest {
                 submit = { evidence -> evidence.enqueued(); posted.complete(Unit); JSONObject() },
                 await = { _ -> delay(10_000); JSONObject() },
                 settle = { fail("a cancelled acquisition was settled") },
-                failed = { status, message -> failure = status to message }).run()
+                failed = { status, message -> failure = status to message },
+                release = { fail("an enqueued send released its reservation") }).run()
         }
         posted.await()
         job.cancelAndJoin()

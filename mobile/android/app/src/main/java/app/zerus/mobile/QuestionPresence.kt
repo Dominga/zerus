@@ -14,7 +14,7 @@ internal data class QuestionPresenceView(val presence: QuestionPresence, val tit
 internal object QuestionPresencePolicies {
     /** Resolves the expanded identity against the current projection. `null` when nothing is expanded. */
     fun resolve(display: QuestionDisplayState, questions: List<Question>, verified: Boolean, available: Boolean,
-        checking: Boolean, checkedAtMillis: Long, nowMillis: Long): QuestionPresenceView? {
+        checking: Boolean, checkedAtMillis: Long, nowMillis: Long, complete: Boolean = true): QuestionPresenceView? {
         if (!display.expanded) return null
         val age = age(checkedAtMillis, nowMillis)
         val exact = display.resolve(questions)
@@ -25,8 +25,9 @@ internal object QuestionPresencePolicies {
                 if (answerable) "" else reason(exact.unavailableReason, exact.optional),
                 age, modal = true)
         }
-        // Only a verified projection proves that this exact request is gone.
-        if (verified) {
+        // Only a verified and complete projection proves that this exact
+        // request is gone; an incomplete one is still being indexed.
+        if (verified && complete) {
             val replacement = questions.firstOrNull { it.id == display.expandedId }
             return if (replacement != null) {
                 QuestionPresenceView(QuestionPresence.Replaced, "Request replaced",
@@ -36,6 +37,11 @@ internal object QuestionPresencePolicies {
                 QuestionPresenceView(QuestionPresence.Closed, "Request closed",
                     "The agent closed this request. Your answer is no longer needed.", age, modal = false)
             }
+        }
+        if (verified) {
+            return QuestionPresenceView(QuestionPresence.Checking, "Checking the conversation",
+                "The agent is still indexing this conversation's questions. Refresh to check again. Your saved answer is kept.",
+                age, modal = false, refresh = true)
         }
         if (checking) {
             return QuestionPresenceView(QuestionPresence.Checking, "Checking the conversation",

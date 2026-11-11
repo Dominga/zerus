@@ -12,8 +12,9 @@ class QuestionPresenceTest {
             source = "codex_async", unavailableReason = reason, run = target.run, conversation = target.conversation)
     private val now = 1_000_000_000L
     private fun resolve(display: QuestionDisplayState, questions: List<Question>, verified: Boolean = true,
-        available: Boolean = true, checking: Boolean = false, checkedAt: Long = now - 5_000) =
-        QuestionPresencePolicies.resolve(display, questions, verified, available, checking, checkedAt, now)!!
+        available: Boolean = true, checking: Boolean = false, checkedAt: Long = now - 5_000,
+        complete: Boolean = true) =
+        QuestionPresencePolicies.resolve(display, questions, verified, available, checking, checkedAt, now, complete)!!
 
     @Test fun anAgedOptionalRequestStaysPendingAndUnanswerableWhileTheAgentWorks() {
         // An optional request can legitimately stay pending while the agent works:
@@ -102,6 +103,32 @@ class QuestionPresenceTest {
             assertNotEquals(QuestionPresence.Closed, view.presence)
         }
         assertEquals(QuestionPresence.Answerable, resolve(display, listOf(request)).presence)
+    }
+
+    @Test fun anIncompleteVerifiedProjectionIsCheckingNeverClosedOrReplaced() {
+        // zerus-a4mub.27: while the native question index is still being
+        // built (pending_questions_complete=false) a verified projection
+        // proves nothing about absence, so it can never close or replace.
+        val display = QuestionDisplayState(target.key).open(question())
+        for (questions in listOf(emptyList<Question>(), listOf(question(hash = "hash-2")))) {
+            val view = resolve(display, questions, verified = true, complete = false)
+            assertEquals(QuestionPresence.Checking, view.presence)
+            assertNotEquals(QuestionPresence.Closed, view.presence)
+            assertNull(view.replacement)
+            assertTrue(view.refresh)
+            assertTrue(view.detail.contains("indexing"))
+            assertEquals("Checked 5s ago", view.age)
+        }
+        // A verified and complete projection still closes or replaces, and a
+        // missing field (an older CLI) keeps that behaviour.
+        assertEquals(QuestionPresence.Closed, resolve(display, emptyList(), verified = true, complete = true).presence)
+        assertEquals(QuestionPresence.Closed, resolve(display, emptyList(), verified = true).presence)
+        assertEquals(QuestionPresence.Replaced, resolve(display, listOf(question(hash = "hash-2")), verified = true, complete = true).presence)
+        // Unverified stays Checking or Unavailable whatever completeness says.
+        for (complete in listOf(true, false)) {
+            val view = resolve(display, emptyList(), verified = false, complete = complete)
+            assertTrue(view.presence in setOf(QuestionPresence.Checking, QuestionPresence.Unavailable))
+        }
     }
 
     @Test fun ageAndReasonsAreBound() {

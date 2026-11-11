@@ -71,11 +71,19 @@ PRESENTATION_UPDATES_SHA = "dde1e6eb48faf7d29a8407726be4cf74b176e95802fd1249bb95
 # entry. One reviewed file; question eligibility, native availability, every
 # verification assignment and all historical pins stay exact. Reverse it first,
 # before the #2041 evidence delta it builds on.
+# Exact question-projection completeness delta of zerus-a4mub.27: a verified
+# projection that is still indexing (pending_questions_complete=false) can never
+# close or replace an expansion; an older CLI omits the field and stays
+# complete. One reviewed file; all historical reconstruction pins stay exact.
+# Reverse it first, before the presence delta it extends.
+QUESTION_PROJECTION_COMPLETE_UPDATES = ROOT / "tests/fixtures/question-availability-question-projection-complete-updates.patch"
+QUESTION_PROJECTION_COMPLETE_UPDATES_SHA = "1209c0704fc6ae050db05e274127450bae3480c8bb42efa79ec9ff888cfdbcfe"
+QUESTION_PROJECTION_COMPLETE_FILES = ("ZerusViewModel.kt",)
 # Exact expanded-question presence delta of zerus-a4mub.12: the verified
 # question projection records when it was last checked, so an obsolete
 # expansion can show its check age instead of a refresh demand. One reviewed
 # file; question eligibility, native availability, every verification writer
-# and all historical reconstruction pins stay exact. Reverse it first.
+# and all historical reconstruction pins stay exact. Reverse it after newer reviewed updates.
 QUESTION_PRESENCE_UPDATES = ROOT / "tests/fixtures/question-availability-question-presence-updates.patch"
 QUESTION_PRESENCE_UPDATES_SHA = "d9dab9d7203e2142c97440db106f8ade2b0b7dc9ffdcfd1db20db254cf38d008"
 QUESTION_PRESENCE_FILES = ("ZerusViewModel.kt",)
@@ -159,6 +167,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha,
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, QUESTION_PROJECTION_COMPLETE_UPDATES, QUESTION_PROJECTION_COMPLETE_UPDATES_SHA, QUESTION_PROJECTION_COMPLETE_FILES)
     source = reverse_reviewed_patch(name, source, QUESTION_PRESENCE_UPDATES, QUESTION_PRESENCE_UPDATES_SHA, QUESTION_PRESENCE_FILES)
     source = reverse_reviewed_patch(name, source, SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
@@ -191,6 +200,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                QUESTION_PROJECTION_COMPLETE_UPDATES, QUESTION_PROJECTION_COMPLETE_UPDATES_SHA, QUESTION_PROJECTION_COMPLETE_FILES)
+                current = reverse_reviewed_patch(name, current,
                                                 QUESTION_PRESENCE_UPDATES, QUESTION_PRESENCE_UPDATES_SHA, QUESTION_PRESENCE_FILES)
                 current = reverse_reviewed_patch(name, current,
                                                 SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
@@ -300,6 +311,16 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         # The check-age projection stays one exact reviewed hunk: changing,
         # removing or duplicating it must break the reconstruction.
         addition = "    var questionCheckedAt by mutableStateOf(0L); private set\n"
+        source = (MAIN / "ZerusViewModel.kt").read_text()
+        self.assertEqual(source.count(addition), 1)
+        for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+            with self.subTest(replacement=replacement):
+                self.assertFalse(original_source("ZerusViewModel.kt", source.replace(addition, replacement, 1)))
+
+    def test_question_projection_complete_projection_refuses_changed_missing_or_duplicate_reviewed_hunk(self):
+        # The completeness projection stays an exact reviewed hunk: changing,
+        # removing or duplicating it must break the reconstruction.
+        addition = "    var questionProjectionComplete by mutableStateOf(true); private set\n"
         source = (MAIN / "ZerusViewModel.kt").read_text()
         self.assertEqual(source.count(addition), 1)
         for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
@@ -486,7 +507,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
 
     def test_question_ui_and_entire_physical_fixture_match_the_reviewed_baselines(self):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
-                         "c7e0bfe9a470015c7103333fd5395bc05da964fd0ef2434e46b9b2c890f82460")
+                         "53816da954ccfc33a8a64a72f5d5930b286f51b7586cc577bbcb4e2762317cb3")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         # The fixture baseline includes the parent-selection and Compose role-child corrections;
         # physical case oracles stay exact.

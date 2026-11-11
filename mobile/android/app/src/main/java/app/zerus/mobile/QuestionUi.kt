@@ -85,7 +85,8 @@ import org.json.JSONObject
     onReview: (Draft) -> Unit) {
     if (!display.expanded) return
     val presence = QuestionPresencePolicies.resolve(display, questions, model.activityVerified, available,
-        model.detailBusy, model.questionCheckedAt, SystemClock.elapsedRealtime()) ?: return
+        model.detailBusy, model.questionCheckedAt, SystemClock.elapsedRealtime(),
+        complete = model.questionProjectionComplete) ?: return
     val question = display.resolve(questions)
     if (question != null) NativeQuestionCard(model, target, question, available, true, null, 120.dp,
         display.page(question), { page -> onDisplay { it.withPage(question, page) } },

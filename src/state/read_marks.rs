@@ -456,25 +456,61 @@ pub(super) fn current_read(name: &str, journal_record: &Value, summary: Value, l
     if conversation.is_empty() {
         return None;
     }
-    let mut view = read_view(name, journal_record, summary, live_pane);
+    let view = read_view(name, journal_record, summary, live_pane);
     #[cfg(test)]
     journal::read_order::note("signed_questions");
     let questions = pending_questions(journal_record, &view, live_pane, question_budget()).unwrap_or(Some(Vec::new()));
+    Some(binding(journal::journal_name(journal_record), conversation, view, questions.as_deref()))
+}
+
+/// `current_read` of a native DeepSeek or OpenCode inspection (zerus-a4mub.24):
+/// `view` is the session as `hgs read` compares a mark with it (`current`),
+/// owned by its name. Each provider captures it in its own read order, before
+/// the messages and questions its inspection shows. `questions` is None when
+/// the provider's attention is unknown: then `attention_complete` is false
+/// and the signature matches nothing `hgs read` accepts. None without a run
+/// or conversation, which no mark can name.
+pub(super) fn native_current_read(name: &str, view: Value, questions: Option<&[Value]>) -> Option<Value> {
+    let conversation = string(&view, "conversation_id").to_owned();
+    if string(&view, "run_id").is_empty() || conversation.is_empty() {
+        return None;
+    }
+    Some(binding(name, &conversation, view, questions))
+}
+
+/// The reply and attention identities `hgs read` would accept now for `view`
+/// and its mark `owner` in `conversation`.
+fn binding(owner: &str, conversation: &str, mut view: Value, questions: Option<&[Value]>) -> Value {
     // As `hgs read`: a recurring job's read reply stays current. Only those
     // sessions need the marks file.
     if view["schedules"]["recurring"].as_u64().is_some_and(|count| count > 0) {
         let marks = load();
-        keep_read_reply(&mut view, record(&marks, journal::journal_name(journal_record), conversation));
+        keep_read_reply(&mut view, record(&marks, owner, conversation));
     }
     let reply = view["reply_id"].as_str().filter(|reply| !reply.is_empty());
-    Some(json!({
+    json!({
         "schema": 1,
         "run_id": view["run_id"],
         "conversation_id": view["conversation_id"],
         "reply_id": reply,
-        "attention_signature": signature(&view, questions.as_deref()),
+        "attention_signature": signature(&view, questions),
         "attention_complete": questions.is_some(),
+    })
+}
+
+/// Which fields of `current_read` `hgs read` applies to `view` with
+/// `questions` (`current`), from an empty mark.
+#[cfg(test)]
+pub(super) fn accepts(view: &Value, questions: Option<&[Value]>, current_read: &Value) -> (bool, bool) {
+    let request = parse(&json!({
+        "run_id": current_read["run_id"],
+        "conversation_id": current_read["conversation_id"],
+        "reply_id": current_read["reply_id"],
+        "attention_signature": current_read["attention_signature"],
     }))
+    .unwrap();
+    let (reply, attention, _) = apply(view, questions, &request, &Value::Null, 1.0);
+    (reply, attention)
 }
 
 /// `hgs read <session> --json`. An unknown session is a JSON answer with exit

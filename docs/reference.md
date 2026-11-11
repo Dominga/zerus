@@ -6650,9 +6650,22 @@ question budget, `attention_complete` is false and the signature matches nothing
 `hgs read` accepts. A recurring job keeps its already read reply current, as
 `hgs read` does. Its only extra work is that bounded question check, plus the marks
 file read for a recurring job. It acknowledges nothing and is absent without the
-flag and for archives, subagents, DeepSeek and OpenCode. A
+flag and for archives and subagents. A
 device acknowledges these values only after it has shown them; `hgs read` still
 applies each one only while it is current.
+
+DeepSeek and OpenCode main inspections name the same fields from the view `hgs
+read` compares a mark with for that provider, owned by the session's name.
+- DeepSeek captures that view from one extra host `list` before it reads the
+  page it shows. Its reply is the turn outline's settled response, which the
+  host commits at `turn/end` after the turn's final message. Its requests are
+  signed through `attention_id` before the page lists its own. The field is
+  absent when that list fails or another host generation served the page. A
+  host row without its pending requests leaves `attention_complete` false.
+- OpenCode names the observation it shows: the forms and permissions it lists
+  and the newest completed reply of its history, never a streaming one. A row
+  without an observation (no service, a failed read, an OpenCode 1 binding) has
+  no reply, and its `attention_complete` is false.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances

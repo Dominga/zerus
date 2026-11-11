@@ -24,6 +24,7 @@ describe("screens wiring", () => {
   it("maps pages to screens and hides them with the window", () => {
     expect(screenOf("dashboard", false)).toBe("overview");
     expect(screenOf("machines", false)).toBe("machines");
+    expect(screenOf("designer", false)).toBe("projects");
     expect(screenOf("sessions", false)).toBeUndefined();
     expect(screenOf("accounts", true)).toBeUndefined();
   });

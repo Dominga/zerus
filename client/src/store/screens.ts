@@ -11,7 +11,7 @@ import { loadProjects } from "./projects";
 // `screen_visible` in step with the page and the window, and pulls a view
 // again when the hub reports it changed.
 
-const SCREEN: Partial<Record<Page, Screen>> = { dashboard: "overview", projects: "projects", machines: "machines", accounts: "accounts" };
+const SCREEN: Partial<Record<Page, Screen>> = { dashboard: "overview", projects: "projects", designer: "projects", machines: "machines", accounts: "accounts" };
 
 /** The screen whose reads run: the page's, while the window shows. */
 export const screenOf = (page: Page, hidden: boolean): Screen | undefined => (hidden ? undefined : SCREEN[page]);

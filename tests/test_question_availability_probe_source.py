@@ -14,7 +14,8 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse presentation, delivery recovery, recent-Activity, child-session and
+# fixtures first reverse the send-entry and transport-evidence additions, then
+# presentation, delivery recovery, recent-Activity, child-session and
 # visible-refresh additions, then the reviewed task-tracker additions to 86aeab6d, then
 # the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
@@ -65,6 +66,14 @@ PRESENTATION_UPDATES_SHA = "dde1e6eb48faf7d29a8407726be4cf74b176e95802fd1249bb95
 # native availability, every verification assignment and all historical
 # reconstruction pins stay exact. Reverse it first on the #2041 head; the later
 # #2044 send-entry delta reverses before it when both are present.
+# Exact outbox send-entry wiring delta of #2044 (zerus-a4mub.21): the send
+# evidence is required by type through RelayApi and OutgoingSend owns the send
+# entry. One reviewed file; question eligibility, native availability, every
+# verification assignment and all historical pins stay exact. Reverse it first,
+# before the #2041 evidence delta it builds on.
+OUTGOING_SEND_UPDATES = ROOT / "tests/fixtures/question-availability-outgoing-send-updates.patch"
+OUTGOING_SEND_UPDATES_SHA = "a65e1fc9cdb0862b597c3c732c48d3c1e7f01d957bf06569c02e5b3042205334"
+OUTGOING_SEND_FILES = ("ZerusViewModel.kt",)
 SEND_ATTEMPT_UPDATES = ROOT / "tests/fixtures/question-availability-send-attempt-updates.patch"
 SEND_ATTEMPT_UPDATES_SHA = "001897f22af91535bc1f88cec7588eff75336a07081f1cb35fe95a5f0078730b"
 SEND_ATTEMPT_FILES = ("ZerusViewModel.kt",)
@@ -126,6 +135,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha,
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
     source = reverse_reviewed_patch(name, source, SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
     source = reverse_reviewed_patch(name, source, PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
@@ -154,6 +164,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
+                current = reverse_reviewed_patch(name, current,
                                                 SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
                 current = reverse_reviewed_patch(name, current,
                                                 PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
@@ -199,15 +211,29 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             self.assertIn(expression, main)
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
 
-    def test_send_attempt_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
-        # The reviewed evidence delta stays an exact hunk: changing, removing
+    def test_outgoing_send_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The send-entry wiring delta stays an exact hunk: changing, removing
         # or duplicating it must break the reconstruction, never be hidden.
-        addition = "        val attempt = SendAttempt(); var rejected: RelayException? = null\n"
+        addition = "                submitOutgoing(api, connection, target, payload, id, evidence)\n"
         source = (MAIN / "ZerusViewModel.kt").read_text()
         self.assertEqual(source.count(addition), 1)
         for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
             with self.subTest(replacement=replacement):
                 self.assertFalse(original_source("ZerusViewModel.kt", source.replace(addition, replacement, 1)))
+
+    def test_send_attempt_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The reviewed evidence delta stays an exact hunk: changing, removing
+        # or duplicating it must break the reconstruction, never be hidden. The
+        # newer #2044 send-entry delta is reversed first, as in the chain.
+        addition = "        val attempt = SendAttempt(); var rejected: RelayException? = null\n"
+        source = reverse_reviewed_patch("ZerusViewModel.kt", (MAIN / "ZerusViewModel.kt").read_text(),
+                                        OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
+        self.assertEqual(source.count(addition), 1)
+        for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+            with self.subTest(replacement=replacement):
+                with self.assertRaises(AssertionError):
+                    reverse_reviewed_patch("ZerusViewModel.kt", source.replace(addition, replacement, 1),
+                                           SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
 
     def test_visible_refresh_projection_refuses_modified_missing_or_duplicate_hunks(self):
         # Reversing the exact UI change must not hide a later policy edit. The

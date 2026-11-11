@@ -4774,7 +4774,7 @@ pub(crate) fn profile_mode(agent: &str, profile: &str) -> Option<&'static str> {
 /// for the start Zerus makes. None when the member may start; else the
 /// refusal with the one action.
 pub(crate) fn deepseek_folder_problem(team: &Team, member: &Member) -> Option<String> {
-    if member.agent != "dsh" || member.state == MemberState::Removed || member.session.is_some() {
+    if member.agent != "dsh" || member.state == MemberState::Removed || member.session.is_some() || dsh_unsandboxed(member) {
         return None;
     }
     let folder = if member.directory.is_empty() { team.folder.as_str() } else { member.directory.as_str() };
@@ -4786,10 +4786,25 @@ pub(crate) fn deepseek_folder_problem(team: &Team, member: &Member) -> Option<St
         return None;
     }
     Some(format!(
-        "{id}: {WHY}, so it may not share {folder}. Give it its own clone: {{\"team\":\"{team}\",\"members_update\":[{{\"id\":\"{id}\",\"folder\":\"clone\"}}],\"request_id\":\"UUID\"}} | hgs team settings --json (or choose another agent for it).",
+        "{id}: {WHY}, so it may not share {folder}. Run it without the sandbox (permissions profile network: DeepSeek's danger-full-access preset runs at Medium integrity and labels nothing): {{\"team\":\"{team}\",\"members_update\":[{{\"id\":\"{id}\",\"permissions_profile\":\"network\"}}],\"request_id\":\"UUID\"}} | hgs team settings --json; or give it its own clone: the same with \"folder\":\"clone\" (or choose another agent for it).",
         id = member.id,
         team = team.id
     ))
+}
+
+/// RogueDOD (owner, 2026-11-12): a DeepSeek member that runs without the
+/// sandbox, DeepSeek's danger-full-access preset (the network and operate
+/// profiles, or a permission that names it). Checked live: its commands run
+/// at Medium integrity, the folder and the repository's .git keep no label,
+/// and git and lore commit there. Such a member may share a folder and
+/// needs no clone of its own.
+pub(crate) fn dsh_unsandboxed(member: &Member) -> bool {
+    member.agent == "dsh"
+        && if member.permissions.trim().is_empty() {
+            matches!(member.permissions_profile.as_str(), "network" | "operate")
+        } else {
+            member.permissions.contains("danger-full-access")
+        }
 }
 
 pub(crate) fn default_folder(agent: &str) -> MemberFolder {
@@ -4807,7 +4822,7 @@ pub(crate) fn default_folder(agent: &str) -> MemberFolder {
 /// meets. Before, the preflight only warned and the member could not commit.
 /// An adopted session keeps the folder it works in.
 pub(crate) fn sandbox_folder(member: &mut Member) {
-    if member.agent == "dsh" && member.folder == MemberFolder::Worktree && member.session.is_none() {
+    if member.agent == "dsh" && member.folder == MemberFolder::Worktree && member.session.is_none() && !dsh_unsandboxed(member) {
         member.folder = MemberFolder::Clone;
     }
 }

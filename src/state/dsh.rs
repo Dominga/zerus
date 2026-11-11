@@ -1678,7 +1678,11 @@ pub(crate) fn launch_with_permissions(
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
-    ensure_sandbox_folder(&cwd)?;
+    // RogueDOD (owner, 2026-11-12): danger-full-access runs without the
+    // sandbox, so the folder (often a shared one) keeps its rights as they are.
+    if !matches!(&selection, Some(PermissionSelection::Preset(preset)) if preset == "danger-full-access") {
+        ensure_sandbox_folder(&cwd)?;
+    }
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});

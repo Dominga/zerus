@@ -1398,7 +1398,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 format!("{}: the shared folder policy leaves no own folder", member.id),
             ));
         }
-        if member.folder == super::model::MemberFolder::Worktree && member.agent == "dsh" {
+        if member.folder == super::model::MemberFolder::Worktree && member.agent == "dsh" && !super::dispatcher::dsh_unsandboxed(member) {
             found.warnings.push(finding(
                 "folder",
                 None,

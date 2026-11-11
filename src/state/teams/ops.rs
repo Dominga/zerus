@@ -438,7 +438,9 @@ fn fill_folder(team: &Team, member: &mut Member, no_folder_given: bool) {
 /// worktrees and clones forbidden) keeps it shared: the preflight then names
 /// the refusal and its action.
 fn deepseek_own_folder(policy: FolderPolicy, worktrees_forbidden: bool, member: &mut Member, folder_given: bool) {
-    if member.agent == "dsh" && !folder_given && member.directory.is_empty() && member.session.is_none() && policy != FolderPolicy::Shared && !worktrees_forbidden {
+    if member.agent == "dsh" && !folder_given && member.directory.is_empty() && member.session.is_none() && policy != FolderPolicy::Shared && !worktrees_forbidden
+        && !super::dispatcher::dsh_unsandboxed(member)
+    {
         member.folder = MemberFolder::Clone;
     }
 }

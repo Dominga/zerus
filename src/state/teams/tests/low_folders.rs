@@ -66,7 +66,7 @@ fn a_low_shared_folder_is_named_at_team_start_and_in_status_with_the_owners_step
 fn a_team_with_a_deepseek_member_in_the_shared_folder_does_not_start() {
     let dir = tempfile::tempdir().unwrap();
     set_test_low(Some(Vec::new()));
-    let mut team = planned(dir.path(), json!([{"id":"qa","role":"QA","agent":"dsh","folder":"shared"}]));
+    let mut team = planned(dir.path(), json!([{"id":"qa","role":"Writer","agent":"dsh","folder":"shared"}]));
     let error = ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap_err().to_string();
     assert!(error.contains("qa: a DeepSeek (dsh) session's sandbox") && error.contains("\"folder\":\"clone\""), "{error}");
     assert_eq!(team.status, TeamStatus::Planning, "nothing started");
@@ -84,7 +84,7 @@ fn a_team_with_a_deepseek_member_in_the_shared_folder_does_not_start() {
 fn a_deepseek_member_given_no_folder_takes_its_own_clone() {
     let dir = tempfile::tempdir().unwrap();
     set_test_low(Some(Vec::new()));
-    let mut team = planned(dir.path(), json!([{"id":"qa","role":"QA","agent":"dsh"},{"id":"rev","role":"Reviewer","agent":"codex","folder":"shared"}]));
+    let mut team = planned(dir.path(), json!([{"id":"qa","role":"Writer","agent":"dsh"},{"id":"rev","role":"Reviewer","agent":"codex","folder":"shared"}]));
     assert_eq!(team.settings.folder_policy, FolderPolicy::Lead);
     assert_eq!(team.member("qa").unwrap().folder, MemberFolder::Clone);
     assert_eq!(team.member("rev").unwrap().folder, MemberFolder::Shared, "other agents keep their choice");

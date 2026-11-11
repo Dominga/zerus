@@ -30,7 +30,7 @@ fn a_deepseek_member_starts_only_in_its_own_zerus_made_folder() {
         };
         let error = member_folder_with(&team, &member, &run).unwrap_err().to_string();
         assert!(error.contains("Low integrity label") && error.contains("may not share"), "{what}: {error}");
-        assert!(error.contains("\"members_update\":[{\"id\":\"qa\",\"folder\":\"clone\"}]") && error.contains("hgs team settings --json"), "{what}: one action: {error}");
+        assert!(error.contains("\"members_update\":[{\"id\":\"qa\",\"permissions_profile\":\"network\"}]") && error.contains("\"folder\":\"clone\"") && error.contains("hgs team settings --json"), "{what}: the actions: {error}");
         assert_eq!(calls.get(), 0, "{what}: nothing ran");
         assert_eq!(deepseek_folder_problem(&team, &member).as_deref(), Some(error.as_str()));
     }
@@ -66,8 +66,37 @@ fn the_preflight_refuses_a_deepseek_member_without_its_own_folder() {
     let found = plan::validate(&team, &BTreeSet::new());
     let folders: Vec<&str> = found.errors.iter().filter(|finding| finding.kind == "folder").map(|finding| finding.text.as_str()).collect();
     assert_eq!(folders.len(), 1, "only qa: {folders:?}");
-    assert!(folders[0].starts_with("qa: ") && folders[0].contains("its own clone"), "{folders:?}");
+    assert!(folders[0].starts_with("qa: ") && folders[0].contains("its own clone") && folders[0].contains("danger-full-access"), "{folders:?}");
     // The clone it is told to take passes.
     team.members[1].folder = MemberFolder::Clone;
     assert!(plan::validate(&team, &BTreeSet::new()).errors.iter().all(|finding| finding.kind != "folder"));
+}
+
+/// RogueDOD (owner, 2026-11-12): a DeepSeek member without the sandbox
+/// (danger-full-access: the network or operate profile, or a permission that
+/// names it) runs at Medium integrity and labels nothing, so it may share the
+/// team folder, lead the team and keep a worktree; checked live that git and
+/// lore commit from it and the folder and .git keep no label.
+#[test]
+fn a_deepseek_member_without_the_sandbox_may_share_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    set_git_ceiling(&dir.path().display().to_string());
+    let repo = folder_repo(dir.path(), "project");
+    let mut member = dsh("qa", MemberFolder::Shared, "");
+    member.permissions_profile = "network".into();
+    assert!(dsh_unsandboxed(&member));
+    let team = folder_team(&repo, member.clone());
+    assert!(deepseek_folder_problem(&team, &member).is_none());
+    assert_eq!(member_folder_with(&team, &member, &|_, args| local_create(args)).unwrap(), repo.display().to_string());
+    let named = Member { permissions: r#"native:{"preset":"danger-full-access"}"#.into(), ..dsh("qa", MemberFolder::Shared, "") };
+    assert!(dsh_unsandboxed(&named));
+    // A permission that names another preset keeps the sandbox, whatever the profile says.
+    let boxed = Member { permissions: r#"native:{"preset":"workspace-write"}"#.into(), permissions_profile: "network".into(), ..dsh("qa", MemberFolder::Shared, "") };
+    assert!(!dsh_unsandboxed(&boxed) && deepseek_folder_problem(&folder_team(&repo, boxed.clone()), &boxed).is_some());
+    // A worktree is kept for it, never turned into a clone.
+    let mut worktree = Member { permissions_profile: "operate".into(), ..dsh("qa", MemberFolder::Worktree, "") };
+    sandbox_folder(&mut worktree);
+    assert_eq!(worktree.folder, MemberFolder::Worktree);
+    let found = plan::validate(&folder_team(&repo, member), &BTreeSet::new());
+    assert!(found.errors.iter().all(|finding| finding.kind != "folder"), "{:?}", found.errors);
 }

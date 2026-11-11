@@ -3,6 +3,7 @@
 import hashlib,json,os,subprocess,sys,tempfile,time,unittest,uuid
 from pathlib import Path
 import test_input as fixtures
+import hook_command_fixtures as shell_probes
 HGS=fixtures.HGS
 TMUX=fixtures.TMUX
 
@@ -107,6 +108,36 @@ class HookHealth(unittest.TestCase):
                 self.assertEqual(json.loads(record.read_text())['programs'][:2],[str(b),str(a)])
                 current=path.read_bytes();self.assertEqual(repair()['status'],'unchanged');self.assertEqual(path.read_bytes(),current)
                 self.assertNotEqual(current,before)
+    def test_repair_preserves_composed_and_custom_quoted_recorded_hooks(self):
+        for agent in ['claude', 'codex', 'kimi']:
+            with self.subTest(agent=agent):
+                directory = self.root / ('.kimi-code' if agent == 'kimi' else '.' + agent)
+                directory.mkdir(exist_ok=True)
+                self.config = directory / ('config.toml' if agent == 'kimi' else 'hooks.json' if agent == 'codex' else 'settings.json')
+                self.program = self.bin / agent
+                self.cache()
+                self.config.write_text('model = "keep"\n' if agent == 'kimi' else '{"model":"keep"}')
+                account = 'native-' + agent
+                def repair():
+                    status = self.run_hgs(['--account', account, '--json'])
+                    args, body = self.repair(status, expected_provider=agent, expected_account_id=account)
+                    args[1] = account
+                    return self.run_hgs(args, body)
+                a = self.bin / 'hgs-wrapper'
+                b = self.bin / 'new runner'
+                for path in [a, b]:
+                    shell_probes.runner(path, HGS)
+                self.env['HGS_EXECUTABLE'] = str(a)
+                self.assertEqual(repair()['status'], 'repaired')
+                probes = shell_probes.composed(self.root, a)
+                shell_probes.preserves_and_runs(self, probes, [v for _, v in probes], self.env)
+                shell_probes.append(self.config, agent, probes)
+                self.env['HGS_EXECUTABLE'] = str(b)
+                self.assertEqual(repair()['status'], 'repaired')
+                actual = shell_probes.commands(self.config, agent, len(probes))
+                shell_probes.preserves_and_runs(self, probes, actual, self.env)
+                self.assertEqual(repair()['status'], 'unchanged')
+
     def test_foreign_state_arguments_do_not_block_repair_or_become_owned(self):
         foreign = [
             dict(type='command', command='/opt/other-tool __state hook', timeout=7),

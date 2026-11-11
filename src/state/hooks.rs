@@ -280,29 +280,39 @@ fn migrate_programs(
         let Ok(mut argv) = shell_words::split(command) else {
             return Ok(None);
         };
-        if argv.len() < 3 {
-            return Ok(None);
-        }
-        let program = argv.len() - 3;
-        if !programs.contains(&argv[program])
-            || !(argv[program + 1..] == HOOK_ARGS || argv[program + 1..] == CHANNEL_ARGS)
+        // Only the standalone form hgs writes. Prefixes belong to the person;
+        // parsing and re-quoting them would change shell operators/assignments.
+        if argv.len() != 3
+            || !programs.contains(&argv[0])
+            || !(argv[1..] == HOOK_ARGS || argv[1..] == CHANNEL_ARGS)
         {
             return Ok(None);
         }
-        if windows {
-            // These are the shell forms hgs writes on Windows. A custom
-            // prefix is not a form whose quoting we can safely reconstruct.
-            if program != 0 {
-                return Ok(None);
-            }
-            let command = windows::shell_command(executable)?;
-            return Ok(Some(if argv[2] == "hook" {
-                command
+        let channel = argv[2] == "answer-channel";
+        let with_args = |base: String| {
+            if channel {
+                format!("{}answer-channel", base.strip_suffix("hook").unwrap())
             } else {
-                format!("{}answer-channel", command.strip_suffix("hook").unwrap())
-            }));
+                base
+            }
+        };
+        let original = if windows {
+            let Ok(base) = windows::shell_command(&argv[0]) else {
+                return Ok(None);
+            };
+            with_args(base)
+        } else {
+            join_command(&argv)
+        };
+        // shell_words drops comments and normalizes quoting. Tokens alone
+        // therefore cannot prove that the original line was written by hgs.
+        if command != original {
+            return Ok(None);
         }
-        argv[program] = current.clone();
+        if windows {
+            return windows::shell_command(executable).map(|base| Some(with_args(base)));
+        }
+        argv[0] = current.clone();
         Ok(Some(join_command(&argv)))
     };
     if agent == "kimi" {

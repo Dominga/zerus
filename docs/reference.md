@@ -685,6 +685,8 @@ from a shell without that `HGS_EXECUTABLE` therefore still recognise the
 entries a wrapper wrote. When the current runner changes (including a different
 `HGS_EXECUTABLE`), the next install or compatible explicit repair rewrites those
 exact recorded tracking/channel entries to the current runner and records it.
+Shell migration accepts only the exact standalone form hgs writes; composed
+commands, comments and alternative quoting remain byte-for-byte unchanged.
 Other entry fields, personal hooks and trusted legacy commands are preserved.
 An unrecorded old wrapper is never silently claimed or deleted: use the exact
 wrapper as `HGS_EXECUTABLE` for a repair or supervised launch to record it first.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end lifecycle tests: private tmux socket, fake agents, no model calls."""
 import hashlib
+import hook_command_fixtures as shell_probes
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
@@ -2001,6 +2002,26 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                 self.assertEqual(doc['model'],'keep')
                 self.hgs('pause',name)
                 self.env['HGS_EXECUTABLE']=str(a)
+
+    def test_launch_preserves_composed_and_custom_quoted_recorded_hooks(self):
+        a = self.bin / 'hgs-wrapper'
+        b = self.bin / 'new runner'
+        for path in [a, b]:
+            shell_probes.runner(path, HGS)
+        for agent in ['claude', 'codex', 'kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE'] = str(a)
+                name = self.start(agent, 'composed')
+                self.hgs('pause', name)
+                path = self.root / ('.kimi-code/config.toml' if agent == 'kimi' else '.codex/hooks.json' if agent == 'codex' else '.claude/settings.json')
+                probes = shell_probes.composed(self.root, a)
+                shell_probes.preserves_and_runs(self, probes, [v for _, v in probes], self.env)
+                shell_probes.append(path, agent, probes)
+                self.env['HGS_EXECUTABLE'] = str(b)
+                self.resume(name)
+                actual = shell_probes.commands(path, agent, len(probes))
+                shell_probes.preserves_and_runs(self, probes, actual, self.env)
+                self.hgs('pause', name)
 
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

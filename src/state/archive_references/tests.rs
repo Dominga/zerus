@@ -27,6 +27,23 @@ fn metadata() -> Result<Vec<Value>> {
     })?;
     Ok(rows)
 }
+/// The probe's own precondition: an untouched state has no reference. Fork
+/// Windows builds #158 and #161 read "coverage is unavailable" here on a
+/// loaded runner, before the case under test had done anything (in #161 for
+/// `timeout`, on the first read of a state folder made a moment earlier). The
+/// refusal is the safe answer the cases themselves check; the precondition
+/// only needs the folder to have settled, so it is read again for a moment.
+fn settled_empty() {
+    let mut last = metadata();
+    for _ in 0..50 {
+        if last.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        last = metadata();
+    }
+    assert!(last.unwrap().is_empty());
+}
 fn related(folder: &Path) -> Result<Vec<Value>> {
     let mut rows = vec![];
     visit_related(until(), folder, "original-owner", |row| {
@@ -197,9 +214,9 @@ fn isolated_reference_probe() {
     let Ok(case) = std::env::var("HGS_TEST_ARCHIVE_REFERENCES") else {
         return;
     };
-    assert!(metadata().unwrap().is_empty());
+    settled_empty();
     private_dir(&root().join("archives")).unwrap();
-    assert!(metadata().unwrap().is_empty());
+    settled_empty();
     let target = root().join("checkout");
     let id = "11111111-1111-4111-8111-111111111111";
     let mut original = record(id, &target);

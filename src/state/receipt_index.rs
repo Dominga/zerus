@@ -376,26 +376,58 @@ impl Catalog {
 
             // #2055 shipped without change tracking. A v1 database has neither
             // column: add them (and seed their sequences) before any index
-            // mentions them. The upgrade transaction above already makes this
-            // atomic for a legacy cache.
+            // mentions them. A cache that already has the row-set guards can
+            // still predate the change columns, and a persisted cut between
+            // ADD COLUMN and its seed leaves rows at change=0 without a
+            // published frontier. Repair both in one transaction, so a reader
+            // never sees a Complete frontier that does not cover its rows.
             let columns: Vec<String> = sql(db.prepare("SELECT name FROM pragma_table_info('receipt_rows')"))?
                 .query_map([], |row| row.get(0))
                 .map_err(|_| "Receipt index is unavailable".to_owned())?
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|_| "Receipt index is unavailable".to_owned())?;
-            if !columns.iter().any(|column| column == "stamp") {
+            let has_stamp = columns.iter().any(|column| column == "stamp");
+            let has_change = columns.iter().any(|column| column == "change");
+            let unseeded = if has_change {
+                sql(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                ))?
+            } else {
+                true
+            };
+            let change_repair = !has_stamp || !has_change || unseeded;
+            let schema_transaction = if upgrade.is_none() && change_repair {
+                Some(sql(db.unchecked_transaction())?)
+            } else {
+                None
+            };
+            if !has_stamp {
                 sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';"))?;
             }
-            if !columns.iter().any(|column| column == "change") {
-                // Seed every discovered original once; later allocations
+            if !has_change {
+                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0;"))?;
+            }
+            if change_repair {
+                // Seed every unseeded original once; later allocations
                 // continue from the committed high-water.
-                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0; UPDATE receipt_rows SET change=seq;"))?;
+                sql(db.execute_batch("UPDATE receipt_rows SET change=seq WHERE change=0;"))?;
             }
             sql(db.execute_batch(
                 "CREATE INDEX IF NOT EXISTS receipt_change ON receipt_rows(source,change);
                  CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
                  CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);",
             ))?;
+            // The frontier must cover every seeded row, repairing a persisted
+            // cut where the column exists but its sequence was never published.
+            sql(db.execute(
+                "INSERT INTO receipt_meta VALUES('change_seq',COALESCE((SELECT MAX(change) FROM receipt_rows),0)) ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+                [],
+            ))?;
+            if let Some(transaction) = schema_transaction {
+                sql(transaction.commit())?;
+            }
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
                 [uuid::Uuid::new_v4().to_string()],
@@ -406,10 +438,7 @@ impl Catalog {
                     [source.key()],
                 ))?;
             }
-            sql(db.execute(
-                "INSERT OR IGNORE INTO receipt_meta VALUES('change_seq',COALESCE((SELECT MAX(change) FROM receipt_rows),0))",
-                [],
-            ))?;
+
         }
         if create {
             sql(db.execute(

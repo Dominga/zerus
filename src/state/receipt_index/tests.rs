@@ -640,3 +640,65 @@ fn a_reader_never_sees_a_sequence_before_its_row_commits() {
         uuid::Uuid::from_u128(1).to_string()
     );
 }
+
+#[test]
+fn a_guarded_cache_with_a_cut_change_upgrade_recovers_its_frontier() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 1.0));
+    put(&catalog, Source::Terminal, &value(2, "wanted", "run", "", 2.0));
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    // The persisted cut after ADD COLUMN change but before its seed: the
+    // guarded cache has the column, unseeded rows, no change indexes and no
+    // published frontier.
+    catalog
+        .db
+        .execute_batch(
+            "DROP INDEX receipt_change;
+             DROP INDEX receipt_change_scope;
+             DROP INDEX receipt_change_initial;
+             UPDATE receipt_rows SET change=0;
+             DELETE FROM receipt_meta WHERE key='change_seq';",
+        )
+        .unwrap();
+    drop(catalog);
+    let recovered = Catalog::open(temp.path(), true).unwrap();
+    let rows: Vec<i64> = recovered
+        .db
+        .prepare("SELECT change FROM receipt_rows ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![1, 2]);
+    let frontier: String = recovered
+        .db
+        .query_row("SELECT value FROM receipt_meta WHERE key='change_seq'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(frontier, "2");
+    let indexes: i64 = recovered
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('receipt_change','receipt_change_scope','receipt_change_initial')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexes, 3);
+    let scope = scope("wanted", "run", "");
+    assert_eq!(
+        recovered.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+    let changed = recovered.changed_page(&scope, "", 100, true).unwrap();
+    assert_eq!(changed.rows.len(), 2);
+    assert!(changed.drained);
+}

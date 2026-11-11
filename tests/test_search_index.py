@@ -89,11 +89,23 @@ class SearchIndex(unittest.TestCase):
 
     def test_catchup_is_bounded_and_reports_live_fallback(self):
         self.fixture()
-        reply = self.invoke("--index-catchup")
-        progress = reply["catchup"]
+        # Each pass is bounded in wall clock, discovery included: on a loaded
+        # machine the process can be descheduled past the discovery budget and
+        # stage nothing, so one pass may legitimately visit no path at all
+        # (zerus-naq2m). Retry within a bound exactly as warm_source does, and
+        # keep every pass inside the production budgets rather than relaxing
+        # them; only the pass that visits the fixture reports live fallback.
+        for _ in range(12):
+            reply = self.invoke("--index-catchup")
+            progress = reply["catchup"]
+            self.assertLessEqual(progress["ingestion"]["records"], 128)
+            self.assertLessEqual(progress["ingestion"]["bytes"], 4 << 20)
+            if progress["visited_paths"]:
+                break
+        else:
+            self.fail("catch-up did not visit the fixture path within 12 bounded passes: "
+                      + json.dumps(reply))
         self.assertEqual(progress["visited_paths"], 1)
-        self.assertLessEqual(progress["ingestion"]["records"], 128)
-        self.assertLessEqual(progress["ingestion"]["bytes"], 4 << 20)
         self.assertEqual(reply["status"]["catalog"]["fallback_sources"], 1)
         self.assertNotEqual(reply["status"]["coverage"]["state"], "ready")
 

@@ -194,6 +194,7 @@ pub(super) async fn confirm(
                 program_review_pending: true,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 reservation: None,
@@ -444,6 +445,7 @@ pub(super) fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> 
             // The resources are released; the unrefused result stays a
             // lookup-only row. No Check again, Force, review or consent.
             job.lookup_only = true;
+            job.physically_released = true;
             job.busy = false;
             job.program_review_pending = true;
             emit(&mut m);
@@ -488,9 +490,17 @@ pub(super) async fn force_offer<A: PipelineApp>(
         app.changed(&mut m);
         stopped
     };
-    let offered = tauri::async_runtime::spawn_blocking(move || stopped.offer_force())
-        .await
-        .map_err(|error| error.to_string());
+    #[cfg(test)]
+    let lost = fixture_offer_lost(&id);
+    let offered = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(test)]
+        if lost {
+            panic!("fixture: the blocking offer task ended without handing back its stop");
+        }
+        stopped.offer_force()
+    })
+    .await
+    .map_err(|error| error.to_string());
     let mut m = lock(&inner.model);
     let revision = m.revision.wrapping_add(1);
     let job = m
@@ -506,6 +516,20 @@ pub(super) async fn force_offer<A: PipelineApp>(
         watch_job(&inner, app, id);
     }
     result
+}
+/// Fixture-only (zerus-y7quu): job ids whose next blocking Force offer task
+/// panics, so force_offer meets a real JoinError and the task drops the stop.
+#[cfg(test)]
+static LOST_OFFERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(super) fn fixture_lose_offer(id: &str) {
+    lock(&LOST_OFFERS).push(id.to_owned());
+}
+#[cfg(test)]
+fn fixture_offer_lost(id: &str) -> bool {
+    let mut lost = lock(&LOST_OFFERS);
+    let at = lost.iter().position(|lost| lost == id);
+    at.map(|at| lost.remove(at)).is_some()
 }
 /// Force offer admission: takes the job's own incomplete normal stop.
 pub(super) fn take_force(job: &mut Job) -> Result<Box<programs::Stopped>, String> {

@@ -420,6 +420,7 @@ mod tests {
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: None,
             archive: None,
             restore_supported: false,

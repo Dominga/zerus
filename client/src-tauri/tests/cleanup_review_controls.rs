@@ -193,6 +193,7 @@ struct Job {
     program_review_pending: bool,
     program_retirement: Option<ProgramRetirement>,
     lookup_only: bool,
+    physically_released: bool,
     phase: &'static str,
     dismissed: bool,
 }
@@ -290,6 +291,7 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
                 program_review_pending: false,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 phase: "checking",
                 dismissed: false,
             }],
@@ -401,6 +403,7 @@ fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> Watch {
             // The resources are released; the unrefused result stays a
             // lookup-only row. No Check again, Force, review or consent.
             job.lookup_only = true;
+            job.physically_released = true;
             job.busy = false;
             job.program_review_pending = true;
             emit(&mut m);

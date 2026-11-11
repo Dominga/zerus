@@ -87,6 +87,10 @@ struct Job {
     // physically retired program (zerus-1y897.5). The row stays for lookup;
     // it never offers Check again, Force or a removal consent.
     lookup_only: bool,
+    // Set only where the watcher's physical_retirement() proved the program
+    // released (zerus-y7quu). A program that merely went missing, such as a
+    // panicked Force offer task's dropped stop, is not physical proof.
+    physically_released: bool,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
@@ -121,7 +125,7 @@ impl Job {
     /// retired has nothing left to wait for. Dismiss may drop it; it still
     /// never offers Check again, Force, a consent or a removal.
     fn released_lookup_only(&self) -> bool {
-        self.lookup_only && !self.has_programs()
+        self.lookup_only && self.physically_released && !self.has_programs()
     }
 
     fn unfinished_programs(&self) -> bool {
@@ -524,6 +528,7 @@ impl Model {
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: Some(target.clone()),
             archive,
             restore_supported,
@@ -1343,6 +1348,7 @@ pub async fn termination_cleanup_confirm(
                 program_review_pending: false,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1577,6 +1583,7 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1676,6 +1683,7 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1795,6 +1803,7 @@ fn stopping_job() -> Job {
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1853,19 +1862,44 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
         assert!(!model.jobs[0].busy);
     }
 
+    // zerus-y7quu: the real force_offer meets a real JoinError. Its blocking
+    // offer task panics and drops the stop inside the task; nothing proves a
+    // physical release, so the row stays lookup-only and undismissable.
     let state = TerminationCleanup::default();
-    let mut job = published_incomplete(lost);
-    let taken = program_pipeline::take_force(&mut job).unwrap();
-    // The blocking task owned the stop and ended without handing it back.
-    drop(taken);
-    assert!(program_pipeline::record_offer(&mut job, 1, Err("offer task ended".into())).is_err());
-    lock(&state.0.model).jobs.push_back(job);
+    lock(&state.0.model)
+        .jobs
+        .push_back(published_incomplete(lost));
+    program_pipeline::fixture_lose_offer("job");
+    let inner = state.0.clone();
+    let offered = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(program_pipeline::force_offer(
+            inner,
+            TestApp::default(),
+            "job".into(),
+        ))
+    })
+    .join()
+    .unwrap();
+    assert!(offered.is_err(), "a lost offer task offered Force");
     assert!(check(&state).is_err());
-    let model = lock(&state.0.model);
+    let mut model = lock(&state.0.model);
     assert!(!model.jobs[0].busy, "a lost offer left the row busy");
     assert!(model.jobs[0].lookup_only);
-    let row = &model.view().rows[0];
-    assert!(!row.can_check && !row.ready && !row.can_force);
+    assert!(model.jobs[0].programs.is_none());
+    {
+        let view = model.view();
+        let row = &view.rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force);
+        assert!(!row.can_remove_anyway);
+        assert!(
+            !row.can_dismiss,
+            "a lost offer's row became dismissible without physical proof"
+        );
+    }
+    assert!(
+        model.dismiss("job").is_err(),
+        "a lost offer's row was dismissed"
+    );
 }
 
 /// zerus-1y897.8: an unconfirmed stop is lookup-only and keeps whatever
@@ -3228,6 +3262,7 @@ fn check_blocking<A: Send + 'static>(
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: None,
             archive: None,
             restore_supported: false,

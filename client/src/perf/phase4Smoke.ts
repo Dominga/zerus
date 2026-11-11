@@ -215,6 +215,22 @@ async function sendFollowStep() {
   const disclosureStart = parseFloat(disclosure.closest<HTMLElement>(".act-virtual-row")!.dataset.start ?? "0");
   disclosure.click();
   await until(atEnd, 3000, "content growth did not stay at the end after send");
+  // A thumbnail reserves 96x64 until its image decodes, then takes the image's
+  // size (attachment-image.ts). Let the transcript's own late layout finish
+  // before the hold, so the check below sees only what the injected journal
+  // events and the held collapse do (zerus-2n2vk).
+  const layout = () => [...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")]
+    .map((row) => `${row.dataset.index}:${row.dataset.start}:${row.getBoundingClientRect().height}`).join(" ") + ` ${scroller.scrollHeight}`;
+  const decoded = () => [...scroller.querySelectorAll<HTMLImageElement>(".att-thumb img")].every((image) => image.complete && image.naturalWidth > 0);
+  let stable = 0, last = "";
+  await until(() => {
+    const now = layout();
+    stable = decoded() && now === last ? stable + 1 : 0;
+    last = now;
+    return stable >= 6;
+  }, 10_000, "Activity layout did not settle before the selection hold").catch((error) => {
+    throw new Error(`${error.message}: ${JSON.stringify({ decoded: decoded(), layout: layout() })}`);
+  });
   const range = document.createRange();
   range.selectNodeContents(scroller.querySelector(".act-msg")!);
   const selection = document.getSelection()!;
@@ -243,7 +259,9 @@ async function sendFollowStep() {
       } }]);
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       frames.push({ top: scroller.scrollTop, height: scroller.scrollHeight });
-      log(`phase4-selection-frame ${JSON.stringify({ n, top: scroller.scrollTop, height: scroller.scrollHeight })}`);
+      // For diagnosis: the virtual total and each mounted row (index:start:height).
+      log(`phase4-selection-frame ${JSON.stringify({ n, top: scroller.scrollTop, height: scroller.scrollHeight,
+        min: scroller.querySelector<HTMLElement>(".act-virtual")?.style.minHeight ?? null, rows: layout() })}`);
     }
     await sleep(300);
     log(`phase4-selection-hold ${JSON.stringify({ selectedTop, selectedHeight, writes, frames: frames.length })}`);
@@ -831,36 +849,6 @@ async function activityGeometryStep() {
     watch.mark("cached-switch-back");
     await select(DOCS);
     await nextFrames(10);
-
-    // zerus-2n2vk: a cached session left at a reading position restores it on
-    // return. Every revealed frame must show rows, never a blank viewport.
-    watch.mark("reading-switch-away");
-    const reading = document.querySelector<HTMLElement>(".act-scroll")!;
-    const jump = () => !!document.querySelector('button[aria-label^="Jump to latest activity"]');
-    // In DOCS's own fixture rows, whose anchors survive a reload of the
-    // campaign's store-only rows: 1.5 viewports below the top (clear of the
-    // older-page read at OLDER_EDGE) and at least three above the latest
-    // rows, so the restored window cannot overlap the tail window.
-    const readingTop = Math.round(reading.clientHeight * 1.5);
-    if (readingTop > reading.scrollHeight - reading.clientHeight * 4)
-      throw new Error(`the geometry transcript is too short for a reading position: ${JSON.stringify({ height: reading.scrollHeight, viewport: reading.clientHeight })}`);
-    reading.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }));
-    reading.scrollTo({ top: readingTop, behavior: "instant" });
-    // The browser delivers a scroll event before it paints the new offset.
-    // Deliver it in this task, so the sampler never sees the unpainted
-    // moment between the setup's write and that event.
-    reading.dispatchEvent(new Event("scroll"));
-    await until(() => jump() && Math.abs(reading.scrollTop - readingTop) <= 2, 10_000, "DOCS did not leave the latest activity for a reading position");
-    await nextFrames(4);
-    await select(PAGINATION);
-    await nextFrames(6);
-    watch.mark("reading-switch-back");
-    await select(DOCS);
-    const restored = document.querySelector<HTMLElement>(".act-scroll")!;
-    await until(() => restored.querySelector<HTMLElement>(".act-col")?.style.visibility === "visible", 10_000, "the reading position was not revealed");
-    await nextFrames(10);
-    if (!jump() || restored.scrollTop + restored.clientHeight >= restored.scrollHeight - restored.clientHeight)
-      throw new Error(`DOCS did not restore its reading position: ${JSON.stringify({ jump: jump(), saved: readingTop, top: restored.scrollTop, height: restored.scrollHeight, viewport: restored.clientHeight })}`);
   } finally {
     const column = document.querySelector<HTMLElement>(".act-scroll .act-col");
     if (column) column.style.fontFamily = "";

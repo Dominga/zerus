@@ -90,9 +90,19 @@ SEND_ATTEMPT_FILES = ("ZerusViewModel.kt",)
 # banner; the model publishes the shown frame's observation time, the read
 # failure's kind and observed shared-read outcomes. Presentation only: question
 # eligibility, native availability, every verification writer and all historical
-# reconstruction pins stay exact. Reverse it first, as the newest reviewed update.
+# reconstruction pins stay exact. Reverse it after newer reviewed updates.
 SYNC_STATUS_UPDATES = ROOT / "tests/fixtures/question-availability-sync-status-updates.patch"
 SYNC_STATUS_UPDATES_SHA = "fc55b33f20190f4ac88fa7012c03a304d855caeb2f238ce9f39f9a4b6a70bf77"
+# Exact two-file current-read delta babdce3c1..3220a3158 (zerus-a4mub.9, #2060):
+# the open conversation acknowledges its verified inspection's current reply and
+# attention after the settled visibility dwell (tail, newest row and questions
+# flags, the current values' dwell key), explicit Mark read shares them, and every
+# shared mark goes through one launchSharedRead, which now holds #2053's Pending
+# note. Shared reads only: question eligibility, native availability, every
+# verification writer and all historical reconstruction pins stay exact. Reverse
+# it first, as the newest reviewed update.
+CURRENT_READ_UPDATES = ROOT / "tests/fixtures/question-availability-current-read-updates.patch"
+CURRENT_READ_UPDATES_SHA = "1f1e6f291f1568fdf2d6fecb7847c3bff9826d7925e8e8422e2bbb5ef93d5ea5"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -151,6 +161,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha,
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, CURRENT_READ_UPDATES, CURRENT_READ_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
@@ -182,6 +193,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                CURRENT_READ_UPDATES, CURRENT_READ_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
@@ -272,6 +285,18 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     reverse_reviewed_patch("ZerusViewModel.kt", source.replace(addition, replacement, 1),
                                            SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
+
+    def test_current_read_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The current-read acknowledgement stays exact reviewed hunks in both files:
+        # changing, removing or duplicating one of its additions must break the reconstruction.
+        for name, addition in (
+                ("ZerusViewModel.kt", "    private fun launchSharedRead(request:SharedReadRequest) {\n"),
+                ("MainActivity.kt", "                model.visibleMessages(target, viewport.ids)\n")):
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.replace("\n", " // changed reviewed addition\n", 1), "", addition + addition):
+                with self.subTest(source=name, replacement=replacement[:40]):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
 
     def test_sync_status_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
         # The status strip stays exact reviewed hunks in both files: changing,

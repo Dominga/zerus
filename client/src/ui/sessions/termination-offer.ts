@@ -8,7 +8,7 @@ export interface CleanupOffer { id: string; checked: boolean; programs?: readonl
 export function completeProgramList(value: readonly CleanupProgram[] | undefined): boolean {
   if (value === undefined) return true; // The existing offer has no program-stop lane.
   return Array.isArray(value) && value.length <= 64 && value.every((program, i) => program != null && Number.isInteger(program.pid)
-    && program.pid > 0 && program.pid <= 0x7fffffff
+    && program.pid > 1 && program.pid <= 0x7fffffff
     && typeof program.label === "string" && program.label.length > 0
     && new TextEncoder().encode(program.label).length <= 512 && !/[\x00-\x1f\x7f-\x9f]/.test(program.label)
     && (i === 0 || value[i - 1].pid < program.pid));

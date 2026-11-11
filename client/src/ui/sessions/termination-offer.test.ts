@@ -45,7 +45,8 @@ describe("Terminate dialog removal availability", () => {
     const programs = [{ pid: 7, label: "Editor" }, { pid: 9, label: "Terminal" }];
     expect(completeProgramList(programs)).toBe(true);
     expect(completeProgramList([])).toBe(true);
-    expect(completeProgramList([{ pid: 1, label: "Namespace init" }])).toBe(true);
+    expect(completeProgramList([{ pid: 1, label: "Namespace init" }])).toBe(false);
+    expect(completeProgramList([{ pid: 0, label: "Invalid process" }])).toBe(false);
     const source = { id: "original-manifest-offer", checked: true, programs };
     let state: CleanupOfferState = {};
     await readCleanupOffer(target, { offer: async () => source, cancel: vi.fn(async () => {}) }, () => true, (next) => { state = next; });

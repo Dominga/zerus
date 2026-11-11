@@ -105,6 +105,26 @@ fn group_cleanup_keeps_the_original_leader_reserved_until_reap() {
 }
 
 #[test]
+fn a_leader_that_exits_after_the_live_check_is_reaped_not_pinned() {
+    // zerus-c7yqf: stop() saw the leader live and it exited before killpg.
+    // XNU reports EPERM for that zombie-only group; the unreaped exit proves
+    // it, so the original is reaped instead of the cleanup failing.
+    let mut child = spawn(0);
+    let mut group = Group::new(&mut child);
+    let until = Instant::now() + Duration::from_secs(5);
+    while group.exited().unwrap().is_none() {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    group
+        .signal(false)
+        .expect("a verified exited sole leader is not refused");
+    assert!(group.signalled && !group.lost);
+    assert!(group.reap().unwrap().success());
+    assert_eq!(group.signals, 1);
+}
+
+#[test]
 fn a_lost_original_wait_suppresses_every_later_group_or_pid_stop() {
     let mut child = spawn(0);
     let mut group = Group::new(&mut child);

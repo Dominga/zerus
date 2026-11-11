@@ -42,7 +42,7 @@ pub(super) struct Entered {
     owner: Arc<owner::Owner>,
 }
 impl Entered {
-    /// Only the fixed Effort keeper calls this constructor; no environment,
+    /// Only the fixed Effort/Settings keeper calls this constructor; no environment,
     /// serialized callback, endpoint prefix or renderer value creates it.
     pub(super) fn install(owner: Arc<owner::Owner>) -> Result<Self> {
         owner.actor()?;

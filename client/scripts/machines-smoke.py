@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import time
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 
 CLIENT = Path(__file__).resolve().parent.parent
 
@@ -38,6 +40,7 @@ def main():
                        '--app',str(app),'--output',str(output),'--inner']
             if args.tools:command.append('--tools')
             if args.setup:command.append('--setup')
+            command = gui_sandbox.sandboxed(command, keep=[private, output])
             log.write('EXECUTED '+json.dumps(command)+'\nFresh allowlisted private HOME/XDG/TMPDIR/TMUX_TMPDIR/D-Bus/Xvfb\n');log.flush()
             result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=100)
             log.write('\nEXIT_CODE '+str(result.returncode)+'\n')
@@ -145,7 +148,7 @@ def main():
             if chooser():press('Return')
     captured=set()
     with (output/'app.log').open('w') as log:
-        process=subprocess.Popen([str(app),'--sessions'],cwd=scratch,env=env,stdout=log,stderr=subprocess.STDOUT)
+        gui_sandbox.refuse_reachable_guard();process=subprocess.Popen([str(app),'--sessions'],cwd=scratch,env=env,stdout=log,stderr=subprocess.STDOUT)
         try:
             deadline=time.monotonic()+70
             while process.poll() is None and time.monotonic()<deadline:

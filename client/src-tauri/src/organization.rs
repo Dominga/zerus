@@ -33,6 +33,7 @@
 //! the I/O lock. Startup reads and all token checkpoints run off main. The exit
 //! path waits at most 500 ms before independently flushing draft and layout.
 
+pub mod adoption_dialog;
 pub mod clones;
 pub mod folders;
 mod legacy_projects;
@@ -148,6 +149,7 @@ struct Hub {
     recovery_seen: Option<(String, bool)>,
     recovery_due: Option<String>,
     presentation_due: bool,
+    adoption: Option<adoption_dialog::Context>,
     catalog: Option<swarm_dialog::Context>,
     legacy: Option<legacy_projects::Context>,
     legacy_report: Option<legacy_projects::Report>,
@@ -205,7 +207,15 @@ struct Shared {
     /// Makes the worker's next pass panic, so a test can stop it.
     #[cfg(test)]
     fail: std::sync::atomic::AtomicBool,
+    /// Runs on the worker after an adoption result queued its next step,
+    /// outside every lock, so a test can act before that step's barrier.
+    #[cfg(test)]
+    adoption_queued: Mutex<Option<AdoptionQueuedHook>>,
 }
+
+/// Test-only: told whether the step just queued is the original mutation.
+#[cfg(test)]
+type AdoptionQueuedHook = Box<dyn Fn(bool) + Send>;
 
 /// The managed state of the organization commands; clones share it. The
 /// worker thread runs while a clone is left.
@@ -471,6 +481,8 @@ impl Organization {
             parked: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             fail: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            adoption_queued: Mutex::new(None),
         }));
         {
             let mut hub = organization.lock();
@@ -1366,6 +1378,9 @@ impl Organization {
             }
             return;
         }
+        if self.adoption_pass() {
+            return;
+        }
         if self.catalog_pass() {
             return;
         }
@@ -2098,6 +2113,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod adoption_dialog_cases;
     mod drive_folders;
     mod legacy_projects;
     mod remote_windows_folders;

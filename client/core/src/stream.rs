@@ -53,7 +53,7 @@ fn replaced(frame: &Frame) -> bool {
         if error.fatal && error.code == zerus_watch_protocol::code::HGS_REPLACED)
 }
 
-mod helper;
+pub(crate) mod helper;
 #[path = "stream_legacy_source.rs"]
 mod legacy_source;
 mod resources;

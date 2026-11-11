@@ -84,6 +84,8 @@ pub(super) fn place(app: &AppHandle) -> Result<(), String> {
     for (key, view, phase) in views {
         if visible && active.as_ref() == Some(&key) && phase == Phase::Ready {
             if let Some(_bounds) = &bounds {
+                // On Linux only this placement shows the child; no main-window
+                // Show can (zerus-06hh0).
                 #[cfg(target_os = "linux")]
                 crate::native_ui::linux::place(
                     &view,
@@ -93,6 +95,7 @@ pub(super) fn place(app: &AppHandle) -> Result<(), String> {
                     _bounds.height,
                 )
                 .map_err(|_| FAILED.to_owned())?;
+                #[cfg(not(target_os = "linux"))]
                 view.show().map_err(|_| FAILED.to_owned())?;
                 continue;
             }

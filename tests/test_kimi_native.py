@@ -849,6 +849,27 @@ class NativeKimi(lifecycle.Harness):
                 found.append(content)
         return found.count(text)
 
+    def test_id_settings_before_first_message_preserves_empty_conversation_and_defaults(self):
+        import native_effort_id as identity
+        import native_settings_id as settings_contract
+        config = self.home / 'config.toml'
+        text = config.read_text()
+        self.assertEqual(text.count('max_context_size = 32768\n'), 1)
+        text = text.replace('max_context_size = 32768\n', 'max_context_size = 32768\ncapabilities = ["thinking"]\n')
+        text += '\n[models.fixture_next]\nprovider = "fixture"\nmodel = "fixture-next"\nmax_context_size = 32768\ncapabilities = ["thinking"]\n'
+        config.write_text(text)
+        name = self.launch()
+        record = self.binding(name)
+        self.assertFalse(record.get('conversation_id'), 'do not prime a first turn for empty-CID settings')
+        before, requests = config.read_bytes(), len(self.requests)
+        record, path, legacy = identity.moved_record(self, name, record)
+        attempts = identity.key_log(self)
+        settings_contract.change_and_replay(self, name, record, path, 'fixture_next', 'on', attempts)
+        self.assertIn('fixture-next', self.screen(name).lower())
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(len(self.requests), requests, 'settings submitted a first model turn')
+        self.assertFalse(legacy.exists())
+
     def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
         import native_effort_id as contract
         config = self.home / 'config.toml'

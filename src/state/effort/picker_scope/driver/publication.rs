@@ -16,6 +16,7 @@ pub(super) struct CommitFence {
     turn: Option<context::Turn>,
     temporary: CString,
     sources: Vec<crate::state::guarded_recovery::Original>,
+    schedule: Option<(Value, Value, settings::Liveness, Value)>,
 }
 impl CommitFence {
     pub(super) fn native(owner: &Arc<owner::Owner>, staged: &Staged) -> Result<Self> {
@@ -30,6 +31,7 @@ impl CommitFence {
             turn: Some(turn),
             temporary: staged.temporary.clone(),
             sources: Vec::new(),
+            schedule: None,
         })
     }
     pub(super) fn recovery(
@@ -50,6 +52,24 @@ impl CommitFence {
             turn: None,
             temporary: staged.temporary.clone(),
             sources: sources.iter().map(|source| (*source).clone()).collect(),
+            schedule: None,
+        })
+    }
+    pub(super) fn schedule(
+        owner: &Arc<owner::Owner>,
+        staged: &Staged,
+        step: &settings::Schedule,
+    ) -> Result<Self> {
+        owner.actor()?;
+        owner.invalidate();
+        let (record, version) = step.check(owner, staged)?;
+        Ok(Self {
+            owner: owner.clone(),
+            epoch: owner.epoch.load(std::sync::atomic::Ordering::Acquire),
+            turn: None,
+            temporary: staged.temporary.clone(),
+            sources: Vec::new(),
+            schedule: Some((record, version, step.class, staged.json()?)),
         })
     }
     pub(super) fn record(&self, record: &Value) -> Result<()> {
@@ -72,6 +92,31 @@ impl CommitFence {
         if let Some(turn) = &self.turn {
             if self.owner.snapshot()? != (turn.record.clone(), turn.version.clone()) {
                 return Err("Original Effort commit source changed after observation".into());
+            }
+        }
+        if let Some((record, version, class, content)) = &self.schedule {
+            if self.owner.control.frame().operation != host::frame::Operation::Settings
+                || !self.owner.native()?
+                || self
+                    .owner
+                    .reservation
+                    .lock()
+                    .map_err(|_| "Settings reservation unavailable")?
+                    .is_some()
+                || self.owner.snapshot()? != (record.clone(), version.clone())
+                || settings::liveness(record)? != *class
+            {
+                return Err("Original schedule source or liveness changed before commit".into());
+            }
+            staged.schedule_content(&self.owner, record, version, *class)?;
+            if staged.json()? != *content {
+                return Err("Original schedule content changed".into());
+            }
+            // Native read/recipe validation above can block. Recheck the SAME
+            // scope and record afterwards, before names and the pure EOF fence.
+            self.owner.check()?;
+            if self.owner.snapshot()? != (record.clone(), version.clone()) {
+                return Err("Original schedule source changed during commit observation".into());
             }
         }
         Ok(())
@@ -228,6 +273,95 @@ impl Staged {
 
     pub(super) fn expected_version(&self) -> Option<&Value> {
         self.expected.as_ref().map(|e| &e.version)
+    }
+
+    pub(super) fn json(&self) -> Result<Value> {
+        use std::os::unix::fs::FileExt as _;
+        let size = self.file.metadata().map_err(|e| e.to_string())?.len();
+        if size > ID_RECORD_BYTES {
+            return Err("Settings stage exceeds its bound".into());
+        }
+        let mut bytes = vec![0; size as usize];
+        self.file
+            .read_exact_at(&mut bytes, 0)
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    }
+
+    pub(super) fn schedule_content(
+        &self,
+        owner: &Arc<owner::Owner>,
+        record: &Value,
+        record_version: &Value,
+        class: settings::Liveness,
+    ) -> Result<()> {
+        let frame = owner.control.frame();
+        let value = self.json()?;
+        owner.with_scope(|scope| {
+            if self.parent.path==scope.sessions.path && self.destination==name(&scope.record.name)? {
+                if self.expected_version()!=Some(record_version) {return Err("Schedule record preimage changed".into());}
+                let mut original=record.clone(); let mut next=value.clone();
+                for key in ["pending_settings","resume_settings","updated"] {
+                    original.as_object_mut().ok_or("Invalid schedule record")?.remove(key);
+                    next.as_object_mut().ok_or("Invalid schedule stage")?.remove(key);
+                }
+                if original!=next || !same_target(record,&value) {return Err("Schedule fence cannot change native settings or marker".into());}
+                let request:SettingsRequest=serde_json::from_slice(&frame.raw).map_err(|e|e.to_string())?;
+                if request.expected_pending_id.is_some() {return Err("Manual pending scheduling cannot replace its original record".into());}
+                if string(&value["pending_settings"],"request_id")!=frame.request_id
+                    || value["pending_settings"]["run_id"]!=record["run_id"]
+                    || value["pending_settings"]["conversation_id"]!=record["conversation_id"]
+                    || value["pending_settings"]["receipt_name"]!=record["name"]
+                    || value["pending_settings"]["receipt_run_id"]!=record["run_id"]
+                    || value["resume_settings"]!=json!({"model":value["pending_settings"]["model"],"effort":value["pending_settings"]["effort"]}) {
+                    return Err("Schedule stage does not name its original request".into());
+                }
+            } else if self.parent.path==scope.receipts.path
+                && self.destination==name(&format!("{}.json",frame.request_id))? {
+                if value["request_id"]!=frame.request_id || value["digest"]!=format!("{:x}",Sha256::digest(&frame.raw))
+                    || value["name"]!=record["name"] || value["run_id"]!=record["run_id"]
+                    || value["conversation_id"]!=record["conversation_id"] || value["scope"]!="session"
+                    || !matches!(value["status"].as_str(),Some("in_progress"|"scheduled"))
+                    || value["apply_when"]!=if class==settings::Liveness::Running {"ready"} else {"resume"} {
+                    return Err("Schedule fence cannot publish this receipt".into());
+                }
+            } else { return Err("Schedule fence cannot write another destination".into()); }
+            Ok(())
+        })
+    }
+
+    /// The final scheduled bytes were fsynced before W in_progress. Advance
+    /// only their receipt preimage from the SAME known successful own commit.
+    pub(super) fn follow_own_settings_receipt(
+        &mut self,
+        owner: &Arc<owner::Owner>,
+        original: &Original,
+    ) -> Result<()> {
+        let frame = owner.control.frame();
+        if frame.operation != host::frame::Operation::Settings
+            || self.expected.is_some()
+            || self.destination != name(&format!("{}.json", frame.request_id))?
+            || self.json()?["status"] != "scheduled"
+        {
+            return Err("Invalid scheduled receipt transition".into());
+        }
+        owner.with_scope(|scope| {
+            original.verify(&scope.receipts)?;
+            let value = original.record(&scope.receipts)?;
+            if self.parent.path != scope.receipts.path
+                || original.name != format!("{}.json", frame.request_id)
+                || value["status"] != "in_progress"
+                || value["request_id"] != frame.request_id
+                || value["digest"] != format!("{:x}", Sha256::digest(&frame.raw))
+            {
+                return Err("Original schedule reservation changed".into());
+            }
+            self.expected = Some(Expected {
+                file: original.file.try_clone().map_err(|e| e.to_string())?,
+                version: original.version.clone(),
+            });
+            Ok(())
+        })
     }
 
     /// The fence contains the completed source/native observation. Its last

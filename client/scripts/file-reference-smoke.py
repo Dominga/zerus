@@ -7,6 +7,8 @@ The app must include the media/custom-protocol build and production frontend.
 """
 import argparse,ctypes as C,json,os,signal,subprocess,sys,tempfile,time,threading
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 repo=Path(__file__).resolve().parents[2]
 worker=len(sys.argv)>1 and sys.argv[1]=='--worker'
 if not worker:
@@ -67,7 +69,7 @@ with (root/'terminal.jsonl').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\
   env['ZERUS_CLIENT_REPLAY']+=':example-peer='+str(root/'peer.ndjson')
   env['ZERUS_CLIENT_QUERY']='page=sessions&skin=zerus-light&file-ssh-smoke=1'
  print('Private file dialog walk:',root,flush=True)
- command=['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app_path),*(['--ssh'] if args.ssh else [])]
+ command=gui_sandbox.sandboxed(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app_path),*(['--ssh'] if args.ssh else [])],keep=[root])
  process=subprocess.Popen(command,env=env,start_new_session=True)
  try:code=process.wait(timeout=90)
  except subprocess.TimeoutExpired:
@@ -125,7 +127,7 @@ def text(value):
 # already private task environment. No inherited owner session values exist.
 env={k:v for k,v in os.environ.items() if k in {'PATH','LANG','HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_RUNTIME_HOME','TMPDIR','TMUX_TMPDIR','HGS_CONFIG_DIR','HGS_STATE_DIR','GDK_BACKEND','WAYLAND_DISPLAY','WEBKIT_DISABLE_DMABUF_RENDERER','NO_AT_BRIDGE','GSETTINGS_BACKEND','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY'} or k.startswith('ZERUS_CLIENT_')}
 with (root/'app.log').open('wb') as log:
- app=subprocess.Popen([str(app_path)],env=env,stdout=log,stderr=log,cwd=repo/'client')
+ gui_sandbox.refuse_reachable_guard();app=subprocess.Popen([str(app_path)],env=env,stdout=log,stderr=log,cwd=repo/'client')
  stages=set();deadline=time.monotonic()+75
  try:
   while time.monotonic()<deadline:

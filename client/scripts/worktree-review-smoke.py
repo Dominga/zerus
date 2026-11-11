@@ -2,6 +2,8 @@
 """Native Worktrees walk in private D-Bus/Xvfb/state, with fake hgs only."""
 import argparse, ctypes, json, os, signal, subprocess, sys, tempfile, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 REPO = Path(__file__).resolve().parents[2]
 MACHINE = '11111111-1111-4111-8111-111111111111'
 if '--worker' not in sys.argv:
@@ -178,7 +180,7 @@ print('{}')
     if options.swarm_conflicts_ui:env['ZERUS_CLIENT_QUERY']='page=projects&skin=zerus-light&project-swarm-conflicts-smoke='+options.swarm_conflicts_ui
     if options.shell_badge:env['ZERUS_CLIENT_QUERY']='page=sessions&skin=zerus-light&shell-badge-smoke=1'
     print('Private Worktrees walk:',root,flush=True)
-    child=subprocess.Popen(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app),*(['--shell-badge'] if options.shell_badge else []),*(['--overview-native'] if options.overview_native else []),*(['--overview-ui'] if options.overview_ui else []),*(['--swarm-native'] if options.swarm_native else []),*(['--swarm-ui'] if options.swarm_ui else []),*(['--swarm-conflicts-ui',options.swarm_conflicts_ui] if options.swarm_conflicts_ui else [])],env=env,start_new_session=True)
+    child=subprocess.Popen(gui_sandbox.sandboxed(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app),*(['--shell-badge'] if options.shell_badge else []),*(['--overview-native'] if options.overview_native else []),*(['--overview-ui'] if options.overview_ui else []),*(['--swarm-native'] if options.swarm_native else []),*(['--swarm-ui'] if options.swarm_ui else []),*(['--swarm-conflicts-ui',options.swarm_conflicts_ui] if options.swarm_conflicts_ui else [])],keep=[root]),env=env,start_new_session=True)
     try:result=child.wait(timeout=110)
     except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGTERM);child.wait(timeout=5);raise
     raise SystemExit(result)
@@ -194,6 +196,7 @@ prefix='swarm-conflicts-smoke: ' if conflicts_mode else 'swarm-ui-smoke: ' if sw
 env={k:v for k,v in os.environ.items() if k in {'PATH','LANG','HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_RUNTIME_HOME','TMPDIR','TMUX_TMPDIR','HGS_CONFIG_DIR','HGS_STATE_DIR','GDK_BACKEND','WAYLAND_DISPLAY','WEBKIT_DISABLE_DMABUF_RENDERER','NO_AT_BRIDGE','GSETTINGS_BACKEND','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY'} or k.startswith('ZERUS_CLIENT_')}
 x=ctypes.CDLL('libX11.so.6');t=ctypes.CDLL('libXtst.so.6');x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p;x.XStringToKeysym.argtypes=[ctypes.c_char_p];x.XStringToKeysym.restype=ctypes.c_ulong;x.XKeysymToKeycode.argtypes=[ctypes.c_void_p,ctypes.c_ulong];x.XKeysymToKeycode.restype=ctypes.c_uint;x.XFlush.argtypes=[ctypes.c_void_p];t.XTestFakeKeyEvent.argtypes=[ctypes.c_void_p,ctypes.c_uint,ctypes.c_int,ctypes.c_ulong];display=x.XOpenDisplay(None);assert display
 with (root/'app.log').open('wb') as log:
+    gui_sandbox.refuse_reachable_guard()
     child=subprocess.Popen([str(app)],cwd=REPO/'client',env=env,stdout=log,stderr=log);stages=set();deadline=time.monotonic()+100
     try:
         while time.monotonic()<deadline:

@@ -2,6 +2,7 @@
 //! place; it is never inferred from a label, recreated after loss, or published
 //! by this module. Duplicate-label creation remains a separate gated writer.
 use super::*;
+mod native_identity;
 
 const BYTES: u64 = 1 << 20;
 const RECORDS: usize = 5_000;
@@ -13,6 +14,9 @@ pub(super) enum Provider {
 }
 
 impl Provider {
+    pub(super) fn native_caller(self, native: &str, home: &Path) -> Result<Option<Value>> {
+        native_identity::find(self, native, home)
+    }
     pub(super) fn named(name: &str) -> Option<Self> {
         match name.split('/').next() {
             Some("dsh") => Some(Self::DeepSeek),
@@ -229,8 +233,11 @@ impl Provider {
             }
             self.label_path(name)
         };
+        let before = native_identity::before_write(self);
         atomic(&path, &record.to_string())?;
+        native_identity::account(self, &before);
         session_index::note(record, self.kind(record));
+        native_identity::note(self, record);
         Ok(())
     }
     pub(super) fn remove(self, record: &Value) -> Result<()> {
@@ -247,8 +254,11 @@ impl Provider {
         } else {
             self.label_path(string(record, "name"))
         };
+        let before = native_identity::before_write(self);
         archive::remove_synced(&path)?;
+        native_identity::account(self, &before);
         session_index::retire_provider(record, self.kind(record));
+        native_identity::retire(self, record);
         // Stale supersets are safe. Do not wait in reverse lock order.
         if storage::in_id_layout(record) {
             if let Ok(Some(_writer)) = storage::writer_until(std::time::Instant::now()) {

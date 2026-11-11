@@ -74,6 +74,10 @@ pub fn load(dir: &Path) -> Result<BTreeMap<String, Connection>> {
 fn revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+pub(crate) fn adoption_configuration_revision(config: &Config) -> Result<String> {
+    Ok(revision(&read(&config.dir)?))
+}
 fn validate_alias(alias: &str) -> Result<()> {
     if alias.is_empty()
         || alias.len() > 80

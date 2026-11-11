@@ -17,6 +17,14 @@ pub(in crate::state::effort::picker_scope) enum Operation {
     Effort,
     Settings,
 }
+impl Operation {
+    pub(in crate::state::effort::picker_scope) fn receipt_directory(self) -> &'static str {
+        match self {
+            Self::Effort => "effort_receipts",
+            Self::Settings => "settings_receipts",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -251,14 +259,10 @@ impl Frame {
         record: &Value,
         deadline: Deadline,
     ) -> Result<Self> {
-        // An Effort receipt is looked up before ANY current native binding.
+        // A picker receipt is looked up before ANY current native binding.
         // The wire carries only the original verified selector; the actual
         // native record is captured under the one Root on a cache miss.
-        let fields = if operation == Operation::Effort {
-            &["session_id", "layout", "name"][..]
-        } else {
-            BINDING_FIELDS
-        };
+        let fields = &["session_id", "layout", "name"][..];
         let binding = fields
             .iter()
             .filter_map(|k| record.get(*k).map(|v| ((*k).into(), v.clone())))
@@ -316,22 +320,18 @@ impl Frame {
             return Err("Invalid original picker frame".into());
         }
         let map = self.binding.as_object().ok_or("Invalid picker binding")?;
-        let lookup_only =
-            self.operation == Operation::Effort && map.len() == 1 && map.contains_key("name");
+        let lookup_only = map.len() == 1 && map.contains_key("name");
         if map
             .keys()
-            .any(|key| !BINDING_FIELDS.contains(&key.as_str()))
+            .any(|key| !["name", "session_id", "layout"].contains(&key.as_str()))
             || (!lookup_only
                 && (!canonical_uuid(string(&self.binding, "session_id"))
                     || !is_id_layout_record(&self.binding, string(&self.binding, "session_id"))))
             || !bounded(string(&self.binding, "name"), 2048, false)
-            || (self.operation == Operation::Settings
-                && (!bounded(string(&self.binding, "run_id"), 128, false)
-                    || !bounded(string(&self.binding, "conversation_id"), 2048, true)))
         {
             return Err("Invalid original picker selector".into());
         }
-        let (id, run, conversation) = match self.operation {
+        let id = match self.operation {
             Operation::Effort => {
                 let r: crate::state::effort::Request =
                     serde_json::from_slice(&self.raw).map_err(|e| e.to_string())?;
@@ -341,12 +341,13 @@ impl Frame {
                 {
                     return Err("Invalid original effort request".into());
                 }
-                (r.request_id, r.expected_run_id, r.expected_conversation_id)
+                r.request_id
             }
             Operation::Settings => {
                 let r: crate::state::effort::SettingsRequest =
                     serde_json::from_slice(&self.raw).map_err(|e| e.to_string())?;
-                if (r.model.is_none() && r.effort.is_none())
+                if r.expected_run_id.is_empty()
+                    || (r.model.is_none() && r.effort.is_none())
                     || r.model.as_deref().is_some_and(|v| !safe_model(v))
                     || r.effort
                         .as_deref()
@@ -354,31 +355,24 @@ impl Frame {
                 {
                     return Err("Invalid original settings request".into());
                 }
-                (r.request_id, r.expected_run_id, r.expected_conversation_id)
+                r.request_id
             }
         };
         if uuid::Uuid::parse_str(&id)
             .map_err(|e| e.to_string())?
             .to_string()
             != self.request_id
-            || (self.operation == Operation::Settings
-                && (run != string(&self.binding, "run_id")
-                    || conversation != string(&self.binding, "conversation_id")))
         {
             return Err("Original picker request and selector disagree".into());
         }
         self.deadline.remaining()?;
         Ok(())
     }
-    pub(in crate::state::effort::picker_scope) fn validate_live_effort(
+    pub(in crate::state::effort::picker_scope) fn validate_live_request(
         &self,
         record: &Value,
     ) -> Result<()> {
-        if self.operation != Operation::Effort {
-            return Err("Original request is not Effort".into());
-        }
-        let request: crate::state::effort::Request =
-            serde_json::from_slice(&self.raw).map_err(|e| e.to_string())?;
+        let request = super::super::driver::request_guard(self.operation, &self.raw)?;
         if !is_id_layout_record(record, string(record, "session_id"))
             || (!string(&self.binding, "session_id").is_empty()
                 && record["session_id"] != self.binding["session_id"])

@@ -418,6 +418,7 @@ mod tests {
             dismissed: false,
             program_review_pending: false,
             program_retirement: None,
+            lookup_only: false,
             source: None,
             archive: None,
             restore_supported: false,

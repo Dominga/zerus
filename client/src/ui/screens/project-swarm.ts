@@ -81,3 +81,68 @@ export const seedMappings = (local: Project[], peer: Project[]) => {
   return new Map(local.filter((p) => ids.has(p.id)).map((p) => [p.id, p.id]));
 };
 export const initialAlias = (aliases: string[], preferred?: string) => aliases.find((a) => a === preferred) ?? aliases[0] ?? "";
+
+export interface AdoptionPreview { request_id: string; alias: string; eligible: boolean; reason: string }
+export interface AdoptionView {
+  id: string; aliases: string[]; preview: AdoptionPreview | null;
+  status: string; error: boolean; busy: boolean; changing: boolean;
+  can_preview: boolean; can_adopt: boolean; can_resume: boolean; mode: string; drive_status: string;
+}
+export function createAdoption(call: Call = invoke) {
+  const [frame, setFrame] = createSignal<AdoptionView>();
+  const [working, setWorking] = createSignal(false);
+  const [error, setError] = createSignal("");
+  let gone = false, reading = false, dirty = false, epoch = 0;
+  const adopt = (next: AdoptionView) => {
+    if (frame() && next.id !== frame()!.id) throw Error("This adoption dialog expired. Open it again.");
+    if (!gone) setFrame(next);
+  };
+  const pull = async () => {
+    if (gone || !frame() || working() || reading || !dirty) return;
+    reading = true; dirty = false;
+    const generation = epoch;
+    try {
+      const next = await call<AdoptionView>("project_adoption_view", { id: frame()!.id });
+      if (!gone && generation === epoch) adopt(next);
+    } catch (e) { if (!gone && generation === epoch) setError(String(e)); }
+    finally { reading = false; if (dirty) void pull(); }
+  };
+  const changed = () => { if (!gone) { dirty = true; void pull(); } };
+  const open = async () => {
+    if (gone || working() || frame()) return;
+    setWorking(true);
+    try {
+      const next = await call<AdoptionView>("project_adoption_open");
+      if (gone) { await call("project_adoption_close", { id: next.id }); return; }
+      adopt(next); dirty = true;
+    } catch (e) { if (!gone) setError(String(e)); }
+    finally { setWorking(false); if (dirty) void pull(); }
+  };
+  const action = async (kind: "preview" | "adopt" | "status" | "resume", args: Record<string, unknown>) => {
+    const current = frame();
+    if (gone || working() || !current || current.busy) return false;
+    const allowed = kind === "preview" ? current.can_preview : kind === "adopt" ? current.can_adopt : kind === "status" ? current.can_resume : false;
+    if (!allowed) return false;
+    ++epoch; setWorking(true); setError("");
+    try { adopt(await call<AdoptionView>(`project_adoption_${kind}`, { id: current.id, ...args })); return true; }
+    catch (e) { if (!gone) setError(String(e)); return false; }
+    finally { setWorking(false); dirty = true; void pull(); }
+  };
+  // Hiding a running original never cancels it; only an in-flight request waits.
+  const close = async () => {
+    if (working()) return false;
+    try { if (frame()) await call("project_adoption_close", { id: frame()!.id }); return true; }
+    catch (e) { if (!gone) setError(String(e)); return false; }
+  };
+  const dispose = () => {
+    if (gone) return;
+    gone = true; ++epoch; dirty = false;
+    if (frame()) void call("project_adoption_close", { id: frame()!.id }).catch(() => {});
+  };
+  return { frame, working, error, open, changed, close, dispose,
+    preview: (alias: string) => action("preview", { alias }),
+    adopt: () => action("adopt", {}),
+    status: () => action("status", {}),
+    resume: () => action("resume", {}),
+  };
+}

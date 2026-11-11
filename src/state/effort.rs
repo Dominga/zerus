@@ -9,8 +9,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-// Original ID Effort custody; the borrowed facade and Settings admission stay
-// separate. Legacy controllers keep their existing native behavior.
+// Original ID Effort/Settings custody. The borrowed facade remains separate;
+// legacy controllers keep their existing native behavior.
 #[cfg(unix)]
 #[allow(dead_code)]
 mod picker_scope;
@@ -193,7 +193,7 @@ fn claude_footer(screen: &str) -> Option<String> {
 }
 
 /// Claude Code caches its account's signed model catalog for the /model picker.
-/// The picker lists the "main" section; other models need --model at launch.
+/// The picker lists main models and its expandable overflow section.
 fn claude_catalog(record: &Value) -> Vec<ModelOption> {
     type Cached = (u64, Option<SystemTime>, Vec<ModelOption>);
     static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, Cached>>> = OnceLock::new();
@@ -233,7 +233,7 @@ fn claude_catalog(record: &Value) -> Vec<ModelOption> {
     let mut models = Vec::new();
     for entry in catalog["config"]["models"].as_array().into_iter().flatten().take(64) {
         let (id, label) = (string(entry, "id"), string(entry, "name"));
-        if string(entry, "section") != "main" || !safe_model(id) || !safe_model(label) {
+        if !["main", "overflow"].contains(&string(entry, "section")) || !safe_model(id) || !safe_model(label) {
             continue;
         }
         let thinking = &entry["thinking"];
@@ -976,6 +976,11 @@ fn reacted() {
 /// the agent reacted to the last of them and is back at its empty prompt.
 /// Otherwise input stays blocked until a native event, as for sent text.
 fn mark_unconfirmed(record: &mut Value) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        let _ = picker_refuse::<()>("Legacy failure writes are forbidden in the original picker keeper".into());
+        return;
+    }
     let (sent, unread) = ATTEMPT_KEYS.with(|keys| keys.replace((false, false)));
     if !sent || (!unread && input::checked_terminal(record, true).is_ok()) {
         return;
@@ -1222,6 +1227,10 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
 }
 
 fn open_model(name: &str, request: &Request) -> Result<()> {
+    open_model_tracked(name, request, None)
+}
+
+fn open_model_tracked(name: &str, request: &Request, opened: Option<&std::cell::Cell<bool>>) -> Result<()> {
     let record = checked(name, request, true)?;
     sent_keys();
     backend::current().send(string(&record, "pane"), &[backend::Key::Literal("/model")])?;
@@ -1233,6 +1242,9 @@ fn open_model(name: &str, request: &Request) -> Result<()> {
     if !command_ready(&record, "/model")? {
         return Err("terminal changed before opening model settings".into());
     }
+    // This is only a cleanup correlation, minted before our possibly effectful
+    // opening key. A pre-existing/replacement picker never supplies it.
+    if let Some(opened) = opened { opened.set(true); }
     send_key(&record, "Enter")
 }
 
@@ -1568,30 +1580,79 @@ fn kimi_model(name: &str, request: &Request, model: &ModelOption) -> Result<()> 
 
 #[derive(Debug, PartialEq)]
 struct ClaudePicker {
-    /// The selected numbered row, as "2. Opus    Opus 5.5 · …".
+    /// A selected model row or a section with its advertised expansion action.
     row: String,
+    section: Option<ClaudeSection>,
     /// The shown effort; empty when the model has none, None when not visible.
     effort: Option<String>,
     /// Enter saves a new default; only `s` keeps the choice in this session.
     session_only: bool,
 }
 
-/// Claude's /model picker: numbered rows (the label column, then the model's
-/// name and description), the effort adjusted with ←/→, and the key legend.
-fn claude_picker(screen: &str) -> Option<ClaudePicker> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ClaudeSection {
+    Collapsed,
+    Expanded,
+}
+
+/// Recognize the native panel independently of its selected row. In particular,
+/// a collapsed section has no numbered selection and offers no model apply key.
+fn claude_model_panel(screen: &str) -> Option<Vec<&str>> {
     let lines: Vec<_> = screen.lines().collect();
     let title = lines.iter().rposition(|line| line.trim() == "Select model")?;
     let below = &lines[title + 1..];
+    if !below.iter().find(|line| !line.trim().is_empty())?
+        .trim_start().starts_with("Switch between Claude models.")
+        || !below.iter().rfind(|line| !line.trim().is_empty())?.contains("Esc to cancel")
+    {
+        return None;
+    }
+    Some(below.to_vec())
+}
+
+/// Claude's /model picker: numbered rows (the label column, then the model's
+/// name and description), the effort adjusted with ←/→, and the key legend.
+fn claude_picker(screen: &str) -> Option<ClaudePicker> {
+    let below = claude_model_panel(screen)?;
     let mut rows = below.iter().filter_map(|line| {
         let row = line.trim_start().strip_prefix("❯ ")?.trim_end();
         let (number, _) = row.split_once(". ")?;
         number.parse::<usize>().ok()?;
         Some(row.to_owned())
     });
-    let row = rows.next()?;
+    let selected = rows.next();
     if rows.next().is_some() {
         return None;
     }
+    let section = if below.iter().any(|line| line.contains("Enter to expand")) {
+        Some(ClaudeSection::Collapsed)
+    } else if below.iter().any(|line| line.contains("Enter to collapse")) {
+        Some(ClaudeSection::Expanded)
+    } else {
+        None
+    };
+    let row = if let Some(section) = section {
+        // Only an explicit expansion/collapse legend permits Enter. A model
+        // row with Enter's save-as-default action never takes this branch.
+        if selected.is_some() {
+            return None;
+        }
+        let marker = match section {
+            ClaudeSection::Collapsed => '▸',
+            ClaudeSection::Expanded => '▾',
+        };
+        let mut sections = below.iter().filter_map(|line| {
+            let row = line.trim_start().strip_prefix("❯ ")?;
+            row.starts_with(marker).then(|| row.trim_end().to_owned())
+        });
+        let row = sections.next()?;
+        if sections.next().is_some() {
+            return None;
+        }
+        row
+    } else {
+        selected?
+    };
     let effort = below.iter().find_map(|line| {
         if line.contains("Effort not supported") {
             return Some(String::new());
@@ -1605,6 +1666,7 @@ fn claude_picker(screen: &str) -> Option<ClaudePicker> {
     });
     Some(ClaudePicker {
         row,
+        section,
         effort,
         session_only,
     })
@@ -1616,9 +1678,17 @@ fn claude_row_is(row: &str, name: &str) -> bool {
         return false;
     };
     // The label column ("Opus", "Haiku ✔") ends at the first double space.
-    let Some((_, description)) = rest.split_once("  ") else {
+    let Some((label, description)) = rest.split_once("  ") else {
         return false;
     };
+    if label.trim_end().trim_end_matches('✔').trim_end() == "Default (recommended)" {
+        return false;
+    }
+    // Served catalogs put the full model name in the label column; the
+    // compiled picker uses an alias and repeats the name in its description.
+    if label.trim_end().trim_end_matches('✔').trim_end() == name {
+        return true;
+    }
     let description = description.trim_start();
     description == name || description.starts_with(&format!("{name} · "))
 }
@@ -1696,9 +1766,15 @@ fn claude_receipt_since(path: &Path, conversation: &str, offset: u64, name: &str
 fn claude_close_picker(name: &str, request: &Request) {
     let closed = || -> Result<bool> {
         let record = checked(name, request, false)?;
-        Ok(claude_picker(&capture(&record)?).is_none())
+        Ok(claude_model_panel(&capture(&record)?).is_none())
     };
     if closed().unwrap_or(true) {
+        return;
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        let _ = picker_scope::close_claude_model(name, request);
+        let _ = wait_until(|| Ok(closed()?.then_some(())));
         return;
     }
     if let Ok(record) = checked(name, request, false) {
@@ -1714,39 +1790,64 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
     let transcript = claude_transcript(&record)?;
     let conversation = string(&record, "conversation_id").to_owned();
     let offset = fs::metadata(&transcript).map(|meta| meta.len()).unwrap_or(0);
-    open_model(name, request)?;
+    let opened = std::cell::Cell::new(false);
+    let result = claude_model_opened(name, request, model, &transcript, &conversation, offset, &opened);
+    if result.is_err() && opened.get() {
+        claude_close_picker(name, request);
+    }
+    result
+}
+
+fn claude_model_opened(
+    name: &str,
+    request: &Request,
+    model: &ModelOption,
+    transcript: &Path,
+    conversation: &str,
+    offset: u64,
+    opened: &std::cell::Cell<bool>,
+) -> Result<()> {
+    open_model_tracked(name, request, Some(opened))?;
     let selected = (|| -> Result<()> {
-        let picker = wait_until(|| {
+        let mut observed = wait_until(|| {
             let record = checked(name, request, false)?;
-            Ok(claude_picker(&capture(&record)?))
+            Ok(claude_picker(&capture(&record)?).map(|picker| (record, picker)))
         })?;
-        if !picker.session_only {
+        if !observed.1.session_only && observed.1.section.is_none() {
             return Err("Claude's model picker does not offer a session-only choice; use Terminal".into());
         }
         let mut visited = Vec::new();
         loop {
-            let record = checked(name, request, false)?;
-            let picker = claude_picker(&capture(&record)?).ok_or("model picker changed; inspect Terminal")?;
+            // The checked observation that found this row supplies its next
+            // key's fresh turn. Reprobing it doubled native reads and could
+            // exhaust the original host deadline before failure cleanup.
+            let (record, picker) = observed;
             if claude_row_is(&picker.row, &model.label) {
                 break;
             }
             // The list wraps around: a repeated row means every row was seen.
-            if visited.contains(&picker.row) || visited.len() >= 64 {
+            let position = (picker.row.clone(), picker.section);
+            if visited.contains(&position) || visited.len() >= 64 {
                 return Err("model is not offered by Claude's model picker".into());
             }
-            visited.push(picker.row.clone());
-            send_key(&record, "Down")?;
-            wait_until(|| {
+            visited.push(position);
+            let key = if picker.section == Some(ClaudeSection::Collapsed) { "Enter" } else { "Down" };
+            send_key(&record, key)?;
+            observed = wait_until(|| {
                 let record = checked(name, request, false)?;
-                let moved = claude_picker(&capture(&record)?).is_some_and(|next| next.row != picker.row);
-                Ok(moved.then_some(()))
+                Ok(claude_picker(&capture(&record)?)
+                    .filter(|next| next.row != picker.row || next.section != picker.section)
+                    .map(|next| (record, next)))
             })?;
         }
         for _ in 0..=model.efforts.len() {
             let record = checked(name, request, false)?;
             let picker = claude_picker(&capture(&record)?).ok_or("model picker changed; inspect Terminal")?;
             // In search mode `s` would be typed into the filter instead.
-            if !claude_row_is(&picker.row, &model.label) || !picker.session_only {
+            if !picker.session_only {
+                return Err("Claude's model picker does not offer a session-only choice; use Terminal".into());
+            }
+            if !claude_row_is(&picker.row, &model.label) {
                 return Err("model picker selection changed; inspect Terminal".into());
             }
             let shown = picker.effort.ok_or("Claude's effort selection is not visible; enlarge Terminal")?;
@@ -1768,12 +1869,7 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
         }
         Err("Claude's effort selection did not settle; inspect Terminal".into())
     })();
-    if let Err(error) = selected {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if picker_entered() { return picker_refuse(error); }
-        claude_close_picker(name, request);
-        return Err(error);
-    }
+    selected?;
     send_key(&checked(name, request, false)?, "s")?;
     let mut confirmed = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1805,7 +1901,6 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
                     let record = checked(name, request, false)?;
                     Ok(claude_switch_dialog(&capture(&record)?).is_none().then_some(()))
                 });
-                claude_close_picker(name, request);
                 return Err("a PreModelSwitch hook asks for confirmation; change the model in Terminal".into());
             }
             Some(ClaudeSwitch::Unknown) => {
@@ -1816,7 +1911,7 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
         if claude_picker(&screen).is_none() {
             // Without a dialog, a closed picker shows Claude read the last key.
             reacted();
-            if let Some(effort) = claude_receipt_since(&transcript, &conversation, offset, &model.label)? {
+            if let Some(effort) = claude_receipt_since(transcript, conversation, offset, &model.label)? {
                 // The receipt names effort only when the picker changed it; the
                 // indicator, when shown, must agree with the request.
                 let shown = claude_footer(&screen);
@@ -1845,6 +1940,8 @@ fn claude_change(name: &str, request: &Request, current: &Settings) -> Result<()
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {return picker_refuse("A picker keeper cannot enter another public controller".into());}
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs effort <session> --json (JSON from stdin)".into());
     }
@@ -2033,6 +2130,10 @@ fn apply_settings(
     receipt_path: &Path,
     receipt: &mut Value,
 ) -> Result<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        return picker_refuse("Legacy Settings application is forbidden in the original picker keeper".into());
+    }
     // The lock is the session's own, keyed by its verified record (#1437
     // review); the record and its terminal are checked once it is held.
     let owner = input::checked_settings(name, &request.expected_run_id, &request.expected_conversation_id)?;
@@ -2111,6 +2212,8 @@ fn apply_settings(
 }
 
 pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {return picker_refuse("A picker keeper cannot enter another public controller".into());}
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs settings <session> --json (JSON from stdin)".into());
     }
@@ -2141,9 +2244,14 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
     }
     let name = &args[0];
     let digest = format!("{:x}", Sha256::digest(&bytes));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(result) = picker_scope::front_settings(name, &bytes) { return result; }
     let receipt_path = absolute_root()?
         .join("settings_receipts")
         .join(format!("{id}.json"));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let _guard = Guard::exclusive(storage::lock_file(&root().join(".lock"))?).map_err(|e|e.to_string())?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _guard = lock(None)?;
     if receipt_path.exists() {
         let text = fs::read_to_string(&receipt_path).map_err(|e| e.to_string())?;
@@ -2156,6 +2264,24 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         }
         println!("{text}");
         return Ok(0);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if session_id::selected().is_none() {
+            super::resolve_effort_label(name, super::LabelGuard::Given {
+                run:request.expected_run_id.clone(),conversation:request.expected_conversation_id.clone()
+            }).map_err(|error|error.text)?;
+        }
+        let original=storage::read_metadata(name)?;
+        if storage::in_id_layout(&original) {return Err("Session moved into the ID layout; refresh before changing settings".into());}
+        session_id::take_deferred(name);
+        rename::recover_locked()?;
+        rename::sync_legacy_locked()?;
+        worktree_lock::recover_locked();
+        let current=storage::read_metadata(name)?;
+        if storage::in_id_layout(&current) || !picker_scope::same_target(&original,&current) {
+            return Err("Original legacy Settings target changed during recovery".into());
+        }
     }
     // zerus-ucck P3c: the request's identities select among sessions that
     // share the label.
@@ -2265,6 +2391,10 @@ pub(super) fn pending_applies(record: &Value) -> bool {
 }
 
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if picker_entered() {
+        return picker_refuse("Legacy pending application is forbidden in the original picker keeper".into());
+    }
     terminating::check_mutation(&record)?;
     if !pending_applies(&record) {
         return Ok(record);
@@ -2900,12 +3030,16 @@ mod tests {
         assert!(picker.session_only);
         // The default row describes the default model; it is not that model's row.
         assert!(!claude_row_is(&picker.row, "Opus 5.5"));
+        assert!(!claude_row_is("1. Default (recommended) ✔  Opus 5.5 · Best for everyday tasks", "Opus 5.5"));
         let opus = CLAUDE_PICKER.replace("   ❯ 1. Default", "     1. Default").replace("     2. Opus", "   ❯ 2. Opus");
         let picker = claude_picker(&opus).unwrap();
         assert!(claude_row_is(&picker.row, "Opus 5.5"));
         assert!(!claude_row_is(&picker.row, "Opus 5"));
         assert!(claude_row_is("5. Haiku ✔                Haiku 5.5 · Fastest for quick answers", "Haiku 5.5"));
         assert!(claude_row_is("3. Fable                    Fable 5.1 · Most capable for your hardest and", "Fable 5.1"));
+        assert!(claude_row_is("6. Fable 5.2                Most capable for your hardest tasks", "Fable 5.2"));
+        assert!(claude_row_is("6. Fable 5.2 ✔              Most capable for your hardest tasks", "Fable 5.2"));
+        assert!(!claude_row_is("6. Fable 5.2                Most capable for your hardest tasks", "Fable 5"));
         for (shown, level) in [("○ Low effort", "low"), ("● High effort", "high"), ("◉ xHigh effort", "xhigh"), ("◈ Max effort", "max")] {
             let screen = CLAUDE_PICKER.replace("◐ Medium effort (default)", shown);
             assert_eq!(claude_picker(&screen).unwrap().effort.as_deref(), Some(level), "{shown}");
@@ -2916,6 +3050,39 @@ mod tests {
         assert!(!claude_picker(&CLAUDE_PICKER.replace(" · s to use this session only", "")).unwrap().session_only);
         assert!(claude_picker(&CLAUDE_PICKER.replace("     4. Sonnet", "   ❯ 4. Sonnet")).is_none());
         assert!(claude_picker(&CLAUDE_PICKER.replace("Select model", "Select a model")).is_none());
+    }
+
+    #[test]
+    fn claude_picker_sections_have_only_their_advertised_navigation_action() {
+        let section = CLAUDE_PICKER
+            .replace("   ❯ 1. Default", "     1. Default")
+            .replace("   ◐ Medium effort (default) ←/→ to adjust", "   ❯ ▸ More models")
+            .replace("Enter to set as default · s to use this session only", "Enter to expand");
+        let picker = claude_picker(&section).unwrap();
+        assert_eq!(picker.section, Some(ClaudeSection::Collapsed));
+        assert_eq!(picker.row, "▸ More models");
+        assert!(!picker.session_only);
+        assert!(!claude_row_is(&picker.row, "More models"));
+        let expanded = section.replace('▸', "▾").replace("Enter to expand", "Enter to collapse");
+        assert_eq!(claude_picker(&expanded).unwrap().section, Some(ClaudeSection::Expanded));
+        assert!(claude_model_panel(&section).is_some());
+        assert!(claude_model_panel(&expanded).is_some());
+        // A section and a model cannot both be selected, and an unadvertised
+        // Enter must never become the model picker's save-as-default action.
+        assert!(claude_picker(&section.replace("     1. Default", "   ❯ 1. Default")).is_none());
+        assert!(claude_picker(&section.replace("Enter to expand", "Enter to set as default")).is_none());
+        assert!(claude_picker(&section.replace("   ❯ ▸ More models", "   ❯ ▸ More models\n   ❯ ▸ Another section")).is_none());
+        assert!(claude_picker(&section.replace("   ❯ ▸ More models", "   ❯ ▸ More models\n     ▸ Another section")).is_some());
+    }
+
+    #[test]
+    fn claude_picker_cleanup_recognizes_the_panel_without_a_model_selection() {
+        let unknown = CLAUDE_PICKER.replace("   ❯ 1. Default", "     1. Default");
+        assert!(claude_picker(&unknown).is_none());
+        assert!(claude_model_panel(&unknown).is_some());
+        assert!(claude_model_panel(&format!("{unknown}\nA different dialog")).is_none());
+        assert!(claude_model_panel(&unknown.replace("Switch between Claude models.", "Quoted conversation text.")).is_none());
+        assert!(claude_model_panel(CLAUDE_SWITCH).is_none());
     }
 
     #[test]
@@ -2967,12 +3134,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_catalog_offers_the_pickers_main_models() {
+    fn claude_catalog_offers_the_pickers_main_and_overflow_models() {
         let home = claude_home();
         let record = json!({"agent":"claude","agent_home":home.path()});
         let models = catalog(&record);
         assert_eq!(models.iter().map(|m| (m.id.as_str(), m.label.as_str())).collect::<Vec<_>>(),
-            vec![("claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5")]);
+            vec![("claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5"), ("claude-haiku-4-5", "Haiku 4.5")]);
         assert_eq!(models[0].efforts, vec!["low", "medium", "high", "xhigh", "max"]);
         assert_eq!((models[0].default_effort.as_str(), models[1].default_effort.as_str()), ("high", "medium"));
         assert_eq!(options(&record, "claude-haiku-5-5").len(), 5);

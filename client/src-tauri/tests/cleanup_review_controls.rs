@@ -5,7 +5,7 @@ use std::{
     ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
     },
     thread,
     time::{Duration, Instant},
@@ -44,12 +44,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 static WATCHES: OnceLock<Mutex<Vec<thread::JoinHandle<()>>>> = OnceLock::new();
 static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+/// A failed control must not fail the next ones through a poisoned lock.
 fn serial() -> MutexGuard<'static, ()> {
-    let guard = SERIAL.get_or_init(Default::default).lock().unwrap();
+    let guard = SERIAL
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     WATCHES
         .get_or_init(Default::default)
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .clear();
     guard
 }
@@ -60,7 +64,7 @@ mod tauri {
             super::super::WATCHES
                 .get_or_init(Default::default)
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(h);
         }
     }
@@ -101,6 +105,16 @@ mod program_pipeline {
         pub(super) fn reviewable_refusal(&self) -> bool {
             self.0.reviewable.load(Ordering::Acquire)
         }
+        pub(super) fn physical_retirement(&self) -> run::Retirement {
+            self.0.physical_calls.fetch_add(1, Ordering::AcqRel);
+            if self.0.failed.load(Ordering::Acquire) {
+                run::Retirement::Failed
+            } else if self.0.retired.load(Ordering::Acquire) {
+                run::Retirement::Retired
+            } else {
+                run::Retirement::Pending
+            }
+        }
         pub(super) fn retirement(&self) -> run::Retirement {
             self.0.retirement_calls.fetch_add(1, Ordering::AcqRel);
             if !self.0.entered_once.swap(true, Ordering::AcqRel) {
@@ -131,6 +145,7 @@ struct Control {
     entered: Option<std::sync::mpsc::Sender<()>>,
     release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     retirement_calls: AtomicUsize,
+    physical_calls: AtomicUsize,
 }
 impl Control {
     fn new(current: bool) -> Self {
@@ -143,6 +158,7 @@ impl Control {
             entered: None,
             release: Mutex::new(None),
             retirement_calls: AtomicUsize::new(0),
+            physical_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -176,6 +192,7 @@ struct Job {
     manual_review: bool,
     program_review_pending: bool,
     program_retirement: Option<ProgramRetirement>,
+    lookup_only: bool,
     phase: &'static str,
     dismissed: bool,
 }
@@ -218,12 +235,14 @@ impl Model {
             can_check: self.can_dismiss(job)
                 && !self.unknown_folder(job)
                 && !job.busy
+                && !job.lookup_only
                 && (!job.has_programs() || job.reviewable_refusal())
                 && job.cleanup.can_refresh()
                 && zerus_client_core::creation::canonical_uuid(&entry.machine),
             ready: self.can_dismiss(job)
                 && !self.unknown_folder(job)
                 && !job.busy
+                && !job.lookup_only
                 && !job.has_programs()
                 && job.manual_review,
             can_force: false,
@@ -258,6 +277,7 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
                 manual_review: false,
                 program_review_pending: false,
                 program_retirement: None,
+                lookup_only: false,
                 phase: "checking",
                 dismissed: false,
             }],
@@ -268,93 +288,133 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
 }
 
 fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
+    // Expiry is one-way. Retaining a UI row never keeps an Actions claim
+    // indefinitely or renews consent after source/authority loss.
     let weak = Arc::downgrade(inner);
     tauri::async_runtime::spawn_blocking(move || loop {
-        thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         let Some(inner) = weak.upgrade() else {
             return;
         };
-        let (reservation, program) = {
-            let mut m = lock(&inner.model);
-            let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
-                return;
-            };
-            let Some(program) = &job.programs else {
-                if job.busy && job.reservation.is_some() && !job.dismissed {
-                    continue;
-                }
-                return;
-            };
-            if !job.busy && job.program_review_pending && job.reservation.is_some() {
-                return;
-            }
-            if program.current() {
-                if program.holder_unavailable() && job.program_retirement.is_none() {
-                    job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
-                    changed(&app, &mut m);
-                }
-                continue;
-            }
-            job.program_retirement
-                .get_or_insert(if program.remaining_millis() == 0 {
-                    ProgramRetirement::Expired
-                } else {
-                    ProgramRetirement::SourceUnavailable
-                });
-            job.busy = true;
-            let reservation = job.reservation.clone();
-            let program = job.programs.take().expect("retained program");
-            (reservation, program)
-        };
-        let retired = program.retirement();
-        let mut m = lock(&inner.model);
-        let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
-            return;
-        };
-        if !job.busy
-            || job.programs.is_some()
-            || job.reservation != reservation
-            || reservation
-                .as_ref()
-                .is_some_and(|reservation| !program.matches(reservation))
-        {
-            return;
-        }
-        match retired {
-            run::Retirement::Pending => {
-                job.programs = Some(program);
-                job.program_review_pending = true;
-                changed(&app, &mut m);
-                continue;
-            }
-            run::Retirement::Failed => {
-                job.programs = Some(program);
-                job.busy = false;
-                job.program_review_pending = true;
-                changed(&app, &mut m);
-                return;
-            }
-            run::Retirement::Retired => {
-                if program.normal_refusal() {
-                    job.program_review_pending = false;
-                }
-                let step = job.cleanup.step();
-                let review = reservation.is_some();
-                job.programs = None;
-                job.reservation = None;
-                job.busy = review;
-                if review {
-                    job.manual_review = true;
-                }
-                changed(&app, &mut m);
-                drop(m);
-                if review {
-                    inner.drive(app, id, step, false);
-                }
+        match watch_once(&inner, &id, |m| changed(&app, m)) {
+            Watch::Continue => {}
+            Watch::Stop => return,
+            Watch::Review(step) => {
+                inner.drive(app, id, step, false);
                 return;
             }
         }
     });
+}
+enum Watch {
+    Continue,
+    Stop,
+    Review(Step),
+}
+/// One passive watcher pass. It runs without the app handle so the real
+/// program controls can drive it; the result says what the loop does next.
+fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> Watch {
+    let (reservation, program) = {
+        let mut m = lock(&inner.model);
+        let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
+            return Watch::Stop;
+        };
+        let Some(program) = &job.programs else {
+            if job.busy && job.reservation.is_some() && !job.dismissed {
+                return Watch::Continue;
+            }
+            return Watch::Stop;
+        };
+        if !job.busy && job.program_review_pending && job.reservation.is_some() {
+            return Watch::Stop;
+        }
+        if program.current() {
+            // A finished control worker is observable failure data, never a
+            // physical-drain proof. Keep the original resources/expiry exactly
+            // as before; only disable presentation of a usable Force offer.
+            if program.holder_unavailable() && job.program_retirement.is_none() {
+                job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
+                emit(&mut m);
+            }
+            return Watch::Continue;
+        }
+        job.program_retirement
+            .get_or_insert(if program.remaining_millis() == 0 {
+                ProgramRetirement::Expired
+            } else {
+                ProgramRetirement::SourceUnavailable
+            });
+        job.busy = true;
+        let reservation = job.reservation.clone();
+        let program = job.programs.take().expect("retained program");
+        (reservation, program)
+    };
+    // A reviewable refusal keeps its own retirement and review path. Any other
+    // result only waits for its original call, mutation and source owner to
+    // physically retire (zerus-1y897.5); nothing is closed, observed or renewed.
+    let release = !program.reviewable_refusal();
+    let retired = if release {
+        program.physical_retirement()
+    } else {
+        program.retirement()
+    };
+    let mut m = lock(&inner.model);
+    let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
+        return Watch::Stop;
+    };
+    if !job.busy
+        || job.programs.is_some()
+        || job.reservation != reservation
+        || reservation
+            .as_ref()
+            .is_some_and(|reservation| !program.matches(reservation))
+    {
+        return Watch::Stop;
+    }
+    match retired {
+        run::Retirement::Pending => {
+            job.programs = Some(program);
+            job.program_review_pending = true;
+            emit(&mut m);
+            Watch::Continue
+        }
+        run::Retirement::Failed => {
+            job.programs = Some(program);
+            job.busy = false;
+            job.program_review_pending = true;
+            emit(&mut m);
+            Watch::Stop
+        }
+        run::Retirement::Retired if release => {
+            // The resources are released; the unrefused result stays a
+            // lookup-only row. No Check again, Force, review or consent.
+            job.lookup_only = true;
+            job.busy = false;
+            job.program_review_pending = true;
+            emit(&mut m);
+            Watch::Stop
+        }
+        run::Retirement::Retired => {
+            if program.normal_refusal() {
+                job.program_review_pending = false;
+            }
+            let step = job.cleanup.step();
+            let review = reservation.is_some();
+            job.programs = None;
+            job.reservation = None;
+            job.busy = review;
+            if review {
+                job.manual_review = true;
+            }
+            emit(&mut m);
+            drop(m);
+            if review {
+                Watch::Review(step)
+            } else {
+                Watch::Stop
+            }
+        }
+    }
 }
 
 fn termination_cleanup_check(
@@ -362,15 +422,30 @@ fn termination_cleanup_check(
     state: State<'_, TerminationCleanup>,
     id: String,
 ) -> Result<View, String> {
-    let mut m = lock(&state.0.model);
+    check_with_runtime(
+        &state.0,
+        id,
+        |model| changed(&app, model),
+        |inner, id, step| inner.drive(app.clone(), id, step, false),
+    )
+}
+fn check_with_runtime(
+    inner: &Arc<Inner>,
+    id: String,
+    emit: impl Fn(&mut Model) + Copy,
+    run_review: impl Fn(Arc<Inner>, String, Step) + Copy,
+) -> Result<View, String> {
+    let mut m = lock(&inner.model);
     if m.jobs
         .iter()
         .find(|j| j.id == id)
-        .is_some_and(|j| j.dismissed || m.unknown_folder(j))
+        .is_some_and(|j| j.dismissed || j.lookup_only || m.unknown_folder(j))
     {
         return Err("An unknown result will not be retried.".into());
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let revision = m.revision.wrapping_add(1);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (step, program, reservation) = {
         let j = m
             .jobs
@@ -411,13 +486,31 @@ fn termination_cleanup_check(
         j.phase = "checking";
         (step, program, reservation)
     };
-    changed(&app, &mut m);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (step, program, reservation): (_, Option<()>, Option<()>) = {
+        let j = m
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or(STATE_CHANGED)?;
+        if j.busy || !j.cleanup.can_refresh() {
+            return Err("An unknown result will not be retried.".into());
+        }
+        j.manual_review = false;
+        j.cleanup.review_remaining();
+        let step = j.cleanup.step();
+        j.busy = true;
+        j.phase = "checking";
+        (step, None, None)
+    };
+    emit(&mut m);
     drop(m);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(program) = program {
         let reservation = reservation.expect("program reservation");
         let retired = program.retirement();
-        let (drive, view) = {
-            let mut m = lock(&state.0.model);
+        let (start_review, view) = {
+            let mut m = lock(&inner.model);
             let j = m
                 .jobs
                 .iter_mut()
@@ -431,11 +524,11 @@ fn termination_cleanup_check(
                     j.programs = Some(program);
                     j.busy = false;
                     j.program_review_pending = true;
-                    changed(&app, &mut m);
+                    emit(&mut m);
                 }
                 return Err(STATE_CHANGED.into());
             }
-            let drive = match retired {
+            let start_review = match retired {
                 run::Retirement::Retired => {
                     j.programs = None;
                     j.reservation = None;
@@ -455,16 +548,18 @@ fn termination_cleanup_check(
                     false
                 }
             };
-            changed(&app, &mut m);
+            emit(&mut m);
             let view = m.view();
-            (drive, view)
+            (start_review, view)
         };
-        if drive {
-            state.0.drive(app, id, step, false);
+        if start_review {
+            run_review(inner.clone(), id, step);
         }
         return Ok(view);
     }
-    let mut m = lock(&state.0.model);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (program, reservation);
+    let mut m = lock(&inner.model);
     let j = m
         .jobs
         .iter_mut()
@@ -473,12 +568,18 @@ fn termination_cleanup_check(
     j.manual_review = true;
     let view = m.view();
     drop(m);
-    state.0.drive(app, id, step, false);
+    run_review(inner.clone(), id, step);
     Ok(view)
 }
 
 fn pop_watcher() -> thread::JoinHandle<()> {
-    WATCHES.get().unwrap().lock().unwrap().pop().unwrap()
+    WATCHES
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .pop()
+        .unwrap()
 }
 fn wait_drives(inner: &Arc<Inner>, expected: usize) {
     let until = Instant::now() + Duration::from_secs(2);
@@ -637,4 +738,171 @@ fn stale_reservation_never_clears_a_newer_operation() {
     assert_eq!(model.jobs[0].reservation.as_ref().unwrap().revision, 999);
     assert!(model.jobs[0].busy);
     assert_eq!(inner.drives.load(Ordering::Acquire), 0);
+}
+
+/// The program path keeps a result that is not a reviewable refusal pending
+/// review; its source has expired.
+fn unrefused(control: Control) -> (Arc<Control>, Arc<Inner>) {
+    control.reviewable.store(false, Ordering::Release);
+    let control = Arc::new(control);
+    let inner = fixture(control.clone());
+    lock(&inner.model).jobs[0].program_review_pending = true;
+    (control, inner)
+}
+
+/// zerus-1y897.5: an expired result that is not a reviewable refusal releases
+/// its physically retired program and leaves a lookup-only row.
+#[test]
+fn an_expired_unrefused_result_is_released_lookup_only() {
+    let _serial = serial();
+    let (control, inner) = unrefused(Control::new(false));
+    control.retired.store(true, Ordering::Release);
+    watch_job(&inner, AppHandle, "job".into());
+    pop_watcher().join().unwrap();
+    assert_eq!(
+        control.retirement_calls.load(Ordering::Acquire),
+        0,
+        "an unrefused result entered the refusal retirement"
+    );
+    assert_eq!(control.physical_calls.load(Ordering::Acquire), 1);
+    assert_eq!(Arc::strong_count(&control), 1, "the program was kept");
+    let selected = TerminationCleanup(inner.clone());
+    assert!(
+        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err(),
+        "a released unrefused result offered Check again"
+    );
+    {
+        let m = lock(&inner.model);
+        let job = &m.jobs[0];
+        assert!(job.programs.is_none());
+        assert!(job.lookup_only);
+        assert!(!job.busy);
+        assert!(job.program_review_pending);
+        assert!(matches!(
+            job.program_retirement,
+            Some(ProgramRetirement::Expired)
+        ));
+        let view = m.view();
+        assert!(!view.can_check && !view.ready && !view.can_force);
+    }
+    assert_eq!(inner.drives.load(Ordering::Acquire), 0);
+    assert!(!lock(&inner.model).jobs[0].busy);
+}
+
+#[test]
+fn pending_physical_retirement_keeps_the_program_and_keeps_watching() {
+    let _serial = serial();
+    let (control, inner) = unrefused(Control::new(false));
+    watch_job(&inner, AppHandle, "job".into());
+    let watcher = pop_watcher();
+    let until = Instant::now() + Duration::from_secs(2);
+    while control.physical_calls.load(Ordering::Acquire) < 3 && Instant::now() < until {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        control.physical_calls.load(Ordering::Acquire) >= 3,
+        "Pending stopped the watcher"
+    );
+    assert!(!watcher.is_finished());
+    {
+        let m = lock(&inner.model);
+        // The job or the running pass holds the program; it is never dropped.
+        assert_eq!(Arc::strong_count(&control), 2);
+        assert!(m.jobs[0].busy);
+        assert!(!m.jobs[0].lookup_only);
+    }
+    let selected = TerminationCleanup(inner.clone());
+    assert!(
+        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
+    );
+    control.retired.store(true, Ordering::Release);
+    watcher.join().unwrap();
+    assert_eq!(Arc::strong_count(&control), 1);
+    assert!(
+        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err(),
+        "a released unrefused result offered Check again"
+    );
+    assert!(lock(&inner.model).jobs[0].lookup_only);
+    assert_eq!(control.retirement_calls.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn failed_physical_retirement_keeps_the_program_and_stops() {
+    let _serial = serial();
+    let (control, inner) = unrefused(Control::new(false));
+    control.failed.store(true, Ordering::Release);
+    watch_job(&inner, AppHandle, "job".into());
+    pop_watcher().join().unwrap();
+    assert_eq!(
+        Arc::strong_count(&control),
+        2,
+        "a failed retirement released the program"
+    );
+    {
+        let m = lock(&inner.model);
+        assert!(m.jobs[0].programs.is_some());
+        assert!(!m.jobs[0].busy);
+        assert!(!m.jobs[0].lookup_only);
+    }
+    let selected = TerminationCleanup(inner.clone());
+    assert!(
+        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
+    );
+    assert_eq!(control.retirement_calls.load(Ordering::Acquire), 0);
+}
+
+/// zerus-1y897.2: the controls above run copies of the production Check and
+/// passive watcher in a synthetic model. Bind them to the production source:
+/// a change there fails here until the copies and their controls are updated.
+#[test]
+fn the_controls_run_the_exact_production_check_and_watcher() {
+    let production = [
+        include_str!("../src/termination_cleanup.rs"),
+        include_str!("../src/termination_cleanup/program_pipeline.rs"),
+    ];
+    let controls = include_str!("cleanup_review_controls.rs");
+    for name in [
+        "termination_cleanup_check",
+        "check_with_runtime",
+        "watch_job",
+        "watch_once",
+    ] {
+        let original = production
+            .iter()
+            .find_map(|source| function(source, name))
+            .unwrap_or_else(|| panic!("production {name} is missing"));
+        assert_eq!(
+            function(controls, name).as_deref(),
+            Some(original.as_str()),
+            "{name} differs from production"
+        );
+    }
+}
+
+/// The function's code from `fn name(` to its closing brace, with comment and
+/// blank lines dropped and indentation trimmed.
+fn function(source: &str, name: &str) -> Option<String> {
+    let start = source.find(&format!("fn {name}("))?;
+    let body = start + source[start..].find('{')?;
+    let mut depth = 0;
+    for (offset, c) in source[body..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let code = &source[start..=body + offset];
+                    return Some(
+                        code.lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

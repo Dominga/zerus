@@ -75,6 +75,35 @@ fn exact_original_record_jobs_settings_and_input_domain_move_together() {
     control("complete");
 }
 #[test]
+fn a_raw_null_conversation_survives_transfer_and_original_input_proof() {
+    control("cid-null");
+}
+#[test]
+fn a_raw_empty_conversation_survives_transfer_and_original_input_proof() {
+    control("cid-empty");
+}
+#[test]
+fn a_numeric_conversation_refuses_before_any_transition_objects() {
+    control("cid-number");
+}
+#[test]
+fn an_object_conversation_refuses_before_any_transition_objects() {
+    control("cid-object");
+}
+#[test]
+fn an_array_conversation_refuses_before_any_transition_objects() {
+    control("cid-array");
+}
+#[test]
+fn a_boolean_conversation_refuses_before_any_transition_objects() {
+    control("cid-bool");
+}
+#[test]
+fn a_changed_raw_conversation_after_the_before_image_refuses_original_commit() {
+    control("cid-race-null");
+    control("cid-race-empty");
+}
+#[test]
 fn the_existing_stopped_runtime_with_a_null_ping_counter_is_carried_unchanged() {
     control("stopped-runtime");
 }
@@ -251,6 +280,92 @@ fn fixture() {
     let writer = lock(None).unwrap();
     let until = Instant::now() + Duration::from_secs(15);
     let legacy = legacy_record_path(string(&data.original, "name"));
+    if case.starts_with("cid-") {
+        let cid = match case.as_str() {
+            "cid-null" | "cid-race-null" => Value::Null,
+            "cid-empty" | "cid-race-empty" => json!(""),
+            "cid-number" => json!(7),
+            "cid-object" => json!({"invalid":true}),
+            "cid-array" => json!([]),
+            "cid-bool" => json!(false),
+            _ => panic!("Unknown raw conversation control"),
+        };
+        data.original["conversation_id"] = cid.clone();
+        let mut job = value(&data.job).unwrap();
+        job["identity"][1] = cid.clone();
+        data.job = encoded(&job).unwrap();
+        atomic(&legacy, &data.original.to_string()).unwrap();
+        atomic(
+            &root()
+                .join("recovery/jobs")
+                .join(format!("{}.json", data.old)),
+            std::str::from_utf8(&data.job).unwrap(),
+        )
+        .unwrap();
+        if matches!(
+            case.as_str(),
+            "cid-number" | "cid-object" | "cid-array" | "cid-bool"
+        ) {
+            let before = fs::read(&legacy).unwrap();
+            assert_eq!(
+                begin(&writer, &data.original, until).unwrap_err(),
+                "The original terminal record cannot enter the ID transaction"
+            );
+            assert_eq!(fs::read(&legacy).unwrap(), before);
+            assert!(!root().join("native-input").exists());
+            assert!(!root().join(DIRECTORY).exists());
+            assert!(!id_record_path(&data.sid).unwrap().exists());
+            return;
+        }
+        if case.starts_with("cid-race-") {
+            // The existing durable cut leaves the SAME before-image and
+            // original aliases, before the ID record and final retention.
+            cut::arm(9);
+            let attempted = begin(&writer, &data.original, until);
+            cut::disarm();
+            assert!(attempted.is_err());
+            let transaction = root().join(DIRECTORY).join(&data.sid);
+            let before = fs::read(transaction.join("before.json")).unwrap();
+            assert_eq!(value(&before).unwrap()["record"]["conversation_id"], cid);
+            let mut foreign = value(&fs::read(&legacy).unwrap()).unwrap();
+            foreign["conversation_id"] = if cid.is_null() {
+                json!("")
+            } else {
+                Value::Null
+            };
+            let changed = encoded(&foreign).unwrap();
+            atomic(&legacy, std::str::from_utf8(&changed).unwrap()).unwrap();
+            assert_eq!(
+                recover(&writer, &data.sid, until).unwrap_err(),
+                "The original legacy record is unconfirmed"
+            );
+            assert_eq!(fs::read(&legacy).unwrap(), changed);
+            assert_eq!(fs::read(transaction.join("before.json")).unwrap(), before);
+            assert!(!transaction.join("complete.json").exists());
+            let pending = value(&fs::read(id_record_path(&data.sid).unwrap()).unwrap()).unwrap();
+            assert!(input_domain::Input::acquire(&pending, until).is_err());
+            return;
+        }
+        let after = begin(&writer, &data.original, until).unwrap();
+        data.check(&after);
+        assert_eq!(after["conversation_id"], cid);
+        let transaction = root().join(DIRECTORY).join(&data.sid);
+        let before = fs::read(transaction.join("before.json")).unwrap();
+        assert_eq!(value(&before).unwrap()["record"], data.original);
+        let retained = value(&fs::read(transaction.join("legacy-record.json")).unwrap()).unwrap();
+        assert_eq!(retained["conversation_id"], cid);
+        let input = input_domain::Input::acquire(&after, until).unwrap();
+        input.verify().unwrap();
+        for key in [&data.old, &data.sid] {
+            let file =
+                fs::File::open(root().join("native-input").join(format!("{key}.lock"))).unwrap();
+            let error = file.try_lock_exclusive().unwrap_err();
+            assert!(crate::platform::lock_contended(&error));
+        }
+        assert_eq!(fs::read(transaction.join("before.json")).unwrap(), before);
+        drop(input);
+        return;
+    }
     if let Some(case) = case.strip_prefix("input:") {
         input_domain_tests::fixture(&data, &writer, until, case);
         return;

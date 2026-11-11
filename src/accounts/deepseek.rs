@@ -152,6 +152,58 @@ pub(super) fn project_api_balance(data: &mut Value) {
     }
 }
 
+/// The private state file for one account profile and home under `dir`.
+pub(super) fn state_path(config: &Config, dir: &str, id: &str, home: &Path) -> PathBuf {
+    config.dir.join(dir).join(format!(
+        "{:x}.json",
+        Sha256::digest(format!("{}:{id}", home.display()).as_bytes())
+    ))
+}
+
+/// An exclusive lock beside `path`, or None while another process holds it:
+/// a skipped update loses nothing, since the next one starts from the same state.
+pub(super) fn try_lock(path: &Path) -> Option<platform::FileLock> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    platform::private_open(&mut options);
+    platform::no_follow(&mut options);
+    let file = options.open(path.with_extension("lock")).ok()?;
+    file.try_lock_exclusive().ok()?;
+    Some(platform::FileLock::held(file))
+}
+
+/// A private regular JSON file of at most `limit` bytes; anything else reads as absent.
+pub(super) fn read_private<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Option<T> {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    platform::no_follow(&mut options);
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() || !platform::verify_private_file(&file).ok()? {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= limit)
+        .then(|| serde_json::from_slice(&bytes).ok())
+        .flatten()
+}
+
+/// Replaces `path` atomically with a private file holding `value`.
+pub(super) fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::new(1, "Invalid state path."))?;
+    platform::private_dir(dir)?;
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    platform::make_private(file.as_file())?;
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| Error::new(1, "Could not encode account state."))?;
+    file.write_all(&bytes)?;
+    platform::persist(file, path).map_err(|_| Error::new(1, "Could not save account state."))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

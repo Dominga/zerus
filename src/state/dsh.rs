@@ -474,9 +474,10 @@ pub(crate) fn launch(
         println!("Create official dsh session {name} in {cwd}");
         return Ok(());
     }
-    let parent = parent_link::launcher_link();
+    let parent = parent_link::launcher_link()?;
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
     if let Some(mut record) = PROVIDER.existing_for_launch(name)? {
+        if parent_link::claimed_launch() { return Err("--parent applies only to new sessions; use hgs parent adopt for an existing session".into()); }
         if new_only {
             return Err("This DeepSeek session name already exists".into());
         }
@@ -537,8 +538,30 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
 /// The host's existing list RPC and its generation semantics are unchanged.
 pub(super) fn snapshot(name: &str) -> Result<Value> {
     let record = binding(name)?;
-    let list = rpc(&record, "list", json!({})).unwrap_or(Value::Null);
-    Ok(snapshot_from(&record, &list))
+    snapshot_record(&record)
+}
+fn snapshot_record(record: &Value) -> Result<Value> {
+    let list = rpc(record, "list", json!({})).unwrap_or(Value::Null);
+    Ok(snapshot_from(record, &list))
+}
+/// Whether a claimed parent runs now, asking the host for at most `limit`.
+/// No host is a definite no; a host that has not answered by then is busy,
+/// never live.
+#[cfg(unix)]
+pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
+    let started = std::time::Instant::now();
+    match rpc_within(record, "list", json!({}), limit) {
+        Ok(list) => {
+            let row = snapshot_from(record, &list);
+            Ok(row["state"] == "running" && row["process_state"] == "running")
+        }
+        Err(_) if started.elapsed() >= limit => Err(parent_link::CLAIM_BUSY.into()),
+        Err(_) => Ok(false),
+    }
+}
+#[cfg(not(unix))]
+pub(super) fn claim_live(_: &Value, _: std::time::Duration) -> Result<bool> {
+    Ok(false)
 }
 
 fn snapshot_from(record: &Value, list: &Value) -> Value {

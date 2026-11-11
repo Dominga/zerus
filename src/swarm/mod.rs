@@ -3,10 +3,12 @@
 //! one locked, atomically replaced store; initialized snapshots read it lock-free.
 //! Drive folders use their own independently durable graph and initialization
 //! witness under that lock, never a claimed two-file transaction.
+mod adoption;
 mod bootstrap;
 mod catalog;
 pub(crate) mod drive_folders;
 pub(crate) mod fence;
+pub(crate) mod drive_footprint;
 mod launch_project;
 mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
@@ -188,6 +190,10 @@ pub(crate) fn worker_status(config: &Config) -> Value {
 pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
     let mut snapshot = if first { bootstrap::read_snapshot(config)? } else { store::read_snapshot(config)? };
     snapshot["worker"] = service::status(config).json();
+    // A partial or unknown adoption is disclosed beside the main-only read.
+    if let Some(adoption) = adoption::availability(&config.dir.join("swarm")) {
+        snapshot["adoption"] = adoption;
+    }
     Ok(snapshot)
 }
 
@@ -196,6 +202,7 @@ pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
 pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {
     let mut files = store::snapshot_files(config);
     files.push(config.dir.join("swarm").join(service::MARKER));
+    files.extend(adoption::followed_files(&config.dir.join("swarm")));
     files
 }
 
@@ -345,6 +352,16 @@ fn input() -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+fn adoption_input(cap: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= cap, "adoption request is too large");
+    adoption::unique_bytes(&bytes, "adoption request")?;
+    Ok(bytes)
+}
+
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32> {
     if dry {
         return Err(cli::Error::new(
@@ -357,7 +374,16 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
             println!("{}", value);
             Ok(0)
         }
-        Err(error) => Err(cli::Error::new(1, format!("{error:#}"))),
+        Err(error) => {
+            let adoption = matches!(args.first().map(String::as_str), Some("adopt" | "adoption-preview" | "adoption-status"));
+            let message = format!("{error:#}");
+            let message = if adoption {
+                message.chars().take(2048).collect()
+            } else {
+                message
+            };
+            Err(cli::Error::new(1, message))
+        }
     }
 }
 
@@ -372,6 +398,30 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
         .then(|| service::supervise(config));
     match action {
+        "adoption-preview" => {
+            ensure!(args.len() == 2 && args[1] == "--json" || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adoption-preview [PEER] --json");
+            if args.len() == 3 {
+                adoption::preview_remote(config, alias()?)
+            } else {
+                adoption::preview_destination(config, adoption_input(64 * 1024)?)
+            }
+        }
+        "adopt" => {
+            ensure!(args == ["adopt"] || args == ["adopt", "--json"] || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adopt [PEER] --json");
+            if args.len() == 3 {
+                adoption::adopt_source(config, alias()?, adoption_input(32 * 1024 * 1024)?)
+            } else {
+                adoption::adopt_destination(config, adoption_input(32 * 1024 * 1024)?)
+            }
+        }
+        "adoption-status" => {
+            ensure!(args.len() == 2 && args[1] == "--json" || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adoption-status [PEER] --json");
+            if args.len() == 3 {
+                adoption::status_remote(config, alias()?, adoption_input(64 * 1024)?)
+            } else {
+                adoption::status_destination(config, adoption_input(64 * 1024)?)
+            }
+        }
         "session-labels-context" => {
             ensure!(args == ["session-labels-context", "--json"], "usage: hgs swarm session-labels-context --json");
             Ok(serde_json::to_value(session_labels::context(config)?)?)

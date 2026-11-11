@@ -406,6 +406,8 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.windows = cached.windows;
             u.balances = cached.balances;
             u.balance_available = cached.balance_available;
+            u.spend = cached.spend;
+            u.local_usage = cached.local_usage;
             u.credits = cached.credits;
             u.retry_at = cached.retry_at;
             if cached.status == "rate_limited" {
@@ -1846,7 +1848,9 @@ mod tests {
             "balances":[{"kind":"Total","balance":"0.00","currency":"USD"},
                         {"kind":"Topped up","balance":"0.00","currency":"USD"},
                         {"kind":"Granted","balance":"0.00","currency":"USD"}],
-            "balance_available":false});
+            "balance_available":false,
+            "spend":{"since":100,"today":"2026-11-10","periods":[{"period":"today","amounts":[{"currency":"USD","spent":"0.14","granted":"0.00"}],"top_up":false,"gap_from":null}]},
+            "local_usage":{"today":"2026-11-10","partial":false,"days":[{"day":"2026-11-10","models":[{"model":"deepseek-flash","requests":3,"cache_hit":10,"cache_miss":2,"output":1}]}]}});
         let raw = &catalog["profiles"][0];
         let reference = usage_ref(&local.computer, raw);
         let seeded = profile_usage(&local, raw, &reference, &state);
@@ -1854,6 +1858,8 @@ mod tests {
         assert_eq!(seeded.balances.len(), 3);
         assert_eq!(seeded.balances[0].kind, "Total");
         assert_eq!(seeded.balance_available, Some(false));
+        assert_eq!(seeded.spend.unwrap().periods[0].amounts[0].spent, "0.14");
+        assert_eq!(seeded.local_usage.unwrap().days[0].models[0].requests, 3);
     }
 
     fn ids(profiles: &[(Profile, Value)]) -> Vec<String> {

@@ -16,6 +16,7 @@ import time
 import unittest
 import uuid
 import signal
+import shlex
 import sys
 import urllib.request
 import http.cookiejar
@@ -153,6 +154,41 @@ class NativeHarness(unittest.TestCase):
     def payload(self, binding, **fields):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **fields}
+
+    def test_native_shell_self_and_explicit_child_parent_are_claimed(self):
+        parent = self.create(permissionMode='bypass')
+        tag = 'claimed-' + uuid.uuid4().hex[:8]
+        output = self.workspace / (tag + '.json')
+        script = ('import json,subprocess;from pathlib import Path;'
+                  f'identity=json.loads(subprocess.check_output({[str(HGS),"self","--json"]!r},text=True));'
+                  f'Path({str(output)!r}).write_text(json.dumps(identity));'
+                  f'subprocess.run({[str(HGS),"dsh",str(self.workspace),"--new","-n",tag,"-d","--parent"]!r}+'
+                  '[json.dumps(identity["parent_identity"])],check=True)')
+        command = shlex.join([sys.executable, '-c', script])
+        self.cli('send', parent, self.payload(parent,text='HGS_SELF_NATIVE_FIXTURE '+command))
+        def finished():
+            if not output.exists():
+                return None
+            return next((json.loads(p.read_text()) for p in (self.state/'dsh/bindings').glob('*.json')
+                         if json.loads(p.read_text())['name'].endswith('/'+tag)), None)
+        child = self.wait(finished,timeout=30)
+        identity = json.loads(output.read_text())
+        self.assertEqual(identity['provider'],'dsh')
+        self.assertEqual(identity['identity_source'],'claimed')
+        self.assertEqual(identity['session_id'],parent['session_id'])
+        self.assertEqual(identity['conversation_id'],parent['conversation_id'])
+        self.assertEqual(child['parent']['source'],'claimed')
+        self.assertEqual(child['parent']['session_id'],parent['session_id'])
+        expected = dict(expected_run_id=child['run_id'],expected_conversation_id=child['conversation_id'])
+        for action in ('clear','adopt'):
+            request = dict(expected,action=action)
+            if action=='adopt':
+                request['parent']=identity['parent_identity']
+            result = subprocess.run([str(HGS),'parent',child['name'],'--json'],env=self.env,input=json.dumps(request),
+                text=True,capture_output=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr)
+            if action=='adopt':
+                self.assertEqual(json.loads(result.stdout)['parent']['source'],'claimed')
 
     def test_new_launch_records_parent_and_resume_keeps_identity_without_readopting(self):
         # This entire host, native home, state and proven caller are fixture-owned.
@@ -876,6 +912,45 @@ class NativeHarness(unittest.TestCase):
             self.assertEqual(after['generation'], before['generation'])
             self.assertEqual(after['selection'], before['selection'])
             self.assertEqual(after['page']['records'], before['page']['records'])
+
+    def test_id_settings_preserves_original_session_default_and_no_model_calls(self):
+        calls = self.root / 'holds' / 'SETTINGS_MODEL_STREAMS'
+        before_control = calls.read_bytes() if calls.exists() else b''
+        control = self.create()
+        self.cli('send', control, self.payload(control, text='Settings stream counter positive control', attachments=[]))
+        self.wait(lambda: (value.get('reply_id') and value['phase'] == 'idle')
+                  if (value := self.cli('inspect', control)) else False)
+        self.assertGreater(len(calls.read_bytes()), len(before_control),
+                           'the no-model-call counter must observe a real inference stream')
+        a, b = self.create(), self.create()
+        defaults = self.rpc('catalog')['default']
+        original = self.rpc('inspect', {'sessionId': a['conversation_id']})
+        before = calls.read_bytes()
+        reference = subprocess.run([str(HGS), 'reference', a['name'], '--json'],
+                                   env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)
+        self.assertEqual(reference.returncode, 0, reference.stdout + reference.stderr)
+        uri = json.loads(reference.stdout)['uri']
+        self.assertTrue(uri.startswith('zerus://session?'))
+        for selector, model, effort in (([a['name'], '--session-id', a['session_id']], 'test-b', 'off'),
+                                        ([uri], 'test-a', 'high')):
+            with self.subTest(selector=selector):
+                request = self.payload(a, model='hgs-test/' + model, effort=effort)
+                result = subprocess.run([str(HGS), 'settings', *selector, '--json'],
+                                        input=json.dumps(request), env=self.env, cwd=REPO,
+                                        text=True, capture_output=True, timeout=35)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)['scope'], 'session')
+                selected = self.cli('inspect', a)
+                self.assertEqual((selected['session_id'], selected['conversation_id'], selected['run_id']),
+                                 (a['session_id'], a['conversation_id'], a['run_id']))
+                self.assertEqual((selected['model'], selected['effort']), (model, effort))
+                self.assertEqual(self.cli('inspect', b)['model'], 'test-a')
+                self.assertEqual(self.rpc('catalog')['default'], defaults)
+                current = self.rpc('inspect', {'sessionId': a['conversation_id']})
+                self.assertEqual(current['generation'], original['generation'])
+                # Native selection events are legitimate; inference is forbidden.
+                self.assertEqual(calls.read_bytes(), before,
+                                 'Settings invoked the private model stream')
 
     def test_model_settings_do_not_change_default_or_other_session(self):
         a, b = self.create(), self.create()

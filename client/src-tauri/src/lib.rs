@@ -461,7 +461,8 @@ pub fn run() {
                     return;
                 }
                 instance::Claim::Duplicate(_) => return,
-                instance::Claim::Failed(_) => {
+                instance::Claim::Failed(why) => {
+                    eprintln!("zerus-client: {why}");
                     std::process::exit(3);
                 }
                 // Nothing was forwarded to that server; say so instead of exiting silently.
@@ -1796,6 +1797,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::swarm_dialog::project_swarm_join,
         organization::swarm_dialog::project_swarm_sync,
         organization::swarm_dialog::project_swarm_close,
+        organization::adoption_dialog::project_adoption_open,
+        organization::adoption_dialog::project_adoption_view,
+        organization::adoption_dialog::project_adoption_preview,
+        organization::adoption_dialog::project_adoption_adopt,
+        organization::adoption_dialog::project_adoption_status,
+        organization::adoption_dialog::project_adoption_resume,
+        organization::adoption_dialog::project_adoption_close,
         organization::swarm_dialog::conflicts::project_swarm_conflicts,
         organization::swarm_dialog::conflicts::project_swarm_conflict_review,
         organization::swarm_dialog::conflicts::project_swarm_resolve,

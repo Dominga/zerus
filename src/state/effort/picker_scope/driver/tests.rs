@@ -98,6 +98,12 @@ fn recovery_atomic_creates_only_checked_children_and_refuses_changed_absence() {
     run("atomic-absence");
 }
 
+#[test]
+fn model_cancellation_refuses_foreign_request_or_agent_before_helpers() {
+    run("cancel-request");
+    run("cancel-agent");
+}
+
 fn contended(file: &File) -> bool {
     match file.try_lock_exclusive() {
         Ok(()) => {
@@ -116,7 +122,28 @@ fn contended(file: &File) -> bool {
 fn fixture() {
     let case = std::env::var("ZERUS_EFFORT_DRIVER_CASE").unwrap();
     let kind = std::env::var("ZERUS_EFFORT_DRIVER_KIND").unwrap();
-    let (writer, record) = super::super::tests::setup(&kind);
+    let (writer, record) = if case == "cancel-agent" {
+        super::super::tests::setup_agent(&kind, "codex")
+    } else {
+        super::super::tests::setup(&kind)
+    };
+    let calls = root().join("unexpected-cancel-helper");
+    if case.starts_with("cancel-") {
+        let bin = root().join("cancel-bin");
+        fs::create_dir(&bin).unwrap();
+        for program in ["tmux", "ps"] {
+            let path = bin.join(program);
+            fs::write(&path, "#!/bin/sh\nprintf called > \"$ZERUS_CANCEL_HELPER_LOG\"\nexit 71\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // These are the originals bound into the frame, never replacements
+        // installed after its configuration/source capture.
+        unsafe {
+            std::env::set_var("PATH", &bin);
+            std::env::set_var("ZERUS_CANCEL_HELPER_LOG", &calls);
+        }
+    }
     let raw=serde_json::to_vec(&json!({"request_id":uuid::Uuid::new_v4().to_string(),
         "expected_run_id":record["run_id"],"expected_conversation_id":record["conversation_id"],"effort":"high"})).unwrap();
     let frame = host::frame::Frame::new(
@@ -215,7 +242,20 @@ fn fixture() {
     owner.open_scope(&record).unwrap();
     let input = super::super::tests::input(&record);
     assert!(contended(&input));
-    if case == "context" {
+    if case.starts_with("cancel-") {
+        let mut request: Request = serde_json::from_slice(&owner.control.frame().raw).unwrap();
+        let expected = if case == "cancel-request" {
+            request.request_id = uuid::Uuid::new_v4().to_string();
+            "Model cancellation does not belong to the original request"
+        } else {
+            "Model cancellation requires the original Claude session"
+        };
+        let error = read::close_claude_model(&owner, string(&record, "name"), &request).unwrap_err();
+        assert_eq!(error, expected);
+        assert!(!calls.exists(), "a refused cancellation started a native helper");
+        assert!(contended(&root_file) && contended(&input));
+        drop(entered);
+    } else if case == "context" {
         let foreign = std::thread::spawn(|| read::route(read::Call::Keys, &[]).unwrap().is_err())
             .join()
             .unwrap();
@@ -257,7 +297,9 @@ fn fixture() {
                 fs::write(temp, b"foreign stage").unwrap();
             }
             "destination-replaced" => {
-                crate::state::storage::atomic(&path, &original.to_string()).unwrap();
+                let replacement = path.with_extension("foreign");
+                fs::write(&replacement, original.to_string()).unwrap();
+                fs::rename(replacement, &path).unwrap();
             }
             "proof-replaced" => {
                 let proof = root()

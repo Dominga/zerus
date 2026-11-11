@@ -43,6 +43,7 @@ METHODS = (
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_long_other_is_confirmed_from_the_complete_review',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_explicit_retry_resumes_the_existing_other_editor',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_foreign_other_is_preserved_without_submission',
+    'test_kimi_native.NativeKimi.test_id_settings_before_first_message_preserves_empty_conversation_and_defaults',
     'test_kimi_native.NativeKimi.test_id_effort_preserves_raw_request_identity_and_shared_defaults',
 )
 LOG_LIMIT = 64 * 1024**2

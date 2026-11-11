@@ -2744,6 +2744,83 @@ mod tests {
         }
         assert!(sources[0].contains("pub async fn termination_cleanup_check("));
     }
+    /// zerus-y2oxp: Check again only reviews; its review passes
+    /// allow_remove = false and never removes by itself. A test cannot build
+    /// the Wry AppHandle the command's review needs, so the command and its
+    /// blocking body are pinned to their reviewed text, ignoring whitespace.
+    #[test]
+    fn check_again_reviews_without_removing() {
+        let source = include_str!("termination_cleanup.rs");
+        let production = &source[..source.find(&["mod ", "tests {"].concat()).unwrap()];
+        let tokens = |text: &str| text.split_whitespace().collect::<String>();
+        let item = |name: &str| {
+            let at = production
+                .find(&["fn ", name, "("].concat())
+                .or_else(|| production.find(&["fn ", name, "<"].concat()))
+                .unwrap_or_else(|| panic!("{name} is missing"));
+            let open = at + production[at..].find('{').unwrap();
+            let mut depth = 0;
+            let close = production[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    depth += match c {
+                        '{' => 1,
+                        '}' => -1,
+                        _ => 0,
+                    };
+                    depth == 0
+                })
+                .map(|(offset, _)| open + offset)
+                .unwrap();
+            tokens(&production[at..=close])
+        };
+        let command = item("termination_cleanup_check");
+        assert!(
+            command.contains(&tokens("inner.drive(app.clone(), id, step, false)")),
+            "Check again's review may remove"
+        );
+        assert_eq!(
+            command,
+            tokens(EXPECTED_CHECK),
+            "the Check again command changed"
+        );
+        assert_eq!(
+            item("check_blocking"),
+            tokens(EXPECTED_BLOCKING),
+            "the Check again body changed"
+        );
+    }
+    const EXPECTED_CHECK: &str = r#"
+fn termination_cleanup_check(
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+) -> Result<View, String> {
+    check_blocking(state.0.clone(), app, id, changed, |app, inner, id, step| {
+        inner.drive(app.clone(), id, step, false)
+    })
+    .await
+}"#;
+    const EXPECTED_BLOCKING: &str = r#"
+fn check_blocking<A: Send + 'static>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    emit: fn(&A, &mut Model),
+    run_review: fn(&A, Arc<Inner>, String, Step),
+) -> Result<View, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = &app;
+        check_with_runtime(
+            &inner,
+            id,
+            |model| emit(app, model),
+            |inner, id, step| run_review(app, inner, id, step),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}"#;
     #[test]
     fn raw_unavailable_git_metadata_cannot_hide_the_confirmed_cleanup_offer() {
         let target = source();

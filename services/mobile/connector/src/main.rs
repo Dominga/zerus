@@ -3,9 +3,11 @@
 //! `%(levelname)s: %(message)s` on stderr.
 use std::process::ExitCode;
 use zerus_mobile_connector::runtime::log;
-use zerus_mobile_connector::{check, cli, config, start, STARTUP_FAILURE};
+use zerus_mobile_connector::{check, cli, config, start, startup, STARTUP_FAILURE};
 
 fn main() -> ExitCode {
+    #[cfg(feature = "test-hooks")]
+    startup::install_fixture_panic_hook();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--workspace")) {
         use std::io::Read;
         let args: Vec<_> = std::env::args_os().collect();
@@ -56,13 +58,19 @@ fn main() -> ExitCode {
         let args: Vec<_> = std::env::args_os().collect();
         let admitted = (|| {
             if args.len() != 5 || args[3] != "--config" {
+                startup::refused(startup::Stage::Arguments);
                 return None;
             }
-            let revision = args[2].to_str()?;
-            if revision.len() != 64 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let Some(revision) = args[2]
+                .to_str()
+                .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            else {
+                startup::refused(startup::Stage::Arguments);
                 return None;
-            }
-            let environment = config::Environment::current().ok()?;
+            };
+            let environment = config::Environment::current()
+                .inspect_err(|_| startup::refused(startup::Stage::Environment))
+                .ok()?;
             zerus_mobile_connector::start_bound(
                 std::path::Path::new(&args[4]),
                 false,
@@ -141,6 +149,7 @@ fn main() -> ExitCode {
             allow_insecure_localhost,
         } => {
             let started = config::Environment::current()
+                .inspect_err(|_| startup::refused(startup::Stage::Environment))
                 .map_err(|_| ())
                 .and_then(|environment| {
                     start(

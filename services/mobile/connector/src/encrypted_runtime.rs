@@ -952,10 +952,15 @@ pub async fn run<N: Native + 'static>(
     private_dir: &Path,
     signals: impl Future<Output = ()>,
 ) -> u8 {
-    let Ok(profile) = workspace::load_active(private_dir) else {
+    crate::startup::enter(crate::startup::Stage::EncryptedProfile);
+    let Ok(profile) = workspace::load_active(private_dir)
+        .inspect_err(|_| crate::startup::refused(crate::startup::Stage::EncryptedProfile))
+    else {
         return 1;
     };
-    if connector.journal.encrypted_init(crate::now()).is_err() {
+    crate::startup::enter(crate::startup::Stage::EncryptedJournal);
+    if let Err(error) = connector.journal.encrypted_init(crate::now()) {
+        crate::startup::journal(crate::startup::Stage::EncryptedJournal, &error);
         return 1;
     }
     let Ok(generation) = crate::workspace_lifecycle::publish(&profile.state_dir) else {

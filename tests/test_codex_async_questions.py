@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 import unittest
 import uuid
 import test_input as fixtures
@@ -118,13 +119,30 @@ class CodexAsync(unittest.TestCase):
         self.append(dict(type='response_item',timestamp='2026-10-07T15:00:00Z',payload=dict(type='function_call',name='request_user_input_async',call_id='call_one',arguments=json.dumps(dict(questions=[dict(title='Which option?',**({'options':self.options} if self.options else {}))])))))
         self.append(dict(type='response_item',payload=dict(type='function_call_output',call_id='call_one',output='{"accepted":true}')))
         return self.inspect()['pending_questions'][0]
-    def inspect(self):
+    def inspect_once(self):
         result=subprocess.run([str(fixtures.HGS),'inspect',self.name],env=self.env,text=True,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
-    def optional(self):
-        result=subprocess.run([str(fixtures.HGS),'ls','--json','--local'],env=self.env,text=True,capture_output=True,timeout=15)
-        self.assertEqual(result.returncode,0,result.stderr)
-        return next(row for row in json.loads(result.stdout)['sessions'] if row['name']==self.name)['optional_questions']
+    def inspect(self):
+        # The receipt locator indexes each fixture's fresh question receipts in
+        # the background (zerus-a4mub.11); until then the questions are
+        # explicitly unknown, never a list to act on (zerus-a4mub.8).
+        until=time.monotonic()+20
+        while True:
+            result=self.inspect_once()
+            if not (result.get('pending_questions_complete') is False
+                    and 'still being indexed' in result.get('pending_questions_error','')):
+                return result
+            self.assertLess(time.monotonic(),until,'questions stayed unknown')
+            time.sleep(0.2)
+    def optional(self,settled=True):
+        until=time.monotonic()+20
+        while True:
+            result=subprocess.run([str(fixtures.HGS),'ls','--json','--local'],env=self.env,text=True,capture_output=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr)
+            value=next(row for row in json.loads(result.stdout)['sessions'] if row['name']==self.name)['optional_questions']
+            if value is not None or not settled or time.monotonic()>=until:
+                return value
+            time.sleep(0.2)
     def answer(self,card,answer=None,request_id=None):
         payload=dict(request_id=request_id or str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=[answer or dict(question_id='q_0',text='Accepted answer')])
         result=subprocess.run([str(fixtures.HGS),'answer',self.name,'--json'],input=json.dumps(payload),env=self.env,text=True,capture_output=True,timeout=15)
@@ -155,7 +173,45 @@ class CodexAsync(unittest.TestCase):
         result=self.inspect()
         self.assertIn('pending_questions_error',result)
         self.assertTrue(any(m.get('detail')=='Public activity remains visible' for m in result['provider_messages']))
-        self.assertIsNone(self.optional())  # Unknown, never a count of 0.
+        self.assertIsNone(self.optional(settled=False))  # Unknown, never a count of 0.
+
+    def test_inspection_never_waits_for_question_indexing_and_shows_unknown(self):
+        # zerus-a4mub.8: while another process holds the question index (as a
+        # long cold scan or receipt recovery does), recent activity still
+        # returns at once and the questions are unknown, never absent.
+        import fcntl,time
+        card=self.request()
+        self.append(dict(type='response_item',timestamp='2026-10-07T15:02:00Z',payload=dict(type='message',role='assistant',channel='commentary',content=[dict(type='output_text',text='Recent activity while indexing')])))
+        lock_path=next((self.state/'codex_questions').glob('*.json')).with_suffix('.lock')
+        with open(lock_path,'a') as held:
+            fcntl.flock(held,fcntl.LOCK_EX)
+            try:
+                started=time.monotonic();result=self.inspect_once();elapsed=time.monotonic()-started
+                optional=self.optional(settled=False)
+            finally:fcntl.flock(held,fcntl.LOCK_UN)
+        self.assertLess(elapsed,10,'inspection waited for the question index')
+        self.assertTrue(any(m.get('detail')=='Recent activity while indexing' for m in result['provider_messages']))
+        self.assertEqual(result['pending_questions'],[])
+        self.assertIs(result['pending_questions_complete'],False)
+        self.assertIn('still being indexed',result['pending_questions_error'])
+        self.assertIsNone(optional)  # Unknown, never a count of 0.
+        # Released: the same exact question is listed and answerable again.
+        current=self.inspect()
+        self.assertIs(current['pending_questions_complete'],True)
+        self.assertNotIn('pending_questions_error',current)
+        self.assertEqual([c['question_id'] for c in current['pending_questions']],[card['question_id']])
+        self.assertTrue(current['pending_questions'][0]['can_answer'])
+        # Without a live agent no question is pending, but the question rows
+        # of its history are still unknown while the index is held.
+        os.kill(self.record['pid'],signal.SIGKILL)
+        self.wait_for(lambda:self.inspect().get('pending_questions')==[])
+        with open(lock_path,'a') as held:
+            fcntl.flock(held,fcntl.LOCK_EX)
+            try:stopped=self.inspect_once()
+            finally:fcntl.flock(held,fcntl.LOCK_UN)
+        self.assertIs(stopped['pending_questions_complete'],False)
+        self.assertIn('still being indexed',stopped['pending_questions_error'])
+        self.assertTrue(any(m.get('detail')=='Recent activity while indexing' for m in stopped['provider_messages']))
 
     def test_answer_from_normal_prompt_has_native_identity_and_removes_only_that_question(self):
         card=self.request();self.assertTrue(card['optional']);self.assertTrue(card['can_answer']);self.assertTrue(card['can_skip'])

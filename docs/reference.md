@@ -6703,6 +6703,19 @@ needs manual inspection before another request. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 
+An inspection indexes the Codex question transcript and recovers earlier
+submitted answers from this session's question receipts within one shared
+one-second budget, saving its progress so the next inspection resumes. Its
+recent messages never wait for that work, and it never scans a long transcript
+or every question receipt unbounded: recovery reads one bounded page of the
+session's receipts at a time through the receipt locator. While the index or
+recovery is incomplete, or held by another process, `pending_questions_complete`
+is `false`, `pending_questions` lists no optional Codex question and
+`pending_questions_error` says the questions are still being indexed. That is
+unknown, never an empty list, and nothing becomes answerable from it. An answer
+first completes the index and recovery, and refuses while earlier answers
+cannot all be checked. An older hgs omits `pending_questions_complete`.
+
 Messages may begin with an absolute file path, including a directory named like
 a command (`/help/capture.png`). A first token of `/name` without another slash,
 or leading `!` shell mode, still requires Terminal. An argument containing a path

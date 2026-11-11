@@ -175,11 +175,42 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
 fn read_cache(record: &Value) -> Result<Value> {
     index(record, &cache_path(record)?, None)?.ok_or_else(|| "question index incomplete".into())
 }
-/// Bring the question cache up to date with the transcript. With a deadline,
-/// indexing stops once it passes (after at least one line) and saves its
-/// progress, so the next call resumes; the cache is returned only when it is
-/// complete. None also when another process holds the cache past the deadline.
+/// One page of question receipts: a bounded call reads at most one, an
+/// unbounded call (an answer) reads every page (zerus-a4mub.8).
+const RECEIPTS_PER_CALL: usize = 64;
+// Work done by the calls of this test thread: transcript lines and receipt
+// files read.
+#[cfg(test)]
+thread_local! {
+    static WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(test)]
+fn worked(lines: usize, receipts: usize) {
+    WORK.with(|work| {
+        let (l, r) = work.get();
+        work.set((l + lines, r + receipts));
+    });
+}
+#[cfg(not(test))]
+fn worked(_: usize, _: usize) {}
+/// Bring the question cache up to date with the transcript, then recover
+/// submissions from this run's question receipts. With a deadline, both
+/// phases stop once it passes (after at least one line or receipt) and save
+/// their progress, so the next call resumes; the cache is returned only when
+/// both are complete, and an incomplete one is unknown, never empty. None
+/// also when another process holds the cache past the deadline.
 fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result<Option<Value>> {
+    index_with(record, cache_path, deadline, absolute_root, |_| {
+        Box::new(Locator)
+    })
+}
+fn index_with(
+    record: &Value,
+    cache_path: &Path,
+    deadline: Option<Instant>,
+    root: impl FnOnce() -> Result<PathBuf>,
+    pages: impl for<'a> FnOnce(&'a Path) -> Box<dyn ReceiptPages + 'a>,
+) -> Result<Option<Value>> {
     let path = PathBuf::from(string(record, "transcript"));
     let id = string(record, "conversation_id");
     if uuid::Uuid::parse_str(id).is_err()
@@ -218,19 +249,23 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
     if !header["payload"]["source"]["subagent"].is_null() {
         return Ok(Some(json!({"items":{}})));
     }
-    let mut cache: Value = fs::read_to_string(cache_path)
+    let saved: Option<Value> = fs::read_to_string(cache_path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(json!({"items":{}}));
+        .and_then(|s| serde_json::from_str(&s).ok());
+    // Only a changed cache is serialized and written again.
+    let mut changed = saved.is_none();
+    let mut cache = saved.unwrap_or(json!({"items":{}}));
     let inode = json!([identity.device, identity.inode]);
     let offset = cache["offset"].as_u64().unwrap_or(0);
     if cache["inode"] != inode || offset > meta.len() {
         cache = json!({"items":{},"offset":0,"inode":inode});
+        changed = true;
     }
     // Questions can stay unanswered long after they leave the recent-message
     // tail. Index the entire exact conversation once, then only appended bytes.
     // Reindex old tail-only caches while retaining explicit local dismissals.
     if cache["scan_version"] != 3 {
+        changed = true;
         cache["offset"] = json!(0);
         cache["scan_version"] = json!(3);
         cache["active_turn"] = Value::Null;
@@ -247,6 +282,7 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
     reader
         .seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
+    changed |= cache["initialized"] != true;
     // Initial tail can begin inside a JSON line; never interpret that fragment.
     if cache.get("initialized").is_none() && offset > 0 {
         line.clear();
@@ -264,6 +300,7 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
         if count == 0 {
             break;
         }
+        worked(1, 0);
         if !line.ends_with('\n') {
             if count <= 1024 * 1024 {
                 cache["offset"] = json!(before);
@@ -294,14 +331,18 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
             break;
         }
     }
+    changed |= cache["offset"].as_u64().unwrap_or(0) != offset;
     if complete {
-        recover_submissions(record, &mut cache)?;
+        let root = root()?;
+        let (recovered, progressed) =
+            recover_submissions(record, &mut cache, &root, pages(&root).as_ref(), deadline)?;
+        complete = recovered;
+        changed |= progressed;
     }
     // The offset is at a line boundary, also after a partial scan.
     cache["initialized"] = json!(true);
-    let serialized = cache.to_string();
-    if fs::read_to_string(cache_path).ok().as_deref() != Some(&serialized) {
-        atomic(cache_path, &serialized)?;
+    if changed {
+        atomic(cache_path, &cache.to_string())?;
     }
     Ok(complete.then_some(cache))
 }
@@ -337,25 +378,32 @@ fn pending(record: &Value, cache: &Value) -> Vec<Value> {
         })
         .collect()
 }
-pub(super) fn messages(record: &Value) -> Result<Vec<Value>> {
+/// The question rows of an inspection, or None (unknown, never no rows) when
+/// the index is not complete by `deadline`; its progress is kept.
+pub(super) fn messages(record: &Value, deadline: Instant) -> Result<Option<Vec<Value>>> {
     if string(record, "agent") != "codex" {
-        return Ok(vec![]);
+        return Ok(Some(vec![]));
     }
-    let cache = read_cache(record)?;
-    Ok(cache["items"].as_object().into_iter().flat_map(|m|m.values()).filter(|c|c["accepted"]==true).map(|card|{
+    let Some(cache) = index(record, &cache_path(record)?, Some(deadline))? else {
+        return Ok(None);
+    };
+    Ok(Some(cache["items"].as_object().into_iter().flat_map(|m|m.values()).filter(|c|c["accepted"]==true).map(|card|{
         let question=&card["questions"][0];
         let choices=question["options"].as_array().unwrap().iter().flat_map(|o|["\n- ",string(o,"label")]).collect::<String>();
         let status=if card["skipped"]==true {"Skipped"}else if !card["response"].is_null(){"Answered"}else if !card["closed"].is_null(){"Closed"}else{"Optional"};
         json!({"type":"AgentMessage","source":"codex_transcript","message_id":card["question_id"],"agent_id":"",
             "at":card["created_at"],"message_phase":"commentary","detail":format!("{}\n{}{}",status,string(question,"question"),choices)})
-    }).collect())
+    }).collect()))
 }
 fn unambiguous(record: &Value, card: &Value) -> Result<bool> {
-    Ok(current(record)?
+    Ok(unique(card, &current(record)?))
+}
+fn unique(card: &Value, pending: &[Value]) -> bool {
+    pending
         .iter()
         .filter(|c| c["questions"] == card["questions"])
         .count()
-        == 1)
+        == 1
 }
 pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
     let cache = read_cache(record)?;
@@ -526,13 +574,25 @@ pub(super) fn fit(record: &Value, card: &Value) {
     }
 }
 pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
+    available_with(record, card, || current(record))
+}
+/// `available` against the pending Codex questions an inspection already
+/// read from a complete index, without indexing again.
+pub(super) fn available_among(record: &Value, card: &Value, pending: &[Value]) -> Result<()> {
+    available_with(record, card, || Ok(pending.to_vec()))
+}
+fn available_with(
+    record: &Value,
+    card: &Value,
+    pending: impl FnOnce() -> Result<Vec<Value>>,
+) -> Result<()> {
     if card["answer_delivery"]["status"] == "submitted" {
         return Err("An answer was already submitted. Wait for Codex to record it.".into());
     }
     let mut terminal = Native::new(record, card);
     let screen = terminal.screen()?;
     if visible_panel(&screen, card)? {
-        if !unambiguous(record, card)? {
+        if !unique(card, &pending()?) {
             return Err(
                 "Several pending questions have the same text. Choose one in Terminal.".into(),
             );
@@ -598,88 +658,217 @@ fn save_submission(record: &Value, card: &Value, answers: &Value, request_id: &s
     atomic(&path, &cache.to_string())
 }
 
+/// One page of a session's question receipts (zerus-a4mub.8): their request
+/// IDs and original files, which recovery reads and validates itself. Only a
+/// complete page without a next cursor, in a chain that began at the head and
+/// never had to restart, covers every receipt; anything else is unknown.
+pub(super) struct ReceiptPage {
+    pub(super) rows: Vec<(String, PathBuf)>,
+    pub(super) next: Option<String>,
+    pub(super) complete: bool,
+    pub(super) restart: bool,
+}
+/// The question receipts of exactly `record`'s name, run and conversation, in
+/// pages of at most `limit`, after `after`. An expired deadline returns no
+/// rows and keeps the cursor.
+pub(super) trait ReceiptPages {
+    fn page(
+        &self,
+        record: &Value,
+        after: Option<&str>,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<ReceiptPage>;
+}
+/// The receipt locator (zerus-a4mub.11): exact identity pages that never
+/// enumerate the receipt folder; without a deadline it first reconciles the
+/// question receipts, then answers Complete or fails.
+struct Locator;
+impl ReceiptPages for Locator {
+    fn page(
+        &self,
+        record: &Value,
+        after: Option<&str>,
+        limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<ReceiptPage> {
+        receipt_index::question_page(
+            string(record, "name"),
+            string(record, "run_id"),
+            string(record, "conversation_id"),
+            after,
+            limit,
+            deadline,
+        )
+        .map(from_locator)
+    }
+}
+/// Only complete coverage can complete recovery, and a restart always
+/// reaches it.
+fn from_locator(page: receipt_index::QuestionReceiptPage) -> ReceiptPage {
+    ReceiptPage {
+        rows: page
+            .rows
+            .into_iter()
+            .map(|row| (row.request_id, row.path))
+            .collect(),
+        next: page.next_cursor,
+        complete: page.coverage == receipt_index::Coverage::Complete,
+        restart: page.restart_required,
+    }
+}
+
 // Older adapters left an in-progress question receipt after successfully
 // entering its envelope. Recover only a confirmed question submission or the
 // exact durable terminal acknowledgement, once per run; a timeout or a queue
-// preview alone never proves submission.
-fn recover_submissions(record: &Value, cache: &mut Value) -> Result<()> {
+// preview alone never proves submission. A replaced question cache also
+// recovers its submitted answers here, so pending questions stay unknown
+// until this run's recovery is complete.
+//
+// A bounded call (with a deadline) reads one page of at most
+// RECEIPTS_PER_CALL receipts from the receipt locator, which never
+// enumerates the receipt folder, and keeps its cursor in the cache
+// (`submission_scan`), so the next call resumes (zerus-a4mub.8). An
+// unbounded call (an answer) reads every page, and fails rather than act
+// when its pages cannot cover this run's receipts. Returns whether this
+// run's recovery is complete and whether the cache changed.
+fn recover_submissions(
+    record: &Value,
+    cache: &mut Value,
+    root: &Path,
+    pages: &dyn ReceiptPages,
+    deadline: Option<Instant>,
+) -> Result<(bool, bool)> {
     if cache["submission_scan_run"] == record["run_id"] {
-        return Ok(());
+        return Ok((true, false));
     }
-    let root = absolute_root()?;
-    let entries = match fs::read_dir(root.join("question_receipts")) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.to_string()),
-    };
-    for entry in entries.into_iter().flatten().flatten() {
-        if !entry
-            .metadata()
-            .is_ok_and(|m| m.is_file() && m.len() <= 256 * 1024)
-        {
-            continue;
-        }
-        let Some(receipt): Option<Value> = fs::read_to_string(entry.path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-        else {
-            continue;
-        };
-        let request_id = string(&receipt, "request_id");
-        if uuid::Uuid::parse_str(request_id).is_err()
-            || receipt["run_id"] != record["run_id"]
-            || receipt["conversation_id"] != record["conversation_id"]
-            || receipt["name"] != record["name"]
-            || !["in_progress", "submitted"].contains(&string(&receipt, "status"))
-        {
-            continue;
-        }
-        let mut card = cache["items"][string(&receipt, "question_id")].clone();
-        card["run_id"] = record["run_id"].clone();
-        if card["source"] != "codex_async"
-            || receipt["question_hash"] != questions::fingerprint(&card)
-            || receipt["answers"].as_array().is_none_or(|a| a.len() != 1)
-            || receipt["answers"][0]["skip"] == true
-            || receipt["answers"][0]["question_id"] != card["questions"][0]["id"]
-        {
-            continue;
-        }
-        if receipt["status"] == "submitted" {
-            if !matching_submission(record, &card, &card["delivery"]) {
-                cache["items"][string(&receipt, "question_id")]["delivery"] =
-                    submission(record, &card, &receipt["answers"], request_id);
+    let mut changed = false;
+    // Another run's unfinished recovery starts again for this one, and an
+    // answer always starts at the head, where its source seals every receipt.
+    if cache["submission_scan"]["run_id"] != record["run_id"]
+        || deadline.is_none() && !cache["submission_scan"]["after"].is_null()
+    {
+        cache["submission_scan"] = json!({"run_id": record["run_id"], "after": null});
+        changed = true;
+    }
+    let mut restarts = 0;
+    loop {
+        let after = cache["submission_scan"]["after"]
+            .as_str()
+            .map(str::to_owned);
+        let page = pages.page(record, after.as_deref(), RECEIPTS_PER_CALL, deadline)?;
+        if page.restart {
+            // A cursor its source no longer accepts: start again at the head.
+            cache["submission_scan"]["after"] = Value::Null;
+            changed = true;
+            restarts += 1;
+            if deadline.is_some() {
+                return Ok((false, changed));
+            }
+            if restarts > 3 {
+                return Err(INCOMPLETE_RECEIPTS.into());
             }
             continue;
         }
-        let input_path = root
-            .join("input_receipts")
-            .join(format!("{request_id}.json"));
-        if !fs::metadata(&input_path).is_ok_and(|m| m.is_file() && m.len() <= 256 * 1024) {
-            continue;
+        for (request_id, path) in &page.rows {
+            recover_receipt(record, cache, root, request_id, path);
         }
-        let Some(input): Option<Value> = fs::read_to_string(input_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-        else {
-            continue;
-        };
-        let Ok(text) = answer_text(&card, &receipt["answers"][0]) else {
-            continue;
-        };
-        if input["status"] == "submitted"
-            && input["request_id"] == request_id
-            && input["name"] == record["name"]
-            && input["run_id"] == record["run_id"]
-            && input["conversation_id"] == record["conversation_id"]
-            && input["text"] == envelope(&card, &text)
-            && !matching_submission(record, &card, &card["delivery"])
+        changed |= !page.rows.is_empty();
+        if page.complete && page.next.is_none() {
+            return Ok(finished(record, cache));
+        }
+        if let Some(next) = page
+            .next
+            .as_deref()
+            .filter(|next| after.as_deref() != Some(*next))
         {
+            cache["submission_scan"]["after"] = json!(next);
+            changed = true;
+            if deadline.is_none() {
+                continue;
+            }
+        } else if deadline.is_none() {
+            return Err(INCOMPLETE_RECEIPTS.into());
+        }
+        return Ok((false, changed));
+    }
+}
+/// An answer (an unbounded call) never acts on incomplete receipt evidence.
+const INCOMPLETE_RECEIPTS: &str =
+    "Earlier answers to this session's questions cannot all be checked yet; refresh before answering";
+fn finished(record: &Value, cache: &mut Value) -> (bool, bool) {
+    cache["submission_scan_run"] = record["run_id"].clone();
+    cache.as_object_mut().unwrap().remove("submission_scan");
+    (true, true)
+}
+/// One question receipt: a confirmed submission of this exact run and
+/// question, or its exact durable terminal acknowledgement, becomes the
+/// question's delivery. Anything else is left alone.
+fn recover_receipt(record: &Value, cache: &mut Value, root: &Path, row: &str, path: &Path) {
+    worked(0, 1);
+    // A regular file only, as its directory entry describes it.
+    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() <= 256 * 1024) {
+        return;
+    }
+    let Some(receipt): Option<Value> = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    else {
+        return;
+    };
+    let request_id = string(&receipt, "request_id");
+    if uuid::Uuid::parse_str(request_id).is_err()
+        || request_id != row
+        || receipt["run_id"] != record["run_id"]
+        || receipt["conversation_id"] != record["conversation_id"]
+        || receipt["name"] != record["name"]
+        || !["in_progress", "submitted"].contains(&string(&receipt, "status"))
+    {
+        return;
+    }
+    let mut card = cache["items"][string(&receipt, "question_id")].clone();
+    card["run_id"] = record["run_id"].clone();
+    if card["source"] != "codex_async"
+        || receipt["question_hash"] != questions::fingerprint(&card)
+        || receipt["answers"].as_array().is_none_or(|a| a.len() != 1)
+        || receipt["answers"][0]["skip"] == true
+        || receipt["answers"][0]["question_id"] != card["questions"][0]["id"]
+    {
+        return;
+    }
+    if receipt["status"] == "submitted" {
+        if !matching_submission(record, &card, &card["delivery"]) {
             cache["items"][string(&receipt, "question_id")]["delivery"] =
                 submission(record, &card, &receipt["answers"], request_id);
         }
+        return;
     }
-    cache["submission_scan_run"] = record["run_id"].clone();
-    Ok(())
+    let input_path = root
+        .join("input_receipts")
+        .join(format!("{request_id}.json"));
+    if !fs::metadata(&input_path).is_ok_and(|m| m.is_file() && m.len() <= 256 * 1024) {
+        return;
+    }
+    let Some(input): Option<Value> = fs::read_to_string(input_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    else {
+        return;
+    };
+    let Ok(text) = answer_text(&card, &receipt["answers"][0]) else {
+        return;
+    };
+    if input["status"] == "submitted"
+        && input["request_id"] == request_id
+        && input["name"] == record["name"]
+        && input["run_id"] == record["run_id"]
+        && input["conversation_id"] == record["conversation_id"]
+        && input["text"] == envelope(&card, &text)
+        && !matching_submission(record, &card, &card["delivery"])
+    {
+        cache["items"][string(&receipt, "question_id")]["delivery"] =
+            submission(record, &card, &receipt["answers"], request_id);
+    }
 }
 
 /// A failure once input may have reached Codex (`touched`) is never a
@@ -924,7 +1113,16 @@ mod tests {
                     "call_id":"call_one","output":"{\"accepted\":true}"}})];
             fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
             let record = json!({"run_id":"run","conversation_id":id,"transcript":path});
-            let cache = index(&record, &dir.path().join("cache.json"), None).unwrap().unwrap();
+            // A private root: recovery never reaches this machine's receipts.
+            let root = dir.path().join("state");
+            let cache = bounded(
+                &record,
+                &dir.path().join("cache.json"),
+                &root,
+                &Rows::default(),
+                None,
+            )
+            .unwrap();
             assert_eq!(pending(&record, &cache).len(), if child { 0 } else { 2 });
         }
     }
@@ -992,6 +1190,537 @@ mod tests {
         // A cache held by another process past the deadline is unknown, not empty.
         let _held = lock(Some(&cache.with_extension("lock"))).unwrap();
         assert_eq!(index(&record, &cache, Some(Instant::now() + Duration::from_millis(30))).unwrap(), None);
+    }
+    /// The work this thread did while `f` ran: transcript lines, receipts.
+    fn work<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
+        let before = WORK.with(|work| work.get());
+        let value = f();
+        let after = WORK.with(|work| work.get());
+        (value, (after.0 - before.0, after.1 - before.1))
+    }
+    /// zerus-a4mub.8: an in-memory receipt locator over exact rows, in
+    /// request-ID order, honouring the page contract.
+    #[derive(Clone, Default)]
+    struct Rows {
+        rows: Vec<(String, PathBuf)>,
+        /// Report a gap (incomplete coverage) instead of the last page.
+        gap: bool,
+        /// Refuse this cursor once, as a page begun before a new head.
+        restart: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+        pages: std::rc::Rc<std::cell::Cell<usize>>,
+        /// The cursor of every page requested without a deadline.
+        unbounded: std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>>,
+    }
+    impl ReceiptPages for Rows {
+        fn page(
+            &self,
+            _: &Value,
+            after: Option<&str>,
+            limit: usize,
+            deadline: Option<Instant>,
+        ) -> Result<ReceiptPage> {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Ok(ReceiptPage {
+                    rows: vec![],
+                    next: after.map(str::to_owned),
+                    complete: false,
+                    restart: false,
+                });
+            }
+            self.pages.set(self.pages.get() + 1);
+            if deadline.is_none() {
+                self.unbounded.borrow_mut().push(after.map(str::to_owned));
+            }
+            if after.is_some() && self.restart.borrow().as_deref() == after {
+                self.restart.replace(None);
+                return Ok(ReceiptPage {
+                    rows: vec![],
+                    next: None,
+                    complete: false,
+                    restart: true,
+                });
+            }
+            let rest: Vec<_> = self
+                .rows
+                .iter()
+                .filter(|(id, _)| after.is_none_or(|after| id.as_str() > after))
+                .cloned()
+                .collect();
+            let rows: Vec<_> = rest.iter().take(limit).cloned().collect();
+            let more = rest.len() > rows.len();
+            Ok(ReceiptPage {
+                next: rows.last().filter(|_| more).map(|(id, _)| id.clone()),
+                complete: !more && !self.gap,
+                rows,
+                restart: false,
+            })
+        }
+    }
+    /// The items without their recovery times.
+    fn settled(cache: &Value) -> Value {
+        let mut items = cache["items"].clone();
+        for card in items.as_object_mut().unwrap().values_mut() {
+            if let Some(delivery) = card["delivery"].as_object_mut() {
+                delivery.remove("submitted_at");
+            }
+        }
+        items
+    }
+    fn bounded(
+        record: &Value,
+        cache: &Path,
+        root: &Path,
+        rows: &Rows,
+        deadline: Option<Instant>,
+    ) -> Option<Value> {
+        let rows = rows.clone();
+        index_with(
+            record,
+            cache,
+            deadline,
+            || Ok(root.to_path_buf()),
+            move |_| Box::new(rows),
+        )
+        .unwrap()
+    }
+    fn second_request() -> Value {
+        json!({"type":"response_item","timestamp":"2026-10-07T15:02:00Z","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call_two","arguments":json!({"questions":[{"title":"Second?","options":["Yes","No"]}]}).to_string()}})
+    }
+    fn accepted(call: &str) -> Value {
+        json!({"type":"response_item","payload":{"type":"function_call_output","call_id":call,"output":"{\"accepted\":true}"}})
+    }
+    /// A session whose first question is answered and second closed by its
+    /// turn, then `filler` lines, then a third question that stays pending.
+    fn closing_session(dir: &Path, filler: usize) -> Value {
+        let id = uuid::Uuid::new_v4().to_string();
+        let transcript = dir.join(format!("rollout-{id}.jsonl"));
+        let (_, cache) = accepted_questions();
+        let first = &cache["items"]["codex-async:call_one:0"];
+        let mut lines = vec![
+            json!({"type":"session_meta","payload":{"id":id}}),
+            boundary("task_started", "t1"),
+            request(),
+            accepted("call_one"),
+        ];
+        lines.extend((0..filler).map(|i| json!({"type":"response_item","payload":{"type":"function_call_output","call_id":format!("other-{i}"),"output":"x"}})));
+        lines.extend([json!({"type":"event_msg","timestamp":"2026-10-07T15:01:00Z","payload":{"type":"user_message","message":envelope(first,"One")}}),
+            boundary("task_complete", "t1"), boundary("task_started", "t2"), second_request(), accepted("call_two")]);
+        fs::write(&transcript, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
+        json!({"agent":"codex","name":"codex/p/one","run_id":"run","conversation_id":id,"transcript":transcript})
+    }
+    /// An exact submitted receipt for `question_id`, and `others` of other runs.
+    fn receipts(
+        root: &Path,
+        record: &Value,
+        card: &Value,
+        others: usize,
+    ) -> (String, Vec<(String, PathBuf)>) {
+        let folder = root.join("question_receipts");
+        fs::create_dir_all(&folder).unwrap();
+        let mut rows = Vec::new();
+        let mut write = |receipt: Value| {
+            let id = string(&receipt, "request_id").to_owned();
+            let path = folder.join(format!("{id}.json"));
+            fs::write(&path, receipt.to_string()).unwrap();
+            rows.push((id, path));
+        };
+        let exact = uuid::Uuid::new_v4().to_string();
+        let mut card = card.clone();
+        card["run_id"] = record["run_id"].clone();
+        write(
+            json!({"status":"submitted","request_id":exact,"name":record["name"],"run_id":record["run_id"],
+            "conversation_id":record["conversation_id"],"question_id":card["question_id"],
+            "question_hash":questions::fingerprint(&card),"answers":[{"question_id":"q_0","selected_option_ids":["opt_0"]}]}),
+        );
+        for _ in 0..others {
+            write(
+                json!({"status":"submitted","request_id":uuid::Uuid::new_v4().to_string(),"name":record["name"],
+                "run_id":"another-run","conversation_id":record["conversation_id"],"question_id":card["question_id"],
+                "question_hash":questions::fingerprint(&card),"answers":[{"question_id":"q_0","selected_option_ids":["opt_0"]}]}),
+            );
+        }
+        rows.sort();
+        (exact, rows)
+    }
+    /// zerus-a4mub.8: a cold index of a large transcript reads one line per
+    /// expired call and stays unknown; an expired call never reads a
+    /// receipt; a bounded call reads at most one page. The result is exactly
+    /// the unbounded one: the answer, the turn's closure and the submission.
+    #[test]
+    fn a_cold_index_and_receipt_recovery_are_bounded_and_close_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let record = closing_session(dir.path(), 2000);
+        // The pending third question's identity, from a complete index elsewhere.
+        let reference = dir.path().join("reference.json");
+        let empty = Rows::default();
+        let full = bounded(&record, &reference, &root, &empty, None).unwrap();
+        let third = full["items"]["codex-async:call_two:0"].clone();
+        let (exact, rows) = receipts(&root, &record, &third, 300);
+        let rows = Rows {
+            rows,
+            ..Rows::default()
+        };
+        let cache = dir.path().join("cache.json");
+        let lines = fs::read_to_string(string(&record, "transcript"))
+            .unwrap()
+            .lines()
+            .count();
+        // Cold: one line per expired call, unknown (never an empty list) until the end.
+        let mut calls = 0;
+        loop {
+            let (result, (read, opened)) =
+                work(|| bounded(&record, &cache, &root, &rows, Some(Instant::now())));
+            assert!(
+                result.is_none(),
+                "an expired call completed with receipts unread"
+            );
+            assert!(
+                read <= 1 && opened == 0,
+                "call {calls} read {read} lines and {opened} receipts"
+            );
+            calls += 1;
+            let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+            if saved["offset"] == json!(fs::metadata(string(&record, "transcript")).unwrap().len())
+            {
+                break;
+            }
+            assert!(calls <= lines, "indexing made no progress");
+        }
+        // Every line ended a call, the header included.
+        assert_eq!(calls, lines);
+        // Expired calls make no recovery progress and read nothing.
+        for _ in 0..3 {
+            let (result, (read, opened)) =
+                work(|| bounded(&record, &cache, &root, &rows, Some(Instant::now())));
+            assert_eq!((result, read, opened), (None, 0, 0));
+        }
+        assert_eq!(rows.pages.get(), 0);
+        // A budget reads at most one page per call until this run's recovery is complete.
+        let budget = || Some(Instant::now() + Duration::from_secs(30));
+        let mut pages = 0;
+        let complete = loop {
+            let (result, (read, opened)) =
+                work(|| bounded(&record, &cache, &root, &rows, budget()));
+            assert_eq!(read, 0);
+            assert!(
+                opened <= RECEIPTS_PER_CALL,
+                "a bounded call read {opened} receipts"
+            );
+            pages += 1;
+            if let Some(cache) = result {
+                break cache;
+            }
+            assert!(
+                pages <= 301_usize.div_ceil(RECEIPTS_PER_CALL),
+                "recovery made no progress"
+            );
+        };
+        assert_eq!(pages, 301_usize.div_ceil(RECEIPTS_PER_CALL));
+        // Exactly the unbounded result, with the same submission.
+        let unbounded =
+            bounded(&record, &dir.path().join("fresh.json"), &root, &rows, None).unwrap();
+        assert_eq!(settled(&complete), settled(&unbounded));
+        let items = &complete["items"];
+        assert_eq!(
+            items["codex-async:call_one:0"]["response"]["response"]["answers"]["Which option?"],
+            "One"
+        );
+        assert_eq!(items["codex-async:call_one:1"]["closed"], "task_complete");
+        assert_eq!(
+            items["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+        let pending = pending(&record, &complete);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["answer_delivery"]["request_id"], exact.as_str());
+        // Complete: no further work.
+        let (again, (read, opened)) = work(|| bounded(&record, &cache, &root, &rows, budget()));
+        assert_eq!((again, read, opened), (Some(complete), 0, 0));
+    }
+    /// zerus-a4mub.8: a page that must restart, or a gap, is never complete
+    /// for a bounded call, and an answer (unbounded) refuses to act on a gap.
+    /// Large receipt counts are read one page per call.
+    #[test]
+    fn recovery_never_completes_from_restarted_or_gapped_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let record = closing_session(dir.path(), 0);
+        let full = bounded(
+            &record,
+            &dir.path().join("reference.json"),
+            &root,
+            &Rows::default(),
+            None,
+        )
+        .unwrap();
+        let third = full["items"]["codex-async:call_two:0"].clone();
+        let (exact, mut rows) = receipts(&root, &record, &third, 200);
+        // Large counts: ids beyond the files are rows whose originals are gone.
+        rows.extend((0..5000).map(|i| {
+            (
+                format!("zz-{i:05}"),
+                root.join("question_receipts")
+                    .join(format!("gone-{i}.json")),
+            )
+        }));
+        let budget = || Some(Instant::now() + Duration::from_secs(30));
+        let cache = dir.path().join("cache.json");
+        // A restart sends the cursor back to the head; nothing completes from it.
+        let restart = Rows {
+            rows: rows.clone(),
+            ..Rows::default()
+        };
+        restart
+            .restart
+            .replace(Some(rows[RECEIPTS_PER_CALL - 1].0.clone()));
+        assert_eq!(bounded(&record, &cache, &root, &restart, budget()), None);
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+        assert_eq!(
+            saved["submission_scan"]["after"],
+            rows[RECEIPTS_PER_CALL - 1].0.as_str()
+        );
+        assert_eq!(bounded(&record, &cache, &root, &restart, budget()), None);
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+        assert_eq!(saved["submission_scan"]["after"], Value::Null);
+        let mut calls = 0;
+        let complete = loop {
+            let (result, (_, opened)) =
+                work(|| bounded(&record, &cache, &root, &restart, budget()));
+            assert!(opened <= RECEIPTS_PER_CALL);
+            calls += 1;
+            if let Some(cache) = result {
+                break cache;
+            }
+            assert!(
+                calls <= rows.len().div_ceil(RECEIPTS_PER_CALL),
+                "recovery made no progress"
+            );
+        };
+        assert_eq!(calls, rows.len().div_ceil(RECEIPTS_PER_CALL));
+        assert_eq!(
+            complete["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+        // A gap stays unknown for every bounded call.
+        let gap = Rows {
+            rows: rows.clone(),
+            gap: true,
+            ..Rows::default()
+        };
+        let cache = dir.path().join("gap.json");
+        for _ in 0..rows.len().div_ceil(RECEIPTS_PER_CALL) + 3 {
+            assert_eq!(bounded(&record, &cache, &root, &gap, budget()), None);
+        }
+        // An answer never acts on it: it fails instead, and the gap stays.
+        let gapped = gap.clone();
+        let refused = index_with(
+            &record,
+            &cache,
+            None,
+            || Ok(root.clone()),
+            move |_| Box::new(gapped),
+        );
+        assert_eq!(refused, Err(INCOMPLETE_RECEIPTS.to_owned()));
+        assert_eq!(bounded(&record, &cache, &root, &gap, budget()), None);
+        // Without the gap, the same answer reads every page and completes,
+        // starting at the head rather than at the bounded cursor.
+        let whole = Rows {
+            rows,
+            ..Rows::default()
+        };
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+        assert!(saved["submission_scan"]["after"].is_string());
+        let answered = bounded(&record, &cache, &root, &whole, None).unwrap();
+        assert_eq!(whole.unbounded.borrow().first(), Some(&None));
+        assert_eq!(
+            answered["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+        assert_eq!(settled(&answered), settled(&complete));
+    }
+    /// zerus-a4mub.8: a locator page completes recovery only with complete
+    /// coverage, and every restart signal reaches recovery.
+    #[test]
+    fn locator_pages_complete_only_with_complete_coverage_and_carry_restarts() {
+        use receipt_index::{Coverage, QuestionReceiptPage, QuestionReceiptRow};
+        let row = QuestionReceiptRow {
+            request_id: "request".into(),
+            path: PathBuf::from("question_receipts/request.json"),
+        };
+        for (coverage, complete) in [
+            (Coverage::Complete, true),
+            (Coverage::Partial, false),
+            (Coverage::Gap, false),
+        ] {
+            for restart in [false, true] {
+                let page = from_locator(QuestionReceiptPage {
+                    rows: vec![row.clone()],
+                    next_cursor: Some("cursor".into()),
+                    coverage,
+                    restart_required: restart,
+                });
+                assert_eq!(
+                    (page.complete, page.restart, page.next.as_deref()),
+                    (complete, restart, Some("cursor")),
+                    "{coverage:?} restart {restart}"
+                );
+                assert_eq!(page.rows, vec![("request".to_owned(), row.path.clone())]);
+            }
+        }
+    }
+    /// zerus-a4mub.8: a receipt counts only under its own request ID, never
+    /// under another row that points at its file.
+    #[test]
+    fn a_receipt_is_recovered_only_under_its_own_request_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let record = closing_session(dir.path(), 0);
+        let full = bounded(
+            &record,
+            &dir.path().join("reference.json"),
+            &root,
+            &Rows::default(),
+            None,
+        )
+        .unwrap();
+        let third = full["items"]["codex-async:call_two:0"].clone();
+        let (exact, rows) = receipts(&root, &record, &third, 0);
+        let path = rows[0].1.clone();
+        let foreign = Rows {
+            rows: vec![(uuid::Uuid::new_v4().to_string(), path.clone())],
+            ..Rows::default()
+        };
+        let cache = bounded(
+            &record,
+            &dir.path().join("cache.json"),
+            &root,
+            &foreign,
+            None,
+        )
+        .unwrap();
+        assert!(cache["items"]["codex-async:call_two:0"]["delivery"].is_null());
+        let own = Rows {
+            rows: vec![(exact.clone(), path)],
+            ..Rows::default()
+        };
+        let cache = bounded(&record, &dir.path().join("own.json"), &root, &own, None).unwrap();
+        assert_eq!(
+            cache["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+    }
+    /// zerus-a4mub.8: through the production index and its state directory,
+    /// an expired bounded call never reads this run's question receipts (on
+    /// the old code its first complete transcript scan read all 301), and
+    /// the questions stay unknown until an answer's unbounded call recovers
+    /// the exact submission. Runs in its own process with a private state.
+    #[test]
+    fn an_expired_call_reads_no_question_receipt() {
+        private_probe("expired");
+    }
+    /// zerus-a4mub.8: an inspection whose Codex question index is held
+    /// reports its questions incomplete and lists none of them; once the
+    /// index is free the same inspection is complete with the question.
+    #[test]
+    fn an_inspection_of_a_held_index_is_incomplete() {
+        private_probe("inspection");
+    }
+    fn private_probe(case: &str) {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::codex_questions::tests::expired_recovery_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("HGS_TEST_QUESTION_RECOVERY", case)
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+    #[test]
+    #[ignore = "runs in its own process with a private HGS_STATE_DIR"]
+    fn expired_recovery_probe() {
+        let Ok(case) = std::env::var("HGS_TEST_QUESTION_RECOVERY") else {
+            return;
+        };
+        if case == "inspection" {
+            return held_inspection_probe();
+        }
+        let root = absolute_root().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let record = closing_session(dir.path(), 0);
+        let full = index(&record, &dir.path().join("reference.json"), None)
+            .unwrap()
+            .unwrap();
+        let third = full["items"]["codex-async:call_two:0"].clone();
+        let (exact, _) = receipts(&root, &record, &third, 300);
+        let cache = dir.path().join("cache.json");
+        let lines = fs::read_to_string(string(&record, "transcript"))
+            .unwrap()
+            .lines()
+            .count();
+        for call in 0..lines + 3 {
+            let result = index(&record, &cache, Some(Instant::now())).unwrap();
+            assert!(
+                result.is_none(),
+                "expired call {call} completed: it read every question receipt"
+            );
+        }
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+        assert_eq!(
+            saved["offset"],
+            json!(fs::metadata(string(&record, "transcript")).unwrap().len())
+        );
+        assert!(saved["items"]["codex-async:call_two:0"]["delivery"].is_null());
+        assert_ne!(saved["submission_scan_run"], "run");
+        // An answer's unbounded call recovers the exact submission.
+        let complete = index(&record, &cache, None).unwrap().unwrap();
+        assert_eq!(
+            complete["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+    }
+    fn held_inspection_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = closing_session(dir.path(), 0);
+        // This test process stands in for the live agent.
+        record["pid"] = json!(std::process::id());
+        record["process_start"] = json!(process_start(std::process::id()));
+        let budget = || Instant::now() + Duration::from_millis(200);
+        // An answer's unbounded index reconciles the locator and recovers.
+        assert_eq!(questions::current(&record).unwrap().len(), 1);
+        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        assert!(complete);
+        assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
+        let held = lock(Some(&cache_path(&record).unwrap().with_extension("lock"))).unwrap();
+        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        assert!(!complete, "a held index was reported complete");
+        assert!(
+            pending
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|card| card["source"] != "codex_async"),
+            "{pending}"
+        );
+        assert_eq!(questions::current_until(&record, budget()).unwrap(), None);
+        drop(held);
+        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        assert!(complete);
+        assert_eq!(pending[0]["question_id"], "codex-async:call_two:0");
     }
     #[test]
     fn an_expired_deadline_stops_after_each_oversized_line() {

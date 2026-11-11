@@ -1,5 +1,5 @@
 import { groupRows, type Row } from "./group-rows";
-export { groupRows, type Row, type ListInput } from "./group-rows";
+export { groupRows, withContainers, endedParent, type Row, type ListInput, type Container } from "./group-rows";
 import { createMemo } from "solid-js";
 import { archive, archiveRows, fleetComputers } from "../../store/archive";
 import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/catalog";
@@ -28,6 +28,8 @@ export function rowHeight(row: Row, strip = false): number {
   if (row.type === "header") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
   if (row.type === "creation") return ROW_HEIGHT.card;
+  // An ended parent's container is a dimmed compact row with its children's line (zerus-sa9qn.17).
+  if (row.type === "container") return row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow;
   // A compact parent takes a second line with its child sessions' summary.
   if (row.compactRow && !strip) return row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow;
   return ROW_HEIGHT.card;
@@ -129,6 +131,7 @@ function listScope() {
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
     parentKey: parentKeyOf(), teamCollapsed,
+    containers: true, machineOf: (s: Session) => machineCards[s.computer]?.machine_id,
   };
 }
 

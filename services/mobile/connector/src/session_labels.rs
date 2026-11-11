@@ -253,7 +253,13 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
-    fn fixture() -> (tempfile::TempDir, Selection, wire::Query, wire::Context, u64) {
+    fn fixture() -> (
+        tempfile::TempDir,
+        Selection,
+        wire::Query,
+        wire::Context,
+        u64,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = temp.path().join("connector.json");
@@ -334,17 +340,10 @@ mod tests {
         // its selected CLI is upgraded; the connector's own flag is required.
         let mut old = answer.clone();
         old.routing_by_id = false;
-        assert!(
-            wire::Reply::parse(&serde_json::to_vec(&old).unwrap(), &next, at).is_none()
-        );
+        assert!(wire::Reply::parse(&serde_json::to_vec(&old).unwrap(), &next, at).is_none());
         let mut partial = answer.clone();
         partial.context.as_mut().unwrap().labels_by_id = false;
-        assert!(wire::Reply::parse(
-            &serde_json::to_vec(&partial).unwrap(),
-            &next,
-            at
-        )
-        .is_none());
+        assert!(wire::Reply::parse(&serde_json::to_vec(&partial).unwrap(), &next, at).is_none());
         // Replacement of the selected configuration closes even a valid nonce.
         put(
             &selection,

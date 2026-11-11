@@ -87,6 +87,10 @@ struct Job {
     // physically retired program (zerus-1y897.5). The row stays for lookup;
     // it never offers Check again, Force or a removal consent.
     lookup_only: bool,
+    // Set only where the watcher's physical_retirement() proved the program
+    // released (zerus-y7quu). A program that merely went missing, such as a
+    // panicked Force offer task's dropped stop, is not physical proof.
+    physically_released: bool,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
@@ -113,7 +117,15 @@ impl Job {
                 .all(|entry| entry.status != Some(Status::Unconfirmed))
     }
     fn dismissible(&self) -> bool {
-        !self.busy && !self.unfinished_programs() && !self.program_review_pending
+        !self.busy
+            && !self.unfinished_programs()
+            && (!self.program_review_pending || self.released_lookup_only())
+    }
+    /// zerus-yxopj: a lookup-only row whose program custody has physically
+    /// retired has nothing left to wait for. Dismiss may drop it; it still
+    /// never offers Check again, Force, a consent or a removal.
+    fn released_lookup_only(&self) -> bool {
+        self.lookup_only && self.physically_released && !self.has_programs()
     }
 
     fn unfinished_programs(&self) -> bool {
@@ -516,6 +528,7 @@ impl Model {
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: Some(target.clone()),
             archive,
             restore_supported,
@@ -1335,6 +1348,7 @@ pub async fn termination_cleanup_confirm(
                 program_review_pending: false,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1362,17 +1376,40 @@ pub async fn termination_cleanup_confirm(
     outcome
 }
 #[tauri::command]
-pub fn termination_cleanup_check(
+pub async fn termination_cleanup_check(
     app: AppHandle,
     state: State<'_, TerminationCleanup>,
     id: String,
 ) -> Result<View, String> {
-    check_with_runtime(
-        &state.0,
-        id,
-        |model| changed(&app, model),
-        |inner, id, step| inner.drive(app.clone(), id, step, false),
-    )
+    check_blocking(state.0.clone(), app, id, changed, |app, inner, id, step| {
+        inner.drive(app.clone(), id, step, false)
+    })
+    .await
+}
+/// The Check again command body, for any app (zerus-wfynn). A known refusal's
+/// retirement observes and closes its original source, and that close waits
+/// for the holder to end, bounded only by the owner's retention deadline.
+/// Tauri runs a synchronous command inline on the GTK main thread, so the
+/// whole check runs on a blocking task instead; the row is reserved and busy
+/// meanwhile, and its guards, reservation and single review are unchanged.
+async fn check_blocking<A: Send + 'static>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    emit: fn(&A, &mut Model),
+    run_review: fn(&A, Arc<Inner>, String, Step),
+) -> Result<View, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = &app;
+        check_with_runtime(
+            &inner,
+            id,
+            |model| emit(app, model),
+            |inner, id, step| run_review(app, inner, id, step),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 fn check_with_runtime(
     inner: &Arc<Inner>,
@@ -1546,6 +1583,7 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1620,12 +1658,15 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
     assert!(stopped.can_force());
     assert!(!stopped.reviewable_refusal());
     assert!(!stopped.current());
+    // zerus-yxopj: the Force variant's folder is not Zerus-owned, so only the
+    // lookup-only guard keeps "Remove anyway" from its released row.
+    let owner = if force { "" } else { "owner-1" };
     let mut entry = Entry::terminated(
         "studio",
         "studio",
         "/home/example/repo-work-1",
         "/home/example/repo/.git",
-        "owner-1",
+        owner,
         None,
     )
     .unwrap();
@@ -1642,6 +1683,7 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1669,6 +1711,9 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         job.lookup_only = false;
     }
     lock(&state.0.model).jobs.push_back(job);
+    // zerus-yxopj: while its program is held, the row cannot be dismissed.
+    assert!(!lock(&state.0.model).view().rows[0].can_dismiss);
+    assert!(lock(&state.0.model).dismiss("job").is_err());
     let emitted = std::cell::Cell::new(0);
     assert!(matches!(
         program_pipeline::watch_once(&state.0, "job", |_| emitted.set(emitted.get() + 1)),
@@ -1705,10 +1750,22 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         assert!(!row.ready);
         assert!(!row.can_force);
         assert_eq!(row.force_revision, None);
-        assert!(!row.can_dismiss);
+        assert!(
+            row.can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
         assert!(!row.can_remove_anyway);
+        assert!(
+            model.manual_entry("job").is_err(),
+            "a released lookup-only row offered Remove anyway"
+        );
+        assert!(!job.manual_review, "a released row reached Remove");
         assert!(!view.can_clear);
     }
+    // Dismiss only drops the settled row; nothing else is granted.
+    let mut model = lock(&state.0.model);
+    model.dismiss("job").unwrap();
+    assert!(model.jobs.is_empty(), "the dismissed row stayed");
 }
 
 /// The program path's own job after production record_stop published a real
@@ -1746,6 +1803,7 @@ fn stopping_job() -> Job {
         program_review_pending: true,
         program_retirement: None,
         lookup_only: false,
+        physically_released: false,
         source: None,
         archive: None,
         restore_supported: true,
@@ -1804,19 +1862,44 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
         assert!(!model.jobs[0].busy);
     }
 
+    // zerus-y7quu: the real force_offer meets a real JoinError. Its blocking
+    // offer task panics and drops the stop inside the task; nothing proves a
+    // physical release, so the row stays lookup-only and undismissable.
     let state = TerminationCleanup::default();
-    let mut job = published_incomplete(lost);
-    let taken = program_pipeline::take_force(&mut job).unwrap();
-    // The blocking task owned the stop and ended without handing it back.
-    drop(taken);
-    assert!(program_pipeline::record_offer(&mut job, 1, Err("offer task ended".into())).is_err());
-    lock(&state.0.model).jobs.push_back(job);
+    lock(&state.0.model)
+        .jobs
+        .push_back(published_incomplete(lost));
+    program_pipeline::fixture_lose_offer("job");
+    let inner = state.0.clone();
+    let offered = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(program_pipeline::force_offer(
+            inner,
+            TestApp::default(),
+            "job".into(),
+        ))
+    })
+    .join()
+    .unwrap();
+    assert!(offered.is_err(), "a lost offer task offered Force");
     assert!(check(&state).is_err());
-    let model = lock(&state.0.model);
+    let mut model = lock(&state.0.model);
     assert!(!model.jobs[0].busy, "a lost offer left the row busy");
     assert!(model.jobs[0].lookup_only);
-    let row = &model.view().rows[0];
-    assert!(!row.can_check && !row.ready && !row.can_force);
+    assert!(model.jobs[0].programs.is_none());
+    {
+        let view = model.view();
+        let row = &view.rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force);
+        assert!(!row.can_remove_anyway);
+        assert!(
+            !row.can_dismiss,
+            "a lost offer's row became dismissible without physical proof"
+        );
+    }
+    assert!(
+        model.dismiss("job").is_err(),
+        "a lost offer's row was dismissed"
+    );
 }
 
 /// zerus-1y897.8: an unconfirmed stop is lookup-only and keeps whatever
@@ -1862,6 +1945,12 @@ pub(crate) fn assert_real_unconfirmed_stops(
                 Some(ProgramRetirement::StopUnconfirmed)
             );
         }
+        // zerus-yxopj: a held stop, even a refusal, cannot be dismissed.
+        assert!(!lock(&state.0.model).view().rows[0].can_dismiss);
+        assert!(
+            lock(&state.0.model).dismiss("job").is_err(),
+            "a held stop was dismissed"
+        );
         // The passive watcher's own passes; only physical retirement releases.
         let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1886,6 +1975,14 @@ pub(crate) fn assert_real_unconfirmed_stops(
         assert!(model.jobs[0].lookup_only);
         let row = &model.view().rows[0];
         assert!(!row.can_check && !row.ready && !row.can_force);
+        assert!(
+            row.can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
+        drop(model);
+        let mut model = lock(&state.0.model);
+        model.dismiss("job").unwrap();
+        assert!(model.jobs.is_empty(), "the dismissed row stayed");
     }
 
     let state = TerminationCleanup::default();
@@ -1981,6 +2078,32 @@ pub(crate) fn assert_real_held_custody(
             "the retired custody was kept"
         );
         assert!(model.jobs[0].lookup_only);
+        // zerus-yxopj: the released row may be dismissed; an unknown removal
+        // outcome stays recorded for its folder and is never replayed.
+        assert!(
+            model.view().rows[0].can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
+        let unknown = model.jobs[0]
+            .cleanup
+            .entries
+            .iter()
+            .any(|entry| entry.status == Some(Status::Unconfirmed));
+        drop(model);
+        let mut model = lock(&state.0.model);
+        model.dismiss("job").unwrap();
+        if unknown {
+            assert!(model.jobs[0].dismissed);
+            assert!(
+                model.unknown_folder(&model.jobs[0]),
+                "the unknown removal outcome was dropped"
+            );
+            assert!(model.view().rows.is_empty());
+        } else {
+            assert!(model.jobs.is_empty(), "the dismissed row stayed");
+        }
+        drop(model);
+        assert!(check(state).is_err());
     }
 
     // Continuation::normal refused: the source went away before the stop.
@@ -2034,6 +2157,480 @@ pub(crate) fn assert_real_held_custody(
         held(&state, live, ProgramRetirement::CleanupUnconfirmed);
         released(&state);
     }
+}
+
+/// A recording app for the program pipeline's real producers.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[derive(Clone, Default)]
+struct TestApp(Arc<Mutex<Vec<String>>>);
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl TestApp {
+    fn events(&self) -> Vec<String> {
+        lock(&self.0).clone()
+    }
+}
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+impl program_pipeline::PipelineApp for TestApp {
+    fn changed(&self, model: &mut Model) {
+        model.revision = model.revision.wrapping_add(1);
+        lock(&self.0).push("changed".into());
+    }
+    fn drive(&self, inner: &Arc<Inner>, id: String, _: Step) {
+        lock(&self.0).push(format!("drive {id}"));
+        if let Some(job) = lock(&inner.model).jobs.iter_mut().find(|job| job.id == id) {
+            job.busy = false;
+        }
+    }
+    fn removed(&self, label: String) {
+        lock(&self.0).push(format!("removed {label}"));
+    }
+}
+
+/// Waits for the real passive watcher to settle the only job.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn watcher_released(state: &TerminationCleanup, failure: &str) {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let model = lock(&state.0.model);
+            if model.jobs[0].programs.is_none() && !model.jobs[0].busy {
+                return;
+            }
+        }
+        assert!(std::time::Instant::now() < until, "{failure}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// zerus-fojet: production publish records a real refusal and starts the real
+/// passive watcher, which retires it; Check again then reviews the retained
+/// cleanup and never removes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_published_refusal(stopped: programs::Stopped) {
+    assert!(stopped.reviewable_refusal());
+    assert!(!stopped.current());
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
+    assert_eq!(
+        app.events().first().map(String::as_str),
+        Some("changed"),
+        "publish recorded nothing"
+    );
+    assert!(
+        !lock(&state.0.model).jobs[0].cleanup.busy(),
+        "a known refusal kept the background cleanup"
+    );
+    watcher_released(&state, "publish did not start the passive watcher");
+    {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(!job.program_review_pending);
+        assert!(!job.lookup_only);
+        let row = &model.view().rows[0];
+        assert!(row.can_check && !row.ready && !row.can_force);
+    }
+    check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |inner, _, mut step| loop {
+            match step {
+                Step::Review {
+                    host, common_dir, ..
+                } => {
+                    let mut model = lock(&inner.model);
+                    let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
+                    let review = json!({"state": "ok", "common_dir": "/home/example/repo/.git",
+                        "worktrees": [{"kind": "linked", "verdict": "ready", "path": "/home/example/repo-work-1",
+                        "fingerprint": "f1", "ownership_id": "owner-1", "zerus_owned": true,
+                        "archive_restore_ready": true, "reasons": [], "changes": 0, "untracked": 0,
+                        "disk_complete": true, "ignored_complete": true, "ignored_count": 0,
+                        "integration": {"kind": "ancestor", "base": "main"}, "merged": true}]});
+                    step = job.cleanup.reviewed(&host, &common_dir, Ok(&review));
+                }
+                Step::Remove { .. } => panic!("Check again must not remove"),
+                Step::Idle | Step::Done => {
+                    lock(&inner.model).jobs[0].busy = false;
+                    break;
+                }
+            }
+        },
+    )
+    .unwrap();
+    let settled = lock(&state.0.model).view();
+    assert!(settled.rows[0].ready && !settled.busy);
+    assert!(!app.events().iter().any(|event| event.starts_with("drive")));
+}
+
+/// zerus-guttv/zerus-g5hh5: settle and settle_removal hand back a phase whose
+/// retirement failed while its source is still current, without closing it;
+/// the row is lookup-only and held.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_current_holds(stopped: programs::Stopped, removal: programs::Removal) {
+    assert!(stopped.current() && removal.current());
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(
+        state.0.clone(),
+        app.clone(),
+        "job".into(),
+        program_pipeline::settle(stopped),
+    );
+    // Each producer is checked before the next one runs: both phases share
+    // the same original source.
+    let held_current = |state: &TerminationCleanup| {
+        lock(&state.0.model).jobs[0]
+            .programs
+            .as_ref()
+            .is_some_and(program_pipeline::ProgramJob::current)
+    };
+    assert!(held_current(&state), "settle closed a current source");
+    let removal_state = TerminationCleanup::default();
+    let mut job = stopping_job();
+    job.phase = "removing";
+    let (gone, live) = program_pipeline::record_removal(
+        &mut job,
+        program_pipeline::settle_removal(Box::new(removal)),
+    );
+    assert!(!gone && live);
+    lock(&removal_state.0.model).jobs.push_back(job);
+    assert!(
+        held_current(&removal_state),
+        "settle_removal closed a current source"
+    );
+    for (state, retirement) in [
+        (&state, ProgramRetirement::StopUnconfirmed),
+        (&removal_state, ProgramRetirement::CleanupUnconfirmed),
+    ] {
+        assert!(held_current(state), "a held phase was closed");
+        {
+            let model = lock(&state.0.model);
+            let job = &model.jobs[0];
+            assert!(job.lookup_only);
+            assert!(!job.busy);
+            assert_eq!(job.program_retirement, Some(retirement));
+        }
+        assert!(check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("a held phase was reviewed"),
+        )
+        .is_err());
+    }
+    // The real watcher keeps the held stop while its source is current.
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        lock(&state.0.model).jobs[0].programs.is_some(),
+        "the watcher released a current held stop"
+    );
+    // Teardown: the shared source stays current for the later controls.
+    lock(&state.0.model).jobs.clear();
+    lock(&removal_state.0.model).jobs.clear();
+}
+
+/// zerus-fojet/guttv/g5hh5: the real async glue. force_offer and force_confirm
+/// run on their own executor; the original's blocking half and a Complete
+/// stop's refused cleanup publish for real; each starts the real watcher,
+/// which alone releases the held custody as a lookup-only row.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_glue(
+    offered: programs::Stopped,
+    confirmed: programs::Stopped,
+    original: programs::Continuation,
+    complete: programs::Stopped,
+) {
+    fn executor<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(run).join().unwrap()
+    }
+    fn lookup_only(state: &TerminationCleanup, retirement: ProgramRetirement) {
+        let model = lock(&state.0.model);
+        assert!(model.jobs[0].lookup_only);
+        assert_eq!(model.jobs[0].program_retirement, Some(retirement));
+    }
+    let app = TestApp::default();
+
+    // A stale Force stop click after the source went away.
+    let state = TerminationCleanup::default();
+    lock(&state.0.model)
+        .jobs
+        .push_back(published_incomplete(offered));
+    let (inner, copy) = (state.0.clone(), app.clone());
+    assert!(executor(
+        move || tauri::async_runtime::block_on(program_pipeline::force_offer(
+            inner,
+            copy,
+            "job".into()
+        ))
+    )
+    .is_err());
+    watcher_released(&state, "force_offer did not watch the returned stop");
+    lookup_only(&state, ProgramRetirement::OfferUnavailable);
+
+    // A stale Force confirmation; its blocking half publishes.
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(confirmed);
+    let Some(program_pipeline::ProgramJob::Stopped(stopped)) = job.programs.take() else {
+        panic!("published stop")
+    };
+    job.programs = Some(program_pipeline::ProgramJob::Force {
+        id: "force".into(),
+        revision: 1,
+        offer: Box::new(programs::fixture_force(*stopped)),
+    });
+    lock(&state.0.model).jobs.push_back(job);
+    let (inner, copy) = (state.0.clone(), app.clone());
+    assert!(executor(
+        move || tauri::async_runtime::block_on(program_pipeline::force_confirm(
+            inner,
+            copy,
+            "job".into(),
+            "force".into()
+        ))
+    )
+    .is_ok());
+    watcher_released(&state, "force_confirm never published its result");
+    lookup_only(&state, ProgramRetirement::StopUnconfirmed);
+
+    // The original's blocking half after its source went away.
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::stop_and_publish(state.0.clone(), app.clone(), "job".into(), original);
+    watcher_released(&state, "the original's stop was never published or watched");
+    lookup_only(&state, ProgramRetirement::StopUnconfirmed);
+
+    // publish sends a Complete stop to finish_cleanup, whose cleanup is refused.
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(complete));
+    watcher_released(
+        &state,
+        "finish_cleanup did not watch the refused cleanup's stop",
+    );
+    lookup_only(&state, ProgramRetirement::CleanupUnconfirmed);
+    assert!(lock(&state.0.model).jobs[0]
+        .cleanup
+        .entries
+        .iter()
+        .all(|entry| entry.status == Some(Status::Unconfirmed)));
+    assert!(!app
+        .events()
+        .iter()
+        .any(|event| event.starts_with("removed")));
+}
+
+/// One online review that finds the fixture folder ready; never removes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn ready_review(inner: Arc<Inner>, mut step: Step) {
+    loop {
+        match step {
+            Step::Review {
+                host, common_dir, ..
+            } => {
+                let mut model = lock(&inner.model);
+                let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
+                let review = json!({"state": "ok", "common_dir": "/home/example/repo/.git",
+                    "worktrees": [{"kind": "linked", "verdict": "ready", "path": "/home/example/repo-work-1",
+                    "fingerprint": "f1", "ownership_id": "owner-1", "zerus_owned": true,
+                    "archive_restore_ready": true, "reasons": [], "changes": 0, "untracked": 0,
+                    "disk_complete": true, "ignored_complete": true, "ignored_count": 0,
+                    "integration": {"kind": "ancestor", "base": "main"}, "merged": true}]});
+                step = job.cleanup.reviewed(&host, &common_dir, Ok(&review));
+            }
+            Step::Remove { .. } => panic!("Check again must not remove"),
+            Step::Idle | Step::Done => {
+                lock(&inner.model).jobs[0].busy = false;
+                break;
+            }
+        }
+    }
+}
+
+/// zerus-1y897.6 (current source): Check again on a published known refusal
+/// observes and closes for real; the holder replies Closed but its output stays
+/// open, so the close stays outstanding while the real watcher leaves the
+/// reserved empty slot alone. Once released, the same click starts exactly one
+/// review.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_delayed_close_check(
+    stopped: programs::Stopped,
+    release: impl FnOnce() + Send + 'static,
+) {
+    static REVIEWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    use std::sync::atomic::Ordering::SeqCst;
+    assert!(stopped.reviewable_refusal());
+    assert!(stopped.current());
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
+    assert!(lock(&state.0.model).view().rows[0].can_check);
+    let (inner, clicker) = (state.0.clone(), app.clone());
+    let (polled, first_poll) = std::sync::mpsc::channel();
+    // zerus-wfynn: the GTK main thread's side of the real command. One poll
+    // must yield while the close is outstanding; the rest finishes off-thread.
+    let click = std::thread::spawn(move || {
+        let mut command = Box::pin(check_blocking(
+            inner,
+            clicker,
+            "job".into(),
+            |app: &TestApp, model| program_pipeline::PipelineApp::changed(app, model),
+            |_, inner, _, step| {
+                REVIEWS.fetch_add(1, SeqCst);
+                ready_review(inner, step)
+            },
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = polled.send(std::future::Future::poll(command.as_mut(), &mut context).is_pending());
+        tauri::async_runtime::block_on(command)
+    });
+    let mut release = Some(release);
+    let yielded = first_poll.recv_timeout(Duration::from_secs(3));
+    if yielded.is_err() {
+        // End a failing run promptly: let the blocked close finish.
+        if let Some(release) = release.take() {
+            release();
+        }
+    }
+    assert_eq!(
+        yielded,
+        Ok(true),
+        "Check again blocked its calling thread while the close was outstanding"
+    );
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let model = lock(&state.0.model);
+            let job = &model.jobs[0];
+            if job.programs.is_none() && job.reservation.is_some() && job.busy {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "Check again never reserved the stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Several watcher passes while the real close is outstanding.
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(
+        !click.is_finished(),
+        "the close did not wait for the holder"
+    );
+    {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(job.programs.is_none() && job.reservation.is_some() && job.busy);
+    }
+    assert_eq!(REVIEWS.load(SeqCst), 0, "a review started before the close");
+    assert!(check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("a second click reviewed"),
+    )
+    .is_err());
+    assert!(lock(&state.0.model).dismiss("job").is_err());
+    if let Some(release) = release.take() {
+        release();
+    }
+    assert!(click.join().unwrap().is_ok());
+    assert_eq!(REVIEWS.load(SeqCst), 1, "the click did not review once");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(REVIEWS.load(SeqCst), 1);
+    assert!(
+        !app.events().iter().any(|event| event.starts_with("drive")),
+        "the watcher started a second review"
+    );
+    let model = lock(&state.0.model);
+    let job = &model.jobs[0];
+    assert!(job.programs.is_none() && job.reservation.is_none() && !job.busy);
+    assert!(model.view().rows[0].ready);
+}
+
+/// zerus-1y897.6 (expired source): a known refusal is published after its
+/// source deadline passed. The click's own retirement cancels the owner and
+/// reads its real join as Pending (the holder's output stays open), so the
+/// click keeps its reservation; the real watcher keeps reading Pending until
+/// the holder output is released, then drives exactly one review for it.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_expired_reserved_review(
+    stopped: programs::Stopped,
+    release: impl FnOnce() + Send + 'static,
+) {
+    assert!(stopped.reviewable_refusal());
+    assert_eq!(stopped.remaining_millis(), 0);
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
+    // The click lands before the new watcher's first pass, which sleeps first.
+    let clicked = check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("Check again reviewed a pending stop"),
+    )
+    .unwrap();
+    assert!(clicked.rows[0].busy);
+    let reserved = |state: &TerminationCleanup| {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        job.reservation.is_some() && job.busy
+    };
+    assert!(reserved(&state), "the pending click lost its reservation");
+    assert!(lock(&state.0.model).jobs[0].programs.is_some());
+    assert!(check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("a second click reviewed"),
+    )
+    .is_err());
+    assert!(lock(&state.0.model).dismiss("job").is_err());
+    let drives = |app: &TestApp| {
+        app.events()
+            .iter()
+            .filter(|event| event.as_str() == "drive job")
+            .count()
+    };
+    // Several real watcher passes read Pending while the output stays open.
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(
+        reserved(&state),
+        "the watcher dropped the pending reservation"
+    );
+    assert_eq!(
+        drives(&app),
+        0,
+        "a review started before the holder retired"
+    );
+    assert_eq!(
+        lock(&state.0.model).jobs[0].program_retirement,
+        Some(ProgramRetirement::Expired)
+    );
+    release();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while drives(&app) == 0 {
+        assert!(
+            std::time::Instant::now() < until,
+            "the watcher never drove the reserved review"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        drives(&app),
+        1,
+        "the reserved click reviewed more than once"
+    );
+    let model = lock(&state.0.model);
+    let job = &model.jobs[0];
+    assert!(job.programs.is_none() && job.reservation.is_none() && job.manual_review);
 }
 
 #[tauri::command]
@@ -2152,6 +2749,178 @@ pub async fn termination_cleanup_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-wfynn: Tauri runs a synchronous command inline on the GTK main
+    /// thread. Only these reviewed cleanup commands stay synchronous, and none
+    /// reaches a program retirement, observation or close; Check again, whose
+    /// retirement can wait for a holder close, must stay async.
+    #[test]
+    fn only_reviewed_cleanup_commands_run_on_the_main_thread() {
+        let sources = [
+            include_str!("termination_cleanup.rs"),
+            include_str!("termination_cleanup/manual.rs"),
+            include_str!("termination_cleanup/presentation.rs"),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            include_str!("termination_cleanup/program_pipeline.rs"),
+        ];
+        // The braces of the item that starts at `at`, inclusive.
+        fn body(source: &str, at: usize) -> &str {
+            let open = at + source[at..].find('{').unwrap();
+            let mut depth = 0;
+            let close = source[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    depth += match c {
+                        '{' => 1,
+                        '}' => -1,
+                        _ => 0,
+                    };
+                    depth == 0
+                })
+                .map(|(offset, _)| open + offset)
+                .unwrap();
+            &source[open..=close]
+        }
+        fn non_blocking(name: &str, body: &str) {
+            for blocking in [
+                "retirement(",
+                ".close(",
+                "observe(",
+                "check_with_runtime(",
+                "offer_force(",
+                ".confirm(",
+                "run_removal(",
+                "settle(",
+            ] {
+                assert!(
+                    !body.contains(blocking),
+                    "{name} runs `{blocking}` on the main thread"
+                );
+            }
+        }
+        let marker = ["#[tauri::", "command]"].concat();
+        let mut synchronous = Vec::new();
+        for source in sources {
+            for (at, _) in source.match_indices(&marker) {
+                let signature = source[at + marker.len()..].trim_start();
+                let Some(rest) = signature.strip_prefix("pub fn ") else {
+                    continue;
+                };
+                let name = rest.split('(').next().unwrap();
+                non_blocking(name, body(source, at));
+                synchronous.push(name.to_owned());
+            }
+        }
+        synchronous.sort();
+        assert_eq!(
+            synchronous,
+            [
+                "termination_cleanup_dismiss",
+                "termination_cleanup_keep",
+                "termination_cleanup_manual_cancel",
+                "termination_cleanup_manual_confirm",
+                "termination_cleanup_remove",
+                "termination_cleanup_view",
+                "termination_program_force_cancel",
+            ]
+        );
+        // The reviewed helpers those commands call directly stay non-blocking.
+        // Each needle is built here so it cannot match its own literal above.
+        for helper in [
+            "view",
+            "dismiss",
+            "clear_settled_results",
+            "admit_manual",
+            "confirm_manual",
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            "force_cancel",
+        ] {
+            let needle = ["fn ", helper, "("].concat();
+            let (source, at) = sources
+                .iter()
+                .find_map(|source| source.find(&needle).map(|at| (*source, at)))
+                .unwrap_or_else(|| panic!("{helper} is missing"));
+            non_blocking(helper, body(source, at));
+        }
+        assert!(sources[0].contains("pub async fn termination_cleanup_check("));
+    }
+    /// zerus-y2oxp: Check again only reviews; its review passes
+    /// allow_remove = false and never removes by itself. A test cannot build
+    /// the Wry AppHandle the command's review needs, so the command and its
+    /// blocking body are pinned to their reviewed text, ignoring whitespace.
+    #[test]
+    fn check_again_reviews_without_removing() {
+        let source = include_str!("termination_cleanup.rs");
+        let production = &source[..source.find(&["mod ", "tests {"].concat()).unwrap()];
+        let tokens = |text: &str| text.split_whitespace().collect::<String>();
+        let item = |name: &str| {
+            let at = production
+                .find(&["fn ", name, "("].concat())
+                .or_else(|| production.find(&["fn ", name, "<"].concat()))
+                .unwrap_or_else(|| panic!("{name} is missing"));
+            let open = at + production[at..].find('{').unwrap();
+            let mut depth = 0;
+            let close = production[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    depth += match c {
+                        '{' => 1,
+                        '}' => -1,
+                        _ => 0,
+                    };
+                    depth == 0
+                })
+                .map(|(offset, _)| open + offset)
+                .unwrap();
+            tokens(&production[at..=close])
+        };
+        let command = item("termination_cleanup_check");
+        assert!(
+            command.contains(&tokens("inner.drive(app.clone(), id, step, false)")),
+            "Check again's review may remove"
+        );
+        assert_eq!(
+            command,
+            tokens(EXPECTED_CHECK),
+            "the Check again command changed"
+        );
+        assert_eq!(
+            item("check_blocking"),
+            tokens(EXPECTED_BLOCKING),
+            "the Check again body changed"
+        );
+    }
+    const EXPECTED_CHECK: &str = r#"
+fn termination_cleanup_check(
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+) -> Result<View, String> {
+    check_blocking(state.0.clone(), app, id, changed, |app, inner, id, step| {
+        inner.drive(app.clone(), id, step, false)
+    })
+    .await
+}"#;
+    const EXPECTED_BLOCKING: &str = r#"
+fn check_blocking<A: Send + 'static>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    emit: fn(&A, &mut Model),
+    run_review: fn(&A, Arc<Inner>, String, Step),
+) -> Result<View, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = &app;
+        check_with_runtime(
+            &inner,
+            id,
+            |model| emit(app, model),
+            |inner, id, step| run_review(app, inner, id, step),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}"#;
     #[test]
     fn raw_unavailable_git_metadata_cannot_hide_the_confirmed_cleanup_offer() {
         let target = source();
@@ -2493,6 +3262,7 @@ mod tests {
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: None,
             archive: None,
             restore_supported: false,

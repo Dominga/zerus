@@ -4,6 +4,27 @@ use super::*;
 use crate::actions::Claim;
 use zerus_client_core::{end_action::Captured, worktree_programs::stop::State as StopState};
 
+/// The app side of the program pipeline: model change notifications, the
+/// cleanup driver after a watcher's review, and folder-removed events. Tauri's
+/// AppHandle in production; the real controls supply their own, so publish,
+/// its passive watcher and the Force glue run for real (zerus-fojet).
+pub(super) trait PipelineApp: Clone + Send + 'static {
+    fn changed(&self, model: &mut Model);
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step);
+    fn removed(&self, label: String);
+}
+impl PipelineApp for AppHandle {
+    fn changed(&self, model: &mut Model) {
+        changed(self, model)
+    }
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step) {
+        inner.drive(self.clone(), id, step, false)
+    }
+    fn removed(&self, label: String) {
+        let _ = self.emit("termination-folder-removed", label);
+    }
+}
+
 pub(super) fn expire_offer(inner: &Arc<Inner>, id: &str) {
     let weak = Arc::downgrade(inner);
     let id = id.to_owned();
@@ -100,7 +121,7 @@ impl ProgramJob {
             Self::Removal(removal) => removal.holder_unavailable(),
         }
     }
-    fn current(&self) -> bool {
+    pub(super) fn current(&self) -> bool {
         match self {
             Self::Stopped(stopped) => stopped.current(),
             Self::Force { offer, .. } => offer.current(),
@@ -173,6 +194,7 @@ pub(super) async fn confirm(
                 program_review_pending: true,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 reservation: None,
@@ -194,17 +216,27 @@ pub(super) async fn confirm(
             drop(m);
             let worker_inner = inner.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                // A returned native receipt is not physical pipe settlement.
-                while continuation.current() && !continuation.original_call_joined() {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                let stopped = stop_original(Box::new(continuation));
-                publish(worker_inner, app, id, stopped);
+                stop_and_publish(worker_inner, app, id, continuation)
             });
         }
     }
     drop(reservation);
     Ok(outcome)
+}
+/// The original's blocking half: wait for the original call's own join while
+/// its source is current, then stop and publish.
+pub(super) fn stop_and_publish<A: PipelineApp>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    continuation: programs::Continuation,
+) {
+    // A returned native receipt is not physical pipe settlement.
+    while continuation.current() && !continuation.original_call_joined() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = stop_original(Box::new(continuation));
+    publish(inner, app, id, stopped);
 }
 /// A stop that was not confirmed, with whatever custody its producer handed
 /// back (zerus-1y897.8).
@@ -238,9 +270,9 @@ pub(super) fn stop_original(
         }),
     }
 }
-fn publish(
+pub(super) fn publish<A: PipelineApp>(
     inner: Arc<Inner>,
-    app: AppHandle,
+    app: A,
     id: String,
     stopped: Result<programs::Stopped, Unconfirmed>,
 ) {
@@ -260,7 +292,7 @@ fn publish(
         return;
     };
     let live = record_stop(job, stopped);
-    changed(&app, &mut m);
+    app.changed(&mut m);
     drop(m);
     if live {
         watch_job(&inner, app, id);
@@ -311,7 +343,7 @@ pub(super) fn record_stop(job: &mut Job, stopped: Result<programs::Stopped, Unco
     }
     live
 }
-fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
+fn watch_job<A: PipelineApp>(inner: &Arc<Inner>, app: A, id: String) {
     // Expiry is one-way. Retaining a UI row never keeps an Actions claim
     // indefinitely or renews consent after source/authority loss.
     let weak = Arc::downgrade(inner);
@@ -320,11 +352,11 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
         let Some(inner) = weak.upgrade() else {
             return;
         };
-        match watch_once(&inner, &id, |m| changed(&app, m)) {
+        match watch_once(&inner, &id, |m| app.changed(m)) {
             Watch::Continue => {}
             Watch::Stop => return,
             Watch::Review(step) => {
-                inner.drive(app, id, step, false);
+                app.drive(&inner, id, step);
                 return;
             }
         }
@@ -413,6 +445,7 @@ pub(super) fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> 
             // The resources are released; the unrefused result stays a
             // lookup-only row. No Check again, Force, review or consent.
             job.lookup_only = true;
+            job.physically_released = true;
             job.busy = false;
             job.program_review_pending = true;
             emit(&mut m);
@@ -441,9 +474,9 @@ pub(super) fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> 
     }
 }
 
-pub(super) async fn force_offer(
+pub(super) async fn force_offer<A: PipelineApp>(
     inner: Arc<Inner>,
-    app: AppHandle,
+    app: A,
     id: String,
 ) -> Result<super::ForceView, String> {
     let stopped = {
@@ -454,12 +487,20 @@ pub(super) async fn force_offer(
             .find(|job| job.id == id)
             .ok_or(STATE_CHANGED)?;
         let stopped = take_force(job)?;
-        changed(&app, &mut m);
+        app.changed(&mut m);
         stopped
     };
-    let offered = tauri::async_runtime::spawn_blocking(move || stopped.offer_force())
-        .await
-        .map_err(|error| error.to_string());
+    #[cfg(test)]
+    let lost = fixture_offer_lost(&id);
+    let offered = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(test)]
+        if lost {
+            panic!("fixture: the blocking offer task ended without handing back its stop");
+        }
+        stopped.offer_force()
+    })
+    .await
+    .map_err(|error| error.to_string());
     let mut m = lock(&inner.model);
     let revision = m.revision.wrapping_add(1);
     let job = m
@@ -469,12 +510,26 @@ pub(super) async fn force_offer(
         .ok_or(STATE_CHANGED)?;
     let result = record_offer(job, revision, offered);
     let live = job.programs.is_some();
-    changed(&app, &mut m);
+    app.changed(&mut m);
     drop(m);
     if live {
         watch_job(&inner, app, id);
     }
     result
+}
+/// Fixture-only (zerus-y7quu): job ids whose next blocking Force offer task
+/// panics, so force_offer meets a real JoinError and the task drops the stop.
+#[cfg(test)]
+static LOST_OFFERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(super) fn fixture_lose_offer(id: &str) {
+    lock(&LOST_OFFERS).push(id.to_owned());
+}
+#[cfg(test)]
+fn fixture_offer_lost(id: &str) -> bool {
+    let mut lost = lock(&LOST_OFFERS);
+    let at = lost.iter().position(|lost| lost == id);
+    at.map(|at| lost.remove(at)).is_some()
 }
 /// Force offer admission: takes the job's own incomplete normal stop.
 pub(super) fn take_force(job: &mut Job) -> Result<Box<programs::Stopped>, String> {
@@ -528,9 +583,9 @@ pub(super) fn record_offer(
         }
     }
 }
-pub(super) async fn force_confirm(
+pub(super) async fn force_confirm<A: PipelineApp>(
     inner: Arc<Inner>,
-    app: AppHandle,
+    app: A,
     id: String,
     confirmation: String,
 ) -> Result<View, String> {
@@ -542,7 +597,7 @@ pub(super) async fn force_confirm(
             .find(|job| job.id == id)
             .ok_or(STATE_CHANGED)?;
         let offer = take_confirm(job, &confirmation)?;
-        changed(&app, &mut m);
+        app.changed(&mut m);
         offer
     };
     let copy = inner.clone();
@@ -607,7 +662,12 @@ pub(super) fn force_cancel(
     Ok(m.view())
 }
 
-fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: programs::Stopped) {
+fn finish_cleanup<A: PipelineApp>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    stopped: programs::Stopped,
+) {
     {
         let mut model = lock(&inner.model);
         let Some(job) = model.jobs.iter_mut().find(|job| job.id == id) else {
@@ -615,7 +675,7 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
         };
         job.busy = true;
         job.phase = "removing";
-        changed(&app, &mut model);
+        app.changed(&mut model);
     }
     // No model lock across native preparation, child I/O, deletion or join.
     // Taking Stopped consumes the only live Remove continuation. Every result,
@@ -635,10 +695,10 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
             .collect();
         model.jobs.retain(|job| job.id != id);
         for label in labels {
-            let _ = app.emit("termination-folder-removed", label);
+            app.removed(label);
         }
     }
-    changed(&app, &mut model);
+    app.changed(&mut model);
     drop(model);
     if live {
         watch_job(&inner, app, id);

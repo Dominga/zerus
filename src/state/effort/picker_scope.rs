@@ -85,7 +85,7 @@ pub(in crate::state) fn own_marker(record: &Value) -> Result<bool> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn deadline(until: Instant) -> Result<Instant> {
+pub(in crate::state) fn deadline(until: Instant) -> Result<Instant> {
     driver::deadline(until)
 }
 

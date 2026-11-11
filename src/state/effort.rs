@@ -27,8 +27,8 @@ pub(super) fn remember_picker_caller_machine(config: &crate::config::Config, exp
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use picker_scope::{
-    entered as picker_entered, helper_read as picker_helper_read, own_marker as picker_own_marker,
-    refuse as picker_refuse, ReadCall as PickerRead,
+    deadline as picker_deadline, entered as picker_entered, helper_read as picker_helper_read,
+    own_marker as picker_own_marker, refuse as picker_refuse, ReadCall as PickerRead,
 };
 
 const MAX_TAIL: u64 = 8 * 1024 * 1024;

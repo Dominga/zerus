@@ -1469,6 +1469,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     }
     match kind {
         "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "TaskStarted" => {
+            // The agent accepted input: this, not a later tool event of a
+            // busy turn, confirms what hgs typed (input::input_unconfirmed).
+            record["input_seen_at"] = json!(timestamp);
             record["activity"] = json!("busy");
             if kind != "UserPromptQueued" || record["phase"] != "compacting" {
                 record["phase"] = json!("working");

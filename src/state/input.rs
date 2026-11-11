@@ -14,6 +14,7 @@ use std::io::Write;
 use std::time::Duration;
 
 mod diagnostic;
+mod settle;
 pub(crate) mod task_refusal;
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -295,9 +296,7 @@ pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
     {
         return Readiness::Ended;
     }
-    let unconfirmed = record["input_pending_at"]
-        .as_f64()
-        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending);
+    let unconfirmed = input_unconfirmed(record);
     if resume_input::pending(record)
         || !string(record, "expected_id").is_empty()
         || string(record, "activity") != "idle"
@@ -310,6 +309,18 @@ pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
         return Readiness::Starting;
     }
     Readiness::Ready
+}
+
+/// Whether the agent has not confirmed the last input hgs typed (zerus-iitw8).
+/// Only an input-acceptance event (UserPromptSubmit, a queued prompt, a turn or
+/// task start) or hgs's own native proof sets `input_seen_at`; a busy agent's
+/// later tool events never do. A record written before this rule has no
+/// `input_seen_at` and keeps the event rule it was written under.
+pub(crate) fn input_unconfirmed(record: &Value) -> bool {
+    let seen = if record.get("input_seen_at").is_some() { "input_seen_at" } else { "last_event_at" };
+    record["input_pending_at"]
+        .as_f64()
+        .is_some_and(|pending| record[seen].as_f64().unwrap_or(0.0) <= pending)
 }
 
 fn checked_input(
@@ -400,10 +411,7 @@ fn checked_input(
     if !allow_working {
         idle_only(&record)?;
     }
-    if record["input_pending_at"]
-        .as_f64()
-        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending)
-    {
+    if input_unconfirmed(&record) {
         return Err("previous input has not been confirmed by the agent; inspect Terminal before sending again".into());
     }
     if settings_unconfirmed(&record) {
@@ -1338,7 +1346,7 @@ fn submit_core(
     let receipt_path = root
         .join("input_receipts")
         .join(format!("{request_id}.json"));
-    let _guard = lock(None).map_err(unknown)?;
+    let guard = lock(None).map_err(unknown)?;
     match existing(&receipt_path, &digest, name) {
         Existing::Absent => {}
         Existing::Submitted(receipt) => return Ok(receipt),
@@ -1472,16 +1480,44 @@ fn submit_core(
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
+    // From this send on the record follows the acceptance rule.
+    if record.get("input_seen_at").is_none() {
+        record["input_seen_at"] = json!(0.0);
+    }
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(unknown(error));
     }
     let pane = string(&record, "pane");
+    // zerus-iitw8: Claude needs native proof; its transcript is read from here.
+    let native = settle::applies(string(&record, "agent"));
+    let transcript = native.then(|| settle::transcript(&record)).flatten();
+    let claim = backend::InputClaim {
+        pane,
+        name: terminal_name(&record),
+        run_id: string(&record, "run_id"),
+        agent: string(&record, "agent"),
+        pid: record["pid"].as_u64(),
+    };
+    // One window for the settle and the proof, set once after the paste.
+    let mut deadline = std::time::Instant::now() + settle::WINDOW;
+    let mut residue: Option<String> = None;
     let result: Result<()> = (|| {
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
-        // Let bracketed-paste handlers finish before Enter. Never send a second
-        // Enter as a retry: that could approve a new dialog or duplicate a turn.
-        std::thread::sleep(Duration::from_millis(180));
+        deadline = std::time::Instant::now() + settle::WINDOW;
+        if native {
+            // Enter only once the composer shows the paste settled: an Enter
+            // while Claude still processes pasted images submits nothing.
+            if let Err(composer) = settle::settle(terminal, &claim, deadline) {
+                residue = composer;
+                return Err("Claude's composer never showed the pasted message settled; no Enter was pressed".into());
+            }
+        } else {
+            // Let bracketed-paste handlers finish before Enter.
+            std::thread::sleep(Duration::from_millis(180));
+        }
+        // Never send a second Enter as a retry: that could approve a new
+        // dialog or duplicate a turn.
         #[cfg(windows)]
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
@@ -1491,16 +1527,65 @@ fn submit_core(
         }
         checked_terminal(&record, false)?;
         terminal.send(pane, &[backend::Key::Named("Enter")])?;
-        receipt["status"] = json!("submitted");
-        atomic(&receipt_path, &receipt.to_string())?;
+        if !native {
+            receipt["status"] = json!("submitted");
+            atomic(&receipt_path, &receipt.to_string())?;
+        }
         Ok(())
     })();
     cleanup();
+    let uncertain = |receipt: &mut Value, error: String, residue: Option<String>| {
+        // The receipt stays `in_progress` (never resent) and names why and
+        // what the composer held, bounded text only.
+        receipt["delivery"] = json!("uncertain");
+        receipt["uncertain_reason"] = json!(error);
+        receipt["composer"] = json!(residue);
+        let _ = atomic(&receipt_path, &receipt.to_string());
+        crate::analytics::adapters::delivery(&root, &record, receipt, crate::analytics::adapters::Delivery::Uncertain);
+        let shown = residue
+            .map(|text| {
+                let short: String = text.chars().take(200).collect();
+                format!("; the composer holds: {short}{}", if text.chars().count() > 200 { "…" } else { "" })
+            })
+            .unwrap_or_default();
+        unknown(format!("delivery uncertain: {error}{shown}; inspect Terminal before retrying"))
+    };
     if let Err(error) = result {
-        crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
-        return Err(unknown(format!(
-            "delivery uncertain: {error}; inspect Terminal before retrying"
-        )));
+        return Err(uncertain(&mut receipt, error, residue));
+    }
+    if native {
+        // Claude runs its UserPromptSubmit hook, which takes this lock, before
+        // it records the message: wait for the proof without holding it. The
+        // record's unconfirmed input keeps other sends out meanwhile.
+        drop(guard);
+        let proof = settle::confirm(terminal, &claim, transcript.as_ref(), &text, deadline);
+        let _guard = lock(None).map_err(unknown)?;
+        match proof {
+            Ok(proof) => {
+                receipt["status"] = json!("submitted");
+                receipt["native"] = json!(proof.name());
+                atomic(&receipt_path, &receipt.to_string()).map_err(unknown)?;
+                // A submitted row follows Claude's UserPromptSubmit hook, which
+                // already marked the input accepted; a busy queue has no hook
+                // until it is dequeued, so its enqueue confirms the input here
+                // (`input_unconfirmed`).
+                if proof == settle::Proof::Queued {
+                    if let Ok(mut current) = read(name) {
+                        if string(&current, "run_id") == string(&record, "run_id") {
+                            current["input_seen_at"] = json!(now());
+                            let _ = write(&mut current);
+                        }
+                    }
+                }
+            }
+            Err(composer) => {
+                return Err(uncertain(
+                    &mut receipt,
+                    "Claude recorded no submission of this message".into(),
+                    composer,
+                ))
+            }
+        }
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)

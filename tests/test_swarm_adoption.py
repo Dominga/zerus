@@ -32,7 +32,9 @@ if alias == 'b' and args[1:2] == ['adopt']:
             os.close(0)
         else:
             sys.stdin.read()
-        (root / 'child-pid').write_text(str(os.getpid()))
+        # Publish the PID whole: a reader never sees a truncated, empty file.
+        (root / 'child-pid.tmp').write_text(str(os.getpid()) + '\\n')
+        os.replace(root / 'child-pid.tmp', root / 'child-pid')
         deadline = time.monotonic() + 60
         while not (root / 'release-child').exists() and time.monotonic() < deadline:
             time.sleep(.02)
@@ -42,36 +44,36 @@ if alias == 'b' and args[1:2] == ['adopt']:
     if (root / 'capture-request').exists():
         (root / 'captured-request.json').write_text(raw)
         print('{}'); sys.exit(0)
+    # Fault fixtures hold the destination (debug-build HGS_TEST_ADOPTION_HOLD)
+    # right after one durable phase and act there, instead of polling a
+    # phase that a loaded runner can miss.
+    holds = {'fail-primary': 'main_committed', 'fail-removal': 'components_verified',
+             'fail-after-guard-cleared': 'guard_cleared'}
+    fault = next((name for name in holds if (root / name).exists()), None)
+    if fault:
+        env = dict(env, HGS_TEST_ADOPTION_HOLD=request['request_id'] + ':' + holds[fault])
     process = subprocess.Popen([os.environ['SWARM_TEST_HGS'], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
     process.stdin.write(raw); process.stdin.close()
-    if (root / 'fail-primary').exists() or (root / 'fail-removal').exists() or (root / 'fail-after-guard-cleared').exists():
-        journal = root / 'b/swarm/adoption-journal' / (request['request_id'] + '.json')
+    if fault:
         import signal, time
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            phase = json.loads(journal.read_text())['phase'] if journal.exists() else None
-            if (root / 'fail-primary').exists() and phase in ('main_started', 'main_committed', 'primary_started'):
-                os.kill(process.pid, signal.SIGSTOP)
+        marker = root / 'b' / ('adoption-test-hold-' + request['request_id'])
+        release = root / 'b' / ('adoption-test-release-' + request['request_id'])
+        deadline = time.monotonic() + 60
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(.005)
+        if marker.exists():
+            if fault == 'fail-primary':
                 sidecar = root / 'b/swarm/session-id-memberships.json'
                 if sidecar.exists(): sidecar.unlink()
                 sidecar.mkdir()
-                (root / 'fault-injected').touch()
-                os.kill(process.pid, signal.SIGCONT)
-                break
-            if (root / 'fail-removal').exists() and phase == 'components_verified':
+            elif fault == 'fail-removal':
                 guard = root / 'b/swarm/adoption-pending.json'
-                if guard.exists():
-                    os.kill(process.pid, signal.SIGSTOP)
-                    guard.unlink()
-                    guard.mkdir()
-                    (root / 'fault-injected').touch()
-                    os.kill(process.pid, signal.SIGCONT)
-                    break
-            if (root / 'fail-after-guard-cleared').exists() and phase == 'guard_cleared':
+                guard.unlink()
+                guard.mkdir()
+            else:
                 os.kill(process.pid, signal.SIGKILL)
-                (root / 'fault-injected').touch()
-                break
-            time.sleep(.0001)
+            (root / 'fault-injected').touch()
+            release.touch()
     stdout, stderr = process.stdout.read(), process.stderr.read()
     process.wait(timeout=30)
     if (root / 'refuse-once').exists():
@@ -330,6 +332,38 @@ class SwarmAdoption(unittest.TestCase):
             control = next(i for i in range(len(argv) - 1) if argv[i:i + 2] == ['-o', 'ControlPath=none'])
             self.assertLess(control, argv.index('b'), argv)
         return options
+
+    def test_the_fault_hold_is_compiled_only_into_debug_builds(self):
+        """zerus-fiyaa: the fault fixtures' hold must never reach a release image.
+        Its module and its only call site are gated by cfg(debug_assertions),
+        and its markers occur nowhere else in the source tree."""
+        source = (REPO / 'src/swarm/adoption.rs').read_text()
+        lines = source.splitlines()
+        module = next(i for i, line in enumerate(lines) if line.strip() == 'mod test_hold {')
+        self.assertEqual(lines[module - 1].strip(), '#[cfg(debug_assertions)]')
+        end = next(i for i in range(module + 1, len(lines)) if lines[i] == '}')
+        calls = [i for i, line in enumerate(lines) if 'test_hold::' in line and not module < i < end]
+        self.assertTrue(calls)
+        for call in calls:
+            # Gated directly, or inside a function whose attributes gate it.
+            if lines[call - 1].strip() == '#[cfg(debug_assertions)]':
+                continue
+            start = next(i for i in range(call, -1, -1) if lines[i].lstrip().startswith(('fn ', 'pub fn ', 'pub(super) fn ')))
+            attributes = []
+            i = start - 1
+            while lines[i].strip().startswith('#['):
+                attributes.append(lines[i].strip())
+                i -= 1
+            self.assertIn('#[cfg(debug_assertions)]', attributes, lines[call])
+        markers = ['HGS_TEST_ADOPTION_HOLD', 'adoption-test-hold-', 'adoption-test-release-']
+        body = '\n'.join(lines[module:end + 1])
+        for marker in markers:
+            self.assertIn(marker, body)
+            self.assertNotIn(marker, '\n'.join(lines[:module] + lines[end + 1:]), marker)
+        for path in (REPO / 'src').rglob('*.rs'):
+            if path != REPO / 'src/swarm/adoption.rs':
+                text = path.read_text(errors='replace')
+                self.assertFalse(any(marker in text for marker in markers), path)
 
     def test_adopts_into_uninitialized_destination_with_all_history_and_only_source_membership(self):
         self.adopt(False)
@@ -743,10 +777,14 @@ class SwarmAdoption(unittest.TestCase):
         import time
         deadline = time.monotonic() + 15
         path = self.root / 'child-pid'
-        while not path.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            # Only a complete, newline-terminated value counts.
+            text = path.read_text() if path.exists() else ''
+            if text.endswith('\n') and text.strip().isdigit():
+                return int(text)
             self.assertIsNone(process.poll())
             time.sleep(.01)
-        return int(path.read_text())
+        self.fail('the fake ssh never published its PID')
 
     def start_adopt(self, options):
         env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))

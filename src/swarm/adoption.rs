@@ -455,10 +455,10 @@ fn read_primary(directory: &Path, catalog: &Catalog) -> Result<RawComponent> {
     let primary = Memberships::from_read(catalog, &read)
         .map_err(|error| anyhow::anyhow!("invalid primary ID membership: {error:#}"))?;
     let canonical = primary.bytes()?;
+    // The parsed graph is the raw body itself (duplicate keys were refused
+    // above), so its operations are the raw count without another parse.
     let count = match &raw {
-        Some(bytes) => bounded::<Catalog>(bytes, "primary ID membership graph")?
-            .operations
-            .len(),
+        Some(_) => primary.operation_count(),
         None => 0,
     };
     Ok(RawComponent {
@@ -1538,7 +1538,58 @@ fn advance_original(
         );
         write_guard(directory, &next)?;
     }
+    #[cfg(debug_assertions)]
+    test_hold::after(directory, &next);
     Ok(next)
+}
+
+/// Debug builds only: this module and its environment read are never compiled
+/// into a release image. A fault fixture may hold ONE exact original request
+/// right after a named destination phase became durable (journal, registry
+/// and guard written), for a bounded time, so it can act at that phase
+/// without racing a poller. It only waits: nothing is skipped, forced,
+/// injected or rewritten, the catalog lock and every resource stay held, and
+/// a release or the timeout continues into the same ordinary code.
+#[cfg(debug_assertions)]
+mod test_hold {
+    use super::*;
+
+    /// `REQUEST_UUID:phase`, data only.
+    const ENV: &str = "HGS_TEST_ADOPTION_HOLD";
+    const LIMIT: Duration = Duration::from_secs(20);
+
+    /// Armed only by the exact canonical request UUID and phase name of a
+    /// destination journal; an absent or malformed value never arms.
+    pub(super) fn armed(value: Option<&str>, role: Role, request_id: &str, phase: Phase) -> bool {
+        let Some((request, wanted)) = value.and_then(|value| value.split_once(':')) else {
+            return false;
+        };
+        role == Role::Destination
+            && canonical_uuid(request)
+            && request == request_id
+            && serde_json::to_value(phase).is_ok_and(|name| name.as_str() == Some(wanted))
+    }
+
+    pub(super) fn after(directory: &Path, journal: &Journal) {
+        let value = std::env::var(ENV).ok();
+        let request = journal.original.request_id.as_str();
+        if !armed(value.as_deref(), journal.role, request, journal.phase) {
+            return;
+        }
+        let Some(config) = directory.parent() else {
+            return;
+        };
+        // The marker announces this held PID; a release file ends the wait.
+        let marker = config.join(format!("adoption-test-hold-{request}"));
+        let release = config.join(format!("adoption-test-release-{request}"));
+        if fs::write(&marker, std::process::id().to_string()).is_err() {
+            return;
+        }
+        let until = Instant::now() + LIMIT;
+        while !release.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 fn original_proof(request: &AdoptionRequest, request_raw_sha256: &str) -> OriginalProof {
@@ -2098,10 +2149,6 @@ fn complete_source_membership(
     bounded_reply(&settled)
 }
 
-fn decode_primary(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponent> {
-    decode_primary_metrics(raw, catalog).map(|(component, _)| component)
-}
-
 fn decode_primary_metrics(
     raw: Option<Vec<u8>>,
     catalog: &Catalog,
@@ -2118,10 +2165,10 @@ fn decode_primary_metrics(
     // It is the view of from_read's own single validation.
     let (primary, view) = Memberships::from_read_view(catalog, &read)?;
     let canonical = primary.bytes()?;
+    // The parsed graph is the raw body itself (duplicate keys were refused
+    // above), so its operations are the raw count without another parse.
     let count = match &raw {
-        Some(bytes) => bounded::<Catalog>(bytes, "primary ID membership graph")?
-            .operations
-            .len(),
+        Some(_) => primary.operation_count(),
         None => 0,
     };
     let mut metrics = ValidatedPrimaryMetrics {
@@ -2221,10 +2268,18 @@ fn decode_twins(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponent>
     })
 }
 
+/// The validated source catalog with the primary and twins proofs computed
+/// from the request's own component bytes.
+struct ValidatedSource {
+    catalog: Catalog,
+    primary: ComponentProof,
+    twins: ComponentProof,
+}
+
 fn validate_source_candidate(
     request: &AdoptionRequest,
     encoded_request_bytes: usize,
-) -> Result<Catalog> {
+) -> Result<ValidatedSource> {
     ensure!(
         request.schema == 1 && request.direction == "initiator_to_empty_destination",
         "unsupported adoption request"
@@ -2326,7 +2381,11 @@ fn validate_source_candidate(
             && metrics.encoded_request_bytes == encoded_request_bytes,
         "candidate metrics mismatch"
     );
-    Ok(catalog)
+    Ok(ValidatedSource {
+        primary: primary.proof(),
+        twins: twins.proof(),
+        catalog,
+    })
 }
 
 fn candidate_metrics(
@@ -2383,7 +2442,8 @@ pub(crate) fn adopt_destination(config: &Config, bytes: Vec<u8>) -> Result<Value
         "aggregate adoption request exceeds 32MiB"
     );
     let request: AdoptionRequest = bounded(&bytes, "adoption request")?;
-    let source_catalog = validate_source_candidate(&request, bytes.len())?;
+    let source = validate_source_candidate(&request, bytes.len())?;
+    let source_catalog = &source.catalog;
     let original = original_proof(&request, &sha256(&bytes));
     let directory = config.dir.join("swarm");
     let mut lock = AdoptionLock::acquire(config)?;
@@ -2526,14 +2586,14 @@ pub(crate) fn adopt_destination(config: &Config, bytes: Vec<u8>) -> Result<Value
         &directory,
         "primary",
         request.source_primary_json.as_deref(),
-        &source_catalog,
+        &source.primary,
         journal,
     )?;
     journal = commit_component(
         &directory,
         "twins",
         request.source_twins_json.as_deref(),
-        &source_catalog,
+        &source.twins,
         journal,
     )?;
     let verified = capture_locked(config, &lock)?;
@@ -2637,11 +2697,25 @@ fn journal_receipt<T: DeserializeOwned>(journal: &Journal, key: &str) -> Result<
     bounded(&serde_json::to_vec(value)?, "stored adoption receipt")
 }
 
+/// Admission's proof, reused only for the identical bytes it was computed
+/// from: the same raw digest and length (or both absent). It never stands for
+/// a re-read; the fresh-read captures afterwards decode what the files hold.
+fn admitted_proof(decoded: &ComponentProof, raw: Option<&str>) -> Result<ComponentProof> {
+    ensure!(
+        decoded.raw_sha256 == raw.map(|text| sha256(text.as_bytes()))
+            && decoded.raw_len == raw.map(|text| text.len() as u64),
+        "admitted component proof does not match the committed bytes"
+    );
+    Ok(decoded.clone())
+}
+
+/// `decoded` is the proof that admission computed from these exact `raw`
+/// bytes with the same source catalog; [`admitted_proof`] binds it to them.
 fn commit_component(
     directory: &Path,
     kind: &str,
     raw: Option<&str>,
-    catalog: &Catalog,
+    decoded: &ComponentProof,
     mut journal: Journal,
 ) -> Result<Journal> {
     let (path, started, committed, original, expected) = match kind {
@@ -2682,12 +2756,7 @@ fn commit_component(
             Err(error) => return Err(error.into()),
         }
     }
-    let component = if kind == "primary" {
-        decode_primary(raw.map(|text| text.as_bytes().to_vec()), catalog)?
-    } else {
-        decode_twins(raw.map(|text| text.as_bytes().to_vec()), catalog)?
-    };
-    let destination = component.proof();
+    let destination = admitted_proof(decoded, raw)?;
     ensure!(
         destination == expected,
         "{kind} first-copy postread mismatch"
@@ -2696,8 +2765,8 @@ fn commit_component(
         component: kind.into(),
         source: expected.clone(),
         destination,
-        destination_raw_sha256: component.raw.as_deref().map(sha256),
-        destination_raw_len: component.raw.as_ref().map(|bytes| bytes.len() as u64),
+        destination_raw_sha256: raw.map(|text| sha256(text.as_bytes())),
+        destination_raw_len: raw.map(|text| text.len() as u64),
         parent_closure: true,
         postread: true,
     };
@@ -2879,6 +2948,136 @@ mod tests {
         assert_eq!(unknown["adoption"]["state"], "unknown");
         assert_eq!(unknown["adoption"]["ordinary_writes"], false);
         assert_eq!(unknown["organization"], plain["organization"]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_test_hold_arms_only_for_the_exact_destination_request_and_phase() {
+        use test_hold::armed;
+        let request = "00000000-0000-4000-8000-0000000000aa";
+        let exact = format!("{request}:guard_cleared");
+        assert!(armed(
+            Some(&exact),
+            Role::Destination,
+            request,
+            Phase::GuardCleared
+        ));
+        for value in [
+            None,
+            Some(""),
+            Some("guard_cleared"),
+            Some(request),
+            Some(":guard_cleared"),
+            Some("not-a-uuid:guard_cleared"),
+            Some("00000000-0000-4000-8000-0000000000AA:guard_cleared"),
+            Some("00000000-0000-4000-8000-0000000000bb:guard_cleared"),
+            Some("00000000-0000-4000-8000-0000000000aa:remote_committed"),
+            Some("00000000-0000-4000-8000-0000000000aa:guard_cleared:extra"),
+        ] {
+            assert!(
+                !armed(value, Role::Destination, request, Phase::GuardCleared),
+                "{value:?}"
+            );
+        }
+        assert!(!armed(
+            Some(&exact),
+            Role::Source,
+            request,
+            Phase::GuardCleared
+        ));
+    }
+
+    #[test]
+    fn an_admitted_proof_is_reused_only_for_its_identical_bytes() {
+        let raw = r#"{"schema":1}"#;
+        let proof = ComponentProof {
+            state: ComponentState::Nonempty,
+            swarm_id: catalog::new_id(),
+            raw_sha256: Some(sha256(raw.as_bytes())),
+            raw_len: Some(raw.len() as u64),
+            canonical_sha256: "c".repeat(64),
+            count: 1,
+            parent_closure: true,
+        };
+        assert_eq!(admitted_proof(&proof, Some(raw)).unwrap(), proof);
+        // Same length but other bytes; another length; absent bytes.
+        assert!(admitted_proof(&proof, Some(r#"{"schema":2}"#)).is_err());
+        assert!(admitted_proof(&proof, Some(r#"{"schema":1} "#)).is_err());
+        assert!(admitted_proof(&proof, None).is_err());
+        let missing = ComponentProof {
+            state: ComponentState::Missing,
+            raw_sha256: None,
+            raw_len: None,
+            ..proof.clone()
+        };
+        assert_eq!(admitted_proof(&missing, None).unwrap(), missing);
+        assert!(admitted_proof(&missing, Some(raw)).is_err());
+    }
+
+    /// The parsed graph's operation count equals the previous count of a
+    /// second raw parse, with and without main-catalog redirects and
+    /// projects in the view; duplicate keys refuse before either count.
+    #[test]
+    fn the_primary_count_equals_a_raw_reparse() {
+        let actor = catalog::new_id();
+        let old_machine = catalog::new_id();
+        let plain = Catalog {
+            swarm_id: catalog::new_id(),
+            ..Default::default()
+        };
+        let mut redirected = plain.clone();
+        redirected
+            .set(&actor, Key::project("work", "name"), json!("Work"))
+            .unwrap();
+        redirected
+            .set(&actor, Key::machine(&old_machine, "redirect"), json!(actor))
+            .unwrap();
+        let session = catalog::new_id();
+        let (parent, child) = (catalog::new_id(), catalog::new_id());
+        let graph = |swarm: &str, redirected_edge: bool| {
+            let parent_machine = if redirected_edge {
+                &old_machine
+            } else {
+                &actor
+            };
+            let mut operations = serde_json::Map::new();
+            operations.insert(
+                parent.clone(),
+                json!({"id": parent, "actor": actor, "clock": 1, "parents": [], "value": "work",
+                    "key": {"kind": "session", "machine": parent_machine, "session": session}}),
+            );
+            operations.insert(
+                child.clone(),
+                json!({"id": child, "actor": actor, "clock": 2, "parents": [parent], "value": "work",
+                    "key": {"kind": "session", "machine": actor, "session": session}}),
+            );
+            serde_json::to_vec(&json!({"schema": 1, "swarm_id": swarm, "operations": operations}))
+                .unwrap()
+        };
+        let empty = |swarm: &str| {
+            serde_json::to_vec(&json!({"schema": 1, "swarm_id": swarm, "operations": {}})).unwrap()
+        };
+        for (base, bytes) in [
+            (&plain, Some(graph(&plain.swarm_id, false))),
+            (&redirected, Some(graph(&redirected.swarm_id, true))),
+            (&redirected, Some(empty(&redirected.swarm_id))),
+            (&plain, None),
+        ] {
+            let (component, metrics) = decode_primary_metrics(bytes.clone(), base).unwrap();
+            let reparsed = bytes.as_ref().map_or(0, |bytes| {
+                bounded::<Catalog>(bytes, "primary")
+                    .unwrap()
+                    .operations
+                    .len()
+            });
+            assert_eq!(component.count, reparsed);
+            assert_eq!(metrics.operations, reparsed);
+        }
+        let duplicate = format!(
+            r#"{{"schema":1,"swarm_id":"{}","operations":{{}},"operations":{{}}}}"#,
+            plain.swarm_id
+        );
+        assert!(decode_primary_metrics(Some(duplicate.into_bytes()), &plain).is_err());
     }
 
     #[test]

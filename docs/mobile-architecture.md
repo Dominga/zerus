@@ -650,7 +650,14 @@ gateway's filesystem.
 Questions share one answer and page owner between the inline card and expanded
 form. Actions distinguish sending, submitted, known non-delivery and unknown
 delivery. An answer is saved before transport, with a bounded aggregate receipt
-wait and HTTP cancellation. A successful question receipt retains exact
+wait and HTTP cancellation. An expanded question keeps its exact id and hash: a
+verified projection that no longer resolves it shows an inline closed or
+replaced notice, while an unverified one is checking during a refresh and
+unavailable otherwise. Pending but unanswerable requests replace the native
+veto with a clear reason and the projection's check age. These notices keep the
+saved answer and submitted lock, never obscure an unrelated delivery review and
+never enable an answer; only a verified projection that still carries the exact
+question does. A successful question receipt retains exact
 target/question/hash/request/answer evidence before any inspection refresh; stale
 or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.

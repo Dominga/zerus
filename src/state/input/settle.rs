@@ -309,13 +309,15 @@ mod tests {
     }
     const SETTLED: &str = "[Image #1] [Image #2][Pasted text #3 +35 lines]";
 
+    /// One captured screen with the cursor column and row.
+    type Frame = (String, usize, usize);
     /// Frames shown in order, one per capture; the last one stays.
-    struct Frames(Mutex<(Vec<(String, usize, usize)>, usize)>);
+    struct Frames(Mutex<(Vec<Frame>, usize)>);
     impl Frames {
-        fn new(frames: Vec<(String, usize, usize)>) -> Self {
+        fn new(frames: Vec<Frame>) -> Self {
             Frames(Mutex::new((frames, 0)))
         }
-        fn current(&self) -> (String, usize, usize) {
+        fn current(&self) -> Frame {
             let state = self.0.lock().unwrap();
             state.0[state.1.min(state.0.len() - 1)].clone()
         }

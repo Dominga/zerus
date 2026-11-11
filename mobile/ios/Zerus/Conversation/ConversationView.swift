@@ -41,6 +41,16 @@ struct ConversationView: View {
             Session(target: route.target, title: route.target.session, agent: "", status: "", project: "", preview: "", pendingCount: 0, raw: [:])
     }
 
+    private func currentQuestions(_ target: Target) -> [Question] {
+        !target.archiveId.isEmpty || app.demo ? [] : model.questions
+    }
+
+    private func questionPresence(questions: [Question], available: Bool) -> QuestionPresenceView? {
+        QuestionPresencePolicies.resolve(display, questions: questions, verified: model.activityVerified, available: available,
+                                         checking: model.detailBusy, checkedAtMillis: model.questionCheckedAt,
+                                         nowMillis: ConversationModel.monotonicMillis(), complete: model.questionProjectionComplete)
+    }
+
     var body: some View {
         let session = self.session
         let target = session.target
@@ -67,6 +77,9 @@ struct ConversationView: View {
         let keys = Self.keys(events: events, questions: questions, warning: warning, bounded: bounded, unreadBoundary: unreadBoundary, loading: loading)
         let online = model.activityVerified || app.demo
         let available = online && model.activityVerified && !model.contextBlocked(target)
+        // zerus-a4mub.25: the expanded question's verified presence. Only a resolved card is a sheet; every obsolete
+        // state is an inline notice, so an unrelated delivery Review stays reachable. It never enables an answer.
+        let presence = questionPresence(questions: questions, available: available)
 
         VStack(spacing: 0) {
             ProgressView()
@@ -161,6 +174,14 @@ struct ConversationView: View {
                     latestButton(target: target, unread: unread, keys: keys)
                 }
             }
+            if let presence, !presence.modal {
+                QuestionPresenceNotice(view: presence, checkedAt: model.questionCheckedAt,
+                                       onClose: { display = display.close() },
+                                       onRefresh: { model.refreshActivity(explicit: true) },
+                                       onOpen: { display = display.open($0) })
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
             if archived {
                 VStack(alignment: .leading, spacing: 6) {
                     ContextFooter(session: session)
@@ -179,8 +200,13 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(!target.agentId.isEmpty)
         .toolbar { toolbar(session: session, raw: raw) }
-        .sheet(isPresented: Binding(get: { display.expanded }, set: { if !$0 { display = display.close() } })) {
-            ExpandedQuestionSheet(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
+        // Dismissing a resolved card closes it; a card that stops resolving leaves the sheet and keeps its
+        // identity for the inline notice.
+        .sheet(isPresented: Binding(get: { presence?.modal == true },
+                                    set: { if !$0 && questionPresence(questions: currentQuestions(target), available: available)?.modal == true {
+                                        display = display.close() } })) {
+            ExpandedQuestionSheet(target: target, questions: questions, available: available, presence: presence, display: $display,
+                                  onReview: { review = $0 })
         }
         .sheet(isPresented: $searching) {
             ConversationSearchSheet(events: events) { id in jump(to: id, events: model.events, target: target) }

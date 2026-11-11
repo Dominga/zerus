@@ -6,7 +6,7 @@ import org.json.JSONObject
 internal class GitStatusRelay(private val api: RelayApi) {
     suspend fun start(connection: Connection, request: GitStatusRequest): JSONObject {
         validate(connection, request)
-        return checked(api.post(connection,request.key.machine.computerId,"",GitStatus.OPERATION,request.payload(),request.requestId),request)
+        return checked(api.post(connection,request.key.machine.computerId,"",GitStatus.OPERATION,request.payload(),request.requestId,SendAttempt()),request)
     }
 
     suspend fun receipt(connection: Connection, request: GitStatusRequest): JSONObject {

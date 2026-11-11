@@ -109,6 +109,11 @@ final class ConversationModel {
     var historyTruncated = false
     var events: [Event] = []
     var questions: [Question] = []
+    /// When the verified question projection was last installed, in monotonic milliseconds; 0 means never
+    /// (zerus-a4mub.25). It only dates the expanded question's presence; it never grants an answer.
+    var questionCheckedAt: Int64 = 0
+    /// The projection's own completeness: an older CLI omits pending_questions_complete and stays complete.
+    var questionProjectionComplete = true
     var outgoing: [OutgoingMessage] = []
     var detailBusy = false
     var detailProgress = false
@@ -276,6 +281,8 @@ final class ConversationModel {
         activity = nil
         events = []
         questions = []
+        questionCheckedAt = 0
+        questionProjectionComplete = true
         outgoing = []
         historyTruncated = false
         revision += 1
@@ -582,6 +589,7 @@ final class ConversationModel {
             questions = prepared.questions
             activity = frame.raw
             activityVerified = verified
+            if verified { noteQuestionProjection(frame.raw) }
             historyCached = !verified
             historyTruncated = frame.truncated
             revision += 1
@@ -647,6 +655,7 @@ final class ConversationModel {
             if self.outgoing != messages { self.outgoing = messages }
             self.activity = frame.raw
             self.activityVerified = self.activeFrameVerified
+            if self.activeFrameVerified { self.noteQuestionProjection(frame.raw) }
             self.historyCached = !self.activeFrameVerified
             self.historyTruncated = frame.truncated
             self.revision += 1
@@ -815,6 +824,8 @@ final class ConversationModel {
             activityVerified = false
             events = []
             questions = []
+            questionCheckedAt = 0
+            questionProjectionComplete = true
             outgoing = []
         }
         await cache?.purgeWorkspace(connection)

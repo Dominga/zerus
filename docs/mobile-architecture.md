@@ -415,6 +415,11 @@ atomically moves the current composition into an outgoing envelope before any
 network request. The conversation immediately shows its delivery status while a
 new composition can be edited. Completion never clears a later draft. Unknown
 delivery remains visible and cannot trigger an automatic resend.
+A send that settles Not sent before the mutation request is enqueued releases
+exactly that send's sealed reservation, so a prepared resend cannot accumulate
+retained copies, and the outbox shows its allowlisted local reason. Once the
+request may have been enqueued, the reservation stays as the unknown and
+no-replay evidence.
 
 Automatic read progress appears only after five seconds of continuous waiting.
 Explicit refresh shows progress immediately, including when it promotes an
@@ -651,6 +656,18 @@ or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.
 Approval review accrues only in the visible, focused foreground disclosure.
 
+The expanded question resolves its exact ID and hash against the current
+projection into one presence: Answerable, Waiting, Checking, Closed, Replaced or
+Unavailable. Only a verified projection whose `pending_questions_complete` is
+true (absent from older CLIs counts as complete) can close or replace it; an
+incomplete one stays Checking while the agent indexes. Only a resolved card is
+modal. Every obsolete state is an inline notice with Refresh, Open new request
+or Close, so an unrelated unknown-delivery Review stays reachable, and the
+expanded identity, saved answer and submitted lock are kept. Presence shows the
+mapped native veto and the check age; cache, age, Working and a partial scan
+never enable an answer. Android and iOS check the same rows in
+`mobile/android/app/src/test/resources/question-presence-contract.json`.
+
 Ordinary agent messages and question disclosures from known agent-authored sources
 render Markdown with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
 quotes, links, tables, strikethrough, static task markers and code blocks.
@@ -685,6 +702,17 @@ acknowledges only that loaded subset. Read all is enabled only when, for some
 conversation in its scope, the captured evidence would clear a phone-local
 reminder or advance past replies counted unread; the predicate follows the same
 skip rules as the ordered edit.
+
+When the computer's `hgs` offers `inspect <session> --current-read`, the
+connector asks for it on every main inspection, never for an archive or
+subagent. The answer's `current_read` names the reply and attention signature
+that `hgs read` would accept now, taken from that same inspection (see
+[Existing session snapshots](reference.md#existing-session-snapshots)). The connector
+keeps the field only when its run and conversation are the inspection's own and
+its values are ones a `mark_read` may carry. When the relay bound drops any of
+the newest rows, it removes the field, because a phone binds it to the newest
+row it displays. Older `hgs` versions and the legacy Python connector send no
+such field, so their phones keep the canonical-head requirement.
 
 Android Sessions publishes catalog rows with local read decoration in one
 background-prepared update and retains unchanged card identities. Its reply
@@ -911,7 +939,13 @@ Exact counters require a complete current index; stale or partial history uses
 the larger of its loaded count and last known canonical count as a lower bound,
 or an unknown state when neither is available. The read watermark remains valid
 for retained rows in the same epoch while offline. A native incoming-sequence anchor locates the
-first unread message beyond the latest page. The unread divider stays attached
+first unread message beyond the latest page. Legacy inspection IDs gain canonical
+aliases without widening a partial mark: an alias keeps the exact reply's read
+identity, and the canonical watermark advances only along consecutive incoming
+sequences already captured in this epoch, stopping at the first unseen, missing
+or duplicated sequence. That alias proof never borrows the prefix authority of
+direct canonical visibility above, so a partial mark cannot acknowledge the
+uncaptured replies between its position and the watermark. The unread divider stays attached
 to that message when legacy inspection IDs gain canonical aliases. It retires
 when the phone confirms that the current complete head is read, and later replies
 do not resurrect that opening divider. Visible canonical epoch and incoming

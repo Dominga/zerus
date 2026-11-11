@@ -337,7 +337,9 @@ class MainActivity : ComponentActivity() {
             if (selected != null && WindowInsets.ime.getBottom(LocalDensity.current) == 0)
                 SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
             if (selected != null) ConversationReadTiming(model, conversationLoad)
-            if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
+            // The open conversation's own read failure is shown, with its details, by its status strip.
+            if (model.error.isNotBlank() && (selected == null || model.conversationReadFailure(selected.target).isBlank()))
+                Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     IconButton(onClick = { model.clearError() }) { Icon(Icons.Default.Close, "Dismiss error") }
@@ -386,6 +388,7 @@ class MainActivity : ComponentActivity() {
         ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation for confirmation."
+                else if (message.error.isNotBlank()) message.error
                 else "This message was not accepted. Review it before trying again.")
             if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
@@ -862,8 +865,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         ConversationRowKeys.reconcile(target.key, previousRowKeys, events, model.conversationSupersededIds)
     }
     SideEffect { previousRowKeys = rowKeys }
-    val keys = ConversationViewport.keys(events, unreadBoundary, warning.isNotBlank(), boundedNotice.isNotBlank(),
-        conversationLoading, queueVisible, questions.isNotEmpty(), eventKey = { rowKeys.key(it.id) })
+    // The bounded-window notice is a status detail now (zerus-a4mub.10), not a list item.
+    val keys = ConversationViewport.keys(events, unreadBoundary, warning.isNotBlank(), hasBoundedNotice = false,
+        conversationLoading = conversationLoading, queueVisible = queueVisible, questionsVisible = questions.isNotEmpty(), eventKey = { rowKeys.key(it.id) })
     val rowKeysHolder = remember(target.key) { mutableStateOf(rowKeys) }
     val eventIdsHolder = remember(target.key) { mutableStateOf(events.mapTo(mutableSetOf()) { it.id }) }
     SideEffect {
@@ -1060,16 +1064,37 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
         }
     }
+    // zerus-a4mub.10: one time-bound conversation status with details on demand. Presentation
+    // only: nothing below takes question, send or read authority from it.
+    val syncFacts = ConversationSyncStatus.Facts(now = 0L, demo = model.demo, archived = archived,
+        loaded = raw != null || events.isNotEmpty() || questions.isNotEmpty(),
+        verified = model.activityVerified, observedAt = model.conversationObservedAt,
+        refreshing = model.detailBusy, refreshVisible = model.detailBusy && model.detailProgress,
+        failure = model.conversationReadFailure(target),
+        offline = model.conversationReadOffline(target) || model.computerReportedOffline(target),
+        // Newer messages outside the loaded window; older ones are history, below.
+        tailPartial = model.hasNewer,
+        history = when {
+            model.olderLoading -> ConversationSyncStatus.History.Loading
+            model.olderError.isNotBlank() -> ConversationSyncStatus.History.Failed
+            model.historyIndexing -> ConversationSyncStatus.History.Indexing
+            model.hasOlder -> ConversationSyncStatus.History.MoreAvailable
+            model.historyEpoch.isBlank() && model.conversationHistoryTruncated -> ConversationSyncStatus.History.Truncated
+            model.historyEpoch.isNotBlank() && model.historyComplete -> ConversationSyncStatus.History.Complete
+            else -> ConversationSyncStatus.History.Unknown
+        }, historyMessage = model.olderError,
+        atLatest = follow.following && !model.hasNewer, unreadLabel = unread?.label.orEmpty(),
+        read = model.sharedReadStatus(target))
     Column(Modifier.fillMaxSize().imePadding()) {
-        if (unread != null || offeredQuestionCount > 0) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(unread?.label.orEmpty(), Modifier.weight(1f),
-                    color = if (unread != null && SessionNotificationPreferences.parse(raw ?: session.raw,target)?.muted != true) Mint else Muted, style = MaterialTheme.typography.bodySmall)
-                if (offeredQuestionCount > 0) TextButton(onClick = {
-                    if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
-                }) { Text("Questions ($offeredQuestionCount)") }
-            }
+        ConversationStatusStrip(syncFacts, refreshing = model.detailBusy && model.detailProgress,
+            onRefresh = { model.refreshActivity(explicit = true) }) {
+            // Compact here ("17 unread", "17+ unread"); the full wording is its description and the Position detail.
+            if (unread != null) Text("${unread.text} unread", Modifier.semantics { contentDescription = unread.description },
+                color = if (SessionNotificationPreferences.parse(raw ?: session.raw,target)?.muted != true) Mint else Muted,
+                style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            if (offeredQuestionCount > 0) TextButton(onClick = {
+                if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
+            }) { Text("Questions ($offeredQuestionCount)") }
         }
         if(searchNotice.isNotBlank()) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),verticalAlignment = Alignment.CenterVertically) {
             Text(searchNotice,Modifier.weight(1f),color = Amber,style = MaterialTheme.typography.bodySmall)
@@ -1092,15 +1117,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     if(model.historyIndexing) Text("History is still indexing. Unread totals may be unavailable.",color = Muted,style = MaterialTheme.typography.labelSmall)
                     if(historyReason.isNotBlank() && events.isNotEmpty()) Text(historyReason,color = Muted,style = MaterialTheme.typography.labelSmall)
                 } }
-                item(key = "history:status") { if (loadStatus?.initial != true && events.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (raw == null && !model.demo) Tag("Checking…", Muted) else SessionDetailBadge(session,raw)
-                    Tag(if (model.demo) "Preview" else if (model.activityVerified) "Connected" else if (raw != null) "Last known" else "Checking…",
-                        if (online) Mint else Amber)
-                } }
+                // Freshness lives in the status strip; this row keeps only the session's own badge.
+                item(key = "history:status") { if (loadStatus?.initial != true && events.isNotEmpty() && (raw != null || model.demo))
+                    SessionDetailBadge(session,raw) }
                 if (warning.isNotBlank()) item(key = "history:warning") { Text(warning, color = Amber, style = MaterialTheme.typography.bodySmall) }
-                if (boundedNotice.isNotBlank()) item(key = "history:bounded") {
-                    Text(boundedNotice, color = Muted, style = MaterialTheme.typography.bodySmall)
-                }
                 item(key = "history:missing-anchor") {
                     if (unavailableSaved) Text("Your saved reading position is outside the loaded messages. Showing the earliest available messages.",
                         color = Muted, style = MaterialTheme.typography.bodySmall)

@@ -1521,16 +1521,18 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "inspect" => {
             let name = args
                 .first()
-                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation]")?;
+                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation] [--current-read]")?;
             let mut after = 0;
             let mut archive_id = None;
             let mut agent_id = None;
             let mut include_processes = true;
             let mut read_observation = false;
+            let mut current_read = false;
             let mut index = 1;
             while index < args.len() {
                 if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
                 if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
+                if args[index] == "--current-read" { current_read = true; index += 1; continue; }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -1550,7 +1552,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             let mut output = if let Some(id) = agent_id {
                 subagents::inspection(name, id, archive_id)?
             } else {
-                journal::inspection(name, after, archive_id, include_processes)?
+                journal::inspection_with(name, after, archive_id, include_processes, current_read)?
             };
             if read_observation && archive_id.is_none() && agent_id.is_none() {
                 read_marks::observation::enrich(&mut output);

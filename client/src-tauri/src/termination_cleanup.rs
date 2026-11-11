@@ -1733,6 +1733,7 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         let job = &model.jobs[0];
         assert!(job.programs.is_none(), "the retired program was kept");
         assert!(job.lookup_only);
+        assert!(job.physically_released);
         assert!(!job.busy);
         assert!(job.program_review_pending);
         assert_eq!(
@@ -1859,6 +1860,10 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
             "the retired stop was kept"
         );
         assert!(model.jobs[0].lookup_only);
+        assert!(
+            model.jobs[0].physically_released,
+            "the watcher's release was not physical"
+        );
         assert!(!model.jobs[0].busy);
     }
 
@@ -1885,6 +1890,7 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
     let mut model = lock(&state.0.model);
     assert!(!model.jobs[0].busy, "a lost offer left the row busy");
     assert!(model.jobs[0].lookup_only);
+    assert!(!model.jobs[0].physically_released, "a lost offer claimed physical release");
     assert!(model.jobs[0].programs.is_none());
     {
         let view = model.view();
@@ -1973,6 +1979,7 @@ pub(crate) fn assert_real_unconfirmed_stops(
             "the retired stop was kept"
         );
         assert!(model.jobs[0].lookup_only);
+        assert!(model.jobs[0].physically_released);
         let row = &model.view().rows[0];
         assert!(!row.can_check && !row.ready && !row.can_force);
         assert!(
@@ -2202,6 +2209,21 @@ fn watcher_released(state: &TerminationCleanup, failure: &str) {
     }
 }
 
+/// Waits for the real passive watcher to leave the only job as a lookup-only
+/// row and requires the physical retirement that makes that a release
+/// (zerus-y4hv7). A lost offer task drops the stop inside the task and also
+/// leaves a lookup-only row without a program, but it never sets the marker.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn watcher_released_lookup_only(state: &TerminationCleanup, failure: &str) {
+    watcher_released(state, failure);
+    let model = lock(&state.0.model);
+    assert!(model.jobs[0].lookup_only, "{failure}");
+    assert!(
+        model.jobs[0].physically_released,
+        "{failure}: a lookup-only row was accepted without physical proof"
+    );
+}
+
 /// zerus-fojet: production publish records a real refusal and starts the real
 /// passive watcher, which retires it; Check again then reviews the retained
 /// cleanup and never removes.
@@ -2349,6 +2371,7 @@ pub(crate) fn assert_real_glue(
     fn lookup_only(state: &TerminationCleanup, retirement: ProgramRetirement) {
         let model = lock(&state.0.model);
         assert!(model.jobs[0].lookup_only);
+        assert!(model.jobs[0].physically_released);
         assert_eq!(model.jobs[0].program_retirement, Some(retirement));
     }
     let app = TestApp::default();
@@ -2367,7 +2390,7 @@ pub(crate) fn assert_real_glue(
         ))
     )
     .is_err());
-    watcher_released(&state, "force_offer did not watch the returned stop");
+    watcher_released_lookup_only(&state, "force_offer did not watch the returned stop");
     lookup_only(&state, ProgramRetirement::OfferUnavailable);
 
     // A stale Force confirmation; its blocking half publishes.
@@ -2392,21 +2415,21 @@ pub(crate) fn assert_real_glue(
         ))
     )
     .is_ok());
-    watcher_released(&state, "force_confirm never published its result");
+    watcher_released_lookup_only(&state, "force_confirm never published its result");
     lookup_only(&state, ProgramRetirement::StopUnconfirmed);
 
     // The original's blocking half after its source went away.
     let state = TerminationCleanup::default();
     lock(&state.0.model).jobs.push_back(stopping_job());
     program_pipeline::stop_and_publish(state.0.clone(), app.clone(), "job".into(), original);
-    watcher_released(&state, "the original's stop was never published or watched");
+    watcher_released_lookup_only(&state, "the original's stop was never published or watched");
     lookup_only(&state, ProgramRetirement::StopUnconfirmed);
 
     // publish sends a Complete stop to finish_cleanup, whose cleanup is refused.
     let state = TerminationCleanup::default();
     lock(&state.0.model).jobs.push_back(stopping_job());
     program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(complete));
-    watcher_released(
+    watcher_released_lookup_only(
         &state,
         "finish_cleanup did not watch the refused cleanup's stop",
     );

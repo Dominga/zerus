@@ -14,6 +14,8 @@ vi.mock("../../store/actions", () => ({ notify: vi.fn() }));
 vi.mock("../../i18n", () => ({ tr: (s: string, ...args: unknown[]) => s.replace(/%(\d+)/g, (_, n) => String(args[Number(n) - 1])), trNoop: (s: string) => s }));
 vi.mock("../lib/icons", () => ({ Icon: () => null }));
 vi.mock("../components/MachineLabel", () => ({ MachineLabel: () => null }));
+const archiveCalls = vi.hoisted(() => ({ calls: [] as string[], disabled: new Set<string>() }));
+vi.mock("../sessions/ActionDialogs", () => ({ actionEntries: (row: { name: string }) => ({ archive: { label: "Move to archive", disabled: archiveCalls.disabled.has(row.name), hint: "Busy", action: () => { archiveCalls.calls.push(row.name); } } }) }));
 import WorktreeCleanup from "./WorktreeCleanup";
 import { CleanupChip, CleanupReviewButton } from "./CleanupChip";
 import { applyCleanup, cleanup, cleanupDialog, closeCleanup, emptyCleanup, openCleanup, type CleanupRow, groupCleanupRows } from "../../store/terminationCleanup";
@@ -93,9 +95,12 @@ it("renders one folder with every source and names the session and program block
   for (const name of sources) expect(host.textContent).toContain(name);
   expect(host.textContent).toContain("claude/example/fourth");
   expect(host.textContent).toContain("report-server (PID 42)");
-  expect(host.querySelector(".wtc-reason")!.textContent).toBe(reason);
-  expect(host.querySelector(".wtc-reason")!.classList.contains("ell")).toBe(false);
-  button(host, "Open session").click();
+  // zerus-l1ryn: the Result cell is the mockup's one line; the full recorded
+  // reason stays in its tooltip and the blockers are grouped below the table.
+  expect(host.querySelector(".wtc-reason")!.textContent).toBe("Other Zerus sessions use this folder");
+  expect(host.querySelector(".wtc-reason")!.classList.contains("ell")).toBe(true);
+  expect(host.querySelector<HTMLElement>(".bc-table tbody td:last-child")!.title).toContain(reason);
+  button(host, "Open").click();
   expect(navigation.select).toHaveBeenCalledExactlyOnceWith("run:live");
   expect(navigation.page).toHaveBeenCalledWith("sessions");
   expect(native.clear).not.toHaveBeenCalled(); expect(native.confirm).not.toHaveBeenCalled();
@@ -226,4 +231,51 @@ it("keeps Check again disabled until the native row admits review", () => {
  expect(native.check).not.toHaveBeenCalled();
  expect(native.offer).not.toHaveBeenCalled();
  expect(native.remove).not.toHaveBeenCalled();
+});
+
+it("groups a kept folder's blockers and archives other sessions only after a confirmation that lists them (zerus-l1ryn)", async () => {
+  archiveCalls.calls = []; archiveCalls.disabled = new Set(["kimi/doge-docs-b"]);
+  const names = ["codex/balance-review", "kimi/doge-docs-a", "kimi/doge-docs-b"];
+  names.forEach((name, i) => { catalogState.rows[name] = { key: `run:${i}`, computer: "", name }; });
+  const kept = row({ can_force: false, can_dismiss: true, sessions: names, processes: [], reason: "Zerus sessions use this folder: " + names.join(", ") + ". Archive them first." });
+  native.inspect.mockResolvedValue({ path: kept.path, common_dir: "/srv/example/.git", review: {
+    sessions: names, processes: [{ pid: 101, command: "codex" }, { pid: 102, command: "python3" }, { pid: 103, command: "hgs" }], process_count: 3,
+    unreadable_processes: [{}, {}, {}, {}, {}, {}, {}], untracked: 1,
+    reasons: [{ code: "sessions", message: "Zerus sessions use this folder." }, { code: "processes", message: "3 running processes use this folder." },
+      { code: "processes_unavailable", message: "7 processes with hidden paths." }, { code: "untracked", message: "1 untracked file." }] } });
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [kept], kept: 1 });
+  const host = mount(); review(host).click(); await flush();
+  const panel = host.querySelector(".bc-blockers")!;
+  expect(panel.textContent).toContain("Other Zerus sessions use this folder");
+  expect(panel.textContent).toContain("Removal waits until these sessions stop using the folder.");
+  expect([...panel.querySelectorAll(".bc-group-title")].map((h) => h.textContent)).toEqual(["Other Zerus sessions use this folder", "Running programs", "Untracked files"]);
+  for (const text of ["codex (PID 101)", "python3 (PID 102)", "hgs (PID 103)", "Programs Zerus cannot check: 7.", "Untracked files: 1"]) expect(panel.textContent).toContain(text);
+  // Nothing is archived before the confirmation, and Cancel archives nothing.
+  button(host, "Archive these 3 sessions…").click(); await flush();
+  const confirmation = document.querySelector<HTMLDialogElement>("dialog.bc-archive")!;
+  await vi.waitFor(() => { for (const name of names) expect(confirmation.textContent).toContain(name); });
+  expect(archiveCalls.calls).toEqual([]);
+  button(confirmation as unknown as HTMLElement, "Cancel").click(); await flush();
+  expect(document.querySelector("dialog.bc-archive")).toBeNull(); expect(archiveCalls.calls).toEqual([]);
+  // Confirm runs the menu's own archive once per archivable session only.
+  button(host, "Archive these 3 sessions…").click(); await flush();
+  const again = document.querySelector<HTMLElement>("dialog.bc-archive")!;
+  await vi.waitFor(() => expect(again.textContent).toContain("Busy"));
+  button(again, "Archive 2 sessions").click(); await flush();
+  expect(archiveCalls.calls).toEqual(["codex/balance-review", "kimi/doge-docs-a"]);
+  expect(host.textContent).toContain("Archive requested for 2 sessions.");
+  expect(native.remove).not.toHaveBeenCalled(); expect(native.check).not.toHaveBeenCalled(); expect(native.confirm).not.toHaveBeenCalled();
+});
+
+it("offers no blocker action for an unknown removal result (zerus-l1ryn)", async () => {
+  archiveCalls.calls = [];
+  const unknown = row({ status: "unknown", can_force: false, can_dismiss: true, sessions: ["codex/balance-review"], processes: [{ pid: 7, label: "codex" }], reason: "Removal could not be confirmed." });
+  catalogState.rows.live = { key: "run:live", computer: "", name: "codex/balance-review" };
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [unknown], unknown: 1 });
+  const host = mount(); review(host).click(); await flush();
+  const panel = host.querySelector(".bc-blockers")!;
+  expect(panel.textContent).toContain("The removal result is unknown and will not be retried.");
+  expect(panel.querySelector("button")).toBeNull();
+  expect(button(host, "Check again").disabled).toBe(true);
+  expect(archiveCalls.calls).toEqual([]); expect(native.remove).not.toHaveBeenCalled();
 });

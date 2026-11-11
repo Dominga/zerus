@@ -50,8 +50,8 @@ import kotlinx.coroutines.delay
                     style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Default.Info, "Context and cache details", Modifier.size(16.dp), tint = muted)
             }
-            Text(listOf(if (view.recorded) "Last known" else "", status.ifBlank { view.compactionSummary })
-                .filter { it.isNotBlank() }.joinToString(" / ").ifBlank { "Context and cache details" },
+            // Whether the conversation is current is the status strip's (zerus-a4mub.10), not this footer's.
+            Text(status.ifBlank { view.compactionSummary }.ifBlank { "Context and cache details" },
                 color = muted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }

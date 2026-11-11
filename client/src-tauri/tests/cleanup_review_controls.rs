@@ -253,6 +253,18 @@ impl Model {
 fn changed(_: &AppHandle, m: &mut Model) {
     m.revision = m.revision.wrapping_add(1)
 }
+trait PipelineApp: Clone + Send + 'static {
+    fn changed(&self, model: &mut Model);
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step);
+}
+impl PipelineApp for AppHandle {
+    fn changed(&self, model: &mut Model) {
+        changed(self, model)
+    }
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step) {
+        inner.drive(self.clone(), id, step, false)
+    }
+}
 struct Inner {
     model: Mutex<Model>,
     drives: AtomicUsize,
@@ -287,7 +299,7 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
     })
 }
 
-fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
+fn watch_job<A: PipelineApp>(inner: &Arc<Inner>, app: A, id: String) {
     // Expiry is one-way. Retaining a UI row never keeps an Actions claim
     // indefinitely or renews consent after source/authority loss.
     let weak = Arc::downgrade(inner);
@@ -296,11 +308,11 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
         let Some(inner) = weak.upgrade() else {
             return;
         };
-        match watch_once(&inner, &id, |m| changed(&app, m)) {
+        match watch_once(&inner, &id, |m| app.changed(m)) {
             Watch::Continue => {}
             Watch::Stop => return,
             Watch::Review(step) => {
-                inner.drive(app, id, step, false);
+                app.drive(&inner, id, step);
                 return;
             }
         }
@@ -882,7 +894,9 @@ fn the_controls_run_the_exact_production_check_and_watcher() {
 /// The function's code from `fn name(` to its closing brace, with comment and
 /// blank lines dropped and indentation trimmed.
 fn function(source: &str, name: &str) -> Option<String> {
-    let start = source.find(&format!("fn {name}("))?;
+    let start = source
+        .find(&format!("fn {name}("))
+        .or_else(|| source.find(&format!("fn {name}<")))?;
     let body = start + source[start..].find('{')?;
     let mut depth = 0;
     for (offset, c) in source[body..].char_indices() {

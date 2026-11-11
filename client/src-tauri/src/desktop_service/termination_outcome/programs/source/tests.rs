@@ -314,7 +314,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             // pipes and loan; they stay unsettled until the control retires them.
             let mut loan: Option<Arc<dyn Send + Sync>> = None;
             let mut lock: Option<Arc<dyn Send + Sync>> = None;
-            let unarmed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(|index| {
+            let unarmed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(|index| {
                 let (unarmed, resources) = Mutation::new(source.clone(), &input);
                 unarmed.armed.store(false, Ordering::Release);
                 if index == 7 {
@@ -340,7 +340,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 assert!(matches!(exit, Exit::Code { code: 0, .. }));
                 unarmed
             });
-            let (never_ran, _) = Mutation::new(source.clone(), &input);
+            let never_ran = [(); 3].map(|()| Mutation::new(source.clone(), &input).0);
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,

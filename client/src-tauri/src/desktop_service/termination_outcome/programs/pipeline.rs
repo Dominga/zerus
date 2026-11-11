@@ -675,13 +675,13 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
-    unarmed: [super::source::Mutation; 10],
-    // The last unarmed phase's extra loan and descendant lock, and a phase
+    unarmed: [super::source::Mutation; 14],
+    // The eighth unarmed phase's extra loan and descendant lock, and phases
     // that never ran.
     (loan, lock, never_ran): (
         Arc<dyn Send + Sync>,
         Arc<dyn Send + Sync>,
-        super::source::Mutation,
+        [super::source::Mutation; 3],
     ),
 ) {
     let binding = input.manifest.binding();
@@ -802,6 +802,42 @@ pub(super) fn assert_presentation_views(
     assert_eq!(returned.identity().0, request_id);
     assert!(returned.current(), "a refused cleanup closed the original");
     let mut previous = *returned;
+    // zerus-guttv/zerus-g5hh5: a stop and a removal whose phase never ran, so
+    // their retirement fails while the shared source is still current.
+    let [never_ran, failing_stop, failing_removal] = never_ran;
+    crate::termination_cleanup::assert_real_current_holds(
+        Stopped {
+            continuation: fixture_original(
+                &previous.continuation,
+                Weak::new(),
+                initial_completion.clone(),
+            ),
+            attempt: StopAttempt {
+                input: input.clone(),
+                result: Ok(report(State::Incomplete)),
+                mutation: failing_stop,
+            },
+        },
+        Removal {
+            continuation: fixture_original(
+                &previous.continuation,
+                Weak::new(),
+                initial_completion.clone(),
+            ),
+            attempt: super::source::CleanupAttempt {
+                input: zerus_client_core::worktree_programs::cleanup::Input {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    stop: Box::new(input.clone()),
+                },
+                result: Err("no removal reply".into()),
+                mutation: failing_removal,
+            },
+        },
+    );
+    assert!(
+        previous.current(),
+        "a held phase closed the shared original"
+    );
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -868,7 +904,7 @@ pub(super) fn assert_presentation_views(
         "an original call whose I/O failed"
     );
     drop((bare, failed));
-    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held, mut ninth, tenth] =
+    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held, mut ninth, tenth, mut published, mut offered, mut confirmed, mut complete] =
         unarmed;
     // An unsettled phase is read through its own physical drain (zerus-1y897.8).
     let settled = std::mem::replace(&mut previous.attempt.mutation, held);
@@ -937,6 +973,10 @@ pub(super) fn assert_presentation_views(
         &mut fourth,
         &mut fifth,
         &mut ninth,
+        &mut published,
+        &mut offered,
+        &mut confirmed,
+        &mut complete,
     ] {
         while !mutation.try_retire().unwrap() {
             assert!(std::time::Instant::now() < until, "unarmed phase settled");
@@ -973,6 +1013,14 @@ pub(super) fn assert_presentation_views(
         stop(fifth, State::Incomplete),
         stop(sixth, State::Incomplete),
         stop(seventh, State::Refused),
+    );
+    // zerus-fojet/guttv/g5hh5: the real producers and their async glue.
+    crate::termination_cleanup::assert_real_published_refusal(stop(published, State::Refused));
+    crate::termination_cleanup::assert_real_glue(
+        stop(offered, State::Incomplete),
+        stop(confirmed, State::Incomplete),
+        original(),
+        stop(complete, State::Complete),
     );
     // zerus-1y897.9: the original, a Complete stop and a removal, each with its
     // source gone; the removal's own phase never settles here.

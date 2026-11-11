@@ -219,9 +219,24 @@ async fn deepseek_and_opencode_values_pass_the_unchanged_gate() {
     let h = Harness::new("current-read-providers", true).await;
     for (label, reply, signature, complete) in [
         ("DeepSeek turn", json!("dsh-turn-3"), json!(SIGNATURE), true),
-        ("DeepSeek unknown requests", json!("dsh-turn-3"), json!(null), false),
-        ("OpenCode reply", json!("msg_14bb2d63e001NhfRTKy4frROM8"), json!(null), true),
-        ("OpenCode without an observation", json!(null), json!(null), false),
+        (
+            "DeepSeek unknown requests",
+            json!("dsh-turn-3"),
+            json!(null),
+            false,
+        ),
+        (
+            "OpenCode reply",
+            json!("msg_14bb2d63e001NhfRTKy4frROM8"),
+            json!(null),
+            true,
+        ),
+        (
+            "OpenCode without an observation",
+            json!(null),
+            json!(null),
+            false,
+        ),
     ] {
         let mut value = current();
         value["reply_id"] = reply;
@@ -229,7 +244,10 @@ async fn deepseek_and_opencode_values_pass_the_unchanged_gate() {
         value["attention_complete"] = json!(complete);
         *h.connector.native.current.borrow_mut() = value.clone();
         let result = h.inspect(expected()).await;
-        assert!(h.last_inspect().contains(&"--current-read".to_owned()), "{label}");
+        assert!(
+            h.last_inspect().contains(&"--current-read".to_owned()),
+            "{label}"
+        );
         assert_eq!(result["current_read"], value, "{label}");
     }
 }

@@ -884,6 +884,8 @@ impl Native for Bounded<'_> {
 /// Whether a claimed parent runs now: the same observation as its status, every
 /// read ending within `limit` of the service connection. No service is a
 /// definite no; a service that has not answered by then is busy, never live.
+/// (Windows reports a refused loopback connection only after about two seconds
+/// of SYN retries, so a service that vanishes mid-check can read as busy there.)
 pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
     if record["service"] != "opencode2" {
         return Ok(false);
@@ -2215,13 +2217,18 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(busy, Err(parent_link::CLAIM_BUSY.to_owned()));
-        // Nothing listening: a definite no, before the bound.
-        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let free = closed.local_addr().unwrap().port();
-        drop(closed);
+        // A service that closes the connection unanswered: a definite no,
+        // before the bound, on every platform.
+        let quitting = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let quit = quitting.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in quitting.incoming() {
+                drop(stream);
+            }
+        });
         let started = Instant::now();
         assert_eq!(
-            claim_live_on(&service(free), &record, started + Duration::from_secs(2)),
+            claim_live_on(&service(quit), &record, started + Duration::from_secs(2)),
             Ok(false)
         );
         assert!(
@@ -2229,6 +2236,36 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+        // Nothing listening. Linux and macOS refuse a loopback connection at
+        // once: a definite no. Windows retries a refused SYN for about two
+        // seconds, so its refusal can arrive only at the bound and read as
+        // busy; it is never live and never outlasts the bound.
+        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = closed.local_addr().unwrap().port();
+        drop(closed);
+        let started = Instant::now();
+        let refused = claim_live_on(&service(free), &record, started + Duration::from_secs(2));
+        #[cfg(not(windows))]
+        {
+            assert_eq!(refused, Ok(false));
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                refused == Ok(false) || refused == Err(parent_link::CLAIM_BUSY.to_owned()),
+                "{refused:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+        }
     }
     use super::*;
     use std::collections::HashMap;

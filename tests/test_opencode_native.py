@@ -562,6 +562,10 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual(row['allowed_actions'], ['forget'])
         self.assertNotIn('events', row)
         self.assertFalse(row['send_supported'])
+        # Without an observation nothing is known: no reply, attention never complete.
+        current = self.hgs(['inspect', name, '--current-read'])['current_read']
+        self.assertEqual(current, dict(schema=1, run_id=binding['run_id'], conversation_id=binding['conversation_id'],
+                                       reply_id=None, attention_signature=None, attention_complete=False))
         listed = self.listing()[name]
         self.assertEqual((listed['state'], listed['phase']), ('unknown', 'unknown'))
         self.assertEqual(listed['inspection_reason'], NOT_RUNNING + ' on fixture')
@@ -825,6 +829,42 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'shell' and 'native-tool-output' in e['detail']
                             for e in final['events']), final['events'])
         self.assert_private(data, final)
+
+    def test_04_current_read_names_what_read_accepts_on_the_shown_observation(self):
+        """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts
+        on the observation the inspection shows, and inspecting acknowledges nothing."""
+        b = self.create()
+        name = b['name']
+        mark = lambda current: self.hgs(['read', name, '--json'], {key: current[key] for key in
+                                         ('run_id', 'conversation_id', 'reply_id', 'attention_signature')})
+        self.hgs(['send', name, '--json'], self.payload(b, text='QUESTION_NATIVE pick a color'))
+        self.wait(name, lambda v: v['pending_questions'])
+        shown = self.hgs(['inspect', name, '--current-read'])
+        asked = shown['current_read']
+        self.assertEqual(set(asked), {'schema', 'run_id', 'conversation_id', 'reply_id', 'attention_signature',
+                                      'attention_complete'})
+        self.assertEqual((asked['schema'], asked['run_id'], asked['conversation_id'], asked['attention_complete']),
+                         (1, b['run_id'], b['conversation_id'], True))
+        self.assertRegex(asked['attention_signature'], r'^[0-9a-f]{64}$')
+        self.assertEqual(asked['attention_signature'], shown['attention_signature'])
+        self.assertNotIn('current_read', self.hgs(['inspect', name]))
+        self.assertFalse((self.state / 'read-marks.json').exists())
+        self.assertEqual(mark(asked)['applied'], {'reply_id': False, 'attention_signature': True})
+        [card] = shown['pending_questions']
+        [item] = card['questions']
+        green = next(o['id'] for o in item['options'] if o['label'] == 'Green')
+        self.assertEqual(self.hgs(['answer', name, '--json'], self.payload(
+            b, question_id=card['question_id'], expected_question_hash=card['question_hash'],
+            answers=[{'question_id': item['id'], 'selected_option_ids': [green], 'text': ''}]))['status'], 'answered')
+        self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id'))
+        final = self.hgs(['inspect', name, '--current-read'])
+        replied = final['current_read']
+        # The named reply is the newest settled reply the inspection shows.
+        settled = [e for e in final['events'] if e['type'] == 'AgentMessage' and not e.get('streaming')]
+        self.assertEqual(replied['reply_id'], settled[-1]['reply_id'])
+        self.assertEqual((replied['attention_signature'], replied['attention_complete']), (None, True))
+        self.assertEqual(mark(asked)['applied'], {'reply_id': False, 'attention_signature': False})
+        self.assertEqual(mark(replied)['applied'], {'reply_id': True, 'attention_signature': False})
 
     def test_05_id_settings_preserves_original_session_defaults_and_no_model_calls(self):
         a, b = self.create('--effort', 'low'), self.create('--effort', 'low')

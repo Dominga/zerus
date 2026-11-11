@@ -1098,6 +1098,102 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct Owner(std::process::Child);
+    #[cfg(unix)]
+    impl Owner {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.kill()?;
+            self.0.wait().map(|_| ())
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_connect_on_a_live_host_is_busy_not_dead() {
+        isolated("refused_connect_fixture");
+    }
+
+    /// zerus-xt6re: BSD refuses a connect on a full listen queue at once
+    /// (ECONNREFUSED, sometimes ECONNRESET). The recorded owner decides: a
+    /// live owner is a busy host, a dead owner or a missing socket a definite
+    /// no. Emulated on Linux by injecting the refusal at the claim's connect.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn refused_connect_fixture() {
+        use sha2::Digest;
+        use std::time::{Duration, Instant};
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("refused-home");
+        let mut parent = claim_record("dsh/example/parent", "session-parent", &home);
+        provider.save(&mut parent).unwrap();
+        let choice = Choice {
+            session_id: string(&parent, "session_id").into(),
+            name: string(&parent, "name").into(),
+            run_id: string(&parent, "run_id").into(),
+            conversation_id: string(&parent, "conversation_id").into(),
+        };
+        let hosts = root().join("dsh/hosts").join(
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(home.to_string_lossy().as_bytes())
+            )[..16],
+        );
+        fs::create_dir_all(&hosts).unwrap();
+        let socket = hosts.join("host.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // A genuinely saturated host: its listen queue is full, so BSD would
+        // answer a non-blocking connect with ECONNREFUSED at once.
+        let fill = fill_unix_queue(&socket);
+        let mut owner = Owner(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        dsh::record_running_for_test(&hosts, owner.0.id()).unwrap();
+        dsh::refuse_connect_for_test(std::io::ErrorKind::ConnectionRefused);
+        let started = Instant::now();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("did not confirm"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A reset refusal is the same busy answer.
+        dsh::refuse_connect_for_test(std::io::ErrorKind::ConnectionReset);
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("did not confirm"), "{error}");
+        // The socket is gone: a definite no, even with a live owner recorded.
+        fs::remove_file(&socket).unwrap();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("must be a live session"), "{error}");
+        // The recorded owner exited: a definite no, even with the socket back.
+        drop(listener);
+        let rebound = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        owner.kill().unwrap();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("must be a live session"), "{error}");
+        dsh::allow_connect_for_test();
+        drop(fill);
+        drop(rebound);
+    }
+
+    #[cfg(unix)]
     #[test]
     #[ignore = "process-isolated private state fixture"]
     fn busy_host_fixture() {

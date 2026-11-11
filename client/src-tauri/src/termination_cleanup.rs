@@ -2299,6 +2299,195 @@ pub(crate) fn assert_real_glue(
         .any(|event| event.starts_with("removed")));
 }
 
+/// One online review that finds the fixture folder ready; never removes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn ready_review(inner: Arc<Inner>, mut step: Step) {
+    loop {
+        match step {
+            Step::Review {
+                host, common_dir, ..
+            } => {
+                let mut model = lock(&inner.model);
+                let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
+                let review = json!({"state": "ok", "common_dir": "/home/example/repo/.git",
+                    "worktrees": [{"kind": "linked", "verdict": "ready", "path": "/home/example/repo-work-1",
+                    "fingerprint": "f1", "ownership_id": "owner-1", "zerus_owned": true,
+                    "archive_restore_ready": true, "reasons": [], "changes": 0, "untracked": 0,
+                    "disk_complete": true, "ignored_complete": true, "ignored_count": 0,
+                    "integration": {"kind": "ancestor", "base": "main"}, "merged": true}]});
+                step = job.cleanup.reviewed(&host, &common_dir, Ok(&review));
+            }
+            Step::Remove { .. } => panic!("Check again must not remove"),
+            Step::Idle | Step::Done => {
+                lock(&inner.model).jobs[0].busy = false;
+                break;
+            }
+        }
+    }
+}
+
+/// zerus-1y897.6 (current source): Check again on a published known refusal
+/// observes and closes for real; the holder replies Closed but its output stays
+/// open, so the close stays outstanding while the real watcher leaves the
+/// reserved empty slot alone. Once released, the same click starts exactly one
+/// review.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_delayed_close_check(
+    stopped: programs::Stopped,
+    release: impl FnOnce() + Send + 'static,
+) {
+    static REVIEWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    use std::sync::atomic::Ordering::SeqCst;
+    assert!(stopped.reviewable_refusal());
+    assert!(stopped.current());
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
+    assert!(lock(&state.0.model).view().rows[0].can_check);
+    let inner = state.0.clone();
+    let click = std::thread::spawn(move || {
+        check_with_runtime(
+            &inner,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |inner, _, step| {
+                REVIEWS.fetch_add(1, SeqCst);
+                ready_review(inner, step)
+            },
+        )
+    });
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let model = lock(&state.0.model);
+            let job = &model.jobs[0];
+            if job.programs.is_none() && job.reservation.is_some() && job.busy {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "Check again never reserved the stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Several watcher passes while the real close is outstanding.
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(
+        !click.is_finished(),
+        "the close did not wait for the holder"
+    );
+    {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(job.programs.is_none() && job.reservation.is_some() && job.busy);
+    }
+    assert_eq!(REVIEWS.load(SeqCst), 0, "a review started before the close");
+    assert!(check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("a second click reviewed"),
+    )
+    .is_err());
+    assert!(lock(&state.0.model).dismiss("job").is_err());
+    release();
+    assert!(click.join().unwrap().is_ok());
+    assert_eq!(REVIEWS.load(SeqCst), 1, "the click did not review once");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(REVIEWS.load(SeqCst), 1);
+    assert!(
+        !app.events().iter().any(|event| event.starts_with("drive")),
+        "the watcher started a second review"
+    );
+    let model = lock(&state.0.model);
+    let job = &model.jobs[0];
+    assert!(job.programs.is_none() && job.reservation.is_none() && !job.busy);
+    assert!(model.view().rows[0].ready);
+}
+
+/// zerus-1y897.6 (expired source): a known refusal is published after its
+/// source deadline passed. The click's own retirement cancels the owner and
+/// reads its real join as Pending (the holder's output stays open), so the
+/// click keeps its reservation; the real watcher keeps reading Pending until
+/// the holder output is released, then drives exactly one review for it.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_expired_reserved_review(
+    stopped: programs::Stopped,
+    release: impl FnOnce() + Send + 'static,
+) {
+    assert!(stopped.reviewable_refusal());
+    assert_eq!(stopped.remaining_millis(), 0);
+    let app = TestApp::default();
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(stopping_job());
+    program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
+    // The click lands before the new watcher's first pass, which sleeps first.
+    let clicked = check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("Check again reviewed a pending stop"),
+    )
+    .unwrap();
+    assert!(clicked.rows[0].busy);
+    let reserved = |state: &TerminationCleanup| {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        job.reservation.is_some() && job.busy
+    };
+    assert!(reserved(&state), "the pending click lost its reservation");
+    assert!(lock(&state.0.model).jobs[0].programs.is_some());
+    assert!(check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("a second click reviewed"),
+    )
+    .is_err());
+    assert!(lock(&state.0.model).dismiss("job").is_err());
+    let drives = |app: &TestApp| {
+        app.events()
+            .iter()
+            .filter(|event| event.as_str() == "drive job")
+            .count()
+    };
+    // Several real watcher passes read Pending while the output stays open.
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(
+        reserved(&state),
+        "the watcher dropped the pending reservation"
+    );
+    assert_eq!(
+        drives(&app),
+        0,
+        "a review started before the holder retired"
+    );
+    assert_eq!(
+        lock(&state.0.model).jobs[0].program_retirement,
+        Some(ProgramRetirement::Expired)
+    );
+    release();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while drives(&app) == 0 {
+        assert!(
+            std::time::Instant::now() < until,
+            "the watcher never drove the reserved review"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        drives(&app),
+        1,
+        "the reserved click reviewed more than once"
+    );
+    let model = lock(&state.0.model);
+    let job = &model.jobs[0];
+    assert!(job.programs.is_none() && job.reservation.is_none() && job.manual_review);
+}
+
 #[tauri::command]
 pub fn termination_cleanup_remove(
     app: AppHandle,

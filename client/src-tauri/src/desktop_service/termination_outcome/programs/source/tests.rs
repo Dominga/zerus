@@ -17,7 +17,7 @@ use zerus_client_core::{
 };
 
 const OWNER: &str = r#"#!/usr/bin/python3
-import json,os,pathlib,sys,uuid
+import json,os,pathlib,sys,time,uuid
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 assert args.pop(0)=='--desktop-helper-rendezvous-v1'
@@ -29,6 +29,13 @@ first=json.loads(sys.stdin.buffer.readline())
 manifest=json.loads((root/'program-manifest').read_text())
 print(json.dumps(dict(op='ready',abi='worktree-program-custody-v1',pipeline=first['pipeline'],manifest=manifest,
     holder=dict(pid=os.getpid(),parent=os.getppid(),birth='fixture-data',audit=None),socket='/tmp/example/pins')),flush=True)
+# A gated holder's detached descendant keeps its output open until released,
+# even after the holder replies Closed or is killed.
+if (root/'program-holder-gate').exists() and os.fork()==0:
+    os.setsid()
+    until=time.monotonic()+20
+    while not (root/'program-holder-release').exists() and time.monotonic()<until:time.sleep(.005)
+    os._exit(0)
 while True:
     frame=json.loads(sys.stdin.buffer.readline());op=frame['op']
     with (root/'program-controls').open('a') as out:out.write(op+'\n')
@@ -358,5 +365,173 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             assert!(actions.begin(key, &Action::Terminate).is_some());
             service.join().await.unwrap();
         }
+    });
+}
+
+/// zerus-1y897.6: a real source whose holder output stays open (a detached
+/// descendant holds it) until `program-holder-release` exists, with a settled
+/// refused-stop phase and a joined original call. `not_after` shortens the
+/// source's own deadline.
+fn gated_refusal(
+    root: &Path,
+    context: Arc<Context>,
+    not_after: Option<Instant>,
+) -> (Arc<Source>, stop::Input, Arc<run::Completion>, Mutation) {
+    let manifest = manifest();
+    let pipeline = uuid::Uuid::new_v4().to_string();
+    let input = stop::Input {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        confirmation_id: uuid::Uuid::new_v4().to_string(),
+        source: stop::Source::Service {
+            epoch: context.scope.service_epoch.clone(),
+        },
+        original: serde_json::to_string(&json!({"request_id": uuid::Uuid::new_v4().to_string(),
+            "action": "terminate", "expected_run_id": manifest.capture.target.run_id,
+            "expected_conversation_id": manifest.capture.target.conversation_id}))
+        .unwrap(),
+        manifest: manifest.clone(),
+        archive_id: uuid::Uuid::new_v4().to_string(),
+        stop: stop::Kind::Normal,
+    };
+    let binding = custody::Binding::for_input(&pipeline, &input);
+    fs::write(
+        root.join("program-manifest"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("program-binding"), binding.bytes().unwrap()).unwrap();
+    fs::write(root.join("program-holder-gate"), b"gate").unwrap();
+    let _ = fs::remove_file(root.join("program-holder-release"));
+    // The mutator's forked reader ends at once; only the holder is gated.
+    fs::write(root.join("program-release"), b"release").unwrap();
+    executable(&root.join("holder"), OWNER);
+    executable(&root.join("mutator"), MUTATOR);
+    let mut owner = Owner::begin(
+        &root.join("holder"),
+        Control::Open {
+            presentation: false,
+            pipeline: pipeline.clone(),
+            discovery: Discovery {
+                capture: manifest.capture.clone(),
+            },
+        },
+        manifest.configuration.clone(),
+        context.environment.clone(),
+        context.clone(),
+        Arc::new(Command::spawn),
+    )
+    .unwrap();
+    let not_after = not_after.unwrap_or(owner.deadline());
+    let Reply::Ready { holder, socket, .. } = owner.ready().unwrap() else {
+        panic!("Ready")
+    };
+    owner
+        .arm(
+            &input,
+            NativeChild {
+                pid: 99999,
+                parent: std::process::id(),
+                birth: "fixture-data".into(),
+                audit: None,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+    let source = Arc::new(Source {
+        presentation: None,
+        context: Arc::new(Origin::Service(context)),
+        owner: Mutex::new(owner),
+        manifest,
+        pipeline,
+        holder,
+        socket,
+        not_after,
+        normal_consumed: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+    });
+    let inv = Invocation {
+        args: Vec::new(),
+        stdin: None,
+        timeout: Duration::from_secs(5),
+        request_id: None,
+    };
+    let (mut mutation, resources) = Mutation::new(source.clone(), &input);
+    let inherited = resources.descendants.clone();
+    let stop_run = run::run_accounted_frozen_with_completion(
+        &root.join("mutator"),
+        &inv,
+        source.context.environment(),
+        1024,
+        &AtomicBool::new(false),
+        (resources, Some(mutation.completion.clone())),
+        move |command| {
+            inherited.inherit(command)?;
+            command.spawn()
+        },
+    )
+    .unwrap();
+    assert!(matches!(stop_run, Exit::Code { code: 0, .. }));
+    let until = Instant::now() + Duration::from_secs(10);
+    while !mutation.try_retire().unwrap() {
+        assert!(Instant::now() < until, "the stop phase settled");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let completion = Arc::new(run::Completion::new());
+    let original = run::run_accounted_frozen_with_completion(
+        &root.join("mutator"),
+        &inv,
+        source.context.environment(),
+        1024,
+        &AtomicBool::new(false),
+        (source.clone(), Some(completion.clone())),
+        move |command| command.spawn(),
+    )
+    .unwrap();
+    assert!(matches!(original, Exit::Code { code: 0, .. }));
+    while completion.join() != run::Retirement::Retired {
+        assert!(Instant::now() < until, "the original call joined");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    (source, input, completion, mutation)
+}
+
+/// zerus-1y897.6: a known refusal's Check again while its holder close is
+/// delayed, through the production publish, passive watcher and Check.
+#[test]
+fn a_refused_check_waits_for_a_delayed_holder_close_and_reviews_once() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let actions = crate::actions::Actions::new(f.0.join("marks"));
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let _release = Release(f.0.clone());
+        for expired in [false, true] {
+            let hold = Arc::new(
+                actions
+                    .begin(key.clone(), &Action::Terminate)
+                    .expect("the previous source released its hold"),
+            );
+            let context = Context::new_supported(service.clone(), hold).unwrap();
+            let not_after = expired.then(|| Instant::now() + Duration::from_secs(3));
+            let (source, input, completion, mutation) = gated_refusal(&f.0, context, not_after);
+            let root = f.0.clone();
+            super::super::pipeline::assert_delayed_close(
+                source,
+                input,
+                completion,
+                mutation,
+                expired,
+                move || fs::write(root.join("program-holder-release"), b"release").unwrap(),
+            );
+        }
+        assert!(
+            actions.begin(key, &Action::Terminate).is_some(),
+            "a held source outlived its control"
+        );
+        service.join().await.unwrap();
     });
 }

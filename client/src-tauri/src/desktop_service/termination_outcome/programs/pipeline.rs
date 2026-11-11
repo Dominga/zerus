@@ -659,6 +659,59 @@ fn fixture_original(
     }
 }
 
+/// Fixture-only (zerus-1y897.6): a known normal refusal on a source whose
+/// holder close is delayed. With `expired`, its source deadline first passes;
+/// nothing reads its currentness yet, so its owner is not cancelled.
+#[cfg(test)]
+pub(super) fn assert_delayed_close(
+    source: Arc<Source>,
+    input: Input,
+    completion: Arc<run::Completion>,
+    mutation: super::source::Mutation,
+    expired: bool,
+    release: impl FnOnce() + Send + 'static,
+) {
+    let report = Report {
+        request_id: input.request_id.clone(),
+        binding: input.binding(),
+        state: State::Refused,
+        members: Vec::new(),
+    };
+    let stopped = Stopped {
+        continuation: Continuation {
+            source,
+            capture: input.manifest.capture.clone(),
+            done: Done::Native(NativeDone {
+                original: String::new(),
+                archive: String::new(),
+                confirmation: String::new(),
+                call: Weak::new(),
+                completion,
+            }),
+            outcome: Outcome::Failed {
+                detail: "inert display fixture".into(),
+            },
+        },
+        attempt: StopAttempt {
+            input,
+            result: Ok(report),
+            mutation,
+        },
+    };
+    if !expired {
+        crate::termination_cleanup::assert_real_delayed_close_check(stopped, release);
+        return;
+    }
+    // The exact deadline instant: remaining_millis rounds down to 0 while up to
+    // a millisecond is left, and a click then would still see a current source.
+    let not_after = stopped.continuation.source.not_after();
+    assert!(not_after < std::time::Instant::now() + Duration::from_secs(10));
+    while std::time::Instant::now() <= not_after {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::termination_cleanup::assert_real_expired_reserved_review(stopped, release);
+}
+
 /// Fixture-only: the offer force_offer holds, without its discovery frame.
 #[cfg(test)]
 pub(crate) fn fixture_force(previous: Stopped) -> ForceOffer {

@@ -1238,6 +1238,14 @@ impl Runtime {
         self.poll_every = every;
         self.chain = chain;
     }
+    /// `Some(None)` proves a live queued consent whose own turn has not
+    /// started its clock; `None` means no such original was admitted.
+    #[cfg(test)]
+    pub(super) fn fixture_chain_started(&self, id: &str) -> Option<Option<Instant>> {
+        self.admitted
+            .get(id)
+            .map(|consent| consent.fixture_chain_started())
+    }
     #[cfg(test)]
     pub(super) fn fixture_mac_fence(&mut self, on: bool) {
         self.mac_fence = on;

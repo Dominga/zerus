@@ -6728,7 +6728,11 @@ DeepSeek and OpenCode main inspections name the same fields from the view `hgs
 read` compares a mark with for that provider, owned by the session's name.
 - DeepSeek captures that view from one extra host `list` before it reads the
   page it shows. Its reply is the turn outline's settled response, which the
-  host commits at `turn/end` after the turn's final message. Its requests are
+  host commits at `turn/end` after the turn's final message. From dsh 0.2.2 the
+  host's list no longer carries that outline (`summary: false`), so an idle
+  row's failure read, the same cached read, supplies it from the session's
+  projections; a running or stopped row keeps the outline last read for its
+  run. `hgs read` takes its view the same way. Its requests are
   signed through `attention_id` before the page lists its own. The capture's
   host reads, including an idle row's failure read, share a 7-second budget,
   so a stalled host delays the inspection by at most about that much. The

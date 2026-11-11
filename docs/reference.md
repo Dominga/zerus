@@ -550,8 +550,11 @@ isolated profile. The report contains provider/account identifiers, configuratio
 and path fingerprints, expected/present/missing/duplicate event names and cached version
 compatibility, never settings, commands, prompts or credentials.
 `unrecognised_tracking` is true when an entry runs `PROGRAM __state hook` or
-`PROGRAM __state answer-channel` for a program hgs neither names nor recorded
-for that file; the report never names it. This flag is only in the account
+`PROGRAM __state answer-channel` for an unrecorded program whose basename
+contains `hgs` (case insensitive), but is neither an hgs basename nor the current
+runner. The name is ambiguity evidence only, never ownership. Unrelated programs
+using these arguments remain personal hooks and do not block repair; the report
+never names them. This flag is only in the account
 report; `hgs hooks SESSION --json` keeps its hooks-health-v1 fields. DeepSeek and
 OpenCode report `not_applicable`: they use their native APIs instead of tracking
 hooks. An unavailable or changed executable-version cache means compatibility
@@ -575,8 +578,10 @@ Explicit configuration repair is native-only:
 report. Repair refuses changed content, account/path/symlink identity, malformed
 or oversized files and unknown/incompatible native-version evidence. It also
 refuses, without writing, while `unrecognised_tracking` is true: run it with
-`HGS_EXECUTABLE` set to the program that entry names, or remove the entry. It merges
-only missing HGS tracking registrations under the existing hook lock and atomic backup
+`HGS_EXECUTABLE` set to that wrapper, or use a supervised launch with that
+runner to record it. Otherwise review or remove the ambiguous entry manually.
+Repair migrates recorded tracking/channel entries to the current runner and merges
+missing HGS tracking registrations under the existing hook lock and atomic backup
 rules, preserving personal settings/hooks and trusted legacy commands. It never
 trusts hooks, enables/widens answer channels, changes permissions, restarts a provider or retrofits running
 agents. If compatibility is unknown, explicit repair is unavailable. The current cache is
@@ -671,13 +676,19 @@ New hooks call `hgs __state hook`. Existing trusted Python commands are retained
 hgs recognises its own entries by the program they run: a path named `hgs` or
 `hgs.exe`, a legacy `hgs_state.py`, exactly the current `HGS_EXECUTABLE`,
 which a wrapper may name differently, or a program hgs recorded for that
-settings file. A later launch therefore adds nothing.
+settings file. A later launch therefore adds no duplicate registrations.
 After a launch or explicit repair leaves an hgs entry that runs the current
 program, hgs records that exact program for the resolved settings file in
 private state (`hook-owners/` below the state directory, up to 8 programs of up
 to 4 KiB each, written atomically under the settings lock). Health and repair
 from a shell without that `HGS_EXECUTABLE` therefore still recognise the
-entries a wrapper wrote. Nothing is recorded for a program hgs did not write.
+entries a wrapper wrote. When the current runner changes (including a different
+`HGS_EXECUTABLE`), the next install or compatible explicit repair rewrites those
+exact recorded tracking/channel entries to the current runner and records it.
+Other entry fields, personal hooks and trusted legacy commands are preserved.
+An unrecorded old wrapper is never silently claimed or deleted: use the exact
+wrapper as `HGS_EXECUTABLE` for a repair or supervised launch to record it first.
+Nothing is recorded for a program hgs did not write.
 Earlier versions added another group for a wrapper at each launch. Exact copies
 of such a group are removed once, and Codex may ask to review that change. A
 group that holds any personal hook is kept as it is, and a command for another

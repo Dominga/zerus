@@ -248,24 +248,163 @@ pub(super) fn record_written(config: &Path, agent: &str, content: &str) {
     }
 }
 
-/// Whether a hook command looks like hgs's (`PROGRAM __state hook` or
-/// `PROGRAM __state answer-channel`, as a line or in exec form) for a
-/// program that is not hgs's in the current scope (zerus-b64dl).
+/// Repoint only tracking/channel entries whose exact program was recorded for
+/// this file. Personal fields, trusted legacy shims and unrecorded entries stay.
+fn migrate_recorded(
+    original: &str,
+    config: &Path,
+    agent: &str,
+    executable: &str,
+    windows: bool,
+) -> Result<Option<String>> {
+    let programs = recorded_programs(config);
+    migrate_programs(original, agent, executable, windows, programs)
+}
+
+fn migrate_programs(
+    original: &str,
+    agent: &str,
+    executable: &str,
+    windows: bool,
+    programs: Vec<String>,
+) -> Result<Option<String>> {
+    let current = written_program(executable);
+    let programs: Vec<_> = programs
+        .into_iter()
+        .filter(|program| program != &current)
+        .collect();
+    if programs.is_empty() {
+        return Ok(None);
+    }
+    let line = |command: &str| -> Result<Option<String>> {
+        let Ok(mut argv) = shell_words::split(command) else {
+            return Ok(None);
+        };
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        let program = argv.len() - 3;
+        if !programs.contains(&argv[program])
+            || !(argv[program + 1..] == HOOK_ARGS || argv[program + 1..] == CHANNEL_ARGS)
+        {
+            return Ok(None);
+        }
+        if windows {
+            // These are the shell forms hgs writes on Windows. A custom
+            // prefix is not a form whose quoting we can safely reconstruct.
+            if program != 0 {
+                return Ok(None);
+            }
+            let command = windows::shell_command(executable)?;
+            return Ok(Some(if argv[2] == "hook" {
+                command
+            } else {
+                format!("{}answer-channel", command.strip_suffix("hook").unwrap())
+            }));
+        }
+        argv[program] = current.clone();
+        Ok(Some(join_command(&argv)))
+    };
+    if agent == "kimi" {
+        let mut document = original
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| e.to_string())?;
+        let mut changed = false;
+        for table in document
+            .get_mut("hooks")
+            .and_then(toml_edit::Item::as_array_of_tables_mut)
+            .into_iter()
+            .flat_map(|tables| tables.iter_mut())
+        {
+            let Some(command) = table.get("command").and_then(toml_edit::Item::as_str) else {
+                continue;
+            };
+            if let Some(replacement) = line(command)? {
+                // Preserve the value's comments and surrounding whitespace.
+                if let Some(toml_edit::Value::String(value)) = table
+                    .get_mut("command")
+                    .and_then(toml_edit::Item::as_value_mut)
+                {
+                    let decor = value.decor().clone();
+                    *value = toml_edit::Formatted::new(replacement);
+                    *value.decor_mut() = decor;
+                    changed = true;
+                }
+            }
+        }
+        return Ok(changed.then(|| document.to_string()));
+    }
+    let mut document: Value = if original.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(original).map_err(|e| e.to_string())?
+    };
+    let mut changed = false;
+    for hook in document
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .into_iter()
+        .flat_map(|hooks| hooks.values_mut())
+        .filter_map(Value::as_array_mut)
+        .flatten()
+        .filter_map(|group| group.get_mut("hooks").and_then(Value::as_array_mut))
+        .flatten()
+    {
+        let Some(command) = hook.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        let replacement = if let Some(args) = hook.get("args") {
+            ((args == &json!(HOOK_ARGS) || args == &json!(CHANNEL_ARGS))
+                && programs.iter().any(|program| program == command))
+            .then(|| current.clone())
+        } else {
+            line(command)?
+        };
+        if let Some(replacement) = replacement {
+            hook["command"] = json!(replacement);
+            changed = true;
+        }
+        // Codex prefers its PowerShell override on Windows. Rewrite only the
+        // exact override hgs wrote; a personal override remains untouched.
+        if let Some(command) = hook.get("commandWindows").and_then(Value::as_str) {
+            if programs.iter().any(|program| {
+                windows::powershell_command(program).ok().as_deref() == Some(command)
+            }) {
+                hook["commandWindows"] = json!(windows::powershell_command(executable)?);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        Ok(Some(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+/// An unrecorded hgs-like basename is ambiguous, never proof of ownership.
+/// An unrelated program's choice of arguments cannot block explicit repair.
 fn unrecognised_program(command: &str, args: Option<&Value>) -> bool {
-    if let Some(args) = args.and_then(Value::as_array) {
-        let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
-        return (args == HOOK_ARGS || args == CHANNEL_ARGS) && !names_hgs(command);
+    let ambiguous = |program: &str| {
+        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        name.to_ascii_lowercase().contains("hgs") && !names_hgs(program)
+    };
+    if let Some(args) = args {
+        return (args == &json!(HOOK_ARGS) || args == &json!(CHANNEL_ARGS)) && ambiguous(command);
     }
     shell_words::split(command).is_ok_and(|argv| {
         let tail = argv.len().saturating_sub(2);
         argv.len() >= 3
             && (argv[tail..] == HOOK_ARGS || argv[tail..] == CHANNEL_ARGS)
-            && !names_hgs(&argv[tail - 1])
+            && ambiguous(&argv[tail - 1])
     })
 }
 
-/// An explicit repair never writes beside an hgs-like entry hgs did not record.
-const UNRECOGNISED_TRACKING: &str = "A hook entry runs an hgs-like command for a program hgs did not record for this file; nothing was repaired. Run the repair with HGS_EXECUTABLE set to that program, or remove the entry.";
+/// An explicit repair never writes beside an ambiguous unrecorded hgs entry.
+const UNRECOGNISED_TRACKING: &str = "A hook entry runs an unrecorded hgs-like program; nothing was repaired. If it is your hgs wrapper, run repair or a supervised launch with HGS_EXECUTABLE set to that program to record it. Otherwise review or remove the ambiguous entry manually.";
 
 fn owns_hook(command: &str) -> bool {
     let Ok(argv) = shell_words::split(command) else {
@@ -915,18 +1054,20 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         version: std::cell::OnceCell::new(),
         seen: seen_version(&path),
     };
+    let migrated = migrate_recorded(&original, &path, agent, &executable, cfg!(windows))?;
+    let source = migrated.as_deref().unwrap_or(&original);
     let merged = if agent == "kimi" {
-        merge_kimi(&original, &path, cfg!(windows), &mut || {
+        merge_kimi(source, &path, cfg!(windows), &mut || {
             fresh_command(&executable)
         })?
     } else {
         // An older version run with this configuration later would stop at
         // hgs's entry for an event it lacks: the entry goes before it starts.
-        let pruned = prune_json(&original, agent, cfg!(windows), &mut || {
+        let pruned = prune_json(source, agent, cfg!(windows), &mut || {
             installed.registered_version(agent)
         });
         merge_json(
-            pruned.as_deref().unwrap_or(&original),
+            pruned.as_deref().unwrap_or(source),
             &path,
             agent,
             cfg!(windows),
@@ -934,7 +1075,8 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
             &mut || installed.native_version(agent),
         )?
         .or(pruned)
-    };
+    }
+    .or(migrated);
     let Some(content) = merged else {
         record_written(&path, agent, &original);
         return Ok(());
@@ -1121,6 +1263,24 @@ fn repair_with(
     executable: &str,
 ) -> Result<Option<String>> {
     let _own = OwnProgram::for_config(Some(executable), path);
+    let migrated = migrate_recorded(original, path, agent, executable, cfg!(windows))?;
+    repair_owned(
+        migrated.as_deref().unwrap_or(original),
+        path,
+        agent,
+        known,
+        executable,
+    )
+    .map(|merged| merged.or(migrated))
+}
+
+fn repair_owned(
+    original: &str,
+    path: &Path,
+    agent: &str,
+    known: Version,
+    executable: &str,
+) -> Result<Option<String>> {
     if agent == "kimi" {
         let health = health_document_mode(original, agent, Some(known), cfg!(windows))?;
         if health["unrecognised_tracking"] == true {
@@ -1137,7 +1297,7 @@ fn repair_with(
         }
         return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(executable));
     }
-    // Existing owned entries (including trusted legacy commands) remain exact.
+    // Trusted legacy commands and personal fields remain exact.
     // Version-incompatible registrations are not removed by explicit repair.
     let health = health_document_mode(original, agent, Some(known), cfg!(windows))?;
     if health["unrecognised_tracking"] == true {
@@ -2112,6 +2272,72 @@ mod tests {
         assert!(!owns_hook(&fresh_command(WRAPPER).unwrap()));
     }
 
+    #[test]
+    fn migration_preserves_windows_forms_channels_and_personal_fields() {
+        let old = "C:/old path/runner.exe";
+        let current = "C:/new path/runner.exe";
+        let mut codex = windows::codex_entry(old).unwrap().group();
+        codex["matcher"] = json!("personal matcher");
+        codex["hooks"][0]["custom"] = json!({"keep": true});
+        let mut exec = windows::claude_entry(old, (2, 1, 296), false)
+            .unwrap()
+            .group();
+        exec["hooks"][0]["args"] = json!(CHANNEL_ARGS);
+        let foreign = json!({"hooks": [{"type": "command", "command": "C:/other/tool.exe", "args": HOOK_ARGS, "timeout": 23}]});
+        let mut personal_override = windows::codex_entry(old).unwrap().group();
+        personal_override["hooks"][0]["commandWindows"] = json!("personal override");
+        let original = json!({"permissions": {"keep": true}, "hooks": {"Stop": [codex.clone(), exec.clone(), foreign.clone(), personal_override]}});
+        let merged = migrate_programs(
+            &original.to_string(),
+            "codex",
+            current,
+            true,
+            vec![old.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let result: Value = serde_json::from_str(&merged).unwrap();
+        let hooks = &result["hooks"]["Stop"];
+        assert_eq!(
+            hooks[0]["hooks"][0]["command"],
+            windows::shell_command(current).unwrap()
+        );
+        assert_eq!(
+            hooks[0]["hooks"][0]["commandWindows"],
+            windows::powershell_command(current).unwrap()
+        );
+        assert_eq!(hooks[0]["matcher"], codex["matcher"]);
+        assert_eq!(hooks[0]["hooks"][0]["custom"], codex["hooks"][0]["custom"]);
+        assert_eq!(hooks[1]["hooks"][0]["command"], current);
+        assert_eq!(hooks[1]["hooks"][0]["args"], json!(CHANNEL_ARGS));
+        assert_eq!(hooks[2], foreign);
+        assert_eq!(hooks[3]["hooks"][0]["commandWindows"], "personal override");
+        assert_eq!(result["permissions"], original["permissions"]);
+        assert!(migrate_programs(
+            &merged,
+            "codex",
+            current,
+            true,
+            vec![old.into(), current.into()]
+        )
+        .unwrap()
+        .is_none());
+        // Basename ownership alone is not a reason to migrate a command; a
+        // legacy shim and an unrecorded wrapper likewise keep their bytes.
+        let unrecorded = json!({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "/usr/bin/hgs __state hook"},
+            {"type": "command", "command": "/old/hgs-wrapper __state hook"},
+            {"type": "command", "command": "python3 /old/hgs_state.py hook"},
+            {"type": "command", "command": old, "args": ["notify"]}
+        ]}]}})
+        .to_string();
+        assert!(
+            migrate_programs(&unrecorded, "claude", current, true, vec![old.into()])
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// zerus-b64dl: the exact programs hgs recorded for one settings file.
     #[test]
     fn owner_records_keep_the_newest_exact_programs_within_bounds() {
@@ -2231,6 +2457,8 @@ mod tests {
             "/opt/old/hgs-wrapper --notify done",
             "/opt/old/hgs-wrapper __state hooks",
             "__state hook",
+            "/opt/other-tool __state hook",
+            "/opt/other-tool __state answer-channel",
             "/usr/local/bin/hgs __state hook",
             "'/opt/hgs dir/hgs' __state answer-channel",
             "python3 /opt/old/hgs_state.py hook",

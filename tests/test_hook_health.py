@@ -17,7 +17,7 @@ class HookHealth(unittest.TestCase):
         for provider in ['codex','kimi','opencode','dsh']:
             path=self.bin/provider;path.write_bytes(self.program.read_bytes());path.chmod(0o755)
         self.env=dict(os.environ,HOME=str(self.root),HGS_CONFIG_DIR=str(self.root/'hgs-config'),HGS_STATE_DIR=str(self.state),HGS_SELF='fixture',HGS_PEERS='',PATH=str(self.bin)+':'+os.environ['PATH'])
-        for key in ['CLAUDE_CONFIG_DIR','TMUX','TMUX_PANE','HGS_RUN_ID','HGS_SESSION','HGS_ACCOUNT_ID']:self.env.pop(key,None)
+        for key in ['CLAUDE_CONFIG_DIR','CODEX_HOME','KIMI_CODE_HOME','DSH_HOME','OPENCODE_HOME','TMUX','TMUX_PANE','HGS_RUN_ID','HGS_SESSION','HGS_ACCOUNT_ID']:self.env.pop(key,None)
     def run_hgs(self,args,body=None,ok=True):
         r=subprocess.run([str(HGS),'hooks',*args],env=self.env,input=json.dumps(body) if body is not None else '',text=True,capture_output=True,timeout=8)
         if ok:self.assertEqual(r.returncode,0,r.stderr);return json.loads(r.stdout)
@@ -68,8 +68,83 @@ class HookHealth(unittest.TestCase):
         status = self.inspect()
         self.assertEqual(status['configuration']['state'],'configured')
         self.assertFalse(status['configuration']['unrecognised_tracking'])
-        args,body=self.repair(status);self.assertEqual(self.run_hgs(args,body)['status'],'unchanged')
-        self.assertEqual(self.config.read_bytes(),written,'a plain repair must not add a current-executable group')
+        args,body=self.repair(status);self.assertEqual(self.run_hgs(args,body)['status'],'repaired')
+        self.assertNotIn(str(wrapper),self.config.read_text())
+        self.assertIn(str(HGS),self.config.read_text(),'repair migrates the recorded wrapper to the current runner')
+    def test_repair_migrates_recorded_runners_and_preserves_foreign_settings(self):
+        for agent in ['claude','codex','kimi']:
+            with self.subTest(agent=agent):
+                directory=self.root/('.kimi-code' if agent=='kimi' else '.'+agent);directory.mkdir(exist_ok=True)
+                path=directory/('config.toml' if agent=='kimi' else 'hooks.json' if agent=='codex' else 'settings.json')
+                self.config=path;self.program=self.bin/agent;self.cache()
+                foreign='/opt/other-tool notify'
+                if agent=='kimi':
+                    path.write_text('model = "keep"\n# personal comment\n[[hooks]]\nevent = "Stop"\ncommand = "'+foreign+'"\ncustom = 17\n')
+                else:
+                    path.write_text(json.dumps(dict(model='keep',permissions=dict(defaultMode='default'),hooks=dict(Stop=[dict(matcher='personal',hooks=[dict(type='command',command=foreign,custom=17)])]))))
+                inspect=lambda:self.run_hgs(['--account','native-'+agent,'--json'])
+                def repair():
+                    status=inspect()['configuration']
+                    request=dict(request_id=str(uuid.uuid4()),expected_provider=agent,expected_account_id='native-'+agent,expected_config_sha256=status['sha256'],expected_path_id=status['path_id'])
+                    return self.run_hgs(['--account','native-'+agent,'--repair','--json'],request)
+                # Real explicit repair first writes and records A, then migrates to B.
+                a=self.wrapper();self.env['HGS_EXECUTABLE']=str(a)
+                # Personal commands and settings remain outside hgs ownership.
+                self.assertFalse(inspect()['configuration']['unrecognised_tracking'])
+                self.assertEqual(repair()['status'],'repaired')
+                before=path.read_bytes()
+                b=self.bin/'new runner';b.write_bytes(a.read_bytes());b.chmod(0o755)
+                self.env['HGS_EXECUTABLE']=str(b)
+                self.assertEqual(repair()['status'],'repaired')
+                text=path.read_text();self.assertNotIn(str(a),text);self.assertIn(str(b),text)
+                self.assertIn(foreign,text)
+                if agent=='kimi':
+                    self.assertIn('# personal comment',text);self.assertIn('custom = 17',text);self.assertIn('model = "keep"',text)
+                else:
+                    doc=json.loads(text);self.assertEqual(doc['model'],'keep');self.assertEqual(doc['permissions'],dict(defaultMode='default'))
+                    self.assertEqual(doc['hooks']['Stop'][0],dict(matcher='personal',hooks=[dict(type='command',command=foreign,custom=17)]))
+                record=self.state/'hook-owners'/(hashlib.sha256(str(path.resolve()).encode()).hexdigest()+'.json')
+                self.assertEqual(json.loads(record.read_text())['programs'][:2],[str(b),str(a)])
+                current=path.read_bytes();self.assertEqual(repair()['status'],'unchanged');self.assertEqual(path.read_bytes(),current)
+                self.assertNotEqual(current,before)
+    def test_foreign_state_arguments_do_not_block_repair_or_become_owned(self):
+        foreign = [
+            dict(type='command', command='/opt/other-tool __state hook', timeout=7),
+            dict(type='command', command='/opt/other-tool __state answer-channel', custom=True),
+            dict(type='command', command='/opt/other-tool', args=['__state', 'hook']),
+            dict(type='command', command='/opt/other-tool', args=['__state', 'answer-channel']),
+        ]
+        group = dict(matcher='personal', hooks=foreign)
+        for agent in ['claude', 'codex', 'kimi']:
+            with self.subTest(agent=agent):
+                directory = self.root / ('.kimi-code' if agent == 'kimi' else '.' + agent)
+                directory.mkdir(exist_ok=True)
+                filename = 'config.toml' if agent == 'kimi' else 'hooks.json' if agent == 'codex' else 'settings.json'
+                self.config = directory / filename
+                self.program = self.bin / agent
+                self.cache()
+                if agent == 'kimi':
+                    original = 'model = "keep"\n# personal comment\n[[hooks]]\nevent = "Stop"\ncommand = "/opt/other-tool __state hook"\ncustom = 17\n'
+                else:
+                    original = json.dumps(dict(model='keep', permissions=dict(defaultMode='default'), hooks=dict(Stop=[group])))
+                self.config.write_text(original)
+                account = 'native-' + agent
+                status = self.run_hgs(['--account', account, '--json'])
+                args, body = self.repair(status, expected_provider=agent, expected_account_id=account)
+                args[1] = account
+                result = self.run_hgs(args, body)
+                self.assertEqual(result['status'], 'repaired')
+                self.assertFalse(status['configuration']['unrecognised_tracking'])
+                text = self.config.read_text()
+                if agent == 'kimi':
+                    self.assertTrue(text.startswith(original), 'foreign Kimi tables and comments keep their bytes')
+                else:
+                    doc = json.loads(text)
+                    self.assertEqual(doc['hooks']['Stop'][0], group)
+                    self.assertEqual(doc['model'], 'keep')
+                    self.assertEqual(doc['permissions'], dict(defaultMode='default'))
+                self.assertFalse(result['configuration']['answer_channel_registered'])
+                self.assertFalse((self.root / 'invoked').exists())
     def test_an_unrecorded_hgs_like_entry_blocks_repair_and_is_flagged(self):
         # Written by a wrapper before records existed, or a look-alike: never
         # adopted, rewritten or removed; an explicit repair refuses instead.

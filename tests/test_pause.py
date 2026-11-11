@@ -1951,6 +1951,8 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                     request = json.dumps({"request_id": str(uuid.uuid4()), "expected_provider": agent,
                                           "expected_account_id": account, "expected_config_sha256": status["sha256"],
                                           "expected_path_id": status["path_id"]})
+                    self.env["HGS_EXECUTABLE"] = str(wrapper)
+                    plain["HGS_EXECUTABLE"] = str(wrapper)
                     repaired = hooks("--repair", body=request)
                     self.assertEqual(repaired.returncode, 0, repaired.stderr)
                     self.assertEqual(json.loads(repaired.stdout)["status"], "unchanged")
@@ -1968,6 +1970,37 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
         self.assertEqual(json.loads(settings.read_text())["hooks"]["SessionStart"], ours + [personal])
         self.hgs("pause", name)
         self.assertEqual(log.read_text().splitlines().count(name + " SessionStart") - before, 1)
+
+    def test_launch_migrates_the_recorded_hook_runner(self):
+        a=self.bin/'runner A';b=self.bin/'runner B'
+        for wrapper in [a,b]:
+            wrapper.write_text('#!/bin/sh\nexec '+shlex.quote(str(HGS))+' "$@"\n');wrapper.chmod(0o755)
+        self.env['HGS_EXECUTABLE']=str(a)
+        for agent in ['claude','codex','kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE']=str(a)
+                path=self.root/('.kimi-code/config.toml' if agent=='kimi' else '.codex/hooks.json' if agent=='codex' else '.claude/settings.json')
+                path.parent.mkdir(exist_ok=True)
+                foreign=dict(type='command',command='true __state hook',custom=17)
+                if agent=='kimi':
+                    path.write_text('model = "keep"\n# personal comment\n[[hooks]]\nevent = "Stop"\ncommand = "true __state hook"\ncustom = 17\n')
+                else:
+                    path.write_text(json.dumps(dict(model='keep',hooks=dict(Stop=[dict(matcher='personal',hooks=[foreign])]))))
+                name=self.start(agent,'migrate')
+                first=self.wrapped_hooks(agent,str(a));self.assertTrue(first)
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(b)
+                self.resume(name)
+                self.assertEqual(self.wrapped_hooks(agent,str(a)),{})
+                self.assertEqual(self.wrapped_hooks(agent,str(b)),first)
+                if agent=='kimi':
+                    doc=tomllib.loads(path.read_text());self.assertIn('# personal comment',path.read_text())
+                    self.assertEqual(doc['hooks'][0],dict(event='Stop',command='true __state hook',custom=17))
+                else:
+                    doc=json.loads(path.read_text());self.assertEqual(doc['hooks']['Stop'][0],dict(matcher='personal',hooks=[foreign]))
+                self.assertEqual(doc['model'],'keep')
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(a)
 
     def test_directory_browser(self):
         folder = self.root / "browse ' test"

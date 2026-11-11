@@ -56,9 +56,18 @@ DELIVERY_RECOVERY_UPDATES_SHA = "9606f2de9579fb7100e4ca0878a4574cb919a651bf37743
 # positions through presentation aliases). It replaces the refresh status banner
 # with read timing only. Question eligibility, native availability, every
 # verification assignment and all historical reconstruction pins stay exact
-# (zerus-p7i3o). Reverse it first, as the newest reviewed update.
+# (zerus-p7i3o). Reverse it after newer reviewed updates.
 PRESENTATION_UPDATES = ROOT / "tests/fixtures/question-availability-presentation-updates.patch"
 PRESENTATION_UPDATES_SHA = "dde1e6eb48faf7d29a8407726be4cf74b176e95802fd1249bb95ee49dc9f8003"
+# Exact two-file conversation-status delta cea24c0f4..8e344939a (zerus-a4mub.10):
+# one time-bound status strip replaces the Connected/Last known tag, the
+# bounded-window list item and the conversation's own global read-failure
+# banner; the model publishes the shown frame's observation time, the read
+# failure's kind and observed shared-read outcomes. Presentation only: question
+# eligibility, native availability, every verification writer and all historical
+# reconstruction pins stay exact. Reverse it first, as the newest reviewed update.
+SYNC_STATUS_UPDATES = ROOT / "tests/fixtures/question-availability-sync-status-updates.patch"
+SYNC_STATUS_UPDATES_SHA = "fc55b33f20190f4ac88fa7012c03a304d855caeb2f238ce9f39f9a4b6a70bf77"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -110,6 +119,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, RECENT_ACTIVITY_UPDATES, RECENT_ACTIVITY_UPDATES_SHA)
@@ -137,6 +147,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
@@ -179,6 +191,18 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                            "online && model.activityVerified && !model.contextBlocked(target)"):
             self.assertIn(expression, main)
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
+
+    def test_sync_status_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The status strip stays exact reviewed hunks in both files: changing,
+        # removing or duplicating one of its additions must break the reconstruction.
+        for name, addition in (
+                ("ZerusViewModel.kt", "    var conversationObservedAt by mutableStateOf<Long?>(null); private set\n"),
+                ("MainActivity.kt", "    Column(Modifier.fillMaxSize().imePadding()) {\n        ConversationStatusStrip(syncFacts, refreshing = model.detailBusy && model.detailProgress,\n")):
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.replace("\n", " // changed reviewed addition\n", 1), "", addition + addition):
+                with self.subTest(source=name, replacement=replacement[:40]):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
 
     def test_visible_refresh_projection_refuses_modified_missing_or_duplicate_hunks(self):
         # Reversing the exact UI change must not hide a later policy edit. The

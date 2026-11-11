@@ -423,15 +423,58 @@ fn current(name: &str) -> Result<Option<Current>> {
     if !live_pane && string(&record, "conversation_id").is_empty() {
         return Ok(None);
     }
-    let mut view = journal::summary(&record, live_pane);
-    view["name"] = json!(name);
-    if !live_pane {
-        view["state"] = json!(if record["paused"].as_bool().unwrap_or(false) { "paused" } else { "stopped" });
-    }
+    let view = read_view(name, &record, journal::summary(&record, live_pane), live_pane);
     drop(guard);
     // As in a listing, an unreadable index adds no attention.
     let questions = pending_questions(&record, &view, live_pane, question_budget()).unwrap_or(Some(Vec::new()));
     Ok(Some((view, journal::journal_name(&record).to_owned(), questions)))
+}
+
+/// The view of a journal-backed session that `hgs read` compares a mark
+/// with, from its `summary`.
+fn read_view(name: &str, record: &Value, mut summary: Value, live_pane: bool) -> Value {
+    summary["name"] = json!(name);
+    if !live_pane {
+        summary["state"] = json!(if record["paused"].as_bool().unwrap_or(false) { "paused" } else { "stopped" });
+    }
+    summary
+}
+
+/// `current_read` of `hgs inspect <session> --current-read`: the reply and
+/// attention identities `hgs read` would accept now, from the same inspection
+/// a device displays. None without a conversation, which no mark can name.
+///
+/// Order is the contract. `summary` (and so the reply) must be captured
+/// before the inspection reads provider messages: a reply's final message is
+/// written before its Stop, so it is in that read or an earlier one. The
+/// questions signed here are read before the inspection lists its own, so
+/// each one that is still pending when a mark arrives was listed. Questions
+/// not indexed in time leave the signature unknown (`attention_complete`
+/// false), never acknowledgeable.
+pub(super) fn current_read(name: &str, journal_record: &Value, summary: Value, live_pane: bool) -> Option<Value> {
+    let conversation = string(journal_record, "conversation_id");
+    if conversation.is_empty() {
+        return None;
+    }
+    let mut view = read_view(name, journal_record, summary, live_pane);
+    #[cfg(test)]
+    journal::read_order::note("signed_questions");
+    let questions = pending_questions(journal_record, &view, live_pane, question_budget()).unwrap_or(Some(Vec::new()));
+    // As `hgs read`: a recurring job's read reply stays current. Only those
+    // sessions need the marks file.
+    if view["schedules"]["recurring"].as_u64().is_some_and(|count| count > 0) {
+        let marks = load();
+        keep_read_reply(&mut view, record(&marks, journal::journal_name(journal_record), conversation));
+    }
+    let reply = view["reply_id"].as_str().filter(|reply| !reply.is_empty());
+    Some(json!({
+        "schema": 1,
+        "run_id": view["run_id"],
+        "conversation_id": view["conversation_id"],
+        "reply_id": reply,
+        "attention_signature": signature(&view, questions.as_deref()),
+        "attention_complete": questions.is_some(),
+    }))
 }
 
 /// `hgs read <session> --json`. An unknown session is a JSON answer with exit

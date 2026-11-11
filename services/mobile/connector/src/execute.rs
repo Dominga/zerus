@@ -913,6 +913,11 @@ impl<N: Native + 'static> Connector<N> {
         if let Some(after) = field("after") {
             argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
         }
+        // Only a main inspection names what a read mark may acknowledge now.
+        let current_read = archive.is_none() && agent.is_none() && self.flags.get().current_read;
+        if current_read {
+            argv.push("--current-read".into());
+        }
         let mut result = self.call(Call::new(argv)).await?;
         if self.flags.get().windows_gateway
             && !crate::capabilities::windows_provider(&result["agent"])
@@ -973,13 +978,27 @@ impl<N: Native + 'static> Connector<N> {
             }
         }
         crate::opencode_privacy::row(&mut result);
-        let result = match result {
+        let mut result = match result {
             Value::Object(result) => result,
             _ => unreachable!(),
         };
+        if !current_read || !crate::inspection::current_read_bound(&result) {
+            result.remove("current_read");
+        }
         // The device envelope of GET adds request_id: leave room for it
-        // below the ordinary one-MiB response bound.
-        let bound = move || bound_inspection(result, MAX_RESULT - 1024);
+        // below the ordinary one-MiB response bound. A bounded inspection keeps
+        // `current_read` only while its newest rows survive: a phone binds it
+        // to the newest row it displays.
+        let bound = move || {
+            let newest = crate::inspection::newest_rows(&result)?;
+            let mut bounded = bound_inspection(result, MAX_RESULT - 1024)?;
+            if bounded.contains_key("current_read")
+                && crate::inspection::newest_rows(&bounded)? != newest
+            {
+                bounded.remove("current_read");
+            }
+            Ok(bounded)
+        };
         let bounded = tokio::task::spawn_blocking(bound)
             .await
             .unwrap_or(Err(PyError::Type))

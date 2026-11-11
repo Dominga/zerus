@@ -459,6 +459,9 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
 /// A session's status. Its readers of the live pane (the effort footer and
 /// every terminal chooser) share one capture of it.
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
+    // Every summary captures the latest reply.
+    #[cfg(test)]
+    read_order::note("reply");
     kimi_tui_choice::observing(|| observed_summary(record, live_pane))
 }
 
@@ -918,7 +921,24 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
     Ok((events, truncated))
 }
 
-pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, include_processes: bool) -> Result<Value> {
+pub(super) fn inspection(
+    name: &str,
+    after: i64,
+    archive_id: Option<&str>,
+    include_processes: bool,
+) -> Result<Value> {
+    inspection_with(name, after, archive_id, include_processes, false)
+}
+
+/// `inspection`, with `current_read` (`--current-read`) for a current tracked
+/// main session: see `read_marks::current_read` for the read order it needs.
+pub(super) fn inspection_with(
+    name: &str,
+    after: i64,
+    archive_id: Option<&str>,
+    include_processes: bool,
+    current_read: bool,
+) -> Result<Value> {
     // An approval answered in Terminal sends no hook; settling it takes the lock.
     if archive_id.is_none() && record_path(name).exists() {
         if let Ok(record) = read(name) {
@@ -1009,12 +1029,11 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
             output[key] = value.clone();
         }
     }
-    output.as_object_mut().unwrap().extend(
-        summary(&record, panes.is_some())
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
+    let summary = summary(&record, panes.is_some());
+    output
+        .as_object_mut()
+        .unwrap()
+        .extend(summary.as_object().unwrap().clone());
     // The compact list preview must not shorten the existing inspector field.
     if !user_prompt(&record).is_null() {
         output["prompt"] = record["prompt"].clone();
@@ -1025,6 +1044,12 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["state"] = json!("archived");
     }
     drop(_guard);
+    // Before the listed questions and the provider messages below.
+    if current_read && archive_id.is_none() {
+        if let Some(current) = read_marks::current_read(name, &record, summary, panes.is_some()) {
+            output["current_read"] = current;
+        }
+    }
     if archive_id.is_none() {
         output.as_object_mut().unwrap().extend(
             input::first_message_summary(&record, panes.is_some())
@@ -1034,6 +1059,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         );
         input::attention_message_summary(&record, &mut output, panes.is_some());
     }
+    #[cfg(test)]
+    read_order::note("listed_questions");
     match questions::inspection(&record, panes.is_some()) {
         Ok(pending) => output["pending_questions"] = pending,
         Err(error) => {
@@ -1079,6 +1106,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
     cache_hint::enrich(&record,&mut output,archive_id.is_none()&&panes.is_some());
+    #[cfg(test)]
+    read_order::note("provider_messages");
     let messages = if string(&record, "agent") == "kimi" {
         kimi_messages::read_with_turns(&record).map(|(messages, turns, complete)| {
             output["kimi_turns"] = json!(turns);
@@ -1773,6 +1802,114 @@ pub(super) fn settle_children(record: &mut Value) {
     {
         record["activity"] = json!("idle");
         record["phase"] = json!("idle");
+    }
+}
+
+/// The order in which an inspection captures its reply and reads its
+/// questions and provider messages (`read_marks::current_read`).
+#[cfg(test)]
+pub(super) mod read_order {
+    use std::cell::RefCell;
+    thread_local! {
+        static STEPS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+    pub(in crate::state) fn note(step: &'static str) {
+        STEPS.with(|steps| steps.borrow_mut().push(step));
+    }
+    pub(in crate::state) fn take() -> Vec<&'static str> {
+        STEPS.with(|steps| std::mem::take(&mut *steps.borrow_mut()))
+    }
+}
+
+#[cfg(test)]
+mod current_read_order {
+    use super::*;
+
+    /// zerus-a4mub.9: `current_read` signs only what the same inspection
+    /// shows. Its reply is captured before provider messages are read, and its
+    /// questions are read before the inspection lists its own. The fixture runs
+    /// in a child process with private state and tmux directories.
+    #[test]
+    fn current_read_is_captured_before_listed_questions_and_provider_messages() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::journal::current_read_order::fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("TMUX_TMPDIR", state.path())
+            .env("ZERUS_CURRENT_READ_ORDER_FIXTURE", "1")
+            .env_remove("TMUX")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run by current_read_is_captured_before_listed_questions_and_provider_messages"]
+    fn fixture() {
+        if std::env::var_os("ZERUS_CURRENT_READ_ORDER_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        let name = "claude/example/current-read";
+        let (run, conversation) = ("run-current", "conversation-current");
+        let record = json!({"version":1,"agent":"claude","name":name,"run_id":run,
+            "conversation_id":conversation,"session_id":uuid::Uuid::new_v4().to_string(),"created":1});
+        atomic(&record_path(name), &record.to_string()).unwrap();
+        read_order::take();
+        let output = inspection_with(name, 0, None, false, true).unwrap();
+        assert_eq!(
+            read_order::take(),
+            [
+                "reply",
+                "signed_questions",
+                "listed_questions",
+                "provider_messages"
+            ]
+        );
+        assert_eq!(
+            output["current_read"],
+            json!({"schema":1,"run_id":run,"conversation_id":conversation,"reply_id":null,
+                "attention_signature":null,"attention_complete":true})
+        );
+        // Without the flag nothing is signed and no field is added.
+        let plain = inspection(name, 0, None, false).unwrap();
+        assert_eq!(
+            read_order::take(),
+            ["reply", "listed_questions", "provider_messages"]
+        );
+        assert!(plain.get("current_read").is_none());
+        // As `hgs read`, a recurring job keeps its already read newer reply current;
+        // other sessions report the summary's reply even when a newer one was read.
+        atomic(&root().join("read-marks.json"), &json!({"version":1,"sessions":{name:{conversation:
+            {"conversation_id":conversation,"reply_id":"8:200.5","attention_signature":null,"at":1.0}}}}).to_string()).unwrap();
+        let summary = |recurring: u64| {
+            json!({"run_id":run,"conversation_id":conversation,
+            "reply_id":"7:100.5","reply_at":100.5,"schedules":{"recurring":recurring}})
+        };
+        let reply = |recurring| {
+            read_marks::current_read(name, &record, summary(recurring), false).unwrap()["reply_id"]
+                .clone()
+        };
+        assert_eq!(reply(1), json!("8:200.5"));
+        assert_eq!(reply(0), json!("7:100.5"));
+        read_order::take();
+        // A record without a conversation has nothing a mark could name.
+        let mut unbound = record.clone();
+        unbound["conversation_id"] = json!("");
+        assert!(read_marks::current_read(name, &unbound, summary(0), false).is_none());
     }
 }
 

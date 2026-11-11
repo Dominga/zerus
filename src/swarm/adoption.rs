@@ -451,9 +451,9 @@ fn read_primary(directory: &Path, catalog: &Catalog) -> Result<RawComponent> {
     if let Some(bytes) = &raw {
         unique_bytes(bytes, "primary ID membership graph")?;
     }
+    // from_read already validated the view with the main-catalog context.
     let primary = Memberships::from_read(catalog, &read)
         .map_err(|error| anyhow::anyhow!("invalid primary ID membership: {error:#}"))?;
-    primary.view(catalog)?;
     let canonical = primary.bytes()?;
     let count = match &raw {
         Some(bytes) => bounded::<Catalog>(bytes, "primary ID membership graph")?
@@ -2113,10 +2113,10 @@ fn decode_primary_metrics(
     if let Some(bytes) = &raw {
         unique_bytes(bytes, "primary ID membership graph")?;
     }
-    let primary = Memberships::from_read(catalog, &read)?;
     // The view carries the main catalog's machine redirects; a valid causal
     // edge from an old machine key to its canonical child validates only here.
-    let view = primary.view(catalog)?;
+    // It is the view of from_read's own single validation.
+    let (primary, view) = Memberships::from_read_view(catalog, &read)?;
     let canonical = primary.bytes()?;
     let count = match &raw {
         Some(bytes) => bounded::<Catalog>(bytes, "primary ID membership graph")?

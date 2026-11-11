@@ -1137,6 +1137,53 @@ mod tests {
         assert_eq!(counts, [1, 0, 1, 0]);
     }
 
+    #[test]
+    fn over_bound_outcomes_are_preserved() {
+        isolated("overflow_outcomes_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn overflow_outcomes_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // The warm changed-binding check has the same RECORDS bound as the
+        // complete scan, so these actual over-bound outcomes are unavailable.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("overflow-outcomes-home");
+        let native = "session-overflow-outcomes";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        for index in 0..provider_binding::RECORDS_FOR_TEST {
+            let name = format!("dsh/example/fill-{index}");
+            let record = claim_record(&name, &format!("session-fill-{index}"), &home);
+            fs::write(provider.label_path(&name), record.to_string()).unwrap();
+        }
+        let mut other = claim_record("dsh/example/other", "session-other", &home);
+        provider.save(&mut other).unwrap();
+        let warm = provider.native_caller(native, &home);
+        println!("overflow-warm-current={warm:?}");
+        assert!(warm.unwrap_err().contains("metadata bound"));
+        let absent = provider.native_caller("session-absent", &home);
+        println!("overflow-warm-absent={absent:?}");
+        assert!(absent.unwrap_err().contains("metadata bound"));
+        let mut unlisted = claim_record("dsh/example/fill-0", native, &home);
+        unlisted["overflow_change"] = json!(true);
+        fs::write(
+            provider.label_path(string(&unlisted, "name")),
+            unlisted.to_string(),
+        )
+        .unwrap();
+        let changed = provider.native_caller(native, &home);
+        println!("overflow-unlisted-changed={changed:?}");
+        assert!(changed.unwrap_err().contains("metadata bound"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_busy_native_host_refuses_a_claim_quickly() {

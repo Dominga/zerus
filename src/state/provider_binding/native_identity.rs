@@ -391,31 +391,22 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
     let accounted = ledger(provider);
     let now = stamp(provider);
     let over_bound = now[2]["overflow"].is_string();
-    if over_bound
+    let known_overflow = over_bound
         && accounted
             .as_ref()
-            .is_some_and(|ledger| ledger["stamp"] == now || ledger["overflow_stamp"] == now)
-    {
-        // A matching overflow avoids work only; it never supplies an identity.
-        return Err(METADATA_BOUND.into());
-    }
+            .is_some_and(|ledger| ledger["stamp"] == now || ledger["overflow_stamp"] == now);
     let dirty = accounted
         .as_ref()
         .is_some_and(|ledger| ledger["stamp"] != now || ledger["dirty_since"].is_u64());
-    if dirty {
+    if dirty && !known_overflow {
         // A complete scan re-baselines a ledger that fell behind an
         // unaccounted write, instead of making every warm claim pay the
         // bounded changed-binding check (zerus-8g1je). A scan that cannot
         // complete (a busy lock, a bound, or unrelated metadata it refuses)
         // leaves the answer to the warm index and that check, as before.
-        match complete_scan(provider, native, home) {
-            Ok(Scan::Done(record)) => return Ok(record),
-            Ok(Scan::Unavailable(reason)) if over_bound && reason == METADATA_BOUND => {
-                // Its stable witness lets the next lookup avoid this scan.
-                return Err(reason);
-            }
-            Ok(_) => {}
-            Err(_) => {}
+        // A known overflow skips only this scan, never the warm check.
+        if let Ok(Scan::Done(record)) = complete_scan(provider, native, home) {
+            return Ok(record);
         }
     }
     let warm = cached(&cache).filter(|value| {
@@ -463,6 +454,13 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         if !records.is_empty() {
             return unique(records);
         }
+    }
+    if over_bound
+        && ledger(provider)
+            .is_some_and(|ledger| ledger["stamp"] == now || ledger["overflow_stamp"] == now)
+    {
+        // With no warm answer, another bounded scan returns this same error.
+        return Err(METADATA_BOUND.into());
     }
     match complete_scan(provider, native, home)? {
         Scan::Done(record) => Ok(record),

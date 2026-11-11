@@ -210,7 +210,7 @@ impl Migration {
                         Ok(value) => {
                             if self
                                 .catalog
-                                .remember(walk.source, filename, &value)
+                                .remember(walk.source, &entry.path(), &value)
                                 .is_err()
                             {
                                 self.catalog.error(walk.source, filename, "corrupt")?;
@@ -251,6 +251,22 @@ impl Migration {
         Ok(false)
     }
 }
+/// Bounded discovery for the canonical history indexer. The detached worker
+/// stays the long-running owner; this only keeps a synchronous indexer from
+/// waiting on worker scheduling, one short budget at a time.
+pub(super) fn advance(state: &Path, budget: Duration) -> Result<bool> {
+    let deadline = Instant::now() + budget;
+    let mut migration = Migration::new(state)?;
+    loop {
+        if migration.step()? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
+}
+
 pub(super) fn worker(state: &Path) -> Result<i32> {
     let Some(_guard) = try_guard(&state.join("receipt-index-worker.lock"))? else {
         return Ok(0);

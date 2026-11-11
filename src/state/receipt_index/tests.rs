@@ -17,7 +17,7 @@ fn put(catalog: &Catalog, source: Source, value: &Value) -> PathBuf {
     let filename = format!("{}.json", string(value, "request_id"));
     let path = directory.join(&filename);
     fs::write(&path, value.to_string()).unwrap();
-    catalog.remember(source, &filename, value).unwrap();
+    catalog.remember(source, &path, value).unwrap();
     path
 }
 fn names(page: &Page) -> Vec<String> {
@@ -43,7 +43,10 @@ fn twelve_thousand_foreign_receipts_do_not_fill_the_target_window() {
             catalog
                 .remember(
                     Source::Terminal,
-                    &format!("{}.json", record["request_id"].as_str().unwrap()),
+                    &catalog
+                        .state
+                        .join(Source::Terminal.directory())
+                        .join(format!("{}.json", record["request_id"].as_str().unwrap())),
                     &record,
                 )
                 .unwrap();
@@ -102,7 +105,10 @@ fn pages_keep_the_original_snapshot_while_new_receipts_arrive() {
         catalog
             .remember(
                 Source::Terminal,
-                &format!("{}.json", value["request_id"].as_str().unwrap()),
+                &catalog
+                    .state
+                    .join(Source::Terminal.directory())
+                    .join(format!("{}.json", value["request_id"].as_str().unwrap())),
                 &value,
             )
             .unwrap();
@@ -223,13 +229,7 @@ fn missing_corrupt_and_rebound_originals_are_explicit_errors() {
     foreign["conversation_id"] = json!("foreign");
     foreign["digest"] = json!("changed");
     fs::write(&path, foreign.to_string()).unwrap();
-    catalog
-        .remember(
-            Source::Terminal,
-            path.file_name().unwrap().to_str().unwrap(),
-            &foreign,
-        )
-        .unwrap();
+    catalog.remember(Source::Terminal, &path, &foreign).unwrap();
     assert_eq!(catalog.original(&locator).unwrap_err(), "binding_changed");
     assert!(catalog
         .page(&scope("foreign", "run", ""), "", 100, true)
@@ -330,6 +330,7 @@ fn unavailable_index_does_not_change_authoritative_receipt_persistence() {
     }
 }
 
+
 #[test]
 fn a_lost_row_invalidates_cursors_and_is_rediscovered_without_original_changes() {
     let temp = tempfile::tempdir().unwrap();
@@ -376,4 +377,164 @@ fn a_lost_row_invalidates_cursors_and_is_rediscovered_without_original_changes()
     assert_eq!(restored.metadata["unattributed_errors"], 0);
     assert_eq!(fs::read(one).unwrap(), original);
     assert!(catalog.page(&scope, cursor, 1, true).is_err());
+
+fn change_count(catalog: &Catalog) -> i64 {
+    catalog
+        .db
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn changed_pages_advance_a_bounded_scope_without_foreign_receipts() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 10.0));
+    put(&catalog, Source::Terminal, &value(2, "wanted", "run", "", 11.0));
+    let transaction = catalog.db.unchecked_transaction().unwrap();
+    for n in 3..=40 {
+        let record = value(n, "foreign", "run", "", n as f64);
+        catalog
+            .remember(
+                Source::Terminal,
+                &catalog
+                    .state
+                    .join(Source::Terminal.directory())
+                    .join(format!("{}.json", record["request_id"].as_str().unwrap())),
+                &record,
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    let scope = scope("wanted", "run", "");
+    let first = catalog.changed_page(&scope, "", 1, true).unwrap();
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(
+        first.rows[0].locator.id,
+        uuid::Uuid::from_u128(1).to_string()
+    );
+    assert!(!first.drained);
+    assert_eq!(first.rows[0].change, 1);
+    let second = catalog.changed_page(&scope, &first.cursor, 10, true).unwrap();
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(
+        second.rows[0].locator.id,
+        uuid::Uuid::from_u128(2).to_string()
+    );
+    assert!(second.drained);
+    let third = catalog.changed_page(&scope, &second.cursor, 10, true).unwrap();
+    assert!(third.rows.is_empty());
+    assert!(third.drained);
+}
+
+#[test]
+fn an_update_beyond_the_frozen_upper_waits_for_the_next_chain() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 10.0));
+    let second = value(2, "wanted", "run", "", 11.0);
+    let path = put(&catalog, Source::Terminal, &second);
+    assert_eq!(change_count(&catalog), 2);
+    let scope = scope("wanted", "run", "");
+    let first = catalog.changed_page(&scope, "", 1, true).unwrap();
+    assert_eq!(first.rows.len(), 1);
+    // The second original changes while the first chain is live. The binding
+    // is immutable; the content stamp and change move beyond the frozen upper.
+    let mut updated = second.clone();
+    updated["status"] = json!("completed");
+    fs::write(&path, updated.to_string()).unwrap();
+    catalog.remember(Source::Terminal, &path, &updated).unwrap();
+    assert_eq!(change_count(&catalog), 3);
+    let frozen = catalog.changed_page(&scope, &first.cursor, 10, true).unwrap();
+    assert!(
+        frozen
+            .rows
+            .iter()
+            .all(|row| row.locator.id != uuid::Uuid::from_u128(2).to_string()),
+        "a status update leaked into the frozen chain"
+    );
+    assert!(frozen.drained);
+    let next = catalog.changed_page(&scope, &frozen.cursor, 10, true).unwrap();
+    assert_eq!(next.rows.len(), 1);
+    assert_eq!(
+        next.rows[0].locator.id,
+        uuid::Uuid::from_u128(2).to_string()
+    );
+    assert_eq!(next.rows[0].change, 3);
+    assert_eq!(
+        catalog.original(&next.rows[0].locator).unwrap()["status"],
+        "completed"
+    );
+}
+
+#[test]
+fn change_cursors_are_bound_to_the_index_epoch_and_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 10.0));
+    let page = catalog
+        .changed_page(&scope("wanted", "run", ""), "", 10, true)
+        .unwrap();
+    assert_eq!(
+        catalog
+            .changed_page(&scope("other", "run", ""), &page.cursor, 10, true)
+            .unwrap_err(),
+        CURSOR_REJECTED
+    );
+    catalog
+        .db
+        .execute("UPDATE receipt_meta SET value='other' WHERE key='epoch'", [])
+        .unwrap();
+    assert_eq!(
+        catalog
+            .changed_page(&scope("wanted", "run", ""), &page.cursor, 10, true)
+            .unwrap_err(),
+        CURSOR_REJECTED
+    );
+}
+
+#[test]
+fn twelve_thousand_foreign_receipts_stay_out_of_a_changed_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let transaction = catalog.db.unchecked_transaction().unwrap();
+    for n in 1..=12_000 {
+        let record = value(
+            n,
+            if n <= 2 { "wanted" } else { "foreign" },
+            "run",
+            "",
+            n as f64,
+        );
+        catalog
+            .remember(
+                Source::Terminal,
+                &catalog
+                    .state
+                    .join(Source::Terminal.directory())
+                    .join(format!("{}.json", record["request_id"].as_str().unwrap())),
+                &record,
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    let page = catalog
+        .changed_page(&scope("wanted", "run", ""), "", 100, true)
+        .unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.locator.id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            uuid::Uuid::from_u128(1).to_string(),
+            uuid::Uuid::from_u128(2).to_string()
+        ]
+    );
+    assert!(page.drained);
+ 97301104d (Use the bounded receipt locator for the canonical history import (zerus-1naad))
 }

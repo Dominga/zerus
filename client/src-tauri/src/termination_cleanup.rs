@@ -113,7 +113,15 @@ impl Job {
                 .all(|entry| entry.status != Some(Status::Unconfirmed))
     }
     fn dismissible(&self) -> bool {
-        !self.busy && !self.unfinished_programs() && !self.program_review_pending
+        !self.busy
+            && !self.unfinished_programs()
+            && (!self.program_review_pending || self.released_lookup_only())
+    }
+    /// zerus-yxopj: a lookup-only row whose program custody has physically
+    /// retired has nothing left to wait for. Dismiss may drop it; it still
+    /// never offers Check again, Force, a consent or a removal.
+    fn released_lookup_only(&self) -> bool {
+        self.lookup_only && !self.has_programs()
     }
 
     fn unfinished_programs(&self) -> bool {
@@ -1643,12 +1651,15 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
     assert!(stopped.can_force());
     assert!(!stopped.reviewable_refusal());
     assert!(!stopped.current());
+    // zerus-yxopj: the Force variant's folder is not Zerus-owned, so only the
+    // lookup-only guard keeps "Remove anyway" from its released row.
+    let owner = if force { "" } else { "owner-1" };
     let mut entry = Entry::terminated(
         "studio",
         "studio",
         "/home/example/repo-work-1",
         "/home/example/repo/.git",
-        "owner-1",
+        owner,
         None,
     )
     .unwrap();
@@ -1692,6 +1703,9 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         job.lookup_only = false;
     }
     lock(&state.0.model).jobs.push_back(job);
+    // zerus-yxopj: while its program is held, the row cannot be dismissed.
+    assert!(!lock(&state.0.model).view().rows[0].can_dismiss);
+    assert!(lock(&state.0.model).dismiss("job").is_err());
     let emitted = std::cell::Cell::new(0);
     assert!(matches!(
         program_pipeline::watch_once(&state.0, "job", |_| emitted.set(emitted.get() + 1)),
@@ -1728,10 +1742,22 @@ pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: boo
         assert!(!row.ready);
         assert!(!row.can_force);
         assert_eq!(row.force_revision, None);
-        assert!(!row.can_dismiss);
+        assert!(
+            row.can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
         assert!(!row.can_remove_anyway);
+        assert!(
+            model.manual_entry("job").is_err(),
+            "a released lookup-only row offered Remove anyway"
+        );
+        assert!(!job.manual_review, "a released row reached Remove");
         assert!(!view.can_clear);
     }
+    // Dismiss only drops the settled row; nothing else is granted.
+    let mut model = lock(&state.0.model);
+    model.dismiss("job").unwrap();
+    assert!(model.jobs.is_empty(), "the dismissed row stayed");
 }
 
 /// The program path's own job after production record_stop published a real
@@ -1885,6 +1911,12 @@ pub(crate) fn assert_real_unconfirmed_stops(
                 Some(ProgramRetirement::StopUnconfirmed)
             );
         }
+        // zerus-yxopj: a held stop, even a refusal, cannot be dismissed.
+        assert!(!lock(&state.0.model).view().rows[0].can_dismiss);
+        assert!(
+            lock(&state.0.model).dismiss("job").is_err(),
+            "a held stop was dismissed"
+        );
         // The passive watcher's own passes; only physical retirement releases.
         let until = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1909,6 +1941,14 @@ pub(crate) fn assert_real_unconfirmed_stops(
         assert!(model.jobs[0].lookup_only);
         let row = &model.view().rows[0];
         assert!(!row.can_check && !row.ready && !row.can_force);
+        assert!(
+            row.can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
+        drop(model);
+        let mut model = lock(&state.0.model);
+        model.dismiss("job").unwrap();
+        assert!(model.jobs.is_empty(), "the dismissed row stayed");
     }
 
     let state = TerminationCleanup::default();
@@ -2004,6 +2044,32 @@ pub(crate) fn assert_real_held_custody(
             "the retired custody was kept"
         );
         assert!(model.jobs[0].lookup_only);
+        // zerus-yxopj: the released row may be dismissed; an unknown removal
+        // outcome stays recorded for its folder and is never replayed.
+        assert!(
+            model.view().rows[0].can_dismiss,
+            "a released lookup-only row could not be dismissed"
+        );
+        let unknown = model.jobs[0]
+            .cleanup
+            .entries
+            .iter()
+            .any(|entry| entry.status == Some(Status::Unconfirmed));
+        drop(model);
+        let mut model = lock(&state.0.model);
+        model.dismiss("job").unwrap();
+        if unknown {
+            assert!(model.jobs[0].dismissed);
+            assert!(
+                model.unknown_folder(&model.jobs[0]),
+                "the unknown removal outcome was dropped"
+            );
+            assert!(model.view().rows.is_empty());
+        } else {
+            assert!(model.jobs.is_empty(), "the dismissed row stayed");
+        }
+        drop(model);
+        assert!(check(state).is_err());
     }
 
     // Continuation::normal refused: the source went away before the stop.

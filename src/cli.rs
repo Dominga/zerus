@@ -119,6 +119,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] hooks --account ID [--repair] --json   inspect or explicitly repair handlers
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] inspect <session> --read-observation   raw shared reads for a current journal-backed main session
+       hgs [@host] inspect <session> --current-read   with the reply and attention a read mark may acknowledge now
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
        hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks

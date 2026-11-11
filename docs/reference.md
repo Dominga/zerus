@@ -6638,6 +6638,22 @@ These fields are not supplied for archives, subagents or other provider-specific
 inspection paths. No shared-read file, lock, delivery or background worker is
 created or changed by this observer.
 
+`hgs inspect NAME --current-read` adds `current_read` for a current tracked main
+session with a conversation: `schema` 1, `run_id`, `conversation_id`, `reply_id`
+(or null) and `attention_signature` (or null), the values `hgs read` would accept
+now, plus `attention_complete`. These come from the same inspection a device
+displays. The reply is captured before provider messages are read, so its final
+message is in that read or an earlier one. The questions it signs are read
+before the inspection lists its own, so every signed question that is still
+pending was listed. When questions cannot be indexed within the shared one-second
+question budget, `attention_complete` is false and the signature matches nothing
+`hgs read` accepts. A recurring job keeps its already read reply current, as
+`hgs read` does. Its only extra work is that bounded question check, plus the marks
+file read for a recurring job. It acknowledges nothing and is absent without the
+flag and for archives, subagents, DeepSeek and OpenCode. A
+device acknowledges these values only after it has shown them; `hgs read` still
+applies each one only while it is current.
+
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances
 the cursor. Reset it when conversation ID changes. `history_truncated` discloses

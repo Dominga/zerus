@@ -686,6 +686,17 @@ conversation in its scope, the captured evidence would clear a phone-local
 reminder or advance past replies counted unread; the predicate follows the same
 skip rules as the ordered edit.
 
+When the computer's `hgs` offers `inspect <session> --current-read`, the
+connector asks for it on every main inspection, never for an archive or
+subagent. The answer's `current_read` names the reply and attention signature
+that `hgs read` would accept now, taken from that same inspection (see
+[Existing session snapshots](reference.md#existing-session-snapshots)). The connector
+keeps the field only when its run and conversation are the inspection's own and
+its values are ones a `mark_read` may carry. When the relay bound drops any of
+the newest rows, it removes the field, because a phone binds it to the newest
+row it displays. Older `hgs` versions and the legacy Python connector send no
+such field, so their phones keep the canonical-head requirement.
+
 Android Sessions publishes catalog rows with local read decoration in one
 background-prepared update and retains unchanged card identities. Its reply
 badges follow the owning computer's shared reply identity. A retained shared read

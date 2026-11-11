@@ -1809,17 +1809,19 @@ fn claude_model_opened(
 ) -> Result<()> {
     open_model_tracked(name, request, Some(opened))?;
     let selected = (|| -> Result<()> {
-        let picker = wait_until(|| {
+        let mut observed = wait_until(|| {
             let record = checked(name, request, false)?;
-            Ok(claude_picker(&capture(&record)?))
+            Ok(claude_picker(&capture(&record)?).map(|picker| (record, picker)))
         })?;
-        if !picker.session_only && picker.section.is_none() {
+        if !observed.1.session_only && observed.1.section.is_none() {
             return Err("Claude's model picker does not offer a session-only choice; use Terminal".into());
         }
         let mut visited = Vec::new();
         loop {
-            let record = checked(name, request, false)?;
-            let picker = claude_picker(&capture(&record)?).ok_or("model picker changed; inspect Terminal")?;
+            // The checked observation that found this row supplies its next
+            // key's fresh turn. Reprobing it doubled native reads and could
+            // exhaust the original host deadline before failure cleanup.
+            let (record, picker) = observed;
             if claude_row_is(&picker.row, &model.label) {
                 break;
             }
@@ -1831,11 +1833,11 @@ fn claude_model_opened(
             visited.push(position);
             let key = if picker.section == Some(ClaudeSection::Collapsed) { "Enter" } else { "Down" };
             send_key(&record, key)?;
-            wait_until(|| {
+            observed = wait_until(|| {
                 let record = checked(name, request, false)?;
-                let moved = claude_picker(&capture(&record)?)
-                    .is_some_and(|next| next.row != picker.row || next.section != picker.section);
-                Ok(moved.then_some(()))
+                Ok(claude_picker(&capture(&record)?)
+                    .filter(|next| next.row != picker.row || next.section != picker.section)
+                    .map(|next| (record, next)))
             })?;
         }
         for _ in 0..=model.efforts.len() {

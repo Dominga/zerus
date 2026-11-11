@@ -6,12 +6,15 @@ HOME/XDG/TMPDIR/TMUX_TMPDIR. Build the app with the switch identity first:
 TAURI_CONFIG='{"identifier":"com.hgdev.hgs-tray"}' cargo build --locked     --manifest-path client/src-tauri/Cargo.toml --features media,tauri/custom-protocol
 Then run this script with --app and a new --output directory.
 
-It runs only inside bwrap with a private /tmp, network and /run/user, and
-refuses to start the app while a canonical GUI guard is reachable: that guard
-(/tmp/com.hgdev.hgs-tray-<uid>, instance_guard.rs) ignores HOME and TMPDIR,
-so an unsandboxed start forwards to the person's running GUI (zerus-06hh0).
+It runs only inside gui_sandbox.sandboxed() (bwrap with a private /tmp,
+/run/user, network and IPC), and the worker refuses to start the app while a
+canonical GUI guard is reachable: that guard (/tmp/com.hgdev.hgs-tray-<uid>,
+instance_guard.rs) ignores HOME and TMPDIR, so an unsandboxed start forwards
+to the person's running GUI (zerus-06hh0, zerus-5a99f).
 """
-import os, pathlib, subprocess, tempfile, json, importlib.util, shutil, re, time, threading, http.server, urllib.parse, unittest
+import os, pathlib, subprocess, sys, tempfile, json, importlib.util, shutil, re, time, threading, http.server, urllib.parse, unittest
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / 'client'
 BINARY = pathlib.Path(os.environ.get('ZERUS_NATIVE_SMOKE_APP', str(CLIENT / 'src-tauri/target/debug/zerus-client')))
@@ -34,17 +37,6 @@ async function resource(url) {
  await Promise.all(['tauri://localhost/index.html','asset://localhost/private-fixture','ipc://localhost/probe','zerus-file://localhost/private-fixture','file:///private-fixture'].map(resource));
  await fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:location.pathname,checks,scriptPopupBlocked,rects:Object.fromEntries([...document.querySelectorAll('a,button')].map(el=>{const r=el.getBoundingClientRect();return [el.id,{x:r.x,y:r.y,width:r.width,height:r.height}]}))})});
 })();</script>'''
-
-def canonical_guard():
-    """instance_guard::directory(): a fixed /tmp path, never HOME or TMPDIR."""
-    return pathlib.Path(f'/tmp/com.hgdev.hgs-tray-{os.geteuid()}')
-
-
-def refuse_reachable_guard():
-    if canonical_guard().exists():
-        raise SystemExit(f'refusing: the canonical GUI guard {canonical_guard()} is reachable; '
-                         'a start would reach the running GUI. Run only through this script, inside bwrap.')
-
 
 class NativeSmoke(unittest.TestCase):
 
@@ -124,6 +116,11 @@ class NativeSmoke(unittest.TestCase):
         env['PYTHONWARNINGS'] = 'ignore::DeprecationWarning'
         env['PATH'] = str(helpers) + os.pathsep + env['PATH']
         env.update(ZERUS_CLIENT_HEADLESS='1', ZERUS_CLIENT_REPLAY=str(CLIENT / 'fixtures/replay.ndjson'), ZERUS_CLIENT_HGS=str(hgs), ZERUS_CLIENT_QUERY='native-ui-smoke=1', ZERUS_CLIENT_PERF='smoke', ZERUS_CLIENT_SMOKE_FILE=str(file), ZERUS_CLIENT_SMOKE_NOW='1793000100')
+        # The smoke's own second starts must forward to the app it started, as a
+        # person's would. A measurement start (ZERUS_CLIENT_PERF) never forwards
+        # (zerus-5a99f), so they are ordinary starts; inside the sandbox the only
+        # GUI they can reach is this smoke's app.
+        forwarding = {key: value for key, value in env.items() if key != 'ZERUS_CLIENT_PERF'}
         for k in ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'TMPDIR', 'TMUX_TMPDIR']:
             os.environ[k] = env[k]
         import gi
@@ -156,7 +153,7 @@ class NativeSmoke(unittest.TestCase):
             with (base / 'log.ndjson').open('a') as f:
                 f.write(json.dumps({'argv': ['native-smoke-control', stage], 'stdin': ''}) + '\n')
         command = [str(BINARY), '--sessions']
-        refuse_reachable_guard()
+        gui_sandbox.refuse_reachable_guard()
         print('EXECUTED', json.dumps(command), 'private bus/Xvfb/allowlist HOME/XDG/TMPDIR/TMUX_TMPDIR', flush=True)
         with log.open('w') as output:
             process = subprocess.Popen(command, cwd=base, env=env, stdout=output, stderr=subprocess.STDOUT)
@@ -328,7 +325,7 @@ class NativeSmoke(unittest.TestCase):
                         print('PASS attachment disposition before MIME: binary Cancel, text Save exact bytes, HTML Cancel without rendering or script execution', flush=True)
 
                         for flags in [[], ['--sessions']]:
-                            second = subprocess.run([str(BINARY), *flags], env=env, capture_output=True, text=True, timeout=8)
+                            second = subprocess.run([str(BINARY), *flags], env=forwarding, capture_output=True, text=True, timeout=8)
                             self.assertEqual(second.returncode, 0, second.stderr)
                             # The canonical guard forwards silently (ec9574f8f); the first app stays.
                             self.assertIsNone(process.poll(), 'a second start replaced the running app')
@@ -392,10 +389,10 @@ class NativeSmoke(unittest.TestCase):
                             wait_for(lambda: not mapped(), 'Close did not hide main with native child')
                         close_window()
                         for flags in [[], ['--background']]:
-                            second = subprocess.run([str(BINARY), *flags], cwd=base, env=env, capture_output=True, text=True, timeout=8)
+                            second = subprocess.run([str(BINARY), *flags], cwd=base, env=forwarding, capture_output=True, text=True, timeout=8)
                             self.assertEqual(second.returncode, 0, second.stderr)
                             self.assertFalse(mapped(), 'plain Show presented hidden window')
-                        second = subprocess.run([str(BINARY), '--sessions'], cwd=base, env=env, capture_output=True, text=True, timeout=8)
+                        second = subprocess.run([str(BINARY), '--sessions'], cwd=base, env=forwarding, capture_output=True, text=True, timeout=8)
                         self.assertEqual(second.returncode, 0, second.stderr)
                         wait_for(mapped, '--sessions did not present retained main with native child')
                         wait_for(lambda: screen('sessions-restored') == (26, 96, 78), '--sessions did not restore native frame after showing main')
@@ -418,7 +415,7 @@ class NativeSmoke(unittest.TestCase):
                             if way == 'tray':
                                 shown = subprocess.run(['/usr/bin/gdbus', 'call', '--session', '--dest', f'org.kde.StatusNotifierItem-{process.pid}-1', '--object-path', '/StatusNotifierItem', '--method', 'org.kde.StatusNotifierItem.Activate', '0', '0'], env=env, capture_output=True, text=True, timeout=8)
                             else:
-                                shown = subprocess.run([str(BINARY), '--sessions'], cwd=base, env=env, capture_output=True, text=True, timeout=8)
+                                shown = subprocess.run([str(BINARY), '--sessions'], cwd=base, env=forwarding, capture_output=True, text=True, timeout=8)
                             self.assertEqual(shown.returncode, 0, shown.stderr)
                             wait_for(mapped, f'Show ({way}) did not present main')
                             time.sleep(0.4)
@@ -451,7 +448,6 @@ class NativeSmoke(unittest.TestCase):
 
 def main():
     import argparse
-    import sys
     import uuid
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--app', type=pathlib.Path, default=CLIENT / 'src-tauri/target/debug/zerus-client')
@@ -461,7 +457,7 @@ def main():
     if sys.platform != 'linux':
         parser.error('Linux only: other platforms have no private canonical GUI guard here')
     if args.private_run:
-        refuse_reachable_guard()
+        gui_sandbox.refuse_reachable_guard()
         if args.private_run != os.environ.get('ZERUS_NATIVE_SMOKE_PRIVATE'):
             parser.error('the private inner process must be launched by this script')
         unittest.main(argv=[sys.argv[0]], verbosity=2)
@@ -480,19 +476,7 @@ def main():
         env.update(GDK_BACKEND='x11', WAYLAND_DISPLAY='zerus-native-ui-nonexistent-wayland', NO_AT_BRIDGE='1', WEBKIT_DISABLE_DMABUF_RENDERER='1', GSETTINGS_BACKEND='memory', PYTHONWARNINGS='ignore::DeprecationWarning', ZERUS_NATIVE_SMOKE_PRIVATE=nonce, ZERUS_NATIVE_SMOKE_APP=str(app), ZERUS_NATIVE_SMOKE_OUTPUT=str(output))
         config = base / 'bus.conf'
         config.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(base) + '</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/><allow own="*"/><allow receive_sender="*"/><allow eavesdrop="true"/></policy></busconfig>')
-        bwrap = shutil.which('bwrap')
-        if not bwrap:
-            parser.error('bubblewrap (bwrap) is required: there is no unsandboxed mode')
-        # Private /tmp (the canonical guard and X sockets), network (abstract
-        # sockets) and /run/user (the person's session bus and display).
-        sandbox = [bwrap, '--dev-bind', '/', '/', '--tmpfs', '/tmp']
-        runtime = pathlib.Path(f'/run/user/{os.geteuid()}')
-        if runtime.is_dir():
-            sandbox += ['--tmpfs', str(runtime)]
-        for keep in [base, output]:
-            sandbox += ['--bind', str(keep), str(keep)]
-        sandbox += ['--unshare-net', '--unshare-ipc', '--die-with-parent', '--']
-        command = sandbox + ['dbus-run-session', '--config-file', str(config), '--', 'xvfb-run', '-a', '-s', '-screen 0 1440x900x24', sys.executable, str(pathlib.Path(__file__).resolve()), '--app', str(app), '--output', str(output), '--private-run', nonce]
+        command = gui_sandbox.sandboxed(['dbus-run-session', '--config-file', str(config), '--', 'xvfb-run', '-a', '-s', '-screen 0 1440x900x24', sys.executable, str(pathlib.Path(__file__).resolve()), '--app', str(app), '--output', str(output), '--private-run', nonce], keep=[base, output])
         print('EXECUTED bwrap private /tmp/net/run-user, private D-Bus/Xvfb; child env from scratch; no owner desktop/session bus', flush=True)
         process = subprocess.Popen(command, cwd=ROOT, env=env, start_new_session=True)
         try:

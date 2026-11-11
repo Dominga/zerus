@@ -1078,7 +1078,9 @@ async function resumeStatusStep() {
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
-  document.querySelector<HTMLElement>(".scard.selected")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 400, clientY: 300 }));
+  // Session actions holds this entry since the row menu was simplified
+  // (00c72fa7f, expandedEntries); the card's context menu no longer does.
+  document.querySelector<HTMLButtonElement>('[data-tip="Session actions"]')!.click();
   await until(() => [...document.querySelectorAll<HTMLButtonElement>("button")].some((candidate) => candidate.textContent?.trim() === "Show running commands"), 3000, "the background-job menu entry did not appear");
   const commands = button("Show running commands");
   if (commands.disabled) throw new Error("the background-job menu entry stayed disabled with live jobs and Processes on");

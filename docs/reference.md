@@ -843,9 +843,12 @@ only when its host reports `human_request: false` and the row itself shows no
 such approval or sign-in; a host that does not report it keeps every request
 visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
 count, and gray badges and edge, while its status, Activity, unread reply,
-questions and approvals stay as they are and it remains in the Active and
-Needs attention filters. Nothing is marked read. Review later, the person's
-own mark, still counts. A person-only request notifies as for any session.
+questions and approvals stay as they are. Nothing is marked read. Unlike a
+muted session, it leaves the **Needs attention** filter, and **Active** unless
+it is working, in Background, Scheduled or has a draft: its unread reply, retry
+or provider limit waits for the parent (zerus-sa9qn.18; Android and iOS follow
+in zerus-sa9qn.19). Review later, the person's own mark, still counts and lists
+it. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
@@ -1124,7 +1127,7 @@ identities, so a device that missed the muted interval does not announce those
 old events when it reconnects. This does not mark the underlying work as read.
 **Unmute** restores future notifications without replaying events seen while
 muted or acknowledging pending work. Muted sessions remain available in the
-Needs attention filter.
+Needs attention filter, and its tab count includes them.
 
 The desktop service accepts notification clicks only for a live, unblocked
 attention request on Linux, macOS and Windows. After a read, mute or resolution
@@ -1449,8 +1452,10 @@ name moves to it.
 
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
-each session once. Desktop and Android use the same filter IDs and membership
-rules; drafts remain local to each device. Drafts for visible subagents also keep
+each session once. Each status filter's tab count is the number of sessions it
+lists before the text search, scoped like the list, and a parent or child that
+fails the filter is never listed for its relative. Desktop and Android use the
+same filter IDs and membership rules; drafts remain local to each device. Drafts for visible subagents also keep
 their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this

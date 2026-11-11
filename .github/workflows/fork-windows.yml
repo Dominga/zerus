@@ -97,9 +97,12 @@ jobs:
       - name: Rust tests
         run: |
           mkdir -p artifacts/test-results
-          cargo test --locked --features socraticode </dev/null 2>&1 | tee artifacts/test-results/rust.log
+          # Owner, 2026-11-11: every test binary runs, and a test that failed is
+          # run once more alone; only one that fails twice fails the build
+          # (scripts/ci/cargo-test-retry.py names the unstable ones).
+          python scripts/ci/cargo-test-retry.py --log artifacts/test-results/rust.log -- cargo test --locked --features socraticode
           # WhiteWh fork: the mobile gateway's connector (docs/fork-updates.md).
-          cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml </dev/null 2>&1 | tee artifacts/test-results/connector.log
+          python scripts/ci/cargo-test-retry.py --log artifacts/test-results/connector.log -- cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml
       - name: Save Rust cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

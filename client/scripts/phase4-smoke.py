@@ -90,7 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=CLIENT / "src-tauri/target/release/zerus-client")
     parser.add_argument("--scratch", type=Path, required=True, help="a new directory; logs are kept here")
-    parser.add_argument("--only", help="run one named phase4 step")
+    parser.add_argument("--only", help="run one named phase4 step, or a comma-separated subset in sequence order")
     parser.add_argument("--native-wheel", action="store_true", help="drive variable-scroll with trusted wheel events in its private Xvfb")
     parser.add_argument("--static-wheel", action="store_true", help="no appends; separate wheel gestures with long idle pauses")
     parser.add_argument("--renderer", choices=("shm", "dmabuf"), default="shm")

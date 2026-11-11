@@ -171,6 +171,9 @@ async function attachStep(path: string) {
 
 async function sendStep(path: string) {
   await select(API);
+  // The attach step's composer call may still be settling (operationLocked):
+  // wait for the observed Send state rather than reading it once.
+  await until(() => composer.sendEnabled(), 10_000, "Send is disabled").catch(() => undefined);
   if (!composer.sendEnabled()) {
     const view = composer.view();
     throw new Error(`Send is disabled: ${JSON.stringify({ status: composer.status(), locked: composer.locked(), operationLocked: composer.operationLocked(),
@@ -686,13 +689,29 @@ async function mediaPlaybackStep() {
   card.querySelector<HTMLButtonElement>('button[aria-label="Show transcript"]')?.click();
   const play = card.querySelector<HTMLButtonElement>(".vp-btn")!;
   const position = () => Number(card.querySelector(".vp-wave")!.getAttribute("aria-valuenow"));
+  const playing = () => play.getAttribute("aria-pressed") === "true";
+  const kept = () => card.isConnected && document.getElementById(card.id) === card && playing();
+  const failure = () => card.querySelector(".vm-error")?.textContent ?? "";
+  const state = () => {
+    const audio = card.querySelector<HTMLAudioElement>("audio");
+    return JSON.stringify({ pressed: play.getAttribute("aria-pressed"), busy: play.getAttribute("aria-busy"), position: position(), error: failure(),
+      connected: card.isConnected, audio: audio && { ready: audio.readyState, network: audio.networkState, paused: audio.paused, code: audio.error?.code ?? null, src: !!audio.getAttribute("src") } });
+  };
   play.click();
-  await until(() => position() > 0 && play.getAttribute("aria-pressed") === "true", 2000, "voice playback did not start");
+  // Reading the recording through the CLI and starting the media pipeline take
+  // seconds on a loaded host: wait for observed playback, and stop on an error.
+  await until(() => !!failure() || (position() > 0 && playing()), 20_000, "voice playback did not start")
+    .catch((error) => { throw new Error(`${error.message}: ${state()}`); });
+  if (failure()) throw new Error(`voice playback failed: ${state()}`);
   const before = position();
   scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }));
   scroller.scrollTo({ top: 0, behavior: "instant" });
-  await sleep(350);
-  if (!card.isConnected || document.getElementById(card.id) !== card || play.getAttribute("aria-pressed") !== "true" || position() <= before) {
+  // The same row keeps playing out of view: it stays mounted and pressed for
+  // at least 350 ms while its position advances.
+  const scrolled = performance.now();
+  await until(() => !kept() || (position() > before && performance.now() - scrolled >= 350), 10_000, "the playing row did not advance out of view")
+    .catch((error) => { throw new Error(`${error.message}: ${state()}`); });
+  if (!kept() || position() <= before) {
     throw new Error(`scrolling stopped or reset the playing row: ${JSON.stringify({ before, after: position(), connected: card.isConnected, pressed: play.getAttribute("aria-pressed") })}`);
   }
   if (card.querySelector(".vm-text")?.textContent !== "media smoke transcript") throw new Error("scrolling closed the media transcript");
@@ -730,7 +749,11 @@ function watchActivityGeometry() {
         badFrames++;
         if (violations.length < 8) {
           violations.push({ phase, at: performance.now(), report });
-          log(`phase4-geometry-violation ${JSON.stringify({ phase, ...compact(report) })}`);
+          // Where the viewport was against the mounted rows, for diagnosis.
+          const edge = scroller.getBoundingClientRect().top;
+          log(`phase4-geometry-violation ${JSON.stringify({ phase, ...compact(report), top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight,
+            mounted: [report.rows[0].top - edge, report.rows.at(-1)!.bottom - edge], indexes: [report.rows[0].index, report.rows.at(-1)!.index],
+            jump: !!document.querySelector('button[aria-label^="Jump to latest activity"]') })}`);
         }
       }
     }
@@ -808,6 +831,36 @@ async function activityGeometryStep() {
     watch.mark("cached-switch-back");
     await select(DOCS);
     await nextFrames(10);
+
+    // zerus-2n2vk: a cached session left at a reading position restores it on
+    // return. Every revealed frame must show rows, never a blank viewport.
+    watch.mark("reading-switch-away");
+    const reading = document.querySelector<HTMLElement>(".act-scroll")!;
+    const jump = () => !!document.querySelector('button[aria-label^="Jump to latest activity"]');
+    // In DOCS's own fixture rows, whose anchors survive a reload of the
+    // campaign's store-only rows: 1.5 viewports below the top (clear of the
+    // older-page read at OLDER_EDGE) and at least three above the latest
+    // rows, so the restored window cannot overlap the tail window.
+    const readingTop = Math.round(reading.clientHeight * 1.5);
+    if (readingTop > reading.scrollHeight - reading.clientHeight * 4)
+      throw new Error(`the geometry transcript is too short for a reading position: ${JSON.stringify({ height: reading.scrollHeight, viewport: reading.clientHeight })}`);
+    reading.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }));
+    reading.scrollTo({ top: readingTop, behavior: "instant" });
+    // The browser delivers a scroll event before it paints the new offset.
+    // Deliver it in this task, so the sampler never sees the unpainted
+    // moment between the setup's write and that event.
+    reading.dispatchEvent(new Event("scroll"));
+    await until(() => jump() && Math.abs(reading.scrollTop - readingTop) <= 2, 10_000, "DOCS did not leave the latest activity for a reading position");
+    await nextFrames(4);
+    await select(PAGINATION);
+    await nextFrames(6);
+    watch.mark("reading-switch-back");
+    await select(DOCS);
+    const restored = document.querySelector<HTMLElement>(".act-scroll")!;
+    await until(() => restored.querySelector<HTMLElement>(".act-col")?.style.visibility === "visible", 10_000, "the reading position was not revealed");
+    await nextFrames(10);
+    if (!jump() || restored.scrollTop + restored.clientHeight >= restored.scrollHeight - restored.clientHeight)
+      throw new Error(`DOCS did not restore its reading position: ${JSON.stringify({ jump: jump(), saved: readingTop, top: restored.scrollTop, height: restored.scrollHeight, viewport: restored.clientHeight })}`);
   } finally {
     const column = document.querySelector<HTMLElement>(".act-scroll .act-col");
     if (column) column.style.fontFamily = "";
@@ -1171,22 +1224,30 @@ async function approvalStep() {
 
 async function queueStep() {
   await select(RELEASE);
-  await until(() => document.querySelector(".act-queue")?.textContent?.includes("also update the changelog") === true,
+  // Read the panel on every check: a queue refresh may remount it, and a
+  // reference taken once would keep watching a detached copy.
+  const queued = () => document.querySelector<HTMLElement>(".act-queue");
+  await until(() => queued()?.textContent?.includes("also update the changelog") === true,
     10_000, "the native queue did not appear");
-  const panel = document.querySelector(".act-queue")!;
-  await until(() => panel.querySelector(".act-body b")?.textContent === "Queued review"
-    && panel.querySelector(".att-caption")?.textContent?.includes("pasted-image.png") === true,
-  5000, "the queue did not use the outgoing Markdown and receipt attachment renderer");
+  await until(() => queued()?.querySelector(".act-body b")?.textContent === "Queued review"
+    && queued()?.querySelector(".att-caption")?.textContent?.includes("pasted-image.png") === true,
+  5000, "the queue did not use the outgoing Markdown and receipt attachment renderer")
+    .catch((error) => {
+      const shown = queued();
+      throw new Error(`${error.message}: ${JSON.stringify({ panels: document.querySelectorAll(".act-queue").length, bold: shown?.querySelector(".act-body b")?.textContent ?? null,
+        caption: shown?.querySelector(".att-caption")?.textContent ?? null, text: shown?.textContent?.slice(0, 200) ?? null })}`);
+    });
+  const panel = queued()!;
   if (panel.textContent?.includes("Inspect the attached") || panel.textContent?.includes("↳")
     || panel.textContent?.includes("/synthetic/")) throw new Error("raw terminal queue chrome/path leaked into the outgoing preview");
   if (getComputedStyle(panel).borderTopStyle !== "dashed" || !panel.querySelector(".act-queue-head svg"))
     throw new Error("queued messages are missing their pending treatment");
   await until(() => {
-    const image = panel.querySelector<HTMLImageElement>(".att-thumb img");
+    const image = queued()?.querySelector<HTMLImageElement>(".att-thumb img");
     return !!image && image.complete && image.naturalWidth === 1;
   }, 5000, "the exact queued receipt thumbnail did not load");
-  if (button("Send now", panel).disabled) throw new Error("Send now is disabled");
-  button("Send now", panel).click();
+  if (button("Send now", queued()!).disabled) throw new Error("Send now is disabled");
+  button("Send now", queued()!).click();
   const sent = await waitCall("send-now", 1);
   const request = JSON.parse(sent[0].stdin) as QueueRequest;
   if (request.queue_id !== "queue-fixture") throw new Error("Send now names the wrong queue");
@@ -1378,10 +1439,12 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
   let current = "start";
   try {
     if (!smokeFile) throw new Error("ZERUS_CLIENT_SMOKE_FILE is not set");
-    const only = new URLSearchParams(location.search).get("phase4-only");
-    if (only && !steps.some(([name]) => name === only)) throw new Error("Unknown phase4 step");
+    // One step, or a comma-separated subset in the sequence's own order, to
+    // reproduce a state an earlier step leaves for a later one.
+    const only = new URLSearchParams(location.search).get("phase4-only")?.split(",").filter(Boolean);
+    if (only?.some((wanted) => !steps.some(([name]) => name === wanted))) throw new Error("Unknown phase4 step");
     // These steps need separate fixture setups and run individually.
-    for (const [name, run] of steps.filter(([name]) => only ? name === only : !["start-poll", "resume-history", "resume-status"].includes(name))) {
+    for (const [name, run] of steps.filter(([name]) => only ? only.includes(name) : !["start-poll", "resume-history", "resume-status"].includes(name))) {
       current = name;
       await run();
       log(`phase4-smoke ${name}: done`);

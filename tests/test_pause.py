@@ -1923,6 +1923,9 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                 name = self.start(agent, "wrapped")
                 first = self.wrapped_hooks(agent, str(wrapper))
                 self.assertTrue(first and set(first.values()) == {1}, first)
+                # zerus-b64dl: entries an older hgs wrote carry no record; a
+                # later launch that changes nothing records their program.
+                shutil.rmtree(Path(self.env["HGS_STATE_DIR"]) / "hook-owners")
                 for _ in range(2):
                     self.hgs("pause", name)
                     self.resume(name)
@@ -1930,6 +1933,28 @@ os.execv(HGS, [HGS, *sys.argv[1:]])
                 self.hgs("pause", name)
                 self.assertEqual(log.read_text().splitlines().count(name + " SessionStart"), 3,
                                  "one SessionStart delivery for each of three launches")
+                # zerus-b64dl: from a shell without the wrapper, health and
+                # repair still recognise the entries the wrapper wrote.
+                plain = {k: v for k, v in self.env.items() if k != "HGS_EXECUTABLE"}
+                account = "native-" + agent
+                hooks = lambda *extra, body="": subprocess.run(
+                    [str(HGS), "hooks", "--account", account, *extra, "--json"], env=plain, input=body,
+                    capture_output=True, text=True, timeout=20)
+                status = hooks()
+                self.assertEqual(status.returncode, 0, status.stderr)
+                status = json.loads(status.stdout)["configuration"]
+                self.assertEqual(status["state"], "configured", status)
+                self.assertFalse(status["unrecognised_tracking"])
+                if agent == "claude":
+                    settings = self.root / ".claude/settings.json"
+                    before = settings.read_bytes()
+                    request = json.dumps({"request_id": str(uuid.uuid4()), "expected_provider": agent,
+                                          "expected_account_id": account, "expected_config_sha256": status["sha256"],
+                                          "expected_path_id": status["path_id"]})
+                    repaired = hooks("--repair", body=request)
+                    self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                    self.assertEqual(json.loads(repaired.stdout)["status"], "unchanged")
+                    self.assertEqual(settings.read_bytes(), before)
         # Copies that earlier launches left behind collapse at the next launch,
         # before the agent reads its settings; a personal hook stays.
         name, settings = "claude/p/wrapped", self.root / ".claude/settings.json"

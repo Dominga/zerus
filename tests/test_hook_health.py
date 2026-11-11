@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Content-free hook health and explicit repair in owned synthetic homes only."""
-import hashlib,json,os,subprocess,tempfile,time,unittest,uuid
+import hashlib,json,os,subprocess,sys,tempfile,time,unittest,uuid
 from pathlib import Path
 import test_input as fixtures
 HGS=fixtures.HGS
@@ -50,6 +50,39 @@ class HookHealth(unittest.TestCase):
         self.assertEqual(result['status'],'repaired');self.assertFalse(result['running_agents_retrofitted'])
         doc=json.loads(self.config.read_text());self.assertEqual(doc['apiKey'],'synthetic-keep');self.assertEqual(doc['hooks']['Stop'],original['hooks']['Stop']);self.assertEqual(self.config.with_name('settings.json.pre-hgs').read_bytes(),old)
         args,body=self.repair(result);self.assertEqual(self.run_hgs(args,body)['status'],'unchanged');self.assertFalse((self.root/'invoked').exists())
+    def wrapper(self):
+        """An HGS_EXECUTABLE wrapper with another name that runs this hgs."""
+        wrapper = self.bin / 'hgs-wrapper'
+        wrapper.write_text('#!/bin/sh\nexec "' + str(HGS) + '" "$@"\n'); wrapper.chmod(0o755)
+        return wrapper
+    def test_entries_a_wrapper_wrote_stay_hgs_from_a_plain_environment(self):
+        # zerus-b64dl: the program an install wrote is recorded for this file,
+        # so health and repair from a shell without the wrapper still own it.
+        self.config.write_text(json.dumps(dict(model='keep')));self.cache()
+        wrapper = self.wrapper()
+        plain = dict(self.env)
+        self.env['HGS_EXECUTABLE'] = str(wrapper)
+        args,body=self.repair(self.inspect());self.assertEqual(self.run_hgs(args,body)['status'],'repaired')
+        written = self.config.read_bytes();self.assertIn(str(wrapper).encode(), written)
+        self.env = plain
+        status = self.inspect()
+        self.assertEqual(status['configuration']['state'],'configured')
+        self.assertFalse(status['configuration']['unrecognised_tracking'])
+        args,body=self.repair(status);self.assertEqual(self.run_hgs(args,body)['status'],'unchanged')
+        self.assertEqual(self.config.read_bytes(),written,'a plain repair must not add a current-executable group')
+    def test_an_unrecorded_hgs_like_entry_blocks_repair_and_is_flagged(self):
+        # Written by a wrapper before records existed, or a look-alike: never
+        # adopted, rewritten or removed; an explicit repair refuses instead.
+        group = dict(hooks=[dict(type='command',command='/opt/old/hgs-wrapper __state hook',timeout=5)])
+        self.config.write_text(json.dumps(dict(hooks=dict(SessionStart=[group]))));self.cache()
+        before = self.config.read_bytes()
+        status = self.inspect()
+        self.assertTrue(status['configuration']['unrecognised_tracking'])
+        self.assertNotEqual(status['configuration']['state'],'configured')
+        args,body=self.repair(status);error=self.run_hgs(args,body,False)
+        self.assertIn('HGS_EXECUTABLE',error)
+        self.assertEqual(self.config.read_bytes(),before)
+        self.assertNotIn('/opt/old/hgs-wrapper',json.dumps(status))
     def test_fresh_repair_adds_only_tracking_and_retains_disabled_native_policy(self):
         self.config.write_text(json.dumps(dict(disableAllHooks=True,permissions=dict(defaultMode='default'))));self.cache()
         args,body=self.repair(self.inspect());result=self.run_hgs(args,body)
@@ -81,7 +114,12 @@ class HookHealth(unittest.TestCase):
         record=dict(version=1,name=name,agent='claude',run_id=run,conversation_id=conversation,agent_home=str(self.directory),account_id='native-claude',base=['claude'])
         path=self.state/(hashlib.sha256(name.encode()).hexdigest()+'.json');path.write_text(json.dumps(record));before=path.read_bytes()
         body=dict(request_id=str(uuid.uuid4()),expected_run_id=run,expected_conversation_id=conversation)
-        self.assertEqual(self.run_hgs([name,'--json'],body)['observed']['state'],'unknown')
+        session=self.run_hgs([name,'--json'],body);self.assertEqual(session['observed']['state'],'unknown')
+        # hooks-health-v1 keeps its keys: the phone connector rejects any other (zerus-b64dl).
+        self.assertNotIn('unrecognised_tracking',session['configuration']);self.assertIn('unrecognised_tracking',self.inspect()['configuration'])
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'services/mobile'))
+        from zerus_mobile.hook_health import metadata_valid
+        self.assertTrue(metadata_valid(session))
         for key in ['expected_run_id','expected_conversation_id']:
             bad={**body,key:'foreign'};self.assertIn('identity changed',self.run_hgs([name,'--json'],bad,False))
         self.run_hgs([name,'--json'],{**body,'action':'repair'},False);self.assertEqual(path.read_bytes(),before)

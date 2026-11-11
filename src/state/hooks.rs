@@ -68,41 +68,204 @@ fn versioned_events(agent: &str) -> &'static [(&'static str, Version)] {
 }
 
 thread_local! {
-    /// The program the running installation writes into hook entries.
-    static OWN_PROGRAM: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The programs hgs owns in the settings file at hand: the one the running
+    /// installation writes and those recorded for that file (zerus-b64dl).
+    static OWN_PROGRAMS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// While alive, entries that run `program` count as hgs's own, whatever its
-/// name: an `HGS_EXECUTABLE` wrapper writes them (zerus-s3wax).
-struct OwnProgram(Option<String>);
+/// While alive, entries that run one of these exact programs count as hgs's
+/// own, whatever their name: an `HGS_EXECUTABLE` wrapper writes them
+/// (zerus-s3wax). Nothing else is ever guessed from a name or path.
+struct OwnProgram(Vec<String>);
 
 impl OwnProgram {
+    #[cfg(all(test, unix))]
     fn scoped(program: &str) -> Self {
-        Self(OWN_PROGRAM.with(|own| own.replace(Some(program.to_owned()))))
+        Self::set(vec![program.to_owned()])
     }
 
-    /// The scope of an installation run by `executable`: its program as hook
-    /// entries name it (on Windows with forward slashes).
-    fn executable(executable: &str) -> Self {
-        #[cfg(windows)]
-        let program = windows::path(executable).unwrap_or_else(|_| executable.to_owned());
-        #[cfg(not(windows))]
-        let program = executable.to_owned();
-        Self::scoped(&program)
+    fn set(programs: Vec<String>) -> Self {
+        Self(OWN_PROGRAMS.with(|own| own.replace(programs)))
+    }
+
+    /// The scope for the settings file `config`: the program `executable`
+    /// writes, when known, and every program an install recorded for it.
+    fn for_config(executable: Option<&str>, config: &Path) -> Self {
+        let mut programs: Vec<String> = executable.map(written_program).into_iter().collect();
+        programs.extend(recorded_programs(config));
+        Self::set(programs)
     }
 }
 
-/// Whether `program` is the one the running installation writes.
+/// The program as hook entries name it (on Windows with forward slashes).
+fn written_program(executable: &str) -> String {
+    #[cfg(windows)]
+    {
+        windows::path(executable).unwrap_or_else(|_| executable.to_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        executable.to_owned()
+    }
+}
+
+/// Whether `program` is one of the programs owned in the current scope.
 fn own_program(program: &str) -> bool {
-    OWN_PROGRAM.with(|own| own.borrow().as_deref() == Some(program))
+    OWN_PROGRAMS.with(|own| own.borrow().iter().any(|own| own == program))
 }
 
 impl Drop for OwnProgram {
     fn drop(&mut self) {
-        let previous = self.0.take();
-        OWN_PROGRAM.with(|own| *own.borrow_mut() = previous);
+        let previous = std::mem::take(&mut self.0);
+        OWN_PROGRAMS.with(|own| *own.borrow_mut() = previous);
     }
 }
+
+/// The most programs, and the longest program, recorded for one settings file.
+const RECORDED_PROGRAMS: usize = 8;
+const RECORDED_PROGRAM_BYTES: usize = 4096;
+
+/// Where hgs keeps the exact programs it wrote into the settings file
+/// `config` (resolved past symlinks), in private state.
+fn owner_record(config: &Path) -> PathBuf {
+    root().join("hook-owners").join(format!(
+        "{:x}.json",
+        Sha256::digest(config.to_string_lossy().as_bytes())
+    ))
+}
+
+fn recordable(program: &str) -> bool {
+    !program.is_empty()
+        && program.len() <= RECORDED_PROGRAM_BYTES
+        && !program.chars().any(char::is_control)
+}
+
+/// The programs recorded in `record`, newest first; anything unreadable is none.
+fn recorded_at(record: &Path) -> Vec<String> {
+    let Ok(Some(bytes)) = super::hook_health::read_bounded(record, 64 * 1024) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Vec::new();
+    };
+    if value["schema"] != 1 {
+        return Vec::new();
+    }
+    value["programs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|program| recordable(program))
+        .take(RECORDED_PROGRAMS)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn recorded_programs(config: &Path) -> Vec<String> {
+    recorded_at(&owner_record(config))
+}
+
+/// Puts `program` first in `record`, keeping the newest few. The caller holds
+/// the settings file's lock.
+fn record_at(record: &Path, program: &str) -> Result<()> {
+    if !recordable(program) {
+        return Ok(());
+    }
+    let mut programs = recorded_at(record);
+    if programs.first().map(String::as_str) == Some(program) {
+        return Ok(());
+    }
+    programs.retain(|recorded| recorded != program);
+    programs.insert(0, program.to_owned());
+    programs.truncate(RECORDED_PROGRAMS);
+    atomic(record, &json!({"schema":1,"programs":programs}).to_string())
+}
+
+/// The program a hook command line runs before hgs's two arguments.
+fn program_of(command: &str) -> Option<String> {
+    let argv = shell_words::split(command).ok()?;
+    (argv.len() >= 3).then(|| argv[argv.len() - 3].clone())
+}
+
+/// Whether `content`, a settings file of `agent`, holds an hgs entry that runs
+/// exactly `program`. Call inside the scope that owns `program`.
+fn holds_program(content: &str, agent: &str, program: &str) -> bool {
+    if agent == "kimi" {
+        let Ok(document) = content.parse::<toml_edit::DocumentMut>() else {
+            return false;
+        };
+        return document
+            .get("hooks")
+            .and_then(toml_edit::Item::as_array_of_tables)
+            .is_some_and(|tables| {
+                tables.iter().any(|table| {
+                    table
+                        .get("command")
+                        .and_then(toml_edit::Item::as_str)
+                        .is_some_and(|command| {
+                            owns_hook(command) && program_of(command).as_deref() == Some(program)
+                        })
+                })
+            });
+    }
+    let Ok(document) = serde_json::from_str::<Value>(content) else {
+        return false;
+    };
+    document["hooks"]
+        .as_object()
+        .into_iter()
+        .flat_map(|hooks| hooks.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .any(|hook| {
+            let Some(command) = hook.get("command").and_then(Value::as_str) else {
+                return false;
+            };
+            let named = if hook.get("args").is_some() {
+                command == program
+            } else {
+                program_of(command).as_deref() == Some(program)
+            };
+            named && (Entry::owned(hook, cfg!(windows)).is_some() || owns_channel(hook))
+        })
+}
+
+/// After hgs wrote or kept `content` as the settings file `config`, under its
+/// lock: records the program this installation writes when an entry runs it,
+/// so a later health read or repair without that `HGS_EXECUTABLE` still
+/// recognises it (zerus-b64dl). A failed record only costs that recognition.
+pub(super) fn record_written(config: &Path, agent: &str, content: &str) {
+    let Ok(executable) = runner_executable() else {
+        return;
+    };
+    let program = written_program(&executable);
+    let _own = OwnProgram::for_config(Some(&executable), config);
+    if holds_program(content, agent, &program) {
+        let _ = record_at(&owner_record(config), &program);
+    }
+}
+
+/// Whether a hook command looks like hgs's (`PROGRAM __state hook` or
+/// `PROGRAM __state answer-channel`, as a line or in exec form) for a
+/// program that is not hgs's in the current scope (zerus-b64dl).
+fn unrecognised_program(command: &str, args: Option<&Value>) -> bool {
+    if let Some(args) = args.and_then(Value::as_array) {
+        let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+        return (args == HOOK_ARGS || args == CHANNEL_ARGS) && !names_hgs(command);
+    }
+    shell_words::split(command).is_ok_and(|argv| {
+        let tail = argv.len().saturating_sub(2);
+        argv.len() >= 3
+            && (argv[tail..] == HOOK_ARGS || argv[tail..] == CHANNEL_ARGS)
+            && !names_hgs(&argv[tail - 1])
+    })
+}
+
+/// An explicit repair never writes beside an hgs-like entry hgs did not record.
+const UNRECOGNISED_TRACKING: &str = "A hook entry runs an hgs-like command for a program hgs did not record for this file; nothing was repaired. Run the repair with HGS_EXECUTABLE set to that program, or remove the entry.";
 
 fn owns_hook(command: &str) -> bool {
     let Ok(argv) = shell_words::split(command) else {
@@ -745,7 +908,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         Err(error) => return Err(error.to_string()),
     };
     let executable = runner_executable()?;
-    let _own = OwnProgram::executable(&executable);
+    let _own = OwnProgram::for_config(Some(&executable), &path);
     let installed = Installed {
         program,
         agent: if agent == "claude" { "Claude Code" } else { agent },
@@ -773,6 +936,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         .or(pruned)
     };
     let Some(content) = merged else {
+        record_written(&path, agent, &original);
         return Ok(());
     };
     if content != original {
@@ -785,6 +949,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
         }
         atomic(&path, &content)?;
     }
+    record_written(&path, agent, &content);
     Ok(())
 }
 
@@ -853,10 +1018,15 @@ pub(super) fn health_events(agent: &str) -> Vec<&'static str> {
 }
 
 /// Content-free registration inventory. Native trust/policy is deliberately not inferred.
-pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u64, u64)>) -> Result<Value> {
-    let _own = runner_executable()
-        .ok()
-        .map(|executable| OwnProgram::executable(&executable));
+/// `config` is the settings file the text came from: programs recorded for it
+/// stay hgs's from any environment.
+pub(super) fn health_document(
+    original: &str,
+    config: &Path,
+    agent: &str,
+    known: Option<(u64, u64, u64)>,
+) -> Result<Value> {
+    let _own = OwnProgram::for_config(runner_executable().ok().as_deref(), config);
     health_document_mode(original, agent, known, cfg!(windows))
 }
 
@@ -866,12 +1036,16 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
     let mut channel_shell = false;
     let mut counts = std::collections::BTreeMap::<String,usize>::new();
     let mut conditional = false;
+    // An hgs-like command for a program that is not hgs's in this scope.
+    let mut unrecognised = false;
     if agent == "kimi" {
         let document = original.parse::<toml_edit::DocumentMut>().map_err(|_| "Invalid hook configuration")?;
         if let Some(item) = document.get("hooks") {
             let tables = item.as_array_of_tables().ok_or("Invalid hook configuration")?;
             for table in tables {
-                if table.get("command").and_then(toml_edit::Item::as_str).is_some_and(owns_hook) {
+                let command = table.get("command").and_then(toml_edit::Item::as_str);
+                unrecognised |= command.is_some_and(|command| unrecognised_program(command, None));
+                if command.is_some_and(owns_hook) {
                     if let Some(event) = table.get("event").and_then(toml_edit::Item::as_str) {
                         if events(agent).contains(&event) { present.insert(event.to_owned()); *counts.entry(event.to_owned()).or_default() += 1; }
                     }
@@ -885,6 +1059,17 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
         let object = document.as_object().ok_or("Invalid hook configuration")?;
         if let Some(hooks) = object.get("hooks") {
             let hooks = hooks.as_object().ok_or("Invalid hook configuration")?;
+            unrecognised = hooks
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .any(|hook| {
+                    hook.get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| unrecognised_program(command, hook.get("args")))
+                });
             // Only the bounded event names hgs itself knows may be returned.
             let names = events(agent).into_iter().chain(versioned_events(agent).iter().map(|(event, _)| *event));
             for event in names {
@@ -916,7 +1101,7 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
     let channel_incompatible = channel && (windows && channel_shell || agent != "claude" || known.is_some_and(|v| v < CLAUDE_ANSWER_CHANNEL));
     Ok(json!({"state":if missing.is_empty(){"configured"}else if present.is_empty(){"missing"}else{"partial"},
         "expected_events":expected,"registered_events":present,"missing_events":missing,"duplicate_events":duplicates,"conditional_matchers":conditional,
-        "answer_channel_registered":channel,"compatibility":{"state":if !incompatible.is_empty() || channel_incompatible {"incompatible"}else if known.is_some(){"compatible"}else{"unknown"},
+        "answer_channel_registered":channel,"unrecognised_tracking":unrecognised,"compatibility":{"state":if !incompatible.is_empty() || channel_incompatible {"incompatible"}else if known.is_some(){"compatible"}else{"unknown"},
         "basis":"Cached executable identity and known HGS versioned entries only",
         "native_version":known.map(|(a,b,c)|format!("{a}.{b}.{c}")),"unsupported_registered_events":incompatible}}))
 }
@@ -924,9 +1109,12 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
 /// Explicit repair uses only a previously verified version. It never probes a provider.
 pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (u64,u64,u64)) -> Result<Option<String>> {
     let executable = runner_executable()?;
-    let _own = OwnProgram::executable(&executable);
+    let _own = OwnProgram::for_config(Some(&executable), path);
     if agent == "kimi" {
-        let health=health_document(original,agent,Some(known))?;
+        let health=health_document(original,path,agent,Some(known))?;
+        if health["unrecognised_tracking"] == true {
+            return Err(UNRECOGNISED_TRACKING.into());
+        }
         if health["state"]=="configured" {
             if health["duplicate_events"].as_array().is_none_or(Vec::is_empty) { return Ok(None); }
             return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(&executable));
@@ -940,7 +1128,10 @@ pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (
     }
     // Existing owned entries (including trusted legacy commands) remain exact.
     // Version-incompatible registrations are not removed by explicit repair.
-    let health = health_document(original, agent, Some(known))?;
+    let health = health_document(original, path, agent, Some(known))?;
+    if health["unrecognised_tracking"] == true {
+        return Err(UNRECOGNISED_TRACKING.into());
+    }
     if health["compatibility"]["state"] != "compatible" { return Err("Hook configuration is incompatible; use a qualified supervised launch".into()); }
     merge_json_mode(original, path, agent, cfg!(windows), &mut || {
         #[cfg(windows)]
@@ -1543,19 +1734,19 @@ mod tests {
         let personal=json!({"type":"command","command":"personal-hook --secret example"});
         let legacy=json!({"type":"command","command":"python3 /opt/old/hgs_state.py hook","timeout":5});
         let original=json!({"apiKey":"never disclose", "hooks":{"Stop":[{"hooks":[personal.clone(),legacy.clone()]}]}}).to_string();
-        let health=health_document(&original,"claude",None).unwrap();
+        let health=health_document(&original,&path(),"claude",None).unwrap();
         assert_eq!(health["state"],"partial");assert_eq!(health["compatibility"]["state"],"unknown");
         assert!(!health.to_string().contains("secret"));assert!(!health.to_string().contains("apiKey"));
         let merged=merge_json(&original,Path::new("/config"),"claude",false,&mut ||panic!("must retain legacy command"),&mut ||Some((2,1,296))).unwrap().unwrap();
         let doc:Value=serde_json::from_str(&merged).unwrap();
         assert_eq!(doc["hooks"]["Stop"][0]["hooks"],json!([personal,legacy]));
-        assert_eq!(health_document(&merged,"claude",Some((2,1,296))).unwrap()["state"],"configured");
+        assert_eq!(health_document(&merged,&path(),"claude",Some((2,1,296))).unwrap()["state"],"configured");
         assert!(merge_json(&merged,Path::new("/config"),"claude",false,&mut ||panic!(),&mut ||Some((2,1,296))).unwrap().is_none());
     }
     #[test]
     fn tracking_repair_does_not_enable_or_widen_answer_channels() {
         let empty=merge_json_mode("{}",Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
-        assert!(!health_document(&empty,"claude",Some((2,1,296))).unwrap()["answer_channel_registered"].as_bool().unwrap());
+        assert!(!health_document(&empty,&path(),"claude",Some((2,1,296))).unwrap()["answer_channel_registered"].as_bool().unwrap());
         let original=json!({"hooks":{"PermissionRequest":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"hgs __state answer-channel"}]}]}});
         let merged=merge_json_mode(&original.to_string(),Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
         let value:Value=serde_json::from_str(&merged).unwrap();assert_eq!(value["hooks"]["PermissionRequest"][0],original["hooks"]["PermissionRequest"][0]);
@@ -1587,7 +1778,7 @@ mod tests {
     #[test]
     fn health_exposes_duplicates_and_partial_kimi_repair_preserves_every_entry() {
         let text=json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"hgs __state hook"},{"type":"command","command":"hgs __state hook"}]}]}}).to_string();
-        assert_eq!(health_document(&text,"claude",None).unwrap()["duplicate_events"],json!(["Stop"]));
+        assert_eq!(health_document(&text,&path(),"claude",None).unwrap()["duplicate_events"],json!(["Stop"]));
         let kimi="# BEGIN hgs session tracking\n[[hooks]]\nevent = \"Stop\"\ncommand = \"hgs __state hook\"\ntimeout = 7\n[[hooks]]\nevent = \"Stop\"\ncommand = \"personal-hook\"\n# END hgs session tracking\n";
         assert!(repair_document(kimi,Path::new("/config"),"kimi",(2,1,1)).is_err());
     }
@@ -1595,10 +1786,10 @@ mod tests {
     #[test]
     fn health_reports_version_drift_and_rejects_malformed_owned_handlers() {
         let future=json!({"hooks":{"PostModelSwitch":[{"hooks":[{"type":"command","command":"hgs __state hook"}]}]}}).to_string();
-        assert_eq!(health_document(&future,"claude",Some((2,1,200))).unwrap()["compatibility"]["state"],"incompatible");
-        assert_eq!(health_document(&future,"claude",None).unwrap()["compatibility"]["state"],"unknown");
+        assert_eq!(health_document(&future,&path(),"claude",Some((2,1,200))).unwrap()["compatibility"]["state"],"incompatible");
+        assert_eq!(health_document(&future,&path(),"claude",None).unwrap()["compatibility"]["state"],"unknown");
         for text in ["[]","{",r#"{"hooks":{"Stop":"invalid"}}"#,r#"{"hooks":{"Stop":[{"hooks":[{"type":"prompt","command":"hgs __state hook"}]}]}}"#] {
-            assert!(health_document(text,"claude",Some((2,1,296))).is_err(),"{text}");
+            assert!(health_document(text,&path(),"claude",Some((2,1,296))).is_err(),"{text}");
         }
     }
 
@@ -1910,6 +2101,211 @@ mod tests {
         assert!(!owns_hook(&fresh_command(WRAPPER).unwrap()));
     }
 
+    /// zerus-b64dl: the exact programs hgs recorded for one settings file.
+    #[test]
+    fn owner_records_keep_the_newest_exact_programs_within_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let record = temp.path().join("hook-owners").join("file.json");
+        assert!(recorded_at(&record).is_empty());
+        for index in 0..10 {
+            record_at(&record, &format!("/opt/hgs-{index}")).unwrap();
+        }
+        let newest: Vec<String> = (2..10).rev().map(|i| format!("/opt/hgs-{i}")).collect();
+        assert_eq!(recorded_at(&record), newest);
+        let written: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(
+            written,
+            json!({"schema": 1, "programs": newest}),
+            "the file itself keeps 8"
+        );
+        // A program recorded again moves first; it is never kept twice.
+        record_at(&record, "/opt/hgs-5").unwrap();
+        let programs = recorded_at(&record);
+        assert_eq!(programs[0], "/opt/hgs-5");
+        assert_eq!(programs.len(), RECORDED_PROGRAMS);
+        assert_eq!(programs.iter().filter(|p| *p == "/opt/hgs-5").count(), 1);
+        // An empty, oversized or control-character program is never written.
+        let before = fs::read(&record).unwrap();
+        for program in [
+            String::new(),
+            "x".repeat(RECORDED_PROGRAM_BYTES + 1),
+            "/opt/a\nb".into(),
+        ] {
+            record_at(&record, &program).unwrap();
+            assert_eq!(fs::read(&record).unwrap(), before);
+        }
+        record_at(&record, &"y".repeat(RECORDED_PROGRAM_BYTES)).unwrap();
+        assert_eq!(recorded_at(&record)[0].len(), RECORDED_PROGRAM_BYTES);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o077;
+            assert_eq!(mode(&record), 0, "the record is private");
+            assert_eq!(mode(record.parent().unwrap()), 0, "its folder is private");
+        }
+        // Replaced atomically: no temporary file stays beside the record.
+        assert_eq!(fs::read_dir(record.parent().unwrap()).unwrap().count(), 1);
+        // A damaged, foreign, oversized or hostile record grants only valid programs.
+        let many: Vec<String> = (0..12).map(|i| format!("/opt/many-{i}")).collect();
+        for (text, granted) in [
+            ("not json".to_owned(), vec![]),
+            (
+                json!({"schema": 2, "programs": ["/opt/x"]}).to_string(),
+                vec![],
+            ),
+            (json!({"programs": ["/opt/x"]}).to_string(), vec![]),
+            (
+                json!({"schema": 1, "programs": ["", "/opt/a\u{7}b", 5, "/opt/ok"]}).to_string(),
+                vec!["/opt/ok".to_owned()],
+            ),
+            (
+                json!({"schema": 1, "programs": ["/opt/x"], "pad": "p".repeat(64 * 1024)})
+                    .to_string(),
+                vec![],
+            ),
+            (
+                json!({"schema": 1, "programs": many}).to_string(),
+                many[..RECORDED_PROGRAMS].to_vec(),
+            ),
+        ] {
+            fs::write(&record, &text).unwrap();
+            assert_eq!(
+                recorded_at(&record),
+                granted,
+                "{}",
+                &text[..text.len().min(80)]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recorded_programs_stay_hgs_and_unrecorded_look_alikes_are_flagged() {
+        for agent in ["claude", "codex"] {
+            let (text, _) = launches(agent, 1);
+            // A plain environment that recorded nothing: the wrapper's entries
+            // are not hgs's, and the report says so without naming them.
+            let plain =
+                health_document_mode(&text, agent, Some(CLAUDE_ANSWER_CHANNEL), false).unwrap();
+            assert_ne!(plain["state"], "configured", "{agent}");
+            assert_eq!(plain["unrecognised_tracking"], true, "{agent}");
+            assert!(!plain.to_string().contains(WRAPPER), "{agent}");
+            // The same text once the wrapper is recorded for this file.
+            let _own = OwnProgram::set(vec!["/usr/local/bin/hgs".into(), WRAPPER.into()]);
+            let recorded =
+                health_document_mode(&text, agent, Some(CLAUDE_ANSWER_CHANNEL), false).unwrap();
+            assert_eq!(recorded["state"], "configured", "{agent}");
+            assert_eq!(recorded["unrecognised_tracking"], false, "{agent}");
+            assert!(
+                json_reuse(&text, agent, false).is_none(),
+                "{agent}: a recorded entry is reused"
+            );
+        }
+        let kimi = {
+            let _own = OwnProgram::scoped(WRAPPER);
+            kimi_merge("model = \"k\"\n", false, &fresh_command(WRAPPER).unwrap()).unwrap()
+        };
+        let plain = health_document_mode(&kimi, "kimi", None, false).unwrap();
+        assert_eq!(plain["unrecognised_tracking"], true);
+        assert!(!plain.to_string().contains(WRAPPER));
+        let _own = OwnProgram::set(vec![WRAPPER.into()]);
+        let recorded = health_document_mode(&kimi, "kimi", None, false).unwrap();
+        assert_eq!(recorded["state"], "configured");
+        assert_eq!(recorded["unrecognised_tracking"], false);
+    }
+
+    #[test]
+    fn personal_hooks_and_hgs_named_entries_are_never_flagged() {
+        let hooks = [
+            "/opt/old/hgs-wrapper --notify done",
+            "/opt/old/hgs-wrapper __state hooks",
+            "__state hook",
+            "/usr/local/bin/hgs __state hook",
+            "'/opt/hgs dir/hgs' __state answer-channel",
+            "python3 /opt/old/hgs_state.py hook",
+        ];
+        let document = json!({"hooks": {"Stop": [{"hooks": hooks.map(|command| json!({"type": "command", "command": command}))}]}}).to_string();
+        assert_eq!(
+            health_document_mode(&document, "claude", None, false).unwrap()
+                ["unrecognised_tracking"],
+            false
+        );
+        let kimi: String = hooks
+            .iter()
+            .map(|command| {
+                format!(
+                    "[[hooks]]\nevent = \"Stop\"\ncommand = {}\n",
+                    toml_edit::Value::from(*command)
+                )
+            })
+            .collect();
+        assert_eq!(
+            health_document_mode(&kimi, "kimi", None, false).unwrap()["unrecognised_tracking"],
+            false
+        );
+        // Either form of an hgs-like command for another program is flagged.
+        for hook in [
+            json!({"type": "command", "command": "/opt/old/hgs-wrapper __state hook"}),
+            json!({"type": "command", "command": "/opt/old/hgs-wrapper __state answer-channel"}),
+            json!({"type": "command", "command": "/opt/old/hgs-wrapper", "args": ["__state", "hook"]}),
+            json!({"type": "command", "command": "/opt/tools/myhgs __state hook"}),
+        ] {
+            let document = json!({"hooks": {"Stop": [{"hooks": [hook.clone()]}]}}).to_string();
+            assert_eq!(
+                health_document_mode(&document, "claude", None, false).unwrap()
+                    ["unrecognised_tracking"],
+                true,
+                "{hook}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_owned_entry_running_the_exact_program_is_recorded() {
+        let (text, _) = launches("claude", 1);
+        let kimi = {
+            let _own = OwnProgram::scoped(WRAPPER);
+            kimi_merge("", false, &fresh_command(WRAPPER).unwrap()).unwrap()
+        };
+        let personal = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": format!("{WRAPPER} --notify done")}]}]}}).to_string();
+        let personal_kimi =
+            format!("[[hooks]]\nevent = \"Stop\"\ncommand = \"{WRAPPER} notify\"\n");
+        {
+            let _own = OwnProgram::scoped(WRAPPER);
+            assert!(holds_program(&text, "claude", WRAPPER));
+            assert!(holds_program(&kimi, "kimi", WRAPPER));
+            assert!(!holds_program(&text, "claude", "/opt/tools/other"));
+            assert!(!holds_program(&kimi, "kimi", "/opt/tools/other"));
+            assert!(
+                !holds_program(&personal, "claude", WRAPPER),
+                "a personal hook is never recorded"
+            );
+            assert!(!holds_program(&personal_kimi, "kimi", WRAPPER));
+            assert!(!holds_program("not json", "claude", WRAPPER));
+        }
+        // Outside the scope that owns it the program is not hgs's: nothing to record.
+        assert!(!holds_program(&text, "claude", WRAPPER));
+        assert!(!holds_program(&kimi, "kimi", WRAPPER));
+    }
+
+    #[test]
+    fn explicit_repair_refuses_beside_an_unrecorded_look_alike_without_writing() {
+        let look_alike = json!({"model": "keep", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "/opt/old/hgs-wrapper __state hook", "timeout": 5}]}]}}).to_string();
+        let error = repair_document(&look_alike, &path(), "claude", (2, 1, 296)).unwrap_err();
+        assert!(error.contains("HGS_EXECUTABLE"), "{error}");
+        assert!(!error.contains("/opt/old"), "{error}");
+        let kimi = "[[hooks]]\nevent = \"Stop\"\ncommand = \"/opt/old/hgs-wrapper __state hook\"\n";
+        let error = repair_document(kimi, &path(), "kimi", (2, 3, 1)).unwrap_err();
+        assert!(error.contains("HGS_EXECUTABLE"), "{error}");
+        // Without the look-alike the same repair goes ahead.
+        assert!(
+            repair_document(r#"{"model":"keep"}"#, &path(), "claude", (2, 1, 296))
+                .unwrap()
+                .is_some()
+        );
+    }
+
     fn hook_entries(text: &str, event: &str) -> Vec<Value> {
         let document: Value = serde_json::from_str(text).unwrap();
         document["hooks"][event]
@@ -2038,7 +2434,7 @@ mod tests {
         let duplicate = format!("{original}{block}");
         let merged = kimi_merge(&duplicate, false, UNIX).unwrap();
         assert_eq!(merged, format!("{original}\n\n"));
-        let health = health_document(&merged, "kimi", Some((2, 3, 1))).unwrap();
+        let health = health_document(&merged, &path(), "kimi", Some((2, 3, 1))).unwrap();
         assert_eq!(health["duplicate_events"], json!([]));
         assert!(merged.contains("# Personal memory hook"));
         assert_eq!(kimi_merge(&merged, false, UNIX), None);

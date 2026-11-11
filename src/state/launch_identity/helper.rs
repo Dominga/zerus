@@ -236,6 +236,36 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Writes the helper script from a child process. Another test thread can
+    /// fork a child that never execs (`ForkedDescriptors`); such a child
+    /// inherits every descriptor open in this process, and one holding the
+    /// staging write descriptor keeps the renamed helper's inode busy: exec
+    /// then fails with ETXTBSY until that child exits (zerus-7xbco). A child
+    /// `sh` owns the write descriptor instead, so this process never holds one.
+    /// Production never stages a helper this way: it probes the selected
+    /// executable, which hgs does not install.
+    fn stage_script(path: &std::path::Path, text: &str) {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cat > \"$1\"")
+            .arg("sh")
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("stage helper script");
+        child
+            .stdin
+            .as_mut()
+            .expect("staging stdin")
+            .write_all(text.as_bytes())
+            .expect("write helper script");
+        assert!(child.wait().expect("wait for staging").success());
+    }
+
     #[test]
     fn unchanged_images_cache_positive_and_negative_answers_and_replacements_reprobe() {
         let temp = tempfile::tempdir().unwrap();
@@ -249,7 +279,7 @@ mod tests {
                 crate::platform::quote(&counter.to_string_lossy()),
                 text
             );
-            std::fs::write(&staging, script).unwrap();
+            stage_script(&staging, &script);
             std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::rename(staging, &path).unwrap();
         };

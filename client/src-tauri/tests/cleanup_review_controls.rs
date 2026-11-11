@@ -193,6 +193,7 @@ struct Job {
     program_review_pending: bool,
     program_retirement: Option<ProgramRetirement>,
     lookup_only: bool,
+    physically_released: bool,
     phase: &'static str,
     dismissed: bool,
 }
@@ -253,6 +254,18 @@ impl Model {
 fn changed(_: &AppHandle, m: &mut Model) {
     m.revision = m.revision.wrapping_add(1)
 }
+trait PipelineApp: Clone + Send + 'static {
+    fn changed(&self, model: &mut Model);
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step);
+}
+impl PipelineApp for AppHandle {
+    fn changed(&self, model: &mut Model) {
+        changed(self, model)
+    }
+    fn drive(&self, inner: &Arc<Inner>, id: String, step: Step) {
+        inner.drive(self.clone(), id, step, false)
+    }
+}
 struct Inner {
     model: Mutex<Model>,
     drives: AtomicUsize,
@@ -278,6 +291,7 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
                 program_review_pending: false,
                 program_retirement: None,
                 lookup_only: false,
+                physically_released: false,
                 phase: "checking",
                 dismissed: false,
             }],
@@ -287,7 +301,7 @@ fn fixture(control: Arc<Control>) -> Arc<Inner> {
     })
 }
 
-fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
+fn watch_job<A: PipelineApp>(inner: &Arc<Inner>, app: A, id: String) {
     // Expiry is one-way. Retaining a UI row never keeps an Actions claim
     // indefinitely or renews consent after source/authority loss.
     let weak = Arc::downgrade(inner);
@@ -296,11 +310,11 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
         let Some(inner) = weak.upgrade() else {
             return;
         };
-        match watch_once(&inner, &id, |m| changed(&app, m)) {
+        match watch_once(&inner, &id, |m| app.changed(m)) {
             Watch::Continue => {}
             Watch::Stop => return,
             Watch::Review(step) => {
-                inner.drive(app, id, step, false);
+                app.drive(&inner, id, step);
                 return;
             }
         }
@@ -389,6 +403,7 @@ fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> Watch {
             // The resources are released; the unrefused result stays a
             // lookup-only row. No Check again, Force, review or consent.
             job.lookup_only = true;
+            job.physically_released = true;
             job.busy = false;
             job.program_review_pending = true;
             emit(&mut m);
@@ -417,16 +432,15 @@ fn watch_once(inner: &Inner, id: &str, emit: impl Fn(&mut Model)) -> Watch {
     }
 }
 
-fn termination_cleanup_check(
-    app: AppHandle,
-    state: State<'_, TerminationCleanup>,
-    id: String,
-) -> Result<View, String> {
+/// Check again's click (zerus-wfynn). The production command is async and runs
+/// the guarded check_with_runtime copy below on a blocking task; its
+/// off-main-thread behaviour is pinned by the real delayed-close control.
+fn click(selected: &TerminationCleanup) -> Result<View, String> {
     check_with_runtime(
-        &state.0,
-        id,
-        |model| changed(&app, model),
-        |inner, id, step| inner.drive(app.clone(), id, step, false),
+        &selected.0,
+        "job".into(),
+        |model| changed(&AppHandle, model),
+        |inner, id, step| inner.drive(AppHandle, id, step, false),
     )
 }
 fn check_with_runtime(
@@ -606,9 +620,7 @@ fn invalid_refusal_never_enters_retirement() {
     let inner = fixture(control.clone());
     assert!(!lock(&inner.model).view().can_check);
     let selected = TerminationCleanup(inner);
-    assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
-    );
+    assert!(click(&selected).is_err());
     assert_eq!(control.retirement_calls.load(Ordering::Acquire), 0);
 }
 
@@ -625,9 +637,7 @@ fn pending_retirement_continues_after_reserved_empty_slot() {
     watch_job(&inner, AppHandle, "job".into());
     let watcher = pop_watcher();
     let selected = TerminationCleanup(inner.clone());
-    let checking = thread::spawn(move || {
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into())
-    });
+    let checking = thread::spawn(move || click(&selected));
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
     thread::sleep(Duration::from_millis(250));
     assert!(
@@ -657,9 +667,7 @@ fn watcher_before_check_keeps_exclusive_ownership() {
     let watcher = pop_watcher();
     let selected = TerminationCleanup(inner.clone());
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
-    );
+    assert!(click(&selected).is_err());
     release_tx.send(()).unwrap();
     thread::sleep(Duration::from_millis(150));
     control.retired.store(true, Ordering::Release);
@@ -681,9 +689,7 @@ fn unrelated_global_revision_does_not_cancel_the_reservation() {
     watch_job(&inner, AppHandle, "job".into());
     let watcher = pop_watcher();
     let selected = TerminationCleanup(inner.clone());
-    let checking = thread::spawn(move || {
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into())
-    });
+    let checking = thread::spawn(move || click(&selected));
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
     lock(&inner.model).revision += 100;
     release_tx.send(()).unwrap();
@@ -702,8 +708,7 @@ fn failed_reservation_stays_lookup_only() {
     let control = Arc::new(control);
     let inner = fixture(control);
     let selected = TerminationCleanup(inner.clone());
-    let view =
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).unwrap();
+    let view = click(&selected).unwrap();
     assert!(!view.can_check);
     assert!(!view.busy);
     watch_job(&inner, AppHandle, "job".into());
@@ -722,9 +727,7 @@ fn stale_reservation_never_clears_a_newer_operation() {
     let control = Arc::new(control);
     let inner = fixture(control);
     let selected = TerminationCleanup(inner.clone());
-    let checking = thread::spawn(move || {
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into())
-    });
+    let checking = thread::spawn(move || click(&selected));
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
     lock(&inner.model).jobs[0].reservation = Some(program_pipeline::ProgramReservation {
         revision: 999,
@@ -768,7 +771,7 @@ fn an_expired_unrefused_result_is_released_lookup_only() {
     assert_eq!(Arc::strong_count(&control), 1, "the program was kept");
     let selected = TerminationCleanup(inner.clone());
     assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err(),
+        click(&selected).is_err(),
         "a released unrefused result offered Check again"
     );
     {
@@ -812,14 +815,12 @@ fn pending_physical_retirement_keeps_the_program_and_keeps_watching() {
         assert!(!m.jobs[0].lookup_only);
     }
     let selected = TerminationCleanup(inner.clone());
-    assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
-    );
+    assert!(click(&selected).is_err());
     control.retired.store(true, Ordering::Release);
     watcher.join().unwrap();
     assert_eq!(Arc::strong_count(&control), 1);
     assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err(),
+        click(&selected).is_err(),
         "a released unrefused result offered Check again"
     );
     assert!(lock(&inner.model).jobs[0].lookup_only);
@@ -845,9 +846,7 @@ fn failed_physical_retirement_keeps_the_program_and_stops() {
         assert!(!m.jobs[0].lookup_only);
     }
     let selected = TerminationCleanup(inner.clone());
-    assert!(
-        termination_cleanup_check(AppHandle, State { inner: &selected }, "job".into()).is_err()
-    );
+    assert!(click(&selected).is_err());
     assert_eq!(control.retirement_calls.load(Ordering::Acquire), 0);
 }
 
@@ -861,12 +860,7 @@ fn the_controls_run_the_exact_production_check_and_watcher() {
         include_str!("../src/termination_cleanup/program_pipeline.rs"),
     ];
     let controls = include_str!("cleanup_review_controls.rs");
-    for name in [
-        "termination_cleanup_check",
-        "check_with_runtime",
-        "watch_job",
-        "watch_once",
-    ] {
+    for name in ["check_with_runtime", "watch_job", "watch_once"] {
         let original = production
             .iter()
             .find_map(|source| function(source, name))
@@ -882,7 +876,9 @@ fn the_controls_run_the_exact_production_check_and_watcher() {
 /// The function's code from `fn name(` to its closing brace, with comment and
 /// blank lines dropped and indentation trimmed.
 fn function(source: &str, name: &str) -> Option<String> {
-    let start = source.find(&format!("fn {name}("))?;
+    let start = source
+        .find(&format!("fn {name}("))
+        .or_else(|| source.find(&format!("fn {name}<")))?;
     let body = start + source[start..].find('{')?;
     let mut depth = 0;
     for (offset, c) in source[body..].char_indices() {

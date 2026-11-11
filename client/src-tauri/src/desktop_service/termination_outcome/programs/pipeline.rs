@@ -659,6 +659,59 @@ fn fixture_original(
     }
 }
 
+/// Fixture-only (zerus-1y897.6): a known normal refusal on a source whose
+/// holder close is delayed. With `expired`, its source deadline first passes;
+/// nothing reads its currentness yet, so its owner is not cancelled.
+#[cfg(test)]
+pub(super) fn assert_delayed_close(
+    source: Arc<Source>,
+    input: Input,
+    completion: Arc<run::Completion>,
+    mutation: super::source::Mutation,
+    expired: bool,
+    release: impl FnOnce() + Send + 'static,
+) {
+    let report = Report {
+        request_id: input.request_id.clone(),
+        binding: input.binding(),
+        state: State::Refused,
+        members: Vec::new(),
+    };
+    let stopped = Stopped {
+        continuation: Continuation {
+            source,
+            capture: input.manifest.capture.clone(),
+            done: Done::Native(NativeDone {
+                original: String::new(),
+                archive: String::new(),
+                confirmation: String::new(),
+                call: Weak::new(),
+                completion,
+            }),
+            outcome: Outcome::Failed {
+                detail: "inert display fixture".into(),
+            },
+        },
+        attempt: StopAttempt {
+            input,
+            result: Ok(report),
+            mutation,
+        },
+    };
+    if !expired {
+        crate::termination_cleanup::assert_real_delayed_close_check(stopped, release);
+        return;
+    }
+    // The exact deadline instant: remaining_millis rounds down to 0 while up to
+    // a millisecond is left, and a click then would still see a current source.
+    let not_after = stopped.continuation.source.not_after();
+    assert!(not_after < std::time::Instant::now() + Duration::from_secs(10));
+    while std::time::Instant::now() <= not_after {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::termination_cleanup::assert_real_expired_reserved_review(stopped, release);
+}
+
 /// Fixture-only: the offer force_offer holds, without its discovery frame.
 #[cfg(test)]
 pub(crate) fn fixture_force(previous: Stopped) -> ForceOffer {
@@ -675,13 +728,13 @@ pub(super) fn assert_presentation_views(
     input: Input,
     initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
-    unarmed: [super::source::Mutation; 10],
-    // The last unarmed phase's extra loan and descendant lock, and a phase
+    unarmed: [super::source::Mutation; 14],
+    // The eighth unarmed phase's extra loan and descendant lock, and phases
     // that never ran.
     (loan, lock, never_ran): (
         Arc<dyn Send + Sync>,
         Arc<dyn Send + Sync>,
-        super::source::Mutation,
+        [super::source::Mutation; 3],
     ),
 ) {
     let binding = input.manifest.binding();
@@ -802,6 +855,42 @@ pub(super) fn assert_presentation_views(
     assert_eq!(returned.identity().0, request_id);
     assert!(returned.current(), "a refused cleanup closed the original");
     let mut previous = *returned;
+    // zerus-guttv/zerus-g5hh5: a stop and a removal whose phase never ran, so
+    // their retirement fails while the shared source is still current.
+    let [never_ran, failing_stop, failing_removal] = never_ran;
+    crate::termination_cleanup::assert_real_current_holds(
+        Stopped {
+            continuation: fixture_original(
+                &previous.continuation,
+                Weak::new(),
+                initial_completion.clone(),
+            ),
+            attempt: StopAttempt {
+                input: input.clone(),
+                result: Ok(report(State::Incomplete)),
+                mutation: failing_stop,
+            },
+        },
+        Removal {
+            continuation: fixture_original(
+                &previous.continuation,
+                Weak::new(),
+                initial_completion.clone(),
+            ),
+            attempt: super::source::CleanupAttempt {
+                input: zerus_client_core::worktree_programs::cleanup::Input {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    stop: Box::new(input.clone()),
+                },
+                result: Err("no removal reply".into()),
+                mutation: failing_removal,
+            },
+        },
+    );
+    assert!(
+        previous.current(),
+        "a held phase closed the shared original"
+    );
     previous.attempt.result = Ok(Report {
         request_id: uuid::Uuid::new_v4().to_string(),
         ..report(State::Refused)
@@ -868,7 +957,7 @@ pub(super) fn assert_presentation_views(
         "an original call whose I/O failed"
     );
     drop((bare, failed));
-    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held, mut ninth, tenth] =
+    let [mut first, mut second, mut third, mut fourth, mut fifth, sixth, seventh, held, mut ninth, tenth, mut published, mut offered, mut confirmed, mut complete] =
         unarmed;
     // An unsettled phase is read through its own physical drain (zerus-1y897.8).
     let settled = std::mem::replace(&mut previous.attempt.mutation, held);
@@ -937,6 +1026,10 @@ pub(super) fn assert_presentation_views(
         &mut fourth,
         &mut fifth,
         &mut ninth,
+        &mut published,
+        &mut offered,
+        &mut confirmed,
+        &mut complete,
     ] {
         while !mutation.try_retire().unwrap() {
             assert!(std::time::Instant::now() < until, "unarmed phase settled");
@@ -973,6 +1066,14 @@ pub(super) fn assert_presentation_views(
         stop(fifth, State::Incomplete),
         stop(sixth, State::Incomplete),
         stop(seventh, State::Refused),
+    );
+    // zerus-fojet/guttv/g5hh5: the real producers and their async glue.
+    crate::termination_cleanup::assert_real_published_refusal(stop(published, State::Refused));
+    crate::termination_cleanup::assert_real_glue(
+        stop(offered, State::Incomplete),
+        stop(confirmed, State::Incomplete),
+        original(),
+        stop(complete, State::Complete),
     );
     // zerus-1y897.9: the original, a Complete stop and a removal, each with its
     // source gone; the removal's own phase never settles here.

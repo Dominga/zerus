@@ -33,17 +33,29 @@ SYSTEM_VARIABLES = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
 # Debug-only hosted-fixture seams (zerus-yfbd.1) compile only under
 # cfg(debug_assertions). A published image must not carry their markers.
 DEBUG_SEAM = ROOT / "src" / "desktop" / "windows_registration" / "native" / "mode" / "held_pause.rs"
+# The swarm adoption fault fixtures' hold (zerus-fiyaa), also debug-only.
+ADOPTION_SEAM = ROOT / "src" / "swarm" / "adoption.rs"
 
 
 def debug_seam_markers():
-    """The seam's exact environment name and handshake prefixes, read from its
-    source so that a rename cannot leave this check vacuous."""
+    """The seams' exact environment names and handshake prefixes, read from
+    their source so that a rename cannot leave this check vacuous."""
     text = DEBUG_SEAM.read_text(encoding="utf-8")
     name = re.search(r'pub\(super\) const ENV: &str = "([A-Z_]+)";', text)
     require(name is not None, "The debug-only held pause seam no longer names its environment marker.")
     prefixes = [prefix for prefix in ("held-pause-", "held-release-") if f'format!("{prefix}{{request}}' in text]
     require(len(prefixes) == 2, "The debug-only held pause seam no longer names its handshake files.")
-    return [name[1].encode(), *(prefix.encode() for prefix in prefixes)]
+    adoption = ADOPTION_SEAM.read_text(encoding="utf-8")
+    start = adoption.find("#[cfg(debug_assertions)]\nmod test_hold {")
+    require(start >= 0, "The debug-only adoption hold is no longer a cfg(debug_assertions) module.")
+    hold = adoption[start:]
+    hold_name = re.search(r'    const ENV: &str = "([A-Z_]+)";', hold)
+    require(hold_name is not None, "The debug-only adoption hold no longer names its environment marker.")
+    hold_prefixes = [prefix for prefix in ("adoption-test-hold-", "adoption-test-release-")
+                     if f'format!("{prefix}{{request}}' in hold]
+    require(len(hold_prefixes) == 2, "The debug-only adoption hold no longer names its handshake files.")
+    return [name[1].encode(), *(prefix.encode() for prefix in prefixes),
+            hold_name[1].encode(), *(prefix.encode() for prefix in hold_prefixes)]
 
 
 def require_no_debug_seams(path):

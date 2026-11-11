@@ -6,7 +6,8 @@
 //! ancestry exactly as `hgs self` proves its caller. The child's computer is
 //! the link's only writer. The link is presentation and attention routing
 //! only: it never authorizes a send, answer, approval, stop or removal, and it
-//! never changes project membership.
+//! never moves a session's project. Only a new child's initial placement
+//! follows a parent this computer proved (zerus-d5twt).
 use super::*;
 use std::{fs, io::Read};
 
@@ -801,10 +802,492 @@ mod tests {
         );
     }
 
+    /// A listener that never accepts, with a queue of `backlog` entries (zerus-taljw).
+    #[cfg(unix)]
+    fn full_unix_listener(path: &Path, backlog: libc::c_int) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(
+            bytes.len() < address.sun_path.len(),
+            "test socket path too long"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let bound = unsafe {
+            libc::bind(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                &address as *const _ as *const libc::sockaddr,
+                length,
+            )
+        };
+        assert_eq!(bound, 0, "bind: {}", io::Error::last_os_error());
+        let listening = unsafe { libc::listen(std::os::fd::AsRawFd::as_raw_fd(&fd), backlog) };
+        assert_eq!(listening, 0, "listen: {}", io::Error::last_os_error());
+        fd
+    }
+
+    /// Connections queued until a nonblocking connect finds the queue full.
+    #[cfg(unix)]
+    fn fill_unix_queue(path: &Path) -> Vec<std::os::unix::net::UnixStream> {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let mut held = Vec::new();
+        loop {
+            let socket = crate::platform::test_nonblocking_socket();
+            let connected = unsafe {
+                libc::connect(
+                    std::os::fd::AsRawFd::as_raw_fd(&socket),
+                    &address as *const _ as *const libc::sockaddr,
+                    length,
+                )
+            };
+            if connected == 0 {
+                held.push(socket);
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            drop(socket);
+            if error.raw_os_error().is_some_and(crate::platform::queue_full) {
+                break;
+            }
+            panic!("filling the listen queue: {error}");
+        }
+        held
+    }
+
+    fn ledger_of(provider: provider_binding::Provider) -> Value {
+        let backend = match provider {
+            provider_binding::Provider::DeepSeek => "dsh",
+            provider_binding::Provider::OpenCode => "opencode",
+        };
+        serde_json::from_slice(
+            &fs::read(
+                root()
+                    .join("native-identities")
+                    .join(format!("{backend}-writes.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_full_unix_listen_queue_refuses_a_claim_within_the_bound() {
+        isolated("full_queue_fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn full_queue_fixture() {
+        use sha2::Digest;
+        use std::time::{Duration, Instant};
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-taljw: a host whose listen queue never frees must refuse the
+        // claim at its bound instead of blocking the agent's tool shell.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("queue-home");
+        let mut parent = claim_record("dsh/example/parent", "session-parent", &home);
+        provider.save(&mut parent).unwrap();
+        let choice = Choice {
+            session_id: string(&parent, "session_id").into(),
+            name: string(&parent, "name").into(),
+            run_id: string(&parent, "run_id").into(),
+            conversation_id: string(&parent, "conversation_id").into(),
+        };
+        let hosts = root().join("dsh/hosts").join(
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(home.to_string_lossy().as_bytes())
+            )[..16],
+        );
+        fs::create_dir_all(&hosts).unwrap();
+        let listener = full_unix_listener(&hosts.join("host.sock"), 1);
+        let fill = fill_unix_queue(&hosts.join("host.sock"));
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(claimed_parent(&choice));
+        });
+        let started = Instant::now();
+        match received.recv_timeout(Duration::from_secs(6)) {
+            Ok(result) => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(6),
+                    "{:?}",
+                    started.elapsed()
+                );
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("did not confirm") || error.contains("must be a live session"),
+                    "{error}"
+                );
+            }
+            Err(_) => panic!("the claim blocked past its bound"),
+        }
+        drop(fill);
+        drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_in_place_binding_rewrite_is_seen() {
+        isolated("in_place_rewrite_fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn in_place_rewrite_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-hgt89: a write that keeps the file's directory entry but
+        // rewrites its content must not leave the warm index trusted.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("in-place-home");
+        let native = "session-in-place";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let mut other = claim_record("dsh/example/other", "session-other", &home);
+        provider.save(&mut other).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        // An older writer rewrites `other` in place, so it now holds the
+        // claimed conversation too without changing any directory entry.
+        let duplicate = claim_record("dsh/example/other", native, &home);
+        fs::write(
+            provider.label_path("dsh/example/other"),
+            duplicate.to_string(),
+        )
+        .unwrap();
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "an in-place duplicate is ambiguous, not the cached session"
+        );
+    }
+
+    #[test]
+    fn a_failed_native_identity_note_is_not_accounted() {
+        isolated("failed_note_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn failed_note_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-8g1je: a write whose optional native-identity note failed must
+        // stay unaccounted, so a later warm lookup cannot trust the index.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("failed-note-home");
+        let native = "session-note";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let accounted = ledger_of(provider)["stamp"].clone();
+        // A directory where the derived cache file belongs makes the note fail.
+        let cache = provider_binding::cache_path_for(provider, native, &home);
+        fs::remove_file(&cache).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let mut duplicate = claim_record("dsh/example/duplicate", native, &home);
+        provider.save(&mut duplicate).unwrap();
+        assert_eq!(
+            ledger_of(provider)["stamp"],
+            accounted,
+            "a failed native-identity note must not be accounted as written"
+        );
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "an unaccounted duplicate must not answer from the warm index"
+        );
+        fs::remove_dir(&cache).unwrap();
+    }
+
+    #[test]
+    fn a_dirty_ledger_is_rebaselined_by_the_next_complete_scan() {
+        isolated("dirty_rebaseline_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn dirty_rebaseline_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-8g1je: a ledger that fell behind an unaccounted write must be
+        // re-baselined by the next complete scan instead of making every warm
+        // claim pay the bounded changed-binding check.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("rebaseline-home");
+        let native = "session-rebaseline";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let before = ledger_of(provider);
+        let foreign = claim_record("dsh/example/foreign", "session-unrelated", &home);
+        atomic(
+            &provider.label_path("dsh/example/foreign"),
+            &foreign.to_string(),
+        )
+        .unwrap();
+        fs::remove_file(provider.label_path("dsh/example/foreign")).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"],
+            "the answer stays the warm session"
+        );
+        let after = ledger_of(provider);
+        assert_ne!(
+            after["stamp"], before["stamp"],
+            "the dirty ledger was re-baselined"
+        );
+        assert_ne!(
+            after["epoch"], before["epoch"],
+            "a complete scan retires older indexes"
+        );
+        assert!(after["dirty_since"].is_null(), "{after}");
+    }
+
+    #[test]
+    fn an_unchanged_overflow_ledger_does_not_scan_every_find() {
+        isolated("overflow_stamp_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn overflow_stamp_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-wult0: overflow never proves an identity. It stays unavailable,
+        // but an unchanged bounded witness must not cost a complete scan.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("overflow-home");
+        let native = "session-overflow";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        for index in 0..provider_binding::RECORDS_FOR_TEST {
+            let name = format!("dsh/example/fill-{index}");
+            let record = claim_record(&name, &format!("session-fill-{index}"), &home);
+            fs::write(provider.label_path(&name), record.to_string()).unwrap();
+        }
+        let find = || {
+            let before = provider_binding::complete_scan_count();
+            let error = provider.native_caller(native, &home).unwrap_err();
+            assert!(error.contains("metadata bound"), "{error}");
+            provider_binding::complete_scan_count() - before
+        };
+        let mut counts = vec![find(), find()];
+        let mut changed = first.clone();
+        changed["overflow_change"] = json!(true);
+        fs::write(
+            provider.label_path(string(&changed, "name")),
+            changed.to_string(),
+        )
+        .unwrap();
+        counts.extend([find(), find()]);
+        println!("overflow-find-scans={counts:?}");
+        assert_eq!(counts, [1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn over_bound_outcomes_are_preserved() {
+        isolated("overflow_outcomes_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn overflow_outcomes_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // The warm changed-binding check has the same RECORDS bound as the
+        // complete scan, so these actual over-bound outcomes are unavailable.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("overflow-outcomes-home");
+        let native = "session-overflow-outcomes";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        for index in 0..provider_binding::RECORDS_FOR_TEST {
+            let name = format!("dsh/example/fill-{index}");
+            let record = claim_record(&name, &format!("session-fill-{index}"), &home);
+            fs::write(provider.label_path(&name), record.to_string()).unwrap();
+        }
+        let mut other = claim_record("dsh/example/other", "session-other", &home);
+        provider.save(&mut other).unwrap();
+        let warm = provider.native_caller(native, &home);
+        println!("overflow-warm-current={warm:?}");
+        assert!(warm.unwrap_err().contains("metadata bound"));
+        let absent = provider.native_caller("session-absent", &home);
+        println!("overflow-warm-absent={absent:?}");
+        assert!(absent.unwrap_err().contains("metadata bound"));
+        let mut unlisted = claim_record("dsh/example/fill-0", native, &home);
+        unlisted["overflow_change"] = json!(true);
+        fs::write(
+            provider.label_path(string(&unlisted, "name")),
+            unlisted.to_string(),
+        )
+        .unwrap();
+        let changed = provider.native_caller(native, &home);
+        println!("overflow-unlisted-changed={changed:?}");
+        assert!(changed.unwrap_err().contains("metadata bound"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_busy_native_host_refuses_a_claim_quickly() {
         isolated("busy_host_fixture");
+    }
+
+    #[cfg(unix)]
+    struct Owner(std::process::Child);
+    #[cfg(unix)]
+    impl Owner {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.kill()?;
+            self.0.wait().map(|_| ())
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_connect_on_a_live_host_is_busy_not_dead() {
+        isolated("refused_connect_fixture");
+    }
+
+    /// zerus-xt6re: BSD refuses a connect on a full listen queue at once
+    /// (ECONNREFUSED, sometimes ECONNRESET). The recorded owner decides: a
+    /// live owner is a busy host, a dead owner or a missing socket a definite
+    /// no. Emulated on Linux by injecting the refusal at the claim's connect.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn refused_connect_fixture() {
+        use sha2::Digest;
+        use std::time::{Duration, Instant};
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("refused-home");
+        let mut parent = claim_record("dsh/example/parent", "session-parent", &home);
+        provider.save(&mut parent).unwrap();
+        let choice = Choice {
+            session_id: string(&parent, "session_id").into(),
+            name: string(&parent, "name").into(),
+            run_id: string(&parent, "run_id").into(),
+            conversation_id: string(&parent, "conversation_id").into(),
+        };
+        let hosts = root().join("dsh/hosts").join(
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(home.to_string_lossy().as_bytes())
+            )[..16],
+        );
+        fs::create_dir_all(&hosts).unwrap();
+        let socket = hosts.join("host.sock");
+        // A small explicit backlog: fill_unix_queue opens one socket per
+        // queue slot, and the default SOMAXCONN backlog exhausts descriptors
+        // under the package check's low nofile limit (zerus-xt6re, zerus-taljw).
+        let listener = full_unix_listener(&socket, 1);
+        // A genuinely saturated host: its listen queue is full, so BSD would
+        // answer a non-blocking connect with ECONNREFUSED at once.
+        let fill = fill_unix_queue(&socket);
+        let mut owner = Owner(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        dsh::record_running_for_test(&hosts, owner.0.id()).unwrap();
+        dsh::refuse_connect_for_test(std::io::ErrorKind::ConnectionRefused);
+        let started = Instant::now();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("did not confirm"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A reset refusal is the same busy answer.
+        dsh::refuse_connect_for_test(std::io::ErrorKind::ConnectionReset);
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("did not confirm"), "{error}");
+        // The socket is gone: a definite no, even with a live owner recorded.
+        fs::remove_file(&socket).unwrap();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("must be a live session"), "{error}");
+        // The recorded owner exited: a definite no, even with the socket back.
+        drop(listener);
+        let rebound = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        owner.kill().unwrap();
+        let error = claimed_parent(&choice).unwrap_err();
+        assert!(error.contains("must be a live session"), "{error}");
+        dsh::allow_connect_for_test();
+        drop(fill);
+        drop(rebound);
     }
 
     #[cfg(unix)]

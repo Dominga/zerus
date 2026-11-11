@@ -36,6 +36,7 @@ impl Model {
         let entry = job.cleanup.entries.first().ok_or(STATE_CHANGED)?;
         let key = presentation::job_key(job);
         if !self.can_dismiss(job)
+            || job.lookup_only
             || self.unknown_folder(job)
             || self
                 .jobs
@@ -419,6 +420,7 @@ mod tests {
             program_review_pending: false,
             program_retirement: None,
             lookup_only: false,
+            physically_released: false,
             source: None,
             archive: None,
             restore_supported: false,

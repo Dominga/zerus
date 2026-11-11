@@ -220,10 +220,28 @@ sys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);sys.exit(r.r
         self.assertIn("Repository changed", value["detail"])
         self.assertEqual(self.events("waiting", "list"), [])
 
+    def expired_refresh(self, **extra):
+        """A forced refresh staged while its cache lock is held elsewhere.
+
+        The fixture publishes while the reader is expected to be waiting on
+        the lock. A loaded machine can deschedule the reader between its
+        common query and that attempt: it then loads the publication itself
+        or finds the lock already free, takes the valid non-coalesced path
+        and lists, so the expired selected query is never issued. Repeat
+        within a bound until the reader actually coalesced (a second common
+        query); a coalesced attempt that reports success still fails below.
+        """
+        for _ in range(12):
+            value, elapsed = self.publish(**extra)
+            if len(self.events("waiting", "common")) >= 2:
+                return value, elapsed
+        self.fail("the fixture never staged a coalesced refresh: "
+                  + json.dumps(self.trace.read_text().splitlines()[-20:]))
+
     def test_expired_selected_queries_are_not_hidden_as_success(self):
         for action in ("common", "root", "branch"):
             with self.subTest(action=action):
-                value, elapsed = self.publish(CATALOG_EXPIRE=action)
+                value, elapsed = self.expired_refresh(CATALOG_EXPIRE=action)
                 self.assertEqual(value["state"], "timeout", value)
                 self.assertEqual(self.events("waiting", "list"), [])
                 self.assertLess(elapsed, 3.7)

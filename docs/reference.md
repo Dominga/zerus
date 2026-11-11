@@ -548,7 +548,14 @@ replacement GUI must respect their still-charged global generation.
 registration without running the agent. Use another exact account ID for an
 isolated profile. The report contains provider/account identifiers, configuration
 and path fingerprints, expected/present/missing/duplicate event names and cached version
-compatibility, never settings, commands, prompts or credentials. DeepSeek and
+compatibility, never settings, commands, prompts or credentials.
+`unrecognised_tracking` is true when an entry runs `PROGRAM __state hook` or
+`PROGRAM __state answer-channel` for an unrecorded program whose basename
+contains `hgs` (case insensitive), but is neither an hgs basename nor the current
+runner. The name is ambiguity evidence only, never ownership. Unrelated programs
+using these arguments remain personal hooks and do not block repair; the report
+never names them. This flag is only in the account
+report; `hgs hooks SESSION --json` keeps its hooks-health-v1 fields. DeepSeek and
 OpenCode report `not_applicable`: they use their native APIs instead of tracking
 hooks. An unavailable or changed executable-version cache means compatibility
 `unknown`; inspection never runs `--version` or refreshes that cache.
@@ -569,8 +576,12 @@ Explicit configuration repair is native-only:
 `request_id`, `expected_provider`, `expected_account_id`,
 `expected_config_sha256` and `expected_path_id` copied from the inspected account
 report. Repair refuses changed content, account/path/symlink identity, malformed
-or oversized files and unknown/incompatible native-version evidence. It merges
-only missing HGS tracking registrations under the existing hook lock and atomic backup
+or oversized files and unknown/incompatible native-version evidence. It also
+refuses, without writing, while `unrecognised_tracking` is true: run it with
+`HGS_EXECUTABLE` set to that wrapper, or use a supervised launch with that
+runner to record it. Otherwise review or remove the ambiguous entry manually.
+Repair migrates recorded tracking/channel entries to the current runner and merges
+missing HGS tracking registrations under the existing hook lock and atomic backup
 rules, preserving personal settings/hooks and trusted legacy commands. It never
 trusts hooks, enables/widens answer channels, changes permissions, restarts a provider or retrofits running
 agents. If compatibility is unknown, explicit repair is unavailable. The current cache is
@@ -663,8 +674,23 @@ while 0.155.1 lacks that required flag.
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
 hgs recognises its own entries by the program they run: a path named `hgs` or
-`hgs.exe`, a legacy `hgs_state.py`, or exactly the current `HGS_EXECUTABLE`,
-which a wrapper may name differently. A later launch therefore adds nothing.
+`hgs.exe`, a legacy `hgs_state.py`, exactly the current `HGS_EXECUTABLE`,
+which a wrapper may name differently, or a program hgs recorded for that
+settings file. A later launch therefore adds no duplicate registrations.
+After a launch or explicit repair leaves an hgs entry that runs the current
+program, hgs records that exact program for the resolved settings file in
+private state (`hook-owners/` below the state directory, up to 8 programs of up
+to 4 KiB each, written atomically under the settings lock). Health and repair
+from a shell without that `HGS_EXECUTABLE` therefore still recognise the
+entries a wrapper wrote. When the current runner changes (including a different
+`HGS_EXECUTABLE`), the next install or compatible explicit repair rewrites those
+exact recorded tracking/channel entries to the current runner and records it.
+Shell migration accepts only the exact standalone form hgs writes; composed
+commands, comments and alternative quoting remain byte-for-byte unchanged.
+Other entry fields, personal hooks and trusted legacy commands are preserved.
+An unrecorded old wrapper is never silently claimed or deleted: use the exact
+wrapper as `HGS_EXECUTABLE` for a repair or supervised launch to record it first.
+Nothing is recorded for a program hgs did not write.
 Earlier versions added another group for a wrapper at each launch. Exact copies
 of such a group are removed once, and Codex may ask to review that change. A
 group that holds any personal hook is kept as it is, and a command for another
@@ -2840,6 +2866,18 @@ existing catalog; resume, adoption,
 manual assignments and explicit unassignment are never reassigned. A fork
 takes its source's project instead ([Fork session…](#fork-session)). This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
+A new session that a live tracked agent on the same computer launches (its
+parent link proven from process ancestry) starts in that parent's project,
+for Claude, Codex, Kimi, DeepSeek and OpenCode alike. The parent's project wins
+over folder inference, so a session tree stays together. A parent whose project
+no longer exists gives the child an explicit Inbox membership. A parent in Inbox,
+without a membership or with an unresolved project choice leaves the child to
+folder inference, as does a claimed, adopted or forwarded parent. The membership
+is written like a fork's: after the child's binding is saved, retrying a busy
+catalog for up to 3 seconds without holding the session state or provider
+binding locks, and only while the child's binding is still the same run and
+conversation. A child name that already has a membership keeps it. Existing
+sessions, including children placed before this rule, are never moved.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer

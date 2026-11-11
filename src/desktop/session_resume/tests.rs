@@ -1529,12 +1529,15 @@ mod actor {
                 inner(state, plan, args, input, lock, resources)
             },
         ));
-        // The first waits 300 ms of a 345 ms chain; a clock from admission
-        // would expire the second before its first turn.
+        // Keep the real operation bound: only the first's deliberately
+        // unfinished wait is short. The second's resume and send are real
+        // child I/O that a loaded runner can stretch past a tight bound, so
+        // the clocks are observed directly instead (zerus-c4q4p, as
+        // zerus-mupq4 for compact-to-send).
         f.runtime.fixture_wait(
             Duration::from_millis(300),
             Duration::from_millis(5),
-            Duration::from_millis(345),
+            runtime::CHAIN,
         );
         // Two stopped sessions: one resume each. The queue runs by admission
         // millisecond, then request ID: with the first's ID lower, a tie
@@ -1552,18 +1555,41 @@ mod actor {
         f.admit(&first);
         let admitted = Instant::now();
         f.admit(&second);
+        let started = |f: &Fixture, original: &Verified| {
+            f.runtime
+                .fixture_chain_started(&original.plan.resume_request_id)
+        };
+        assert_eq!(
+            started(&f, &first),
+            Some(None),
+            "admission must not start the first operation's clock"
+        );
+        assert_eq!(
+            started(&f, &second),
+            Some(None),
+            "admission must not start the queued operation's clock"
+        );
+        f.until("first holds the waiting work slot", |f| {
+            f.row(&first).receipt.resume.step == Step::Recorded && !f.row(&first).receipt.drained
+        });
+        assert!(
+            started(&f, &first).flatten().is_some(),
+            "the first turn must start the first operation's clock"
+        );
+        assert_eq!(
+            started(&f, &second),
+            Some(None),
+            "another operation's wait must not start the queued clock"
+        );
+        assert_eq!(f.row(&second).receipt.resume.step, Step::Queued);
         f.until("both settled", |f| {
             f.row(&first).receipt.drained && f.row(&second).receipt.drained
         });
-        assert!(Instant::now() > admitted + Duration::from_millis(345));
-        // The first ends unsent at its own budget or deadline, whichever its
-        // timing reaches first; the second, queued behind it, still sends.
+        assert!(Instant::now() > admitted + Duration::from_millis(300));
+        // The first ends unsent at its own wait budget; the second, queued
+        // behind it, still resumes and sends within its own bound.
         let first_receipt = f.row(&first).receipt;
-        assert!(
-            [ledger::WAIT_EXPIRED, ledger::CHAIN_EXPIRED].contains(&first_receipt.code.as_str()),
-            "{}",
-            first_receipt.code
-        );
+        assert_eq!(first_receipt.code, ledger::WAIT_EXPIRED);
         assert_eq!(
             first_receipt.result(&first.plan),
             Some(Settled::NotSent {

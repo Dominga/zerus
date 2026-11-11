@@ -1,14 +1,14 @@
 //! Optional initial grouping. Never initialize a catalog, replace any explicit
 //! membership (including a tombstone), infer by a path prefix, or create Git data.
 use super::{
-    catalog::{Catalog, Key},
+    catalog::{Catalog, Key, Operation},
     store::{LockedStore, Store},
 };
 use crate::config::Config;
 use crate::state::Pinned;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     time::{Duration, Instant},
 };
@@ -31,15 +31,7 @@ pub(crate) fn infer_new_session(config: &Config, name: &str, directory: &Path) {
             if Instant::now() >= end {
                 return Ok(());
             }
-            let key = Key::Session {
-                machine: store.data.catalog.machine(&store.data.node_id),
-                session: name.into(),
-            };
-            let actor = store.data.node_id.clone();
-            store.data.catalog.set(&actor, key, json!(project))?;
-            let local = [(actor.clone(), name.to_owned())];
-            super::session_ids::write(&store.data.catalog, &mut store.data.twins, &actor, &local)?;
-            store.save_catalog_only()?;
+            write_membership(&mut store, name, &project)?;
         }
         Ok(())
     })();
@@ -76,15 +68,7 @@ pub(crate) fn inherit_fork_project(
                 return Ok(false);
             };
             if let Some(project) = inherited(&store.data, name, source, archive) {
-                let key = Key::Session {
-                    machine: store.data.catalog.machine(&store.data.node_id),
-                    session: name.into(),
-                };
-                let actor = store.data.node_id.clone();
-                store.data.catalog.set(&actor, key, json!(project))?;
-                let local = [(actor.clone(), name.to_owned())];
-                super::session_ids::write(&store.data.catalog, &mut store.data.twins, &actor, &local)?;
-                store.save_catalog_only()?;
+                write_membership(&mut store, name, &project)?;
             }
             anyhow::Ok(true)
         });
@@ -93,6 +77,141 @@ pub(crate) fn inherit_fork_project(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+/// This computer's membership of `name`, with its ID twin, saved alone.
+fn write_membership(store: &mut LockedStore, name: &str, project: &str) -> anyhow::Result<()> {
+    let key = Key::Session {
+        machine: store.data.catalog.machine(&store.data.node_id),
+        session: name.into(),
+    };
+    let actor = store.data.node_id.clone();
+    store.data.catalog.set(&actor, key, json!(project))?;
+    let local = [(actor.clone(), name.to_owned())];
+    super::session_ids::write(&store.data.catalog, &mut store.data.twins, &actor, &local)?;
+    store.save_catalog_only()
+}
+
+/// A parent link that places a new child (zerus-d5twt): one this computer
+/// proved from its own process ancestry (`launch`). A claimed, adopted or
+/// forwarded link stays presentation only and leaves folder inference alone.
+pub(crate) fn placing_parent(link: &Value) -> bool {
+    crate::state::parent_link::valid(link) && link["source"] == "launch"
+}
+
+/// A new child session's initial project (zerus-d5twt), written like a
+/// fork's once the child's binding exists and its launch released the state
+/// and provider locks: the project of the tracked parent that launched it,
+/// or an explicit Inbox when that project no longer exists. A parent in
+/// Inbox, without a single membership or with an unresolved one decides
+/// nothing, and the child's folder is inferred in the same attempt, as for a
+/// session without a parent. The parent's project wins over folder inference,
+/// so a session tree stays together. Never initializes a catalog or replaces
+/// an explicit membership (including a tombstone), and never moves the parent
+/// or any existing session. Each attempt holds the state lock only to pin
+/// `name` to `run_id` and `conversation` and tries the provider and catalog
+/// locks once; a busy one is retried outside the state lock until the shared
+/// 3 s cap. A failure never fails the launch.
+pub(crate) fn place_child_session(
+    config: &Config,
+    name: &str,
+    directory: &Path,
+    run_id: &str,
+    conversation: &Value,
+    parent: &Value,
+) {
+    if !config.dir.join("swarm/catalog.json").is_file() {
+        return;
+    }
+    let end = Instant::now() + Duration::from_secs(3);
+    loop {
+        let attempt =
+            crate::state::with_pinned_session_binding(name, run_id, conversation, end, || {
+                let Ok(mut store) = LockedStore::try_load_scoped(config) else {
+                    return Ok(false);
+                };
+                let project = match from_parent(&store.data, name, parent) {
+                    Parent::Project(project) => Some(project),
+                    Parent::Keep => None,
+                    Parent::Folder => infer(&store.data, name, directory, end, |directory| {
+                        crate::state::worktree_catalog_until(directory, end)
+                    }),
+                };
+                if let Some(project) = project.filter(|_| Instant::now() < end) {
+                    write_membership(&mut store, name, &project)?;
+                }
+                anyhow::Ok(true)
+            });
+        if !retry(&attempt) || Instant::now() >= end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+/// What a new child's parent decides for the child's initial project.
+#[derive(Debug, PartialEq)]
+enum Parent {
+    /// Write this membership: the parent's live project, or Inbox.
+    Project(String),
+    /// Nothing from the parent: infer the child's folder.
+    Folder,
+    /// Write nothing: an existing membership or no initialized catalog.
+    Keep,
+}
+fn from_parent(store: &Store, name: &str, link: &Value) -> Parent {
+    if !store.imported {
+        return Parent::Keep;
+    }
+    let machine = store.catalog.machine(&store.node_id);
+    let key = Key::Session {
+        machine: machine.clone(),
+        session: name.into(),
+    };
+    if store.catalog.heads().contains_key(&key) {
+        return Parent::Keep;
+    }
+    if !placing_parent(link) || link["machine"].as_str() != Some(store.node_id.as_str()) {
+        return Parent::Folder;
+    }
+    let heads = store.catalog.effective_heads();
+    let Some(project) = parent_membership(store, &heads, &machine, link) else {
+        return Parent::Folder;
+    };
+    if project == INBOX {
+        return Parent::Folder;
+    }
+    let alive = Key::project(&project, "alive");
+    let live = heads
+        .get(&alive)
+        .and_then(|versions| Catalog::selected(&alive, versions))
+        .is_some_and(|op| op.value == true);
+    Parent::Project(if live { project } else { INBOX.into() })
+}
+/// The parent's single current project, read as a project move reads it: its
+/// ID membership when it has one, else its label's. Unassigned, unresolved or
+/// unreadable gives `None`.
+fn parent_membership(
+    store: &Store,
+    heads: &BTreeMap<Key, Vec<&Operation>>,
+    machine: &str,
+    link: &Value,
+) -> Option<String> {
+    let id = link["session_id"].as_str().unwrap_or_default();
+    if let Some(primary) = store.id_memberships.as_ref().filter(|_| !id.is_empty()) {
+        match primary.resolve(&store.catalog, &store.node_id, id) {
+            Ok(Some(record)) if record.conflict => return None,
+            Ok(Some(record)) => return record.value.as_str().map(str::to_owned),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+    }
+    let key = Key::Session {
+        machine: machine.into(),
+        session: link["name"].as_str()?.into(),
+    };
+    let [only] = heads.get(&key)?.as_slice() else {
+        return None;
+    };
+    only.value.as_str().map(str::to_owned)
 }
 /// Whether a fork's project attempt may run again: a busy lock or catalog,
 /// with nothing held now. Done, a changed binding or a failure ends it.
@@ -363,6 +482,128 @@ mod tests {
         // An uninitialized catalog is never written.
         store.imported = false;
         assert_eq!(from(&store, "codex/p/source", None), None);
+    }
+
+    /// zerus-d5twt: a child its proven parent launched takes the parent's
+    /// live project, else an explicit Inbox for a deleted one; any other
+    /// parent leaves it to folder inference. An existing membership stays.
+    #[test]
+    fn a_child_takes_its_proven_parents_project_or_inbox() {
+        let mut store = store();
+        let local = store.node_id.clone();
+        let machine = store.catalog.machine(&local);
+        let member = |session: &str| Key::Session {
+            machine: machine.clone(),
+            session: session.into(),
+        };
+        let set = |store: &mut Store, key: Key, value: Value| {
+            store.catalog.set(&local, key, value).unwrap();
+        };
+        for project in ["work", "other", "gone"] {
+            set(&mut store, Key::project(project, "alive"), json!(true));
+        }
+        set(&mut store, member("claude/p/lead"), json!("work"));
+        set(&mut store, member("claude/p/inbox"), json!("ungrouped"));
+        set(&mut store, member("claude/p/cleared"), Value::Null);
+        set(&mut store, member("claude/p/orphan"), json!("gone"));
+        set(&mut store, member("claude/p/lost"), json!("never-created"));
+        set(&mut store, Key::project("gone", "alive"), json!(false));
+        let mut remote = store.catalog.clone();
+        remote
+            .set(&new_id(), member("claude/p/split"), json!("other"))
+            .unwrap();
+        set(&mut store, member("claude/p/split"), json!("work"));
+        store
+            .catalog
+            .merge(
+                &remote.swarm_id.clone(),
+                remote.operations.into_values().collect(),
+            )
+            .unwrap();
+        let link = |name: &str, source: &str| {
+            json!({"schema":1,"machine":local,"host":"example","session_id":"",
+                "name":name,"conversation_id":"conversation","run_id":"run","source":source,"at":1})
+        };
+        let child = |store: &Store, link: &Value| from_parent(store, "codex/p/child", link);
+        let work = Parent::Project("work".into());
+        let inbox = Parent::Project("ungrouped".into());
+        assert_eq!(child(&store, &link("claude/p/lead", "launch")), work);
+        for parent in ["claude/p/orphan", "claude/p/lost"] {
+            assert_eq!(child(&store, &link(parent, "launch")), inbox, "{parent}");
+        }
+        // Inbox, no single membership or an unassigned parent: folder inference.
+        for parent in [
+            "claude/p/inbox",
+            "claude/p/cleared",
+            "claude/p/split",
+            "claude/p/unplaced",
+        ] {
+            assert_eq!(
+                child(&store, &link(parent, "launch")),
+                Parent::Folder,
+                "{parent}"
+            );
+        }
+        // Only this computer's own process proof places a child.
+        for source in ["claimed", "adopt", "manual", "forwarded"] {
+            assert_eq!(
+                child(&store, &link("claude/p/lead", source)),
+                Parent::Folder,
+                "{source}"
+            );
+        }
+        let mut elsewhere = link("claude/p/lead", "launch");
+        elsewhere["machine"] = json!(new_id());
+        assert_eq!(child(&store, &elsewhere), Parent::Folder);
+        let mut malformed = link("claude/p/lead", "launch");
+        malformed.as_object_mut().unwrap().remove("schema");
+        assert_eq!(child(&store, &malformed), Parent::Folder);
+        // An explicit membership of the child, even Inbox or a tombstone, stays.
+        for value in [json!("ungrouped"), Value::Null, json!("other")] {
+            let mut explicit = store.clone();
+            set(&mut explicit, member("codex/p/child"), value);
+            assert_eq!(
+                child(&explicit, &link("claude/p/lead", "launch")),
+                Parent::Keep
+            );
+        }
+        // A project deleted since the parent joined it: Inbox.
+        let mut retired = store.clone();
+        set(&mut retired, Key::project("work", "alive"), json!(false));
+        assert_eq!(child(&retired, &link("claude/p/lead", "launch")), inbox);
+        // The parent's ID membership is read first, as a project move reads it.
+        let parent_id = "44444444-4444-4444-8444-444444444444";
+        let mut by_id = store.clone();
+        let mut primary = super::super::session_memberships::Memberships::empty(&by_id.catalog);
+        primary
+            .set(&by_id.catalog, &local, &local, parent_id, json!("other"))
+            .unwrap();
+        by_id.id_memberships = Some(primary);
+        let mut renamed = link("claude/p/renamed", "launch");
+        renamed["session_id"] = json!(parent_id);
+        assert_eq!(child(&by_id, &renamed), Parent::Project("other".into()));
+        let mut labelled = link("claude/p/lead", "launch");
+        labelled["session_id"] = json!(parent_id);
+        assert_eq!(child(&by_id, &labelled), Parent::Project("other".into()));
+        // Without an ID record, the label's membership decides.
+        labelled["session_id"] = json!("55555555-5555-4555-8555-555555555555");
+        assert_eq!(child(&by_id, &labelled), work);
+        // An unassigned ID record wins over its label too.
+        let mut cleared = by_id.clone();
+        cleared
+            .id_memberships
+            .as_mut()
+            .unwrap()
+            .set(&cleared.catalog, &local, &local, parent_id, Value::Null)
+            .unwrap();
+        labelled["session_id"] = json!(parent_id);
+        assert_eq!(child(&cleared, &labelled), Parent::Folder);
+        // An uninitialized catalog is never written.
+        store.imported = false;
+        assert_eq!(
+            child(&store, &link("claude/p/lead", "launch")),
+            Parent::Keep
+        );
     }
 
     #[cfg(unix)]

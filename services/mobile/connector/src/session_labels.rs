@@ -16,6 +16,23 @@ use zerus_watch_protocol::session_labels as wire;
 // original nonce still needs the selected CLI's fresh complete-label context.
 const ROUTING_BY_ID: bool = true;
 
+/// A bounded reason a session-label query was not answered. The production
+/// path collapses these to `None`; the synchronous tests report them so a rare
+/// rejection names its branch instead of only "None" (zerus-1uvah).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rejected {
+    /// Another connector operation holds the private-state lock right now.
+    Busy,
+    /// No query file exists yet.
+    Missing,
+    /// The store, directory or query file could not be read safely.
+    Store,
+    /// The query is malformed or outside its freshness window at this instant.
+    Invalid,
+    /// The query asks another canonical configuration.
+    Foreign,
+}
+
 pub(crate) struct Selection {
     path: PathBuf,
     directory: PathBuf,
@@ -87,10 +104,23 @@ impl Selection {
             .is_some_and(|bytes| binding(&self.path, &bytes).as_ref() == Some(&self.binding))
     }
     fn query(&self, now: u64) -> Option<wire::Query> {
-        let store = Store::try_lock(&self.directory, false).ok()??;
-        let bytes = store.read(wire::QUERY_FILE).ok()??;
-        let query = wire::Query::parse(&bytes, now)?;
-        (query.connector_configuration == self.binding).then_some(query)
+        self.inspect(now).ok()
+    }
+    /// The same decision as `query`, naming the rejection. Tests assert on it
+    /// so a failure says which bounded branch refused (zerus-1uvah); the
+    /// production path still collapses every rejection to `None`.
+    fn inspect(&self, now: u64) -> std::result::Result<wire::Query, Rejected> {
+        let store = Store::try_lock(&self.directory, false)
+            .map_err(|_| Rejected::Store)?
+            .ok_or(Rejected::Busy)?;
+        let bytes = store
+            .read(wire::QUERY_FILE)
+            .map_err(|_| Rejected::Store)?
+            .ok_or(Rejected::Missing)?;
+        let query = wire::Query::parse(&bytes, now).ok_or(Rejected::Invalid)?;
+        (query.connector_configuration == self.binding)
+            .then_some(query)
+            .ok_or(Rejected::Foreign)
     }
     fn publish(&self, query: &wire::Query, context: Option<wire::Context>, now: u64) {
         if !query.valid(now) || !self.current() {
@@ -223,20 +253,27 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
-    fn fixture() -> (tempfile::TempDir, Selection, wire::Query, wire::Context) {
+    fn fixture() -> (
+        tempfile::TempDir,
+        Selection,
+        wire::Query,
+        wire::Context,
+        u64,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = temp.path().join("connector.json");
         std::fs::write(&path, b"{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let selection = Selection::at(&path, b"{}", &path).unwrap();
+        let at = now().unwrap();
         let query = wire::Query {
             schema: wire::SCHEMA,
             nonce: "a".repeat(32),
             machine: "11111111-1111-4111-8111-111111111111".into(),
             configuration: "b".repeat(64),
             connector_configuration: selection.binding.clone(),
-            expires_at_millis: now().unwrap() + 2_000,
+            expires_at_millis: at + wire::QUERY_MILLIS,
         };
         let context = wire::Context {
             schema: wire::SCHEMA,
@@ -247,7 +284,7 @@ mod tests {
             membership_by_id: true,
             labels_by_id: true,
         };
-        (temp, selection, query, context)
+        (temp, selection, query, context, at)
     }
     fn put(selection: &Selection, name: &str, value: &impl serde::Serialize) {
         let store = Store::lock(&selection.directory, false).unwrap();
@@ -268,7 +305,7 @@ mod tests {
     }
     #[test]
     fn only_the_same_canonical_configuration_answers_an_original_query() {
-        let (_temp, selection, query, context) = fixture();
+        let (_temp, selection, query, context, at) = fixture();
         assert!(Selection::at(
             &selection.path,
             b"{}",
@@ -276,58 +313,77 @@ mod tests {
         )
         .is_none());
         put(&selection, wire::QUERY_FILE, &query);
-        assert_eq!(selection.query(now().unwrap()), Some(query.clone()));
+        // zerus-1uvah: the synchronous identity check reuses the fixture's
+        // own clock sample instead of sampling the wall clock again. The
+        // fixture expires at exactly QUERY_MILLIS, so any second sample that
+        // lands before the first (a clock adjustment between the two calls)
+        // would be rejected by the freshness rule.
+        assert_eq!(
+            selection.query(at),
+            Some(query.clone()),
+            "rejected: {:?}",
+            selection.inspect(at).err()
+        );
         // A later query cannot receive this earlier query's reply.
         let mut next = query.clone();
         next.nonce = "d".repeat(32);
         put(&selection, wire::QUERY_FILE, &next);
-        selection.publish(&query, Some(context.clone()), now().unwrap());
+        selection.publish(&query, Some(context.clone()), at);
         assert!(reply(&selection).is_none());
-        selection.publish(&next, Some(context.clone()), now().unwrap());
+        selection.publish(&next, Some(context.clone()), at);
         let bytes = reply(&selection).unwrap();
         let answer: wire::Reply = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(answer.query, next);
         assert!(answer.routing_by_id);
-        assert!(wire::Reply::parse(&bytes, &next, now().unwrap()).is_some());
+        assert!(wire::Reply::parse(&bytes, &next, at).is_some());
         // A still-running foundation connector remains negative after only
         // its selected CLI is upgraded; the connector's own flag is required.
         let mut old = answer.clone();
         old.routing_by_id = false;
-        assert!(
-            wire::Reply::parse(&serde_json::to_vec(&old).unwrap(), &next, now().unwrap()).is_none()
-        );
+        assert!(wire::Reply::parse(&serde_json::to_vec(&old).unwrap(), &next, at).is_none());
         let mut partial = answer.clone();
         partial.context.as_mut().unwrap().labels_by_id = false;
-        assert!(wire::Reply::parse(
-            &serde_json::to_vec(&partial).unwrap(),
-            &next,
-            now().unwrap()
-        )
-        .is_none());
+        assert!(wire::Reply::parse(&serde_json::to_vec(&partial).unwrap(), &next, at).is_none());
         // Replacement of the selected configuration closes even a valid nonce.
         put(
             &selection,
             "connector.json",
             &serde_json::json!({"changed":true}),
         );
-        selection.publish(&query, Some(context), now().unwrap());
+        selection.publish(&query, Some(context), at);
         assert!(!selection.current());
     }
     #[test]
+    fn a_query_sample_must_lie_strictly_inside_the_freshness_window() {
+        // zerus-1uvah: the fixture's query lasts exactly QUERY_MILLIS, so
+        // the freshness rule accepts the write's own sample and rejects a
+        // second sample taken even 1 ms before it or after the window. A
+        // synchronous test must therefore reuse the fixture's sample.
+        let (_temp, selection, query, _context, at) = fixture();
+        put(&selection, wire::QUERY_FILE, &query);
+        assert_eq!(selection.inspect(at), Ok(query.clone()));
+        assert_eq!(selection.inspect(at - 1), Err(Rejected::Invalid));
+        assert_eq!(
+            selection.inspect(at + wire::QUERY_MILLIS + 1),
+            Err(Rejected::Invalid)
+        );
+    }
+
+    #[test]
     fn busy_irregular_and_oversized_inputs_never_block_or_prove_ready() {
         use std::os::unix::fs::symlink;
-        let (_temp, selection, query, context) = fixture();
+        let (_temp, selection, query, context, at) = fixture();
         let held = Store::lock(&selection.directory, false).unwrap();
-        assert!(selection.query(now().unwrap()).is_none());
+        assert!(selection.query(at).is_none());
         assert!(!selection.current());
         drop(held);
         let path = selection.directory.join(wire::QUERY_FILE);
         symlink(&selection.path, &path).unwrap();
-        assert!(selection.query(now().unwrap()).is_none());
+        assert!(selection.query(at).is_none());
         std::fs::remove_file(&path).unwrap();
         make_fifo(&path);
         let start = std::time::Instant::now();
-        assert!(selection.query(now().unwrap()).is_none());
+        assert!(selection.query(at).is_none());
         assert!(start.elapsed() < Duration::from_secs(1));
         std::fs::remove_file(&path).unwrap();
         put(
@@ -335,11 +391,11 @@ mod tests {
             wire::QUERY_FILE,
             &"x".repeat(wire::MAX_BYTES + 1),
         );
-        assert!(selection.query(now().unwrap()).is_none());
+        assert!(selection.query(at).is_none());
         put(&selection, wire::QUERY_FILE, &query);
         std::fs::remove_file(&selection.path).unwrap();
         make_fifo(&selection.path);
-        selection.publish(&query, Some(context), now().unwrap());
+        selection.publish(&query, Some(context), at);
         assert!(reply(&selection).is_none());
     }
 
@@ -359,7 +415,7 @@ mod tests {
         }
     }
     async fn run(replace: bool, ready: bool) {
-        let (temp, selection, query, context) = fixture();
+        let (temp, selection, query, context, at) = fixture();
         let journal = Journal::open(&temp.path().join("journal"), "fixture", 1_000.0).unwrap();
         let connector = Rc::new(Connector::new(
             NativeFixture {
@@ -407,10 +463,7 @@ mod tests {
                     ready.then_some(&connector.native.context)
                 );
                 assert!(answer.routing_by_id);
-                assert_eq!(
-                    wire::Reply::parse(&bytes, &query, now().unwrap()).is_some(),
-                    ready
-                );
+                assert_eq!(wire::Reply::parse(&bytes, &query, at).is_some(), ready);
             }
             let calls = connector.native.calls.borrow();
             assert_eq!(calls[0].argv, ["swarm", "session-labels-context", "--json"]);

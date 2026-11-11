@@ -249,8 +249,10 @@ class SignalTraceSource(unittest.TestCase):
                 self.assertEqual(syncs, [('sync', 17), ('sync', 23), ('close', 23)])
 
 
-MAC_PROTECTED = {'direct_signal_agent': '0e0e76129449c8490a15cb5efadccb631f46aefe8d62b8081a8bf3364c2fd9bd', 'DirectSignalTrace': 'fb9bc39f72f835553e15c00b5744337a23fb3c6ba7d800143e87964c1a32c880', 'Lifecycle': '4b443f77dc93dd7e9e79de6e5cf8cfcd0be6e519159a3b1c38afde253926df09', 'Archive': 'd996ae7fdb6970a0d61f3213e6891c8bc2a88011a82eb00d5660d251221b4dae'}
+MAC_PROTECTED = {'direct_signal_agent': '0e0e76129449c8490a15cb5efadccb631f46aefe8d62b8081a8bf3364c2fd9bd', 'DirectSignalTrace': 'fb9bc39f72f835553e15c00b5744337a23fb3c6ba7d800143e87964c1a32c880', 'Lifecycle': '0c75dcf0a29b6aeacd206e972daccb084584cb9396080baba237f83beae17f87', 'Archive': 'd996ae7fdb6970a0d61f3213e6891c8bc2a88011a82eb00d5660d251221b4dae'}
 # The fake agent also records HGS_SESSION_ID (zerus-ucck P1, approved addition).
+# Lifecycle gains only zerus-b64dl's plain-environment hook health/repair checks in
+# test_wrapper_named_hgs_executable_keeps_one_hook_entry_per_event (25 inserted lines).
 MAC_AGENT_SHA256 = '0177d1ac2bbb07117e2524e77a585b340297f2b9e2bcb6734151a1901a81a588'
 
 # BEGIN private Mac pause observer controls. Authored separately from native gates.

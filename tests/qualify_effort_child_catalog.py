@@ -151,6 +151,7 @@ def qualify(args):
         fixture.assertFalse((fixture.state / 'effort_receipts' / (request['request_id'] + '.json')).exists())
         fixture.assertFalse(legacy.exists())
         fixture.assertEqual(native_effort_id.image_digest(test_input.HGS), hgs_sha256)
+        shutil.copy(log, args.output.parent / 'native-catalog-opens.log')
         return dict(boundary='actual CLI; private scripted tmux/SQLite fixture; not official native',
                     hgs_sha256=hgs_sha256,
                     seed_sha256=native_effort_id.image_digest(image),

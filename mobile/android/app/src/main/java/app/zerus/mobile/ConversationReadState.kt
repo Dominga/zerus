@@ -25,6 +25,12 @@ data class ConversationReadState(val records:List<ConversationReadRecord> = empt
         val next=if(sequence != null) put(previous!!.copy(readThrough=maxOf(previous.readThrough,sequence),established=true)) else this
         return next.viewed(target,incoming.filter { it.incomingSeq == null || it.historyEpoch != previous?.epoch }.map { it.id }.toSet())
     }
+    /** Raises the epoch watermark; it never lowers it and never invents an epoch. */
+    fun acknowledged(target:Target,through:Long):ConversationReadState {
+        val old=record(target) ?: return this
+        if(old.epoch.isBlank() || through<=old.readThrough) return this
+        return put(old.copy(readThrough=through,established=true))
+    }
     fun head(target:Target,epoch:String,latest:Long?,total:Long?,complete:Boolean):ConversationReadState {
         if(epoch.isBlank() || epoch.length > 512 || latest != null && latest < 0 || total != null && total < 0) return this
         val old=record(target) ?: ConversationReadRecord(target)

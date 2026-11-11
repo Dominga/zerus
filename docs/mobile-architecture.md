@@ -911,7 +911,13 @@ Exact counters require a complete current index; stale or partial history uses
 the larger of its loaded count and last known canonical count as a lower bound,
 or an unknown state when neither is available. The read watermark remains valid
 for retained rows in the same epoch while offline. A native incoming-sequence anchor locates the
-first unread message beyond the latest page. The unread divider stays attached
+first unread message beyond the latest page. Legacy inspection IDs gain canonical
+aliases without widening a partial mark: an alias keeps the exact reply's read
+identity, and the canonical watermark advances only along consecutive incoming
+sequences already captured in this epoch, stopping at the first unseen, missing
+or duplicated sequence. That alias proof never borrows the prefix authority of
+direct canonical visibility above, so a partial mark cannot acknowledge the
+uncaptured replies between its position and the watermark. The unread divider stays attached
 to that message when legacy inspection IDs gain canonical aliases. It retires
 when the phone confirms that the current complete head is read, and later replies
 do not resurrect that opening divider. Visible canonical epoch and incoming

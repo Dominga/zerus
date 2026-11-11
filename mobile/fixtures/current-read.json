@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "description": "zerus-a4mub.9 current-read acknowledgement: SharedReadPolicies.current and currentPayload on Android and iOS. target and row are the open conversation; inspection is its verified native inspection; reply_shown is the tail or newest row visible after the settled dwell; attention_shown is its questions (or, without questions, the same tail) visible. current is the parsed authority, payload the mark_read. viewports: SharedReadPolicies.currentShown for one settled viewport. layouts: the platform viewport mapping (Android items in viewport, iOS visible ids) to flags, then currentShown.",
+ "description": "zerus-a4mub.9 current-read acknowledgement: SharedReadPolicies.current and currentPayload on Android and iOS. target and row are the open conversation; inspection is its verified native inspection; reply_shown is the tail or newest row visible after the settled dwell; attention_shown is its questions (or, without questions, the same tail) visible. current is the parsed authority, payload the mark_read. viewports: SharedReadPolicies.currentShown for one settled viewport. layouts: one settled viewport (offsets and sizes in dp on Android, pt on iOS) mapped by the shared readable-visibility rule (zerus-a4mub.31) to the items it shows (visible), then flags, then currentShown. The rule: an item is shown when the part of it inside the viewport is at least min(its height, readable, the viewport height); the 1-unit history:tail sentinel is shown when it starts inside the viewport and ends at most 2 units past it. Both platforms feed the same shown items to the canonical read dwell and to the current flags.",
  "cases": [
   {
    "name": "reply and attention after both were shown",
@@ -1174,7 +1174,8 @@
    ],
    "visible": [
     "event:e1",
-    "event:e2"
+    "event:e2",
+    "history:newer"
    ],
    "newest": "e2",
    "latest": true,
@@ -1466,6 +1467,323 @@
    },
    "reply_shown": false,
    "attention_shown": false
+  },
+  {
+   "name": "a sliver of the questions pane is not shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "event:e2",
+     "offset": 0,
+     "size": 880
+    },
+    {
+     "key": "history:questions",
+     "offset": 880,
+     "size": 400
+    },
+    {
+     "key": "history:tail",
+     "offset": 1280,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e2"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": true,
+   "flags": {
+    "tail": false,
+    "newest": true,
+    "questions": false
+   },
+   "reply_shown": true,
+   "attention_shown": false
+  },
+  {
+   "name": "a questions pane taller than twice the viewport is shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "history:questions",
+     "offset": 0,
+     "size": 2000
+    },
+    {
+     "key": "history:tail",
+     "offset": 2000,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "history:questions"
+   ],
+   "newest": "",
+   "latest": true,
+   "questions_listed": true,
+   "flags": {
+    "tail": false,
+    "newest": false,
+    "questions": true
+   },
+   "reply_shown": false,
+   "attention_shown": true
+  },
+  {
+   "name": "the readable part of a tall newest row is enough",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "event:e1",
+     "offset": 0,
+     "size": 852
+    },
+    {
+     "key": "event:e2",
+     "offset": 852,
+     "size": 600
+    },
+    {
+     "key": "history:tail",
+     "offset": 1452,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e1",
+    "event:e2"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": true,
+    "questions": false
+   },
+   "reply_shown": true,
+   "attention_shown": true
+  },
+  {
+   "name": "one unit short of the readable part is not shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "event:e1",
+     "offset": 0,
+     "size": 853
+    },
+    {
+     "key": "event:e2",
+     "offset": 853,
+     "size": 600
+    },
+    {
+     "key": "history:tail",
+     "offset": 1453,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e1"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": false,
+    "questions": false
+   },
+   "reply_shown": false,
+   "attention_shown": false
+  },
+  {
+   "name": "a short row must be fully visible",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "event:e1",
+     "offset": 0,
+     "size": 870
+    },
+    {
+     "key": "event:e2",
+     "offset": 870,
+     "size": 40
+    },
+    {
+     "key": "history:tail",
+     "offset": 922,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e1"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": false,
+    "questions": false
+   },
+   "reply_shown": false,
+   "attention_shown": false
+  },
+  {
+   "name": "a short row fully visible at the edge is shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "event:e1",
+     "offset": 0,
+     "size": 860
+    },
+    {
+     "key": "event:e2",
+     "offset": 860,
+     "size": 40
+    },
+    {
+     "key": "history:tail",
+     "offset": 912,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e1",
+    "event:e2"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": true,
+    "questions": false
+   },
+   "reply_shown": true,
+   "attention_shown": true
+  },
+  {
+   "name": "a viewport shorter than the readable part caps it",
+   "viewport": [
+    0,
+    30
+   ],
+   "items": [
+    {
+     "key": "event:e2",
+     "offset": -100,
+     "size": 200
+    },
+    {
+     "key": "history:tail",
+     "offset": 112,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "event:e2"
+   ],
+   "newest": "e2",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": true,
+    "questions": false
+   },
+   "reply_shown": true,
+   "attention_shown": true
+  },
+  {
+   "name": "the tail within its rounding slack is shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "history:empty",
+     "offset": 0,
+     "size": 60
+    },
+    {
+     "key": "history:tail",
+     "offset": 900,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "history:empty",
+    "history:tail"
+   ],
+   "newest": "",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": true,
+    "newest": false,
+    "questions": false
+   },
+   "reply_shown": true,
+   "attention_shown": true
+  },
+  {
+   "name": "a tail past its rounding slack is not shown",
+   "viewport": [
+    0,
+    900
+   ],
+   "items": [
+    {
+     "key": "history:empty",
+     "offset": 0,
+     "size": 60
+    },
+    {
+     "key": "history:tail",
+     "offset": 902,
+     "size": 1
+    }
+   ],
+   "visible": [
+    "history:empty"
+   ],
+   "newest": "",
+   "latest": true,
+   "questions_listed": false,
+   "flags": {
+    "tail": false,
+    "newest": false,
+    "questions": false
+   },
+   "reply_shown": false,
+   "attention_shown": false
   }
- ]
+ ],
+ "readable": 48
 }

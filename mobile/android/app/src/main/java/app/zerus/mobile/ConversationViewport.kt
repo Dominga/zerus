@@ -42,19 +42,37 @@ object ConversationViewport {
      * sentinel, the newest displayed event row and the questions item.
      */
     data class CurrentFlags(val tail: Boolean = false, val newest: Boolean = false, val questions: Boolean = false)
-    private fun overlaps(item: Item, start: Int, end: Int) = item.offset < end && item.offset + item.size > start
-    /** The event ids of rows overlapping the viewport; [eventId] maps a row key to its displayed event, else null. */
-    fun visibleEventIds(items: List<Item>, start: Int, end: Int, eventId: (String) -> String?): Set<String> =
-        items.filter { it.key.startsWith("event:") && overlaps(it, start, end) }.mapNotNull { eventId(it.key) }.toSet()
+    /** The readable part of an item in dp (points on iOS): about one line of body text with its padding. */
+    const val READABLE_HEIGHT_DP = 48
     /**
-     * The current acknowledgement flags of one settled viewport: the 1 dp tail sentinel entirely inside it, the
-     * newest displayed event row ([newestId], empty when the latest messages are not shown) overlapping it, and
-     * the questions item overlapping it.
+     * Whether [item] counts as shown in the viewport from [start] to [end] after the settled dwell, for both the
+     * canonical read and the current flags (zerus-a4mub.31). iOS applies the same rule to the same shared layouts
+     * (mobile/fixtures/current-read.json): the part inside the viewport is at least min(its height, [readable], the
+     * viewport height). A short item must be wholly visible; a taller one, however tall, needs its readable part.
+     * The 1 dp tail sentinel counts when it starts inside the viewport and ends at most 2 px past it.
      */
-    fun currentFlags(items: List<Item>, start: Int, end: Int, newestId: String, eventId: (String) -> String?) = CurrentFlags(
-        tail = items.any { it.key == "history:tail" && it.offset >= start && it.offset + it.size <= end + 2 },
-        newest = newestId.isNotEmpty() && newestId in visibleEventIds(items, start, end, eventId),
-        questions = items.any { it.key == "history:questions" && overlaps(it, start, end) })
+    fun shows(item: Item, start: Int, end: Int, readable: Int): Boolean {
+        if (item.key == "history:tail") return item.offset >= start && item.offset + item.size <= end + 2
+        val visible = minOf(item.offset + item.size, end) - maxOf(item.offset, start)
+        return visible > 0 && visible >= minOf(item.size, readable, end - start)
+    }
+    /** The keys of the items [shows] counts, top to bottom. */
+    fun visibleKeys(items: List<Item>, start: Int, end: Int, readable: Int): List<String> =
+        items.filter { shows(it, start, end, readable) }.sortedBy { it.offset }.map { it.key }
+    /** The event ids of the rows [shows] counts; [eventId] maps a row key to its displayed event, else null. */
+    fun visibleEventIds(items: List<Item>, start: Int, end: Int, readable: Int, eventId: (String) -> String?): Set<String> =
+        visibleKeys(items, start, end, readable).filter { it.startsWith("event:") }.mapNotNull(eventId).toSet()
+    /**
+     * The current acknowledgement flags of one settled viewport, from the items [shows] counts: the tail sentinel,
+     * the newest displayed event row ([newestId], empty when the latest messages are not shown) and the questions item.
+     */
+    fun currentFlags(items: List<Item>, start: Int, end: Int, readable: Int, newestId: String,
+        eventId: (String) -> String?): CurrentFlags {
+        val visible = visibleKeys(items, start, end, readable)
+        return CurrentFlags(tail = "history:tail" in visible,
+            newest = newestId.isNotEmpty() && visible.any { it.startsWith("event:") && eventId(it) == newestId },
+            questions = "history:questions" in visible)
+    }
 
     /** The row of this phone's latest send, to bring into view. */
     fun own(events: List<Event>, ownSendId: String): Event? = events.lastOrNull { it.outgoingId == ownSendId || it.receiptRequestId == ownSendId }

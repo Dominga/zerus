@@ -62,17 +62,26 @@ class SharedReadCurrentTest {
         }
     }
 
-    /** zerus-a4mub.30: the settled layout reaches the flags, and the flags the decision, exactly as shared. */
+    /**
+     * zerus-a4mub.30/.31: the settled layout reaches the shown items through the shared readable-visibility rule, the
+     * shown items the flags, and the flags the decision, exactly as ZerusKit maps the same layouts.
+     */
     @Test fun everySharedLayoutMapsToItsFlagsAndDecision() {
-        val layouts=fixture().getJSONArray("layouts")
-        assertTrue(layouts.length()>=10)
+        val shared=fixture();val layouts=shared.getJSONArray("layouts")
+        assertTrue(layouts.length()>=19)
+        val readable=shared.getInt("readable")
+        assertEquals(ConversationViewport.READABLE_HEIGHT_DP,readable)
         val eventId={ key:String -> key.takeIf { it.startsWith("event:") }?.removePrefix("event:") }
         for(i in 0 until layouts.length()) {
             val case=layouts.getJSONObject(i);val name=case.getString("name")
             val viewport=case.getJSONArray("viewport")
             val items=case.getJSONArray("items").let { array -> (0 until array.length()).map { array.getJSONObject(it) }
                 .map { ConversationViewport.Item(it.getString("key"),it.getInt("offset"),it.getInt("size")) } }
-            val flags=ConversationViewport.currentFlags(items,viewport.getInt(0),viewport.getInt(1),case.getString("newest"),eventId)
+            val visible=case.getJSONArray("visible").let { array -> (0 until array.length()).map(array::getString) }
+            assertEquals(name,visible,ConversationViewport.visibleKeys(items,viewport.getInt(0),viewport.getInt(1),readable))
+            assertEquals(name,visible.filter { it.startsWith("event:") }.map { it.removePrefix("event:") }.toSet(),
+                ConversationViewport.visibleEventIds(items,viewport.getInt(0),viewport.getInt(1),readable,eventId))
+            val flags=ConversationViewport.currentFlags(items,viewport.getInt(0),viewport.getInt(1),readable,case.getString("newest"),eventId)
             val expected=case.getJSONObject("flags")
             assertEquals(name,ConversationViewport.CurrentFlags(expected.getBoolean("tail"),expected.getBoolean("newest"),expected.getBoolean("questions")),flags)
             val shown=SharedReadPolicies.currentShown(latest=case.getBoolean("latest"),questionsListed=case.getBoolean("questions_listed"),flags=flags)

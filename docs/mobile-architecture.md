@@ -717,6 +717,14 @@ such field, so their phones keep the canonical-head requirement.
 Android and iOS acknowledge those current values from the open conversation's
 verified inspection. This is separate from the canonical history that moves
 their private read position.
+- **Visible.** Both phones apply one rule to the canonical read and to these
+  values. After the settled dwell, an item counts as visible when its part
+  inside the viewport is at least the smallest of its height, its readable part
+  (48 dp on Android, 48 pt on iOS) and the viewport height. A short row must be
+  wholly visible; a taller row, or a questions pane of any height, needs its
+  readable part. The 1-unit tail sentinel counts when it starts inside the
+  viewport and ends at most 2 units past it (pixels on Android, points on iOS),
+  allowing for layout rounding.
 - **Reply.** It is sent after the same settled visibility dwell, with overlays
   excluded, once the conversation shows its latest messages and either its tail
   or its newest displayed row is visible.
@@ -728,7 +736,8 @@ their private read position.
 - **Mark read.** An explicit Mark read shares both values.
 - **What stays the same.** This never advances the private read position, the
   unread divider or the counts. Read all still shares replies only. Both phones
-  share these rules through `mobile/fixtures/current-read.json`, and every
+  share these rules, including partly visible layouts that pin the visibility
+  rule, through `mobile/fixtures/current-read.json`, and every
   shared mark goes through one delivery path with the existing retries.
 
 Android Sessions publishes catalog rows with local read decoration in one
@@ -940,7 +949,8 @@ every stale conversation has been tried, rather than waiting for later refreshes
 Read positions are private to the phone and follow the canonical conversation
 across a verified resume. Incoming agent messages count; tool events and the
 user's own messages do not. Automatic read progress advances only after
-content is actually visible in the active conversation, with overlays excluded.
+content is actually visible in the active conversation, with overlays excluded;
+a row is visible under the shared rule described for current values above.
 For authenticated canonical rows, the visible message position acknowledges
 incoming replies before it in the window's server order. A tall own message or
 compaction summary can therefore advance that incoming prefix without counting

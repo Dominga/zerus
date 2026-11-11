@@ -63,16 +63,34 @@ final class SharedReadCurrentTests: XCTestCase {
         }
     }
 
-    /// zerus-a4mub.30: the visible ids reach the flags, and the flags the decision, exactly as shared.
+    /// zerus-a4mub.30/.31: the settled layout reaches the shown items through the shared readable-visibility rule, the
+    /// shown items the flags, and the flags the decision, exactly as Android maps the same layouts.
     func testEverySharedLayoutMapsToItsFlagsAndDecision() throws {
-        let layouts = try fixture().objects("layouts")
-        XCTAssertGreaterThanOrEqual(layouts.count, 10)
+        let shared = try fixture()
+        let layouts = shared.objects("layouts")
+        XCTAssertGreaterThanOrEqual(layouts.count, 19)
+        let readable = shared.double("readable")
+        XCTAssertEqual(readable, ConversationReadViewport.readableHeight)
+        func number(_ value: JSON) -> Double {
+            switch value {
+            case .int(let value): Double(value)
+            case .double(let value): value
+            default: .nan
+            }
+        }
         for item in layouts {
             let name = item.string("name")
-            let visible = (item["visible"]?.array ?? []).compactMap { value -> String? in
+            let viewport = (item["viewport"]?.array ?? []).map(number)
+            XCTAssertEqual(viewport.count, 2, name)
+            let items = item.objects("items").map {
+                ConversationReadViewport.Item(key: $0.string("key"), offset: $0.double("offset"), size: $0.double("size"))
+            }
+            let visible = ConversationReadViewport.visible(items, start: viewport[0], end: viewport[1], readable: readable)
+            let expectedVisible = (item["visible"]?.array ?? []).compactMap { value -> String? in
                 if case .string(let text) = value { return text }
                 return nil
             }
+            XCTAssertEqual(visible, expectedVisible, name)
             let flags = ConversationReadViewport.flags(visible: visible, newestId: item.string("newest"))
             let expected = try XCTUnwrap(item.object("flags"), name)
             XCTAssertEqual(flags, CurrentReadFlags(tail: expected.bool("tail"), newest: expected.bool("newest"), questions: expected.bool("questions")), name)
@@ -80,6 +98,20 @@ final class SharedReadCurrentTests: XCTestCase {
             XCTAssertEqual(shown.reply, item.bool("reply_shown"), name)
             XCTAssertEqual(shown.attention, item.bool("attention_shown"), name)
         }
+    }
+
+    /// zerus-a4mub.31: SwiftUI places items on fractional points; rounding never hides a wholly visible row or the
+    /// tail, and never shows a row half a point short of its readable part.
+    func testFractionalLayoutRoundingKeepsTheSharedDecision() {
+        let end = 900.0 + 1.0 / 3.0
+        let short = ConversationReadViewport.Item(key: "event:e2", offset: end - 40 + 1e-9, size: 40)
+        XCTAssertTrue(ConversationReadViewport.shows(short, start: 0, end: end))
+        let tail = ConversationReadViewport.Item(key: "history:tail", offset: end + 1.0 / 3.0, size: 1)
+        XCTAssertTrue(ConversationReadViewport.shows(tail, start: 0, end: end))
+        let tall = ConversationReadViewport.Item(key: "event:e2", offset: end - 47.4, size: 600)
+        XCTAssertFalse(ConversationReadViewport.shows(tall, start: 0, end: end))
+        let readable = ConversationReadViewport.Item(key: "event:e2", offset: end - 47.6, size: 600)
+        XCTAssertTrue(ConversationReadViewport.shows(readable, start: 0, end: end))
     }
 
     func testACatalogRowNeverStandsInForTheDisplayedInspection() throws {

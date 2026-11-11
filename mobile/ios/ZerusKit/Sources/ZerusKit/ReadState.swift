@@ -487,8 +487,43 @@ public struct CurrentReadFlags: Equatable, Sendable {
     }
 }
 
-/// The conversation list's visible item ids, as SwiftUI reports them, mapped to reading inputs.
+/// The conversation list's visible item ids mapped to reading inputs.
 public enum ConversationReadViewport {
+    /// One listed item of a settled viewport: its key, top offset and height in the viewport's coordinates (points).
+    public struct Item: Equatable, Sendable {
+        public let key: String
+        public let offset: Double
+        public let size: Double
+        public init(key: String, offset: Double, size: Double) {
+            self.key = key
+            self.offset = offset
+            self.size = size
+        }
+    }
+
+    /// The readable part of an item (points; dp on Android): about one line of body text with its padding.
+    public static let readableHeight: Double = 48
+    /// Layout rounding every comparison tolerates.
+    private static let rounding = 0.5
+
+    /// Whether `item` counts as shown in the viewport from `start` to `end`, after the settled dwell, for both the
+    /// canonical read and the current flags (zerus-a4mub.31). Android applies the same rule to the same shared layouts
+    /// (mobile/fixtures/current-read.json): the part inside the viewport is at least min(its height, `readable`, the
+    /// viewport height). A short item must be wholly visible; a taller one, however tall, needs its readable part.
+    /// The 1-point tail sentinel counts when it starts inside the viewport and ends at most 2 points past it.
+    public static func shows(_ item: Item, start: Double, end: Double, readable: Double = readableHeight) -> Bool {
+        if item.key == "history:tail" {
+            return item.offset + rounding >= start && item.offset + item.size <= end + 2 + rounding
+        }
+        let visible = min(item.offset + item.size, end) - max(item.offset, start)
+        return visible > 0 && visible + rounding >= min(item.size, readable, end - start)
+    }
+
+    /// The keys of the items `shows` counts, top to bottom.
+    public static func visible(_ items: [Item], start: Double, end: Double, readable: Double = readableHeight) -> [String] {
+        items.filter { shows($0, start: start, end: end, readable: readable) }.sorted { $0.offset < $1.offset }.map(\.key)
+    }
+
     /// The event ids among the visible item ids (`event:` keys).
     public static func eventIds(_ visible: [String]) -> Set<String> {
         Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })

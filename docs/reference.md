@@ -1730,6 +1730,38 @@ bounded history window and disappears when it no longer matches, including on
 edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
 equality is never request-ID receipt evidence and never clears or retries input.
 
+Recent attachment delivery projection uses the private, rebuildable
+`delivery-receipts-v1.sqlite3` locator in the state directory. A refresh reads
+at most 100 original receipts for the selected provider, conversation and child;
+older receipts use an opaque cursor bound to that scope and an index snapshot.
+New receipts cannot displace rows in an existing page chain. The locator stores
+identities and bindings, not message bodies or attachment bytes. Original JSON
+receipts remain authoritative for delivery, attachment access and no-replay
+checks; a missing locator never permits another send.
+
+The inspection's `receipt_projection` reports index coverage, its next cursor
+and explicit missing, corrupt or changed-original gaps. An unavailable or still
+building index is unknown coverage, not evidence that no message was sent.
+Legacy discovery runs in one coalesced background worker per state directory,
+with transactions limited to 64 directory entries or 25 ms and a pause between
+batches. An interrupted worker retains committed locators and their sequence
+numbers; discovery reopens in the background. It never deletes or rewrites
+receipt history. New sends retain the original atomic receipt write and update
+the locator on a best-effort basis afterward.
+
+Older caches remain unverified until the worker reconciles their originals.
+Removing a locator or changing its indexed identity invalidates coverage and
+snapshot cursors. Every worker restart reconciles the original directory even
+when its modification time is unchanged; inspection never does that walk.
+
+The same locator exposes exact name, run and conversation pages for question
+recovery. Deadline-bounded inspection never walks the question receipt directory;
+incomplete coverage keeps recovery unknown. An explicit answer authority read
+can reconcile that family synchronously, then must validate every original and
+drain a complete snapshot before treating recovery as complete. A cursor from an
+incomplete snapshot requires a fresh chain after migration finishes. Locator
+coverage alone never proves an answer's submission.
+
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
 pending and clears when that read completes or fails. Switching sessions shows
@@ -6724,6 +6756,23 @@ reply. Saved receipts make identical requests idempotent. An uncertain result
 needs manual inspection before another request. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
+
+An inspection indexes the Codex question transcript and recovers earlier
+submitted answers from this session's question receipts within one shared
+one-second budget, saving its progress so the next inspection resumes. Its
+recent messages never wait for that work, and it never scans a long transcript
+or every question receipt unbounded: recovery reads one bounded page of the
+session's receipts at a time through the receipt locator. While the index or
+recovery is incomplete, or held by another process, `pending_questions_complete`
+is `false`, `pending_questions` lists no optional Codex question and
+`pending_questions_error` says the questions are still being indexed. That is
+unknown, never an empty list, and nothing becomes answerable from it. A
+completed earlier check grants nothing: each inspection and each answer checks
+the locator's current coverage again from its head. A receipt indexed since is
+recovered, and a gap the locator records (a receipt it cannot attribute) makes
+`pending_questions_error` say earlier answers cannot all be checked. An answer
+first completes the index and recovery, and refuses while earlier answers
+cannot all be checked. An older hgs omits `pending_questions_complete`.
 
 Messages may begin with an absolute file path, including a directory named like
 a command (`/help/capture.png`). A first token of `/name` without another slash,

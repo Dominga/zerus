@@ -1345,7 +1345,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
     }
     result["cursor"] = json!(0);
     result["events"] = json!(events);
-    result["attachment_messages"] = attachments::messages(&record, agent_id.unwrap_or(""));
+    attachments::decorate(&record, agent_id.unwrap_or(""), &mut result);
     result["voice_messages"] = conversation_history::inspected_voice_messages(&record, &result, agent_id);
     result["replace_events"] = json!(true);
     result["history_truncated"] = inspected["page"]["hasMore"].clone();
@@ -1761,7 +1761,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                         receipt["graph_target"] = target;
                     }
                 }
-                atomic(&receipt_path, &receipt.to_string())?;
+                receipt_index::persist(&receipt_path, &receipt)?;
                 if agent_id.is_empty() {
                     rpc(
                         &record,
@@ -1778,7 +1778,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 }
                 receipt["status"] = json!("submitted");
                 receipt["transport"] = json!("native_dsh");
-                atomic(&receipt_path, &receipt.to_string())?;
+                receipt_index::persist(&receipt_path, &receipt)?;
             } else {
                 let current = inspect(name, None)?;
                 let selected = if string(&request, "model").is_empty() {

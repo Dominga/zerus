@@ -15,6 +15,7 @@ mod claude_question;
 mod claude_statusline;
 mod claude_subagents;
 mod attachments;
+mod receipt_index;
 mod computer_files;
 pub(crate) mod voice;
 mod interrupt;
@@ -1395,6 +1396,13 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
         if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}
         return effort::picker_custodian_entry();
+    }
+    if args.first().map(String::as_str)==Some("receipt-index-worker") {
+        if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
+        return receipt_index::worker();
+    }
+    if args.first().map(String::as_str)==Some("receipt-index-page") {
+        return attachments::page_dispatch(&args[1..]);
     }
     // Receipt observation needs neither a native host nor a state writer.
     if args.first().map(String::as_str)==Some("session-action-status") { return session_action::status_dispatch(&args[1..]); }

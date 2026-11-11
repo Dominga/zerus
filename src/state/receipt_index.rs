@@ -406,7 +406,22 @@ impl Catalog {
             } else {
                 true
             };
-            let change_repair = !has_stamp || !has_change || unseeded;
+            let frontier_behind = if has_change {
+                let frontier: i64 = sql(db.query_row(
+                    "SELECT COALESCE(CAST((SELECT value FROM receipt_meta WHERE key='change_seq') AS INTEGER),0)",
+                    [],
+                    |row| row.get(0),
+                ))?;
+                let maximum: i64 = sql(db.query_row(
+                    "SELECT COALESCE(MAX(change),0) FROM receipt_rows",
+                    [],
+                    |row| row.get(0),
+                ))?;
+                frontier < maximum
+            } else {
+                false
+            };
+            let change_repair = !has_stamp || !has_change || unseeded || frontier_behind;
             let schema_transaction = if upgrade.is_none() && change_repair {
                 Some(sql(db.unchecked_transaction())?)
             } else {
@@ -435,6 +450,14 @@ impl Catalog {
                 "INSERT INTO receipt_meta VALUES('change_seq',COALESCE((SELECT MAX(change) FROM receipt_rows),0)) ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
                 [],
             ))?;
+            if change_repair {
+                // A consumer must not resume a cursor from before a repair:
+                // the sequence meaning changed, so old cursors restart.
+                sql(db.execute(
+                    "UPDATE receipt_meta SET value=? WHERE key='epoch'",
+                    [uuid::Uuid::new_v4().to_string()],
+                ))?;
+            }
             if let Some(transaction) = schema_transaction {
                 sql(transaction.commit())?;
             }
@@ -853,6 +876,22 @@ impl Catalog {
             )
             .unwrap_or(false);
         if !witness {
+            return false;
+        }
+        // A row without a sequence, or a frontier behind MAX(change), means a
+        // schema repair has not published its sequence yet. Never call that
+        // Complete: the cursor must restart after the writer's repair.
+        let consistent: bool = self
+            .db
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)
+                   AND COALESCE((SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'),0)
+                       >= COALESCE((SELECT MAX(change) FROM receipt_rows),0)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !consistent {
             return false;
         }
         true

@@ -852,3 +852,86 @@ fn a_stale_but_consistent_verification_stays_complete() {
         true
     );
 }
+
+#[test]
+fn unseeded_rows_or_a_behind_frontier_are_not_complete_and_repair_restarts_cursors() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 1.0));
+    put(&catalog, Source::Terminal, &value(2, "wanted", "run", "", 2.0));
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    let scope = scope("wanted", "run", "");
+    let epoch = |catalog: &Catalog| -> String {
+        catalog
+            .db
+            .query_row("SELECT value FROM receipt_meta WHERE key='epoch'", [], |row| row.get(0))
+            .unwrap()
+    };
+    let initial_epoch = epoch(&catalog);
+    // F2: the change indexes exist, but the rows are unseeded and the
+    // frontier is 0. A Complete reader would skip both originals.
+    catalog
+        .db
+        .execute_batch(
+            "UPDATE receipt_rows SET change=0;
+             UPDATE receipt_meta SET value='0' WHERE key='change_seq';",
+        )
+        .unwrap();
+    assert!(!catalog.coverage_verified());
+    let broken = catalog.page(&scope, "", 1, true).unwrap();
+    assert_eq!(broken.metadata["migration_complete"], false);
+    let stale_cursor = broken.metadata["next_cursor"].as_str().unwrap().to_owned();
+    drop(catalog);
+    let repaired = Catalog::open(temp.path(), true).unwrap();
+    let rows: Vec<i64> = repaired
+        .db
+        .prepare("SELECT change FROM receipt_rows ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![1, 2]);
+    let frontier: String = repaired
+        .db
+        .query_row("SELECT value FROM receipt_meta WHERE key='change_seq'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(frontier, "2");
+    assert!(repaired.coverage_verified());
+    assert_ne!(epoch(&repaired), initial_epoch);
+    assert_eq!(
+        repaired.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+    assert!(repaired.page(&scope, &stale_cursor, 100, true).is_err());
+    // G: only the frontier is behind MAX(change); rows and indexes are intact.
+    repaired
+        .db
+        .execute("UPDATE receipt_meta SET value='0' WHERE key='change_seq'", [])
+        .unwrap();
+    assert!(!repaired.coverage_verified());
+    let broken = repaired.page(&scope, "", 1, true).unwrap();
+    assert_eq!(broken.metadata["migration_complete"], false);
+    let stale_cursor = broken.metadata["next_cursor"].as_str().unwrap().to_owned();
+    let behind_epoch = epoch(&repaired);
+    drop(repaired);
+    let repaired = Catalog::open(temp.path(), true).unwrap();
+    let frontier: String = repaired
+        .db
+        .query_row("SELECT value FROM receipt_meta WHERE key='change_seq'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(frontier, "2");
+    assert!(repaired.coverage_verified());
+    assert_ne!(epoch(&repaired), behind_epoch);
+    assert!(repaired.page(&scope, &stale_cursor, 100, true).is_err());
+    let changed = repaired.changed_page(&scope, "", 100, true).unwrap();
+    assert_eq!(changed.rows.len(), 2);
+    assert!(changed.drained);
+}

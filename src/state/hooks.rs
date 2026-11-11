@@ -1108,36 +1108,47 @@ fn health_document_mode(original: &str, agent: &str, known: Option<Version>, win
 
 /// Explicit repair uses only a previously verified version. It never probes a provider.
 pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (u64,u64,u64)) -> Result<Option<String>> {
-    let executable = runner_executable()?;
-    let _own = OwnProgram::for_config(Some(&executable), path);
+    repair_with(original, path, agent, known, &runner_executable()?)
+}
+
+/// The repair `executable` would write. Health is read in the same scope, so
+/// the program it writes and the programs it owns are one set (zerus-b64dl).
+fn repair_with(
+    original: &str,
+    path: &Path,
+    agent: &str,
+    known: (u64, u64, u64),
+    executable: &str,
+) -> Result<Option<String>> {
+    let _own = OwnProgram::for_config(Some(executable), path);
     if agent == "kimi" {
-        let health=health_document(original,path,agent,Some(known))?;
+        let health = health_document_mode(original, agent, Some(known), cfg!(windows))?;
         if health["unrecognised_tracking"] == true {
             return Err(UNRECOGNISED_TRACKING.into());
         }
         if health["state"]=="configured" {
             if health["duplicate_events"].as_array().is_none_or(Vec::is_empty) { return Ok(None); }
-            return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(&executable));
+            return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(executable));
         }
         // Rewriting an existing Kimi block can discard custom fields/personal
         // entries within it. Explicit repair refuses that lossy transformation.
         if health["state"]=="partial" || original.contains(KIMI_BEGIN) || original.contains(KIMI_END) {
             return Err("Partial Kimi hooks require a supervised launch or manual review; explicit repair preserved the existing block".into());
         }
-        return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(&executable));
+        return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(executable));
     }
     // Existing owned entries (including trusted legacy commands) remain exact.
     // Version-incompatible registrations are not removed by explicit repair.
-    let health = health_document(original, path, agent, Some(known))?;
+    let health = health_document_mode(original, agent, Some(known), cfg!(windows))?;
     if health["unrecognised_tracking"] == true {
         return Err(UNRECOGNISED_TRACKING.into());
     }
     if health["compatibility"]["state"] != "compatible" { return Err("Hook configuration is incompatible; use a qualified supervised launch".into()); }
     merge_json_mode(original, path, agent, cfg!(windows), &mut || {
         #[cfg(windows)]
-        { if agent=="claude" { windows::claude_entry(&executable, known, windows::git_bash().is_some()) } else { windows::codex_entry(&executable) } }
+        { if agent=="claude" { windows::claude_entry(executable, known, windows::git_bash().is_some()) } else { windows::codex_entry(executable) } }
         #[cfg(unix)]
-        { Ok(Entry::shell(fresh_command(&executable)?)) }
+        { Ok(Entry::shell(fresh_command(executable)?)) }
     }, &mut || Some(known), false)
 }
 
@@ -2291,19 +2302,44 @@ mod tests {
 
     #[test]
     fn explicit_repair_refuses_beside_an_unrecorded_look_alike_without_writing() {
+        // An explicit runner: a Windows test host has no installed stable CLI.
+        let runner = if cfg!(windows) {
+            r"C:\Tools\hgs.exe"
+        } else {
+            "/usr/local/bin/hgs"
+        };
         let look_alike = json!({"model": "keep", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "/opt/old/hgs-wrapper __state hook", "timeout": 5}]}]}}).to_string();
-        let error = repair_document(&look_alike, &path(), "claude", (2, 1, 296)).unwrap_err();
+        let error = repair_with(&look_alike, &path(), "claude", (2, 1, 296), runner).unwrap_err();
         assert!(error.contains("HGS_EXECUTABLE"), "{error}");
         assert!(!error.contains("/opt/old"), "{error}");
         let kimi = "[[hooks]]\nevent = \"Stop\"\ncommand = \"/opt/old/hgs-wrapper __state hook\"\n";
-        let error = repair_document(kimi, &path(), "kimi", (2, 3, 1)).unwrap_err();
+        let error = repair_with(kimi, &path(), "kimi", (2, 3, 1), runner).unwrap_err();
         assert!(error.contains("HGS_EXECUTABLE"), "{error}");
         // Without the look-alike the same repair goes ahead.
-        assert!(
-            repair_document(r#"{"model":"keep"}"#, &path(), "claude", (2, 1, 296))
-                .unwrap()
-                .is_some()
-        );
+        assert!(repair_with(
+            r#"{"model":"keep"}"#,
+            &path(),
+            "claude",
+            (2, 1, 296),
+            runner
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    /// Repair reads health in its own scope: the entries the program it
+    /// writes wrote are hgs's, whatever runs the test.
+    #[cfg(unix)]
+    #[test]
+    fn explicit_repair_owns_the_program_it_writes() {
+        for agent in ["claude", "codex"] {
+            let (text, _) = launches(agent, 1);
+            assert_eq!(
+                repair_with(&text, &path(), agent, CLAUDE_ANSWER_CHANNEL, WRAPPER),
+                Ok(None),
+                "{agent}"
+            );
+        }
     }
 
     fn hook_entries(text: &str, event: &str) -> Vec<Value> {

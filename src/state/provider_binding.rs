@@ -4,10 +4,12 @@
 use super::*;
 mod native_identity;
 #[cfg(test)]
-pub(in crate::state) use native_identity::cache_path_for;
+pub(in crate::state) use native_identity::{cache_path_for, complete_scan_count};
 
 const BYTES: u64 = 1 << 20;
 const RECORDS: usize = 5_000;
+#[cfg(test)]
+pub(in crate::state) const RECORDS_FOR_TEST: usize = RECORDS;
 
 #[derive(Clone, Copy)]
 pub(super) enum Provider {

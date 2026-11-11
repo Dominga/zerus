@@ -9,6 +9,7 @@ use std::{
 
 const CACHE_BYTES: u64 = 8192;
 const CANDIDATES: usize = 8;
+const METADATA_BOUND: &str = "Native identity lookup exceeded its metadata bound";
 
 fn physical(home: &Path) -> PathBuf {
     crate::platform::canonical(home).unwrap_or_else(|_| home.to_path_buf())
@@ -76,45 +77,27 @@ fn stamp(provider: Provider) -> Value {
     ])
 }
 
-/// The identity of every binding file, folded into one digest: an in-place
-/// rewrite keeps the directory entry but changes this, so a stale index is not
-/// trusted (zerus-hgt89). Bounded like the changed-binding check; a bound that
-/// is hit returns a fresh marker that never matches a stored stamp.
-fn binding_files(provider: Provider) -> Value {
-    let until = Instant::now() + Duration::from_secs(2);
-    let mut count = 0usize;
-    let mut files: Vec<(PathBuf, String)> = Vec::new();
-    for name in ["bindings", "sessions"] {
-        let Ok(entries) = fs::read_dir(root().join(provider.backend()).join(name)) else {
-            continue;
-        };
-        for entry in entries {
-            count += 1;
-            if count > RECORDS || Instant::now() >= until {
-                return json!({"overflow": uuid::Uuid::new_v4().to_string()});
-            }
-            let Ok(entry) = entry else {
-                return json!({"overflow": uuid::Uuid::new_v4().to_string()});
-            };
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension != "json")
-            {
-                continue;
-            }
-            let Ok(file) = entry.file_name().into_string() else {
-                continue;
-            };
-            files.push((path, format!("{name}/{file}")));
-        }
+fn unknown_binding_files() -> Value {
+    json!({"unknown": uuid::Uuid::new_v4().to_string()})
+}
+
+fn binding_file(directory: &str, entry: fs::DirEntry) -> Option<(PathBuf, String)> {
+    let path = entry.path();
+    if path
+        .extension()
+        .is_some_and(|extension| extension != "json")
+    {
+        return None;
     }
+    let file = entry.file_name().into_string().ok()?;
+    Some((path, format!("{directory}/{file}")))
+}
+
+fn digest_binding_files(mut files: Vec<(PathBuf, String)>) -> Option<String> {
     files.sort_by(|left, right| left.1.cmp(&right.1));
     let mut digest = Sha256::new();
     for (path, name) in files {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            return json!({"overflow": uuid::Uuid::new_v4().to_string()});
-        };
+        let meta = fs::symlink_metadata(&path).ok()?;
         digest.update(name.as_bytes());
         #[cfg(unix)]
         {
@@ -139,7 +122,46 @@ fn binding_files(provider: Provider) -> Value {
             );
         }
     }
-    json!(format!("{:x}", digest.finalize()))
+    Some(format!("{:x}", digest.finalize()))
+}
+
+/// The identity of every binding file, folded into one digest: an in-place
+/// rewrite keeps the directory entry but changes this, so a stale index is not
+/// trusted (zerus-hgt89). An entry-count overflow has a stable bounded digest,
+/// used only to avoid repeated scans while lookup stays unavailable. Time,
+/// entry and metadata unknowns keep a fresh marker (zerus-wult0).
+fn binding_files(provider: Provider) -> Value {
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut count = 0usize;
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for name in ["bindings", "sessions"] {
+        let Ok(entries) = fs::read_dir(root().join(provider.backend()).join(name)) else {
+            continue;
+        };
+        for entry in entries {
+            count += 1;
+            if count > RECORDS {
+                let Ok(entry) = entry else {
+                    return unknown_binding_files();
+                };
+                if let Some(file) = binding_file(name, entry) {
+                    files.push(file);
+                }
+                return digest_binding_files(files)
+                    .map_or_else(unknown_binding_files, |digest| json!({"overflow": digest}));
+            }
+            if Instant::now() >= until {
+                return unknown_binding_files();
+            }
+            let Ok(entry) = entry else {
+                return unknown_binding_files();
+            };
+            if let Some(file) = binding_file(name, entry) {
+                files.push(file);
+            }
+        }
+    }
+    digest_binding_files(files).map_or_else(unknown_binding_files, |digest| json!(digest))
 }
 /// The provider's write ledger: the directories as hgs last accounted for
 /// them and when, the epoch of the complete indexes made since the last
@@ -167,6 +189,24 @@ fn write_ledger(provider: Provider, epoch: &Value, dirty_since: Option<u64>) {
         let _ = atomic(&path, &value.to_string());
     }
 }
+
+/// Under the provider lock, remember only an unavailable overflow witness.
+/// This neither cleans the write ledger nor advances its complete-index epoch.
+fn record_overflow(provider: Provider) {
+    let path = ledger_path(provider);
+    if !writable(&path) {
+        return;
+    }
+    let Some(mut value) = ledger(provider) else {
+        return;
+    };
+    let stamp = stamp(provider);
+    if stamp[2]["overflow"].is_string() {
+        value["overflow_stamp"] = stamp;
+        let _ = atomic(&path, &value.to_string());
+    }
+}
+
 /// The directories before a writer that accounts for itself changes them.
 pub(super) fn before_write(provider: Provider) -> Value {
     stamp(provider)
@@ -335,6 +375,14 @@ pub(in crate::state) fn cache_path_for(provider: Provider, native: &str, home: &
     path(provider, native, home)
 }
 
+#[cfg(test)]
+static COMPLETE_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(in crate::state) fn complete_scan_count() -> usize {
+    COMPLETE_SCANS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Option<Value>> {
     if native.is_empty() || native.len() > 512 || native.chars().any(char::is_control) {
         return Err("Invalid native session identity".into());
@@ -342,6 +390,15 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
     let cache = path(provider, native, home);
     let accounted = ledger(provider);
     let now = stamp(provider);
+    let over_bound = now[2]["overflow"].is_string();
+    if over_bound
+        && accounted
+            .as_ref()
+            .is_some_and(|ledger| ledger["stamp"] == now || ledger["overflow_stamp"] == now)
+    {
+        // A matching overflow avoids work only; it never supplies an identity.
+        return Err(METADATA_BOUND.into());
+    }
     let dirty = accounted
         .as_ref()
         .is_some_and(|ledger| ledger["stamp"] != now || ledger["dirty_since"].is_u64());
@@ -351,8 +408,14 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         // bounded changed-binding check (zerus-8g1je). A scan that cannot
         // complete (a busy lock, a bound, or unrelated metadata it refuses)
         // leaves the answer to the warm index and that check, as before.
-        if let Ok(Scan::Done(record)) = complete_scan(provider, native, home) {
-            return Ok(record);
+        match complete_scan(provider, native, home) {
+            Ok(Scan::Done(record)) => return Ok(record),
+            Ok(Scan::Unavailable(reason)) if over_bound && reason == METADATA_BOUND => {
+                // Its stable witness lets the next lookup avoid this scan.
+                return Err(reason);
+            }
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
     let warm = cached(&cache).filter(|value| {
@@ -417,6 +480,8 @@ enum Scan {
 /// exceeded bound is reported as unavailable, so a warm lookup can answer; any
 /// other error is definitive for a cold lookup.
 fn complete_scan(provider: Provider, native: &str, home: &Path) -> Result<Scan> {
+    #[cfg(test)]
+    COMPLETE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some(_writer) = lock_until(
         &root().join(provider.backend()).join("bindings.lock"),
         Instant::now() + Duration::from_millis(100),
@@ -441,10 +506,12 @@ fn complete_scan(provider: Provider, native: &str, home: &Path) -> Result<Scan> 
         };
         for entry in entries {
             count += 1;
-            if count > RECORDS || Instant::now() >= until {
-                return Ok(Scan::Unavailable(
-                    "Native identity lookup exceeded its metadata bound".into(),
-                ));
+            if count > RECORDS {
+                record_overflow(provider);
+                return Ok(Scan::Unavailable(METADATA_BOUND.into()));
+            }
+            if Instant::now() >= until {
+                return Ok(Scan::Unavailable(METADATA_BOUND.into()));
             }
             let file = entry.map_err(|e| e.to_string())?.path();
             if file.extension().is_none_or(|e| e != "json") {

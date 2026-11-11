@@ -1091,6 +1091,52 @@ mod tests {
         assert!(after["dirty_since"].is_null(), "{after}");
     }
 
+    #[test]
+    fn an_unchanged_overflow_ledger_does_not_scan_every_find() {
+        isolated("overflow_stamp_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn overflow_stamp_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-wult0: overflow never proves an identity. It stays unavailable,
+        // but an unchanged bounded witness must not cost a complete scan.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("overflow-home");
+        let native = "session-overflow";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        for index in 0..provider_binding::RECORDS_FOR_TEST {
+            let name = format!("dsh/example/fill-{index}");
+            let record = claim_record(&name, &format!("session-fill-{index}"), &home);
+            fs::write(provider.label_path(&name), record.to_string()).unwrap();
+        }
+        let find = || {
+            let before = provider_binding::complete_scan_count();
+            let error = provider.native_caller(native, &home).unwrap_err();
+            assert!(error.contains("metadata bound"), "{error}");
+            provider_binding::complete_scan_count() - before
+        };
+        let mut counts = vec![find(), find()];
+        let mut changed = first.clone();
+        changed["overflow_change"] = json!(true);
+        fs::write(
+            provider.label_path(string(&changed, "name")),
+            changed.to_string(),
+        )
+        .unwrap();
+        counts.extend([find(), find()]);
+        println!("overflow-find-scans={counts:?}");
+        assert_eq!(counts, [1, 0, 1, 0]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_busy_native_host_refuses_a_claim_quickly() {

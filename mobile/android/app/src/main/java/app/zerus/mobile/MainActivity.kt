@@ -386,6 +386,7 @@ class MainActivity : ComponentActivity() {
         ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation for confirmation."
+                else if (message.error.isNotBlank()) message.error
                 else "This message was not accepted. Review it before trying again.")
             if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)

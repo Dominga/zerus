@@ -3288,7 +3288,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             failed = { status, failure ->
                 try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = status, error = failure) } }) }
                 catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
-            })
+            },
+            release = { api.releaseReservedOutgoing(connection, id) })
         try { send.run() } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
     }
     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject) {

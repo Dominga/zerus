@@ -71,6 +71,13 @@ PRESENTATION_UPDATES_SHA = "dde1e6eb48faf7d29a8407726be4cf74b176e95802fd1249bb95
 # entry. One reviewed file; question eligibility, native availability, every
 # verification assignment and all historical pins stay exact. Reverse it first,
 # before the #2041 evidence delta it builds on.
+# Exact Android outbox follow-up delta of zerus-a4mub.22/.23: a send proven
+# Not sent before the transport marker releases its sealed reservation and the
+# outbox shows its allowlisted local reason. Two reviewed files; question
+# eligibility, native availability, every verification assignment and all
+# historical reconstruction pins stay exact. Reverse it first.
+OUTBOX_RELEASE_REASON_UPDATES = ROOT / "tests/fixtures/question-availability-outbox-release-reason-updates.patch"
+OUTBOX_RELEASE_REASON_UPDATES_SHA = "fd8c60cc4c63947e781283532f12e0153a9bb5e95373e5313d3f4cb987834505"
 OUTGOING_SEND_UPDATES = ROOT / "tests/fixtures/question-availability-outgoing-send-updates.patch"
 OUTGOING_SEND_UPDATES_SHA = "a65e1fc9cdb0862b597c3c732c48d3c1e7f01d957bf06569c02e5b3042205334"
 OUTGOING_SEND_FILES = ("ZerusViewModel.kt",)
@@ -135,6 +142,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha,
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
     source = reverse_reviewed_patch(name, source, SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
     source = reverse_reviewed_patch(name, source, PRESENTATION_UPDATES, PRESENTATION_UPDATES_SHA)
@@ -164,6 +172,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
                 current = reverse_reviewed_patch(name, current,
                                                 SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
@@ -211,6 +221,20 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             self.assertIn(expression, main)
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
 
+    def test_outbox_release_reason_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The release and local-reason delta stays exact: changing, removing or
+        # duplicating either reviewed hunk must break the reconstruction.
+        additions = {
+            "ZerusViewModel.kt": "            release = { api.releaseReservedOutgoing(connection, id) })\n",
+            "MainActivity.kt": "                else if (message.error.isNotBlank()) message.error\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
     def test_outgoing_send_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
         # The send-entry wiring delta stays an exact hunk: changing, removing
         # or duplicating it must break the reconstruction, never be hidden.
@@ -227,6 +251,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         # newer #2044 send-entry delta is reversed first, as in the chain.
         addition = "        val attempt = SendAttempt(); var rejected: RelayException? = null\n"
         source = reverse_reviewed_patch("ZerusViewModel.kt", (MAIN / "ZerusViewModel.kt").read_text(),
+                                        OUTBOX_RELEASE_REASON_UPDATES, OUTBOX_RELEASE_REASON_UPDATES_SHA)
+        source = reverse_reviewed_patch("ZerusViewModel.kt", source,
                                         OUTGOING_SEND_UPDATES, OUTGOING_SEND_UPDATES_SHA, OUTGOING_SEND_FILES)
         self.assertEqual(source.count(addition), 1)
         for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):

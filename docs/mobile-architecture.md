@@ -415,6 +415,11 @@ atomically moves the current composition into an outgoing envelope before any
 network request. The conversation immediately shows its delivery status while a
 new composition can be edited. Completion never clears a later draft. Unknown
 delivery remains visible and cannot trigger an automatic resend.
+A send that settles Not sent before the mutation request is enqueued releases
+exactly that send's sealed reservation, so a prepared resend cannot accumulate
+retained copies, and the outbox shows its allowlisted local reason. Once the
+request may have been enqueued, the reservation stays as the unknown and
+no-replay evidence.
 
 Automatic read progress appears only after five seconds of continuous waiting.
 Explicit refresh shows progress immediately, including when it promotes an

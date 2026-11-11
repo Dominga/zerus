@@ -846,9 +846,9 @@ count, and gray badges and edge, while its status, Activity, unread reply,
 questions and approvals stay as they are. Nothing is marked read. Unlike a
 muted session, it leaves the **Needs attention** filter, and **Active** unless
 it is working, in Background, Scheduled or has a draft: its unread reply, retry
-or provider limit waits for the parent (zerus-sa9qn.18; Android and iOS follow
-in zerus-sa9qn.19). Review later, the person's own mark, still counts and lists
-it. A person-only request notifies as for any session.
+or provider limit waits for the parent (zerus-sa9qn.18), on desktop, Android
+and iOS alike (zerus-sa9qn.19). Review later, the person's own mark, still
+counts and lists it. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
@@ -1454,8 +1454,11 @@ The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
 each session once. Each status filter's tab count is the number of sessions it
 lists before the text search, scoped like the list, and a parent or child that
-fails the filter is never listed for its relative. Desktop and Android use the
-same filter IDs and membership rules; drafts remain local to each device. Drafts for visible subagents also keep
+fails the filter is never listed for its relative. Archive counts and lists the
+same loaded date window. Desktop, Android and iOS use the same filter IDs and
+membership rules, pinned by one shared case table
+(`mobile/android/app/src/test/resources/session-filter-contract.json`); drafts
+remain local to each device. Drafts for visible subagents also keep
 their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this

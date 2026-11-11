@@ -5025,6 +5025,17 @@ to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
 
+Model-default entries are read independently. An unknown provider, unfamiliar
+field shape or model/effort value this build cannot validate is preserved
+verbatim and unused, so it cannot block other accounts or launches.
+`account ls` and `model-settings` report `model_defaults_status` as `inherited`,
+`saved` or `ignored`, with `model_defaults_reason` for an ignored choice.
+Saving a choice still checks the selected account's native catalog and supported
+values; setting or clearing one choice preserves all other entries unchanged.
+Invalid JSON still refuses the catalog. This compatibility applies only to
+builds with the lenient reader: older builds can still reject a newer saved
+choice, so clear that choice (`--model ''`) before rolling back to them.
+
 Without a choice, a Claude, Codex or Kimi account bypasses permissions (owner,
 2026-11-07, T-6hcfnu): each provider's own bypass switch is added at launch
 (`--permission-mode bypassPermissions`,

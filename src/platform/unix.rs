@@ -286,6 +286,84 @@ pub fn kill_process_group(child: &mut Child) {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
 }
+/// A Unix socket connected within `limit`: a listen queue that stays full must
+/// refuse at the bound instead of blocking the claim that reads it
+/// (zerus-taljw). A blocking connect has no such deadline, so the socket is
+/// connected non-blocking and a full queue is retried until the deadline; the
+/// socket returned is blocking, as `UnixStream::connect` leaves it.
+pub fn connect_unix(path: &Path, limit: Duration) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let maximum = address.sun_path.len() - 1;
+    if bytes.is_empty() || bytes.len() > maximum || bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid unix socket path",
+        ));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            address.sun_path.as_mut_ptr() as *mut u8,
+            bytes.len(),
+        )
+    };
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+    }
+    let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let deadline = Instant::now() + limit;
+    loop {
+        let descriptor = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let connected = unsafe {
+            libc::connect(
+                descriptor,
+                &address as *const _ as *const libc::sockaddr,
+                length,
+            )
+        };
+        if connected == 0 {
+            let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(descriptor) };
+            socket.set_nonblocking(false)?;
+            return Ok(socket);
+        }
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(descriptor) };
+        let queued = error.raw_os_error().is_some_and(|code| {
+            code == libc::EAGAIN || code == libc::EWOULDBLOCK || code == libc::EINPROGRESS
+        });
+        if !queued {
+            return Err(error);
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the unix socket stayed busy",
+            ));
+        };
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the unix socket stayed busy",
+            ));
+        }
+        // A full listen queue has no event to wait for: retry until the deadline.
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
 pub fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -1801,6 +1879,140 @@ pub(crate) fn write_script(path: &Path, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// A listener that never accepts, with a queue of `backlog` entries.
+    fn full_unix_listener(path: &Path, backlog: libc::c_int) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(
+            bytes.len() < address.sun_path.len(),
+            "test socket path too long"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let bound = unsafe {
+            libc::bind(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                &address as *const _ as *const libc::sockaddr,
+                length,
+            )
+        };
+        assert_eq!(bound, 0, "bind: {}", io::Error::last_os_error());
+        let listening = unsafe { libc::listen(std::os::fd::AsRawFd::as_raw_fd(&fd), backlog) };
+        assert_eq!(listening, 0, "listen: {}", io::Error::last_os_error());
+        fd
+    }
+
+    #[test]
+    fn a_unix_socket_connects_within_the_bound_and_stays_usable() {
+        use std::io::{Read, Write};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plain.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let accept = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut byte = [0u8; 1];
+            peer.read_exact(&mut byte).unwrap();
+            peer.write_all(&[byte[0] + 1]).unwrap();
+        });
+        let started = Instant::now();
+        let mut socket = connect_unix(&path, Duration::from_secs(2)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        socket.write_all(b"x").unwrap();
+        let mut answer = [0u8; 1];
+        socket.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, [b'y']);
+        accept.join().unwrap();
+    }
+
+    /// Connections queued until a nonblocking connect finds the queue full.
+    fn fill_unix_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let mut held = Vec::new();
+        loop {
+            let fd =
+                unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
+            assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+            let connected =
+                unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr, length) };
+            if connected == 0 {
+                held.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            if error.raw_os_error() == Some(libc::EAGAIN)
+                || error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                break;
+            }
+            panic!("filling the listen queue: {error}");
+        }
+        held
+    }
+
+    #[test]
+    fn a_full_unix_listen_queue_refuses_within_the_bound() {
+        // zerus-taljw: a blocking connect waits for a free queue slot forever;
+        // the claim that connects must refuse at its bound instead.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("full.sock");
+        let listener = full_unix_listener(&path, 1);
+        let fill = fill_unix_queue(&path);
+        let (sent, received) = std::sync::mpsc::channel();
+        let requested = path.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(connect_unix(&requested, Duration::from_millis(300)));
+        });
+        let started = Instant::now();
+        match received.recv_timeout(Duration::from_secs(5)) {
+            Ok(Err(error)) => assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ),
+                "{error}"
+            ),
+            Ok(Ok(_)) => panic!("a full listen queue must not connect"),
+            Err(_) => panic!("connect did not respect its bound"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(fill);
+        drop(listener);
+    }
     use super::*;
 
     #[test]

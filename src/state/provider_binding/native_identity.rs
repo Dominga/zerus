@@ -69,7 +69,77 @@ fn stamp(provider: Provider) -> Value {
         #[cfg(not(unix))]
         json!([modified])
     };
-    json!([directory("bindings"), directory("sessions")])
+    json!([
+        directory("bindings"),
+        directory("sessions"),
+        binding_files(provider)
+    ])
+}
+
+/// The identity of every binding file, folded into one digest: an in-place
+/// rewrite keeps the directory entry but changes this, so a stale index is not
+/// trusted (zerus-hgt89). Bounded like the changed-binding check; a bound that
+/// is hit returns a fresh marker that never matches a stored stamp.
+fn binding_files(provider: Provider) -> Value {
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut count = 0usize;
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for name in ["bindings", "sessions"] {
+        let Ok(entries) = fs::read_dir(root().join(provider.backend()).join(name)) else {
+            continue;
+        };
+        for entry in entries {
+            count += 1;
+            if count > RECORDS || Instant::now() >= until {
+                return json!({"overflow": uuid::Uuid::new_v4().to_string()});
+            }
+            let Ok(entry) = entry else {
+                return json!({"overflow": uuid::Uuid::new_v4().to_string()});
+            };
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension != "json")
+            {
+                continue;
+            }
+            let Ok(file) = entry.file_name().into_string() else {
+                continue;
+            };
+            files.push((path, format!("{name}/{file}")));
+        }
+    }
+    files.sort_by(|left, right| left.1.cmp(&right.1));
+    let mut digest = Sha256::new();
+    for (path, name) in files {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            return json!({"overflow": uuid::Uuid::new_v4().to_string()});
+        };
+        digest.update(name.as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            digest.update(meta.dev().to_le_bytes());
+            digest.update(meta.ino().to_le_bytes());
+            digest.update(meta.size().to_le_bytes());
+            digest.update(meta.mtime().to_le_bytes());
+            digest.update(meta.mtime_nsec().to_le_bytes());
+            digest.update(meta.ctime().to_le_bytes());
+            digest.update(meta.ctime_nsec().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        {
+            digest.update(meta.len().to_le_bytes());
+            digest.update(
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+                    .to_le_bytes(),
+            );
+        }
+    }
+    json!(format!("{:x}", digest.finalize()))
 }
 /// The provider's write ledger: the directories as hgs last accounted for
 /// them and when, the epoch of the complete indexes made since the last
@@ -192,9 +262,12 @@ fn unlisted_holder(
     Some(false)
 }
 
-/// Provider writers already hold the provider lock. A failed optional note
-/// costs a bounded cold lookup; it never fails the binding's write.
-pub(super) fn note(provider: Provider, record: &Value) {
+/// Whether the derived index recorded this binding. Provider writers already
+/// hold the provider lock. A note that cannot be written never fails the
+/// binding's write, but the write stays unaccounted, so a later warm lookup
+/// cannot trust the index (zerus-8g1je): `false` means this identity belongs
+/// in the index and could not be written there.
+pub(super) fn note(provider: Provider, record: &Value) -> bool {
     let id = string(record, "session_id");
     let native = string(record, "conversation_id");
     let home = Path::new(string(record, "agent_home"));
@@ -204,17 +277,18 @@ pub(super) fn note(provider: Provider, record: &Value) {
         || !home.is_absolute()
         || !matches(provider, record, native, home)
     {
-        return;
+        // Nothing to record: this binding never answers a native lookup.
+        return true;
     }
     let path = path(provider, native, home);
     if !writable(&path) {
-        return;
+        return false;
     }
     let mut value = cached(&path).unwrap_or_else(|| json!({"schema":1,"entries":[]}));
     let entry = json!({"session_id":id,"name":record["name"]});
     let entries = value["entries"].as_array_mut().unwrap();
     if entries.contains(&entry) {
-        return;
+        return true;
     }
     entries.retain(|e| e["session_id"] != id);
     if entries.len() == CANDIDATES {
@@ -222,27 +296,29 @@ pub(super) fn note(provider: Provider, record: &Value) {
     } else {
         entries.push(entry);
     }
-    let _ = atomic(&path, &value.to_string());
+    atomic(&path, &value.to_string()).is_ok()
 }
 
-pub(super) fn retire(provider: Provider, record: &Value) {
+/// Whether the derived index no longer lists this binding. `false` means an
+/// entry may remain, so the removal stays unaccounted (zerus-8g1je).
+pub(super) fn retire(provider: Provider, record: &Value) -> bool {
     let path = path(
         provider,
         string(record, "conversation_id"),
         Path::new(string(record, "agent_home")),
     );
     if !writable(&path) {
-        return;
+        return false;
     }
     let Some(mut value) = cached(&path) else {
-        return;
+        return true;
     };
     let entries = value["entries"].as_array_mut().unwrap();
     entries.retain(|e| e["session_id"] != record["session_id"] || e["name"] != record["name"]);
     if entries.is_empty() && value["overflow"] != true {
-        let _ = fs::remove_file(path);
+        fs::remove_file(path).is_ok()
     } else {
-        let _ = atomic(&path, &value.to_string());
+        atomic(&path, &value.to_string()).is_ok()
     }
 }
 
@@ -253,12 +329,32 @@ fn unique(mut records: Vec<Value>) -> Result<Option<Value>> {
     Ok(records.pop())
 }
 
+/// The derived cache path for one identity, for the process-isolated fixtures.
+#[cfg(test)]
+pub(in crate::state) fn cache_path_for(provider: Provider, native: &str, home: &Path) -> PathBuf {
+    path(provider, native, home)
+}
+
 pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Option<Value>> {
     if native.is_empty() || native.len() > 512 || native.chars().any(char::is_control) {
         return Err("Invalid native session identity".into());
     }
     let cache = path(provider, native, home);
     let accounted = ledger(provider);
+    let now = stamp(provider);
+    let dirty = accounted
+        .as_ref()
+        .is_some_and(|ledger| ledger["stamp"] != now || ledger["dirty_since"].is_u64());
+    if dirty {
+        // A complete scan re-baselines a ledger that fell behind an
+        // unaccounted write, instead of making every warm claim pay the
+        // bounded changed-binding check (zerus-8g1je). A scan that cannot
+        // complete (a busy lock, a bound, or unrelated metadata it refuses)
+        // leaves the answer to the warm index and that check, as before.
+        if let Ok(Scan::Done(record)) = complete_scan(provider, native, home) {
+            return Ok(record);
+        }
+    }
     let warm = cached(&cache).filter(|value| {
         let Some(ledger) = &accounted else {
             return false;
@@ -268,15 +364,11 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         }
         // Writes hgs did not account for: trust the index only when none of
         // the bindings changed since then holds this identity unlisted.
-        let since = if ledger["stamp"] != stamp(provider) {
-            Some(
-                ledger["dirty_since"]
-                    .as_u64()
-                    .unwrap_or(ledger["at"].as_u64().unwrap_or(0)),
-            )
-        } else {
-            ledger["dirty_since"].as_u64()
-        };
+        let since = dirty.then(|| {
+            ledger["dirty_since"]
+                .as_u64()
+                .unwrap_or(ledger["at"].as_u64().unwrap_or(0))
+        });
         since.is_none_or(|since| {
             unlisted_holder(
                 provider,
@@ -309,13 +401,31 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
             return unique(records);
         }
     }
-    // Legacy bindings predate this derived index. A complete, bounded metadata
-    // scan can seed it; partial coverage never chooses a caller.
-    let _writer = lock_until(
+    match complete_scan(provider, native, home)? {
+        Scan::Done(record) => Ok(record),
+        Scan::Unavailable(reason) => Err(reason),
+    }
+}
+
+enum Scan {
+    Done(Option<Value>),
+    Unavailable(String),
+}
+
+/// Legacy bindings predate this derived index. A complete, bounded metadata
+/// scan can seed it; partial coverage never chooses a caller. A busy lock or an
+/// exceeded bound is reported as unavailable, so a warm lookup can answer; any
+/// other error is definitive for a cold lookup.
+fn complete_scan(provider: Provider, native: &str, home: &Path) -> Result<Scan> {
+    let Some(_writer) = lock_until(
         &root().join(provider.backend()).join("bindings.lock"),
         Instant::now() + Duration::from_millis(100),
     )?
-    .ok_or("Native session metadata is busy; retry hgs self")?;
+    else {
+        return Ok(Scan::Unavailable(
+            "Native session metadata is busy; retry hgs self".into(),
+        ));
+    };
     let until = Instant::now() + Duration::from_secs(2);
     let mut count = 0;
     let mut bytes = 0;
@@ -332,7 +442,9 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         for entry in entries {
             count += 1;
             if count > RECORDS || Instant::now() >= until {
-                return Err("Native identity lookup exceeded its metadata bound".into());
+                return Ok(Scan::Unavailable(
+                    "Native identity lookup exceeded its metadata bound".into(),
+                ));
             }
             let file = entry.map_err(|e| e.to_string())?.path();
             if file.extension().is_none_or(|e| e != "json") {
@@ -343,7 +455,9 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
                 .ok_or("A native binding disappeared")?;
             bytes += raw.len();
             if bytes > 64 << 20 {
-                return Err("Native identity lookup exceeded its byte bound".into());
+                return Ok(Scan::Unavailable(
+                    "Native identity lookup exceeded its byte bound".into(),
+                ));
             }
             let id = by_id.then(|| {
                 file.file_stem()
@@ -363,7 +477,9 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         }
     }
     if Instant::now() >= until {
-        return Err("Native identity lookup exceeded its metadata bound".into());
+        return Ok(Scan::Unavailable(
+            "Native identity lookup exceeded its metadata bound".into(),
+        ));
     }
     let record = unique(records)?;
     if let Some(record) = &record {
@@ -372,7 +488,7 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
         // complete scan under the provider lock can establish a warm index.
         // The scan read the directories as they are now, under the lock:
         // they become the accounted state, in a new epoch after any foreign write.
-        if writable(&ledger_path(provider)) && writable(&cache) {
+        if writable(&ledger_path(provider)) && writable(&path(provider, native, home)) {
             // Unaccounted writes may have touched other identities too: a new
             // epoch retires every older index, which then scans again.
             let clean = ledger(provider)
@@ -385,9 +501,9 @@ pub(super) fn find(provider: Provider, native: &str, home: &Path) -> Result<Opti
             if ledger(provider).is_some_and(|l| l["epoch"] == epoch) {
                 let value = json!({"schema":1,"complete":true,"epoch":epoch,"entries":[{
                     "session_id":record["session_id"],"name":record["name"]}]});
-                let _ = atomic(&cache, &value.to_string());
+                let _ = atomic(&path(provider, native, home), &value.to_string());
             }
         }
     }
-    Ok(record)
+    Ok(Scan::Done(record))
 }

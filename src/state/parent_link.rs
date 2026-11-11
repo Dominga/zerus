@@ -801,6 +801,296 @@ mod tests {
         );
     }
 
+    /// A listener that never accepts, with a queue of `backlog` entries (zerus-taljw).
+    #[cfg(unix)]
+    fn full_unix_listener(path: &Path, backlog: libc::c_int) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(
+            bytes.len() < address.sun_path.len(),
+            "test socket path too long"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let bound = unsafe {
+            libc::bind(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                &address as *const _ as *const libc::sockaddr,
+                length,
+            )
+        };
+        assert_eq!(bound, 0, "bind: {}", io::Error::last_os_error());
+        let listening = unsafe { libc::listen(std::os::fd::AsRawFd::as_raw_fd(&fd), backlog) };
+        assert_eq!(listening, 0, "listen: {}", io::Error::last_os_error());
+        fd
+    }
+
+    /// Connections queued until a nonblocking connect finds the queue full.
+    #[cfg(unix)]
+    fn fill_unix_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                address.sun_path.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
+        };
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of::<libc::sockaddr_un>() as u8;
+        }
+        let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let mut held = Vec::new();
+        loop {
+            let fd =
+                unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
+            assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+            let connected =
+                unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr, length) };
+            if connected == 0 {
+                held.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            if error.raw_os_error() == Some(libc::EAGAIN)
+                || error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                break;
+            }
+            panic!("filling the listen queue: {error}");
+        }
+        held
+    }
+
+    fn ledger_of(provider: provider_binding::Provider) -> Value {
+        let backend = match provider {
+            provider_binding::Provider::DeepSeek => "dsh",
+            provider_binding::Provider::OpenCode => "opencode",
+        };
+        serde_json::from_slice(
+            &fs::read(
+                root()
+                    .join("native-identities")
+                    .join(format!("{backend}-writes.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_full_unix_listen_queue_refuses_a_claim_within_the_bound() {
+        isolated("full_queue_fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn full_queue_fixture() {
+        use sha2::Digest;
+        use std::time::{Duration, Instant};
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-taljw: a host whose listen queue never frees must refuse the
+        // claim at its bound instead of blocking the agent's tool shell.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("queue-home");
+        let mut parent = claim_record("dsh/example/parent", "session-parent", &home);
+        provider.save(&mut parent).unwrap();
+        let choice = Choice {
+            session_id: string(&parent, "session_id").into(),
+            name: string(&parent, "name").into(),
+            run_id: string(&parent, "run_id").into(),
+            conversation_id: string(&parent, "conversation_id").into(),
+        };
+        let hosts = root().join("dsh/hosts").join(
+            &format!(
+                "{:x}",
+                sha2::Sha256::digest(home.to_string_lossy().as_bytes())
+            )[..16],
+        );
+        fs::create_dir_all(&hosts).unwrap();
+        let listener = full_unix_listener(&hosts.join("host.sock"), 1);
+        let fill = fill_unix_queue(&hosts.join("host.sock"));
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(claimed_parent(&choice));
+        });
+        let started = Instant::now();
+        match received.recv_timeout(Duration::from_secs(6)) {
+            Ok(result) => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(6),
+                    "{:?}",
+                    started.elapsed()
+                );
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("did not confirm") || error.contains("must be a live session"),
+                    "{error}"
+                );
+            }
+            Err(_) => panic!("the claim blocked past its bound"),
+        }
+        drop(fill);
+        drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_in_place_binding_rewrite_is_seen() {
+        isolated("in_place_rewrite_fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn in_place_rewrite_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-hgt89: a write that keeps the file's directory entry but
+        // rewrites its content must not leave the warm index trusted.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("in-place-home");
+        let native = "session-in-place";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let mut other = claim_record("dsh/example/other", "session-other", &home);
+        provider.save(&mut other).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        // An older writer rewrites `other` in place, so it now holds the
+        // claimed conversation too without changing any directory entry.
+        let duplicate = claim_record("dsh/example/other", native, &home);
+        fs::write(
+            provider.label_path("dsh/example/other"),
+            duplicate.to_string(),
+        )
+        .unwrap();
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "an in-place duplicate is ambiguous, not the cached session"
+        );
+    }
+
+    #[test]
+    fn a_failed_native_identity_note_is_not_accounted() {
+        isolated("failed_note_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn failed_note_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-8g1je: a write whose optional native-identity note failed must
+        // stay unaccounted, so a later warm lookup cannot trust the index.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("failed-note-home");
+        let native = "session-note";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let accounted = ledger_of(provider)["stamp"].clone();
+        // A directory where the derived cache file belongs makes the note fail.
+        let cache = provider_binding::cache_path_for(provider, native, &home);
+        fs::remove_file(&cache).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let mut duplicate = claim_record("dsh/example/duplicate", native, &home);
+        provider.save(&mut duplicate).unwrap();
+        assert_eq!(
+            ledger_of(provider)["stamp"],
+            accounted,
+            "a failed native-identity note must not be accounted as written"
+        );
+        assert!(
+            provider.native_caller(native, &home).is_err(),
+            "an unaccounted duplicate must not answer from the warm index"
+        );
+        fs::remove_dir(&cache).unwrap();
+    }
+
+    #[test]
+    fn a_dirty_ledger_is_rebaselined_by_the_next_complete_scan() {
+        isolated("dirty_rebaseline_fixture");
+    }
+
+    #[test]
+    #[ignore = "process-isolated private state fixture"]
+    fn dirty_rebaseline_fixture() {
+        if std::env::var("ZERUS_CLAIMED_PARENT_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        // zerus-8g1je: a ledger that fell behind an unaccounted write must be
+        // re-baselined by the next complete scan instead of making every warm
+        // claim pay the bounded changed-binding check.
+        let provider = provider_binding::Provider::DeepSeek;
+        let home = root().join("rebaseline-home");
+        let native = "session-rebaseline";
+        let mut first = claim_record("dsh/example/first", native, &home);
+        provider.save(&mut first).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"]
+        );
+        let before = ledger_of(provider);
+        let foreign = claim_record("dsh/example/foreign", "session-unrelated", &home);
+        atomic(
+            &provider.label_path("dsh/example/foreign"),
+            &foreign.to_string(),
+        )
+        .unwrap();
+        fs::remove_file(provider.label_path("dsh/example/foreign")).unwrap();
+        assert_eq!(
+            provider.native_caller(native, &home).unwrap().unwrap()["session_id"],
+            first["session_id"],
+            "the answer stays the warm session"
+        );
+        let after = ledger_of(provider);
+        assert_ne!(
+            after["stamp"], before["stamp"],
+            "the dirty ledger was re-baselined"
+        );
+        assert_ne!(
+            after["epoch"], before["epoch"],
+            "a complete scan retires older indexes"
+        );
+        assert!(after["dirty_since"].is_null(), "{after}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_busy_native_host_refuses_a_claim_quickly() {

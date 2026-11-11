@@ -116,7 +116,8 @@ fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duratio
 }
 #[cfg(unix)]
 fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
-    let mut socket = UnixStream::connect(path).map_err(|_| HOST_UNAVAILABLE)?;
+    let mut socket =
+        crate::platform::connect_unix(path, read_timeout).map_err(|_| HOST_UNAVAILABLE)?;
     // The request's last byte is its newline, and the compact JSON holds no
     // other, so a failed write never wrote it and the host never ran it.
     (|| -> io::Result<()> {

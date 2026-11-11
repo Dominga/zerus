@@ -1704,6 +1704,33 @@ bounded history window and disappears when it no longer matches, including on
 edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
 equality is never request-ID receipt evidence and never clears or retries input.
 
+Recent attachment delivery projection uses the private, rebuildable
+`delivery-receipts-v1.sqlite3` locator in the state directory. A refresh reads
+at most 100 original receipts for the selected provider, conversation and child;
+older receipts use an opaque cursor bound to that scope and an index snapshot.
+New receipts cannot displace rows in an existing page chain. The locator stores
+identities and bindings, not message bodies or attachment bytes. Original JSON
+receipts remain authoritative for delivery, attachment access and no-replay
+checks; a missing locator never permits another send.
+
+The inspection's `receipt_projection` reports index coverage, its next cursor
+and explicit missing, corrupt or changed-original gaps. An unavailable or still
+building index is unknown coverage, not evidence that no message was sent.
+Legacy discovery runs in one coalesced background worker per state directory,
+with transactions limited to 64 directory entries or 25 ms and a pause between
+batches. An interrupted worker retains committed locators and their sequence
+numbers; discovery reopens in the background. It never deletes or rewrites
+receipt history. New sends retain the original atomic receipt write and update
+the locator on a best-effort basis afterward.
+
+The same locator exposes exact name, run and conversation pages for question
+recovery. Deadline-bounded inspection never walks the question receipt directory;
+incomplete coverage keeps recovery unknown. An explicit answer authority read
+can reconcile that family synchronously, then must validate every original and
+drain a complete snapshot before treating recovery as complete. A cursor from an
+incomplete snapshot requires a fresh chain after migration finishes. Locator
+coverage alone never proves an answer's submission.
+
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
 pending and clears when that read completes or fails. Switching sessions shows

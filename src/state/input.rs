@@ -1465,7 +1465,7 @@ fn submit_core(
         record["keep_warm_pending"] = json!({"request_id":request_id,"ping":id,"submitted_at":submitted_at});
     }
     // The marker may be published even when its write reports an error.
-    if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
+    if let Err(error) = receipt_index::persist(&receipt_path, &receipt) {
         cleanup();
         return Err(unknown(error));
     }
@@ -1492,7 +1492,7 @@ fn submit_core(
         checked_terminal(&record, false)?;
         terminal.send(pane, &[backend::Key::Named("Enter")])?;
         receipt["status"] = json!("submitted");
-        atomic(&receipt_path, &receipt.to_string())?;
+        receipt_index::persist(&receipt_path, &receipt)?;
         Ok(())
     })();
     cleanup();

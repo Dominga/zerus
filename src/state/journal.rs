@@ -1146,7 +1146,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["message_events_truncated"] = json!(truncated);
     output["message_events_limit"] = json!(MESSAGE_EVENTS_LIMIT);
     output["message_events_max_bytes"] = json!(MESSAGE_EVENTS_BYTES);
-    output["attachment_messages"] = attachments::messages(&record, "");
+    attachments::decorate(&record, "", &mut output);
     output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
     // The lock was released after `snapshot`, so a rename may have landed since.
     // The pane folders go by the session IDs, which a rename keeps, to the name

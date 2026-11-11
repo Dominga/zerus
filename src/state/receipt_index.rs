@@ -1,0 +1,695 @@
+//! Rebuildable, body-free receipt locators. Original JSON alone proves delivery.
+//! Reads never enumerate source directories. Legacy discovery runs separately in
+//! bounded background batches and never deletes or repairs original receipts.
+use super::*;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Read;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
+
+mod migration;
+mod question;
+// The independently developed recovery consumer stacks on this interface.
+#[allow(unused_imports)]
+pub(crate) use question::{question_page, Coverage, QuestionReceiptPage, QuestionReceiptRow};
+#[cfg(test)]
+mod tests;
+
+pub(super) const PAGE_LIMIT: usize = 100;
+const EXAMINE: usize = 256;
+const ORIGINAL_BYTES: u64 = 256 * 1024;
+const DATABASE: &str = "delivery-receipts-v1.sqlite3";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Source {
+    Terminal,
+    Dsh,
+    OpenCode,
+    Question,
+}
+impl Source {
+    const ALL: [Self; 4] = [Self::Question, Self::Terminal, Self::Dsh, Self::OpenCode];
+    pub(super) fn of(record: &Value) -> Self {
+        if record["agent"] == "opencode" || record["backend"] == "opencode" {
+            Self::OpenCode
+        } else if record["agent"] == "dsh" || record["backend"] == "dsh" {
+            Self::Dsh
+        } else {
+            Self::Terminal
+        }
+    }
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Terminal => "input_receipts",
+            Self::Dsh => "dsh/receipts",
+            Self::OpenCode => "opencode/receipts",
+            Self::Question => "question_receipts",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Dsh => "dsh",
+            Self::OpenCode => "opencode",
+            Self::Question => "question",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Scope {
+    source: Source,
+    name: Option<String>,
+    run: String,
+    conversation: String,
+    agent: String,
+}
+impl Scope {
+    pub(super) fn new(record: &Value, agent: &str) -> Self {
+        Self {
+            source: Source::of(record),
+            name: None,
+            run: string(record, "run_id").into(),
+            conversation: string(record, "conversation_id").into(),
+            agent: agent.into(),
+        }
+    }
+    fn hash(&self, files: bool) -> String {
+        hash(
+            &json!([
+                self.source,
+                self.name,
+                self.run,
+                self.conversation,
+                self.agent,
+                files
+            ])
+            .to_string(),
+        )
+    }
+}
+fn hash(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+fn sql<T>(r: rusqlite::Result<T>) -> Result<T> {
+    r.map_err(|_| "Receipt index is unavailable".into())
+}
+fn bounded_identity(value: &str, limit: usize) -> bool {
+    value.len() <= limit && !value.chars().any(char::is_control)
+}
+
+/// An adapter's immutable original binding, not a delivery acknowledgement.
+/// Other receipt families can reuse Catalog/pages with their own binding hash.
+struct Binding {
+    id: String,
+    name: String,
+    run: String,
+    conversation: String,
+    agent: String,
+    first: bool,
+    at: f64,
+    files: bool,
+    fingerprint: String,
+}
+impl Binding {
+    fn parse(source: Source, value: &Value, filename: &str) -> Result<Self> {
+        let id = string(value, "request_id");
+        let name = string(value, "name");
+        let run = string(value, "run_id");
+        let original = string(value, "conversation_id");
+        let resolved = string(value, "resolved_conversation_id");
+        let agent = string(value, "agent_id");
+        if id.is_empty()
+            || id.len() > 128
+            || filename != format!("{id}.json")
+            || id.contains(['/', '\\'])
+            || !bounded_identity(id, 128)
+            || !bounded_identity(name, 512)
+            || (source == Source::Question && (name.is_empty() || run.is_empty()))
+            || !bounded_identity(run, 128)
+            || !bounded_identity(original, 512)
+            || !bounded_identity(resolved, 512)
+            || !bounded_identity(agent, 512)
+            || (run.is_empty() && original.is_empty())
+            || (!original.is_empty() && !resolved.is_empty() && original != resolved)
+        {
+            return Err("Invalid receipt binding".into());
+        }
+        let at = value
+            .get("submitted_at")
+            .or_else(|| value.get("at"))
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        Ok(Self {
+            id: id.into(),
+            name: name.into(),
+            run: run.into(),
+            conversation: if resolved.is_empty() {
+                original
+            } else {
+                resolved
+            }
+            .into(),
+            agent: agent.into(),
+            first: value["first_message"] == true,
+            at,
+            files: value["attachments"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty()),
+            fingerprint: if source == Source::Question {
+                hash(
+                    &json!([
+                        value["request_id"],
+                        value["name"],
+                        value["run_id"],
+                        value["conversation_id"],
+                        value["question_id"],
+                        value["question_hash"],
+                        value["digest"]
+                    ])
+                    .to_string(),
+                )
+            } else {
+                hash(
+                    &json!([
+                        value["request_id"],
+                        value["name"],
+                        value["run_id"],
+                        value["conversation_id"],
+                        value["agent_id"],
+                        value["digest"],
+                        value["first_message"],
+                        value["graph_target"]
+                    ])
+                    .to_string(),
+                )
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Locator {
+    source: Source,
+    pub(super) id: String,
+    sequence: i64,
+    at: f64,
+    fingerprint: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cursor {
+    version: u8,
+    epoch: String,
+    scope: String,
+    snapshot: i64,
+    complete: bool,
+    at: f64,
+    id: String,
+}
+
+fn cursor_mac(secret: &str, bytes: &[u8]) -> String {
+    let mut key = [0u8; 64];
+    key[..secret.len()].copy_from_slice(secret.as_bytes());
+    let mut inner = Sha256::new();
+    inner.update(key.map(|b| b ^ 0x36));
+    inner.update(bytes);
+    let mut outer = Sha256::new();
+    outer.update(key.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    format!("{:x}", outer.finalize())
+}
+fn encode_cursor(secret: &str, cursor: &Cursor) -> std::result::Result<String, PageFailure> {
+    let bytes = serde_json::to_vec(cursor).map_err(|_| PageFailure::Cursor)?;
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(&bytes),
+        cursor_mac(secret, &bytes)
+    ))
+}
+fn decode_cursor(secret: &str, token: &str) -> std::result::Result<Cursor, PageFailure> {
+    let (body, signature) = token.split_once('.').ok_or(PageFailure::Cursor)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(body)
+        .map_err(|_| PageFailure::Cursor)?;
+    let expected = cursor_mac(secret, &bytes);
+    if signature.len() != expected.len()
+        || !signature
+            .bytes()
+            .zip(expected.bytes())
+            .fold(true, |same, (a, b)| same & (a == b))
+    {
+        return Err(PageFailure::Cursor);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| PageFailure::Cursor)
+}
+
+enum PageFailure {
+    InvalidQuery,
+    Cursor,
+    Unavailable,
+    Deadline,
+}
+impl From<String> for PageFailure {
+    fn from(_: String) -> Self {
+        Self::Unavailable
+    }
+}
+impl PageFailure {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::InvalidQuery => "Invalid receipt page",
+            Self::Cursor => "Receipt cursor belongs to another target or index",
+            Self::Unavailable => "Receipt index is unavailable",
+            Self::Deadline => "Receipt page deadline elapsed",
+        }
+    }
+}
+
+pub(super) struct Page {
+    pub(super) locators: Vec<Locator>,
+    pub(super) metadata: Value,
+}
+
+pub(super) struct Catalog {
+    db: Connection,
+    state: PathBuf,
+}
+impl Catalog {
+    fn open(state: &Path, create: bool) -> Result<Self> {
+        let path = state.join(DATABASE);
+        if create {
+            private_dir(state)?;
+            match crate::platform::private_open(OpenOptions::new().write(true).create_new(true))
+                .open(&path)
+            {
+                Ok(file) => {
+                    file.sync_all()
+                        .map_err(|_| "Receipt index is unavailable")?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err("Receipt index is unavailable".into()),
+            }
+        }
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
+            return Err("Receipt index is unavailable".into());
+        }
+        let flags = if create {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let db = sql(Connection::open_with_flags(&path, flags))?;
+        sql(db.busy_timeout(if create {
+            Duration::from_millis(20)
+        } else {
+            Duration::ZERO
+        }))?;
+        if create {
+            sql(db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+                CREATE TABLE IF NOT EXISTS receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,UNIQUE(source,request));
+                CREATE INDEX IF NOT EXISTS receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
+                CREATE INDEX IF NOT EXISTS receipt_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC);
+                CREATE INDEX IF NOT EXISTS receipt_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC);
+                CREATE INDEX IF NOT EXISTS receipt_file_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC) WHERE files=1;
+                CREATE INDEX IF NOT EXISTS receipt_file_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC) WHERE files=1;
+                CREATE TABLE IF NOT EXISTS receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(source,name));
+                CREATE TRIGGER IF NOT EXISTS receipt_row_count AFTER INSERT ON receipt_rows BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
+                CREATE TRIGGER IF NOT EXISTS receipt_error_count AFTER INSERT ON receipt_errors BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
+                CREATE TRIGGER IF NOT EXISTS receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;"))?;
+            sql(db.execute(
+                "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
+                [uuid::Uuid::new_v4().to_string()],
+            ))?;
+            for source in Source::ALL {
+                sql(db.execute(
+                    "INSERT OR IGNORE INTO receipt_sources(source) VALUES(?)",
+                    [source.key()],
+                ))?;
+            }
+        }
+        if create {
+            sql(db.execute(
+                "INSERT OR IGNORE INTO receipt_meta VALUES('cursor_secret',?)",
+                [uuid::Uuid::new_v4().to_string()],
+            ))?;
+        }
+        Ok(Self {
+            db,
+            state: state.to_owned(),
+        })
+    }
+    fn remember(&self, source: Source, filename: &str, value: &Value) -> Result<()> {
+        let binding = Binding::parse(source, value, filename)?;
+        let prior: Option<(String, String)> = sql(self
+            .db
+            .query_row(
+                "SELECT binding,conversation FROM receipt_rows WHERE source=? AND request=?",
+                params![source.key(), binding.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional())?;
+        if let Some((original, conversation)) = prior {
+            if original != binding.fingerprint
+                || (!conversation.is_empty() && conversation != binding.conversation)
+            {
+                return self.error(source, filename, "binding_changed");
+            }
+            // Only the existing one-way first-prompt resolution may move scope.
+            sql(self.db.execute("UPDATE receipt_rows SET conversation=? WHERE source=? AND request=? AND conversation=''",params![binding.conversation,source.key(),binding.id]))?;
+        } else {
+            sql(self.db.execute("INSERT INTO receipt_rows(source,request,name,run,conversation,agent,first_message,at,files,binding) VALUES(?,?,?,?,?,?,?,?,?,?)",params![source.key(),binding.id,binding.name,binding.run,binding.conversation,binding.agent,binding.first,binding.at,binding.files,binding.fingerprint]))?;
+        }
+        sql(self.db.execute(
+            "DELETE FROM receipt_errors WHERE source=? AND name=?",
+            params![source.key(), filename],
+        ))?;
+        Ok(())
+    }
+    fn error(&self, source: Source, name: &str, reason: &str) -> Result<()> {
+        sql(self.db.execute("INSERT INTO receipt_errors VALUES(?,?,?) ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason",params![source.key(),name,reason]))?;
+        Ok(())
+    }
+    fn page(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<Page> {
+        self.page_until(scope, cursor, limit, files, None)
+            .map_err(|error| error.message().to_owned())
+    }
+    fn page_until(
+        &self,
+        scope: &Scope,
+        cursor: &str,
+        limit: usize,
+        files: bool,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<Page, PageFailure> {
+        if !(1..=PAGE_LIMIT).contains(&limit) || cursor.len() > 2048 {
+            return Err(PageFailure::InvalidQuery);
+        }
+        if scope.run.is_empty() && scope.conversation.is_empty() {
+            return Err(PageFailure::InvalidQuery);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(PageFailure::Deadline);
+        }
+        // Pin locator rows, namespace coverage and the high-water in one WAL
+        // snapshot. Backfill finishing between separate queries must not turn
+        // a prefix snapshot into complete legacy coverage.
+        let transaction = sql(self.db.unchecked_transaction())?;
+        let work = Arc::new(AtomicUsize::new(0));
+        let counter = work.clone();
+        self.db.progress_handler(
+            1000,
+            Some(move || {
+                counter.fetch_add(1000, Ordering::Relaxed) >= 50_000
+                    || deadline.is_some_and(|d| Instant::now() >= d)
+            }),
+        );
+        let epoch: String = sql(self.db.query_row(
+            "SELECT value FROM receipt_meta WHERE key='epoch'",
+            [],
+            |r| r.get(0),
+        ))?;
+        let secret: String = sql(self.db.query_row(
+            "SELECT value FROM receipt_meta WHERE key='cursor_secret'",
+            [],
+            |r| r.get(0),
+        ))?;
+        if secret.len() != 36 || uuid::Uuid::parse_str(&secret).is_err() {
+            return Err(PageFailure::Unavailable);
+        }
+        let (stamp, complete, indexed, errors): (String, bool, i64, i64) = sql(self.db.query_row(
+            "SELECT stamp,complete,indexed,errors FROM receipt_sources WHERE source=?",
+            [scope.source.key()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ))?;
+        let current = migration::stamp(&self.state.join(scope.source.directory()));
+        let ready = complete && current.as_ref().is_ok_and(|v| *v == stamp);
+        let mut position = if cursor.is_empty() {
+            Cursor {
+                version: 1,
+                epoch: epoch.clone(),
+                scope: scope.hash(files),
+                snapshot: sql(self.db.query_row(
+                    "SELECT COALESCE(MAX(seq),0) FROM receipt_rows",
+                    [],
+                    |r| r.get(0),
+                ))?,
+                complete: ready && errors == 0,
+                at: f64::MAX,
+                id: String::new(),
+            }
+        } else {
+            decode_cursor(&secret, cursor)?
+        };
+        if position.version != 1
+            || position.epoch != epoch
+            || position.scope != scope.hash(files)
+            || position.snapshot < 0
+            || !position.at.is_finite()
+            || position.at < 0.0
+            || position.id.len() > 128
+        {
+            return Err(PageFailure::Cursor);
+        }
+        let mut candidates = Vec::new();
+        if let Some(name) = &scope.name {
+            let mut statement=sql(self.db.prepare("SELECT request,seq,at,binding FROM receipt_rows INDEXED BY receipt_exact WHERE source=?1 AND name=?2 AND run=?3 AND conversation=?4 AND (at,request)<(?5,?6) ORDER BY at DESC,request DESC LIMIT ?7"))?;
+            let rows = sql(statement.query_map(
+                params![
+                    scope.source.key(),
+                    name,
+                    scope.run,
+                    scope.conversation,
+                    position.at,
+                    position.id,
+                    EXAMINE + 1
+                ],
+                |r| {
+                    Ok(Locator {
+                        source: scope.source,
+                        id: r.get(0)?,
+                        sequence: r.get(1)?,
+                        at: r.get(2)?,
+                        fingerprint: r.get(3)?,
+                    })
+                },
+            ))?;
+            for row in rows {
+                candidates.push(sql(row)?);
+            }
+        } else {
+            for initial in [false, true] {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Err(PageFailure::Deadline);
+                }
+                if !initial && scope.conversation.is_empty() {
+                    continue;
+                }
+                let index = match (files, initial) {
+                    (true, true) => "receipt_file_initial",
+                    (true, false) => "receipt_file_scope",
+                    (false, true) => "receipt_initial",
+                    (false, false) => "receipt_scope",
+                };
+                let extra = if initial {
+                    "conversation='' AND first_message=1 AND run=?3"
+                } else {
+                    "conversation=?3"
+                };
+                let query=format!("SELECT request,seq,at,binding FROM receipt_rows INDEXED BY {index} WHERE source=?1 AND agent=?2 AND {extra} {} AND (at,request)<(?4,?5) ORDER BY at DESC,request DESC LIMIT ?6",if files {"AND files=1"} else {""});
+                let mut statement = sql(self.db.prepare(&query))?;
+                let rows = sql(statement.query_map(
+                    params![
+                        scope.source.key(),
+                        scope.agent,
+                        if initial {
+                            &scope.run
+                        } else {
+                            &scope.conversation
+                        },
+                        position.at,
+                        position.id,
+                        EXAMINE + 1
+                    ],
+                    |r| {
+                        Ok(Locator {
+                            source: scope.source,
+                            id: r.get(0)?,
+                            sequence: r.get(1)?,
+                            at: r.get(2)?,
+                            fingerprint: r.get(3)?,
+                        })
+                    },
+                ))?;
+                for row in rows {
+                    candidates.push(sql(row)?);
+                }
+            }
+        }
+        candidates.sort_by(|a, b| b.at.total_cmp(&a.at).then_with(|| b.id.cmp(&a.id)));
+        let available = candidates.len();
+        let mut scanned = 0;
+        let mut locators = Vec::new();
+        for locator in candidates.into_iter().take(EXAMINE) {
+            if !locator.at.is_finite()
+                || locator.at < 0.0
+                || locator.id.is_empty()
+                || !bounded_identity(&locator.id, 128)
+                || locator.id.contains(['/', '\\'])
+            {
+                return Err(PageFailure::Unavailable);
+            }
+            position.at = locator.at;
+            position.id = locator.id.clone();
+            scanned += 1;
+            if locator.sequence <= position.snapshot {
+                locators.push(locator);
+            }
+            if locators.len() == limit {
+                break;
+            }
+        }
+        let more = scanned < available;
+        let restart = ready && errors == 0 && !position.complete;
+        let next = if more {
+            encode_cursor(&secret, &position)?
+        } else {
+            String::new()
+        };
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(PageFailure::Deadline);
+        }
+        sql(transaction.commit())?;
+        Ok(Page {
+            locators,
+            metadata: json!({"schema":1,"state":if ready && errors==0 {"indexed"}else if errors>0 {"partial"}else{"building"},"coverage":"indexed_snapshot","absence_confirmed":false,"migration_complete":ready,"catalog_complete_at_snapshot":position.complete,"restart_required":restart,"indexed":indexed,"unattributed_errors":errors,"examined":scanned,"snapshot":position.snapshot,"has_more":more,"next_cursor":next}),
+        })
+    }
+    pub(super) fn original(&self, locator: &Locator) -> std::result::Result<Value, &'static str> {
+        if locator.id.is_empty()
+            || !bounded_identity(&locator.id, 128)
+            || locator.id.contains(['/', '\\'])
+        {
+            return Err("corrupt_index");
+        }
+        let filename = format!("{}.json", locator.id);
+        let value = read_original(&self.state.join(locator.source.directory()).join(&filename))?;
+        let binding = Binding::parse(locator.source, &value, &filename).map_err(|_| "corrupt")?;
+        if binding.fingerprint != locator.fingerprint {
+            return Err("binding_changed");
+        }
+        Ok(value)
+    }
+}
+
+fn read_original(path: &Path) -> std::result::Result<Value, &'static str> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    crate::platform::refuse_link(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            "missing"
+        } else {
+            "unreadable"
+        }
+    })?;
+    if !file.metadata().map_err(|_| "unreadable")?.is_file() {
+        return Err("unreadable");
+    }
+    let mut bytes = Vec::new();
+    file.take(ORIGINAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "unreadable")?;
+    if bytes.len() as u64 > ORIGINAL_BYTES {
+        return Err("oversized");
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "corrupt")
+}
+
+/// Projection is advisory. Missing index/original data is never proof of absence
+/// and this module is deliberately absent from every send/retry admission check.
+pub(super) fn page(
+    record: &Value,
+    agent: &str,
+    cursor: &str,
+    limit: usize,
+) -> Result<(Catalog, Page)> {
+    let state = root();
+    let catalog = Catalog::open(&state, false)?;
+    let page = catalog.page(&Scope::new(record, agent), cursor, limit, true)?;
+    if page.metadata["migration_complete"] != true {
+        migration::request(&state);
+    }
+    Ok((catalog, page))
+}
+pub(super) fn request_migration() {
+    migration::request(&root());
+}
+
+/// Preserve the authoritative atomic write and its error exactly. Index failure
+/// never turns a possibly delivered send into a refusal or allows its replay.
+pub(super) fn persist(path: &Path, value: &Value) -> Result<()> {
+    let source = Source::ALL.into_iter().find(|source| {
+        path.parent()
+            .is_some_and(|p| p.ends_with(source.directory()))
+    });
+    let before = source
+        .and_then(|_| path.parent())
+        .and_then(|p| migration::stamp(p).ok());
+    atomic(path, &value.to_string())?;
+    if let Some(source) = source {
+        let remember = (|| -> Result<()> {
+            let parent = path.parent().ok_or("Invalid receipt path")?;
+            let owner = if matches!(source, Source::Terminal | Source::Question) {
+                parent.parent()
+            } else {
+                parent.parent().and_then(Path::parent)
+            }
+            .ok_or("Invalid receipt owner")?;
+            let state =
+                crate::platform::canonical(owner).map_err(|_| "Receipt owner is unavailable")?;
+            if crate::platform::canonical(parent).map_err(|_| "Receipt directory is unavailable")?
+                != state.join(source.directory())
+            {
+                return Err("Foreign receipt directory".into());
+            }
+            let catalog = Catalog::open(&state, true)?;
+            let filename = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or("Invalid receipt name")?;
+            catalog.remember(source, filename, value)?;
+            // Only advance an already reconciled snapshot. A missed/legacy
+            // writer leaves a mismatch, so inspection requests background work.
+            if let (Some(before), Ok(after)) = (before, migration::stamp(parent)) {
+                sql(catalog.db.execute(
+                    "UPDATE receipt_sources SET stamp=? WHERE source=? AND complete=1 AND stamp=?",
+                    params![after, source.key(), before],
+                ))?;
+            }
+            Ok(())
+        })();
+        let _ = remember;
+    }
+    Ok(())
+}
+
+pub(super) fn worker() -> Result<i32> {
+    migration::worker(&root())
+}

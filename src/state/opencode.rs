@@ -821,7 +821,7 @@ fn parent_view(
     )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
-        result["attachment_messages"] = attachments::messages(record, "");
+        attachments::decorate(record, "", &mut result);
         result["voice_messages"] =
             conversation_history::inspected_voice_messages(record, &result, None);
     }
@@ -1294,7 +1294,7 @@ fn refuse_removed(ledger: &Ledger, record: &Value, message_id: &str) -> Result<(
     }
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(&path, &receipt.to_string())
+    receipt_index::persist(&path, &receipt)
 }
 /// A receipt whose message was confirmed removed becomes that definite
 /// non-delivery before anything else is read; nothing is sent for it.
@@ -1310,7 +1310,7 @@ fn apply_removal(ledger: &Ledger, record: &Value, receipt: &mut Value, path: &Pa
     let _guard = ledger.lock()?;
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(path, &receipt.to_string())
+    receipt_index::persist(path, receipt)
 }
 /// Resolve one message ID exactly from native state. It is never posted
 /// again: OpenCode 2.0.32 forgets an ID once its queued message is removed,
@@ -1401,7 +1401,7 @@ fn settle(
             receipt["reason"] = json!(reason);
         }
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, receipt)?;
     Ok(outcome)
 }
 pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
@@ -1534,7 +1534,7 @@ fn deliver(
         &json!({"request_id":request["request_id"],"conversation_id":record["conversation_id"]})
             .to_string(),
     )?;
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     let posted = native.raw(
         "POST",
         &session_path(record, "/prompt"),
@@ -1556,7 +1556,7 @@ fn deliver(
             // Keep the detailed first refusal local; a durable delivery
             // record needs only the confirmed HTTP status, not provider text.
             receipt["reason"] = json!(format!("HTTP {}", answer.status));
-            atomic(path, &receipt.to_string())?;
+            receipt_index::persist(path, &receipt)?;
             return Err(refused(&reason));
         }
         // A transport error or a 5xx leaves the admission unknown.
@@ -1570,7 +1570,7 @@ fn deliver(
     if queued {
         receipt["queued"] = json!(true);
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     Ok(receipt)
 }
 fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {

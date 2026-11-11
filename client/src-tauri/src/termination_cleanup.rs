@@ -83,6 +83,10 @@ struct Job {
     // program pipeline while its incomplete/unknown result still needs review.
     program_review_pending: bool,
     program_retirement: Option<ProgramRetirement>,
+    // Set once a result that is not a reviewable refusal released its
+    // physically retired program (zerus-1y897.5). The row stays for lookup;
+    // it never offers Check again, Force or a removal consent.
+    lookup_only: bool,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
@@ -511,6 +515,7 @@ impl Model {
             dismissed: false,
             program_review_pending: false,
             program_retirement: None,
+            lookup_only: false,
             source: Some(target.clone()),
             archive,
             restore_supported,
@@ -634,6 +639,7 @@ impl Model {
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         {
                             !job.busy
+                                && !job.lookup_only
                                 && job.program_retirement.is_none()
                                 && job
                                     .programs
@@ -666,12 +672,14 @@ impl Model {
                     can_check: self.can_dismiss(job)
                         && !self.unknown_folder(job)
                         && !job.busy
+                        && !job.lookup_only
                         && (!job.has_programs() || job.reviewable_refusal())
                         && job.cleanup.can_refresh()
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     ready: self.can_dismiss(job)
                         && !self.unknown_folder(job)
                         && !job.busy
+                        && !job.lookup_only
                         && !job.has_programs()
                         && job.manual_review
                         && job.has_launch_owner()
@@ -1326,6 +1334,7 @@ pub async fn termination_cleanup_confirm(
                 dismissed: false,
                 program_review_pending: false,
                 program_retirement: None,
+                lookup_only: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1375,7 +1384,7 @@ fn check_with_runtime(
     if m.jobs
         .iter()
         .find(|j| j.id == id)
-        .is_some_and(|j| j.dismissed || m.unknown_folder(j))
+        .is_some_and(|j| j.dismissed || j.lookup_only || m.unknown_folder(j))
     {
         return Err("An unknown result will not be retried.".into());
     }
@@ -1511,7 +1520,6 @@ fn check_with_runtime(
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_json::Value {
     assert!(stopped.reviewable_refusal());
-    let program = program_pipeline::ProgramJob::Stopped(Box::new(stopped));
     let mut entry = Entry::terminated(
         "studio",
         "studio",
@@ -1522,24 +1530,30 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
     )
     .unwrap();
     entry.machine = "11111111-1111-4111-8111-111111111111".into();
-    entry.offline = true;
+    // Online: Check again really reviews the folder (zerus-1y897.3).
+    entry.offline = false;
     entry.status = Some(Status::Kept);
     let state = TerminationCleanup::default();
-    lock(&state.0.model).jobs.push_back(Job {
+    // The program path's own job, published through production record_stop
+    // (zerus-1y897.3): a known refusal must leave a retained cleanup.
+    let mut job = Job {
         id: "job".into(),
-        cleanup: Cleanup::retained(vec![entry]),
-        busy: false,
-        phase: "checking",
+        cleanup: Cleanup::after_termination(vec![entry]),
+        busy: true,
+        phase: "stopping",
         manual_review: false,
         dismissed: false,
-        program_review_pending: false,
+        program_review_pending: true,
         program_retirement: None,
+        lookup_only: false,
         source: None,
         archive: None,
         restore_supported: true,
-        programs: Some(program),
+        programs: None,
         reservation: None,
-    });
+    };
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    lock(&state.0.model).jobs.push_back(job);
     let projection = lock(&state.0.model).view();
     assert!(projection.rows[0].can_check);
     assert!(!projection.rows[0].ready);
@@ -1556,11 +1570,14 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
                 } => {
                     let mut model = lock(&inner.model);
                     let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
-                    step = job.cleanup.reviewed(
-                        &host,
-                        &common_dir,
-                        Err("offline synthetic review".into()),
-                    );
+                    // A fresh review that finds the folder ready to remove.
+                    let review = json!({"state": "ok", "common_dir": "/home/example/repo/.git",
+                        "worktrees": [{"kind": "linked", "verdict": "ready", "path": "/home/example/repo-work-1",
+                        "fingerprint": "f1", "ownership_id": "owner-1", "zerus_owned": true,
+                        "archive_restore_ready": true, "reasons": [], "changes": 0, "untracked": 0,
+                        "disk_complete": true, "ignored_complete": true, "ignored_count": 0,
+                        "integration": {"kind": "ancestor", "base": "main"}, "merged": true}]});
+                    step = job.cleanup.reviewed(&host, &common_dir, Ok(&review));
                 }
                 Step::Remove { .. } => panic!("Check again must not remove"),
                 Step::Idle | Step::Done => {
@@ -1575,10 +1592,448 @@ pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_jso
     assert!(!checked.rows[0].can_force);
     let settled = lock(&state.0.model).view();
     assert!(!settled.busy);
+    // No automatic removal is pending and the explicit one stays available.
+    let mut cleanup = lock(&state.0.model).jobs[0].cleanup.clone();
+    assert!(!cleanup.busy(), "Check again left the Core cleanup running");
+    assert!(
+        matches!(cleanup.remove(Default::default()), Step::Remove { .. }),
+        "explicit removal must stay available after the fresh review"
+    );
     assert!(settled.rows[0].can_check);
-    assert!(!settled.rows[0].ready);
+    // The ready folder is offered for the user's explicit Remove only.
+    assert!(settled.rows[0].ready);
     assert!(!settled.rows[0].can_force);
+    // Projection only (zerus-1y897.5): on this reviewed row the lookup-only
+    // flag alone withholds Check again and the Remove consent.
+    lock(&state.0.model).jobs[0].lookup_only = true;
+    let lookup = lock(&state.0.model).view();
+    assert!(!lookup.rows[0].can_check);
+    assert!(!lookup.rows[0].ready);
     serialized
+}
+
+/// zerus-1y897.5: a real incomplete stop whose source is gone, published by
+/// production record_stop and released by the production watcher pass. With
+/// `force`, a Force offer over it was still open when the source went away.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_expired_release(stopped: programs::Stopped, force: bool) {
+    assert!(stopped.can_force());
+    assert!(!stopped.reviewable_refusal());
+    assert!(!stopped.current());
+    let mut entry = Entry::terminated(
+        "studio",
+        "studio",
+        "/home/example/repo-work-1",
+        "/home/example/repo/.git",
+        "owner-1",
+        None,
+    )
+    .unwrap();
+    entry.machine = "11111111-1111-4111-8111-111111111111".into();
+    entry.offline = false;
+    let state = TerminationCleanup::default();
+    let mut job = Job {
+        id: "job".into(),
+        cleanup: Cleanup::after_termination(vec![entry]),
+        busy: true,
+        phase: "stopping",
+        manual_review: false,
+        dismissed: false,
+        program_review_pending: true,
+        program_retirement: None,
+        lookup_only: false,
+        source: None,
+        archive: None,
+        restore_supported: true,
+        programs: None,
+        reservation: None,
+    };
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    if force {
+        let Some(program_pipeline::ProgramJob::Stopped(stopped)) = job.programs.take() else {
+            panic!("published stop")
+        };
+        job.programs = Some(program_pipeline::ProgramJob::Force {
+            id: "force".into(),
+            revision: 1,
+            offer: Box::new(programs::fixture_force(*stopped)),
+        });
+    } else {
+        // Projection only: the flag alone also withholds a usable Force.
+        assert!(job.programs.as_ref().unwrap().can_force());
+        lock(&state.0.model).jobs.push_back(job);
+        assert!(lock(&state.0.model).view().rows[0].can_force);
+        lock(&state.0.model).jobs[0].lookup_only = true;
+        assert!(!lock(&state.0.model).view().rows[0].can_force);
+        job = lock(&state.0.model).jobs.pop_front().unwrap();
+        job.lookup_only = false;
+    }
+    lock(&state.0.model).jobs.push_back(job);
+    let emitted = std::cell::Cell::new(0);
+    assert!(matches!(
+        program_pipeline::watch_once(&state.0, "job", |_| emitted.set(emitted.get() + 1)),
+        program_pipeline::Watch::Stop
+    ));
+    assert_eq!(emitted.get(), 1);
+    // Behaviour first: the native admission refuses Check again.
+    assert!(check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |_, _, _| panic!("a released unrefused result was reviewed"),
+    )
+    .is_err());
+    {
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(job.programs.is_none(), "the retired program was kept");
+        assert!(job.lookup_only);
+        assert!(!job.busy);
+        assert!(job.program_review_pending);
+        assert_eq!(
+            job.program_retirement,
+            Some(ProgramRetirement::SourceUnavailable)
+        );
+        assert!(job
+            .cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.status == Some(Status::Kept)));
+        let view = model.view();
+        let row = &view.rows[0];
+        assert!(!row.can_check);
+        assert!(!row.ready);
+        assert!(!row.can_force);
+        assert_eq!(row.force_revision, None);
+        assert!(!row.can_dismiss);
+        assert!(!row.can_remove_anyway);
+        assert!(!view.can_clear);
+    }
+}
+
+/// The program path's own job after production record_stop published a real
+/// incomplete stop whose source is gone.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn published_incomplete(stopped: programs::Stopped) -> Job {
+    assert!(stopped.can_force());
+    assert!(!stopped.current());
+    let mut job = stopping_job();
+    assert!(program_pipeline::record_stop(&mut job, Ok(stopped)));
+    job
+}
+
+/// The program path's own job while its original stop runs.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn stopping_job() -> Job {
+    let mut entry = Entry::terminated(
+        "studio",
+        "studio",
+        "/home/example/repo-work-1",
+        "/home/example/repo/.git",
+        "owner-1",
+        None,
+    )
+    .unwrap();
+    entry.machine = "11111111-1111-4111-8111-111111111111".into();
+    entry.offline = false;
+    Job {
+        id: "job".into(),
+        cleanup: Cleanup::after_termination(vec![entry]),
+        busy: true,
+        phase: "stopping",
+        manual_review: false,
+        dismissed: false,
+        program_review_pending: true,
+        program_retirement: None,
+        lookup_only: false,
+        source: None,
+        archive: None,
+        restore_supported: true,
+        programs: None,
+        reservation: None,
+    }
+}
+
+/// zerus-1y897.7: a stale Force stop click after the source went away. The
+/// refused offer hands back the SAME stop with its custody; the native Check
+/// admission stays closed while it is held, and only the watcher's physical
+/// retirement releases it. `lost` is a blocking offer that never returned.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: programs::Stopped) {
+    let check = |state: &TerminationCleanup| {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("an unrefused stop was reviewed"),
+        )
+    };
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(stopped);
+    let (request_id, _, _) = job.programs.as_ref().unwrap().identity();
+    let taken = program_pipeline::take_force(&mut job).unwrap();
+    assert!(job.busy);
+    let offered = taken.offer_force();
+    assert!(program_pipeline::record_offer(&mut job, 1, Ok(offered)).is_err());
+    assert_eq!(
+        job.programs.as_ref().map(|program| program.identity().0),
+        Some(request_id),
+        "the refused offer released the stop"
+    );
+    assert!(!job.busy);
+    assert!(!job.lookup_only);
+    assert_eq!(
+        job.program_retirement,
+        Some(ProgramRetirement::OfferUnavailable)
+    );
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    assert!(lock(&state.0.model).jobs[0].programs.is_some());
+    assert!(matches!(
+        program_pipeline::watch_once(&state.0, "job", |_| {}),
+        program_pipeline::Watch::Stop
+    ));
+    assert!(check(&state).is_err());
+    {
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired stop was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+        assert!(!model.jobs[0].busy);
+    }
+
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(lost);
+    let taken = program_pipeline::take_force(&mut job).unwrap();
+    // The blocking task owned the stop and ended without handing it back.
+    drop(taken);
+    assert!(program_pipeline::record_offer(&mut job, 1, Err("offer task ended".into())).is_err());
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    let model = lock(&state.0.model);
+    assert!(!model.jobs[0].busy, "a lost offer left the row busy");
+    assert!(model.jobs[0].lookup_only);
+    let row = &model.view().rows[0];
+    assert!(!row.can_check && !row.ready && !row.can_force);
+}
+
+/// zerus-1y897.8: an unconfirmed stop is lookup-only and keeps whatever
+/// custody its producer handed back until the watcher's physical retirement:
+/// a stale Force confirmation (`offered`) and stops whose source went away
+/// before their phase settled (`incomplete`, `refused`).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_unconfirmed_stops(
+    offered: programs::Stopped,
+    incomplete: programs::Stopped,
+    refused: programs::Stopped,
+) {
+    fn check(state: &TerminationCleanup) -> Result<View, String> {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("an unconfirmed stop was reviewed"),
+        )
+    }
+    fn assert_held(state: &TerminationCleanup, request_id: String, live: bool) {
+        assert_eq!(
+            lock(&state.0.model).jobs[0]
+                .programs
+                .as_ref()
+                .map(|program| program.identity().0),
+            Some(request_id),
+            "the unconfirmed stop was released"
+        );
+        assert!(check(state).is_err());
+        {
+            let mut model = lock(&state.0.model);
+            let job = &mut model.jobs[0];
+            assert!(live, "the held stop is not watched");
+            assert!(
+                program_pipeline::take_force(job).is_err(),
+                "an unconfirmed stop offered Force"
+            );
+            assert!(job.lookup_only);
+            assert!(!job.busy);
+            assert_eq!(
+                job.program_retirement,
+                Some(ProgramRetirement::StopUnconfirmed)
+            );
+        }
+        // The passive watcher's own passes; only physical retirement releases.
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match program_pipeline::watch_once(&state.0, "job", |_| {}) {
+                program_pipeline::Watch::Continue => {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "the held stop never retired"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                program_pipeline::Watch::Stop => break,
+                program_pipeline::Watch::Review(_) => panic!("an unconfirmed stop was reviewed"),
+            }
+        }
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired stop was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+        let row = &model.view().rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force);
+    }
+
+    let state = TerminationCleanup::default();
+    let mut job = published_incomplete(offered);
+    let (request_id, _, _) = job.programs.as_ref().unwrap().identity();
+    let Some(program_pipeline::ProgramJob::Stopped(stopped)) = job.programs.take() else {
+        panic!("published stop")
+    };
+    // The Force dialog that was still open when the source went away.
+    job.programs = Some(program_pipeline::ProgramJob::Force {
+        id: "force".into(),
+        revision: 1,
+        offer: Box::new(programs::fixture_force(*stopped)),
+    });
+    let offer = program_pipeline::take_confirm(&mut job, "force").unwrap();
+    assert!(job.busy);
+    let live = program_pipeline::record_stop(&mut job, program_pipeline::confirm_force(offer));
+    lock(&state.0.model).jobs.push_back(job);
+    assert_held(&state, request_id, live);
+
+    for stopped in [incomplete, refused] {
+        let state = TerminationCleanup::default();
+        let mut job = stopping_job();
+        let (request_id, _, _) = stopped.identity();
+        let live = program_pipeline::record_stop(&mut job, program_pipeline::settle(stopped));
+        lock(&state.0.model).jobs.push_back(job);
+        assert_held(&state, request_id, live);
+    }
+
+    // A refused original stop hands nothing back: only the lookup-only row.
+    let state = TerminationCleanup::default();
+    let mut job = stopping_job();
+    assert!(!program_pipeline::record_stop(
+        &mut job,
+        Err(program_pipeline::Unconfirmed { held: None }),
+    ));
+    lock(&state.0.model).jobs.push_back(job);
+    assert!(check(&state).is_err());
+    let model = lock(&state.0.model);
+    assert!(model.jobs[0].lookup_only);
+    let row = &model.view().rows[0];
+    assert!(!row.can_check && !row.ready && !row.can_force);
+}
+
+/// zerus-1y897.9: a refused original normal stop, a refused cleanup of a
+/// Complete stop and a removal whose source went away keep their custody,
+/// lookup-only and watched, until the watcher's physical retirement.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_held_custody(
+    original: programs::Continuation,
+    complete: programs::Stopped,
+    removal: programs::Removal,
+) {
+    fn check(state: &TerminationCleanup) -> Result<View, String> {
+        check_with_runtime(
+            &state.0,
+            "job".into(),
+            |model| model.revision = model.revision.wrapping_add(1),
+            |_, _, _| panic!("held custody was reviewed"),
+        )
+    }
+    fn held(state: &TerminationCleanup, live: bool, retirement: ProgramRetirement) {
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        let job = &model.jobs[0];
+        assert!(live, "the held custody is not watched");
+        assert!(job.lookup_only);
+        assert!(!job.busy);
+        assert_eq!(job.program_retirement, Some(retirement));
+        let row = &model.view().rows[0];
+        assert!(!row.can_check && !row.ready && !row.can_force && !row.can_dismiss);
+    }
+    // The passive watcher's own passes; only physical retirement releases.
+    fn released(state: &TerminationCleanup) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match program_pipeline::watch_once(&state.0, "job", |_| {}) {
+                program_pipeline::Watch::Continue => {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "the held custody never retired"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                program_pipeline::Watch::Stop => break,
+                program_pipeline::Watch::Review(_) => panic!("held custody was reviewed"),
+            }
+        }
+        assert!(check(state).is_err());
+        let model = lock(&state.0.model);
+        assert!(
+            model.jobs[0].programs.is_none(),
+            "the retired custody was kept"
+        );
+        assert!(model.jobs[0].lookup_only);
+    }
+
+    // Continuation::normal refused: the source went away before the stop.
+    let state = TerminationCleanup::default();
+    let mut job = stopping_job();
+    let live = program_pipeline::record_stop(
+        &mut job,
+        program_pipeline::stop_original(Box::new(original)),
+    );
+    assert!(
+        matches!(
+            job.programs,
+            Some(program_pipeline::ProgramJob::Original(_))
+        ),
+        "the refused original was released"
+    );
+    lock(&state.0.model).jobs.push_back(job);
+    held(&state, live, ProgramRetirement::StopUnconfirmed);
+    released(&state);
+
+    // A Complete stop whose cleanup is refused, then a removal that never
+    // settled: each source went away first.
+    let (complete_id, _, _) = complete.identity();
+    let (removal_id, _, _) = removal.identity();
+    for (request_id, removed) in [
+        (
+            complete_id,
+            program_pipeline::run_removal(Box::new(complete)),
+        ),
+        (
+            removal_id,
+            program_pipeline::settle_removal(Box::new(removal)),
+        ),
+    ] {
+        let state = TerminationCleanup::default();
+        let mut job = stopping_job();
+        job.phase = "removing";
+        let (gone, live) = program_pipeline::record_removal(&mut job, removed);
+        assert_eq!(
+            job.programs.as_ref().map(|program| program.identity().0),
+            Some(request_id),
+            "the refused removal released its custody"
+        );
+        assert!(!gone);
+        assert!(job
+            .cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.status == Some(Status::Unconfirmed)));
+        lock(&state.0.model).jobs.push_back(job);
+        held(&state, live, ProgramRetirement::CleanupUnconfirmed);
+        released(&state);
+    }
 }
 
 #[tauri::command]
@@ -2037,6 +2492,7 @@ mod tests {
             dismissed: false,
             program_review_pending: false,
             program_retirement: None,
+            lookup_only: false,
             source: None,
             archive: None,
             restore_supported: false,

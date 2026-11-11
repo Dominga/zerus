@@ -25,13 +25,13 @@ const [target, setTarget] = createSignal({ id: "first" });
 const [events, setEvents] = createSignal(page(1));
 const [loaded, setLoaded] = createSignal(true);
 const [loadingOlder, setLoadingOlder] = createSignal(false);
-let reads = 0;
+let reads = 0, olderRows = true;
 const source: ActivitySource = {
   target, events, loaded, loadingOlder, summary: () => undefined,
   olderDone: () => false, ended: () => false, error: () => undefined,
   loadOlder: after => {
     reads++; setLoadingOlder(true);
-    setTimeout(() => batch(() => { setEvents([...page((after ?? 0) + 1), ...events()]); setLoadingOlder(false); }), 100);
+    setTimeout(() => batch(() => { if (olderRows) setEvents([...page((after ?? 0) + 1), ...events()]); setLoadingOlder(false); }), 100);
   },
 };
 
@@ -49,12 +49,14 @@ async function run() {
     }
     await sleep(300);
   };
-  const visit = async (id: string, start: number, count = 100) => {
+  const visitRows = async (id: string, rows: ActivityEvent[]) => {
     batch(() => { setTarget({ id }); setEvents([]); setLoaded(false); });
     await sleep(60);
-    batch(() => { setEvents(page(start, count)); setLoaded(true); });
+    batch(() => { setEvents(rows); setLoaded(true); });
     await placed();
   };
+  const visit = (id: string, start: number, count = 100) => visitRows(id, page(start, count));
+  const atLatest = () => following() && scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight <= 1;
   const read = async (top: number) => {
     scroller().dispatchEvent(new WheelEvent("wheel", { deltaY: -500, bubbles: true }));
     scroller().scrollTo({ top, behavior: "instant" });
@@ -86,6 +88,30 @@ async function run() {
   await visit("second", 501);
   await visit("first", 1, 120);
   check(following() && scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight <= 1, "A pinned session did not follow its new end");
+  // No saved row returns: the nearest earlier surviving message goes to the
+  // top, released, never the saved pixel offset.
+  await visit("third", 2001);
+  const pruned = Number((await read(1800)).key.slice("item-s".length));
+  await visit("second", 501);
+  const readsBefore = reads;
+  await visitRows("third", page(2001).filter(event => event.seq! < pruned || event.seq! > pruned + 30));
+  const nearest = activityReadingRows(scroller()).offset(`item-s${pruned - 1}`);
+  cases.push({ label: "pruned saved rows", key: `item-s${pruned - 1}`, before: 0, after: nearest });
+  check(nearest !== undefined && Math.abs(nearest) <= 1.5, `pruned saved rows: nearest earlier message not at the top (${nearest})`);
+  check(!following(), "pruned saved rows: unexpectedly following");
+  check(reads === readsBefore, `pruned saved rows: unexpected older read (${reads - readsBefore})`);
+  // The saved window expired: its one read returns no rows and Activity follows Latest.
+  await visit("fourth", 3001);
+  await read(1800);
+  await visit("second", 501);
+  olderRows = false;
+  const expiredBefore = reads;
+  await visit("fourth", 4001);
+  await sleep(1500);
+  cases.push({ label: "expired saved window", reads: reads - expiredBefore, following: following() });
+  check(reads - expiredBefore === 1, `expired saved window: expected one read, got ${reads - expiredBefore}`);
+  check(atLatest(), "expired saved window did not follow Latest");
+  olderRows = true;
   dispose();
   return { failures, cases, reads };
 }

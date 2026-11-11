@@ -254,7 +254,7 @@ class KimiNativeCI(unittest.TestCase):
                              (['--enable-utf8proc', '--enable-jemalloc'] if system == 'Darwin' else []))
             self.assertEqual(list(runtime.iterdir()), [])
 
-    def test_only_reviewed_architectures_and_exact_eight_methods_are_selected(self):
+    def test_only_reviewed_architectures_and_exact_method_inventory_are_selected(self):
         self.assertEqual(ci.target('Linux', 'x86_64'), 'linux-x64')
         self.assertEqual(ci.target('Darwin', 'arm64'), 'darwin-arm64')
         for pair in (('Linux', 'aarch64'), ('Darwin', 'x86_64'), ('Windows', 'AMD64')):
@@ -262,7 +262,8 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
-        self.assertEqual(len(ci.METHODS),15)
+        self.assertEqual(len(ci.METHODS),16)
+        self.assertIn('test_kimi_native.NativeKimi.test_id_settings_before_first_message_preserves_empty_conversation_and_defaults',ci.METHODS)
         self.assertEqual(ci.METHODS[-1],'test_kimi_native.NativeKimi.test_id_effort_preserves_raw_request_identity_and_shared_defaults')
 
     def test_the_only_redirect_is_one_exact_302_to_the_cdn(self):

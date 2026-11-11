@@ -70,6 +70,23 @@ export async function nativeUiSmoke(allowed: boolean, smokeFile?: string) {
     await ready("RESTORED"); await control("restored");
     nativeUi.reload();
     await ready("RELOADED"); await control("reloaded");
+    // zerus-06hh0: once Activity or another session replaces the Native UI
+    // tab, the driver shows the main window again (Show, the tray) and the
+    // retained child must stay hidden under the new view.
+    setDetailTab("activity");
+    await until(() => !document.querySelector(".native-frame"), "Activity did not replace the native tab");
+    await sleep(150);
+    await log("AWAY"); await control("away");
+    const other = orderedRows().find((candidate) => candidate.agent !== "deepseek" && candidate.state !== "archived");
+    require(other, "the fixture has no other live session");
+    setSelectedKey(other!.key);
+    await until(() => activity.target()?.id === other!.key && activity.loaded(), "the other session's Activity did not load");
+    await sleep(150);
+    await log("OTHER"); await control("other");
+    setSelectedKey(row.key);
+    await until(() => activity.target()?.id === row.key && activity.loaded() && composer.view()?.loaded === true, "native Activity did not load again");
+    button("Native UI").click();
+    await ready("BACK"); await control("back");
     for (let index = 1; index <= 5; index++) {
       await log(`PROFILE_CHANGE ${index}`); await control(`profile-change-${index}`);
       nativeUi.reload();

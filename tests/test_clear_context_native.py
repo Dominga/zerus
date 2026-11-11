@@ -240,6 +240,23 @@ wire_api="responses"
         self.assertEqual(json.loads(self.record_path.read_text())['pid'],self.record['pid'])
         self.assertEqual((self.native_home/'config.toml').read_bytes(),before,'Session choices never save account defaults')
 
+    def test_id_settings_unknown_initial_effort_preserves_shared_defaults(self):
+        import native_effort_id as identity
+        import native_settings_id as settings_contract
+        models = [dict(slug='gpt-6.1-sol', display_name='GPT-6.1-Sol', default_reasoning_level='medium',
+                       supported_reasoning_levels=[dict(effort=e) for e in ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']])]
+        (self.native_home / 'models_cache.json').write_text(json.dumps(dict(models=models)))
+        self.record.update(model='gpt-6.1-sol', phase='idle', activity='idle', active_tools={})
+        self.write_record()
+        before = (self.native_home / 'config.toml').read_bytes()
+        record, path, legacy = identity.moved_record(self, self.name, self.record)
+        self.record, self.record_path = record, path
+        attempts = identity.key_log(self)
+        settings_contract.change_and_replay(self, self.name, record, path, 'gpt-6.1-sol', 'high', attempts)
+        self.assertRegex(self.tmux('capture-pane', '-p', '-t', self.pane), r'(?m)^\s*GPT-6\.1-Sol\s+high\s+·')
+        self.assertEqual((self.native_home / 'config.toml').read_bytes(), before)
+        self.assertFalse(legacy.exists())
+
     def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
         import native_effort_id as contract
         import test_clear_context

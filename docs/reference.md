@@ -90,11 +90,23 @@ unknown reference field.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
-An agent obtains its own reference with `hgs self [--json]`. The caller must run
-inside a live tracked native agent: like an agent-originated send, the binding is
-proven through that agent's process ancestry, never through `HGS_SESSION` alone.
-The reply carries the current name after a rename, the `reference` fields and
-`provider`. It never routes to a peer and refuses `--dry-run`.
+An agent obtains its own reference with `hgs self [--json]`. Terminal agents are
+identified through their native process ancestry, never `HGS_SESSION` alone.
+DeepSeek and OpenCode tool shells already receive their native conversation ID
+as [`DSH_SESSION_ID`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/shell/shell-env/README.md)
+or [`OPENCODE_SESSION_ID`](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/shell.ts).
+Without a proven terminal caller, `self` resolves that claim against the native
+home and a live local binding. Its JSON reply distinguishes `identity_source`
+`process` from `claimed`, includes the durable `session_id`, and supplies
+`parent_identity` with the exact session, run and conversation for parent commands.
+The native lookup uses a derived index with authoritative rereads; its cold
+metadata scan is bounded to 5000 entries, 64 MiB and two seconds, and incomplete
+or ambiguous coverage refuses. A missing, stale, archived or unavailable native
+session refuses too. Current names follow renames. Native hosts need access to
+the same Zerus state/config paths; new OpenCode services retain only those two
+HGS path variables, never HGS session/run identity. `self` never routes to a peer
+and refuses `--dry-run`. Claimed identity never enters send/graph attribution,
+task ownership or permission proof.
 
 `hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
 agents that read, message, wait for, launch or stop other sessions. The text is
@@ -650,6 +662,13 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+hgs recognises its own entries by the program they run: a path named `hgs` or
+`hgs.exe`, a legacy `hgs_state.py`, or exactly the current `HGS_EXECUTABLE`,
+which a wrapper may name differently. A later launch therefore adds nothing.
+Earlier versions added another group for a wrapper at each launch. Exact copies
+of such a group are removed once, and Codex may ask to review that change. A
+group that holds any personal hook is kept as it is, and a command for another
+program is never treated as hgs's.
 Codex can request **Hooks need review** before both a new session and a saved
 conversation's resume or archive restore. Activity shows that exact native
 decision; messages remain blocked while it is open. Only the person's explicit
@@ -677,20 +696,35 @@ process exit. A live process without verified activity shows **Status unknown**;
 
 A new session that a live tracked agent launches on the same computer is
 that agent's child. Terminal-agent forks also record their launching caller. The launching `hgs` proves its caller by native process
-ancestry, exactly as `hgs self` does, and passes it to the new session as
+ancestry, as the process-proven mode of `hgs self` does, and passes it to the new session as
 `HGS_PARENT`; it always sets the variable, empty when no live agent owns the
 launch, so an inherited or typed value never reaches the record. The new
 session's first record keeps it as `parent`: the parent's machine UUID and
 durable `session_id`, its name, conversation and run as hints, `source`
-(`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
+(`launch`, `adopt`, `manual`, `claimed` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
 Codex, Kimi, DeepSeek and OpenCode sessions can be children and manually chosen
 parents. New DeepSeek and OpenCode bindings record the proven launcher directly,
 before native creation; they never trust an inherited `HGS_PARENT` value.
-DeepSeek and OpenCode agents cannot prove themselves as callers from their
-shared native host, so they cannot adopt sessions or record themselves as the
-parent of sessions they launch. Use an explicit `set` for those relationships.
+DeepSeek and OpenCode agents cannot prove process ownership from their shared
+host. They can explicitly claim a parent identity: `adopt` may also name
+`parent` with an exact `session_id`, `run_id` and `conversation_id` (optional
+name hint). The parent must freshly match a live session on this computer;
+the recorded source is `claimed`, distinct from process-proven `adopt`.
+The same choice is accepted by new `hgs claude/codex/kimi/dsh/opencode` launches
+as `--parent JSON`, for example `--parent "$(hgs self --json | jq -c .parent_identity)"`.
+This explicit choice overrides automatic launcher detection, must still match
+at launch, and never reparents an existing/resumed session. Use `hgs parent`
+for an existing session. The installed help marker is `claimed-parent-v1`;
+explicit peer launches require it. The selected computer checks the claim
+against its own sessions, so the claimed parent must be live there: a claim
+copied from an agent on another computer (`hgs @peer dsh … --parent "$(hgs self
+…)"`) is refused and nothing is recorded. `hgs self` never routes to a peer.
+A DeepSeek or OpenCode parent must confirm it is live within 2 seconds; a host
+that has not answered by then is refused as busy, never counted as live.
+Claimed links are presentation/attention metadata like manual links and grant
+no operation or permission authority.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
@@ -2308,11 +2342,14 @@ Missing or invalid priorities follow ranked entries in their original order;
 a legacy catalog without priorities keeps its source order. This shared catalog
 order applies to both desktop and Android without changing the current model.
 
-Claude options are the models its `/model` picker lists, from the catalog Claude
-Code caches in the account's profile. Zerus selects the model and effort in that
-picker and applies them with its session-only choice (`s`). Its Enter, and a typed
-`/model NAME` or `/effort LEVEL`, would save new defaults and are never used. The
-change is confirmed by Claude's receipt in the exact conversation transcript and by
+Claude options are the models its `/model` picker lists, including **More models**,
+from the catalog Claude Code caches in the account's profile. Zerus expands a
+section only when the native picker advertises that action, selects the model
+and effort, and applies them with its session-only choice (`s`). Enter on a model
+row saves new defaults; Zerus never uses that action or the typed `/model NAME`
+and `/effort LEVEL` shortcuts for a session change. An unconfirmed selection
+closes the recognized model picker with Escape while its original input authority
+is still valid. The change is confirmed by Claude's receipt in the exact conversation transcript and by
 its effort indicator when shown. In a conversation that already has replies, Claude
 warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in
@@ -3039,6 +3076,131 @@ Disconnect stops outbound exchange through that connection while retaining the
 catalog and session access. It does not deny inbound exchange from an existing
 member; SSH controls transport access. `HGS_SWARM_SERVICE=0 ./install.sh` skips
 worker installation.
+
+### Empty-peer adoption
+
+`hgs swarm adoption-preview PEER --json` checks whether the configured empty
+computer can adopt the local catalog without opening its desktop UI. The
+destination accepts either an untouched store (`imported=false`, no operations
+or pending marker) or the narrow first-read bootstrap: a valid same-node v1
+`gui-import-pending.json`, only the current self machine-name operation, the
+initial empty-peer membership and empty/missing sidecars. Peers, other product
+history, foreign or unreadable data, an existing drive store, or a
+present/unreadable Qt store refuses. The pending marker is preserved byte for
+byte, and the later missing-only GUI import retains adopted values, tombstones
+and concurrent heads.
+
+`hgs swarm adopt PEER --json` performs the explicitly previewed original
+request. It copies the complete catalog, primary session memberships and twins,
+including every raw operation and parent. Canonical full-body hashes are bound
+to raw file presence (`missing`, `valid_empty` or `nonempty`), swarm identity and
+pre/post receipts. An absent file's zero bytes are not a valid empty JSON
+component. The aggregate request is at most 32 MiB including every component;
+preview, status and mutation receipts are at most 64 KiB. Disk read ceilings do
+not widen wire limits. Journals and the registry are bounded and directly
+indexed by original UUID; one adoption is active per catalog.
+
+The destination keeps its own node and self bindings and gets no reverse peer
+or source-local binding. Only the source adds the configured destination peer
+and calls `sync_peer` for that peer, preserving existing peers and unrelated
+synchronization. Without real reverse enrollment, drive-folder import remains
+unsupported and the drive component stays `Uninitialized`; preview and
+settlement disclose this rather than claiming every component is shared.
+
+`hgs swarm adoption-status PEER --json` returns the bounded original phase and
+receipts without repairing anything. Main, primary and twins commit separately
+under the destination catalog lock, with write-ahead phases and fresh-read
+receipts. The durable `adoption-pending.json` guard blocks capable ordinary
+loaders and savers after every partial phase, including before directory/lock
+creation. It is removed with a parent barrier only after all components verify;
+`remote_committed` follows that removal. Ordinary loaders and savers also
+refuse a bounded registry whose role/phase pairs are invalid, whose unfinished
+request is not the active one, whose active entry is not in an active phase, or
+whose active request has no matching durable journal (one direct read by UUID).
+A crash or unknown result before the terminal receipt remains partial/unknown
+and read-only. The lock-free organization read and its watch keep showing the
+main catalog but add `adoption` (`state` `partial`, `pending` or `unknown`,
+`ordinary_writes`, original `request_id`, `role` and `phase`) whenever a guard
+exists or a request is active, and follow the guard and registry files; with
+neither, the projection is unchanged. Older binaries are not
+claimed to honor the guard.
+
+Exactly two continuations exist, and only within the original live CLI call: a
+durable original `refused_not_started` with zero product effects plus fresh
+identical proof, or a terminal `remote_committed` with an explicitly unstarted
+local source-membership phase. Both require the original native owner,
+request/body, configuration, source preimages, per-UUID lease, and actual child
+exit plus both physical pipe EOFs within the original 25-second deadline. A
+receipt, idle output, byte count, or serialized drain claim is not drain proof.
+A distinct or restarted CLI has only original-status and fully validated
+committed-receipt lookup; it cannot continue mutation. A lost reply, changed
+context, active or unknown writer, restarted owner, missing receipt, or stranded
+guard is `Partial`/`Unknown` and status-only. No new UUID, remote replay after
+an unknown result, duplicate cleanup, or third destination repair is permitted.
+The native dialog binds the original to independently observed Live machine
+cards for this computer and the destination (computer, host and machine UUID
+equal to the preview node) and refuses a stopped hub. It rechecks those cards,
+the original generation, configuration, ticket and resource custody at the
+queued invocation barrier, at each preflight result, at the mutation's drained
+result and before native settlement. A refusal is sticky: a restored card or
+configuration never revives that original. Its later review action is
+read-only, not another adoption call.
+
+Each original remote call keeps the same ssh child (and its Windows job),
+request writer and both pipe readers until they physically settle. After any
+failure the child may exit by itself until the original deadline; then only
+that owned child is stopped and its exit confirmed by wait. No process group,
+descendant or name-based kill is used, and a PID whose status is no longer
+trusted is never signalled. The CLI then waits for the writer and both pipe
+EOFs before it reports the call as unknown, so a descendant that still holds a
+pipe keeps the call, and its native accounting, retained. A call whose exit
+cannot be confirmed stays pinned and admits no other call in that process. The
+adoption ssh passes `-o ControlPath=none` ahead of the configured connection
+options, so a user's `ControlMaster`/`ControlPersist` setting cannot start a
+background mux master that inherits stderr. Its uncached remote-shell discovery
+probe does the same. Every other remote operation's discovery probe keeps the
+configured connection sharing unchanged. The desktop runs the call beside
+its organization worker: other organization work continues, the dialog can be
+closed and reopened onto the same original, and after the original deadline it
+reports that the original is still settling with an unknown result. Only new
+adoption actions wait, and no failure or timeout settles or replays it.
+
+The desktop runs only its three fixed adoption calls (`adoption-preview`,
+`adopt` and `adoption-status`) with the CLI as the leader of a private process
+group it creates for that one call; its local reads keep the ordinary runner.
+It observes the leader's exit with `waitid(WNOWAIT)`, so the unreaped leader pins
+the group, and only then, or on its own timeout, sends `SIGKILL` to that exact
+group and reaps the leader. It never signals after reaping, and a shared group,
+a process scan or a name or path match is never an authority to signal. So when
+anything kills the CLI, the original ssh and its in-group descendants (such as
+a ProxyCommand) are stopped and reaped before the dialog settles. The accounted
+resources stay held until the leader is reaped and both of its pipes reach EOF.
+The result stays unknown and status-only, the ticket stays held, and nothing is
+retried or continued. Windows keeps its per-child kill-on-close jobs.
+Processes that leave the group (setsid or a process group of their own) stay
+outside it and are never signalled by it. Two boundaries remain: if the
+desktop has crashed, a later kill of the CLI is not accounted by anyone; and
+after a desktop restart the dialog cannot reopen the original. It can still
+review it read-only: when the organization read discloses an adoption request
+and the dialog holds no original of its own, **Review original status** reads
+this computer's journal for that request (`hgs swarm adoption-status --json`)
+and, for a source original whose recorded peer is configured here, the
+destination's status. Nothing creates a ticket, continues the original or
+sends a mutation, and a mismatched request or an unconfigured peer refuses
+before any remote call.
+
+Adoption-specific raw JSON rejects duplicate object keys recursively before a
+typed map is constructed. The source catalog and sidecars must match their
+declared source and source-node machine operation. The original destination is
+validated independently against its own empty preimage, whose swarm may differ
+from the source. The complete main/primary/twins candidate, cross-component
+closure, aggregate operations, parent edges and encoded wire size are checked
+before any journal, guard or product effect. Primary counts come from the
+membership view validated with the main catalog's machine redirects, so a valid
+causal edge from an old machine key to its canonical child is accepted. Terminal and settlement receipts
+must match the full original request and all component preimages and postimages;
+a same-UUID or hash-shaped response is insufficient. `guard_cleared` is durable
+before `remote_committed`; a crash between them remains manual/status-only.
 
 ### Phone notification timing
 
@@ -5268,6 +5430,46 @@ balance. A key from the launch environment, an
 unreachable API or a rejected key leaves `configured` without a balance. A
 DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
 web host. DeepSeek publishes no usage or cost endpoint for API keys.
+
+Each refresh with an API-key balance also records that reading in a private
+journal (`account-spend/` in the hgs configuration directory), kept per account
+profile and key identity. It makes no additional network requests. The usage
+panel shows **Spent today** and **Spent this month** across the whole account
+(every key, tool and computer), computed from balance decreases since the first
+reading:
+- An interval in which the topped-up balance rose contains a top-up, so it is
+  left out.
+- A decrease in the granted balance counts as spend but is named separately,
+  because an expiring grant looks the same.
+- An interval without readings is counted on the day it ends, and the panel
+  names the previous reading.
+- A currency missing from one reading keeps its previous baseline, so its
+  spend counts from its own last reading.
+
+The journal keeps the last reading and up to 400 days of daily totals. Days
+follow the computer's local time.
+
+The panel also lists requests and cache-read, uncached-input and output tokens
+per model. It shows today, this month and each of the last 31 days, from this
+computer's native session logs (`DSH_HOME/sessions`). hgs only reads these logs:
+- A private index (`account-usage/`) remembers each log's identity, size,
+  modification time and last complete Zstandard frame. A refresh reads only
+  appended frames, newest logs first, within 32 MiB and 2.5 seconds. That budget
+  also covers the identity check (up to 4 KiB per new or changed log). The rest
+  follows on later refreshes, and meanwhile the panel says totals may grow. A
+  log whose check waits keeps its previous counts.
+- A malformed or unreadable log is set aside until it changes. The panel says
+  how many logs could not be read and are not counted.
+- A forked session counts only after its inherited prefix (`session/end-seed`
+  with `inherited: true`). Only each session's current format generation
+  counts. A log is read again from its start when it is replaced or shortened,
+  rewritten without growing, or rewritten in its first 4 KiB or in the 4 KiB
+  before the counted offset.
+- Logs untouched for 31 days are not opened.
+
+Other computers and tools using the same key are not included. No cost is
+estimated from token counts, because peak hours, holidays and price changes make
+such estimates brittle; the balance journal records real spend.
 
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange

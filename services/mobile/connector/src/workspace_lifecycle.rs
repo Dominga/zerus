@@ -44,15 +44,25 @@ fn generation(value: &Value) -> Result<&str> {
     Ok(generation)
 }
 fn replace(store: &Store, name: &str, value: &Value) -> Result<()> {
-    let expected = Store::revision(store.read(name).map_err(|_| fail())?.as_deref());
-    let bytes = serde_json::to_vec(value).map_err(|_| fail())?;
-    store.replace(name, &expected, &bytes).map_err(|_| fail())?;
+    replace_raw(store, name, value).map_err(|_| fail())
+}
+fn replace_raw(store: &Store, name: &str, value: &Value) -> std::io::Result<()> {
+    let expected = Store::revision(store.read(name)?.as_deref());
+    let bytes = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    store.replace(name, &expected, &bytes)?;
     Ok(())
 }
 /// Call only after the connector owns the exact receipt directory journal lock.
 pub fn publish(state_dir: &Path) -> Result<String> {
-    let store = Store::lock(state_dir, false).map_err(|_| fail())?;
-    let generation = crate::private_state::random_id().map_err(|_| fail())?;
+    crate::startup::enter(crate::startup::Stage::GenerationLock);
+    let store = Store::lock(state_dir, false).map_err(|error| {
+        crate::startup::io(crate::startup::Stage::GenerationLock, &error);
+        fail()
+    })?;
+    let generation = crate::private_state::random_id().map_err(|error| {
+        crate::startup::io(crate::startup::Stage::GenerationRandom, &error);
+        fail()
+    })?;
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut control = json!({"version":1,"generation":generation,"pid":std::process::id()});
     // A Windows Stop needs this to name the instance. Without it the connector
@@ -61,7 +71,11 @@ pub fn publish(state_dir: &Path) -> Result<String> {
     if let Ok(birth) = zerus_windows_private::current_process_birth() {
         control["birth"] = json!(birth);
     }
-    replace(&store, CONTROL, &control)?;
+    crate::startup::enter(crate::startup::Stage::GenerationPublish);
+    replace_raw(&store, CONTROL, &control).map_err(|error| {
+        crate::startup::io(crate::startup::Stage::GenerationPublish, &error);
+        fail()
+    })?;
     Ok(generation)
 }
 /// Reads only the marker for this process generation. An old stop record cannot
@@ -184,6 +198,8 @@ pub async fn manage_start(config_path: &Path, input: &Value) -> Result<Value> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(feature = "test-hooks")]
+    crate::hooks::capture_child_stderr(&mut command)?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

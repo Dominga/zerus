@@ -42,6 +42,7 @@ pub mod session_notifications;
 pub mod session_projects;
 pub mod session_selector;
 pub mod speech;
+pub mod startup;
 pub mod url;
 pub mod validate;
 pub mod watch_listing;
@@ -99,30 +100,58 @@ pub fn start_bound(
     expected_revision: Option<&str>,
 ) -> Result<Started, ConnectorError> {
     #[cfg(windows)]
+    startup::enter(startup::Stage::AdmissionLock);
+    #[cfg(windows)]
     let _guard = if expected_revision.is_some() {
         windows_management::admission_guard(path)
     } else {
         windows_management::guard(path, false)
     }
-    .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
-    let (text, findings) = config::read_file(path, fsguard::euid())?;
+    .map_err(|error| {
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            startup::io(startup::Stage::AdmissionLock, error);
+        } else {
+            startup::refused(startup::Stage::AdmissionLock);
+        }
+        ConnectorError::new(STARTUP_FAILURE)
+    })?;
+    startup::enter(startup::Stage::Configuration);
+    let (text, findings) = config::read_file(path, fsguard::euid())
+        .inspect_err(|_| startup::refused(startup::Stage::Configuration))?;
     let revision = zerus_relay::json::digest(text.as_bytes());
     if expected_revision.is_some_and(|expected| expected != revision) {
+        startup::refused(startup::Stage::Revision);
         return Err(ConnectorError::new(STARTUP_FAILURE));
     }
     if let Some(refusal) = findings.iter().find(|finding| finding.refusal) {
+        startup::refused(startup::Stage::Configuration);
         return Err(ConnectorError::new(refusal.message));
     }
-    let value = config::parse(&text)?;
-    let mut config = config::validate(&value, allow_insecure_localhost, environment)?;
+    let value =
+        config::parse(&text).inspect_err(|_| startup::refused(startup::Stage::Configuration))?;
+    let mut config = config::validate(&value, allow_insecure_localhost, environment)
+        .inspect_err(|_| startup::refused(startup::Stage::Configuration))?;
     // Missing/corrupt protected state never falls back to legacy transport.
-    config::bind_workspace(&mut config, path)?;
+    startup::enter(startup::Stage::WorkspaceBinding);
+    config::bind_workspace(&mut config, path)
+        .inspect_err(|_| startup::refused(startup::Stage::WorkspaceBinding))?;
+    startup::enter(startup::Stage::JournalOpen);
     let journal = journal::Journal::open(&config.state_dir, &config.binding, now)
+        .inspect_err(|error| startup::journal(startup::Stage::JournalOpen, error))
         .map_err(|error| ConnectorError::new(error.message()))?;
     let labels = session_labels::Selection::new(path, text.as_bytes());
     #[cfg(windows)]
-    let generation = windows_management::prepare_running(&config.state_dir, &revision)
-        .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
+    startup::enter(startup::Stage::LegacyControl);
+    #[cfg(windows)]
+    let generation =
+        windows_management::prepare_running(&config.state_dir, &revision).map_err(|error| {
+            if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                startup::io(startup::Stage::LegacyControl, error);
+            } else {
+                startup::refused(startup::Stage::LegacyControl);
+            }
+            ConnectorError::new(STARTUP_FAILURE)
+        })?;
     Ok(Started {
         config,
         journal,
@@ -165,6 +194,7 @@ pub fn clock_scale() -> f64 {
 /// status: 0 after a graceful stop, 1 when the journal failed. A second
 /// signal exits at once (divergence h).
 pub fn run(started: Started) -> u8 {
+    startup::enter(startup::Stage::Runtime);
     let Started {
         config,
         journal,
@@ -185,12 +215,16 @@ pub fn run(started: Started) -> u8 {
     } else {
         None
     };
-    let Ok(tokio) = tokio::runtime::Builder::new_current_thread()
+    let tokio = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    else {
-        runtime::log("ERROR", STARTUP_FAILURE);
-        return 1;
+    {
+        Ok(tokio) => tokio,
+        Err(error) => {
+            startup::io(startup::Stage::Runtime, &error);
+            runtime::log("ERROR", STARTUP_FAILURE);
+            return 1;
+        }
     };
     let settings = runtime::Settings {
         interval: config.poll_interval,
@@ -240,9 +274,13 @@ pub fn run(started: Started) -> u8 {
             connector.stopping.set();
             code
         };
-        let (code, ()) =
-            futures_util::future::join(work, session_labels::serve(&connector, labels.as_ref()))
-                .await;
+        // Keep the large request future off the stack before join copies its
+        // inputs. Debug Windows executables reserve only 1 MiB for this thread.
+        let (code, ()) = futures_util::future::join(
+            Box::pin(work),
+            session_labels::serve(&connector, labels.as_ref()),
+        )
+        .await;
         code
     });
     // Usage refreshes still running are dropped, which kills their children.

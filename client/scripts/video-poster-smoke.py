@@ -2,6 +2,8 @@
 """Video poster/render qualification in private D-Bus/Xvfb/state, fake hgs only."""
 import argparse, base64, json, os, signal, subprocess, sys, tempfile, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 REPO = Path(__file__).resolve().parents[2]
 if '--worker' not in sys.argv:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -42,13 +44,14 @@ print('{}')
     env.update({'ZERUS_CLIENT_HEADLESS':'1','ZERUS_CLIENT_REPLAY':str(root/'replay.ndjson'),'ZERUS_CLIENT_HGS':str(fake),'ZERUS_CLIENT_QUERY':'page=sessions&skin=zerus-light&video-poster-smoke=1','ZERUS_CLIENT_PERF':'smoke'})
     (root/'bus.conf').write_text('<busconfig><type>session</type><listen>unix:tmpdir='+str(root/'runtime')+'</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>')
     print('Private video poster walk:',root,flush=True)
-    child=subprocess.Popen(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app)],env=env,start_new_session=True)
+    child=subprocess.Popen(gui_sandbox.sandboxed(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app)],keep=[root]),env=env,start_new_session=True)
     try: code=child.wait(timeout=110)
     except subprocess.TimeoutExpired: os.killpg(child.pid,signal.SIGTERM);child.wait(timeout=5);raise
     raise SystemExit(code)
 root,app=Path(sys.argv[2]),Path(sys.argv[3]); assert os.environ['HOME']==str(root/'home')
 env={k:v for k,v in os.environ.items() if k in {'PATH','LANG','HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_RUNTIME_HOME','TMPDIR','TMUX_TMPDIR','HGS_CONFIG_DIR','HGS_STATE_DIR','GDK_BACKEND','WAYLAND_DISPLAY','WEBKIT_DISABLE_DMABUF_RENDERER','NO_AT_BRIDGE','GSETTINGS_BACKEND','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY'} or k.startswith('ZERUS_CLIENT_')}
 with (root/'app.log').open('wb') as log:
+    gui_sandbox.refuse_reachable_guard()
     child=subprocess.Popen([str(app)],cwd=REPO/'client',env=env,stdout=log,stderr=log);stages=set();deadline=time.monotonic()+100
     try:
         while time.monotonic()<deadline:

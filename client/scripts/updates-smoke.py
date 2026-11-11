@@ -8,6 +8,8 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 
 
 CLIENT = Path(__file__).resolve().parent.parent
@@ -133,7 +135,7 @@ trap - EXIT
         ZERUS_CLIENT_QUERY=query,
         ZERUS_CLIENT_PERF="smoke",
     )
-    command = ["xvfb-run", "-a", "-s", "-screen 0 1440x900x24", "sh", str(script)]
+    command = gui_sandbox.sandboxed(["xvfb-run", "-a", "-s", "-screen 0 1440x900x24", "sh", str(script)], keep=[scratch])
     result = subprocess.run(command, cwd=CLIENT, env=env, timeout=60, check=False)
     if result.returncode or not image.is_file() or image.stat().st_size == 0:
         raise RuntimeError(f"updates smoke failed for {state} {theme}; see {log}")

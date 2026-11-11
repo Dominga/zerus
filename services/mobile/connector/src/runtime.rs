@@ -62,6 +62,10 @@ const LIST_TOO_LARGE: &str = "relay request list exceeds size limit";
 /// closed stderr loses the line; it never stops the connector.
 pub fn log(level: &str, message: &str) {
     use std::io::Write;
+    #[cfg(feature = "test-hooks")]
+    if crate::hooks::write_captured_stderr(level, message) {
+        return;
+    }
     let _ = writeln!(std::io::stderr(), "{level}: {message}");
 }
 

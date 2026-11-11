@@ -2,8 +2,9 @@
 //! neither an error nor removal of the caller's context drops their resources.
 use super::*;
 use std::sync::{
+    Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    mpsc, Mutex,
+    mpsc,
 };
 
 struct RootPhase {
@@ -205,7 +206,15 @@ impl Owner {
             .writer
             .take()
             .ok_or("Original Effort writer unavailable")?;
-        let mut scope = Scope::owned(writer, record, Receipts::Effort, self.until)?;
+        let mut scope = Scope::owned(
+            writer,
+            record,
+            match self.control.frame().operation {
+                host::frame::Operation::Effort => Receipts::Effort,
+                host::frame::Operation::Settings => Receipts::Settings,
+            },
+            self.until,
+        )?;
         scope.host = Some(host::Hold::barrier(self.control.clone()));
         *phase = Phase::Native(Box::new(scope));
         Ok(())

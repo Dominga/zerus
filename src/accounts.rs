@@ -10,6 +10,8 @@ mod permission_scope;
 pub(crate) mod marks;
 mod install;
 mod deepseek;
+mod deepseek_spend;
+mod deepseek_usage;
 use crate::{
     cli::{Error, Result},
     config::Config,

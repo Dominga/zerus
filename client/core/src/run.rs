@@ -162,6 +162,42 @@ pub fn run_cancellable(
 /// A retained pipe keeps its copy after this bounded call returns. Unverified
 /// child exit pins a copy until host exit; the host must cap admissions.
 /// No journal, execution authorization or effect retry is provided here.
+/// [`run_accounted`] with the child as the leader of a private process group
+/// this call creates (`helper_group::prepare`), used only for the desktop's
+/// three fixed adoption invocations (adoption-preview, adopt, adoption-status).
+///
+/// The leader's exit is observed with waitid(WNOWAIT), so its unreaped PID pins
+/// the group. Only then, or when the call must stop (timeout or cancel), is
+/// that exact group signalled (killpg SIGKILL) and the leader reaped; nothing
+/// is signalled after reaping. A shared group, a process scan or a name/path
+/// match is never an authority to signal, and setsid-detached children stay
+/// outside. The original adoption ssh and its in-group descendants are thus
+/// stopped and reaped even when something else SIGKILLed the CLI, before the
+/// resources settle: the leader must be reaped and both pipes reach EOF.
+/// Windows keeps its per-child kill-on-close jobs; `prepare` is a no-op there.
+/// This never retries or replays a call.
+pub fn run_accounted_group(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+) -> Result<Exit, Stopped> {
+    accounted(
+        hgs,
+        inv,
+        parent_env,
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes {
+            group: true,
+            ..Pipes::default()
+        },
+    )
+}
+
 pub fn run_accounted(
     hgs: &Path,
     inv: &Invocation,
@@ -454,6 +490,8 @@ struct Pipes {
     child_exited: Option<Arc<AtomicBool>>,
     clear_environment: bool,
     completion: Option<Arc<Completion>>,
+    /// The child leads a private group this call created ([`run_accounted_group`]).
+    group: bool,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
     /// Runs in the writer thread right after it signals completion.
@@ -463,6 +501,7 @@ struct Pipes {
 
 struct StopContext {
     exited: Option<Arc<AtomicBool>>,
+    group: bool,
     #[cfg(any(windows, test))]
     hidden: Option<Arc<hidden::State>>,
 }
@@ -814,6 +853,7 @@ fn run_inner(
 ) -> Result<Exit, Stopped> {
     let stop_context = StopContext {
         exited: pipes.child_exited.clone(),
+        group: pipes.group,
         #[cfg(any(windows, test))]
         hidden: pipes.hidden_stop.clone(),
     };
@@ -853,6 +893,10 @@ fn run_inner(
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if pipes.group {
+        crate::stream::helper::prepare(&mut command);
+    }
+    let group = pipes.group;
     let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(spawn_helper))(&mut command) {
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
@@ -1012,7 +1056,14 @@ fn run_inner(
             drain(&done_rx);
             return Ok(exit);
         }
-        match child.try_wait() {
+        // A group leader's exit is seen unreaped; its pinned group is then
+        // signalled and the leader reaped before the status is returned.
+        let waited = if group {
+            crate::stream::helper::try_wait(&mut child)
+        } else {
+            child.try_wait()
+        };
+        match waited {
             Ok(Some(status)) => {
                 if let Some(exited) = &pipes.child_exited {
                     exited.store(true, Ordering::Release);
@@ -1151,6 +1202,16 @@ fn stop(mut child: Child, exit: Exit, context: &StopContext) -> Exit {
     #[cfg(any(windows, test))]
     if let Some(state) = &context.hidden {
         return state.stop(child, exit, context.exited.clone());
+    }
+    if context.group {
+        // killpg on the still-pinned private group, then reap; an unverified
+        // wait leaves the exit unconfirmed (the resources stay pinned).
+        if crate::stream::helper::terminate(&mut child).is_ok() {
+            if let Some(exited) = &context.exited {
+                exited.store(true, Ordering::Release);
+            }
+        }
+        return exit;
     }
     let _ = child.kill();
     if child.wait().is_ok() {
@@ -1888,5 +1949,256 @@ mod hidden_tests {
             modules.replace('/', "\\").to_lowercase()
         );
         assert_eq!(&after[1..], ["", "None"]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod group_tests {
+    use super::*;
+
+    /// A python3 leader that starts an in-group stand-in for its ssh child
+    /// (private streams, same process group), records its PID, then `rest`.
+    fn leader(pid_file: &Path, rest: &str, timeout: Duration) -> Invocation {
+        let code = format!(
+            "import os, subprocess, sys, time\n\
+             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n\
+             open({path:?}, 'w').write(str(child.pid))\n\
+             {rest}\n",
+            path = pid_file.display().to_string(),
+        );
+        Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    /// A private scratch folder, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "zerus-run-group-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn stand_in(pid_file: &Path) -> libc::pid_t {
+        fs_pid(pid_file).expect("the leader recorded its child")
+    }
+
+    fn fs_pid(path: &Path) -> Option<libc::pid_t> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
+    /// The kernel's state for `pid` is zombie (or dead), from /proc/PID/stat.
+    /// A container whose PID 1 never reaps (CI's `tail -f /dev/null`) keeps
+    /// such zombies: they run no code and hold no pipes.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: libc::pid_t) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        })
+    }
+
+    /// macOS hands orphans to launchd, which reaps them.
+    #[cfg(not(target_os = "linux"))]
+    fn zombie(_pid: libc::pid_t) -> bool {
+        false
+    }
+
+    /// Running: present and not a zombie.
+    fn running(pid: libc::pid_t) -> bool {
+        let present = unsafe { libc::kill(pid, 0) } == 0;
+        present && !zombie(pid)
+    }
+
+    /// Gone: stopped, whether already reaped or left as a zombie.
+    fn gone(pid: libc::pid_t) -> bool {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !running(pid) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run(inv: &Invocation, resources: Arc<dyn Send + Sync>) -> Exit {
+        run_accounted_group(
+            Path::new("python3"),
+            inv,
+            &[],
+            1 << 20,
+            &AtomicBool::new(false),
+            resources,
+        )
+        .unwrap()
+    }
+
+    /// The boundary: processes that left the private group (setsid or a
+    /// group of their own) are never signalled by it.
+    fn escaped_leader(directory: &Path, rest: &str, timeout: Duration) -> Invocation {
+        let code = format!(
+            "import os, subprocess, sys, time\n\
+             def start(path, **escape):\n\
+             \x20   child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+             \x20       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **escape)\n\
+             \x20   open(path, 'w').write(str(child.pid))\n\
+             start({inside:?})\n\
+             start({session:?}, start_new_session=True)\n\
+             start({group:?}, preexec_fn=os.setpgrp)\n\
+             {rest}\n",
+            inside = directory.join("inside").display().to_string(),
+            session = directory.join("session").display().to_string(),
+            group = directory.join("group").display().to_string(),
+        );
+        Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    /// Kills an escaped fixture process this test started (by its exact
+    /// recorded PID, while it is still alive), so nothing outlives the test.
+    fn clean_up(pid: libc::pid_t) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    #[test]
+    fn processes_outside_the_private_group_survive_its_signal() {
+        for (name, rest, timeout) in [
+            ("normal exit", "print('done')", Duration::from_secs(20)),
+            (
+                "external kill",
+                "import signal\nos.kill(os.getpid(), signal.SIGKILL)",
+                Duration::from_secs(20),
+            ),
+            ("timeout", "time.sleep(30)", Duration::from_millis(1500)),
+        ] {
+            let temp = Scratch::new();
+            let exit = run(&escaped_leader(&temp.0, rest, timeout), Arc::new(()));
+            let inside = stand_in(&temp.0.join("inside"));
+            let session = stand_in(&temp.0.join("session"));
+            let group = stand_in(&temp.0.join("group"));
+            assert!(
+                gone(inside),
+                "{name}: the in-group stand-in survived ({exit:?})"
+            );
+            let session_alive = running(session);
+            let group_alive = running(group);
+            clean_up(session);
+            clean_up(group);
+            assert!(session_alive, "{name}: a setsid process was signalled");
+            assert!(group_alive, "{name}: an own-group process was signalled");
+        }
+    }
+
+    #[test]
+    fn a_leader_that_exits_leaves_no_group_member_running() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(&pid_file, "print('done')", Duration::from_secs(20));
+        let exit = run(&inv, Arc::new(()));
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(
+            gone(stand_in(&pid_file)),
+            "an in-group member outlived the call"
+        );
+    }
+
+    #[test]
+    fn an_externally_killed_leader_has_its_group_stopped_and_is_reaped() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(
+            &pid_file,
+            "import signal\nos.kill(os.getpid(), signal.SIGKILL)",
+            Duration::from_secs(20),
+        );
+        let resources: Arc<dyn Send + Sync> = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let exit = run(&inv, resources);
+        assert!(matches!(exit, Exit::Abnormal { .. }), "{exit:?}");
+        assert!(
+            gone(stand_in(&pid_file)),
+            "the killed leader's group survived"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "the confirmed reap releases the accounted resources"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_leader_has_its_whole_group_stopped() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(&pid_file, "time.sleep(30)", Duration::from_millis(1500));
+        let started = Instant::now();
+        let exit = run(&inv, Arc::new(()));
+        assert_eq!(exit, Exit::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert!(
+            gone(stand_in(&pid_file)),
+            "the timed-out leader's group survived"
+        );
+    }
+
+    #[test]
+    fn a_member_holding_the_leader_pipes_is_stopped_with_the_group() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        // This member inherits the leader's own stdout and stderr.
+        let code = format!(
+            "import os, subprocess, sys\n\
+             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+                 stdin=subprocess.DEVNULL)\n\
+             open({path:?}, 'w').write(str(child.pid))\n\
+             print('done')\n",
+            path = pid_file.display().to_string(),
+        );
+        let inv = Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout: Duration::from_secs(20),
+            request_id: None,
+        };
+        let resources: Arc<dyn Send + Sync> = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let started = Instant::now();
+        let exit = run(&inv, resources);
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(gone(stand_in(&pid_file)));
+        let until = Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "both pipes reach EOF once the group is stopped"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 }

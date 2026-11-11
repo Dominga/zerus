@@ -130,7 +130,10 @@ fn valid_record(r: &Value) -> Result<()> {
         || !AGENTS.contains(&string(r, "agent"))
         || !name.starts_with(&format!("{}/", string(r, "agent")))
         || string(r, "run_id").is_empty()
-        || string(r, "conversation_id").is_empty()
+        // An unprimed terminal may have a null or empty conversation value.
+        // Keep that exact raw value in the before-image; SID/run and retained
+        // original exclusions still establish the transaction identity.
+        || !(r["conversation_id"].is_null() || r["conversation_id"].is_string())
         || r.get(MARKER).is_some()
         || r.get("legacy_shadow").is_some()
         || r["rename_shadow"] == true

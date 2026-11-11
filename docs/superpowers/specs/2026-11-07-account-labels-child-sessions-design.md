@@ -55,7 +55,9 @@ the host snapshot. Collapsing a parent's children is device-local UI state.
 
 **Authority.** The link is presentation and attention routing only. It never
 authorizes a send, answer, approval, stop, archive or removal, and it never
-changes project membership.
+moves an existing session's project. Since zerus-d5twt (2026-11-11) a new
+child's initial placement follows the project of a parent this computer proved
+from process ancestry; see the project inference rules in `docs/reference.md`.
 
 ### 1.2 Where the link comes from
 

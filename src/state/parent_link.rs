@@ -6,7 +6,8 @@
 //! ancestry exactly as `hgs self` proves its caller. The child's computer is
 //! the link's only writer. The link is presentation and attention routing
 //! only: it never authorizes a send, answer, approval, stop or removal, and it
-//! never changes project membership.
+//! never moves a session's project. Only a new child's initial placement
+//! follows a parent this computer proved (zerus-d5twt).
 use super::*;
 use std::{fs, io::Read};
 

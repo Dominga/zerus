@@ -11,7 +11,9 @@ pub(crate) mod fence;
 pub(crate) mod drive_footprint;
 mod launch_project;
 mod infer_project;
-pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
+pub(crate) use infer_project::{
+    directory_project, infer_new_session, inherit_fork_project, place_child_session, placing_parent,
+};
 mod session_project;
 mod session_ids;
 mod session_memberships;

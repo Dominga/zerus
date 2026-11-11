@@ -273,6 +273,7 @@ struct Encrypted {
     state: PathBuf,
     revision: String,
     scratch: Scratch,
+    stderr_attempt: std::cell::Cell<u32>,
 }
 
 impl Encrypted {
@@ -333,6 +334,7 @@ impl Encrypted {
             state,
             revision,
             scratch,
+            stderr_attempt: std::cell::Cell::new(0),
         }
     }
 
@@ -351,7 +353,7 @@ impl Encrypted {
         if action == "start" {
             command.env(
                 zerus_mobile_connector::hooks::STARTUP_STDERR,
-                self.stderr_path(),
+                self.fresh_stderr_path(),
             );
         }
         let mut call = command.spawn().unwrap();
@@ -364,7 +366,17 @@ impl Encrypted {
     }
 
     fn stderr_path(&self) -> PathBuf {
-        self.scratch.0.join("fixture-startup.stderr")
+        self.scratch.0.join(format!(
+            "fixture-startup-{}.stderr",
+            self.stderr_attempt.get()
+        ))
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn fresh_stderr_path(&self) -> PathBuf {
+        self.stderr_attempt
+            .set(self.stderr_attempt.get().checked_add(1).unwrap());
+        self.stderr_path()
     }
 
     fn startup_diagnostics(&self) -> String {
@@ -508,13 +520,8 @@ impl Encrypted {
             .stderr(Stdio::null());
         #[cfg(feature = "test-hooks")]
         {
-            let path = self.stderr_path();
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)
-                .unwrap();
+            let path = self.fresh_stderr_path();
+            let file = zerus_mobile_connector::hooks::create_stderr(&path).unwrap();
             command
                 .env(zerus_mobile_connector::hooks::STARTUP_STDERR, path)
                 .stderr(file);

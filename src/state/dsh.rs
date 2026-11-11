@@ -211,7 +211,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     host_identity::before_start(&dir)?;
     let recommended = REVIEWED_VERSIONS.last().expect("reviewed harness version");
     let version = Command::new("dsh").arg("--version").output().map_err(|_| {
-        format!("Install the official harness: npm install -g @deepseek-ai/dsh@{recommended}")
+        format!("Install the official harness and its reviewed security overrides: see docs/installation.md#agents (@deepseek-ai/dsh@{recommended})")
     })?;
     if !version.status.success()
         || !reviewed_harness_version(String::from_utf8_lossy(&version.stdout).trim())

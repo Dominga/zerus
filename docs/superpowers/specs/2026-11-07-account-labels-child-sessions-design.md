@@ -125,9 +125,21 @@ hash map, rebuilt with the list; there is no per-session cache and no extra read
 | Parent | Child shows |
 | --- | --- |
 | Listed in the same project group and visible under the current filters | nested under it |
-| Listed elsewhere, hidden by a filter, or in another project | at top level of its own group, with a **from PARENT** chip that selects the parent |
-| Archived (Archive view lists it) | nested in Archive; in the live list at top level with **from PARENT (archived)** |
-| Not listed: terminated, removed, its computer offline, or unknown | at top level with **from PARENT** using the recorded name; the tooltip says the parent is not listed |
+| Stopped or paused (or its agent ended), in the same project group, hidden by a filter | nested under a dimmed **Ended** container of the parent's own row (zerus-sa9qn.17) |
+| Running but hidden by a filter, or listed in another project | at top level of its own group, with a **from PARENT** chip that selects the parent |
+| Archived, including terminated (its link says `archived`) | in the live list nested under a dimmed **Archived** container built from the link; nested in Archive (zerus-sa9qn.17) |
+| Not listed on the child's own computer: forgotten or removed (link `missing` there, or `saved` but unlisted) | nested under a dimmed **Ended** container built from the link (zerus-sa9qn.17) |
+| Not listed elsewhere: on another computer, that computer offline, or unknown | at top level with **from PARENT** using the recorded name; the tooltip says the parent is not listed |
+
+**Ended parents (zerus-sa9qn.17, owner 2026-11-11).** Ending a parent never
+orphans its live children in the list: the ended parent stays as their
+container until no live (non-archived) child remains, then leaves the list by
+itself. The container is presentation only and grants nothing: it is not a
+session row, takes no selection, keyboard step, drag target or attention, and
+its menu offers only Open, Resume or Restore, and Move to archive of the
+parent's own listed row, or Open in Archive for a parent known only from the
+link. It appears only for children the filters show, and is built in the same
+single pass with one hash map per kind, without extra reads.
 
 **Cycles** can only come from `adopt` across computers or from a rewritten
 record. The writer refuses local cycles. The list builder walks parents with a

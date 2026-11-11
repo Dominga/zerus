@@ -815,6 +815,21 @@ level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
+An ended parent with live child sessions stays in the live list as their
+container (zerus-sa9qn.17): a dimmed compact row with the parent's tile, title,
+**Ended** or **Archived** state and its children's line, the children nested
+under it. A stopped or paused parent that the filters hide is shown this way
+from its own row; a terminated or archived parent, or one no longer listed on
+the child's own computer, from its children's recorded link. The container is
+presentational: it counts as no session, takes no keyboard step, drag target,
+selection range or attention, and its menu offers only **Open**, **Resume** or
+**Restore** and **Move to archive** of its own listed row, or **Open in
+Archive** for a parent known only from the link. It leaves the list by itself
+once no live (non-archived) child remains, and it is shown only for children
+the filters show. A parent that still runs, is listed in another project, or
+is missing on another computer keeps its children at top level with **from
+PARENT**, as before. The containers come from the same one-pass resolution and
+hash maps as the nesting; there is no extra read per row.
 Cards show a large agent tile at the left: the agent's mark from the owner's
 design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
 its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The

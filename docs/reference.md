@@ -6803,7 +6803,23 @@ the available full roster. Profile groups without individual IDs remain groups.
 place attachments at their first marker; otherwise they append. IDs come from a
 fresh inspection. `status: submitted` confirms native input delivery, not a model
 reply. Saved receipts make identical requests idempotent. An uncertain result
-needs manual inspection before another request. `agent_id` is supported only for
+needs manual inspection before another request.
+
+Claude Code attaches a pasted line that is only an image path asynchronously:
+until it has read the image its composer is empty with a `Pasting…` footer, and
+an Enter then submits nothing (zerus-iitw8). For Claude the single Enter
+therefore waits until the composer shows the paste settled, and `submitted`
+requires Claude's own transcript to record the message: a new user row
+(`native: transcript`) or, while it works, a queue `enqueue` (`native: queue`).
+A new conversation with no transcript yet counts its settled composer emptying
+after Enter (`native: composer`). Both waits share one 8-second window from the
+paste. Otherwise the receipt stays `in_progress` with `delivery: uncertain`, its
+reason and the composer's text (at most 2,000 characters, never image bytes),
+and the error names that text; it is never retyped. Codex and Kimi show a paste
+at once, so their Enter still confirms the receipt. A busy agent's tool events
+never confirm the previous input: only an input-acceptance event (a submitted
+or queued prompt, a turn or task start) or that native proof lets the next
+request through. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 

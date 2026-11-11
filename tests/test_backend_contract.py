@@ -660,6 +660,7 @@ class Sessions(Contract):
                          {key: row[key] for key in ("run_id", "launch_id", "conversation_id")})
 
     def test_rename_keeps_the_running_agent(self):
+        self.configure(ECHO="1")  # Claude shows the paste it settles on (zerus-iitw8).
         name, row, agent = self.launch()
         pid = agent["pid"]
         renamed = "claude/project/renamed"
@@ -858,14 +859,17 @@ class Sessions(Contract):
 
 class Input(Contract):
     def test_send_pastes_exact_bytes_then_one_enter_and_never_repeats(self):
+        # The agent shows the paste in its composer as Claude does: hgs presses
+        # Enter only once it is settled there (zerus-iitw8).
+        self.configure(ECHO="1")
         name, row, agent = self.launch()
         pid = agent["pid"]
         marker = self.root / "never-created"
         text = f"Привет\nsecond line\t$(touch {marker}) `literal` ✓"
         payload = self.message(row, text)
         receipt = self.send(name, payload)
-        self.assertEqual((receipt["status"], receipt["submitted_text"], receipt["run_id"]),
-                         ("submitted", text, row["run_id"]))
+        self.assertEqual((receipt["status"], receipt["submitted_text"], receipt["run_id"], receipt["native"]),
+                         ("submitted", text, row["run_id"], "transcript"))
         self.wait_for(lambda: len(self.tokens(pid)) == 2, "the message")
         paste, enter = self.tokens(pid)
         self.assertEqual((paste["kind"], paste["text"], enter["kind"]), ("paste", text, "enter"))

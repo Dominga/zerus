@@ -2,7 +2,7 @@
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::fs::OpenOptions;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 use std::io::{Read, Write};
 const MAX_FILE: u64 = 10 * 1024 * 1024;

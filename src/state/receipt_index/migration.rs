@@ -4,6 +4,7 @@
 use super::*;
 use fs2::FileExt;
 use std::fs::ReadDir;
+#[cfg(not(test))]
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -34,6 +35,15 @@ fn try_guard(path: &Path) -> Result<Option<Guard>> {
     }
 }
 pub(super) fn request(state: &Path) {
+    // A libtest image is not an hgs helper. Actual detached-worker coverage
+    // uses the separately built CLI and a private state root.
+    #[cfg(test)]
+    let _ = state;
+    #[cfg(not(test))]
+    request_worker(state);
+}
+#[cfg(not(test))]
+fn request_worker(state: &Path) {
     let launch = (|| -> Result<()> {
         let canonical =
             crate::platform::canonical(state).map_err(|_| "Receipt state is unavailable")?;
@@ -129,19 +139,17 @@ impl Migration {
                         continue;
                     }
                 };
-                let prior: Option<(String, bool, i64)> = sql(self
+                let prior: Option<(String, bool)> = sql(self
                     .catalog
                     .db
                     .query_row(
-                        "SELECT stamp,complete,errors FROM receipt_sources WHERE source=?",
+                        "SELECT stamp,complete FROM receipt_sources WHERE source=?",
                         [source.key()],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional())?;
                 if !self.force
-                    && prior.is_some_and(|(stamp, complete, errors)| {
-                        complete && errors == 0 && stamp == started
-                    })
+                    && prior.is_some_and(|(stamp, complete)| complete && stamp == started)
                 {
                     continue;
                 }
@@ -202,7 +210,7 @@ impl Migration {
                         params![walk.started, complete, source.key()],
                     ))?;
                     sql(self.catalog.db.execute(
-                        "DELETE FROM receipt_errors WHERE source=? AND name='@source'",
+                        "DELETE FROM receipt_errors WHERE source=? AND name IN('@source','@enumeration')",
                         [source.key()],
                     ))?;
                     self.walk = None;

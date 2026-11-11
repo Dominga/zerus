@@ -273,6 +273,11 @@ fn bounded_migration_resumes_without_rewriting_history_or_sequences() {
         .collect();
     assert!(!before.is_empty() && before.len() <= 64);
     drop(migration);
+    let writer = Catalog::open(temp.path(), true).unwrap();
+    writer
+        .error(Source::Terminal, "@enumeration", "enumeration_incomplete")
+        .unwrap();
+    drop(writer);
     let mut resumed = migration::Migration::new(temp.path()).unwrap();
     let mut done = false;
     for _ in 0..1000 {

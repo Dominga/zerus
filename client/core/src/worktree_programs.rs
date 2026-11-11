@@ -37,7 +37,7 @@ pub struct Program {
 }
 impl Program {
     fn valid(&self) -> bool {
-        self.pid > 1 && bounded(&self.birth, 128) && bounded(&self.label, 512)
+        self.pid > 0 && bounded(&self.birth, 128) && bounded(&self.label, 512)
     }
     pub fn same_process(&self, other: &Self) -> bool {
         self.pid == other.pid && self.birth == other.birth
@@ -268,5 +268,21 @@ pub(crate) mod tests {
         changed.programs[0].label = "different display".into();
         assert_ne!(digest, changed.binding());
         assert!(m.contains_originals(&changed.programs));
+    }
+
+    #[test]
+    fn namespace_init_program_is_valid_but_pid_zero_is_refused() {
+        let mut m = manifest();
+        m.programs.insert(
+            0,
+            Program {
+                pid: 1,
+                birth: "init-birth".into(),
+                label: "init".into(),
+            },
+        );
+        assert!(m.valid(1000));
+        m.programs[0].pid = 0;
+        assert!(!m.valid(1000));
     }
 }

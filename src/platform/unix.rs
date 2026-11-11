@@ -286,13 +286,48 @@ pub fn kill_process_group(child: &mut Child) {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
 }
+/// A non-blocking Unix socket, close-on-exec: Linux asks for both in
+/// `socket()`, while Apple's libc has no such flags, so macOS sets them with
+/// `fcntl` under the spawn turn, as the worktree borrower's socket does
+/// (zerus-taljw).
+fn nonblocking_socket() -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+    #[cfg(target_os = "macos")]
+    let _turn = spawn_turn();
+    #[cfg(target_os = "macos")]
+    let kind = libc::SOCK_STREAM;
+    #[cfg(not(target_os = "macos"))]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+    let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let descriptor = socket.as_raw_fd();
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, libc::O_NONBLOCK) } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(socket)
+}
+
+/// The same non-blocking socket for the process-isolated fixtures.
+#[cfg(test)]
+pub(crate) fn test_nonblocking_socket() -> std::os::unix::net::UnixStream {
+    nonblocking_socket().expect("a non-blocking test socket")
+}
+
 /// A Unix socket connected within `limit`: a listen queue that stays full must
 /// refuse at the bound instead of blocking the claim that reads it
 /// (zerus-taljw). A blocking connect has no such deadline, so the socket is
 /// connected non-blocking and a full queue is retried until the deadline; the
 /// socket returned is blocking, as `UnixStream::connect` leaves it.
 pub fn connect_unix(path: &Path, limit: Duration) -> io::Result<std::os::unix::net::UnixStream> {
-    use std::os::fd::FromRawFd;
     let bytes = path.as_os_str().as_encoded_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -317,30 +352,20 @@ pub fn connect_unix(path: &Path, limit: Duration) -> io::Result<std::os::unix::n
     let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
     let deadline = Instant::now() + limit;
     loop {
-        let descriptor = unsafe {
-            libc::socket(
-                libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-            )
-        };
-        if descriptor < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let socket = nonblocking_socket()?;
         let connected = unsafe {
             libc::connect(
-                descriptor,
+                socket.as_raw_fd(),
                 &address as *const _ as *const libc::sockaddr,
                 length,
             )
         };
         if connected == 0 {
-            let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(descriptor) };
             socket.set_nonblocking(false)?;
             return Ok(socket);
         }
         let error = io::Error::last_os_error();
-        unsafe { libc::close(descriptor) };
+        drop(socket);
         let queued = error.raw_os_error().is_some_and(|code| {
             code == libc::EAGAIN || code == libc::EWOULDBLOCK || code == libc::EINPROGRESS
         });
@@ -1940,8 +1965,7 @@ mod tests {
     }
 
     /// Connections queued until a nonblocking connect finds the queue full.
-    fn fill_unix_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
-        use std::os::fd::FromRawFd;
+    fn fill_unix_queue(path: &Path) -> Vec<std::os::unix::net::UnixStream> {
         let bytes = path.as_os_str().as_encoded_bytes();
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         address.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -1959,17 +1983,20 @@ mod tests {
         let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
         let mut held = Vec::new();
         loop {
-            let fd =
-                unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
-            assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
-            let connected =
-                unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr, length) };
+            let socket = nonblocking_socket().expect("a non-blocking socket");
+            let connected = unsafe {
+                libc::connect(
+                    socket.as_raw_fd(),
+                    &address as *const _ as *const libc::sockaddr,
+                    length,
+                )
+            };
             if connected == 0 {
-                held.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                held.push(socket);
                 continue;
             }
             let error = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
+            drop(socket);
             if error.raw_os_error() == Some(libc::EAGAIN)
                 || error.raw_os_error() == Some(libc::EWOULDBLOCK)
             {

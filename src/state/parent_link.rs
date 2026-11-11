@@ -842,8 +842,7 @@ mod tests {
 
     /// Connections queued until a nonblocking connect finds the queue full.
     #[cfg(unix)]
-    fn fill_unix_queue(path: &Path) -> Vec<std::os::fd::OwnedFd> {
-        use std::os::fd::FromRawFd;
+    fn fill_unix_queue(path: &Path) -> Vec<std::os::unix::net::UnixStream> {
         let bytes = path.as_os_str().as_encoded_bytes();
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         address.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -861,17 +860,20 @@ mod tests {
         let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
         let mut held = Vec::new();
         loop {
-            let fd =
-                unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0) };
-            assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
-            let connected =
-                unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr, length) };
+            let socket = crate::platform::test_nonblocking_socket();
+            let connected = unsafe {
+                libc::connect(
+                    std::os::fd::AsRawFd::as_raw_fd(&socket),
+                    &address as *const _ as *const libc::sockaddr,
+                    length,
+                )
+            };
             if connected == 0 {
-                held.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                held.push(socket);
                 continue;
             }
             let error = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
+            drop(socket);
             if error.raw_os_error() == Some(libc::EAGAIN)
                 || error.raw_os_error() == Some(libc::EWOULDBLOCK)
             {

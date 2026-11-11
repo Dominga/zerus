@@ -2840,6 +2840,18 @@ existing catalog; resume, adoption,
 manual assignments and explicit unassignment are never reassigned. A fork
 takes its source's project instead ([Fork session…](#fork-session)). This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
+A new session that a live tracked agent on the same computer launches (its
+parent link proven from process ancestry) starts in that parent's project,
+for Claude, Codex, Kimi, DeepSeek and OpenCode alike. The parent's project wins
+over folder inference, so a session tree stays together. A parent whose project
+no longer exists gives the child an explicit Inbox membership. A parent in Inbox,
+without a membership or with an unresolved project choice leaves the child to
+folder inference, as does a claimed, adopted or forwarded parent. The membership
+is written like a fork's: after the child's binding is saved, retrying a busy
+catalog for up to 3 seconds without holding the session state or provider
+binding locks, and only while the child's binding is still the same run and
+conversation. A child name that already has a membership keeps it. Existing
+sessions, including children placed before this rule, are never moved.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer

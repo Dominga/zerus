@@ -452,8 +452,26 @@ pub(crate) fn launch(
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
     save(&mut record)?;
+    // A child its proven parent launched starts in the parent's project,
+    // written after the state and bindings locks are released (zerus-d5twt).
+    let child = record
+        .get("parent")
+        .filter(|link| crate::swarm::placing_parent(link))
+        .map(|link| {
+            (
+                link.clone(),
+                string(&record, "run_id").to_owned(),
+                record["conversation_id"].clone(),
+            )
+        });
     finish_creation(&service, record, true)?;
-    if let Ok(config) = crate::config::Config::load() {
+    if let Some((parent, run, conversation)) = child {
+        drop(_guard);
+        drop(_writer);
+        if let Ok(config) = crate::config::Config::load() {
+            crate::swarm::place_child_session(&config, name, &cwd, &run, &conversation, &parent);
+        }
+    } else if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
     Ok(())

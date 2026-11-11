@@ -1362,17 +1362,40 @@ pub async fn termination_cleanup_confirm(
     outcome
 }
 #[tauri::command]
-pub fn termination_cleanup_check(
+pub async fn termination_cleanup_check(
     app: AppHandle,
     state: State<'_, TerminationCleanup>,
     id: String,
 ) -> Result<View, String> {
-    check_with_runtime(
-        &state.0,
-        id,
-        |model| changed(&app, model),
-        |inner, id, step| inner.drive(app.clone(), id, step, false),
-    )
+    check_blocking(state.0.clone(), app, id, changed, |app, inner, id, step| {
+        inner.drive(app.clone(), id, step, false)
+    })
+    .await
+}
+/// The Check again command body, for any app (zerus-wfynn). A known refusal's
+/// retirement observes and closes its original source, and that close waits
+/// for the holder to end, bounded only by the owner's retention deadline.
+/// Tauri runs a synchronous command inline on the GTK main thread, so the
+/// whole check runs on a blocking task instead; the row is reserved and busy
+/// meanwhile, and its guards, reservation and single review are unchanged.
+async fn check_blocking<A: Send + 'static>(
+    inner: Arc<Inner>,
+    app: A,
+    id: String,
+    emit: fn(&A, &mut Model),
+    run_review: fn(&A, Arc<Inner>, String, Step),
+) -> Result<View, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = &app;
+        check_with_runtime(
+            &inner,
+            id,
+            |model| emit(app, model),
+            |inner, id, step| run_review(app, inner, id, step),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 fn check_with_runtime(
     inner: &Arc<Inner>,
@@ -2345,18 +2368,38 @@ pub(crate) fn assert_real_delayed_close_check(
     lock(&state.0.model).jobs.push_back(stopping_job());
     program_pipeline::publish(state.0.clone(), app.clone(), "job".into(), Ok(stopped));
     assert!(lock(&state.0.model).view().rows[0].can_check);
-    let inner = state.0.clone();
+    let (inner, clicker) = (state.0.clone(), app.clone());
+    let (polled, first_poll) = std::sync::mpsc::channel();
+    // zerus-wfynn: the GTK main thread's side of the real command. One poll
+    // must yield while the close is outstanding; the rest finishes off-thread.
     let click = std::thread::spawn(move || {
-        check_with_runtime(
-            &inner,
+        let mut command = Box::pin(check_blocking(
+            inner,
+            clicker,
             "job".into(),
-            |model| model.revision = model.revision.wrapping_add(1),
-            |inner, _, step| {
+            |app: &TestApp, model| program_pipeline::PipelineApp::changed(app, model),
+            |_, inner, _, step| {
                 REVIEWS.fetch_add(1, SeqCst);
                 ready_review(inner, step)
             },
-        )
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = polled.send(std::future::Future::poll(command.as_mut(), &mut context).is_pending());
+        tauri::async_runtime::block_on(command)
     });
+    let mut release = Some(release);
+    let yielded = first_poll.recv_timeout(Duration::from_secs(3));
+    if yielded.is_err() {
+        // End a failing run promptly: let the blocked close finish.
+        if let Some(release) = release.take() {
+            release();
+        }
+    }
+    assert_eq!(
+        yielded,
+        Ok(true),
+        "Check again blocked its calling thread while the close was outstanding"
+    );
     let until = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         {
@@ -2392,7 +2435,9 @@ pub(crate) fn assert_real_delayed_close_check(
     )
     .is_err());
     assert!(lock(&state.0.model).dismiss("job").is_err());
-    release();
+    if let Some(release) = release.take() {
+        release();
+    }
     assert!(click.join().unwrap().is_ok());
     assert_eq!(REVIEWS.load(SeqCst), 1, "the click did not review once");
     std::thread::sleep(Duration::from_millis(300));
@@ -2604,6 +2649,101 @@ pub async fn termination_cleanup_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-wfynn: Tauri runs a synchronous command inline on the GTK main
+    /// thread. Only these reviewed cleanup commands stay synchronous, and none
+    /// reaches a program retirement, observation or close; Check again, whose
+    /// retirement can wait for a holder close, must stay async.
+    #[test]
+    fn only_reviewed_cleanup_commands_run_on_the_main_thread() {
+        let sources = [
+            include_str!("termination_cleanup.rs"),
+            include_str!("termination_cleanup/manual.rs"),
+            include_str!("termination_cleanup/presentation.rs"),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            include_str!("termination_cleanup/program_pipeline.rs"),
+        ];
+        // The braces of the item that starts at `at`, inclusive.
+        fn body(source: &str, at: usize) -> &str {
+            let open = at + source[at..].find('{').unwrap();
+            let mut depth = 0;
+            let close = source[open..]
+                .char_indices()
+                .find(|&(_, c)| {
+                    depth += match c {
+                        '{' => 1,
+                        '}' => -1,
+                        _ => 0,
+                    };
+                    depth == 0
+                })
+                .map(|(offset, _)| open + offset)
+                .unwrap();
+            &source[open..=close]
+        }
+        fn non_blocking(name: &str, body: &str) {
+            for blocking in [
+                "retirement(",
+                ".close(",
+                "observe(",
+                "check_with_runtime(",
+                "offer_force(",
+                ".confirm(",
+                "run_removal(",
+                "settle(",
+            ] {
+                assert!(
+                    !body.contains(blocking),
+                    "{name} runs `{blocking}` on the main thread"
+                );
+            }
+        }
+        let marker = ["#[tauri::", "command]"].concat();
+        let mut synchronous = Vec::new();
+        for source in sources {
+            for (at, _) in source.match_indices(&marker) {
+                let signature = source[at + marker.len()..].trim_start();
+                let Some(rest) = signature.strip_prefix("pub fn ") else {
+                    continue;
+                };
+                let name = rest.split('(').next().unwrap();
+                non_blocking(name, body(source, at));
+                synchronous.push(name.to_owned());
+            }
+        }
+        synchronous.sort();
+        assert_eq!(
+            synchronous,
+            [
+                "termination_cleanup_dismiss",
+                "termination_cleanup_keep",
+                "termination_cleanup_manual_cancel",
+                "termination_cleanup_manual_confirm",
+                "termination_cleanup_remove",
+                "termination_cleanup_view",
+                "termination_program_force_cancel",
+            ]
+        );
+        // The reviewed helpers those commands call directly stay non-blocking.
+        // Each needle is built here so it cannot match its own literal above.
+        for helper in [
+            "view",
+            "dismiss",
+            "clear_settled_results",
+            "admit_manual",
+            "confirm_manual",
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            "force_cancel",
+        ] {
+            let needle = ["fn ", helper, "("].concat();
+            let (source, at) = sources
+                .iter()
+                .find_map(|source| source.find(&needle).map(|at| (*source, at)))
+                .unwrap_or_else(|| panic!("{helper} is missing"));
+            non_blocking(helper, body(source, at));
+        }
+        assert!(sources[0].contains("pub async fn termination_cleanup_check("));
+    }
     #[test]
     fn raw_unavailable_git_metadata_cannot_hide_the_confirmed_cleanup_offer() {
         let target = source();

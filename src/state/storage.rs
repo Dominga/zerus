@@ -70,9 +70,25 @@ pub(super) fn test_default_root() -> PathBuf {
                 }
             }
         }
-        base.join(std::process::id().to_string()).join("sessions")
+        fresh_test_root(&base, std::process::id())
     })
     .clone()
+}
+
+/// This process's own state folder below `base`, empty. Fork Windows builds
+/// #158, #161 and #162 each failed another archive reference test with
+/// "coverage is unavailable" on a probe's first read: the folder is named by
+/// the process id, Windows gives a finished process's id to a new one, and a
+/// probe that got such an id read the archives and the catalog an earlier
+/// probe had left there (one of them corrupt on purpose). No live process has
+/// this id but this one, so what is there is always a leftover.
+#[cfg(test)]
+pub(super) fn fresh_test_root(base: &Path, process: u32) -> PathBuf {
+    let own = base.join(process.to_string());
+    if own.exists() {
+        let _ = fs::remove_dir_all(&own);
+    }
+    own.join("sessions")
 }
 
 /// Whether `dir` is a test's own: below the temporary folder or the folder

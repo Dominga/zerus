@@ -27,23 +27,6 @@ fn metadata() -> Result<Vec<Value>> {
     })?;
     Ok(rows)
 }
-/// The probe's own precondition: an untouched state has no reference. Fork
-/// Windows builds #158 and #161 read "coverage is unavailable" here on a
-/// loaded runner, before the case under test had done anything (in #161 for
-/// `timeout`, on the first read of a state folder made a moment earlier). The
-/// refusal is the safe answer the cases themselves check; the precondition
-/// only needs the folder to have settled, so it is read again for a moment.
-fn settled_empty() {
-    let mut last = metadata();
-    for _ in 0..50 {
-        if last.is_ok() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-        last = metadata();
-    }
-    assert!(last.unwrap().is_empty());
-}
 fn related(folder: &Path) -> Result<Vec<Value>> {
     let mut rows = vec![];
     visit_related(until(), folder, "original-owner", |row| {
@@ -82,6 +65,13 @@ fn run(case: &str) {
         .env("HOME", directory.path())
         .env("HGS_CONFIG_DIR", directory.path().join("config"))
         .env("HGS_STATE_DIR", directory.path().join("state"))
+        // The probe keeps its state in this folder only when it knows the
+        // folder as a temporary one (storage::test_owned): with the
+        // environment cleared it did not, and wrote into the shared
+        // per-process test state instead (see storage::fresh_test_root).
+        .env("TEMP", std::env::temp_dir())
+        .env("TMP", std::env::temp_dir())
+        .env("TMPDIR", std::env::temp_dir())
         .env("HGS_TEST_ARCHIVE_REFERENCES", case);
     if let Some(system) = std::env::var_os("SystemRoot") {
         command.env("SystemRoot", system);
@@ -209,14 +199,36 @@ fn irregular_catalog_and_sidecars_refuse_before_a_blocking_open() {
     }
 }
 
+/// A probe that gets a finished probe's process id starts from an empty state
+/// (storage::fresh_test_root), and another process's state is left alone.
+#[test]
+fn a_reused_process_id_never_inherits_an_earlier_test_state() {
+    let base = tempfile::tempdir().unwrap();
+    for process in ["4242", "4243"] {
+        let left = base.path().join(process).join("sessions").join("archives");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("leftover.json"), "{").unwrap();
+    }
+    let root = crate::state::storage::fresh_test_root(base.path(), 4242);
+    assert_eq!(root, base.path().join("4242").join("sessions"));
+    assert!(!root.exists(), "the earlier process's state is gone");
+    assert!(base.path().join("4243").join("sessions").join("archives").join("leftover.json").exists());
+}
+
 #[test]
 fn isolated_reference_probe() {
     let Ok(case) = std::env::var("HGS_TEST_ARCHIVE_REFERENCES") else {
         return;
     };
-    settled_empty();
+    // The state is the folder the launcher made, not the shared test state.
+    assert!(
+        std::env::var_os("HGS_STATE_DIR").is_some_and(|given| root() == Path::new(&given)),
+        "the probe's state is {}",
+        root().display()
+    );
+    assert!(metadata().unwrap().is_empty());
     private_dir(&root().join("archives")).unwrap();
-    settled_empty();
+    assert!(metadata().unwrap().is_empty());
     let target = root().join("checkout");
     let id = "11111111-1111-4111-8111-111111111111";
     let mut original = record(id, &target);

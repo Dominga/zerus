@@ -175,6 +175,21 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
 fn read_cache(record: &Value) -> Result<Value> {
     index(record, &cache_path(record)?, None)?.ok_or_else(|| "question index incomplete".into())
 }
+/// The transcript's questions and replies alone, without answer authority:
+/// for reading a native acknowledgement or recording this request's own
+/// submission. Receipts are not recovered here, and nothing here decides
+/// whether a question may be answered.
+fn read_transcript(record: &Value) -> Result<Value> {
+    index_with(
+        record,
+        &cache_path(record)?,
+        None,
+        false,
+        absolute_root,
+        |_| Box::new(Locator),
+    )?
+    .ok_or_else(|| "question index incomplete".into())
+}
 /// One page of question receipts: a bounded call reads at most one, an
 /// unbounded call (an answer) reads every page (zerus-a4mub.8).
 const RECEIPTS_PER_CALL: usize = 64;
@@ -200,7 +215,7 @@ fn worked(_: usize, _: usize) {}
 /// both are complete, and an incomplete one is unknown, never empty. None
 /// also when another process holds the cache past the deadline.
 fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result<Option<Value>> {
-    index_with(record, cache_path, deadline, absolute_root, |_| {
+    index_with(record, cache_path, deadline, true, absolute_root, |_| {
         Box::new(Locator)
     })
 }
@@ -208,6 +223,7 @@ fn index_with(
     record: &Value,
     cache_path: &Path,
     deadline: Option<Instant>,
+    recover: bool,
     root: impl FnOnce() -> Result<PathBuf>,
     pages: impl for<'a> FnOnce(&'a Path) -> Box<dyn ReceiptPages + 'a>,
 ) -> Result<Option<Value>> {
@@ -332,17 +348,27 @@ fn index_with(
         }
     }
     changed |= cache["offset"].as_u64().unwrap_or(0) != offset;
-    if complete {
+    let mut refused = None;
+    if complete && recover {
         let root = root()?;
-        let (recovered, progressed) =
-            recover_submissions(record, &mut cache, &root, pages(&root).as_ref(), deadline)?;
-        complete = recovered;
-        changed |= progressed;
+        let source = pages(&root);
+        let recovered = recover_submissions(record, &mut cache, &root, source.as_ref(), deadline);
+        match recovered {
+            Ok((recovered, progressed)) => {
+                complete = recovered;
+                changed |= progressed;
+            }
+            // The transcript's progress is still kept.
+            Err(error) => refused = Some(error),
+        }
     }
     // The offset is at a line boundary, also after a partial scan.
     cache["initialized"] = json!(true);
     if changed {
         atomic(cache_path, &cache.to_string())?;
+    }
+    if let Some(error) = refused {
+        return Err(error);
     }
     Ok(complete.then_some(cache))
 }
@@ -406,7 +432,7 @@ fn unique(card: &Value, pending: &[Value]) -> bool {
         == 1
 }
 pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
-    let cache = read_cache(record)?;
+    let cache = read_transcript(record)?;
     let response = &cache["items"][string(card, "question_id")]["response"];
     Ok((!response.is_null()).then(|| response.clone()))
 }
@@ -642,7 +668,7 @@ fn submission(record: &Value, card: &Value, answers: &Value, request_id: &str) -
 }
 
 fn save_submission(record: &Value, card: &Value, answers: &Value, request_id: &str) -> Result<()> {
-    read_cache(record)?;
+    read_transcript(record)?;
     let path = cache_path(record)?;
     let _guard = lock(Some(&path.with_extension("lock")))?;
     let mut cache: Value =
@@ -666,6 +692,9 @@ pub(super) struct ReceiptPage {
     pub(super) rows: Vec<(String, PathBuf)>,
     pub(super) next: Option<String>,
     pub(super) complete: bool,
+    /// The source knows receipts it cannot attribute: nothing it covers is
+    /// complete until they are read again.
+    pub(super) gap: bool,
     pub(super) restart: bool,
 }
 /// The question receipts of exactly `record`'s name, run and conversation, in
@@ -714,24 +743,27 @@ fn from_locator(page: receipt_index::QuestionReceiptPage) -> ReceiptPage {
             .collect(),
         next: page.next_cursor,
         complete: page.coverage == receipt_index::Coverage::Complete,
+        gap: page.coverage == receipt_index::Coverage::Gap,
         restart: page.restart_required,
     }
 }
 
 // Older adapters left an in-progress question receipt after successfully
 // entering its envelope. Recover only a confirmed question submission or the
-// exact durable terminal acknowledgement, once per run; a timeout or a queue
-// preview alone never proves submission. A replaced question cache also
-// recovers its submitted answers here, so pending questions stay unknown
-// until this run's recovery is complete.
+// exact durable terminal acknowledgement; a timeout or a queue preview alone
+// never proves submission. A replaced question cache also recovers its
+// submitted answers here, so pending questions stay unknown until recovery
+// is complete.
 //
-// A bounded call (with a deadline) reads one page of at most
-// RECEIPTS_PER_CALL receipts from the receipt locator, which never
-// enumerates the receipt folder, and keeps its cursor in the cache
-// (`submission_scan`), so the next call resumes (zerus-a4mub.8). An
-// unbounded call (an answer) reads every page, and fails rather than act
-// when its pages cannot cover this run's receipts. Returns whether this
-// run's recovery is complete and whether the cache changed.
+// A completed recovery is never trusted later: every call validates the
+// receipt locator's current coverage from the head, so a receipt or a gap
+// recorded since is seen (zerus-a4mub.8 review). A bounded call (with a
+// deadline) reads one page of at most RECEIPTS_PER_CALL receipts, which never
+// enumerates the receipt folder, and keeps an unfinished chain's cursor in
+// the cache (`submission_scan`), so the next call resumes it. An unbounded
+// call (an answer) starts at the head, reads every page, and fails rather
+// than act when the pages cannot cover this run's receipts. A gap fails both.
+// Returns whether recovery is complete and whether the cache changed.
 fn recover_submissions(
     record: &Value,
     cache: &mut Value,
@@ -739,11 +771,13 @@ fn recover_submissions(
     pages: &dyn ReceiptPages,
     deadline: Option<Instant>,
 ) -> Result<(bool, bool)> {
-    if cache["submission_scan_run"] == record["run_id"] {
-        return Ok((true, false));
-    }
-    let mut changed = false;
-    // Another run's unfinished recovery starts again for this one, and an
+    // An older cache's completion marker grants nothing.
+    let mut changed = cache
+        .as_object_mut()
+        .ok_or("Invalid question cache")?
+        .remove("submission_scan_run")
+        .is_some();
+    // Another run's unfinished chain starts again for this one, and an
     // answer always starts at the head, where its source seals every receipt.
     if cache["submission_scan"]["run_id"] != record["run_id"]
         || deadline.is_none() && !cache["submission_scan"]["after"].is_null()
@@ -757,6 +791,9 @@ fn recover_submissions(
             .as_str()
             .map(str::to_owned);
         let page = pages.page(record, after.as_deref(), RECEIPTS_PER_CALL, deadline)?;
+        if page.gap {
+            return Err(INCOMPLETE_RECEIPTS.into());
+        }
         if page.restart {
             // A cursor its source no longer accepts: start again at the head.
             cache["submission_scan"]["after"] = Value::Null;
@@ -775,7 +812,12 @@ fn recover_submissions(
         }
         changed |= !page.rows.is_empty();
         if page.complete && page.next.is_none() {
-            return Ok(finished(record, cache));
+            // Complete now; the next call validates again from the head.
+            if after.is_some() {
+                cache["submission_scan"]["after"] = Value::Null;
+                changed = true;
+            }
+            return Ok((true, changed));
         }
         if let Some(next) = page
             .next
@@ -796,11 +838,6 @@ fn recover_submissions(
 /// An answer (an unbounded call) never acts on incomplete receipt evidence.
 const INCOMPLETE_RECEIPTS: &str =
     "Earlier answers to this session's questions cannot all be checked yet; refresh before answering";
-fn finished(record: &Value, cache: &mut Value) -> (bool, bool) {
-    cache["submission_scan_run"] = record["run_id"].clone();
-    cache.as_object_mut().unwrap().remove("submission_scan");
-    (true, true)
-}
 /// One question receipt: a confirmed submission of this exact run and
 /// question, or its exact durable terminal acknowledgement, becomes the
 /// question's delivery. Anything else is left alone.
@@ -1148,7 +1185,9 @@ mod tests {
         let cache_path = dir.path().join("cache.json");
         fs::write(&cache_path, cache.to_string()).unwrap();
         let record = json!({"run_id":"run","conversation_id":id,"transcript":path});
-        let cache = index(&record, &cache_path, None).unwrap().unwrap();
+        // A private root: recovery never reaches this machine's receipts.
+        let root = dir.path().join("state");
+        let cache = bounded(&record, &cache_path, &root, &Rows::default(), None).unwrap();
         assert_eq!(cache["scan_version"], 3);
         assert!(pending(&record, &cache).is_empty());
         assert_eq!(cache["items"]["codex-async:call_one:0"]["skipped"], true);
@@ -1167,29 +1206,34 @@ mod tests {
         let cache = dir.path().join("cache.json");
         let meta = fs::metadata(&transcript).unwrap();
         let source = crate::platform::file_identity(&transcript).unwrap();
-        // Skip the one-time submission recovery, which reads the hgs state directory.
+        // An older cache's completion marker grants nothing; recovery uses
+        // a private root and never reaches this machine's receipts.
         fs::write(&cache, json!({"items":{},"offset":0,"inode":[source.device,source.inode],"scan_version":2,
             "initialized":true,"submission_scan_run":"run"}).to_string()).unwrap();
-        // An expired deadline still indexes one line per call and keeps it.
+        let root = dir.path().join("state");
+        let none = Rows::default();
+        // An expired deadline still indexes one line per call and keeps it,
+        // and stays unknown: it recovers nothing.
         let expired = Instant::now();
         let mut offsets = Vec::new();
-        let complete = loop {
+        while offsets.last() != Some(&meta.len()) {
             assert!(offsets.len() < lines.len(), "indexing made no progress");
-            if let Some(cache) = index(&record, &cache, Some(expired)).unwrap() {
-                break cache;
-            }
+            assert_eq!(bounded(&record, &cache, &root, &none, Some(expired)), None);
             let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
             offsets.push(saved["offset"].as_u64().unwrap());
-        };
-        // Every line but the last one ended a call, the header included.
-        assert_eq!(offsets.len(), lines.len() - 1);
+        }
+        // Every line ended a call, the header included.
+        assert_eq!(offsets.len(), lines.len());
         assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        let budget = Some(Instant::now() + Duration::from_secs(30));
+        let complete = bounded(&record, &cache, &root, &none, budget).unwrap();
         assert_eq!(complete["offset"], json!(meta.len()));
         assert_eq!(pending(&record, &complete).len(), 2);
-        assert_eq!(index(&record, &cache, None).unwrap(), Some(complete));
+        assert_eq!(bounded(&record, &cache, &root, &none, None), Some(complete));
         // A cache held by another process past the deadline is unknown, not empty.
         let _held = lock(Some(&cache.with_extension("lock"))).unwrap();
-        assert_eq!(index(&record, &cache, Some(Instant::now() + Duration::from_millis(30))).unwrap(), None);
+        let held = Some(Instant::now() + Duration::from_millis(30));
+        assert_eq!(bounded(&record, &cache, &root, &none, held), None);
     }
     /// The work this thread did while `f` ran: transcript lines, receipts.
     fn work<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
@@ -1203,7 +1247,9 @@ mod tests {
     #[derive(Clone, Default)]
     struct Rows {
         rows: Vec<(String, PathBuf)>,
-        /// Report a gap (incomplete coverage) instead of the last page.
+        /// Report partial coverage instead of the last page.
+        partial: bool,
+        /// Report a gap (receipts the source cannot attribute) on every page.
         gap: bool,
         /// Refuse this cursor once, as a page begun before a new head.
         restart: std::rc::Rc<std::cell::RefCell<Option<String>>>,
@@ -1224,6 +1270,7 @@ mod tests {
                     rows: vec![],
                     next: after.map(str::to_owned),
                     complete: false,
+                    gap: false,
                     restart: false,
                 });
             }
@@ -1237,6 +1284,7 @@ mod tests {
                     rows: vec![],
                     next: None,
                     complete: false,
+                    gap: false,
                     restart: true,
                 });
             }
@@ -1250,7 +1298,8 @@ mod tests {
             let more = rest.len() > rows.len();
             Ok(ReceiptPage {
                 next: rows.last().filter(|_| more).map(|(id, _)| id.clone()),
-                complete: !more && !self.gap,
+                complete: !more && !self.partial,
+                gap: self.gap,
                 rows,
                 restart: false,
             })
@@ -1273,15 +1322,24 @@ mod tests {
         rows: &Rows,
         deadline: Option<Instant>,
     ) -> Option<Value> {
+        try_bounded(record, cache, root, rows, deadline).unwrap()
+    }
+    fn try_bounded(
+        record: &Value,
+        cache: &Path,
+        root: &Path,
+        rows: &Rows,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Value>> {
         let rows = rows.clone();
         index_with(
             record,
             cache,
             deadline,
+            true,
             || Ok(root.to_path_buf()),
             move |_| Box::new(rows),
         )
-        .unwrap()
     }
     fn second_request() -> Value {
         json!({"type":"response_item","timestamp":"2026-10-07T15:02:00Z","payload":{"type":"function_call","name":"request_user_input_async","call_id":"call_two","arguments":json!({"questions":[{"title":"Second?","options":["Yes","No"]}]}).to_string()}})
@@ -1434,9 +1492,23 @@ mod tests {
         let pending = pending(&record, &complete);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0]["answer_delivery"]["request_id"], exact.as_str());
-        // Complete: no further work.
-        let (again, (read, opened)) = work(|| bounded(&record, &cache, &root, &rows, budget()));
-        assert_eq!((again, read, opened), (Some(complete), 0, 0));
+        // A completed recovery is validated again from the head: this
+        // source's 301 rows take the same five bounded pages, and the
+        // result is the same.
+        let mut again = 0;
+        let validated = loop {
+            let (result, (read, opened)) =
+                work(|| bounded(&record, &cache, &root, &rows, budget()));
+            assert_eq!(read, 0);
+            assert!(opened <= RECEIPTS_PER_CALL);
+            again += 1;
+            if let Some(cache) = result {
+                break cache;
+            }
+            assert!(again <= 301_usize.div_ceil(RECEIPTS_PER_CALL));
+        };
+        assert_eq!(again, 301_usize.div_ceil(RECEIPTS_PER_CALL));
+        assert_eq!(settled(&validated), settled(&complete));
     }
     /// zerus-a4mub.8: a page that must restart, or a gap, is never complete
     /// for a bounded call, and an answer (unbounded) refuses to act on a gap.
@@ -1502,27 +1574,41 @@ mod tests {
             complete["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
             exact.as_str()
         );
-        // A gap stays unknown for every bounded call.
+        // Partial coverage stays unknown for every bounded call.
+        let partial = Rows {
+            rows: rows.clone(),
+            partial: true,
+            ..Rows::default()
+        };
+        let cache = dir.path().join("partial.json");
+        for _ in 0..rows.len().div_ceil(RECEIPTS_PER_CALL) + 3 {
+            assert_eq!(bounded(&record, &cache, &root, &partial, budget()), None);
+        }
+        // An answer never acts on it: it fails instead, and the cursor stays.
+        let refused = try_bounded(&record, &cache, &root, &partial, None);
+        assert_eq!(refused, Err(INCOMPLETE_RECEIPTS.to_owned()));
+        assert_eq!(bounded(&record, &cache, &root, &partial, budget()), None);
+        // A gap fails a bounded call and an answer alike, and a cold
+        // transcript's progress is still kept.
         let gap = Rows {
             rows: rows.clone(),
             gap: true,
             ..Rows::default()
         };
-        let cache = dir.path().join("gap.json");
-        for _ in 0..rows.len().div_ceil(RECEIPTS_PER_CALL) + 3 {
-            assert_eq!(bounded(&record, &cache, &root, &gap, budget()), None);
-        }
-        // An answer never acts on it: it fails instead, and the gap stays.
-        let gapped = gap.clone();
-        let refused = index_with(
-            &record,
-            &cache,
-            None,
-            || Ok(root.clone()),
-            move |_| Box::new(gapped),
+        let cold = dir.path().join("gap.json");
+        assert_eq!(
+            try_bounded(&record, &cold, &root, &gap, budget()),
+            Err(INCOMPLETE_RECEIPTS.to_owned())
         );
-        assert_eq!(refused, Err(INCOMPLETE_RECEIPTS.to_owned()));
-        assert_eq!(bounded(&record, &cache, &root, &gap, budget()), None);
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&cold).unwrap()).unwrap();
+        assert_eq!(
+            saved["offset"],
+            json!(fs::metadata(string(&record, "transcript")).unwrap().len())
+        );
+        assert_eq!(
+            try_bounded(&record, &cold, &root, &gap, None),
+            Err(INCOMPLETE_RECEIPTS.to_owned())
+        );
         // Without the gap, the same answer reads every page and completes,
         // starting at the head rather than at the bounded cursor.
         let whole = Rows {
@@ -1538,6 +1624,53 @@ mod tests {
             exact.as_str()
         );
         assert_eq!(settled(&answered), settled(&complete));
+    }
+    /// zerus-a4mub.8 review: a completed recovery grants nothing later. A
+    /// submitted receipt indexed since is recovered by the next bounded call
+    /// and by an answer, and a gap recorded since fails both; the warm
+    /// cache's completion is never trusted.
+    #[test]
+    fn a_completed_recovery_is_validated_again_from_the_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let record = closing_session(dir.path(), 0);
+        let cache = dir.path().join("cache.json");
+        let budget = || Some(Instant::now() + Duration::from_secs(30));
+        let warm = bounded(&record, &cache, &root, &Rows::default(), budget()).unwrap();
+        let third = warm["items"]["codex-async:call_two:0"].clone();
+        assert!(third["delivery"].is_null());
+        // An older cache's completion marker for this run is ignored too.
+        let mut saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+        saved["submission_scan_run"] = json!("run");
+        fs::write(&cache, saved.to_string()).unwrap();
+        let (exact, rows) = receipts(&root, &record, &third, 0);
+        let indexed = Rows {
+            rows,
+            ..Rows::default()
+        };
+        let current = bounded(&record, &cache, &root, &indexed, budget()).unwrap();
+        let pending = pending(&record, &current);
+        assert_eq!(pending[0]["answer_delivery"]["request_id"], exact.as_str());
+        // An answer reads it from the head as well, from a fresh warm cache.
+        let answer_cache = dir.path().join("answer.json");
+        bounded(&record, &answer_cache, &root, &Rows::default(), budget()).unwrap();
+        let answered = bounded(&record, &answer_cache, &root, &indexed, None).unwrap();
+        assert_eq!(indexed.unbounded.borrow().first(), Some(&None));
+        assert_eq!(
+            answered["items"]["codex-async:call_two:0"]["delivery"]["request_id"],
+            exact.as_str()
+        );
+        // A gap recorded after completion: unknown for both, never complete.
+        let gap = Rows {
+            gap: true,
+            ..Rows::default()
+        };
+        for deadline in [budget(), None] {
+            assert_eq!(
+                try_bounded(&record, &cache, &root, &gap, deadline),
+                Err(INCOMPLETE_RECEIPTS.to_owned())
+            );
+        }
     }
     /// zerus-a4mub.8: a locator page completes recovery only with complete
     /// coverage, and every restart signal reaches recovery.
@@ -1565,6 +1698,7 @@ mod tests {
                     (complete, restart, Some("cursor")),
                     "{coverage:?} restart {restart}"
                 );
+                assert_eq!(page.gap, coverage == Coverage::Gap);
                 assert_eq!(page.rows, vec![("request".to_owned(), row.path.clone())]);
             }
         }
@@ -1739,17 +1873,26 @@ mod tests {
         let source = crate::platform::file_identity(&transcript).unwrap();
         fs::write(&cache, json!({"items":{},"offset":0,"inode":[source.device,source.inode],"scan_version":2,
             "initialized":true,"submission_scan_run":"run"}).to_string()).unwrap();
+        // An older completion marker grants nothing, and recovery uses a
+        // private root: it never reaches this machine's receipts.
+        let root = dir.path().join("state");
+        let none = Rows::default();
         let expired = Instant::now();
+        let end = json!(fs::metadata(&transcript).unwrap().len());
         let mut calls = 0;
-        let complete = loop {
+        loop {
             calls += 1;
             assert!(calls <= lines.len(), "indexing made no progress");
-            if let Some(cache) = index(&record, &cache, Some(expired)).unwrap() {
-                break cache;
+            assert_eq!(bounded(&record, &cache, &root, &none, Some(expired)), None);
+            let saved: Value = serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+            if saved["offset"] == end {
+                break;
             }
-        };
-        // Every line but the last one ended a call, each oversized line included.
+        }
+        // Every line ended a call, each oversized line included.
         assert_eq!(calls, lines.len());
+        let budget = Some(Instant::now() + Duration::from_secs(30));
+        let complete = bounded(&record, &cache, &root, &none, budget).unwrap();
         assert_eq!(pending(&record, &complete).len(), 2);
     }
     /// zerus-cqkoh: a Skip whose key may have reached Codex never fails as

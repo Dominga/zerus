@@ -6712,7 +6712,11 @@ session's receipts at a time through the receipt locator. While the index or
 recovery is incomplete, or held by another process, `pending_questions_complete`
 is `false`, `pending_questions` lists no optional Codex question and
 `pending_questions_error` says the questions are still being indexed. That is
-unknown, never an empty list, and nothing becomes answerable from it. An answer
+unknown, never an empty list, and nothing becomes answerable from it. A
+completed earlier check grants nothing: each inspection and each answer checks
+the locator's current coverage again from its head. A receipt indexed since is
+recovered, and a gap the locator records (a receipt it cannot attribute) makes
+`pending_questions_error` say earlier answers cannot all be checked. An answer
 first completes the index and recovery, and refuses while earlier answers
 cannot all be checked. An older hgs omits `pending_questions_complete`.
 

@@ -213,6 +213,58 @@ class CodexAsync(unittest.TestCase):
         self.assertIn('still being indexed',stopped['pending_questions_error'])
         self.assertTrue(any(m.get('detail')=='Recent activity while indexing' for m in stopped['provider_messages']))
 
+    def receipt_worker(self):
+        worker=subprocess.run([str(fixtures.HGS),'__state','receipt-index-worker'],env=self.env,text=True,capture_output=True,timeout=15)
+        self.assertEqual(worker.returncode,0,worker.stderr)
+        import sqlite3
+        return sqlite3.connect('file:'+str(self.state/'delivery-receipts-v1.sqlite3')+'?mode=ro',uri=True)
+    def warm_with_old_marker(self):
+        # A completed, warm question cache, plus an older build's completion
+        # marker for this run: neither may stand in for current receipts.
+        card=self.request()
+        self.assertIs(self.inspect()['pending_questions_complete'],True)
+        cache_path=next((self.state/'codex_questions').glob('*.json'))
+        cache=json.loads(cache_path.read_text());cache['submission_scan_run']=self.run_id
+        cache_path.write_text(json.dumps(cache))
+        return card,cache_path
+    def test_a_completed_cache_never_answers_over_a_newly_indexed_submission(self):
+        # zerus-a4mub.8 review P1: an exact submitted receipt indexed after the
+        # cache completed makes a different request refuse, with no input.
+        card,cache_path=self.warm_with_old_marker()
+        original=str(uuid.uuid4())
+        receipt=dict(status='submitted',request_id=original,name=self.name,run_id=self.run_id,conversation_id=self.conversation_id,
+            question_id=card['question_id'],question_hash=card['question_hash'],digest='f'*64,submitted_at=time.time(),
+            answers=[dict(question_id='q_0',text='Already submitted')])
+        folder=self.state/'question_receipts';folder.mkdir(exist_ok=True)
+        (folder/(original+'.json')).write_text(json.dumps(receipt))
+        with self.receipt_worker() as db:
+            indexed=db.execute("SELECT COUNT(*) FROM receipt_rows WHERE source='question' AND request=?",[original]).fetchone()[0]
+        self.assertEqual(indexed,1,'the earlier receipt was not indexed')
+        attempt,_=self.answer(card,answer=dict(question_id='q_0',text='Accepted answer'))
+        self.assertNotEqual(attempt.returncode,0,attempt.stdout)
+        self.assertIn('already submitted',attempt.stderr.lower())
+        self.assertEqual(self.received(),b'')
+        self.assertFalse((self.root/'submitted').exists(),'an answer reached the native terminal')
+        # Inspection shows the same submission, never an answerable question.
+        current=self.inspect()['pending_questions'][0]
+        self.assertFalse(current['can_answer']);self.assertEqual(current['answer_delivery']['request_id'],original)
+    def test_a_completed_cache_reports_a_newly_recorded_receipt_gap(self):
+        # zerus-a4mub.8 review P1: a gap the locator records after the cache
+        # completed makes inspection incomplete, never complete and answerable.
+        card,_=self.warm_with_old_marker()
+        folder=self.state/'question_receipts';folder.mkdir(exist_ok=True)
+        (folder/'corrupt.json').write_text('{')
+        with self.receipt_worker() as db:
+            errors=db.execute("SELECT errors FROM receipt_sources WHERE source='question'").fetchone()[0]
+        self.assertGreater(errors,0,'the control did not establish a known locator gap')
+        value=self.inspect_once()
+        self.assertIs(value.get('pending_questions_complete'),False,'a completed cache hid the new receipt gap')
+        self.assertEqual(value['pending_questions'],[])
+        self.assertIn('cannot all be checked',value.get('pending_questions_error',''))
+        attempt,_=self.answer(card,answer=dict(question_id='q_0',text='Accepted answer'))
+        self.assertNotEqual(attempt.returncode,0,attempt.stdout)
+        self.assertEqual(self.received(),b'')
+
     def test_answer_from_normal_prompt_has_native_identity_and_removes_only_that_question(self):
         card=self.request();self.assertTrue(card['optional']);self.assertTrue(card['can_answer']);self.assertTrue(card['can_skip'])
         result,payload=self.answer(card);self.assertEqual(result.returncode,0,result.stderr)

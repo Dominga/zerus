@@ -111,6 +111,10 @@ impl Memberships {
             .filter(|(_, op)| matches!(op.key, Key::Session { .. }))
             .collect();
     }
+    /// The raw graph's own operations, as parsed (a missing file is empty).
+    pub(super) fn operation_count(&self) -> usize {
+        self.graph.operations.len()
+    }
     pub(super) fn is_empty(&self) -> bool {
         self.graph.operations.is_empty()
     }

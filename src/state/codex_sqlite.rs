@@ -154,15 +154,16 @@ mod snapshot {
         let mut done = 0;
         while done < bytes.len() {
             live(until)?;
+            let end = (done + 1024 * 1024).min(bytes.len());
             #[cfg(unix)]
             let result = {
                 use std::os::unix::fs::FileExt;
-                file.read_at(&mut bytes[done..], done as u64)
+                file.read_at(&mut bytes[done..end], done as u64)
             };
             #[cfg(windows)]
             let result = {
                 use std::os::windows::fs::FileExt;
-                file.seek_read(&mut bytes[done..], done as u64)
+                file.seek_read(&mut bytes[done..end], done as u64)
             };
             match result {
                 Ok(0) => return Err(SnapshotError::Changed),
@@ -189,6 +190,15 @@ mod snapshot {
         }
     }
 
+    fn hot_journal(home: &Path, until: Instant) -> SnapshotResult<Option<Version>> {
+        live(until)?;
+        match open_source(&home.join("state_5.sqlite-journal")) {
+            Ok(file) => Ok(Some(version(&file)?)),
+            Err(SnapshotError::Missing) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn page_size(source: &Source) -> SnapshotResult<usize> {
         let bytes = &source.bytes;
         if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") {
@@ -199,10 +209,11 @@ mod snapshot {
         if !(512..=65536).contains(&size)
             || !size.is_power_of_two()
             || !bytes.len().is_multiple_of(size)
-            || bytes[18] > 2
-            || bytes[19] > 2
         {
             return Err(failed("Codex catalog page layout is invalid"));
+        }
+        if bytes[18] != 2 || bytes[19] != 2 {
+            return Err(failed("Codex catalog is not in WAL mode"));
         }
         Ok(size)
     }
@@ -227,7 +238,8 @@ mod snapshot {
         u32::from_be_bytes(bytes.try_into().unwrap())
     }
 
-    fn validate_wal(source: &Source, expected_page: usize) -> SnapshotResult<()> {
+    fn validate_wal(source: &Source, expected_page: usize, until: Instant) -> SnapshotResult<()> {
+        live(until)?;
         let bytes = &source.bytes;
         if bytes.is_empty() {
             return Ok(());
@@ -254,6 +266,7 @@ mod snapshot {
             return Err(SnapshotError::Changed);
         }
         for header in bytes[32..].chunks_exact(frame) {
+            live(until)?;
             if stored(&header[..4]) == 0 || &header[8..16] != salt {
                 return Err(failed("Codex WAL frame identity is invalid"));
             }
@@ -266,7 +279,7 @@ mod snapshot {
         Ok(())
     }
 
-    fn write_copy(path: &Path, bytes: &[u8]) -> SnapshotResult<()> {
+    fn write_copy(path: &Path, bytes: &[u8], until: Instant) -> SnapshotResult<()> {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -277,8 +290,12 @@ mod snapshot {
         #[cfg(windows)]
         crate::platform::private_open(&mut options);
         let mut file = options.open(path).map_err(failed)?;
-        file.write_all(bytes).map_err(failed)?;
-        file.flush().map_err(failed)
+        for chunk in bytes.chunks(1024 * 1024) {
+            live(until)?;
+            file.write_all(chunk).map_err(failed)?;
+        }
+        file.flush().map_err(failed)?;
+        live(until)
     }
 
     #[cfg(test)]
@@ -312,9 +329,13 @@ mod snapshot {
             }
         });
         let main_path = directory.path().join("state_5.sqlite");
-        write_copy(&main_path, &main.bytes)?;
+        write_copy(&main_path, &main.bytes, until)?;
         if let Some(wal) = wal {
-            write_copy(&directory.path().join("state_5.sqlite-wal"), &wal.bytes)?;
+            write_copy(
+                &directory.path().join("state_5.sqlite-wal"),
+                &wal.bytes,
+                until,
+            )?;
         }
         let db = Connection::open_with_flags(
             &main_path,
@@ -391,18 +412,24 @@ mod snapshot {
         ids: &[String],
         until: Instant,
     ) -> SnapshotResult<BTreeMap<String, String>> {
+        if hot_journal(home, until)?.is_some() {
+            return Err(failed("Codex rollback journal is present"));
+        }
         let main = read_source(&home.join("state_5.sqlite"), until)?;
         let size = page_size(&main)?;
         let wal = read_wal(&home.join("state_5.sqlite-wal"), until)?;
         if let Some(source) = &wal {
-            validate_wal(source, size)?;
+            validate_wal(source, size, until)?;
         }
         let paths = query_copy(&main, &wal, ids, until)?;
-        if unchanged(&main, &wal, home, until) {
-            Ok(paths)
-        } else {
-            Err(SnapshotError::Changed)
+        if !unchanged(&main, &wal, home, until) {
+            return Err(SnapshotError::Changed);
         }
+        if hot_journal(home, until)?.is_some() {
+            return Err(failed("Codex rollback journal appeared during its read"));
+        }
+        live(until)?;
+        Ok(paths)
     }
 
     pub(in crate::state) fn rollout_paths(

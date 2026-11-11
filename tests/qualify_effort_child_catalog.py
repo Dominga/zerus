@@ -7,7 +7,6 @@ main+WAL snapshot, without native writes, SQLite locks or sidecar mutations.
 This is not official-agent qualification.
 """
 import argparse
-import contextlib
 import fcntl
 import json
 import os
@@ -74,14 +73,20 @@ def qualify(args):
     hgs_sha256 = native_effort_id.image_digest(test_input.HGS)
     fixture = test_effort.EffortTransport(methodName='runTest')
     fixture.setUp()
+    db = None
     try:
         home = fixture.root / '.codex'
         database = home / 'state_5.sqlite'
         child = home / 'rollout-child.jsonl'
-        with contextlib.closing(sqlite3.connect(database)) as db:
-            db.execute('CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT)')
-            db.execute('INSERT INTO threads VALUES(?,?)', (CHILD, str(child)))
-            db.commit()
+        db = sqlite3.connect(database)
+        assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        db.execute('CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT)')
+        db.commit()
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        db.execute('INSERT INTO threads VALUES(?,?)', (CHILD, str(child)))
+        db.commit()
+        assert CHILD.encode() not in database.read_bytes()
+        assert CHILD.encode() in (home / 'state_5.sqlite-wal').read_bytes()
         fixture.record.update(main_done=True, agent_home=str(home), subagents={CHILD: dict(
             name='Catalog child', state='working', started=1.0, updated=2.0)})
         fixture.write_record()
@@ -117,7 +122,7 @@ def qualify(args):
                     for suffix in ('-wal', '-shm', '-journal')}
         request = fixture.payload('low')
         log = fixture.root / 'native-catalog-opens.log'
-        command = [trace, '-f', '-o', str(log), '-s', '2048',
+        command = [trace, '-f', '-yy', '-o', str(log), '-s', '2048',
                    '-e', 'trace=open,openat,openat2,creat,fcntl,flock,unlink,unlinkat,rename,renameat,renameat2',
                    str(test_input.HGS), 'effort', fixture.name,
                    '--session-id', record['session_id'], '--json']
@@ -128,14 +133,15 @@ def qualify(args):
                          result.stderr)
         fixture.assertLess(log.stat().st_size, 4 * 1024**2)
         prefix = str(home) + '/'
-        opens = [line for line in log.read_text().splitlines() if prefix in line]
+        native = [line for line in log.read_text().splitlines() if prefix in line]
+        opens = [line for line in native if any(call in line for call in ('open(', 'openat(', 'openat2(', 'creat('))]
         fixture.assertTrue(opens, 'no raw native catalog read was observed')
         for line in opens:
             fixture.assertIn('O_RDONLY', line, line)
             fixture.assertFalse(any(flag in line for flag in ('O_WRONLY', 'O_RDWR', 'O_CREAT')), line)
-        lock_calls = [line for line in opens if 'fcntl(' in line or 'flock(' in line]
+        lock_calls = [line for line in native if 'F_SETLK' in line or 'F_OFD_SETLK' in line or 'flock(' in line]
         fixture.assertEqual(lock_calls, [], lock_calls)
-        sidecar_mutations = [line for line in opens
+        sidecar_mutations = [line for line in native
                              if any(call in line for call in ('unlink', 'rename'))]
         fixture.assertEqual(sidecar_mutations, [], sidecar_mutations)
         fixture.assertEqual(signature(database), before['main'])
@@ -163,6 +169,8 @@ def qualify(args):
                     new_keys=0, new_receipts=0,
                     source_bytes_and_sidecar_membership_unchanged=True)
     finally:
+        if db is not None:
+            db.close()
         cleanup(fixture)
 
 

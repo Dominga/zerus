@@ -441,8 +441,10 @@ fn panic_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("state_5.sqlite");
     let db = Connection::open(&database).unwrap();
-    db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT)")
-        .unwrap();
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL; CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT)",
+    )
+    .unwrap();
     drop(db);
     let directories = Rc::new(RefCell::new(Vec::new()));
     let captured = Rc::clone(&directories);
@@ -503,4 +505,135 @@ fn missing_child() {
     assert!(error.contains("absent"), "{error}");
     assert_removed(&directories);
     writer.finish();
+}
+
+#[test]
+fn rollback_mode_and_hot_journals_refuse() {
+    isolated("rollback_mode_main");
+    isolated("hot_journal_present");
+    isolated("hot_journal_appears");
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn rollback_mode_main() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("state_5.sqlite");
+    let db = Connection::open(&database).unwrap();
+    db.execute_batch(
+        "PRAGMA journal_mode=DELETE; CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES(?1,?2)",
+        rusqlite::params![CHILD_ID, "/private/fixture/committed.jsonl"],
+    )
+    .unwrap();
+    drop(db);
+    let main = fs::read(&database).unwrap();
+    assert_ne!(&main[18..20], [2, 2]);
+    assert!(!directory.path().join("state_5.sqlite-journal").exists());
+    let directories = directories();
+    let error = rollout_paths(directory.path(), &[CHILD_ID.into()], until()).unwrap_err();
+    assert!(error.contains("not in WAL mode"), "{error}");
+    assert!(directories.borrow().is_empty());
+    AFTER_DIRECTORY.with(|hook| {
+        hook.borrow_mut().take();
+    });
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn hot_journal_present() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let mut writer = start("positive");
+    fs::write(writer.home.join("state_5.sqlite-journal"), b"hot fixture").unwrap();
+    let directories = directories();
+    let error = rollout_paths(&writer.home, &[CHILD_ID.into()], until()).unwrap_err();
+    assert!(error.contains("rollback journal"), "{error}");
+    assert!(directories.borrow().is_empty());
+    AFTER_DIRECTORY.with(|hook| {
+        hook.borrow_mut().take();
+    });
+    writer.finish();
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn hot_journal_appears() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let mut writer = start("positive");
+    let home = writer.home.clone();
+    let directories = directories();
+    AFTER_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::write(home.join("state_5.sqlite-journal"), b"hot fixture").unwrap();
+        }));
+    });
+    let error = rollout_paths(&writer.home, &[CHILD_ID.into()], until()).unwrap_err();
+    AFTER_READ.with(|hook| {
+        hook.borrow_mut().take();
+    });
+    assert!(error.contains("appeared"), "{error}");
+    assert_removed(&directories);
+    writer.finish();
+}
+
+#[test]
+fn a_large_wal_honors_the_owner_deadline() {
+    isolated("large_wal_deadline");
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn large_wal_deadline() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let database = home.join("state_5.sqlite");
+    let wal_path = home.join("state_5.sqlite-wal");
+    let db = Connection::open(&database).unwrap();
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA wal_autocheckpoint=0;
+        CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT);",
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES(?1,?2)",
+        rusqlite::params![CHILD_ID, "/private/fixture/current.jsonl"],
+    )
+    .unwrap();
+    let main = fs::read(&database).unwrap();
+    for index in 0..7900 {
+        db.execute(
+            "UPDATE threads SET rollout_path=?1",
+            rusqlite::params![format!("/private/fixture/current{}.jsonl", index % 2)],
+        )
+        .unwrap();
+    }
+    let wal = fs::read(&wal_path).unwrap();
+    assert!(wal.len() > 30 * 1024 * 1024 && wal.len() <= MAX_SOURCE as usize);
+    drop(db);
+    fs::write(&database, main).unwrap();
+    fs::write(&wal_path, wal).unwrap();
+    let start = Instant::now();
+    let error =
+        rollout_paths(home, &[CHILD_ID.into()], start + Duration::from_millis(50)).unwrap_err();
+    let elapsed = start.elapsed();
+    println!(
+        "large_wal_deadline_elapsed_ms={}",
+        elapsed.as_secs_f64() * 1000.0
+    );
+    assert!(error.contains("deadline"), "{error}");
+    assert!(elapsed < Duration::from_millis(150), "{elapsed:?}");
 }

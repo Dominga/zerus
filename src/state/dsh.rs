@@ -1308,6 +1308,7 @@ fn inspect_options(args: &[String]) -> Result<(Option<&str>, bool, bool)> {
 /// The host reads of one `current_read` capture share this budget (zerus-a4mub.32), as search-history bounds
 /// one host: a stalled host adds at most about this much to an inspection, which then names nothing.
 const CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(7);
+#[cfg(unix)]
 const CAPTURE_EXPIRED: &str = "The DeepSeek host did not answer the current read in time";
 /// One capture read from the host socket at `path`, ending by `deadline`.
 #[cfg(unix)]

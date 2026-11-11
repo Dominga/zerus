@@ -1048,9 +1048,8 @@ impl Catalog {
         let ready = verified && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
         let coverage = if ready && errors == 0 {
             Coverage::Complete
-        } else if !ready && indexed > 0 && stamp == "absent" {
-            Coverage::Gap
-        } else if ready {
+        } else if ready || (indexed > 0 && stamp == "absent") {
+            // Ready with errors, or an indexed source whose directory is gone.
             Coverage::Gap
         } else {
             Coverage::Partial

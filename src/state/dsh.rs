@@ -1204,9 +1204,40 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
 pub(crate) fn inspect_processes(name: &str) -> Result<Value> {
     inspect_with_processes(name, None, true, false)
 }
+/// `hgs inspect NAME` options: the subagent, whether to list processes and whether to name the current read.
+/// Native DeepSeek has no archives, so `--archive` is refused rather than answered with the live session
+/// (zerus-a4mub.33), as reference details refuse it.
+fn inspect_options(args: &[String]) -> Result<(Option<&str>, bool, bool)> {
+    if args.iter().any(|arg| arg == "--archive") {
+        return Err("DeepSeek archives are unavailable".into());
+    }
+    let agent = args.windows(2).find(|pair| pair[0] == "--agent").map(|pair| pair[1].as_str());
+    Ok((agent, !args.iter().any(|arg| arg == "--skip-processes"), args.iter().any(|arg| arg == "--current-read")))
+}
+/// The host reads of one `current_read` capture share this budget (zerus-a4mub.32), as search-history bounds
+/// one host: a stalled host adds at most about this much to an inspection, which then names nothing.
+const CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(7);
+const CAPTURE_EXPIRED: &str = "The DeepSeek host did not answer the current read in time";
+/// One capture read from the host socket at `path`, ending by `deadline`.
+#[cfg(unix)]
+fn rpc_by(path: &Path, method: &str, params: Value, deadline: std::time::Instant) -> Result<Value> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return Err(CAPTURE_EXPIRED.into());
+    }
+    rpc_at(path, method, params, left)
+}
+#[cfg(not(unix))]
+fn rpc_by(_: &Path, _: &str, _: Value, _: std::time::Instant) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
 fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes: bool, current_read: bool) -> Result<Value> {
     let record = binding(name)?;
-    inspect_record(name, &record, agent_id, include_processes, current_read, &mut |method, params| rpc(&record, method, params))
+    let socket = host_dir(&record).join("host.sock");
+    let deadline = std::time::Instant::now() + CAPTURE_BUDGET;
+    inspect_record(name, &record, agent_id, include_processes, current_read,
+        &mut |method, params| rpc_by(&socket, method, params, deadline),
+        &mut |method, params| rpc(&record, method, params))
 }
 /// `hgs read`'s own view of a DeepSeek session (`snapshot`) and the host list
 /// it came from, for `current_read` (zerus-a4mub.24). The inspection captures
@@ -1214,10 +1245,22 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
 /// settled response, committed at `turn/end` after the turn's final message,
 /// so that message is in the page or an earlier one. Its requests are signed
 /// through `attention_id` before the page lists its own, so every signed
-/// request still pending is listed. None when the host cannot list.
-fn read_capture(record: &Value, rpc: &mut dyn FnMut(&str, Value) -> Result<Value>) -> Option<(Value, Value)> {
-    let list = rpc("list", json!({})).ok()?;
-    Some((snapshot_with(record, &list, rpc), list))
+/// request still pending is listed. `capture` reads the host within the
+/// capture's own deadline (zerus-a4mub.32). None when any of its reads fails,
+/// including an idle row's failure read: a view missing that failure would
+/// sign what `hgs read` may not accept.
+fn read_capture(record: &Value, capture: &mut dyn FnMut(&str, Value) -> Result<Value>) -> Option<(Value, Value)> {
+    let failed = std::cell::Cell::new(false);
+    let mut checked = |method: &str, params: Value| {
+        let answer = capture(method, params);
+        if answer.is_err() {
+            failed.set(true);
+        }
+        answer
+    };
+    let list = checked("list", json!({})).ok()?;
+    let view = snapshot_with(record, &list, &mut checked);
+    (!failed.get()).then_some((view, list))
 }
 /// The values `hgs read` would accept now from a `read_capture`, only for
 /// the host generation that served the inspection's page. As `hgs read`, the
@@ -1232,11 +1275,12 @@ fn current_read_of(name: &str, record: &Value, (view, list): (Value, Value), ins
     let known = row.is_some_and(|row| row["pendingQuestions"].is_array());
     read_marks::native_current_read(name, view, known.then_some(&[][..]))
 }
+/// One inspection: `capture` serves the bounded `current_read` capture, `rpc` the inspection's own reads.
 fn inspect_record(name: &str, record: &Value, agent_id: Option<&str>, include_processes: bool, current_read: bool,
-    rpc: &mut dyn FnMut(&str, Value) -> Result<Value>) -> Result<Value> {
+    capture: &mut dyn FnMut(&str, Value) -> Result<Value>, rpc: &mut dyn FnMut(&str, Value) -> Result<Value>) -> Result<Value> {
     let record = record.clone();
     // Only a main inspection names what a read mark may acknowledge.
-    let read = if current_read && agent_id.is_none() { read_capture(&record, rpc) } else { None };
+    let read = if current_read && agent_id.is_none() { read_capture(&record, capture) } else { None };
     let inspected = rpc(
         "inspect",
         json!({"sessionId":record["conversation_id"],"agentId":agent_id,"includeProcesses":include_processes}),
@@ -1590,12 +1634,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let mut record = binding(name)?;
     match command {
         "inspect" => {
-            let agent = args
-                .windows(2)
-                .find(|p| p[0] == "--agent")
-                .map(|p| p[1].as_str());
-            let current_read = args.iter().any(|s| s == "--current-read");
-            println!("{}", inspect_with_processes(name, agent, !args.iter().any(|s|s=="--skip-processes"), current_read)?);
+            let (agent, include_processes, current_read) = inspect_options(args)?;
+            println!("{}", inspect_with_processes(name, agent, include_processes, current_read)?);
         }
         "compact-context" => {
             let request = checked_request(&record)?;
@@ -1930,14 +1970,29 @@ mod current_read_tests {
             "page":{"records":[],"hasMore":false},
             "pendingQuestions":questions.iter().map(|id| json!({"id":id,"questions":[]})).collect::<Vec<_>>()})
     }
-    /// Inspects through a scripted host: each method answers from its queue.
-    fn inspect(current_read: bool, agent: Option<&str>, mut answers: BTreeMap<&'static str, Vec<Result<Value>>>) -> (Result<Value>, Vec<String>) {
-        let mut called = Vec::new();
-        let result = inspect_record(NAME, &record(), agent, false, current_read, &mut |method, _| {
-            called.push(method.to_owned());
-            answers.get_mut(method).filter(|queue| !queue.is_empty()).map_or_else(|| Err("not scripted".into()), |queue| queue.remove(0))
-        });
-        (result, called)
+    type Script = BTreeMap<&'static str, Vec<Result<Value>>>;
+    /// Inspects through a scripted host: each method answers from its queue. Reads through the capture seam
+    /// are logged as `capture:METHOD`; `captured` answers them, else the shared `answers`.
+    fn inspect_with(current_read: bool, agent: Option<&str>, answers: Script, captured: Script) -> (Result<Value>, Vec<String>) {
+        let log = std::cell::RefCell::new(Vec::new());
+        let answers = std::cell::RefCell::new(answers);
+        let captured = std::cell::RefCell::new(captured);
+        let answer = |script: &std::cell::RefCell<Script>, method: &str| {
+            script.borrow_mut().get_mut(method).filter(|queue| !queue.is_empty()).map(|queue| queue.remove(0))
+        };
+        let result = inspect_record(NAME, &record(), agent, false, current_read,
+            &mut |method, _| {
+                log.borrow_mut().push(format!("capture:{method}"));
+                answer(&captured, method).or_else(|| answer(&answers, method)).unwrap_or_else(|| Err("not scripted".into()))
+            },
+            &mut |method, _| {
+                log.borrow_mut().push(method.to_owned());
+                answer(&answers, method).unwrap_or_else(|| Err("not scripted".into()))
+            });
+        (result, log.into_inner())
+    }
+    fn inspect(current_read: bool, agent: Option<&str>, answers: Script) -> (Result<Value>, Vec<String>) {
+        inspect_with(current_read, agent, answers, Script::new())
     }
 
     #[test]
@@ -1956,9 +2011,10 @@ mod current_read_tests {
         ]);
         let (shown, called) = inspect(true, None, script());
         let shown = shown.unwrap();
-        // The capture is the first host read; then the page, then the inspection's own list.
-        assert_eq!(called[..3], ["list", "inspect", "list"]);
-        assert_eq!(called.iter().filter(|m| *m == "list" || *m == "inspect").count(), 3);
+        // The capture is the first host read, through its own bounded seam; then the page, then the
+        // inspection's own list.
+        assert_eq!(called[..3], ["capture:list", "inspect", "list"]);
+        assert_eq!(called.iter().filter(|m| m.ends_with("list") || m.ends_with("inspect")).count(), 3);
         let current = &shown["current_read"];
         let view = snapshot_from(&record(), &before);
         assert_eq!(current["reply_id"], "dsh-turn-3");
@@ -1977,11 +2033,13 @@ mod current_read_tests {
         let (plain, called) = inspect(false, None, script());
         assert!(plain.unwrap().get("current_read").is_none());
         assert_eq!(called[..2], ["inspect", "list"]);
-        assert_eq!(called.iter().filter(|m| *m == "list").count(), 1);
+        assert_eq!(called.iter().filter(|m| m.ends_with("list")).count(), 1);
+        assert!(!called.iter().any(|m| m.starts_with("capture:")));
         // A subagent inspection names nothing.
         let (child, called) = inspect(true, Some("child-1"), script());
         assert!(child.unwrap().get("current_read").is_none());
         assert_eq!(called[0], "inspect");
+        assert!(!called.iter().any(|m| m.starts_with("capture:")));
 
         // Another host generation served the page: nothing is claimed.
         let (changed, _) = inspect(true, None, BTreeMap::from([
@@ -2007,6 +2065,57 @@ mod current_read_tests {
             assert_eq!(current["attention_complete"], false, "{unknown}");
             assert!(!read_marks::accepts(&snapshot_from(&record(), &unknown), Some(&[]), &current).1, "{unknown}");
         }
+        // zerus-a4mub.32: an idle row's failure read is part of the capture, through the same bounded seam.
+        // When it fails or its deadline passes, the view would miss a failure hgs read may see: nothing is
+        // claimed, and the inspection still answers.
+        // A successful failure read is cached by its stamp; each case has its own update time.
+        let idle_row = |updated: f64| { let mut row = row(&[3], Some(&[])); row["running"] = json!(false); row["updatedAt"] = json!(updated); row };
+        let failure_page = json!({"generation":"host-1","page":{"records":[]}});
+        for (updated, failure, named) in [(2_000_000.0, Ok(failure_page), true),
+            (3_000_000.0, Err("The DeepSeek host did not answer the current read in time".into()), false)] {
+            let idle_list = list("host-1", vec![idle_row(updated)]);
+            let (shown, called) = inspect_with(true, None,
+                BTreeMap::from([("list", vec![Ok(idle_list.clone())]), ("inspect", vec![Ok(page("host-1", &[3], &[]))])]),
+                BTreeMap::from([("list", vec![Ok(idle_list.clone())]), ("inspect", vec![failure])]));
+            assert_eq!(called[..4], ["capture:list", "capture:inspect", "inspect", "list"]);
+            assert_eq!(shown.unwrap().get("current_read").is_some(), named);
+        }
+
+        // zerus-a4mub.32 end to end, through the production seams: a host that never answers the capture's
+        // list (holding it past the ordinary read timeout) costs about the capture budget, and the inspection
+        // still answers, without current_read.
+        let mut bound = record();
+        bound["session_id"] = json!("11111111-1111-4111-8111-111111111111");
+        bound["cwd"] = json!("/nonexistent/workspace");
+        bound["created"] = json!(1.0);
+        save(&mut bound).unwrap();
+        let socket = host_dir(&bound).join("host.sock");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let host = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let served = page("host-1", &[3], &[]);
+        let listed = list("host-1", vec![row(&[3], Some(&[]))]);
+        std::thread::spawn(move || {
+            let mut lists = 0;
+            for stream in host.incoming().flatten() {
+                let mut line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut line).is_err() { continue; }
+                let method = serde_json::from_str::<Value>(&line).map(|request| string(&request, "method").to_owned()).unwrap_or_default();
+                let value = match method.as_str() {
+                    "list" => { lists += 1; if lists == 1 { std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(45)); drop(stream) }); continue; } listed.clone() }
+                    "inspect" => served.clone(),
+                    _ => { let _ = writeln!(&stream, "{}", json!({"ok":false,"error":"not scripted"})); continue; }
+                };
+                let _ = writeln!(&stream, "{}", json!({"ok":true,"value":value}));
+            }
+        });
+        let started = Instant::now();
+        let shown = inspect_with_processes(NAME, None, false, true).unwrap();
+        let elapsed = started.elapsed();
+        assert!(shown.get("current_read").is_none());
+        assert_eq!(shown["reply_id"], "dsh-turn-3");
+        assert!(elapsed >= CAPTURE_BUDGET - Duration::from_millis(500) && elapsed < CAPTURE_BUDGET + Duration::from_secs(5), "{elapsed:?}");
+
         // No request pending: nothing to sign, and the reply still applies.
         let idle = list("host-1", vec![row(&[3], Some(&[]))]);
         let (shown, _) = inspect(true, None, BTreeMap::from([
@@ -2016,6 +2125,41 @@ mod current_read_tests {
         let current = shown.unwrap()["current_read"].clone();
         assert_eq!((current["attention_signature"].clone(), current["attention_complete"].clone()), (Value::Null, json!(true)));
         assert_eq!(read_marks::accepts(&snapshot_from(&record(), &idle), Some(&[]), &current), (true, false));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod current_read_bounds {
+    use super::*;
+
+    /// zerus-a4mub.32: the capture's host reads share one short deadline; a stalled host costs at most about that.
+    #[test]
+    fn a_capture_read_ends_by_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // A host that accepts and never answers.
+        let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| { std::thread::sleep(Duration::from_secs(4)); drop(stream) }));
+        let started = Instant::now();
+        assert!(rpc_by(&path, "list", json!({}), started + Duration::from_millis(300)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        // An expired deadline never reaches the host.
+        assert_eq!(rpc_by(&dir.path().join("absent.sock"), "list", json!({}), Instant::now()).unwrap_err(), CAPTURE_EXPIRED);
+        assert!(CAPTURE_BUDGET <= Duration::from_secs(7));
+        held.join().unwrap().unwrap();
+    }
+
+    /// zerus-a4mub.33: DeepSeek has no archive inspection; the arm refuses it rather than inspecting the live session.
+    #[test]
+    fn inspect_refuses_an_archive_and_reads_its_options() {
+        let args = |list: &[&str]| list.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        for refused in [args(&["dsh/project/a", "--archive", "11111111-1111-4111-8111-111111111111"]),
+            args(&["dsh/project/a", "--current-read", "--archive", "11111111-1111-4111-8111-111111111111"])] {
+            assert_eq!(inspect_options(&refused).unwrap_err(), "DeepSeek archives are unavailable");
+        }
+        assert_eq!(inspect_options(&args(&["dsh/project/a"])).unwrap(), (None, true, false));
+        assert_eq!(inspect_options(&args(&["dsh/project/a", "--skip-processes", "--current-read"])).unwrap(), (None, false, true));
+        assert_eq!(inspect_options(&args(&["dsh/project/a", "--agent", "child-1"])).unwrap(), (Some("child-1"), true, false));
     }
 }
 

@@ -1096,6 +1096,17 @@ class NativeHarness(unittest.TestCase):
             self.rpc('answer', {'sessionId':b['conversation_id'],'id':question['question_id'],
                                 'generation':data['host_generation'],'answers':[]})
 
+    def test_inspect_refuses_an_archive_instead_of_the_live_session(self):
+        """zerus-a4mub.33: DeepSeek has no archive inspection, with or without --current-read."""
+        b = self.create()
+        archive = str(uuid.uuid4())
+        for extra in ([], ['--current-read']):
+            proc = self.hgs('inspect', b['name'], '--archive', archive, *extra)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn('DeepSeek archives are unavailable', proc.stderr)
+            self.assertNotIn('current_read', proc.stdout)
+        self.assertEqual(self.cli('inspect', b)['conversation_id'], b['conversation_id'])
+
     def test_current_read_names_what_read_accepts_from_the_list_read_before_the_page(self):
         """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts,
         from the host list read before the page, and inspecting acknowledges nothing."""

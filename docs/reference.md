@@ -6659,9 +6659,14 @@ read` compares a mark with for that provider, owned by the session's name.
 - DeepSeek captures that view from one extra host `list` before it reads the
   page it shows. Its reply is the turn outline's settled response, which the
   host commits at `turn/end` after the turn's final message. Its requests are
-  signed through `attention_id` before the page lists its own. The field is
-  absent when that list fails or another host generation served the page. A
-  host row without its pending requests leaves `attention_complete` false.
+  signed through `attention_id` before the page lists its own. The capture's
+  host reads, including an idle row's failure read, share a 7-second budget,
+  so a stalled host delays the inspection by at most about that much. The
+  field is absent when any of those reads fails or runs out of time, or when
+  another host generation served the page. A host row without its pending
+  requests leaves `attention_complete` false. DeepSeek has no archive
+  inspection: `hgs inspect NAME --archive ID` refuses with "DeepSeek archives
+  are unavailable" instead of answering for the live session.
 - OpenCode names the observation it shows: the forms and permissions it lists
   and the newest completed reply of its history, never a streaming one. A row
   without an observation (no service, a failed read, an OpenCode 1 binding) has

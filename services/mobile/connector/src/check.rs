@@ -239,7 +239,7 @@ fn journal(path: &Path, binding: &str, lock: LockState) -> Value {
 }
 
 struct Contents {
-    objects: Vec<(String, String)>,
+    objects: Vec<(String, String, Option<String>)>,
     binding: Option<String>,
     columns: BTreeSet<String>,
     counts: Vec<(String, i64, i64)>,
@@ -254,14 +254,14 @@ fn read_journal(path: &Path) -> rusqlite::Result<Contents> {
     let db = Connection::open_with_flags(path, flags)?;
     db.busy_timeout(Duration::from_secs(5))?;
     let tx = db.unchecked_transaction()?;
-    let objects: Vec<(String, String)> = tx
-        .prepare("SELECT type, name FROM sqlite_master ORDER BY rowid")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let objects: Vec<(String, String, Option<String>)> = tx
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY rowid")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let has = |name: &str| {
         objects
             .iter()
-            .any(|(kind, object)| kind == "table" && object == name)
+            .any(|(kind, object, _)| kind == "table" && object == name)
     };
     let binding = if has("metadata") {
         tx.query_row(
@@ -296,19 +296,100 @@ fn read_journal(path: &Path) -> rusqlite::Result<Contents> {
     })
 }
 
+const ENCRYPTED_OBJECTS: [(&str, &str, Option<&str>); 14] = [
+    (
+        "table",
+        "encrypted_requests",
+        Some(
+            "CREATE TABLE encrypted_requests (
+            request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, header TEXT NOT NULL,
+            result TEXT, delivered INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL, read_cache_class INTEGER NOT NULL DEFAULT 0)",
+        ),
+    ),
+    ("index", "sqlite_autoindex_encrypted_requests_1", None),
+    (
+        "index",
+        "encrypted_pending",
+        Some("CREATE INDEX encrypted_pending ON encrypted_requests(delivered,request_id)"),
+    ),
+    (
+        "index",
+        "encrypted_payload_retention",
+        Some("CREATE INDEX encrypted_payload_retention ON encrypted_requests(updated_at,request_id) WHERE delivered=1 AND result IS NOT NULL"),
+    ),
+    (
+        "table",
+        "encrypted_snapshots",
+        Some(
+            "CREATE TABLE encrypted_snapshots (
+            slot TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, envelope TEXT NOT NULL)",
+        ),
+    ),
+    ("index", "sqlite_autoindex_encrypted_snapshots_1", None),
+    (
+        "table",
+        "encrypted_usage",
+        Some(
+            "CREATE TABLE encrypted_usage (
+            id INTEGER PRIMARY KEY CHECK(id=1), identities INTEGER NOT NULL,
+            result_bytes INTEGER NOT NULL,snapshots INTEGER NOT NULL,snapshot_bytes INTEGER NOT NULL)",
+        ),
+    ),
+    (
+        "index",
+        "encrypted_read_classify",
+        Some("CREATE INDEX encrypted_read_classify ON encrypted_requests(updated_at,request_id) WHERE read_cache_class=0 AND delivered=1 AND result IS NOT NULL"),
+    ),
+    (
+        "index",
+        "encrypted_read_pressure",
+        Some("CREATE INDEX encrypted_read_pressure ON encrypted_requests(updated_at,request_id) WHERE read_cache_class=1 AND delivered=1 AND result IS NOT NULL"),
+    ),
+    (
+        "trigger",
+        "encrypted_request_admit",
+        Some("CREATE TRIGGER encrypted_request_admit AFTER INSERT ON encrypted_requests BEGIN UPDATE encrypted_usage SET identities=identities+1,result_bytes=result_bytes+coalesce(length(new.result),0) WHERE id=1; END"),
+    ),
+    (
+        "trigger",
+        "encrypted_request_result",
+        Some("CREATE TRIGGER encrypted_request_result AFTER UPDATE OF result ON encrypted_requests BEGIN UPDATE encrypted_usage SET result_bytes=result_bytes+coalesce(length(new.result),0)-coalesce(length(old.result),0) WHERE id=1; END"),
+    ),
+    (
+        "trigger",
+        "encrypted_snapshot_admit",
+        Some("CREATE TRIGGER encrypted_snapshot_admit AFTER INSERT ON encrypted_snapshots BEGIN UPDATE encrypted_usage SET snapshots=snapshots+1,snapshot_bytes=snapshot_bytes+length(new.envelope) WHERE id=1; END"),
+    ),
+    (
+        "trigger",
+        "encrypted_snapshot_replace",
+        Some("CREATE TRIGGER encrypted_snapshot_replace AFTER UPDATE OF envelope ON encrypted_snapshots BEGIN UPDATE encrypted_usage SET snapshot_bytes=snapshot_bytes+length(new.envelope)-length(old.envelope) WHERE id=1; END"),
+    ),
+    (
+        "trigger",
+        "encrypted_snapshot_remove",
+        Some("CREATE TRIGGER encrypted_snapshot_remove AFTER DELETE ON encrypted_snapshots BEGIN UPDATE encrypted_usage SET snapshots=snapshots-1,snapshot_bytes=snapshot_bytes-length(old.envelope) WHERE id=1; END"),
+    ),
+];
+
+fn schema_sql(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl Contents {
     fn describe(&self, binding: &str) -> Value {
         let tables: BTreeSet<&str> = self
             .objects
             .iter()
-            .filter(|(kind, _)| kind == "table")
-            .map(|(_, name)| name.as_str())
+            .filter(|(kind, _, _)| kind == "table")
+            .map(|(_, name, _)| name.as_str())
             .collect();
         let indexes: BTreeSet<&str> = self
             .objects
             .iter()
-            .filter(|(kind, _)| kind == "index")
-            .map(|(_, name)| name.as_str())
+            .filter(|(kind, _, _)| kind == "index")
+            .map(|(_, name, _)| name.as_str())
             .collect();
         let mut pending = Vec::new();
         if !tables.contains("metadata") {
@@ -336,13 +417,41 @@ impl Contents {
         ]
         .into_iter()
         .chain(INDEXES.iter().map(|(name, _)| *name))
+        .chain(ENCRYPTED_OBJECTS.iter().map(|(_, name, _)| *name))
         .collect();
-        let unexpected: Vec<&str> = self
+        let encrypted = self.objects.iter().any(|(_, name, _)| {
+            ENCRYPTED_OBJECTS
+                .iter()
+                .any(|(_, expected, _)| name == expected)
+        });
+        let mut unexpected: Vec<&str> = self
             .objects
             .iter()
-            .map(|(_, name)| name.as_str())
+            .map(|(_, name, _)| name.as_str())
             .filter(|name| !known.contains(name))
             .collect();
+        if encrypted {
+            for &(kind, name, definition) in &ENCRYPTED_OBJECTS {
+                let found = self
+                    .objects
+                    .iter()
+                    .any(|(actual_kind, actual_name, actual_sql)| {
+                        if actual_kind != kind || actual_name != name {
+                            return false;
+                        }
+                        match (definition, actual_sql) {
+                            (Some(expected), Some(actual)) => {
+                                schema_sql(expected) == schema_sql(actual)
+                            }
+                            (None, None) => true,
+                            _ => false,
+                        }
+                    });
+                if !found {
+                    unexpected.push(name);
+                }
+            }
+        }
         let schema = if !tables.contains("requests") {
             "uninitialized"
         } else if pending.is_empty() {
@@ -573,5 +682,66 @@ pub fn run(path: &Path, allow_insecure_localhost: bool, as_json: bool) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::Journal;
+
+    fn initialized_encrypted() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let journal = Journal::open(&state, "protected", 1.0).unwrap();
+        journal.encrypted_init(1.0).unwrap();
+        drop(journal);
+        let path = state.join(JOURNAL);
+        (directory, path)
+    }
+
+    #[test]
+    fn an_initialized_encrypted_journal_passes_the_read_only_check() {
+        let (_directory, path) = initialized_encrypted();
+        let before = std::fs::read(&path).unwrap();
+        let report = journal(&path, "protected", LockState::Absent);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(report["schema"], "current");
+        assert_eq!(report["binding"], "matches");
+        assert_eq!(report["unexpected_objects"], json!([]));
+        assert_eq!(report["ok"], true, "{report}");
+    }
+
+    #[test]
+    fn an_unexpected_object_still_refuses_an_encrypted_journal() {
+        let (_directory, path) = initialized_encrypted();
+        let db = Connection::open(&path).unwrap();
+        db.execute("CREATE TABLE alien_object (id INTEGER)", [])
+            .unwrap();
+        drop(db);
+        let report = journal(&path, "protected", LockState::Absent);
+        assert_eq!(report["unexpected_objects"], json!(["alien_object"]));
+        assert_eq!(report["ok"], false, "{report}");
+    }
+
+    #[test]
+    fn a_changed_encrypted_trigger_definition_is_refused() {
+        let (_directory, path) = initialized_encrypted();
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "DROP TRIGGER encrypted_request_admit;
+            CREATE TRIGGER encrypted_request_admit AFTER INSERT ON encrypted_requests BEGIN UPDATE encrypted_usage SET identities=identities+2 WHERE id=1; END;",
+        )
+        .unwrap();
+        drop(db);
+        let report = journal(&path, "protected", LockState::Absent);
+        assert!(
+            report["unexpected_objects"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("encrypted_request_admit")),
+            "{report}"
+        );
+        assert_eq!(report["ok"], false, "{report}");
     }
 }

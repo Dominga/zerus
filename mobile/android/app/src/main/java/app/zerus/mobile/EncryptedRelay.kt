@@ -213,7 +213,7 @@ internal suspend fun RelayApi.encryptedEvents(connection:Connection,after:Long,w
     return WorkspaceNotifications.events(connection,records,page,after,System.currentTimeMillis()/1000.0)
 }
 
-internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObject,attempt:SendAttempt?=null):JSONObject=withContext(Dispatchers.IO) {
+internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObject,attempt:SendAttempt):JSONObject=withContext(Dispatchers.IO) {
     val state=synchronizeWorkspace(connection);val membership=state.requireActive();val journal=journal()
     val id=WorkspaceProtocol.string(body,"request_id");WorkspaceProtocol.identifier(id)
     val computer=WorkspaceProtocol.string(body,"computer_id");val previous=journal.recordedRequest(connection,id)

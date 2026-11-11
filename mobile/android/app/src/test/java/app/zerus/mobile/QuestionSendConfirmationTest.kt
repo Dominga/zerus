@@ -213,7 +213,7 @@ class QuestionSendConfirmationTest {
                 gate.confirm(pending, pending.matches(target, 1, question, draft))?.let { approved ->
                     api.submit(connection, approved.target, "answer", approved.target.json().put("request_id", "request")
                         .put("question_id", approved.question.id).put("expected_question_hash", approved.question.hash)
-                        .put("answers", JSONArray(approved.answers)), "request")
+                        .put("answers", JSONArray(approved.answers)), "request", SendAttempt())
                 }
             }
             assertEquals(1, server.requestCount)

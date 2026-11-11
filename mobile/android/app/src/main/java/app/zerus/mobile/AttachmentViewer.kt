@@ -264,7 +264,7 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
                 val id = UUID.randomUUID().toString()
                 val receipt = try {
                     api.await(gateway, api.submit(gateway, target, AttachmentIdentity.OPERATION,
-                        AttachmentIdentity.payload(target, file, id, offset, length), id), maxPolls = 150, pollDelayMs = 300)
+                        AttachmentIdentity.payload(target, file, id, offset, length), id, SendAttempt()), maxPolls = 150, pollDelayMs = 300)
                 } catch (error: RelayException) { throw AttachmentOpenException(AttachmentIdentity.relayFailure(error.status)) }
                 if (receipt.string("state") != "completed" || receipt.optJSONObject("result") == null)
                     throw AttachmentOpenException(AttachmentIdentity.failure(receipt))

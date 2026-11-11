@@ -199,7 +199,7 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     private suspend fun request(connection: Connection, computerId: String, operation: String, payload: JSONObject, maxPolls: Int = 80): JSONObject {
         val relay = api()
         val target = Target(computerId, "", "", "", connection.id)
-        return relay.await(connection, relay.submit(connection, target, operation, payload, UUID.randomUUID().toString()),
+        return relay.await(connection, relay.submit(connection, target, operation, payload, UUID.randomUUID().toString(), SendAttempt()),
             maxPolls = maxPolls, pollDelayMs = 400)
     }
 

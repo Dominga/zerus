@@ -23,7 +23,10 @@ import sys
 import time
 import uuid
 
-CASES = ("testReadableVisibilityDrivesTheReadDwellOnScreen",)
+CASES = (
+    "test1TheOpeningReplyIsReadAfterTheDwell", "test2ASliverIsNotReadButTheWholeRowIs",
+    "test3TheQuestionsPaneCountsFromItsReadablePart",
+)
 
 
 def results(text):

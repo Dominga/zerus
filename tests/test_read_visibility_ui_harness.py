@@ -16,7 +16,8 @@ import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-CASE = "testReadableVisibilityDrivesTheReadDwellOnScreen"
+CASES = ("test1TheOpeningReplyIsReadAfterTheDwell", "test2ASliverIsNotReadButTheWholeRowIs",
+         "test3TheQuestionsPaneCountsFromItsReadablePart")
 
 
 def module(name, path):
@@ -38,12 +39,13 @@ def native_log(*cases, passed=True, succeeded=True, extra=""):
 
 
 class ReadVisibilityHarness(unittest.TestCase):
-    def test_result_requires_the_one_native_case_once(self):
+    def test_result_requires_each_native_case_once(self):
         ios = module("ios_read_visibility_ui", "scripts/ci/ios-read-visibility-ui.py")
-        self.assertEqual(ios.CASES, (CASE,))
-        self.assertEqual(ios.results(native_log(CASE)), {"started": [CASE], "passed": [CASE], "failed": 0, "skipped": 0})
-        for text in (native_log(), native_log(CASE, CASE), native_log("testSomethingElse"), native_log(CASE, passed=False),
-                     native_log(CASE, succeeded=False), native_log(CASE, extra="Test Case '-[X y]' skipped (0.1 seconds).")):
+        self.assertEqual(ios.CASES, CASES)
+        self.assertEqual(ios.results(native_log(*CASES)), {"started": list(CASES), "passed": list(CASES), "failed": 0, "skipped": 0})
+        for text in (native_log(), native_log(*CASES[:2]), native_log(*CASES, CASES[0]), native_log(*CASES[:2], "testSomethingElse"),
+                     native_log(*CASES, passed=False), native_log(*CASES, succeeded=False),
+                     native_log(*CASES, extra="Test Case '-[X y]' skipped (0.1 seconds).")):
             with self.subTest(text=text), self.assertRaises(AssertionError):
                 ios.results(text)
 
@@ -68,7 +70,8 @@ class ReadVisibilityHarness(unittest.TestCase):
                 self.assertIn(old, expected)
                 expected = expected.replace(old, new)
         # The case inventory and its counted assertions are the only other difference.
-        expected = re.sub(r"CASES = \(\n.*?\n\)\n", "CASES = (\"" + CASE + "\",)\n", expected, flags=re.S)
+        expected = re.sub(r"CASES = \(\n.*?\n\)\n", "CASES = (\n    \"" + "\", \"".join(CASES[:2]) + "\",\n    \"" + CASES[2] + "\",\n)\n",
+                          expected, flags=re.S)
         expected = expected.replace("ApprovalChoicesUITests", "ReadVisibilityUITests")
         expected = expected.replace('== 7, "no additional native tests"', '== len(CASES), "no additional native tests"')
         expected = expected.replace("passed \\([0-9.]+ seconds\\)\\.\", text)) == 7", "passed \\([0-9.]+ seconds\\)\\.\", text)) == len(CASES)")
@@ -115,7 +118,7 @@ class ReadVisibilityHarness(unittest.TestCase):
 
     def test_fixture_drives_production_placement_and_holds_no_live_client(self):
         tests = (ROOT / "mobile/ios/ReadVisibilityUIFixture/ReadVisibilityUITests.swift").read_text()
-        self.assertEqual(re.findall(r"func (test\w+)\(", tests), [CASE])
+        self.assertEqual(re.findall(r"func (test\w+)\(", tests), list(CASES))
         app = (ROOT / "mobile/ios/ReadVisibilityUIFixture/ReadVisibilityUIFixtureApp.swift").read_text()
         for production in ("ConversationReadLayout()", ".readingItem(", "ConversationReadViewport.eventIds(",
                            "ConversationReadViewport.flags(", "ConversationReadPolicies.lowerBound(", ".milliseconds(350)"):

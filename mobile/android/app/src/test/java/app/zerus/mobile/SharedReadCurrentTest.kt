@@ -56,9 +56,27 @@ class SharedReadCurrentTest {
         assertTrue(viewports.length()>=8)
         for(i in 0 until viewports.length()) {
             val case=viewports.getJSONObject(i)
-            val shown=SharedReadPolicies.currentShown(case.getBoolean("latest"),case.getBoolean("tail_visible"),case.getBoolean("newest_visible"),
-                case.getBoolean("questions_listed"),case.getBoolean("questions_visible"))
+            val shown=SharedReadPolicies.currentShown(latest=case.getBoolean("latest"),questionsListed=case.getBoolean("questions_listed"),
+                flags=ConversationViewport.CurrentFlags(case.getBoolean("tail_visible"),case.getBoolean("newest_visible"),case.getBoolean("questions_visible")))
             assertEquals(case.getString("name"),case.getBoolean("reply_shown") to case.getBoolean("attention_shown"),shown)
+        }
+    }
+
+    /** zerus-a4mub.30: the settled layout reaches the flags, and the flags the decision, exactly as shared. */
+    @Test fun everySharedLayoutMapsToItsFlagsAndDecision() {
+        val layouts=fixture().getJSONArray("layouts")
+        assertTrue(layouts.length()>=10)
+        val eventId={ key:String -> key.takeIf { it.startsWith("event:") }?.removePrefix("event:") }
+        for(i in 0 until layouts.length()) {
+            val case=layouts.getJSONObject(i);val name=case.getString("name")
+            val viewport=case.getJSONArray("viewport")
+            val items=case.getJSONArray("items").let { array -> (0 until array.length()).map { array.getJSONObject(it) }
+                .map { ConversationViewport.Item(it.getString("key"),it.getInt("offset"),it.getInt("size")) } }
+            val flags=ConversationViewport.currentFlags(items,viewport.getInt(0),viewport.getInt(1),case.getString("newest"),eventId)
+            val expected=case.getJSONObject("flags")
+            assertEquals(name,ConversationViewport.CurrentFlags(expected.getBoolean("tail"),expected.getBoolean("newest"),expected.getBoolean("questions")),flags)
+            val shown=SharedReadPolicies.currentShown(latest=case.getBoolean("latest"),questionsListed=case.getBoolean("questions_listed"),flags=flags)
+            assertEquals(name,case.getBoolean("reply_shown") to case.getBoolean("attention_shown"),shown)
         }
     }
 

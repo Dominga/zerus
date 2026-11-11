@@ -56,11 +56,29 @@ final class SharedReadCurrentTests: XCTestCase {
         let viewports = try fixture().objects("viewports")
         XCTAssertGreaterThanOrEqual(viewports.count, 8)
         for item in viewports {
-            let shown = SharedReadPolicies.currentShown(latest: item.bool("latest"), tailVisible: item.bool("tail_visible"),
-                                                        newestVisible: item.bool("newest_visible"), questionsListed: item.bool("questions_listed"),
-                                                        questionsVisible: item.bool("questions_visible"))
+            let flags = CurrentReadFlags(tail: item.bool("tail_visible"), newest: item.bool("newest_visible"), questions: item.bool("questions_visible"))
+            let shown = SharedReadPolicies.currentShown(latest: item.bool("latest"), questionsListed: item.bool("questions_listed"), flags: flags)
             XCTAssertEqual(shown.reply, item.bool("reply_shown"), item.string("name"))
             XCTAssertEqual(shown.attention, item.bool("attention_shown"), item.string("name"))
+        }
+    }
+
+    /// zerus-a4mub.30: the visible ids reach the flags, and the flags the decision, exactly as shared.
+    func testEverySharedLayoutMapsToItsFlagsAndDecision() throws {
+        let layouts = try fixture().objects("layouts")
+        XCTAssertGreaterThanOrEqual(layouts.count, 10)
+        for item in layouts {
+            let name = item.string("name")
+            let visible = (item["visible"]?.array ?? []).compactMap { value -> String? in
+                if case .string(let text) = value { return text }
+                return nil
+            }
+            let flags = ConversationReadViewport.flags(visible: visible, newestId: item.string("newest"))
+            let expected = try XCTUnwrap(item.object("flags"), name)
+            XCTAssertEqual(flags, CurrentReadFlags(tail: expected.bool("tail"), newest: expected.bool("newest"), questions: expected.bool("questions")), name)
+            let shown = SharedReadPolicies.currentShown(latest: item.bool("latest"), questionsListed: item.bool("questions_listed"), flags: flags)
+            XCTAssertEqual(shown.reply, item.bool("reply_shown"), name)
+            XCTAssertEqual(shown.attention, item.bool("attention_shown"), name)
         }
     }
 

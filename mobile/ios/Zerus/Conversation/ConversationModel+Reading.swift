@@ -304,10 +304,9 @@ extension ConversationModel {
     /// After the settled visibility dwell, acknowledges what the open conversation showed of its current inspection:
     /// the reply once its tail or newest row was visible, the attention once its questions were (without questions,
     /// once the same tail or newest row was). `key` is `currentReadKey` as the dwell saw it.
-    func visibleCurrent(_ target: Target, key: String, tailVisible: Bool, newestVisible: Bool, questionsVisible: Bool) {
+    func visibleCurrent(_ target: Target, key: String, flags: CurrentReadFlags) {
         guard let current = currentRead(target), key == currentReadKey(current) else { return }
-        let shown = SharedReadPolicies.currentShown(latest: !hasNewer, tailVisible: tailVisible, newestVisible: newestVisible,
-                                                    questionsListed: !questions.isEmpty, questionsVisible: questionsVisible)
+        let shown = SharedReadPolicies.currentShown(latest: !hasNewer, questionsListed: !questions.isEmpty, flags: flags)
         shareCurrent(target, current, replyShown: shown.reply, attentionShown: shown.attention)
     }
 

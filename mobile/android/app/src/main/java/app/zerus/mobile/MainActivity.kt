@@ -1042,14 +1042,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 it.key.toString().startsWith("event:") && it.offset < layout.viewportEndOffset &&
                     it.offset + it.size > layout.viewportStartOffset
             }.let { rows ->
-                val ids=rows.mapNotNull { displayedEventId(it.key.toString()) }.toSet()
-                val items=layout.visibleItemsInfo
-                val newest=model.newestDisplayedEventId(target)
+                val items=layout.visibleItemsInfo.map { ConversationViewport.Item(it.key.toString(),it.offset,it.size) }
+                val start=layout.viewportStartOffset;val end=layout.viewportEndOffset
+                val ids=ConversationViewport.visibleEventIds(items,start,end,::displayedEventId)
                 ReadViewport(ids,rows.firstOrNull()?.let { row -> displayedEventId(row.key.toString())?.let { it to (-row.offset).coerceAtLeast(0) } },
                     model.visibleReadEvidence(target,ids),model.currentReadKey(target),
-                    items.any { it.key == "history:tail" && it.offset + it.size <= layout.viewportEndOffset + 2 },
-                    newest.isNotEmpty() && newest in ids,
-                    items.any { it.key == "history:questions" && it.offset < layout.viewportEndOffset && it.offset + it.size > layout.viewportStartOffset })
+                    ConversationViewport.currentFlags(items,start,end,model.newestDisplayedEventId(target),::displayedEventId))
             }
         }.distinctUntilChanged().collectLatest { viewport ->
             if (viewport == null) return@collectLatest
@@ -1057,7 +1055,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             delay(350)
             if (currentHistoryTarget == target.key && foreground && window.isWindowFocused && !programmatic) {
                 model.visibleMessages(target, viewport.ids)
-                model.visibleCurrent(target,viewport.current,viewport.tail,viewport.newest,viewport.questions)
+                model.visibleCurrent(target,viewport.current,viewport.flags)
                 viewport.first?.let { (id, offset) -> model.saveConversationViewport(target,id,offset,follow.following && !model.hasNewer) }
             }
         }
@@ -1212,10 +1210,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 /**
  * One settled reading viewport: the visible event rows, the first row and its offset, the private read
  * evidence, and for the shared current acknowledgement the open inspection's values ([ZerusViewModel.currentReadKey])
- * and whether the tail, the newest displayed row and the questions were visible.
+ * and what the viewport showed of it ([ConversationViewport.currentFlags]).
  */
 private data class ReadViewport(val ids:Set<String>,val first:Pair<String,Int>?,val evidence:List<Triple<String,String,Long?>>,
-    val current:String,val tail:Boolean,val newest:Boolean,val questions:Boolean)
+    val current:String,val flags:ConversationViewport.CurrentFlags)
 
 @Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {

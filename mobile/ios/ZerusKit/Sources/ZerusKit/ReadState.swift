@@ -474,6 +474,34 @@ public struct CurrentRead: Equatable, Sendable {
     }
 }
 
+/// What one settled viewport showed for the shared current acknowledgement (zerus-a4mub.9): the tail sentinel, the
+/// newest displayed event row and the questions item.
+public struct CurrentReadFlags: Equatable, Sendable {
+    public let tail: Bool
+    public let newest: Bool
+    public let questions: Bool
+    public init(tail: Bool = false, newest: Bool = false, questions: Bool = false) {
+        self.tail = tail
+        self.newest = newest
+        self.questions = questions
+    }
+}
+
+/// The conversation list's visible item ids, as SwiftUI reports them, mapped to reading inputs.
+public enum ConversationReadViewport {
+    /// The event ids among the visible item ids (`event:` keys).
+    public static func eventIds(_ visible: [String]) -> Set<String> {
+        Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
+    }
+
+    /// The current acknowledgement flags of one settled viewport: the tail sentinel, the newest displayed event row
+    /// (`newestId`, empty when the latest messages are not shown) and the questions item among the visible ids.
+    public static func flags(visible: [String], newestId: String) -> CurrentReadFlags {
+        CurrentReadFlags(tail: visible.contains("history:tail"), newest: !newestId.isEmpty && eventIds(visible).contains(newestId),
+                         questions: visible.contains("history:questions"))
+    }
+}
+
 public enum SharedReadPolicies {
     private static let currentKeys: Set<String> = ["schema", "run_id", "conversation_id", "reply_id", "attention_signature", "attention_complete"]
 
@@ -509,10 +537,9 @@ public enum SharedReadPolicies {
     /// What one settled viewport of the open conversation showed of its current inspection: the reply when it shows
     /// the latest messages and the tail or the newest displayed row was visible; the attention when the listed
     /// questions were visible or, without questions, when the reply was shown.
-    public static func currentShown(latest: Bool, tailVisible: Bool, newestVisible: Bool, questionsListed: Bool,
-                                    questionsVisible: Bool) -> (reply: Bool, attention: Bool) {
-        let reply = latest && (tailVisible || newestVisible)
-        return (reply, latest && (questionsListed ? questionsVisible : reply))
+    public static func currentShown(latest: Bool, questionsListed: Bool, flags: CurrentReadFlags) -> (reply: Bool, attention: Bool) {
+        let reply = latest && (flags.tail || flags.newest)
+        return (reply, latest && (questionsListed ? flags.questions : reply))
     }
 
     /// The `mark_read` the open conversation may send for `current`: its reply once the conversation's tail or newest

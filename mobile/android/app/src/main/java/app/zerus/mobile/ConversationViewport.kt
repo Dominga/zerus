@@ -35,6 +35,27 @@ object ConversationViewport {
     }
     fun inheritedKey(eventKey: String): String = "history:inherited:" + eventKey.removePrefix("event:")
 
+    /** One laid-out list item: its key, top offset and height, as the settled layout reports it. */
+    data class Item(val key: String, val offset: Int, val size: Int)
+    /**
+     * What one settled viewport showed for the shared current acknowledgement (zerus-a4mub.9): the tail
+     * sentinel, the newest displayed event row and the questions item.
+     */
+    data class CurrentFlags(val tail: Boolean = false, val newest: Boolean = false, val questions: Boolean = false)
+    private fun overlaps(item: Item, start: Int, end: Int) = item.offset < end && item.offset + item.size > start
+    /** The event ids of rows overlapping the viewport; [eventId] maps a row key to its displayed event, else null. */
+    fun visibleEventIds(items: List<Item>, start: Int, end: Int, eventId: (String) -> String?): Set<String> =
+        items.filter { it.key.startsWith("event:") && overlaps(it, start, end) }.mapNotNull { eventId(it.key) }.toSet()
+    /**
+     * The current acknowledgement flags of one settled viewport: the 1 dp tail sentinel entirely inside it, the
+     * newest displayed event row ([newestId], empty when the latest messages are not shown) overlapping it, and
+     * the questions item overlapping it.
+     */
+    fun currentFlags(items: List<Item>, start: Int, end: Int, newestId: String, eventId: (String) -> String?) = CurrentFlags(
+        tail = items.any { it.key == "history:tail" && it.offset >= start && it.offset + it.size <= end + 2 },
+        newest = newestId.isNotEmpty() && newestId in visibleEventIds(items, start, end, eventId),
+        questions = items.any { it.key == "history:questions" && overlaps(it, start, end) })
+
     /** The row of this phone's latest send, to bring into view. */
     fun own(events: List<Event>, ownSendId: String): Event? = events.lastOrNull { it.outgoingId == ownSendId || it.receiptRequestId == ownSendId }
     fun content(state: ConversationFollowState, keys: List<String>, ownSendId: String, ownItemKey: String?): ConversationScroll {

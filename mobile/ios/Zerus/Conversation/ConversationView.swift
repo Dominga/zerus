@@ -252,10 +252,9 @@ struct ConversationView: View {
             // A transient row during initial positioning or a fling is not a deliberate read.
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
-            let ids = Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
+            let ids = ConversationReadViewport.eventIds(visible)
             model.visibleMessages(target, ids)
-            model.visibleCurrent(target, key: current, tailVisible: visible.contains("history:tail"),
-                                 newestVisible: !newest.isEmpty && ids.contains(newest), questionsVisible: visible.contains("history:questions"))
+            model.visibleCurrent(target, key: current, flags: ConversationReadViewport.flags(visible: visible, newestId: newest))
             if let first = visible.first(where: { $0.hasPrefix("event:") }) {
                 model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0, following: follow.following && !model.hasNewer)
             }

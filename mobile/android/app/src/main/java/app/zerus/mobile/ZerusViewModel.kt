@@ -860,11 +860,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
      * inspection: the reply once its tail or newest row was visible, the attention once its questions were
      * (without questions, once the same tail or newest row was). [key] is [currentReadKey] as the dwell saw it.
      */
-    fun visibleCurrent(target:Target,key:String,tailVisible:Boolean,newestVisible:Boolean,questionsVisible:Boolean) {
+    fun visibleCurrent(target:Target,key:String,flags:ConversationViewport.CurrentFlags) {
         val current=currentRead(target) ?: return
         if(key!=currentReadKey(current)) return
-        val (replyShown,attentionShown)=SharedReadPolicies.currentShown(!hasNewer,tailVisible,newestVisible,
-            conversationQuestions.isNotEmpty(),questionsVisible)
+        val (replyShown,attentionShown)=SharedReadPolicies.currentShown(latest=!hasNewer,
+            questionsListed=conversationQuestions.isNotEmpty(),flags=flags)
         shareCurrent(target,current,replyShown,attentionShown)
     }
     private fun shareCurrent(target:Target,current:CurrentRead,replyShown:Boolean,attentionShown:Boolean) {

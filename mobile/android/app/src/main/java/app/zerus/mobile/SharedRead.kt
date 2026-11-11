@@ -88,9 +88,9 @@ object SharedReadPolicies {
      * shows the latest messages and the tail or the newest displayed row was visible; the attention when the
      * listed questions were visible or, without questions, when the reply was shown. Returns (reply, attention).
      */
-    fun currentShown(latest:Boolean,tailVisible:Boolean,newestVisible:Boolean,questionsListed:Boolean,questionsVisible:Boolean):Pair<Boolean,Boolean> {
-        val reply=latest && (tailVisible || newestVisible)
-        return reply to (latest && if(questionsListed) questionsVisible else reply)
+    fun currentShown(latest:Boolean,questionsListed:Boolean,flags:ConversationViewport.CurrentFlags):Pair<Boolean,Boolean> {
+        val reply=latest && (flags.tail || flags.newest)
+        return reply to (latest && if(questionsListed) flags.questions else reply)
     }
     /**
      * The `mark_read` the open conversation may send for [current]: its reply once the conversation's tail

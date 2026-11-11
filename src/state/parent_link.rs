@@ -1151,7 +1151,10 @@ mod tests {
         );
         fs::create_dir_all(&hosts).unwrap();
         let socket = hosts.join("host.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // A small explicit backlog: fill_unix_queue opens one socket per
+        // queue slot, and the default SOMAXCONN backlog exhausts descriptors
+        // under the package check's low nofile limit (zerus-xt6re, zerus-taljw).
+        let listener = full_unix_listener(&socket, 1);
         // A genuinely saturated host: its listen queue is full, so BSD would
         // answer a non-blocking connect with ECONNREFUSED at once.
         let fill = fill_unix_queue(&socket);

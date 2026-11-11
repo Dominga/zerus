@@ -874,9 +874,7 @@ mod tests {
             }
             let error = io::Error::last_os_error();
             drop(socket);
-            if error.raw_os_error() == Some(libc::EAGAIN)
-                || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-            {
+            if error.raw_os_error().is_some_and(crate::platform::queue_full) {
                 break;
             }
             panic!("filling the listen queue: {error}");

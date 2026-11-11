@@ -322,6 +322,17 @@ pub(crate) fn test_nonblocking_socket() -> std::os::unix::net::UnixStream {
     nonblocking_socket().expect("a non-blocking test socket")
 }
 
+/// Whether a non-blocking connect error means a full listen queue: Linux
+/// reports the queue with `EAGAIN`, while BSD/macOS refuses the connection at
+/// once (`ECONNREFUSED`). Both mean the queue is full, and a later refused
+/// connect is a definite "not live" (zerus-taljw).
+#[cfg(test)]
+pub(crate) fn queue_full(code: i32) -> bool {
+    code == libc::EAGAIN
+        || code == libc::EWOULDBLOCK
+        || (cfg!(target_os = "macos") && (code == libc::ECONNREFUSED || code == libc::ECONNRESET))
+}
+
 /// A Unix socket connected within `limit`: a listen queue that stays full must
 /// refuse at the bound instead of blocking the claim that reads it
 /// (zerus-taljw). A blocking connect has no such deadline, so the socket is
@@ -1997,9 +2008,7 @@ mod tests {
             }
             let error = io::Error::last_os_error();
             drop(socket);
-            if error.raw_os_error() == Some(libc::EAGAIN)
-                || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-            {
+            if error.raw_os_error().is_some_and(queue_full) {
                 break;
             }
             panic!("filling the listen queue: {error}");
@@ -2022,13 +2031,23 @@ mod tests {
         });
         let started = Instant::now();
         match received.recv_timeout(Duration::from_secs(5)) {
-            Ok(Err(error)) => assert!(
-                matches!(
+            Ok(Err(error)) => {
+                // Linux waits for a free slot until the deadline; macOS
+                // refuses a connect on a full queue at once. Both are a
+                // bounded refusal, never a connect.
+                #[cfg(target_os = "macos")]
+                let refused = matches!(
                     error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ),
-                "{error}"
-            ),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::ConnectionReset
+                );
+                #[cfg(not(target_os = "macos"))]
+                let refused =
+                    matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock);
+                assert!(refused, "{error}");
+            }
             Ok(Ok(_)) => panic!("a full listen queue must not connect"),
             Err(_) => panic!("connect did not respect its bound"),
         }

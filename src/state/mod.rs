@@ -20,6 +20,7 @@ pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod codex_clear_recovery;
+mod codex_sqlite;
 mod compact_context;
 mod continuations;
 mod cache_hint;

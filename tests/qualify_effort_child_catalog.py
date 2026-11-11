@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Actual-CLI Codex child-catalog refusal with a private scripted tmux agent.
+"""Actual-CLI Codex current-WAL child reconciliation with a private tmux agent.
 
 The ordinary path positively reads a real SQLite catalog and native rollout.
-The ID Effort path must refuse before opening that catalog, retain stale raw
-child evidence, and deliver no input. This is not official-agent qualification.
+The guarded ID Effort path must read that same current child from a private
+main+WAL snapshot, without native writes, SQLite locks or sidecar mutations.
+This is not official-agent qualification.
 """
 import argparse
 import contextlib
@@ -22,7 +23,6 @@ import test_input
 
 CHILD = '22222222-2222-4222-8222-222222222222'
 TURN = '33333333-3333-4333-8333-333333333333'
-REFUSAL = 'ID Effort cannot verify this Codex child catalog; use Terminal'
 
 
 def cleanup(fixture):
@@ -57,6 +57,14 @@ def rollout(path, parent, event, stamp):
     row = dict(type='event_msg', timestamp=stamp,
                payload=dict(type=event, turn_id=TURN, last_agent_message='Complete'))
     path.write_text(json.dumps(header) + '\n' + json.dumps(row) + '\n')
+
+
+def signature(path):
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns, path.read_bytes()
+    except FileNotFoundError:
+        return None
 
 
 def qualify(args):
@@ -98,22 +106,46 @@ def qualify(args):
         fixture.assertEqual(observed['subagent_active_count'], 1)
         fixture.assertEqual(observed['phase'], 'working')
         fixture.assertEqual(json.loads(path.read_bytes())['subagents'][CHILD]['state'], 'finished')
-        before = path.read_bytes(), database.read_bytes(), fixture.received()
+        before = {
+            'record': path.read_bytes(),
+            'main': signature(database),
+            'wal': signature(home / 'state_5.sqlite-wal'),
+            'shm': signature(home / 'state_5.sqlite-shm'),
+            'received': fixture.received(),
+        }
         sidecars = {suffix: (home / ('state_5.sqlite' + suffix)).exists()
                     for suffix in ('-wal', '-shm', '-journal')}
         request = fixture.payload('low')
         log = fixture.root / 'native-catalog-opens.log'
         command = [trace, '-f', '-o', str(log), '-s', '2048',
-                   '-e', 'trace=open,openat,openat2,creat', str(test_input.HGS),
-                   'effort', fixture.name, '--session-id', record['session_id'], '--json']
+                   '-e', 'trace=open,openat,openat2,creat,fcntl,flock,unlink,unlinkat,rename,renameat,renameat2',
+                   str(test_input.HGS), 'effort', fixture.name,
+                   '--session-id', record['session_id'], '--json']
         result = subprocess.run(command, input=json.dumps(request), env=fixture.env,
                                 text=True, capture_output=True, timeout=25)
-        fixture.assertNotEqual(result.returncode, 0, result.stdout)
-        fixture.assertIn(REFUSAL, result.stderr)
+        fixture.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        fixture.assertIn('agent is busy or waiting for approval; wait for Ready or use Terminal',
+                         result.stderr)
         fixture.assertLess(log.stat().st_size, 4 * 1024**2)
-        opens = [line for line in log.read_text().splitlines() if 'state_5.sqlite' in line]
-        fixture.assertEqual(opens, [], 'the keeper opened the native SQLite catalog')
-        fixture.assertEqual((path.read_bytes(), database.read_bytes(), fixture.received()), before)
+        prefix = str(home) + '/'
+        opens = [line for line in log.read_text().splitlines() if prefix in line]
+        fixture.assertTrue(opens, 'no raw native catalog read was observed')
+        for line in opens:
+            fixture.assertIn('O_RDONLY', line, line)
+            fixture.assertFalse(any(flag in line for flag in ('O_WRONLY', 'O_RDWR', 'O_CREAT')), line)
+        lock_calls = [line for line in opens if 'fcntl(' in line or 'flock(' in line]
+        fixture.assertEqual(lock_calls, [], lock_calls)
+        sidecar_mutations = [line for line in opens
+                             if any(call in line for call in ('unlink', 'rename'))]
+        fixture.assertEqual(sidecar_mutations, [], sidecar_mutations)
+        fixture.assertEqual(signature(database), before['main'])
+        fixture.assertEqual(signature(home / 'state_5.sqlite-wal'), before['wal'])
+        fixture.assertEqual(signature(home / 'state_5.sqlite-shm'), before['shm'])
+        fixture.assertEqual(fixture.received(), before['received'])
+        fixture.assertEqual(json.loads(path.read_bytes())['subagents'][CHILD]['state'], 'finished')
+        observed_after = native_effort_id.inspect(fixture, fixture.name, record['session_id'])
+        fixture.assertEqual(observed_after['subagent_active_count'], 1)
+        fixture.assertEqual(observed_after['phase'], 'working')
         fixture.assertEqual({suffix: (home / ('state_5.sqlite' + suffix)).exists()
                              for suffix in sidecars}, sidecars)
         fixture.assertFalse((fixture.state / 'effort_receipts' / (request['request_id'] + '.json')).exists())
@@ -123,8 +155,11 @@ def qualify(args):
                     hgs_sha256=hgs_sha256,
                     seed_sha256=native_effort_id.image_digest(image),
                     ordinary_native_child_reconciliation=True,
-                    stale_finished_metadata_preserved=True, sticky_refusal=REFUSAL,
-                    native_catalog_opens=0, new_keys=0, new_receipts=0,
+                    current_wal_child_reconciled=True,
+                    native_readiness_refusal='busy',
+                    native_catalog_raw_reads=len(opens), native_sqlite_locks=0,
+                    native_catalog_write_opens=0, native_sidecar_mutations=0,
+                    new_keys=0, new_receipts=0,
                     source_bytes_and_sidecar_membership_unchanged=True)
     finally:
         cleanup(fixture)

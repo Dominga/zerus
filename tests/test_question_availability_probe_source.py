@@ -111,6 +111,14 @@ CURRENT_READ_UPDATES_SHA = "1f1e6f291f1568fdf2d6fecb7847c3bff9826d7925e8e8422e2b
 # pins stay exact. Reverse it first, as the newest reviewed update.
 CURRENT_READ_FLAGS_UPDATES = ROOT / "tests/fixtures/question-availability-current-read-flags-updates.patch"
 CURRENT_READ_FLAGS_UPDATES_SHA = "773de1b95877011a63741d2c8ce795cb7a1c1a062b041cf10988f2059c141289"
+# Exact one-file readable-visibility delta 10f3a8455..6b147ec95 (zerus-a4mub.31, #2069): the
+# settled layout passes the shared readable height in pixels to
+# ConversationViewport.visibleEventIds and currentFlags. Visibility for reading only:
+# question eligibility, native availability, every verification writer and all
+# historical reconstruction pins stay exact. Reverse it first, as the newest reviewed update.
+READABLE_VISIBILITY_UPDATES = ROOT / "tests/fixtures/question-availability-readable-visibility-updates.patch"
+READABLE_VISIBILITY_UPDATES_SHA = "37238564a4fd15832d0dcd543462939d2708d1d497a23ed202b9477040c15dc4"
+READABLE_VISIBILITY_FILES = ("MainActivity.kt",)
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -169,6 +177,8 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha,
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, READABLE_VISIBILITY_UPDATES, READABLE_VISIBILITY_UPDATES_SHA,
+                                    READABLE_VISIBILITY_FILES)
     source = reverse_reviewed_patch(name, source, CURRENT_READ_FLAGS_UPDATES, CURRENT_READ_FLAGS_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, CURRENT_READ_UPDATES, CURRENT_READ_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, SYNC_STATUS_UPDATES, SYNC_STATUS_UPDATES_SHA)
@@ -202,6 +212,9 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                READABLE_VISIBILITY_UPDATES, READABLE_VISIBILITY_UPDATES_SHA,
+                                                READABLE_VISIBILITY_FILES)
+                current = reverse_reviewed_patch(name, current,
                                                 CURRENT_READ_FLAGS_UPDATES, CURRENT_READ_FLAGS_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 CURRENT_READ_UPDATES, CURRENT_READ_UPDATES_SHA)
@@ -296,6 +309,20 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     reverse_reviewed_patch("ZerusViewModel.kt", source.replace(addition, replacement, 1),
                                            SEND_ATTEMPT_UPDATES, SEND_ATTEMPT_UPDATES_SHA, SEND_ATTEMPT_FILES)
+
+    def test_readable_visibility_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # The readable-visibility delta stays exact reviewed hunks in its one file:
+        # changing, removing or duplicating one of its additions must break the reconstruction.
+        for name, addition in (
+                ("MainActivity.kt", "    val readableHeight = with(LocalDensity.current) { ConversationViewport.READABLE_HEIGHT_DP.dp.roundToPx() }\n"),
+                ("MainActivity.kt", "                val ids=ConversationViewport.visibleEventIds(items,start,end,readableHeight,::displayedEventId)\n")):
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.replace("\n", " // changed reviewed addition\n", 1), "", addition + addition):
+                with self.subTest(source=name, replacement=replacement[:40]):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+        # It never touches the view model.
+        self.assertEqual(READABLE_VISIBILITY_FILES, ("MainActivity.kt",))
 
     def test_current_read_flags_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
         # The flags mapping stays exact reviewed hunks in both files: changing,

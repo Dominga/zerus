@@ -29,16 +29,25 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     .connectTimeout(10, TimeUnit.SECONDS).readTimeout(35, TimeUnit.SECONDS)
     .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build(),
     internal val workspace: WorkspaceJournal? = null,
-    internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 }) {
+    internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 },
+    /** Test seam: a deterministic local seal failure before any mutation POST (zerus-a4mub.6). */
+    internal val sealEnvelope: (WorkspaceIdentity, WorkspaceDevice, WorkspaceHeader, ByteArray) -> WorkspaceEnvelope =
+        { identity, recipient, header, plaintext -> WorkspaceEnvelope.seal(identity, recipient, header, plaintext) }) {
     private val resultStream = RelayResultStream(client)
     internal fun closeResultStreams(connectionId: String? = null) = resultStream.close(connectionId)
-    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
+    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false,
+        attempt: SendAttempt? = null): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
         val request = Request.Builder().url(ManagedRelay.transport(url) + path).header("Accept", "application/json")
         if (token.isNotBlank()) request.header("Authorization", "Bearer $token")
         if (delete) request.delete() else if (body != null) request.post(JsonRequestBody(body, when(path) { "/v1/requests" -> 30_408_704L; "/v2/requests" -> 41L*1024*1024; else -> 1_048_576L }))
         val call = client.newCall(request.build())
         suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { call.cancel() }
+            // Already cancelled before the client saw it: nothing can leave.
+            if (!continuation.isActive) return@suspendCancellableCoroutine
+            // The mutation request is handed to the client here: from this point
+            // delivery may have begun, so settlement may only call it unknown.
+            attempt?.enqueued()
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, error: IOException) {
                     continuation.resumeWithException(error)
@@ -90,21 +99,26 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     }
     suspend fun registerPush(connection:Connection,provider:String,token:String) = call(connection.url,connection.token,
         if(connection.protocolVersion==2) "/v2/push" else "/v1/push",JSONObject().put("provider",provider).put("token",token))
-    suspend fun post(connection:Connection,computerId:String,session:String="",operation:String,payload:JSONObject,id:String):JSONObject {
+    suspend fun post(connection:Connection,computerId:String,session:String="",operation:String,payload:JSONObject,id:String,
+        attempt: SendAttempt):JSONObject {
         val body=JSONObject().put("request_id",id).put("computer_id",computerId).put("session",session).put("operation",operation).put("payload",payload)
-        return (if(connection.protocolVersion==2) encryptedPost(connection,body) else call(connection.url,connection.token,"/v1/requests",body)).also {
+        return (if(connection.protocolVersion==2) encryptedPost(connection,body,attempt) else call(connection.url,connection.token,"/v1/requests",body,attempt = attempt)).also {
             check(it.string("request_id")==id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
         }
     }
-    suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
+    /** One mutation, with its transport evidence. The evidence is required by
+     *  type (no default): the outbox send cannot silently drop it and fall back
+     *  to "before the marker" (zerus-a4mub.21). */
+    suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String,
+        attempt: SendAttempt): JSONObject {
         require(target.agentId.isBlank() || operation in setOf("inspect", "history", "history_projection", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
         require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
-        return post(connection,target.computerId,target.session,operation,payload,id)
+        return post(connection,target.computerId,target.session,operation,payload,id,attempt)
     }
     internal suspend fun speech(connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
         id: String = UUID.randomUUID().toString()): JSONObject {
         require(host.connectionId == connection.id && operation in SpeechProtocol.operations + "speech_stats")
-        val initial = post(connection,host.computerId,"",operation,payload,id)
+        val initial = post(connection,host.computerId,"",operation,payload,id,SendAttempt())
         check(initial.string("request_id") == id) { "Gateway returned a different voice receipt." }
         val receipt = await(connection, initial)
         check(receipt.string("state") == "completed") {
@@ -116,7 +130,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         require(connection.id == target.connectionId && operation in VoiceProtocol.operations && target.session.isNotBlank())
         require(payload.string("request_id") == id && payload.string("expected_run_id") == target.run &&
             payload.string("expected_conversation_id") == target.conversation)
-        val receipt = await(connection, submit(connection, target, operation, payload, id))
+        val receipt = await(connection, submit(connection, target, operation, payload, id, SendAttempt()))
         check(receipt.string("request_id") == id && receipt.string("state") == "completed") {
             receipt.string("error").ifBlank { "The computer has not confirmed this voice request. Check its status." }
         }
@@ -127,7 +141,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         require(host.key.connectionId == connection.id && operation in SpeechConfigProtocol.operations)
         if (operation in SpeechConfigProtocol.mutations) require(payload.string("request_id") == id)
         if (operation != "speech_config") require(payload.string("expected_machine_id") == host.machineId)
-        val initial = post(connection,host.key.computerId,"",operation,payload,id)
+        val initial = post(connection,host.key.computerId,"",operation,payload,id,SendAttempt())
         check(initial.string("request_id") == id) { "The gateway returned a different configuration receipt." }
         val receipt = await(connection, initial)
         check(receipt.string("state") == "completed") { "The computer has not confirmed this configuration operation. Check its status." }
@@ -177,7 +191,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
             if (target.archiveId.isNotBlank()) it.put("archive_id", target.archiveId)
             if (target.agentId.isNotBlank()) it.put("agent_id",target.agentId).put("expected_run_id",target.run).put("expected_conversation_id",target.parentConversation)
         }
-        val result = await(connection, submit(connection, target, "inspect", payload, UUID.randomUUID().toString()),firstPollDelayMs=100)
+        val result = await(connection, submit(connection, target, "inspect", payload, UUID.randomUUID().toString(), SendAttempt()),firstPollDelayMs=100)
         check(result.string("state") == "completed") { result.string("error").ifBlank { "Computer has not returned its activity yet. Refresh to check again." } }
         result.getJSONObject("result").also { activity ->
             if(target.agentId.isNotBlank()) check(activity.string("agent_id") == target.agentId && activity.string("parent_conversation_id") == target.parentConversation && activity.string("run_id") == target.run && activity.string("name") == target.session) { "Computer returned a different child conversation." }
@@ -192,7 +206,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         require(direction in setOf("","before","after","around","unread") && (direction.isEmpty() == cursor.isEmpty()) && cursor.length<=8192)
         val id=UUID.randomUUID().toString()
         val payload=HistoryRequests.payload(target,id,direction,cursor,limit)
-        val receipt=await(connection,submit(connection,target,"history",payload,id),firstPollDelayMs=100)
+        val receipt=await(connection,submit(connection,target,"history",payload,id, SendAttempt()),firstPollDelayMs=100)
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History is not available yet. Try again." } }
         withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
     }
@@ -200,7 +214,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     suspend fun historyProjection(connection:Connection,target:Target,epoch:String,after:Long,until:Long):HistoryProjection.Page = RelayReadTiming.read(RelayReadTiming.Operation.Projection) {
         val id=UUID.randomUUID().toString()
         val payload=HistoryProjection.payload(target,id,epoch,after,until)
-        val receipt=await(connection,submit(connection,target,"history_projection",payload,id),firstPollDelayMs=100)
+        val receipt=await(connection,submit(connection,target,"history_projection",payload,id, SendAttempt()),firstPollDelayMs=100)
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History changes are not available yet." } }
         withContext(Dispatchers.Default) { HistoryProjection.parse(target,id,epoch,after,until,receipt.getJSONObject("result")) }
     }
@@ -208,7 +222,7 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     suspend fun markRead(connection: Connection, target: Target, payload: JSONObject): JSONObject {
         require(target.archiveId.isBlank() && target.agentId.isBlank()) { "Read marks belong to the live parent conversation." }
         val id = UUID.randomUUID().toString()
-        return await(connection, submit(connection, target, "mark_read", payload, id))
+        return await(connection, submit(connection, target, "mark_read", payload, id, SendAttempt()))
     }
     suspend fun events(connection: Connection, after: Long, wait: Int = 25) = if(connection.protocolVersion==2) encryptedEvents(connection,after,wait)
         else call(connection.url, connection.token, "/v1/events?after=$after&wait=$wait")

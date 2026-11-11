@@ -195,7 +195,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun loadArchivePage(key:MachineKey,query:JSONObject):ArchivePage {
         val connection=connections.find { it.id==key.connectionId } ?: error("Workspace disconnected")
         val id=UUID.randomUUID().toString()
-        val initial=api.post(connection,key.computerId,"","archive_list",query,id)
+        val initial=api.post(connection,key.computerId,"","archive_list",query,id,SendAttempt())
         check(initial.string("request_id")==id){"Gateway returned another archive receipt"}
         val receipt=api.await(connection,initial,150,200)
         check(receipt.string("request_id")==id && receipt.string("state")=="completed"){receipt.string("error").ifBlank{"Archive page is not available. Refresh to retry."}}
@@ -1342,7 +1342,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val id=UUID.randomUUID().toString()
                 val payload=RepositoryAcquisition.statusPayload(stored,id)
-                val receipt=api.await(connection,api.submit(connection,stored.target,"repository_status",payload,id))
+                val receipt=api.await(connection,api.submit(connection,stored.target,"repository_status",payload,id, SendAttempt()))
                 val settled=RepositoryAcquisition.result(stored,receipt,id)
                 durable({ state -> state.action(settled) })
                 launchError=settled.error
@@ -1363,7 +1363,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             var action:SessionAction?=null;var attempted=false;var rejected=false
             try {
                 val checkId=UUID.randomUUID().toString()
-                val checked=api.await(connection,api.submit(connection,target,"repository_check",JSONObject(args.toString()).put("request_id",checkId),checkId))
+                val checked=api.await(connection,api.submit(connection,target,"repository_check",JSONObject(args.toString()).put("request_id",checkId),checkId, SendAttempt()))
                 val destination=RepositoryAcquisition.checkedDestination(args,checked,checkId)
                 check(launchVisible && launchMachine==machine && launchGeneration==generation && launchCatalogEvidence==expectedCatalog) { "The selected computer or form changed." }
                 if(destination.needsConfirmation) {
@@ -1380,7 +1380,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 check(launchVisible && launchGeneration==generation && launchMachine==machine && launchCatalogEvidence==expectedCatalog && connections.any { it==connection } &&
                     machines.any { it.connectionId==machine.connectionId && it.id==machine.computerId && it.machineId==identity && it.online && !it.lastKnown }) { "The selected computer changed before checkout." }
                 launchStage="cloning";attempted=true
-                val initial=try { api.submit(connection,target,creation.operation,JSONObject(args.toString()).put("request_id",creation.requestId),creation.requestId) }
+                val initial=try { api.submit(connection,target,creation.operation,JSONObject(args.toString()).put("request_id",creation.requestId),creation.requestId, SendAttempt()) }
                     catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
                 settleSessionAction(creation,api.await(connection,initial,maxPolls=100))
                 val settled=messageState.sessionActions.first { it.requestId==creation.requestId }
@@ -1425,7 +1425,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         launchCatalogJob=viewModelScope.launch {
             try {
                 val target=Target(machine.computerId,"","","",machine.connectionId);val id=UUID.randomUUID().toString()
-                val receipt=api.await(connection,api.submit(connection,target,"catalog",JSONObject().put("request_id",id),id))
+                val receipt=api.await(connection,api.submit(connection,target,"catalog",JSONObject().put("request_id",id),id, SendAttempt()))
                 check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "The native account catalog is unavailable." } }
                 val raw=receipt.getJSONObject("result")
                 val sanitized=withContext(Dispatchers.Default) { LaunchPresentation.sanitizeCatalog(raw) }
@@ -1440,7 +1440,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishLaunch() { launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchVisible=false;launchGeneration++;launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchCatalogLoading=false;launchDirectoryLoading=false }
     private suspend fun readLaunchDirectory(connection:Connection,machine:MachineKey,path:String):JSONObject {
         val target=Target(machine.computerId,"","","",machine.connectionId);val id=UUID.randomUUID().toString()
-        val receipt=api.await(connection,api.submit(connection,target,"dirs",JSONObject().put("request_id",id).put("path",path),id))
+        val receipt=api.await(connection,api.submit(connection,target,"dirs",JSONObject().put("request_id",id).put("path",path),id, SendAttempt()))
         check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "This folder is unavailable." } }
         val raw=receipt.getJSONObject("result")
         check(raw.string("path").startsWith('/')) { "Computer returned an invalid folder." }
@@ -1448,7 +1448,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     private suspend fun readLaunchWorktrees(connection:Connection,machine:MachineKey,path:String,requested:String):JSONObject {
         val id=UUID.randomUUID().toString();val target=Target(machine.computerId,"","","",machine.connectionId)
-        val receipt=api.await(connection,api.submit(connection,target,"worktrees",JSONObject().put("request_id",id).put("path",path),id))
+        val receipt=api.await(connection,api.submit(connection,target,"worktrees",JSONObject().put("request_id",id).put("path",path),id, SendAttempt()))
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "Worktree catalog unavailable." } }
         return receipt.getJSONObject("result").put("requested_path",requested)
     }
@@ -1503,7 +1503,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     "The selected computer or form changed. Folder creation was not sent."
                 }
                 attempted=true
-                val initial=try { api.submit(connection,action.target,action.operation,JSONObject(action.arguments).put("request_id",action.requestId),action.requestId) }
+                val initial=try { api.submit(connection,action.target,action.operation,JSONObject(action.arguments).put("request_id",action.requestId),action.requestId, SendAttempt()) }
                     catch(error:RelayException) { rejected=error.status in listOf(400,401,403,404,409,413,429);throw error }
                 settleSessionAction(action,api.await(connection,initial))
                 val settled=messageState.sessionActions.first { it.requestId==action.requestId }
@@ -1576,7 +1576,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
             check(launchVisible && launchGeneration==generation && launchMachine==machine && launchWorktreeState?.string("common_dir")==evidence.string("common_dir")) { "The selected repository changed. Worktree creation was not sent." }
             attempted=true
-            val initial=try { api.submit(connection,action.target,"worktree_create",JSONObject(arguments.toString()).put("request_id",action.requestId),action.requestId) }
+            val initial=try { api.submit(connection,action.target,"worktree_create",JSONObject(arguments.toString()).put("request_id",action.requestId),action.requestId, SendAttempt()) }
                 catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
             settleSessionAction(action,api.await(connection,initial))
             val completed=messageState.sessionActions.find { it.requestId==action.requestId }
@@ -1629,7 +1629,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             durable({ state -> check(state.sessionActions.none { it.operation == "launch" && it.target.computerId == target.computerId && it.target.connectionId == target.connectionId && it.blocksSending });state.action(action) }, { current,written -> current.action(written.sessionActions.first { it.requestId == action.requestId }) })
             check(launchVisible && launchGeneration == generation && launchMachine == machine && launchCatalogEvidence == expectedCatalog && connections.any { it.id == machine.connectionId }) { "The launch form changed before creating the session." }
             attempted=true
-            val initial=try { api.submit(connection,target,"launch",JSONObject(action.arguments).put("request_id",action.requestId),action.requestId) } catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+            val initial=try { api.submit(connection,target,"launch",JSONObject(action.arguments).put("request_id",action.requestId),action.requestId, SendAttempt()) } catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
             val receipt=api.await(connection,initial);settleSessionAction(action,receipt)
             val completed=messageState.sessionActions.find { it.requestId == action.requestId }
             if(completed?.status == "completed" && completed.resultTarget != null && launchVisible && launchGeneration == generation && launchMachine == machine) {
@@ -1731,7 +1731,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 durable({ state -> check(state.sessionActions.none { it.operation==MobileDelivery.OPERATION && it.target.connectionId==connectionId && it.blocksSending });state.action(action) },
                     { current,written -> current.action(written.sessionActions.first { it.requestId==action.requestId }) })
                 attempted=true
-                val initial=try { api.submit(connection,target,MobileDelivery.OPERATION,JSONObject(args.toString()),action.requestId) }
+                val initial=try { api.submit(connection,target,MobileDelivery.OPERATION,JSONObject(args.toString()),action.requestId, SendAttempt()) }
                     catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
                 settleSessionAction(action,api.await(connection,initial))
                 val settled=messageState.sessionActions.find { it.requestId==action.requestId }
@@ -1820,7 +1820,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val id=UUID.randomUUID().toString()
                 val payload=target.json().put("request_id",id)
-                val receipt=api.await(connection,api.submit(connection,target,"terminal_snapshot",payload,id),50,100)
+                val receipt=api.await(connection,api.submit(connection,target,"terminal_snapshot",payload,id, SendAttempt()),50,100)
                 check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "Terminal is not available yet." } }
                 val result=receipt.getJSONObject("result")
                 check(result.string("request_id") == id && result.string("name") == target.session && result.string("run_id") == target.run && result.string("conversation_id") == target.conversation &&
@@ -1883,7 +1883,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val payload=JSONObject().put("request_id",id).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation).put("process_id",processId)
                 if(target.archiveId.isNotBlank()) payload.put("archive_id",target.archiveId)
                 if(generation != null) payload.put("generation",generation)
-                val receipt=api.await(connection,api.submit(connection,target,"process_output",payload,id))
+                val receipt=api.await(connection,api.submit(connection,target,"process_output",payload,id, SendAttempt()))
                 check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "Process output is not available yet." } }
                 val result=receipt.getJSONObject("result")
                 check(result.string("request_id") == id && result.string("name") == target.session && result.string("id") == processId && result.string("run_id") == target.run && result.string("conversation_id") == target.conversation && result.string("archive_id") == target.archiveId) { "Computer returned output for another process." }
@@ -2040,7 +2040,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     else JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
                 if(target.archiveId.isNotBlank()) payload.put("archive_id",target.archiveId)
                 attempted=true
-                val initial=try { api.submit(connection,target,operation,payload,action.requestId) }
+                val initial=try { api.submit(connection,target,operation,payload,action.requestId, SendAttempt()) }
                     catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429); throw e }
                 val receipt = if(operation == "terminal_input") api.await(connection,initial,50,100) else api.await(connection,initial)
                 settleSessionAction(action,receipt,authorized)
@@ -2242,7 +2242,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             val payload = ContextPolicies.payload(op)
             attempted = true
-            val initial = try { api.submit(connection, target, operation, payload, op.requestId) }
+            val initial = try { api.submit(connection, target, operation, payload, op.requestId, SendAttempt()) }
             catch (error: RelayException) { if (error.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejection = error; throw error }
             val receipt = api.await(connection, initial)
             val result = ContextPolicies.result(op, receipt)
@@ -3230,7 +3230,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             val payload=target.json().put("request_id",sending.requestId).put("question_id",question.id).put("expected_question_hash",question.hash).put("answers",JSONArray(frozenAnswers))
             val receipt=withTimeout(45_000) {
                 attempted=true
-                val initial=try { api.submit(connection,target,"answer",payload,sending.requestId) }
+                val initial=try { api.submit(connection,target,"answer",payload,sending.requestId, SendAttempt()) }
                     catch(e:RelayException) { refused=e.status in listOf(400,401,403,404,409,413,429);throw e }
                 api.await(connection,initial)
             }
@@ -3270,9 +3270,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         preparingTargets -= target.key
         val message = written.outgoing.first { it.requestId == id }
         lastOwnSend = target to id
-        var attempted = false; var rejected: RelayException? = null
-        try {
-            val receipt = withTimeout(45_000) {
+        val send = OutgoingSend(SendAttempt(),
+            submit = { evidence ->
                 val files = attachmentStore.payload(message.attachments)
                 check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
                 if (intent != null) {
@@ -3282,19 +3281,15 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
                 if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
-                attempted = true
-                val initial = try { api.submit(connection, target, "send", payload, id) }
-                catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
-                api.await(connection, initial)
-            }
-            settleOutgoing(message, receipt)
-        } catch (e: Exception) {
-            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt or dismiss the warning to continue." else
-                (e as? AttachmentException)?.message ?: "The saved message was not sent. Review it before trying again."
-            try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = if (attempted && rejected == null) "uncertain" else "failed", error = failure) } }) }
-            catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
-            if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
-        } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
+                submitOutgoing(api, connection, target, payload, id, evidence)
+            },
+            await = { initial -> api.await(connection, initial) },
+            settle = { receipt -> settleOutgoing(message, receipt) },
+            failed = { status, failure ->
+                try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = status, error = failure) } }) }
+                catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
+            })
+        try { send.run() } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
     }
     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject) {
         val result = receipt.optJSONObject("result"); val state = receipt.string("state")
@@ -3459,7 +3454,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         try {
             check(fresh(target) && activity?.optDouble("turn_started") == turn)
             val payload = target.json().put("request_id", draft.requestId).put("expected_turn_started", turn)
-            settle(draft, api.await(connection, api.submit(connection, target, "interrupt", payload, draft.requestId)))
+            settle(draft, api.await(connection, api.submit(connection, target, "interrupt", payload, draft.requestId, SendAttempt())))
         } catch (_: Exception) {
             editState { state -> state.copy(drafts = state.drafts.map { if (it.key == draft.key && it.requestId == draft.requestId) it.copy(status = "uncertain") else it }) }
             flushDrafts(); error = "Interruption is unconfirmed. Check the conversation before trying again."

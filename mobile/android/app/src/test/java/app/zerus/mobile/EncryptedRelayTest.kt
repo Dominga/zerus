@@ -11,6 +11,12 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -113,8 +119,8 @@ class EncryptedRelayTest {
                     assertFalse(result.toString().contains("Expired private content"))
                     assertEquals(setOf(fresh),store.load(connection).routes.keys)
                 }
-                assertTrue(runCatching { api.post(connection,old,operation="inspect",payload=JSONObject(),id="expired-action") }.isFailure)
-                api.post(connection,fresh,operation="inspect",payload=JSONObject(),id="fresh-action")
+                assertTrue(runCatching { api.post(connection,old,operation="inspect",payload=JSONObject(),id="expired-action",attempt=SendAttempt()) }.isFailure)
+                api.post(connection,fresh,operation="inspect",payload=JSONObject(),id="fresh-action",attempt=SendAttempt())
                 assertEquals(listOf("route-$fresh"),posted.toList())
             }
         }
@@ -143,7 +149,7 @@ class EncryptedRelayTest {
                     assertEquals(listOf("old"),result.getJSONArray("unavailable_computers").let { (0 until it.length()).map(it::getString) })
                     assertFalse(result.toString().contains("Expiring private content"))
                     assertEquals(setOf("fresh"),store.load(connection).routes.keys)
-                    assertTrue(runCatching { api.post(connection,"old",operation="inspect",payload=JSONObject(),id="expired-after-page") }.isFailure)
+                    assertTrue(runCatching { api.post(connection,"old",operation="inspect",payload=JSONObject(),id="expired-after-page",attempt=SendAttempt()) }.isFailure)
                 } finally { release.countDown();pending.cancelAndJoin() }
             }
         }
@@ -173,7 +179,7 @@ class EncryptedRelayTest {
                     assertEquals("Usable alternative",result.getJSONArray("computers").getJSONObject(0).string("name"))
                     assertEquals(0,result.getJSONArray("unavailable_computers").length())
                     assertEquals("alternative-route",store.load(connection).routes[computer]?.routeId)
-                    api.post(connection,computer,operation="inspect",payload=JSONObject(),id="admitted-alternative")
+                    api.post(connection,computer,operation="inspect",payload=JSONObject(),id="admitted-alternative",attempt=SendAttempt())
                     assertEquals(listOf("alternative-route"),posted.toList())
                 } finally { release.countDown();pending.cancelAndJoin() }
             }
@@ -354,12 +360,12 @@ class EncryptedRelayTest {
             server.start();val connection=Connection("route-choice","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
             val store=MemoryWorkspaceJournal();store.create(connection,state().withRoutes(mapOf(computer to WorkspaceRoute(computer,gateway.device.deviceId,"preferred-route",computer))))
             val api=RelayApi(workspace=store);val target=Target(computer,"native-session","run","conversation",connection.id);val payload=target.json().put("text","Private message")
-            api.submit(connection,target,"send",payload,pendingId)
+            api.submit(connection,target,"send",payload,pendingId,SendAttempt())
             val computers=api.computers(connection).getJSONArray("computers")
             assertEquals(1,computers.length());assertTrue(computers.getJSONObject(0).getBoolean("online"))
             assertEquals("online-route",store.load(connection).routes.getValue(computer).routeId)
-            api.submit(connection,target,"send",payload,newId)
-            api.submit(connection,target,"send",payload,pendingId)
+            api.submit(connection,target,"send",payload,newId,SendAttempt())
+            api.submit(connection,target,"send",payload,pendingId,SendAttempt())
             assertEquals("preferred-route",WorkspaceEnvelope.parse(JSONObject(saved[0]).getJSONObject("envelope")).header.routeId)
             assertEquals("online-route",WorkspaceEnvelope.parse(JSONObject(saved[1]).getJSONObject("envelope")).header.routeId)
             assertEquals(saved[0],saved[2])
@@ -541,23 +547,23 @@ class EncryptedRelayTest {
             val store=MemoryWorkspaceJournal();store.create(connection,state());val api=RelayApi(workspace=store)
             val target=Target("machine-fixture","native-session","exact-run","exact-conversation",connection.id)
             val payload=target.json().put("text","private message")
-            assertEquals("queued",api.submit(connection,target,"send",payload,"request-one").string("state"))
+            assertEquals("queued",api.submit(connection,target,"send",payload,"request-one",SendAttempt()).string("state"))
             val first=store.load(connection)
             store.update(connection,first,first.withRoutes(mapOf("machine-fixture" to WorkspaceRoute("machine-fixture",gateway.device.deviceId,"changed-catalog-route","machine-fixture"))))
-            assertEquals("queued",api.submit(connection,target,"send",payload,"request-one").string("state"))
+            assertEquals("queued",api.submit(connection,target,"send",payload,"request-one",SendAttempt()).string("state"))
             assertEquals(saved[0],saved[1]);val restarted=RelayApi(workspace=store)
             assertEquals("uncertain",restarted.receipt(connection,"request-one").string("state"));assertEquals(2,saved.size)
             outerOnly=false;wrongRoute=true
             assertTrue(runCatching { restarted.receipt(connection,"request-one") }.isFailure);assertEquals(2,saved.size)
             wrongRoute=false
             assertEquals("completed",restarted.receipt(connection,"request-one").string("state"));assertEquals(2,saved.size)
-            assertTrue(runCatching { restarted.submit(connection,target,"send",payload,"request-one") }.isFailure);assertEquals(2,saved.size)
+            assertTrue(runCatching { restarted.submit(connection,target,"send",payload,"request-one",SendAttempt()) }.isFailure);assertEquals(2,saved.size)
         }
     }
     @Test fun missingProtectedStateRefusesBeforeAnyNetworkAndCannotUseV1()=runBlocking {
         MockWebServer().use { server ->
             server.start();val connection=Connection("missing","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
-            assertTrue(runCatching { RelayApi().submit(connection,Target("machine","private-session","run","conversation",connection.id),"send",JSONObject(),"request-one") }.isFailure)
+            assertTrue(runCatching { RelayApi().submit(connection,Target("machine","private-session","run","conversation",connection.id),"send",JSONObject(),"request-one",SendAttempt()) }.isFailure)
             assertEquals(0,server.requestCount)
         }
     }
@@ -573,6 +579,179 @@ class EncryptedRelayTest {
             val state=journal.load(connection)
             assertEquals(phone.device,state.identity.device);assertNull(state.membership)
             assertFalse(state.candidate.json().toString().contains(f.getJSONObject("invitation").getString("secret")))
+        }
+    }
+
+    private fun serveMembership(server:MockWebServer,onPost:(RecordedRequest)->MockResponse):AtomicInteger {
+        val posts=AtomicInteger()
+        server.dispatcher=object:Dispatcher() {
+            override fun dispatch(r:RecordedRequest):MockResponse {
+                if(r.method=="POST" && r.path=="/v2/requests") { posts.incrementAndGet();return onPost(r) }
+                if(r.path!!.startsWith("/v2/membership")) return MockResponse().setBody(history().toString())
+                return MockResponse().setResponseCode(500)
+            }
+        }
+        return posts
+    }
+    private fun sendTarget(connection:Connection,computer:String="machine-fixture")=
+        Target(computer,"native-session","exact-run","exact-conversation",connection.id)
+    private fun sendPayload()=JSONObject().put("text","private message")
+    private fun encryptedConnection(server:MockWebServer,id:String)=
+        Connection(id,"Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
+
+    @Test fun aMissingRouteNeverPostsAndStaysLocal()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { MockResponse().setBody("""{"request_id":"request-one","state":"queued","envelope":null}""") }
+            server.start();val connection=encryptedConnection(server,"no-route")
+            val store=MemoryWorkspaceJournal();store.create(connection,state().withRoutes(emptyMap()))
+            val attempt=SendAttempt()
+            val failure=runCatching { RelayApi(workspace=store).submit(connection,sendTarget(connection,"unknown-machine"),"send",sendPayload(),"request-one",attempt) }.exceptionOrNull()
+            assertNotNull(failure);assertTrue(failure!!.message!!.contains("encrypted route"))
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertEquals("failed",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    @Test fun aSealFailureNeverPostsAndStaysLocal()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { error("a mutation POST is refused by this test") }
+            server.start();val connection=encryptedConnection(server,"seal-failure")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val attempt=SendAttempt()
+            val api=RelayApi(workspace=store,sealEnvelope={ _,_,_,_ -> error("seal unavailable") })
+            val failure=runCatching { api.submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) }.exceptionOrNull()
+            assertNotNull(failure);assertTrue(failure!!.message!!.contains("seal unavailable"))
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertEquals("failed",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    private class FailingReserve(private val inner:WorkspaceJournal):WorkspaceJournal by inner {
+        override fun reserve(connection:Connection,id:String,plainHash:String,envelope:WorkspaceEnvelope):WorkspaceEnvelope=
+            error("reserve unavailable")
+    }
+
+    @Test fun aReservationFailureNeverPostsAndStaysLocal()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { error("a mutation POST is refused by this test") }
+            server.start();val connection=encryptedConnection(server,"reserve-failure")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val attempt=SendAttempt()
+            val failure=runCatching { RelayApi(workspace=FailingReserve(store)).submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) }.exceptionOrNull()
+            assertNotNull(failure);assertTrue(failure!!.message!!.contains("reserve unavailable"))
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertEquals("failed",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    @Test fun aStartedPostIsEnqueuedEvenWhenItsResponseIsLost()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
+            server.start();val connection=encryptedConnection(server,"lost-response")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val attempt=SendAttempt()
+            val failure=runCatching { RelayApi(workspace=store).submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) }.exceptionOrNull()
+            assertNotNull(failure);assertEquals(1,posts.get())
+            assertEquals(TransportStage.Enqueued,attempt.stage)
+            assertEquals("uncertain",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    @Test fun aCancelDuringMembershipNeverPostsAndStaysLocal()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=AtomicInteger()
+            server.dispatcher=object:Dispatcher() {
+                override fun dispatch(r:RecordedRequest):MockResponse {
+                    if(r.method=="POST" && r.path=="/v2/requests") { posts.incrementAndGet();return MockResponse().setBody("{}") }
+                    if(r.path!!.startsWith("/v2/membership")) return MockResponse().setBody(history().toString()).setBodyDelay(5,TimeUnit.SECONDS)
+                    return MockResponse().setResponseCode(500)
+                }
+            }
+            server.start();val connection=encryptedConnection(server,"cancel-local")
+            val store=MemoryWorkspaceJournal();store.create(connection,state());val api=RelayApi(workspace=store)
+            val attempt=SendAttempt()
+            val job=launch(Dispatchers.IO) { runCatching { api.submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) } }
+            assertNotNull(server.takeRequest(2,TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertEquals("failed",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    @Test fun aCancelAfterTheMutationPostStaysUnknown()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=AtomicInteger();val queued=CountDownLatch(1)
+            server.dispatcher=object:Dispatcher() {
+                override fun dispatch(r:RecordedRequest):MockResponse {
+                    if(r.method=="POST" && r.path=="/v2/requests") {
+                        posts.incrementAndGet();queued.countDown()
+                        return MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                    }
+                    if(r.path!!.startsWith("/v2/membership")) return MockResponse().setBody(history().toString())
+                    return MockResponse().setResponseCode(500)
+                }
+            }
+            server.start();val connection=encryptedConnection(server,"cancel-sent")
+            val store=MemoryWorkspaceJournal();store.create(connection,state());val api=RelayApi(workspace=store)
+            val attempt=SendAttempt()
+            val job=launch(Dispatchers.IO) { runCatching { api.submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) } }
+            assertTrue(queued.await(2,TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            assertEquals(1,posts.get());assertEquals(TransportStage.Enqueued,attempt.stage)
+            assertEquals("uncertain",SendSettlement.status(attempt.stage,null))
+        }
+    }
+
+    @Test fun aStartedSendThroughTheOutboxEntrySettlesUnknown()=runBlocking {
+        // zerus-a4mub.21: the ViewModel's send entry (OutgoingSend + the
+        // required evidence) settles Unknown when the mutation POST started and
+        // its response was lost. submitOutgoing requires the attempt by type, so
+        // dropping the evidence does not compile.
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
+            server.start();val connection=encryptedConnection(server,"outbox-entry")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val api=RelayApi(workspace=store);val attempt=SendAttempt()
+            var status:String?=null;var message:String?=null;var settled:JSONObject?=null
+            OutgoingSend(attempt,
+                submit={ evidence -> submitOutgoing(api,connection,sendTarget(connection),sendPayload(),"request-one",evidence) },
+                await={ initial -> api.await(connection,initial) },
+                settle={ receipt -> settled=receipt },
+                failed={ s,m -> status=s;message=m }).run()
+            assertEquals(1,posts.get());assertEquals(TransportStage.Enqueued,attempt.stage)
+            assertNull(settled);assertEquals("uncertain",status)
+            assertEquals("Delivery is unconfirmed. Check its receipt or dismiss the warning to continue.",message)
+        }
+    }
+
+    @Test fun aLocalFailureThroughTheOutboxEntrySettlesNotSent()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { error("a mutation POST is refused by this test") }
+            server.start();val connection=encryptedConnection(server,"outbox-local")
+            val store=MemoryWorkspaceJournal();store.create(connection,state().withRoutes(emptyMap()))
+            val api=RelayApi(workspace=store);val attempt=SendAttempt()
+            var status:String?=null;var message:String?=null
+            OutgoingSend(attempt,
+                submit={ evidence -> submitOutgoing(api,connection,sendTarget(connection,"unknown-machine"),sendPayload(),"request-one",evidence) },
+                await={ initial -> api.await(connection,initial) },
+                settle={ error("a local failure cannot settle") },
+                failed={ s,m -> status=s;message=m }).run()
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertEquals("failed",status)
+            assertEquals("The saved message was not sent. Review it before trying again.",message)
+        }
+    }
+
+    @Test fun aTimeoutAfterTheMutationPostStaysUnknown()=runBlocking {
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
+            server.start();val connection=encryptedConnection(server,"timeout-sent")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val attempt=SendAttempt()
+            val failure=runCatching { withTimeout(2_000) { RelayApi(workspace=store).submit(connection,sendTarget(connection),"send",sendPayload(),"request-one",attempt) } }.exceptionOrNull()
+            assertTrue(failure is TimeoutCancellationException)
+            assertEquals(1,posts.get());assertEquals(TransportStage.Enqueued,attempt.stage)
+            assertEquals("uncertain",SendSettlement.status(attempt.stage,null))
         }
     }
 }

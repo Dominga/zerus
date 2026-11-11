@@ -59,7 +59,7 @@ class SessionNotificationPreferencesTest {
             server.enqueue(MockResponse().setBody("""{"request_id":"request","state":"queued"}"""));server.start()
             val connection=Connection(target.connectionId,"Fixture",server.url("/").toString().trimEnd('/'),"synthetic")
             val args=JSONObject().put("muted",true).put("expected_revision",2)
-            RelayApi().submit(connection,target,SessionNotificationPreferences.operation,SessionNotificationPreferences.payload(target,args),"request")
+            RelayApi().submit(connection,target,SessionNotificationPreferences.operation,SessionNotificationPreferences.payload(target,args),"request",SendAttempt())
             val request=server.takeRequest();val body=JSONObject(request.body.readUtf8())
             assertEquals("POST",request.method);assertEquals("/v1/requests",request.path)
             assertEquals("request",body.getString("request_id"));assertEquals(SessionNotificationPreferences.operation,body.getString("operation"))

@@ -96,9 +96,9 @@ class ArchiveBrowsingTest {
             val testConnection = connection.copy(url = server.url("/").toString().trimEnd('/'))
             val archived = live.copy(archiveId = first)
             listOf("send", "answer", "interrupt").forEach { operation ->
-                assertTrue(runCatching { RelayApi().submit(testConnection, archived, operation, JSONObject(), "request") }.isFailure)
+                assertTrue(runCatching { RelayApi().submit(testConnection, archived, operation, JSONObject(), "request", SendAttempt()) }.isFailure)
             }
-            assertTrue(runCatching { RelayApi().submit(testConnection, archived, "inspect", JSONObject(), "request") }.isFailure)
+            assertTrue(runCatching { RelayApi().submit(testConnection, archived, "inspect", JSONObject(), "request", SendAttempt()) }.isFailure)
             assertEquals(0, server.requestCount)
         }
     }

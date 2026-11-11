@@ -449,8 +449,8 @@ fn read_view(name: &str, record: &Value, mut summary: Value, live_pane: bool) ->
 /// written before its Stop, so it is in that read or an earlier one. The
 /// questions signed here are read before the inspection lists its own, so
 /// each one that is still pending when a mark arrives was listed. Questions
-/// not indexed in time leave the signature unknown (`attention_complete`
-/// false), never acknowledgeable.
+/// not indexed in time, or an unreadable index, leave the signature unknown
+/// (`attention_complete` false), never acknowledgeable.
 pub(super) fn current_read(name: &str, journal_record: &Value, summary: Value, live_pane: bool) -> Option<Value> {
     let conversation = string(journal_record, "conversation_id");
     if conversation.is_empty() {
@@ -459,7 +459,10 @@ pub(super) fn current_read(name: &str, journal_record: &Value, summary: Value, l
     let view = read_view(name, journal_record, summary, live_pane);
     #[cfg(test)]
     journal::read_order::note("signed_questions");
-    let questions = pending_questions(journal_record, &view, live_pane, question_budget()).unwrap_or(Some(Vec::new()));
+    // Unlike a listing or `hgs read`, which count an unreadable index as no
+    // questions, this field never claims completeness it does not have: such
+    // an index leaves the questions unknown (zerus-a4mub.28).
+    let questions = pending_questions(journal_record, &view, live_pane, question_budget()).unwrap_or(None);
     Some(binding(journal::journal_name(journal_record), conversation, view, questions.as_deref()))
 }
 

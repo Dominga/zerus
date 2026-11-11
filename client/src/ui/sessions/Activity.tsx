@@ -1119,6 +1119,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
       }
       scroller.scrollTo({ top, behavior: "instant" });
       virtualizer.scrollOffset = scroller.scrollTop;
+      // The offset alone recomputes nothing. A scroll event reports a changed
+      // offset only after this paint, and an unchanged one (a position clamped
+      // at the end) never: recompute the window now, so the restored position
+      // is never revealed with the previous window's rows (zerus-2n2vk).
+      virtualizer.measure();
       reading.restore(anchors);
       batch(() => { setRestoring(undefined); setPlaced(true); });
     });

@@ -171,6 +171,9 @@ async function attachStep(path: string) {
 
 async function sendStep(path: string) {
   await select(API);
+  // The attach step's composer call may still be settling (operationLocked):
+  // wait for the observed Send state rather than reading it once.
+  await until(() => composer.sendEnabled(), 10_000, "Send is disabled").catch(() => undefined);
   if (!composer.sendEnabled()) {
     const view = composer.view();
     throw new Error(`Send is disabled: ${JSON.stringify({ status: composer.status(), locked: composer.locked(), operationLocked: composer.operationLocked(),
@@ -212,6 +215,22 @@ async function sendFollowStep() {
   const disclosureStart = parseFloat(disclosure.closest<HTMLElement>(".act-virtual-row")!.dataset.start ?? "0");
   disclosure.click();
   await until(atEnd, 3000, "content growth did not stay at the end after send");
+  // A thumbnail reserves 96x64 until its image decodes, then takes the image's
+  // size (attachment-image.ts). Let the transcript's own late layout finish
+  // before the hold, so the check below sees only what the injected journal
+  // events and the held collapse do (zerus-2n2vk).
+  const layout = () => [...scroller.querySelectorAll<HTMLElement>(".act-virtual-row")]
+    .map((row) => `${row.dataset.index}:${row.dataset.start}:${row.getBoundingClientRect().height}`).join(" ") + ` ${scroller.scrollHeight}`;
+  const decoded = () => [...scroller.querySelectorAll<HTMLImageElement>(".att-thumb img")].every((image) => image.complete && image.naturalWidth > 0);
+  let stable = 0, last = "";
+  await until(() => {
+    const now = layout();
+    stable = decoded() && now === last ? stable + 1 : 0;
+    last = now;
+    return stable >= 6;
+  }, 10_000, "Activity layout did not settle before the selection hold").catch((error) => {
+    throw new Error(`${error.message}: ${JSON.stringify({ decoded: decoded(), layout: layout() })}`);
+  });
   const range = document.createRange();
   range.selectNodeContents(scroller.querySelector(".act-msg")!);
   const selection = document.getSelection()!;
@@ -240,7 +259,9 @@ async function sendFollowStep() {
       } }]);
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       frames.push({ top: scroller.scrollTop, height: scroller.scrollHeight });
-      log(`phase4-selection-frame ${JSON.stringify({ n, top: scroller.scrollTop, height: scroller.scrollHeight })}`);
+      // For diagnosis: the virtual total and each mounted row (index:start:height).
+      log(`phase4-selection-frame ${JSON.stringify({ n, top: scroller.scrollTop, height: scroller.scrollHeight,
+        min: scroller.querySelector<HTMLElement>(".act-virtual")?.style.minHeight ?? null, rows: layout() })}`);
     }
     await sleep(300);
     log(`phase4-selection-hold ${JSON.stringify({ selectedTop, selectedHeight, writes, frames: frames.length })}`);
@@ -686,13 +707,29 @@ async function mediaPlaybackStep() {
   card.querySelector<HTMLButtonElement>('button[aria-label="Show transcript"]')?.click();
   const play = card.querySelector<HTMLButtonElement>(".vp-btn")!;
   const position = () => Number(card.querySelector(".vp-wave")!.getAttribute("aria-valuenow"));
+  const playing = () => play.getAttribute("aria-pressed") === "true";
+  const kept = () => card.isConnected && document.getElementById(card.id) === card && playing();
+  const failure = () => card.querySelector(".vm-error")?.textContent ?? "";
+  const state = () => {
+    const audio = card.querySelector<HTMLAudioElement>("audio");
+    return JSON.stringify({ pressed: play.getAttribute("aria-pressed"), busy: play.getAttribute("aria-busy"), position: position(), error: failure(),
+      connected: card.isConnected, audio: audio && { ready: audio.readyState, network: audio.networkState, paused: audio.paused, code: audio.error?.code ?? null, src: !!audio.getAttribute("src") } });
+  };
   play.click();
-  await until(() => position() > 0 && play.getAttribute("aria-pressed") === "true", 2000, "voice playback did not start");
+  // Reading the recording through the CLI and starting the media pipeline take
+  // seconds on a loaded host: wait for observed playback, and stop on an error.
+  await until(() => !!failure() || (position() > 0 && playing()), 20_000, "voice playback did not start")
+    .catch((error) => { throw new Error(`${error.message}: ${state()}`); });
+  if (failure()) throw new Error(`voice playback failed: ${state()}`);
   const before = position();
   scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }));
   scroller.scrollTo({ top: 0, behavior: "instant" });
-  await sleep(350);
-  if (!card.isConnected || document.getElementById(card.id) !== card || play.getAttribute("aria-pressed") !== "true" || position() <= before) {
+  // The same row keeps playing out of view: it stays mounted and pressed for
+  // at least 350 ms while its position advances.
+  const scrolled = performance.now();
+  await until(() => !kept() || (position() > before && performance.now() - scrolled >= 350), 10_000, "the playing row did not advance out of view")
+    .catch((error) => { throw new Error(`${error.message}: ${state()}`); });
+  if (!kept() || position() <= before) {
     throw new Error(`scrolling stopped or reset the playing row: ${JSON.stringify({ before, after: position(), connected: card.isConnected, pressed: play.getAttribute("aria-pressed") })}`);
   }
   if (card.querySelector(".vm-text")?.textContent !== "media smoke transcript") throw new Error("scrolling closed the media transcript");
@@ -730,7 +767,11 @@ function watchActivityGeometry() {
         badFrames++;
         if (violations.length < 8) {
           violations.push({ phase, at: performance.now(), report });
-          log(`phase4-geometry-violation ${JSON.stringify({ phase, ...compact(report) })}`);
+          // Where the viewport was against the mounted rows, for diagnosis.
+          const edge = scroller.getBoundingClientRect().top;
+          log(`phase4-geometry-violation ${JSON.stringify({ phase, ...compact(report), top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight,
+            mounted: [report.rows[0].top - edge, report.rows.at(-1)!.bottom - edge], indexes: [report.rows[0].index, report.rows.at(-1)!.index],
+            jump: !!document.querySelector('button[aria-label^="Jump to latest activity"]') })}`);
         }
       }
     }
@@ -1171,22 +1212,30 @@ async function approvalStep() {
 
 async function queueStep() {
   await select(RELEASE);
-  await until(() => document.querySelector(".act-queue")?.textContent?.includes("also update the changelog") === true,
+  // Read the panel on every check: a queue refresh may remount it, and a
+  // reference taken once would keep watching a detached copy.
+  const queued = () => document.querySelector<HTMLElement>(".act-queue");
+  await until(() => queued()?.textContent?.includes("also update the changelog") === true,
     10_000, "the native queue did not appear");
-  const panel = document.querySelector(".act-queue")!;
-  await until(() => panel.querySelector(".act-body b")?.textContent === "Queued review"
-    && panel.querySelector(".att-caption")?.textContent?.includes("pasted-image.png") === true,
-  5000, "the queue did not use the outgoing Markdown and receipt attachment renderer");
+  await until(() => queued()?.querySelector(".act-body b")?.textContent === "Queued review"
+    && queued()?.querySelector(".att-caption")?.textContent?.includes("pasted-image.png") === true,
+  5000, "the queue did not use the outgoing Markdown and receipt attachment renderer")
+    .catch((error) => {
+      const shown = queued();
+      throw new Error(`${error.message}: ${JSON.stringify({ panels: document.querySelectorAll(".act-queue").length, bold: shown?.querySelector(".act-body b")?.textContent ?? null,
+        caption: shown?.querySelector(".att-caption")?.textContent ?? null, text: shown?.textContent?.slice(0, 200) ?? null })}`);
+    });
+  const panel = queued()!;
   if (panel.textContent?.includes("Inspect the attached") || panel.textContent?.includes("↳")
     || panel.textContent?.includes("/synthetic/")) throw new Error("raw terminal queue chrome/path leaked into the outgoing preview");
   if (getComputedStyle(panel).borderTopStyle !== "dashed" || !panel.querySelector(".act-queue-head svg"))
     throw new Error("queued messages are missing their pending treatment");
   await until(() => {
-    const image = panel.querySelector<HTMLImageElement>(".att-thumb img");
+    const image = queued()?.querySelector<HTMLImageElement>(".att-thumb img");
     return !!image && image.complete && image.naturalWidth === 1;
   }, 5000, "the exact queued receipt thumbnail did not load");
-  if (button("Send now", panel).disabled) throw new Error("Send now is disabled");
-  button("Send now", panel).click();
+  if (button("Send now", queued()!).disabled) throw new Error("Send now is disabled");
+  button("Send now", queued()!).click();
   const sent = await waitCall("send-now", 1);
   const request = JSON.parse(sent[0].stdin) as QueueRequest;
   if (request.queue_id !== "queue-fixture") throw new Error("Send now names the wrong queue");
@@ -1378,10 +1427,12 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
   let current = "start";
   try {
     if (!smokeFile) throw new Error("ZERUS_CLIENT_SMOKE_FILE is not set");
-    const only = new URLSearchParams(location.search).get("phase4-only");
-    if (only && !steps.some(([name]) => name === only)) throw new Error("Unknown phase4 step");
+    // One step, or a comma-separated subset in the sequence's own order, to
+    // reproduce a state an earlier step leaves for a later one.
+    const only = new URLSearchParams(location.search).get("phase4-only")?.split(",").filter(Boolean);
+    if (only?.some((wanted) => !steps.some(([name]) => name === wanted))) throw new Error("Unknown phase4 step");
     // These steps need separate fixture setups and run individually.
-    for (const [name, run] of steps.filter(([name]) => only ? name === only : !["start-poll", "resume-history", "resume-status"].includes(name))) {
+    for (const [name, run] of steps.filter(([name]) => only ? only.includes(name) : !["start-poll", "resume-history", "resume-status"].includes(name))) {
       current = name;
       await run();
       log(`phase4-smoke ${name}: done`);

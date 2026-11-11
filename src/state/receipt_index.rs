@@ -26,7 +26,8 @@ pub(super) const PAGE_LIMIT: usize = 100;
 const EXAMINE: usize = 256;
 const ORIGINAL_BYTES: u64 = 256 * 1024;
 const DATABASE: &str = "delivery-receipts-v1.sqlite3";
-const ROWSET_PROTOCOL: &str = "1";
+const ROWSET_PROTOCOL: &str = "2";
+const VERIFY_SECONDS: f64 = 600.0;
 
 // Coverage is sealed only after discovery. These guards invalidate that seal
 // if a cached locator disappears or moves without a matching original walk.
@@ -363,10 +364,18 @@ impl Catalog {
                   UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
                 END;
                 CREATE TRIGGER IF NOT EXISTS receipt_row_rebound AFTER UPDATE ON receipt_rows
-                WHEN OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
+                WHEN (OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
                   OR OLD.name IS NOT NEW.name OR OLD.run IS NOT NEW.run OR OLD.conversation IS NOT NEW.conversation
                   OR OLD.agent IS NOT NEW.agent OR OLD.first_message IS NOT NEW.first_message
-                  OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding
+                  OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding)
+                  -- The one-way first-prompt pin is not a rebind: an empty
+                  -- conversation resolving to its run's conversation keeps
+                  -- every other identity column and the row's coverage.
+                  AND NOT (OLD.conversation='' AND NEW.conversation<>''
+                    AND OLD.seq IS NEW.seq AND OLD.source IS NEW.source AND OLD.request IS NEW.request
+                    AND OLD.name IS NEW.name AND OLD.run IS NEW.run AND OLD.agent IS NEW.agent
+                    AND OLD.first_message IS NEW.first_message AND OLD.at IS NEW.at
+                    AND OLD.files IS NEW.files AND OLD.binding IS NEW.binding)
                 BEGIN
                   UPDATE receipt_sources SET complete=0 WHERE source IN(OLD.source,NEW.source);
                   INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_changed')
@@ -419,6 +428,7 @@ impl Catalog {
                  CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
                  CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);",
             ))?;
+
             // The frontier must cover every seeded row, repairing a persisted
             // cut where the column exists but its sequence was never published.
             sql(db.execute(
@@ -427,6 +437,37 @@ impl Catalog {
             ))?;
             if let Some(transaction) = schema_transaction {
                 sql(transaction.commit())?;
+            }
+            if !verified {
+                // Reissue the invalidation guards so a cache created with the
+                // earlier trigger definition also exempts the first-prompt pin.
+                sql(db.execute_batch(
+                    "DROP TRIGGER IF EXISTS receipt_row_removed;
+                     DROP TRIGGER IF EXISTS receipt_row_rebound;
+                     CREATE TRIGGER receipt_row_removed AFTER DELETE ON receipt_rows BEGIN
+                       UPDATE receipt_sources SET complete=0,indexed=MAX(0,indexed-1) WHERE source=OLD.source;
+                       INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_missing')
+                         ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                       UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                     END;
+                     CREATE TRIGGER receipt_row_rebound AFTER UPDATE ON receipt_rows
+                     WHEN (OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
+                       OR OLD.name IS NOT NEW.name OR OLD.run IS NOT NEW.run OR OLD.conversation IS NOT NEW.conversation
+                       OR OLD.agent IS NOT NEW.agent OR OLD.first_message IS NOT NEW.first_message
+                       OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding)
+                       AND NOT (OLD.conversation='' AND NEW.conversation<>''
+                         AND OLD.seq IS NEW.seq AND OLD.source IS NEW.source AND OLD.request IS NEW.request
+                         AND OLD.name IS NEW.name AND OLD.run IS NEW.run AND OLD.agent IS NEW.agent
+                         AND OLD.first_message IS NEW.first_message AND OLD.at IS NEW.at
+                         AND OLD.files IS NEW.files AND OLD.binding IS NEW.binding)
+                     BEGIN
+                       UPDATE receipt_sources SET complete=0 WHERE source IN(OLD.source,NEW.source);
+                       INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_changed')
+                         ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                       UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                     END;",
+                ))?;
+
             }
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
@@ -438,7 +479,10 @@ impl Catalog {
                     [source.key()],
                 ))?;
             }
-
+            sql(db.execute(
+                "INSERT OR IGNORE INTO receipt_meta VALUES('verified_at',?)",
+                [now().to_string()],
+            ))?;
         }
         if create {
             sql(db.execute(
@@ -591,8 +635,9 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ))?;
         let current = migration::stamp(&self.state.join(scope.source.directory()));
+        let verified = self.coverage_verified();
         let protocol = rowset_protocol(&self.db);
-        let ready = protocol && complete && current.as_ref().is_ok_and(|v| *v == stamp);
+        let ready = verified && complete && current.as_ref().is_ok_and(|v| *v == stamp);
         let mut position = if cursor.is_empty() {
             Cursor {
                 version: 1,
@@ -790,6 +835,46 @@ struct ChangeCursor {
 }
 
 impl Catalog {
+    /// A cheap structural and freshness check for a pinned read. Presence of
+    /// the invalidation guards, the trigger-maintained row witness and a
+    /// bounded verification age keep silent row loss and coarse-timestamp
+    /// originals from masquerading as complete coverage. It neither walks the
+    /// directory nor writes: the caller requests the background worker.
+    fn coverage_verified(&self) -> bool {
+        if !rowset_protocol(&self.db) {
+            return false;
+        }
+        let witness: bool = self
+            .db
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources WHERE indexed != (SELECT COUNT(*) FROM receipt_rows WHERE source=receipt_sources.source))",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !witness {
+            return false;
+        }
+        true
+    }
+    /// A stale-but-consistent locator stays complete: age only schedules the
+    /// background re-verification walk, which flips coverage when it finds a
+    /// discrepancy. No consumer waits on the 600 s timer by itself.
+    fn verification_due(&self) -> bool {
+        let verified_at = self
+            .db
+            .query_row(
+                "SELECT value FROM receipt_meta WHERE key='verified_at'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        now() - verified_at >= VERIFY_SECONDS
+    }
     fn change_epoch(&self) -> Result<(String, String, i64)> {
         let epoch: String = sql(self.db.query_row(
             "SELECT value FROM receipt_meta WHERE key='epoch'",
@@ -917,10 +1002,11 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ))?;
         let current_directory = migration::stamp(&self.state.join(scope.source.directory()));
-        // The pinned changed page retains the row-set protocol check: a cache
-        // without its invalidation guards proves no coverage.
-        let protocol = rowset_protocol(&self.db);
-        let ready = protocol && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
+        // The pinned changed page retains the row-set protocol check through
+        // coverage_verified(): a cache without its invalidation guards proves
+        // no coverage.
+        let verified = self.coverage_verified();
+        let ready = verified && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
         let coverage = if ready && errors == 0 {
             Coverage::Complete
         } else if !ready && indexed > 0 && stamp == "absent" {
@@ -989,6 +1075,9 @@ pub(super) fn changed(
         let advanced = catalog.changed_page(&scope, cursor, limit, files)?;
         return Ok((catalog, advanced));
     }
+    if catalog.verification_due() {
+        migration::request(&state);
+    }
     Ok((catalog, page))
 }
 
@@ -1046,7 +1135,7 @@ pub(super) fn page(
     let state = root();
     let catalog = Catalog::open(&state, false)?;
     let page = catalog.page(&Scope::new(record, agent), cursor, limit, true)?;
-    if page.metadata["migration_complete"] != true {
+    if page.metadata["migration_complete"] != true || catalog.verification_due() {
         migration::request(&state);
     }
     Ok((catalog, page))

@@ -702,3 +702,153 @@ fn a_guarded_cache_with_a_cut_change_upgrade_recovers_its_frontier() {
     assert_eq!(changed.rows.len(), 2);
     assert!(changed.drained);
 }
+
+#[test]
+fn a_first_prompt_pin_keeps_coverage_while_a_real_rebind_invalidates() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let record = value(1, "", "run", "", 1.0);
+    put(&catalog, Source::Terminal, &record);
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    let coverage = || -> (i64, i64, i64, String) {
+        let (complete, indexed, errors): (i64, i64, i64) = catalog
+            .db
+            .query_row(
+                "SELECT complete,indexed,errors FROM receipt_sources WHERE source='terminal'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let epoch: String = catalog
+            .db
+            .query_row("SELECT value FROM receipt_meta WHERE key='epoch'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        (complete, indexed, errors, epoch)
+    };
+    let before = coverage();
+    assert_eq!(before.0, 1);
+    assert_eq!(before.1, 1);
+    assert_eq!(before.2, 0);
+    // The reviewer's verbatim-SQL probe: the legitimate one-way first-prompt
+    // pin changes only the empty conversation. It must keep coverage and epoch.
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_rows SET conversation='resolved' WHERE source='terminal' AND request=? AND conversation=''",
+            [uuid::Uuid::from_u128(1).to_string()],
+        )
+        .unwrap();
+    assert_eq!(coverage(), before);
+    // Any other identity rebind still invalidates coverage and rotates the
+    // epoch, so old cursors cannot pass the missing row.
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_rows SET run='other-run' WHERE source='terminal' AND request=?",
+            [uuid::Uuid::from_u128(1).to_string()],
+        )
+        .unwrap();
+    let after = coverage();
+    assert_eq!(after.0, 0);
+    assert!(after.2 >= 1);
+    assert_ne!(after.3, before.3);
+}
+
+#[test]
+fn a_lost_witness_or_stale_verification_turns_coverage_incomplete_and_the_walk_repairs_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 1.0));
+    put(&catalog, Source::Terminal, &value(2, "wanted", "run", "", 2.0));
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    let scope = scope("wanted", "run", "");
+    assert_eq!(
+        catalog.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+    // A row lost without its DELETE trigger leaves the trigger-maintained
+    // witness ahead of the rows. A pinned read must not claim completion.
+    catalog
+        .db
+        .execute("UPDATE receipt_sources SET indexed=5 WHERE source='terminal'", [])
+        .unwrap();
+    let page = catalog.page(&scope, "", 100, true).unwrap();
+    assert_eq!(page.metadata["migration_complete"], false);
+    // The bounded verification requests the worker; its forced walk repairs
+    // the witness (and any lost row) and refreshes the verification age.
+    let mut migration = migration::Migration::new(temp.path()).unwrap();
+    while !migration.step().unwrap() {}
+    let repaired = catalog.page(&scope, "", 100, true).unwrap();
+    assert_eq!(repaired.metadata["migration_complete"], true);
+    assert_eq!(repaired.metadata["indexed"], 2);
+    // Age alone is not evidence: a stale-but-consistent locator stays
+    // complete and only schedules the re-verification walk.
+    catalog
+        .db
+        .execute("UPDATE receipt_meta SET value='0' WHERE key='verified_at'", [])
+        .unwrap();
+    assert!(catalog.verification_due());
+    assert_eq!(
+        catalog.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+    let mut migration = migration::Migration::new(temp.path()).unwrap();
+    while !migration.step().unwrap() {}
+    assert!(!catalog.verification_due());
+    assert_eq!(
+        catalog.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+}
+
+#[test]
+fn a_stale_but_consistent_verification_stays_complete() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    put(&catalog, Source::Terminal, &value(1, "wanted", "run", "", 1.0));
+    put(&catalog, Source::Terminal, &value(2, "wanted", "run", "", 2.0));
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    catalog
+        .db
+        .execute("UPDATE receipt_meta SET value='0' WHERE key='verified_at'", [])
+        .unwrap();
+    let scope = scope("wanted", "run", "");
+    assert!(catalog.verification_due());
+    let page = catalog.page(&scope, "", 100, true).unwrap();
+    assert_eq!(page.metadata["migration_complete"], true);
+    assert_eq!(page.metadata["state"], "indexed");
+    let changed = catalog.changed_page(&scope, "", 100, true).unwrap();
+    assert!(changed.drained);
+    assert_eq!(changed.rows.len(), 2);
+    // The background walk only refreshes the verification age here.
+    let mut migration = migration::Migration::new(temp.path()).unwrap();
+    while !migration.step().unwrap() {}
+    assert!(!catalog.verification_due());
+    assert_eq!(
+        catalog.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        true
+    );
+}

@@ -346,9 +346,6 @@ impl Catalog {
             sql(db.execute_batch("CREATE TABLE IF NOT EXISTS receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,stamp TEXT NOT NULL DEFAULT '',change INTEGER NOT NULL DEFAULT 0,UNIQUE(source,request));
-                CREATE INDEX IF NOT EXISTS receipt_change ON receipt_rows(source,change);
-                CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
-                CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);
                 CREATE INDEX IF NOT EXISTS receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
                 CREATE INDEX IF NOT EXISTS receipt_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC);
                 CREATE INDEX IF NOT EXISTS receipt_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC);
@@ -357,6 +354,7 @@ impl Catalog {
                 CREATE TABLE IF NOT EXISTS receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(source,name));
                 CREATE TRIGGER IF NOT EXISTS receipt_row_count AFTER INSERT ON receipt_rows BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
                 CREATE TRIGGER IF NOT EXISTS receipt_error_count AFTER INSERT ON receipt_errors BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
+
                 CREATE TRIGGER IF NOT EXISTS receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;
                 CREATE TRIGGER IF NOT EXISTS receipt_row_removed AFTER DELETE ON receipt_rows BEGIN
                   UPDATE receipt_sources SET complete=0,indexed=MAX(0,indexed-1) WHERE source=OLD.source;
@@ -375,6 +373,29 @@ impl Catalog {
                     ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
                   UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
                 END;"))?;
+
+            // #2055 shipped without change tracking. A v1 database has neither
+            // column: add them (and seed their sequences) before any index
+            // mentions them. The upgrade transaction above already makes this
+            // atomic for a legacy cache.
+            let columns: Vec<String> = sql(db.prepare("SELECT name FROM pragma_table_info('receipt_rows')"))?
+                .query_map([], |row| row.get(0))
+                .map_err(|_| "Receipt index is unavailable".to_owned())?
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| "Receipt index is unavailable".to_owned())?;
+            if !columns.iter().any(|column| column == "stamp") {
+                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';"))?;
+            }
+            if !columns.iter().any(|column| column == "change") {
+                // Seed every discovered original once; later allocations
+                // continue from the committed high-water.
+                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0; UPDATE receipt_rows SET change=seq;"))?;
+            }
+            sql(db.execute_batch(
+                "CREATE INDEX IF NOT EXISTS receipt_change ON receipt_rows(source,change);
+                 CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
+                 CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);",
+            ))?;
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
                 [uuid::Uuid::new_v4().to_string()],
@@ -383,24 +404,6 @@ impl Catalog {
                 sql(db.execute(
                     "INSERT OR IGNORE INTO receipt_sources(source) VALUES(?)",
                     [source.key()],
-                ))?;
-            }
-            // #2055 shipped without change tracking. Existing rows are seeded
-            // with their discovery sequence so a fresh consumer frontier sees
-            // them once; the sequence then continues atomically.
-            let has_change: bool = sql(db.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('receipt_rows') WHERE name='change'",
-                [],
-                |r| r.get::<_, i64>(0).map(|n| n > 0),
-            ))?;
-            if !has_change {
-                sql(db.execute_batch(
-                    "ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';
-                     ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0;
-                     UPDATE receipt_rows SET change=seq;
-                     CREATE INDEX IF NOT EXISTS receipt_change ON receipt_rows(source,change);
-                     CREATE INDEX IF NOT EXISTS receipt_change_scope ON receipt_rows(source,agent,conversation,change,request);
-                     CREATE INDEX IF NOT EXISTS receipt_change_initial ON receipt_rows(source,agent,run,change,request);",
                 ))?;
             }
             sql(db.execute(
@@ -437,6 +440,18 @@ impl Catalog {
         })
     }
     fn remember(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
+        // Sequence allocation and the row write must be visible together: a
+        // reader that sees a higher change_seq must also see every lower row.
+        if self.db.is_autocommit() {
+            let transaction = sql(self.db.unchecked_transaction())?;
+            self.remember_row(source, path, value)?;
+            sql(transaction.commit())?;
+            Ok(())
+        } else {
+            self.remember_row(source, path, value)
+        }
+    }
+    fn remember_row(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -768,6 +783,17 @@ impl Catalog {
         if !(1..=PAGE_LIMIT).contains(&limit) || cursor.len() > 2048 {
             return Err("Invalid receipt change page".into());
         }
+        // The frozen upper and the rows it covers come from one snapshot, so
+        // an upper can never pass a row that is not visible to this read.
+        let transaction = sql(self.db.unchecked_transaction())?;
+        let page = self.changed_page_snapshot(scope, cursor, limit, files)?;
+        sql(transaction.commit())?;
+        Ok(page)
+    }
+    fn changed_page_snapshot(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<ChangedPage> {
+        if scope.run.is_empty() && scope.conversation.is_empty() {
+            return Err("Invalid receipt change page".into());
+        }
         if scope.run.is_empty() && scope.conversation.is_empty() {
             return Err("Invalid receipt change page".into());
         }
@@ -862,7 +888,10 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ))?;
         let current_directory = migration::stamp(&self.state.join(scope.source.directory()));
-        let ready = complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
+        // The pinned changed page retains the row-set protocol check: a cache
+        // without its invalidation guards proves no coverage.
+        let protocol = rowset_protocol(&self.db);
+        let ready = protocol && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
         let coverage = if ready && errors == 0 {
             Coverage::Complete
         } else if !ready && indexed > 0 && stamp == "absent" {

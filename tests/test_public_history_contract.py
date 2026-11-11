@@ -878,6 +878,53 @@ class PublicHistoryContract(unittest.TestCase):
         self.assertEqual(classified, 0)
 
 
+    def test_v1_receipt_index_migrates_through_the_real_worker(self):
+        path = self.state / "delivery-receipts-v1.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            db.executescript("""
+                CREATE TABLE receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',
+                    complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,
+                    errors INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,
+                    request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,
+                    agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,
+                    files INTEGER NOT NULL,binding TEXT NOT NULL,UNIQUE(source,request));
+                CREATE INDEX receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
+                CREATE INDEX receipt_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC);
+                CREATE INDEX receipt_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC);
+                CREATE INDEX receipt_file_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC) WHERE files=1;
+                CREATE INDEX receipt_file_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC) WHERE files=1;
+                CREATE TABLE receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,
+                    PRIMARY KEY(source,name));
+                CREATE TRIGGER receipt_row_count AFTER INSERT ON receipt_rows
+                    BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
+                CREATE TRIGGER receipt_error_count AFTER INSERT ON receipt_errors
+                    BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
+                CREATE TRIGGER receipt_error_clear AFTER DELETE ON receipt_errors
+                    BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;
+                INSERT INTO receipt_meta VALUES('epoch','v1-epoch'),('cursor_secret','v1-secret');
+                INSERT INTO receipt_sources(source,complete,indexed) VALUES('terminal',1,0);
+            """)
+        path.chmod(0o600)
+        self.receipt_worker()
+        with closing(sqlite3.connect(path)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(receipt_rows)")}
+            self.assertIn("stamp", columns)
+            self.assertIn("change", columns)
+            indexes = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN "
+                                 "('receipt_change','receipt_change_scope','receipt_change_initial')").fetchone()[0]
+            self.assertEqual(indexes, 3)
+            self.assertEqual(db.execute("SELECT value FROM receipt_meta WHERE key='change_seq'").fetchone()[0], "0")
+        request = str(uuid.uuid4())
+        self.receipt(request)
+        self.receipt_worker()
+        self.complete()
+        rows, classified = self.indexed_receipts()
+        self.assertEqual(rows.get(request), 1)
+        self.assertEqual(classified, 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()

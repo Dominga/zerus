@@ -377,6 +377,7 @@ fn a_lost_row_invalidates_cursors_and_is_rediscovered_without_original_changes()
     assert_eq!(restored.metadata["unattributed_errors"], 0);
     assert_eq!(fs::read(one).unwrap(), original);
     assert!(catalog.page(&scope, cursor, 1, true).is_err());
+}
 
 fn change_count(catalog: &Catalog) -> i64 {
     catalog
@@ -536,5 +537,106 @@ fn twelve_thousand_foreign_receipts_stay_out_of_a_changed_scope() {
         ]
     );
     assert!(page.drained);
- 97301104d (Use the bounded receipt locator for the canonical history import (zerus-1naad))
+}
+
+#[test]
+fn a_v1_database_migrates_before_change_indexes_are_created() {
+    let temp = tempfile::tempdir().unwrap();
+    // The exact #2055 schema: no stamp/change columns and no change indexes.
+    let path = temp.path().join("delivery-receipts-v1.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+         CREATE TABLE receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0);
+         CREATE TABLE receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,UNIQUE(source,request));
+         CREATE INDEX receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
+         CREATE INDEX receipt_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC);
+         CREATE INDEX receipt_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC);
+         CREATE INDEX receipt_file_scope ON receipt_rows(source,agent,conversation,at DESC,request DESC) WHERE files=1;
+         CREATE INDEX receipt_file_initial ON receipt_rows(source,agent,run,conversation,first_message,at DESC,request DESC) WHERE files=1;
+         CREATE TABLE receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(source,name));
+         CREATE TRIGGER receipt_row_count AFTER INSERT ON receipt_rows BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
+         CREATE TRIGGER receipt_error_count AFTER INSERT ON receipt_errors BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
+         CREATE TRIGGER receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;
+         INSERT INTO receipt_meta VALUES('epoch','v1-epoch'),('cursor_secret','v1-secret');
+         INSERT INTO receipt_sources(source,complete,indexed) VALUES('terminal',1,1);
+         INSERT INTO receipt_rows(source,request,name,run,conversation,agent,first_message,at,files,binding)
+             VALUES('terminal','existing-request','name','run','conversation','',0,1.0,1,'existing-binding');",
+    )
+    .unwrap();
+    drop(db);
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let columns: Vec<String> = catalog
+        .db
+        .prepare("SELECT name FROM pragma_table_info('receipt_rows')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    for column in ["stamp", "change"] {
+        assert!(columns.iter().any(|value| value == column), "{column} was not added");
+    }
+    let change: i64 = catalog
+        .db
+        .query_row("SELECT change FROM receipt_rows WHERE request='existing-request'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(change, 1);
+    let sequence: String = catalog
+        .db
+        .query_row("SELECT value FROM receipt_meta WHERE key='change_seq'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sequence, "1");
+    let indexes: i64 = catalog
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('receipt_change','receipt_change_scope','receipt_change_initial')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexes, 3);
+    // Reopening the migrated database is idempotent.
+    let again = Catalog::open(temp.path(), true).unwrap();
+    let change: i64 = again
+        .db
+        .query_row("SELECT change FROM receipt_rows WHERE request='existing-request'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(change, 1);
+}
+
+#[test]
+fn a_reader_never_sees_a_sequence_before_its_row_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let writer = Catalog::open(temp.path(), true).unwrap();
+    let reader = Catalog::open(temp.path(), true).unwrap();
+    let other = Catalog::open(temp.path(), true).unwrap();
+    other.db.busy_timeout(Duration::ZERO).unwrap();
+    let scope = scope("wanted", "run", "");
+    let first = value(1, "wanted", "run", "", 10.0);
+    let directory = temp.path().join(Source::Terminal.directory());
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("{}.json", first["request_id"].as_str().unwrap()));
+    fs::write(&path, first.to_string()).unwrap();
+    let transaction = writer.db.unchecked_transaction().unwrap();
+    writer.remember(Source::Terminal, &path, &first).unwrap();
+    let during = reader.changed_page(&scope, "", 10, true).unwrap();
+    assert!(during.rows.is_empty(), "an uncommitted change was published");
+    // A second writer cannot publish a higher sequence over the held one.
+    let second = value(2, "wanted", "run", "", 11.0);
+    let second_path = directory.join(format!("{}.json", second["request_id"].as_str().unwrap()));
+    fs::write(&second_path, second.to_string()).unwrap();
+    assert!(
+        other.remember(Source::Terminal, &second_path, &second).is_err(),
+        "a higher sequence committed over an uncommitted lower one"
+    );
+    let still = reader.changed_page(&scope, "", 10, true).unwrap();
+    assert!(still.rows.is_empty());
+    transaction.commit().unwrap();
+    let after = reader.changed_page(&scope, "", 10, true).unwrap();
+    assert_eq!(after.rows.len(), 1);
+    assert_eq!(
+        after.rows[0].locator.id,
+        uuid::Uuid::from_u128(1).to_string()
+    );
 }

@@ -1256,8 +1256,9 @@ python3 client/scripts/native-ui-smoke.py \
   --output artifacts/validation/native-ui-proof
 ```
 
-The script runs only inside `bwrap` with a private `/tmp`, network and
-`/run/user`, and it refuses to start the app while a canonical GUI guard
+Like every app-starting smoke, the script runs only through
+`scripts/gui_sandbox.py` (bwrap with a private `/tmp`, `/run/user`, network and
+IPC), and it refuses to start the app while a canonical GUI guard
 (`/tmp/com.hgdev.hgs-tray-<uid>`) is reachable. That guard ignores HOME and
 TMPDIR, so an unsandboxed start forwards to the person's running GUI. Inside, it
 creates a private D-Bus, Xvfb and HOME/XDG/TMPDIR/TMUX_TMPDIR from a fresh

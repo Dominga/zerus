@@ -19,18 +19,17 @@ APP_SMOKES = {
     "file-reference-smoke.py": True,
     "linux-startup-smoke.py": True,
     "machines-smoke.py": True,
+    "native-ui-smoke.py": True,
     "project-vivid-smoke.py": True,
     "termination-cleanup-smoke.py": True,
     "video-poster-smoke.py": True,
     "worktree-review-smoke.py": True,
 }
-# Scripts that start a display without the Zerus entry point, or that keep a
-# reviewed sandbox of their own until they move to this helper.
+# Scripts that start a display without the Zerus entry point.
 NOT_APP_STARTS = {
     "menu-smoke.py": "a browser against the local Vite server",
     "window-resize-smoke.py": "a synthetic window fixture, never the instance claim",
     "window-theme-smoke.py": "a synthetic window fixture, never the instance claim",
-    "native-ui-smoke.py": "its own bwrap sandbox (zerus-06hh0) until it adopts this helper",
     "phase4-wheel-driver.py": "the app child phase4-smoke.py starts inside its sandbox",
 }
 

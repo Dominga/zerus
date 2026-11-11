@@ -4,6 +4,7 @@
 #[path = "../crates/freedesktop-notify/src/ingress/test_bus.rs"]
 mod bus;
 use serde_json::{json, Value};
+use std::os::fd::AsRawFd;
 use std::{
     collections::BTreeMap,
     fs,
@@ -79,31 +80,45 @@ impl Fixture {
         command
     }
     fn run(&self, args: &[&str], input: &[u8]) -> Output {
+        fn drain(reader: &mut impl Read, bytes: &mut Vec<u8>, ended: &mut bool) {
+            if *ended { return; }
+            loop {
+                let mut chunk = [0; 8192];
+                match reader.read(&mut chunk) {
+                    Ok(0) => { *ended = true; return; }
+                    Ok(n) => {
+                        assert!(bytes.len() + n <= 128 << 10, "private CLI output bound");
+                        bytes.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => panic!("private CLI pipe read: {error}"),
+                }
+            }
+        }
         let mut child = Process(self.command(args).spawn().unwrap());
         child.0.stdin.take().unwrap().write_all(input).unwrap();
         let until = Instant::now() + Duration::from_secs(10);
-        while child.0.try_wait().unwrap().is_none() {
+        let mut stdout = child.0.stdout.take().unwrap();
+        let mut stderr = child.0.stderr.take().unwrap();
+        for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+        }
+        let (mut output, mut error) = (Vec::new(), Vec::new());
+        let (mut stdout_ended, mut stderr_ended) = (false, false);
+        loop {
+            // Drain while the original child runs: a status larger than the
+            // kernel pipe capacity must not deadlock behind our exit wait.
+            drain(&mut stdout, &mut output, &mut stdout_ended);
+            drain(&mut stderr, &mut error, &mut stderr_ended);
+            if child.0.try_wait().unwrap().is_some() && stdout_ended && stderr_ended {
+                break;
+            }
             assert!(Instant::now() < until, "private CLI deadline");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        child
-            .0
-            .stdout
-            .take()
-            .unwrap()
-            .take(128 << 10)
-            .read_to_end(&mut output)
-            .unwrap();
-        child
-            .0
-            .stderr
-            .take()
-            .unwrap()
-            .take(128 << 10)
-            .read_to_end(&mut error)
-            .unwrap();
         Output {
             status: child.0.wait().unwrap(),
             stdout: output,

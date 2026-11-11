@@ -29,16 +29,25 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     .connectTimeout(10, TimeUnit.SECONDS).readTimeout(35, TimeUnit.SECONDS)
     .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build(),
     internal val workspace: WorkspaceJournal? = null,
-    internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 }) {
+    internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 },
+    /** Test seam: a deterministic local seal failure before any mutation POST (zerus-a4mub.6). */
+    internal val sealEnvelope: (WorkspaceIdentity, WorkspaceDevice, WorkspaceHeader, ByteArray) -> WorkspaceEnvelope =
+        { identity, recipient, header, plaintext -> WorkspaceEnvelope.seal(identity, recipient, header, plaintext) }) {
     private val resultStream = RelayResultStream(client)
     internal fun closeResultStreams(connectionId: String? = null) = resultStream.close(connectionId)
-    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
+    suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false,
+        attempt: SendAttempt? = null): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
         val request = Request.Builder().url(ManagedRelay.transport(url) + path).header("Accept", "application/json")
         if (token.isNotBlank()) request.header("Authorization", "Bearer $token")
         if (delete) request.delete() else if (body != null) request.post(JsonRequestBody(body, when(path) { "/v1/requests" -> 30_408_704L; "/v2/requests" -> 41L*1024*1024; else -> 1_048_576L }))
         val call = client.newCall(request.build())
         suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { call.cancel() }
+            // Already cancelled before the client saw it: nothing can leave.
+            if (!continuation.isActive) return@suspendCancellableCoroutine
+            // The mutation request is handed to the client here: from this point
+            // delivery may have begun, so settlement may only call it unknown.
+            attempt?.enqueued()
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, error: IOException) {
                     continuation.resumeWithException(error)
@@ -90,16 +99,18 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     }
     suspend fun registerPush(connection:Connection,provider:String,token:String) = call(connection.url,connection.token,
         if(connection.protocolVersion==2) "/v2/push" else "/v1/push",JSONObject().put("provider",provider).put("token",token))
-    suspend fun post(connection:Connection,computerId:String,session:String="",operation:String,payload:JSONObject,id:String):JSONObject {
+    suspend fun post(connection:Connection,computerId:String,session:String="",operation:String,payload:JSONObject,id:String,
+        attempt: SendAttempt? = null):JSONObject {
         val body=JSONObject().put("request_id",id).put("computer_id",computerId).put("session",session).put("operation",operation).put("payload",payload)
-        return (if(connection.protocolVersion==2) encryptedPost(connection,body) else call(connection.url,connection.token,"/v1/requests",body)).also {
+        return (if(connection.protocolVersion==2) encryptedPost(connection,body,attempt) else call(connection.url,connection.token,"/v1/requests",body,attempt = attempt)).also {
             check(it.string("request_id")==id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
         }
     }
-    suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
+    suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String,
+        attempt: SendAttempt? = null): JSONObject {
         require(target.agentId.isBlank() || operation in setOf("inspect", "history", "history_projection", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
         require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
-        return post(connection,target.computerId,target.session,operation,payload,id)
+        return post(connection,target.computerId,target.session,operation,payload,id,attempt)
     }
     internal suspend fun speech(connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
         id: String = UUID.randomUUID().toString()): JSONObject {

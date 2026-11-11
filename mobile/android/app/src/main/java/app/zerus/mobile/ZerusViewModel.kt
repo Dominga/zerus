@@ -3270,7 +3270,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         preparingTargets -= target.key
         val message = written.outgoing.first { it.requestId == id }
         lastOwnSend = target to id
-        var attempted = false; var rejected: RelayException? = null
+        val attempt = SendAttempt(); var rejected: RelayException? = null
         try {
             val receipt = withTimeout(45_000) {
                 val files = attachmentStore.payload(message.attachments)
@@ -3282,16 +3282,19 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
                 if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
-                attempted = true
-                val initial = try { api.submit(connection, target, "send", payload, id) }
+                val initial = try { api.submit(connection, target, "send", payload, id, attempt) }
                 catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
                 api.await(connection, initial)
             }
             settleOutgoing(message, receipt)
         } catch (e: Exception) {
-            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt or dismiss the warning to continue." else
-                (e as? AttachmentException)?.message ?: "The saved message was not sent. Review it before trying again."
-            try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = if (attempted && rejected == null) "uncertain" else "failed", error = failure) } }) }
+            // Positive transport evidence decides the settlement (zerus-a4mub.6):
+            // a failure before the mutation request was enqueued is Not sent, and
+            // once it may have left the phone a lost response, timeout or
+            // cancellation stays unknown with the same request identity.
+            val failure = SendSettlement.message(attempt.stage, rejected, (e as? AttachmentException)?.message)
+            val status = SendSettlement.status(attempt.stage, rejected)
+            try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = status, error = failure) } }) }
             catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
             if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
         } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }

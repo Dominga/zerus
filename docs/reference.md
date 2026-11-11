@@ -1723,6 +1723,11 @@ numbers; discovery reopens in the background. It never deletes or rewrites
 receipt history. New sends retain the original atomic receipt write and update
 the locator on a best-effort basis afterward.
 
+Older caches remain unverified until the worker reconciles their originals.
+Removing a locator or changing its indexed identity invalidates coverage and
+snapshot cursors. Every worker restart reconciles the original directory even
+when its modification time is unchanged; inspection never does that walk.
+
 The same locator exposes exact name, run and conversation pages for question
 recovery. Deadline-bounded inspection never walks the question receipt directory;
 incomplete coverage keeps recovery unknown. An explicit answer authority read

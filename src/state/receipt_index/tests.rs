@@ -329,3 +329,51 @@ fn unavailable_index_does_not_change_authoritative_receipt_persistence() {
             .is_err());
     }
 }
+
+#[test]
+fn a_lost_row_invalidates_cursors_and_is_rediscovered_without_original_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let one = put(
+        &catalog,
+        Source::Terminal,
+        &value(1, "wanted", "run", "", 1.0),
+    );
+    put(
+        &catalog,
+        Source::Terminal,
+        &value(2, "wanted", "run", "", 2.0),
+    );
+    let original = fs::read(&one).unwrap();
+    let stamp = migration::stamp(&temp.path().join(Source::Terminal.directory())).unwrap();
+    catalog
+        .db
+        .execute(
+            "UPDATE receipt_sources SET stamp=?,complete=1 WHERE source='terminal'",
+            [stamp],
+        )
+        .unwrap();
+    let scope = scope("wanted", "run", "");
+    let first = catalog.page(&scope, "", 1, true).unwrap();
+    let cursor = first.metadata["next_cursor"].as_str().unwrap();
+    catalog
+        .db
+        .execute(
+            "DELETE FROM receipt_rows WHERE request=?",
+            [uuid::Uuid::from_u128(1).to_string()],
+        )
+        .unwrap();
+    assert!(catalog.page(&scope, cursor, 1, true).is_err());
+    let missing = catalog.page(&scope, "", 100, true).unwrap();
+    assert_eq!(missing.metadata["migration_complete"], false);
+    assert_eq!(missing.metadata["unattributed_errors"], 1);
+    let mut migration = migration::Migration::new(temp.path()).unwrap();
+    while !migration.step().unwrap() {}
+    let restored = catalog.page(&scope, "", 100, true).unwrap();
+    assert_eq!(restored.locators.len(), 2);
+    assert_eq!(restored.metadata["state"], "indexed");
+    assert_eq!(restored.metadata["indexed"], 2);
+    assert_eq!(restored.metadata["unattributed_errors"], 0);
+    assert_eq!(fs::read(one).unwrap(), original);
+    assert!(catalog.page(&scope, cursor, 1, true).is_err());
+}

@@ -165,6 +165,71 @@ class ReceiptIndex(unittest.TestCase):
         self.fixture.send(uncertain, success=False)
         self.assertEqual(self.fixture.received(), received)
 
+    def test_lost_locator_invalidates_coverage_and_worker_restores_the_original(self):
+        path = self.original(1)
+        before = path.read_bytes()
+        self.migrate()
+        self.assertEqual(self.ids(self.inspect()), [path.stem])
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("DELETE FROM receipt_rows WHERE request=?", (path.stem,))
+        missing = self.inspect()
+        self.assertEqual(self.ids(missing), [])
+        self.assertNotEqual(missing["receipt_projection"]["state"], "indexed")
+        self.assertFalse(missing["receipt_projection"]["migration_complete"])
+        self.assertFalse(missing["receipt_projection"]["catalog_complete_at_snapshot"])
+        self.assertTrue(missing["receipt_projection"]["gaps"])
+        self.migrate()
+        restored = self.inspect()
+        self.assertEqual(self.ids(restored), [path.stem])
+        self.assertEqual(restored["receipt_projection"]["state"], "indexed")
+        self.assertEqual(restored["receipt_projection"]["indexed"], 1)
+        self.assertEqual(restored["receipt_projection"]["gaps"], [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_worker_reconciles_a_loss_that_did_not_notify_the_index(self):
+        path = self.original(1)
+        second = self.original(2)
+        before = path.read_bytes()
+        self.migrate()
+        first = self.page(limit=1)
+        self.assertEqual(self.ids(first), [second.stem])
+        cursor = first["receipt_projection"]["next_cursor"]
+        # Models row loss outside the current writer's invalidation protocol.
+        # Keep the installed guards and complete metadata to exercise startup
+        # reconciliation independently from the ordinary DELETE notification.
+        with closing(sqlite3.connect(self.database)) as db, db:
+            trigger = db.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='receipt_row_removed'").fetchone()
+            if trigger:
+                db.execute("DROP TRIGGER receipt_row_removed")
+            db.execute("DELETE FROM receipt_rows WHERE request=?", (path.stem,))
+            if trigger:
+                db.execute(trigger[0])
+        self.migrate()
+        restored = self.inspect()
+        self.assertEqual(self.ids(restored), [second.stem, path.stem])
+        self.assertEqual(restored["receipt_projection"]["indexed"], 2)
+        self.call("__state", "receipt-index-page", self.fixture.name, "--json",
+                  payload=dict(expected_run_id=self.fixture.run_id,
+                               expected_conversation_id=self.fixture.conversation_id,
+                               cursor=cursor), success=False)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_an_old_unverified_cache_is_unknown_until_worker_reconciliation(self):
+        path = self.original(1)
+        before = path.read_bytes()
+        self.migrate()
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("DROP TRIGGER IF EXISTS receipt_row_removed")
+            db.execute("DROP TRIGGER IF EXISTS receipt_row_rebound")
+            db.execute("DELETE FROM receipt_meta WHERE key='rowset_protocol'")
+            db.execute("DELETE FROM receipt_rows WHERE request=?", (path.stem,))
+        unknown = self.inspect()
+        self.assertFalse(unknown["receipt_projection"]["migration_complete"])
+        self.assertTrue(unknown["receipt_projection"]["gaps"])
+        self.migrate()
+        self.assertEqual(self.ids(self.inspect()), [path.stem])
+        self.assertEqual(path.read_bytes(), before)
+
     def test_cold_inspection_is_unknown_and_background_worker_discovers_originals(self):
         paths = [self.original(n) for n in range(1, 201)]
         before = {p.name: p.read_bytes() for p in paths}

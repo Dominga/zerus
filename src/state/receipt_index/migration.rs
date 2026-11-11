@@ -89,6 +89,8 @@ struct Walk {
     source: Source,
     entries: ReadDir,
     started: String,
+    covered: bool,
+    indexed: i64,
 }
 pub(super) struct Migration {
     catalog: Catalog,
@@ -99,7 +101,9 @@ pub(super) struct Migration {
 }
 impl Migration {
     pub(super) fn new(state: &Path) -> Result<Self> {
-        Self::with_sources(state, Source::ALL.to_vec(), false)
+        // Restart reconciles originals even when cached directory metadata
+        // claims completion. A lost locator is not a change to its directory.
+        Self::with_sources(state, Source::ALL.to_vec(), true)
     }
     pub(super) fn questions(state: &Path) -> Result<Self> {
         Self::with_sources(state, vec![Source::Question], true)
@@ -149,7 +153,9 @@ impl Migration {
                     )
                     .optional())?;
                 if !self.force
-                    && prior.is_some_and(|(stamp, complete)| complete && stamp == started)
+                    && prior
+                        .as_ref()
+                        .is_some_and(|(stamp, complete)| *complete && *stamp == started)
                 {
                     continue;
                 }
@@ -166,10 +172,13 @@ impl Migration {
                 }
                 let entries =
                     fs::read_dir(&directory).map_err(|_| "Receipt source is unavailable")?;
+                let covered = prior.is_some_and(|(stamp, complete)| complete && stamp == started);
                 self.walk = Some(Walk {
                     source,
                     entries,
                     started,
+                    covered,
+                    indexed: 0,
                 });
             }
             let walk = self.walk.as_mut().unwrap();
@@ -181,6 +190,21 @@ impl Migration {
                     else {
                         continue;
                     };
+                    let id = filename.strip_suffix(".json").unwrap();
+                    let known: bool = sql(self.catalog.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE source=? AND request=?)",
+                        params![walk.source.key(), id],
+                        |row| row.get(0),
+                    ))?;
+                    if !known && walk.covered {
+                        // The unchanged directory was previously covered, but
+                        // its row vanished without notification. Reject old
+                        // snapshot cursors before restoring the original.
+                        sql(self.catalog.db.execute(
+                            "UPDATE receipt_meta SET value=? WHERE key='epoch'",
+                            [uuid::Uuid::new_v4().to_string()],
+                        ))?;
+                    }
                     let loaded = read_original(&entry.path());
                     match loaded {
                         Ok(value) => {
@@ -194,6 +218,12 @@ impl Migration {
                         }
                         Err(reason) => self.catalog.error(walk.source, filename, reason)?,
                     }
+                    let indexed: bool = sql(self.catalog.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE source=? AND request=?)",
+                        params![walk.source.key(), id],
+                        |row| row.get(0),
+                    ))?;
+                    walk.indexed += i64::from(indexed);
                 }
                 Some(Err(_)) => {
                     examined += 1;
@@ -206,8 +236,8 @@ impl Migration {
                     let current = stamp(&self.catalog.state.join(source.directory()));
                     let complete = current.as_ref().is_ok_and(|stamp| *stamp == walk.started);
                     sql(self.catalog.db.execute(
-                        "UPDATE receipt_sources SET stamp=?,complete=? WHERE source=?",
-                        params![walk.started, complete, source.key()],
+                        "UPDATE receipt_sources SET stamp=?,complete=?,indexed=? WHERE source=?",
+                        params![walk.started, complete, walk.indexed, source.key()],
                     ))?;
                     sql(self.catalog.db.execute(
                         "DELETE FROM receipt_errors WHERE source=? AND name IN('@source','@enumeration')",

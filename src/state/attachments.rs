@@ -161,6 +161,9 @@ fn projected_page(record:&Value,agent:&str,cursor:&str,limit:usize)->Result<(Val
     let (catalog,mut page)=receipt_index::page(record,agent,cursor,limit)?;
     let mut messages=Vec::new();
     let mut gaps=Vec::new();
+    if page.metadata["index_protocol_verified"] != true || page.metadata["unattributed_errors"] != 0 {
+        gaps.push(json!({"state":"receipt_index_gap"}));
+    }
     for locator in &page.locators {
         let mut receipt=match catalog.original(locator) {
             Ok(value)=>value,
@@ -198,7 +201,7 @@ fn projected_page(record:&Value,agent:&str,cursor:&str,limit:usize)->Result<(Val
 pub(super) fn decorate(record:&Value,agent:&str,output:&mut Value) {
     let (messages,metadata)=projected_page(record,agent,"",receipt_index::PAGE_LIMIT).unwrap_or_else(|_| {
         receipt_index::request_migration();
-        (json!([]),json!({"schema":1,"state":"unavailable","coverage":"unknown","absence_confirmed":false,"reason":"receipt_index_unavailable","gaps":[]}))
+        (json!([]),json!({"schema":1,"state":"unavailable","coverage":"unknown","absence_confirmed":false,"migration_complete":false,"catalog_complete_at_snapshot":false,"index_protocol_verified":false,"reason":"receipt_index_unavailable","gaps":[{"state":"receipt_index_gap"}]}))
     });
     output["attachment_messages"]=messages;
     output["receipt_projection"]=metadata;

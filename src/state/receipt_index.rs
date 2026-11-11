@@ -26,6 +26,21 @@ pub(super) const PAGE_LIMIT: usize = 100;
 const EXAMINE: usize = 256;
 const ORIGINAL_BYTES: u64 = 256 * 1024;
 const DATABASE: &str = "delivery-receipts-v1.sqlite3";
+const ROWSET_PROTOCOL: &str = "1";
+
+// Coverage is sealed only after discovery. These guards invalidate that seal
+// if a cached locator disappears or moves without a matching original walk.
+// They never change an original receipt or establish delivery authority.
+fn rowset_protocol(db: &Connection) -> bool {
+    db.query_row(
+        "SELECT (SELECT value FROM receipt_meta WHERE key='rowset_protocol')=?1 AND
+         (SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name IN
+          ('receipt_row_removed','receipt_row_rebound'))=2",
+        [ROWSET_PROTOCOL],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -314,9 +329,21 @@ impl Catalog {
         } else {
             Duration::ZERO
         }))?;
+        let verified = rowset_protocol(&db);
+        if !create && !verified {
+            return Err("Receipt index coverage is unverified".into());
+        }
         if create {
-            sql(db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-                CREATE TABLE IF NOT EXISTS receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            sql(db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"))?;
+        }
+        // Publish repaired guards and invalidated legacy coverage together.
+        let mut upgrade = if create && !verified {
+            Some(sql(db.unchecked_transaction())?)
+        } else {
+            None
+        };
+        if create {
+            sql(db.execute_batch("CREATE TABLE IF NOT EXISTS receipt_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS receipt_sources(source TEXT PRIMARY KEY,stamp TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0,indexed INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS receipt_rows(seq INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,request TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,agent TEXT NOT NULL,first_message INTEGER NOT NULL,at REAL NOT NULL,files INTEGER NOT NULL,binding TEXT NOT NULL,UNIQUE(source,request));
                 CREATE INDEX IF NOT EXISTS receipt_exact ON receipt_rows(source,name,run,conversation,at DESC,request DESC);
@@ -327,7 +354,24 @@ impl Catalog {
                 CREATE TABLE IF NOT EXISTS receipt_errors(source TEXT NOT NULL,name TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(source,name));
                 CREATE TRIGGER IF NOT EXISTS receipt_row_count AFTER INSERT ON receipt_rows BEGIN UPDATE receipt_sources SET indexed=indexed+1 WHERE source=NEW.source; END;
                 CREATE TRIGGER IF NOT EXISTS receipt_error_count AFTER INSERT ON receipt_errors BEGIN UPDATE receipt_sources SET errors=errors+1 WHERE source=NEW.source; END;
-                CREATE TRIGGER IF NOT EXISTS receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;"))?;
+                CREATE TRIGGER IF NOT EXISTS receipt_error_clear AFTER DELETE ON receipt_errors BEGIN UPDATE receipt_sources SET errors=MAX(0,errors-1) WHERE source=OLD.source; END;
+                CREATE TRIGGER IF NOT EXISTS receipt_row_removed AFTER DELETE ON receipt_rows BEGIN
+                  UPDATE receipt_sources SET complete=0,indexed=MAX(0,indexed-1) WHERE source=OLD.source;
+                  INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_missing')
+                    ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                  UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                END;
+                CREATE TRIGGER IF NOT EXISTS receipt_row_rebound AFTER UPDATE ON receipt_rows
+                WHEN OLD.seq IS NOT NEW.seq OR OLD.source IS NOT NEW.source OR OLD.request IS NOT NEW.request
+                  OR OLD.name IS NOT NEW.name OR OLD.run IS NOT NEW.run OR OLD.conversation IS NOT NEW.conversation
+                  OR OLD.agent IS NOT NEW.agent OR OLD.first_message IS NOT NEW.first_message
+                  OR OLD.at IS NOT NEW.at OR OLD.files IS NOT NEW.files OR OLD.binding IS NOT NEW.binding
+                BEGIN
+                  UPDATE receipt_sources SET complete=0 WHERE source IN(OLD.source,NEW.source);
+                  INSERT INTO receipt_errors VALUES(OLD.source,OLD.request||'.json','index_row_changed')
+                    ON CONFLICT(source,name) DO UPDATE SET reason=excluded.reason;
+                  UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
+                END;"))?;
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
                 [uuid::Uuid::new_v4().to_string()],
@@ -344,7 +388,24 @@ impl Catalog {
                 "INSERT OR IGNORE INTO receipt_meta VALUES('cursor_secret',?)",
                 [uuid::Uuid::new_v4().to_string()],
             ))?;
+            if !verified {
+                // A #2055 cache, or one with missing invalidation guards, has
+                // no row-set proof. Do not inherit its old complete flags.
+                sql(db.execute("UPDATE receipt_sources SET complete=0", []))?;
+                sql(db.execute(
+                    "UPDATE receipt_meta SET value=? WHERE key='epoch'",
+                    [uuid::Uuid::new_v4().to_string()],
+                ))?;
+                sql(db.execute(
+                    "INSERT INTO receipt_meta VALUES('rowset_protocol',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [ROWSET_PROTOCOL],
+                ))?;
+            }
         }
+        if let Some(transaction) = upgrade.take() {
+            sql(transaction.commit())?;
+        }
+        drop(upgrade);
         Ok(Self {
             db,
             state: state.to_owned(),
@@ -434,7 +495,8 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         ))?;
         let current = migration::stamp(&self.state.join(scope.source.directory()));
-        let ready = complete && current.as_ref().is_ok_and(|v| *v == stamp);
+        let protocol = rowset_protocol(&self.db);
+        let ready = protocol && complete && current.as_ref().is_ok_and(|v| *v == stamp);
         let mut position = if cursor.is_empty() {
             Cursor {
                 version: 1,
@@ -573,7 +635,7 @@ impl Catalog {
         sql(transaction.commit())?;
         Ok(Page {
             locators,
-            metadata: json!({"schema":1,"state":if ready && errors==0 {"indexed"}else if errors>0 {"partial"}else{"building"},"coverage":"indexed_snapshot","absence_confirmed":false,"migration_complete":ready,"catalog_complete_at_snapshot":position.complete,"restart_required":restart,"indexed":indexed,"unattributed_errors":errors,"examined":scanned,"snapshot":position.snapshot,"has_more":more,"next_cursor":next}),
+            metadata: json!({"schema":1,"state":if ready && errors==0 {"indexed"}else if errors>0 {"partial"}else{"building"},"coverage":"indexed_snapshot","absence_confirmed":false,"migration_complete":ready,"index_protocol_verified":protocol,"catalog_complete_at_snapshot":position.complete,"restart_required":restart,"indexed":indexed,"unattributed_errors":errors,"examined":scanned,"snapshot":position.snapshot,"has_more":more,"next_cursor":next}),
         })
     }
     pub(super) fn original(&self, locator: &Locator) -> std::result::Result<Value, &'static str> {

@@ -2126,6 +2126,30 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     steps.push(Step::SwitchModel { task: id, member: member.id.clone(), from, model: choice.model.clone(), effort: choice.effort.clone() });
                 }
                 None => {
+                    // RogueDOD (2026-11-12): a started DeepSeek member whose
+                    // role chose a model or effort is not `available` until its
+                    // settings are applied, and nothing else applies them for a
+                    // task for a role, so three idle secretaries never got a
+                    // task. The free one takes its settings first; a later tick
+                    // hands it the task, as an assignee's task does.
+                    if let Some(member) = candidates.iter().find(|m| {
+                        m.needs_settings()
+                            && !failed(m)
+                            && (m.id == task.assignee || !output_blocks)
+                            && super::stages::held(team, &m.id).is_none()
+                            && !matches!(m.state, MemberState::Removed | MemberState::Paused)
+                            && (!m.draining || own_rework(m, Some(id)))
+                            && !busy.contains(m.id.as_str())
+                            && !team.reserved_for_rework(&m.id, Some(id))
+                            && m.session.is_some()
+                            && !refused_recently(m)
+                            && session_of(m, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
+                    }) {
+                        busy.insert(member.id.as_str());
+                        claim_outputs(&mut claimed, task);
+                        steps.push(Step::Settings { member: member.id.clone() });
+                        continue;
+                    }
                     // Start the first member that could run it once it is up.
                     if let Some(member) = candidates.iter().find(|m| {
                         !team.reserved_for_rework(&m.id, Some(id)) && !failed(m) && (m.id == task.assignee || !output_blocks)

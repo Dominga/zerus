@@ -737,3 +737,34 @@ fn relaunch_and_swap_of_a_working_member(root: &std::path::Path) {
     let feed = store.events(&t.id, None, 50).unwrap().to_string();
     assert!(feed.contains("was paused and saved as codex/x/dev-replaced"), "{feed}");
 }
+
+/// RogueDOD (team 75549318, 2026-11-12): three idle DeepSeek secretaries
+/// whose role chose a model and effort never got a task for their role: such
+/// a member is not available until its settings are applied, and only an
+/// assignee's task applied them. A free member of the role takes its settings
+/// first; the next tick hands it the task.
+#[test]
+fn a_task_for_a_role_starts_a_deepseek_members_settings_and_then_goes_to_it() {
+    let mut team = team();
+    for (id, run) in [("sec1", "r5"), ("sec2", "r6")] {
+        team.members.push(Member {
+            id: id.into(), role: "Secretary".into(), agent: "dsh".into(), model: "deepseek-flash".into(), effort: "low".into(),
+            state: MemberState::Active, folder: MemberFolder::Shared, permissions_profile: "network".into(),
+            session: Some(SessionRef { name: format!("dsh/x/{id}"), run_id: run.into(), conversation_id: "c".into(), ..Default::default() }),
+            ..Default::default()
+        });
+    }
+    // The plan's own tasks are done; the role's task is the only ready one.
+    for task in team.tasks.iter_mut() {
+        task.status = TaskStatus::Accepted;
+    }
+    team.tasks.push(Task { id: 6, title: "ai: AIBehavior.md".into(), phase: 1, status: TaskStatus::Pending, role: "Secretary".into(),
+        output: vec!["lore:ai".into()], ..Default::default() });
+    let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("dsh/x/sec1", "r5", true), session("dsh/x/sec2", "r6", true)];
+    let first = steps(&team, &seen, 1.0);
+    assert!(first.contains(&Step::Settings { member: "sec1".into() }), "{first:?}");
+    assert!(!first.contains(&Step::Settings { member: "sec2".into() }), "one member for one task: {first:?}");
+    team.members.iter_mut().find(|m| m.id == "sec1").unwrap().settings_applied = true;
+    let next = steps(&team, &seen, 2.0);
+    assert!(next.iter().any(|s| matches!(s, Step::Rebalance { task: 6, to, .. } if to == "sec1") || matches!(s, Step::HandOut { task: 6, member } if member == "sec1")), "{next:?}");
+}

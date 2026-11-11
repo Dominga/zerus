@@ -41,6 +41,8 @@ internal class MemoryWorkspaceJournal:WorkspaceJournal {
         outgoing[key]=plainHash to envelope;return envelope
     }
     override fun recordedRequest(connection:Connection,id:String)=outgoing[connection.id to id]?.second?.header
+    fun reserved(connection:Connection,id:String)=outgoing.containsKey(connection.id to id)
+    override fun release(connection:Connection,id:String) { check(connection.id to id !in settled);outgoing.remove(connection.id to id) }
     override fun settle(connection:Connection,id:String) { settled+=connection.id to id }
     override fun forget(connection:Connection) { states.remove(connection.id) }
 }
@@ -713,14 +715,20 @@ class EncryptedRelayTest {
             val store=MemoryWorkspaceJournal();store.create(connection,state())
             val api=RelayApi(workspace=store);val attempt=SendAttempt()
             var status:String?=null;var message:String?=null;var settled:JSONObject?=null
+            var releases=0
             OutgoingSend(attempt,
                 submit={ evidence -> submitOutgoing(api,connection,sendTarget(connection),sendPayload(),"request-one",evidence) },
                 await={ initial -> api.await(connection,initial) },
                 settle={ receipt -> settled=receipt },
-                failed={ s,m -> status=s;message=m }).run()
+                failed={ s,m -> status=s;message=m },
+                release={ releases+=1;api.releaseReservedOutgoing(connection,"request-one") }).run()
             assertEquals(1,posts.get());assertEquals(TransportStage.Enqueued,attempt.stage)
             assertNull(settled);assertEquals("uncertain",status)
             assertEquals("Delivery is unconfirmed. Check its receipt or dismiss the warning to continue.",message)
+            // zerus-a4mub.22: a marked request is the unknown/no-replay evidence,
+            // so its sealed reservation must survive the settlement.
+            assertEquals(0,releases)
+            assertTrue(store.reserved(connection,"request-one"))
         }
     }
 
@@ -731,14 +739,52 @@ class EncryptedRelayTest {
             val store=MemoryWorkspaceJournal();store.create(connection,state().withRoutes(emptyMap()))
             val api=RelayApi(workspace=store);val attempt=SendAttempt()
             var status:String?=null;var message:String?=null
+            var releases=0
             OutgoingSend(attempt,
                 submit={ evidence -> submitOutgoing(api,connection,sendTarget(connection,"unknown-machine"),sendPayload(),"request-one",evidence) },
                 await={ initial -> api.await(connection,initial) },
                 settle={ error("a local failure cannot settle") },
-                failed={ s,m -> status=s;message=m }).run()
+                failed={ s,m -> status=s;message=m },
+                release={ releases+=1;api.releaseReservedOutgoing(connection,"request-one") }).run()
             assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
             assertEquals("failed",status)
-            assertEquals("The saved message was not sent. Review it before trying again.",message)
+            // zerus-a4mub.23: the actionable local route reason is carried.
+            assertEquals("Refresh this computer's encrypted route before sending.",message)
+            assertEquals(1,releases);assertFalse(store.reserved(connection,"request-one"))
+        }
+    }
+
+    @Test fun aCancelBetweenTheReservationAndThePostReleasesIt()=runBlocking {
+        // zerus-a4mub.22: the sealed request is reserved before the mutation
+        // POST. Everything a local failure does in between (a cancellation or a
+        // timeout in the call's dispatcher hop) must release that reservation;
+        // the next Prepare again then reserves one fresh copy, not another leak.
+        MockWebServer().use { server ->
+            val posts=serveMembership(server) { MockResponse().setResponseCode(500) }
+            server.start();val connection=encryptedConnection(server,"cancel-after-reserve")
+            val store=MemoryWorkspaceJournal();store.create(connection,state())
+            val reserved=CountDownLatch(1);val go=CountDownLatch(1)
+            val blocking=object:WorkspaceJournal by store {
+                override fun reserve(connection:Connection,id:String,plainHash:String,envelope:WorkspaceEnvelope):WorkspaceEnvelope {
+                    val retained=store.reserve(connection,id,plainHash,envelope)
+                    reserved.countDown();go.await(2,TimeUnit.SECONDS);return retained
+                }
+            }
+            val api=RelayApi(workspace=blocking);val attempt=SendAttempt()
+            val job=launch(Dispatchers.IO) {
+                runCatching { OutgoingSend(attempt,
+                    submit={ evidence -> submitOutgoing(api,connection,sendTarget(connection),sendPayload(),"request-one",evidence) },
+                    await={ initial -> api.await(connection,initial) },
+                    settle={ error("a canceled send cannot settle") },
+                    failed={ _, _ -> },
+                    release={ api.releaseReservedOutgoing(connection,"request-one") }).run() }
+            }
+            assertTrue(reserved.await(2,TimeUnit.SECONDS))
+            assertTrue(store.reserved(connection,"request-one"))
+            job.cancel();go.countDown();job.join()
+            assertTrue(job.isCancelled)
+            assertEquals(0,posts.get());assertEquals(TransportStage.Local,attempt.stage)
+            assertFalse("a reservation that never reached the transport is released",store.reserved(connection,"request-one"))
         }
     }
 

@@ -1,7 +1,9 @@
 package app.zerus.mobile
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -17,6 +19,7 @@ internal class OutgoingSend(
     private val await: suspend (JSONObject) -> JSONObject,
     private val settle: suspend (JSONObject) -> Unit,
     private val failed: suspend (status: String, message: String) -> Unit,
+    private val release: suspend () -> Unit,
     private val timeoutMillis: Long = 45_000,
 ) {
     suspend fun run() {
@@ -32,8 +35,14 @@ internal class OutgoingSend(
             // before the mutation request was enqueued is Not sent, and once it
             // may have left the phone a lost response, timeout or cancellation
             // stays unknown with the same request identity.
-            failed(SendSettlement.status(attempt.stage, rejected),
-                SendSettlement.message(attempt.stage, rejected, (e as? AttachmentException)?.message))
+            val status = SendSettlement.status(attempt.stage, rejected)
+            if (status == "failed" && attempt.stage == TransportStage.Local) {
+                // No mutation marker exists: release exactly this send's sealed
+                // reservation so a prepared resend cannot accumulate copies.
+                // A marked request keeps its reservation as unknown evidence.
+                runCatching { withContext(NonCancellable) { release() } }
+            }
+            failed(status, SendSettlement.message(attempt.stage, rejected, SendSettlement.localReason(e)))
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
         }
     }

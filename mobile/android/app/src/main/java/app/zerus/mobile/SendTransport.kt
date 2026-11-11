@@ -32,6 +32,30 @@ object SendSettlement {
     fun message(stage: TransportStage, rejected: RelayException?, local: String?): String = when {
         rejected != null -> rejected.message ?: "The computer rejected this message."
         stage == TransportStage.Enqueued -> "Delivery is unconfirmed. Check its receipt or dismiss the warning to continue."
-        else -> local ?: "The saved message was not sent. Review it before trying again."
+        else -> local?.takeIf { it.isNotBlank() } ?: "The saved message was not sent. Review it before trying again."
     }
+
+    /** The actionable local reason to show for a positively local failure.
+     *  Only these reviewed, user-facing texts cross; transport or library text
+     *  never does, so an unknown local failure keeps the generic message. */
+    fun localReason(error: Throwable): String? {
+        (error as? AttachmentException)?.message?.let { return it }
+        val message = error.message ?: return null
+        return message.takeIf { it in LOCAL_REASONS }
+    }
+
+    // Keep in sync with the send path's own user-facing reasons (the English
+    // source is the catalog; mobile has no resource string table).
+    private val LOCAL_REASONS = setOf(
+        "Refresh this computer's encrypted route before sending.",
+        "Encrypted outgoing storage is full. Check outstanding deliveries.",
+        "The session changed before transport. Review the saved message.",
+        "Compact continuation was canceled. The captured message was not sent and remains recoverable.",
+        "The executing gateway is no longer enrolled.",
+        "This encrypted phone enrollment is not active.",
+        "This phone has been removed from the workspace.",
+        "Waiting for the inviting computer to approve this phone. Refresh to check again.",
+        "Workspace membership was rolled back or forked.",
+        "Encrypted workspace storage is unavailable. Plaintext fallback is disabled.",
+    )
 }

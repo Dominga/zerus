@@ -147,6 +147,12 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         check(receipt.string("state") == "completed") { "The computer has not confirmed this configuration operation. Check its status." }
         return receipt.getJSONObject("result")
     }
+    /** Releases the exact sealed reservation of an outbox send proven never
+     *  enqueued. Call only while the same live SendAttempt is Local: a marked
+     *  request keeps its reservation as the unknown/no-replay evidence. */
+    internal suspend fun releaseReservedOutgoing(connection: Connection, id: String) = withContext(Dispatchers.IO) {
+        if (connection.protocolVersion == 2) workspace?.release(connection, id)
+    }
     suspend fun receipt(connection: Connection, id: String) = (if(connection.protocolVersion==2) encryptedReceipt(connection,id) else call(connection.url, connection.token, "/v1/requests/$id")).also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }

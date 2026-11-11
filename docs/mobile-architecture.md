@@ -656,6 +656,18 @@ or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.
 Approval review accrues only in the visible, focused foreground disclosure.
 
+The expanded question resolves its exact ID and hash against the current
+projection into one presence: Answerable, Waiting, Checking, Closed, Replaced or
+Unavailable. Only a verified projection whose `pending_questions_complete` is
+true (absent from older CLIs counts as complete) can close or replace it; an
+incomplete one stays Checking while the agent indexes. Only a resolved card is
+modal. Every obsolete state is an inline notice with Refresh, Open new request
+or Close, so an unrelated unknown-delivery Review stays reachable, and the
+expanded identity, saved answer and submitted lock are kept. Presence shows the
+mapped native veto and the check age; cache, age, Working and a partial scan
+never enable an answer. Android and iOS check the same rows in
+`mobile/android/app/src/test/resources/question-presence-contract.json`.
+
 Ordinary agent messages and question disclosures from known agent-authored sources
 render Markdown with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
 quotes, links, tables, strikethrough, static task markers and code blocks.

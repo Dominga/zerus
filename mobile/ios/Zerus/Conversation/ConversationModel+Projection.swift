@@ -73,3 +73,14 @@ extension ConversationModel {
         projectionTasks[target.key] = (target, token, task)
     }
 }
+
+extension ConversationModel {
+    /// The monotonic clock the expanded question's check age uses.
+    static func monotonicMillis() -> Int64 { Int64(ProcessInfo.processInfo.systemUptime * 1_000) }
+
+    /// A verified frame dates the question projection and records its completeness (zerus-a4mub.25).
+    func noteQuestionProjection(_ raw: JSONObject) {
+        questionCheckedAt = Self.monotonicMillis()
+        questionProjectionComplete = raw.bool("pending_questions_complete", default: true)
+    }
+}

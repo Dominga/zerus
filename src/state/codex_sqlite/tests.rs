@@ -151,6 +151,42 @@ fn writer_process() {
         rusqlite::params![CHILD_ID, rollout.to_str().unwrap()],
     )
     .unwrap();
+    // A WAL restarted after a complete checkpoint: SQLite's next commit writes
+    // a new header salt and overwrites from the start, leaving earlier frames
+    // with the old salt after its own, which every SQLite reader ignores.
+    if case == "restarted" {
+        db.execute(
+            "INSERT OR REPLACE INTO threads VALUES(?1,?2)",
+            rusqlite::params!["other-before-restart", rollout.to_str().unwrap()],
+        )
+        .unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(PASSIVE)").unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO threads VALUES(?1,?2)",
+            rusqlite::params!["other-after-restart", rollout.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+    // A transaction still being written: a small page cache spills its pages
+    // into the WAL as frames without a commit (the child's new path included).
+    if case == "uncommitted" {
+        db.execute_batch("PRAGMA cache_size=1; BEGIN;").unwrap();
+        db.execute(
+            "UPDATE threads SET rollout_path=?2 WHERE id=?1",
+            rusqlite::params![
+                CHILD_ID,
+                home.join("rollout-uncommitted.jsonl").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+        for index in 0..64 {
+            db.execute(
+                "INSERT INTO threads VALUES(?1,?2)",
+                rusqlite::params![format!("spill-{index}"), "x".repeat(6000)],
+            )
+            .unwrap();
+        }
+    }
     let ready = json!({
         "main_contains_child": main_contains_child,
         "stamps": stamps(&home),
@@ -499,6 +535,83 @@ fn replacement_between_attempts() {
         result.unwrap_err(),
         "Codex catalog was replaced during its read"
     );
+    writer.finish();
+}
+
+/// zerus-wa90v: a live WAL restarted after a complete checkpoint keeps the
+/// earlier generation's frames after the current ones (another header salt).
+/// SQLite ignores them; the snapshot reads the catalog instead of refusing it.
+#[test]
+fn a_restarted_wal_with_an_earlier_tail_is_read() {
+    isolated("restarted_wal");
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn restarted_wal() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let mut writer = start("restarted");
+    let wal = fs::read(writer.home.join("state_5.sqlite-wal")).unwrap();
+    let page = u32::from_be_bytes(wal[8..12].try_into().unwrap()) as usize;
+    let salts: Vec<bool> = wal[32..]
+        .chunks_exact(24 + page)
+        .map(|frame| frame[8..16] == wal[16..24])
+        .collect();
+    // The fixture's WAL holds current frames followed by an earlier tail.
+    assert!(
+        salts.first() == Some(&true) && salts.last() == Some(&false),
+        "{salts:?}"
+    );
+    let directories = directories();
+    let paths = rollout_paths(&writer.home, &[CHILD_ID.into()], until()).unwrap();
+    assert_eq!(
+        paths[CHILD_ID],
+        writer.home.join("rollout-child.jsonl").to_string_lossy()
+    );
+    assert_removed(&directories);
+    writer.finish();
+}
+
+/// zerus-wa90v: frames after the WAL's last commit frame belong to a
+/// transaction still being written. They are not catalog content, and a torn
+/// one is the writer's work in progress, not corruption.
+#[test]
+fn uncommitted_trailing_frames_are_not_read_or_refused() {
+    isolated("uncommitted_frames");
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn uncommitted_frames() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let mut writer = start("uncommitted");
+    let wal_path = writer.home.join("state_5.sqlite-wal");
+    let mut wal = fs::read(&wal_path).unwrap();
+    let page = u32::from_be_bytes(wal[8..12].try_into().unwrap()) as usize;
+    let commits: Vec<bool> = wal[32..]
+        .chunks_exact(24 + page)
+        .map(|frame| frame[4..8] != [0; 4])
+        .collect();
+    // Committed frames, then the open transaction's frames.
+    assert!(
+        commits.contains(&true) && commits.last() == Some(&false),
+        "{commits:?}"
+    );
+    // The last frame torn, as a reader may find a frame still being written.
+    let last = wal.len() - page;
+    wal[last] ^= 1;
+    fs::write(&wal_path, wal).unwrap();
+    let directories = directories();
+    let paths = rollout_paths(&writer.home, &[CHILD_ID.into()], until()).unwrap();
+    assert_eq!(
+        paths[CHILD_ID],
+        writer.home.join("rollout-child.jsonl").to_string_lossy()
+    );
+    assert_removed(&directories);
     writer.finish();
 }
 

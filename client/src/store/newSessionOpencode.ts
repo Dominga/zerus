@@ -74,7 +74,7 @@ const errorText = (error: unknown) => (typeof error === "string" ? error : error
 
 export function createOpenCode(h: OpenCodeHost) {
   const standard = createStandardModels(h), openCode = createOpenCodeOnly(h);
-  const current = () => ["claude", "codex", "kimi"].includes(h.agent()) ? standard : openCode;
+  const current = () => ["claude", "codex", "kimi", "dsh"].includes(h.agent()) ? standard : openCode;
   return {
     updateModels() { current().updateModels(); },
     model: () => current().model(),

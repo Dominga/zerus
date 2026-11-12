@@ -289,8 +289,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   --permissions provider|bypass|native:<json>   this session's discovered native permission selection instead of the account's
   --local-model NAME   this session's model of a local Ollama account (claude)
   --model-server NAME   this session runs on a model server's API (needs --model MODEL; a new session)
-  --model PROVIDER/MODEL   OpenCode native model for a new session
-  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
+  --model PROVIDER/MODEL   OpenCode or DeepSeek native model for a new session
+  --effort VARIANT   OpenCode or DeepSeek effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
   -d       start detached (do not attach)      --fresh  explicitly replace a saved conversation
   --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh/.ps1 launcher
@@ -3200,7 +3200,7 @@ fn launch(
         if options.resume || options.resume_id.is_some() || options.fresh {
             return Err(Error::new(1, "--model-server starts a new session; resume keeps the conversation's original provider"));
         }
-    } else if options.model.is_some() || options.effort.is_some() {return Err(Error::new(1,"--model and --effort are OpenCode launch options; other agent flags go after --"));}
+    } else if command_name != "dsh" && (options.model.is_some() || options.effort.is_some()) {return Err(Error::new(1,"--model and --effort are OpenCode launch options; other agent flags go after --"));}
     if command_name == "dsh" {
         if options
             .account
@@ -3223,6 +3223,9 @@ fn launch(
         } else {
             sanitize(&project)
         };
+        if options.effort.is_some() && options.model.is_none() {
+            return Err(Error::new(1, "--effort needs --model"));
+        }
         let name = format!(
             "dsh/{project}{}",
             if options.tag.is_empty() {
@@ -3231,10 +3234,12 @@ fn launch(
                 format!("/{}", options.tag)
             }
         );
-        state::dsh::launch_with_permissions(
+        state::dsh::launch_with_model(
             &name,
             &directory,
             options.launch_id.as_deref(),
+            options.model.as_deref().unwrap_or(""),
+            options.effort.as_deref().unwrap_or(""),
             options.permissions.as_deref(),
             options.dry,
             options.new_only,
@@ -4422,7 +4427,7 @@ mod tests {
         // `--effort` is an OpenCode launch option that hgs refuses without
         // `--model` or with an empty value; omitting it keeps the model's default.
         assert!(usage.contains(
-            "\n  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)\n"
+            "\n  --effort VARIANT   OpenCode or DeepSeek effort; needs --model, one of that model's effort_options (omit for the model's default)\n"
         ), "{usage}");
         // The only explicit start of the shared service; inspection never starts it.
         assert!(usage.contains(

@@ -7881,13 +7881,14 @@ the same provider identity and organization grouping as **Agent accounts**, with
 bindings only from the selected computer. Aliases of one account share a row;
 conflicting account IDs, organizations and unidentified profiles stay separate.
 The selected, remembered or default local profile remains the exact launch binding.
-For Claude, Codex and Kimi, New session also lists the selected account's native
-model catalog and, where the provider supports it, reasoning effort. The empty
-model keeps the account/provider defaults; an explicit choice applies only to the
-new conversation and is passed after `--` (Claude effort as `--effort`, Codex as
-`model_reasoning_effort`). Kimi effort stays in its native settings. DeepSeek keeps
-its native/post-start model flow. OpenCode keeps its richer folder/provider model
-picker and its own `--model`/`--effort` options.
+For Claude, Codex, Kimi and DeepSeek, New session also lists the selected
+account's native model catalog and, where the provider supports it, reasoning
+effort. The empty model keeps the account/provider defaults; an explicit choice
+applies only to the new conversation and is passed after `--` (Claude and DeepSeek
+effort as `--effort`, Codex as `model_reasoning_effort`). Kimi effort stays in its
+native settings. DeepSeek applies its choice through the native settings RPC
+immediately after creating the session. OpenCode keeps its richer folder/provider
+model picker and its own `--model`/`--effort` options.
 Rows show cached limits at once. On desktop, opening the chooser also asks for
 current limits of the chosen computer's accounts, except those checked within
 the last five minutes, and **Refresh** asks for all of them again. Replies update

@@ -1,7 +1,7 @@
 # Provider account, model and effort selection unification
 
 Date: 2026-11-12
-Status: phases 1–4 and the non-OpenCode launch follow-up implemented; DeepSeek remains on its native/post-start model flow
+Status: all provider-selection phases implemented, including DeepSeek's native post-start model flow
 
 ## Summary
 
@@ -351,11 +351,12 @@ not necessarily identical presentation.
 
 ### Separate behavioral follow-up
 
-Implemented explicit New session model/effort choices for Claude, Codex and Kimi.
-The plan retains those values, and launch arguments pass them after `--` using
-the provider's existing mapping. Empty model keeps account/provider defaults.
-DeepSeek remains on its native/post-start model flow rather than being forced
-through the terminal-agent path.
+Implemented explicit New session model/effort choices for Claude, Codex, Kimi
+and DeepSeek. The plan retains those values, and launch arguments pass them
+after `--` using the provider's existing mapping. Empty model keeps
+account/provider defaults. DeepSeek applies the same native settings RPC used
+by its settings action immediately after creating the session, rather than
+being forced through the detached terminal-agent path.
 
 ## Concrete defects found during the audit
 
@@ -428,13 +429,14 @@ project's standard client build and test commands for the final deliverable.
 
 ## Implementation outcome
 
-Phases 1–4 and the non-OpenCode launch follow-up are implemented:
+All provider-selection phases are implemented:
 
 - `client/src/ui/provider-selection.ts` owns account presentation, exact account
   references, model catalog normalization and account/model transitions.
-- `client/core/src/launch.rs` retains explicit models for Claude, Codex and Kimi
-  and passes them with effort after `--`; `newSessionProviderModels.ts` loads the
-  selected account's catalog, while DeepSeek keeps its native model flow.
+- `client/core/src/launch.rs` retains explicit models for Claude, Codex, Kimi and
+  DeepSeek and passes them with effort after `--`;
+  `newSessionProviderModels.ts` loads the selected account's catalog. DeepSeek
+  applies the choice through the native settings RPC after session creation.
 - `client/core/src/model_catalog.rs` is the shared bounded Rust projection used
   by account defaults and team-role model reads. It preserves aligned effort
   labels and the model's default effort.
@@ -461,6 +463,10 @@ Verification completed:
   scrollbar coverage audit in `src/ui/styles/popups.test.ts` for
   `.nt-intro-lead`, `.tg-nav` and `.tg-article`, unrelated to this change.
 - `cargo test --locked --test launch`: all 32 launch integration tests pass.
+- `cargo build --locked` and the focused DeepSeek catalog/model helper tests
+  pass. `NativeHarness.test_launch_applies_model_and_effort_to_new_session` was
+  skipped because the official DeepSeek Harness is unavailable here, so the
+  native post-start RPC path was not exercised end-to-end in this environment.
 - Focused client-core model tests pass. The full client-core library suite has
   1,820 passing tests and two unrelated machine-dependent failures:
   `image::linux::tests::same_inode_native_rewrite_after_the_last_check_executes_the_immutable_original`

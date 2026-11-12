@@ -96,7 +96,10 @@ fn launch_arguments_follow_launch_detached_session() {
     let mut dsh = launch_of("dsh");
     dsh.model = "m/x".into();
     dsh.effort = "high".into();
-    assert!(!launch_invocation(&local, &dsh, "").args.contains(&"--model".to_owned()));
+    let dsh_args = launch_invocation(&local, &dsh, "").args;
+    assert!(dsh_args.contains(&"--model".to_owned()));
+    assert!(dsh_args.contains(&"--effort".to_owned()));
+    assert!(!dsh_args.contains(&"-d".to_owned()));
 
     // A peer's alias comes first, the machine guard after it.
     let peer = launch_invocation(&ComputerId::from("box"), &launch_of("codex"), "m-1");
@@ -1246,7 +1249,7 @@ fn the_background_plan_follows_qt() {
     );
     assert!(!opencode.terminal);
     let dsh = launch::plan(&Choices { agent: "dsh".into(), ..choices() });
-    assert_eq!((dsh.model.as_str(), dsh.effort.as_str()), ("", ""));
+    assert_eq!((dsh.model.as_str(), dsh.effort.as_str()), ("m/x", "high"));
 
     // None, or no verified catalog, plans no generated worktree.
     let direct = launch::plan(&Choices {

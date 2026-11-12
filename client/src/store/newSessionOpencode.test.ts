@@ -406,10 +406,15 @@ describe("OpenCode (NewSessionDialog.cpp 1145-1313)", () => {
     expect(t.world.creating()).toEqual([]);
   });
 
-  it("deepSeekKeepsItsNativeLaunchModelFlow", async () => {
+  it("deepSeekUsesTheStandardModelSelector", async () => {
     const t = setup();
     await t.open({ agent: "dsh", path: "/workspace/example" });
-    expect(t.state()).toMatchObject({ modelVisible: false, model: "", effort: "" });
-    expect(t.world.count("teamRoleModels")).toBe(0);
+    expect(t.state()).toMatchObject({ modelVisible: true, model: "", effort: "" });
+    expect(t.world.of("teamRoleModels").map((call) => call.args)).toEqual([["", "dsh", "native-dsh"]]);
+    t.act.chooseModel("model-a");
+    t.act.chooseEffort("low");
+    await settle();
+    await t.start();
+    expect(t.choices()).toMatchObject({ agent: "dsh", account: "native-dsh", model: "model-a", effort: "low" });
   });
 });

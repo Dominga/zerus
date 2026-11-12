@@ -51,7 +51,7 @@ pub struct Intent {
 
 /// The fixed effect: the existing detached launch, through the shared
 /// `launch::launch_invocation`. This recovery leaf carries no model choice;
-/// the general launch path supports OpenCode, Claude, Codex and Kimi.
+/// the general launch path supports OpenCode, Claude, Codex, Kimi and DeepSeek.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {

@@ -191,8 +191,9 @@ fn a_stream_that_ends_reconnects_after_growing_delays_and_keeps_its_rows() {
             "restart {attempt} after {gap} s, before {delay} s"
         );
     }
-    assert_eq!(timing.restart_delay(4), Duration::from_millis(600));
-    assert_eq!(timing.restart_delay(9), Duration::from_millis(600));
+    // The default 10 s later delay, scaled by 0.002.
+    assert_eq!(timing.restart_delay(4), Duration::from_millis(20));
+    assert_eq!(timing.restart_delay(9), Duration::from_millis(20));
     // Each start probed the CLI again.
     assert!(fake.runs("", &["-h"]).len() >= 4);
 }
@@ -249,7 +250,7 @@ fn a_replaced_executable_restarts_at_once_and_only_once_a_minute() {
     let timing = Timing {
         // A restart after a failure waits a visible 2 s; the first replaced
         // stream's restart must not.
-        restart: [2, 2, 2, 2].map(Duration::from_secs),
+        restart: [2, 2, 2, 2].map(Duration::from_secs).into(),
         stop_grace: common::WAIT + Duration::from_secs(1),
         ..quick()
     };

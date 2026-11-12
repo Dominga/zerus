@@ -262,6 +262,7 @@
   .sc-team .team-glyph { position: absolute; left: 6px; top: 4px; }
   .sc-team .chev { position: absolute; right: 5px; top: 7px; transition: rotate var(--z-motion-base) var(--ease); }
   .sc-team.open .chev { rotate: 180deg; }
+  .team-badge { flex: none; display: inline-flex; align-items: center; gap: 2px; }
   .sc-team .team-asking, .sc-team .team-needs { margin-left: 6px; padding: 0 4px; border-radius: 3px; font-weight: 600; }
   .sc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
   .sc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
@@ -284,6 +285,9 @@
   /* Compact (collapsed) row: 40 px row, 30 px card; status, provider, mute and expand at the right. */
   .scard.compact { display: flex; align-items: center; padding: 2px 3px 0 11px; bottom: 6px; }
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
+  /* An ended parent kept for its live child sessions (zerus-sa9qn.17): dimmed, never a session's live marks. */
+  .scard.ended-parent .cc-line, .scard.ended-parent .sc-title { color: var(--z-list-muted); }
+  .scard.ended-parent .cc-tile, .scard.ended-parent .cc-line > .sbadge { opacity: .62; }
   .scard.compact .sbadge { flex: 0 0 auto; max-width: 100%; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
   /* A muted row: the name keeps its width and the bell after it takes the rest. */

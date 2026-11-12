@@ -952,10 +952,15 @@ pub async fn run<N: Native + 'static>(
     private_dir: &Path,
     signals: impl Future<Output = ()>,
 ) -> u8 {
-    let Ok(profile) = workspace::load_active(private_dir) else {
+    crate::startup::enter(crate::startup::Stage::EncryptedProfile);
+    let Ok(profile) = workspace::load_active(private_dir)
+        .inspect_err(|_| crate::startup::refused(crate::startup::Stage::EncryptedProfile))
+    else {
         return 1;
     };
-    if connector.journal.encrypted_init(crate::now()).is_err() {
+    crate::startup::enter(crate::startup::Stage::EncryptedJournal);
+    if let Err(error) = connector.journal.encrypted_init(crate::now()) {
+        crate::startup::journal(crate::startup::Stage::EncryptedJournal, &error);
         return 1;
     }
     let Ok(generation) = crate::workspace_lifecycle::publish(&profile.state_dir) else {
@@ -1300,7 +1305,17 @@ mod tests {
     }
     #[tokio::test]
     async fn authenticated_native_dispatch_is_guarded_and_every_read_identity_is_permanent() {
+        assert_authenticated_native_dispatch(cfg!(windows)).await;
+    }
+    #[tokio::test]
+    async fn windows_gateway_authenticated_dispatch_checks_provider_before_execution() {
+        assert_authenticated_native_dispatch(true).await;
+    }
+    async fn assert_authenticated_native_dispatch(windows_gateway: bool) {
         let f = Fixture::new();
+        let mut flags = f.connector.flags.get();
+        flags.windows_gateway = windows_gateway;
+        f.connector.flags.set(flags);
         let engine = f.engine();
         let profile = workspace::load_active(&f.private_dir).unwrap();
         let route = &profile.identity.device.device_id;
@@ -1308,23 +1323,6 @@ mod tests {
         let value = serde_json::to_value(&envelope).unwrap();
         engine.receive(&profile, value.clone()).await.unwrap();
         engine.receive(&profile, value).await.unwrap();
-        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
-        assert_eq!(
-            f.connector.native.calls.borrow().last().unwrap(),
-            &["--expect-machine", MACHINE, "inspect", "codex/fixture/main"]
-        );
-        if cfg!(windows) {
-            assert_eq!(
-                f.connector.native.calls.borrow()[0],
-                [
-                    "--expect-machine",
-                    MACHINE,
-                    "inspect",
-                    "codex/fixture/main",
-                    "--skip-processes"
-                ]
-            );
-        }
         let native = f
             .connector
             .journal
@@ -1333,6 +1331,23 @@ mod tests {
             .unwrap();
         let receipt: Value = serde_json::from_str(&native).unwrap();
         assert_eq!(receipt["state"], "completed");
+        let mut expected = Vec::new();
+        if windows_gateway {
+            expected.push(vec![
+                "--expect-machine",
+                MACHINE,
+                "inspect",
+                "codex/fixture/main",
+                "--skip-processes",
+            ]);
+        }
+        expected.push(vec![
+            "--expect-machine",
+            MACHINE,
+            "inspect",
+            "codex/fixture/main",
+        ]);
+        assert_eq!(*f.connector.native.calls.borrow(), expected);
         let ciphertext = engine
             .seal_receipt(&profile, &envelope.header, receipt)
             .unwrap();
@@ -1348,7 +1363,7 @@ mod tests {
             .receive(&profile, serde_json::to_value(changed).unwrap())
             .await
             .is_err());
-        assert_eq!(f.connector.native.calls.borrow().len(), DISPATCH_CALLS);
+        assert_eq!(*f.connector.native.calls.borrow(), expected);
     }
     #[tokio::test(start_paused = true)]
     async fn queued_authenticated_reads_claim_again_after_flush_without_a_success_sleep() {

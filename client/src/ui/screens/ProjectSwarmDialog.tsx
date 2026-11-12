@@ -8,7 +8,7 @@ import { ProjectLabel } from "../components/ProjectLabel";
 import { inTauri } from "../../bridge";
 import { setPage } from "../../store/ui";
 import type { Project } from "../../types";
-import { createSwarm, syncText, seedMappings, initialAlias } from "./project-swarm";
+import { createSwarm, createAdoption, syncText, seedMappings, initialAlias } from "./project-swarm";
 import "../styles/project-swarm.css";
 import { tr } from "../../i18n";
 const SwarmConflicts = lazy(() => import("./SwarmConflicts"));
@@ -16,7 +16,9 @@ const SwarmConflicts = lazy(() => import("./SwarmConflicts"));
 /** setup-swarm Computers / Connect computer; the native worker owns every call. */
 export default function ProjectSwarmDialog(props: { projects: Project[]; connect?: boolean; preferred?: string; origin: HTMLElement; close(): void }) {
   const state = createSwarm(), view = state.frame;
-  const [tab, setTab] = createSignal<"computers" | "connect" | "conflicts">(props.connect ? "connect" : "computers");
+  const adoption = createAdoption(), adoptionView = adoption.frame;
+  const [adoptionAlias, setAdoptionAlias] = createSignal("");
+  const [tab, setTab] = createSignal<"computers" | "connect" | "conflicts" | "adopt">(props.connect ? "connect" : "computers");
   const [reviewError, setReviewError] = createSignal("");
   const [filter, setFilter] = createSignal("");
   const [sort, setSort] = createSignal({ column: 0, ascending: true });
@@ -26,6 +28,8 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
   const [mapping, setMapping] = createSignal<Map<string, string>>(new Map());
   const [keep, setKeep] = createSignal(true);
   const busy = () => state.working() || !!view()?.busy;
+  const adoptionBusy = () => adoption.working() || !!adoptionView()?.busy;
+  // A running adoption never holds the dialog open: closing only hides it, and reopening shows the same original.
   const changing = () => state.working() || !!view()?.changing;
   const preview = () => { const p = view()?.preview; return p?.id === validPreview() && p?.alias === alias() ? p : undefined; };
   const differs = () => !!preview()?.initialized && !preview()?.same_swarm;
@@ -39,8 +43,16 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
     return computers().filter((r) => !f || `${r.name} ${r.access} ${syncText(r)}`.toLowerCase().includes(f))
       .toSorted((a, b) => (key(a).localeCompare(key(b)) || a.id.localeCompare(b.id)) * (s.ascending ? 1 : -1));
   });
-  let dialog!: HTMLDialogElement, gone = false, aliasInitialized = false, off: (() => void) | undefined;
-  const close = async () => { if (await state.close()) props.close(); };
+  let dialog!: HTMLDialogElement, gone = false, aliasInitialized = false, off: (() => void) | undefined, adoptionOff: (() => void) | undefined;
+  const openAdoption = () => { setTab("adopt"); void adoption.open(); };
+  const close = async () => {
+    const [swarmClosed, adoptionClosed] = await Promise.all([state.close(), adoption.close()]);
+    if (swarmClosed && adoptionClosed) props.close();
+  };
+  createEffect(() => {
+    const aliases = adoptionView()?.aliases ?? [];
+    if (!aliases.includes(adoptionAlias())) setAdoptionAlias(aliases[0] ?? "");
+  });
   createEffect(() => {
     const aliases = view()?.aliases ?? [];
     if (!aliasInitialized && aliases.length) {
@@ -71,11 +83,13 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
     void (async () => {
       const stop = inTauri() ? await listen("project-swarm-changed", state.changed) : () => {};
       if (gone) { stop(); return; }
-      off = stop; await state.open();
+      off = stop;
+      adoptionOff = inTauri() ? await listen("project-swarm-changed", adoption.changed) : () => {};
+      await state.open();
       if (!gone) dialog.querySelector<HTMLElement>(tab() === "computers" ? "input[type=search]" : '[role="combobox"]')?.focus();
     })();
   });
-  onCleanup(() => { gone = true; off?.(); state.dispose(); dialog.close(); queueMicrotask(() => { if (props.origin.isConnected) props.origin.focus(); }); });
+  onCleanup(() => { gone = true; off?.(); adoptionOff?.(); state.dispose(); adoption.dispose(); dialog.close(); queueMicrotask(() => { if (props.origin.isConnected) props.origin.focus(); }); });
   const header = (column: number, label: string) => <th aria-sort={sort().column === column ? (sort().ascending ? "ascending" : "descending") : "none"}><button class="su-th" onClick={() => setSort((s) => ({ column, ascending: s.column === column ? !s.ascending : true }))}>{label}</button></th>;
   const label = (id: string): Project => props.projects.find((p) => p.id === id) ?? { id, name: localById().get(id)?.name ?? id, color: null, accessible: false, is_default: false, palette: 0, folders: [] };
   return <dialog ref={dialog} class="dlg su-dlg project-swarm" style={{ width: "780px", height: "min(680px, calc(100vh - 48px))", position: "fixed", inset: "0", margin: "auto" }} aria-labelledby="project-swarm-title" onCancel={(e) => { if (e.target !== e.currentTarget) return; e.preventDefault(); void close(); }}>
@@ -85,9 +99,27 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
       <div class="tabs sw-tabs" role="tablist" aria-label={tr("Project swarm")}>
         <button id="swarm-computers-tab" class="tab" role="tab" classList={{ on: tab() === "computers" }} aria-selected={tab() === "computers"} aria-controls="swarm-computers" onClick={() => setTab("computers")}>{tr("Computers")}</button>
         <button id="swarm-connect-tab" class="tab" role="tab" classList={{ on: tab() === "connect" }} aria-selected={tab() === "connect"} aria-controls="swarm-connect" onClick={() => setTab("connect")}>{tr("Connect computer")}</button>
+        <button id="swarm-adopt-tab" class="tab" role="tab" classList={{ on: tab() === "adopt" }} aria-selected={tab() === "adopt"} aria-controls="swarm-adopt" onClick={openAdoption}>{tr("Adopt catalog")}</button>
         <button id="swarm-conflicts-tab" class="tab" role="tab" classList={{ on: tab() === "conflicts" }} aria-selected={tab() === "conflicts"} aria-controls="swarm-conflicts" onClick={() => setTab("conflicts")}>{tr("Conflicts (%1)", view()?.catalog?.conflicts ?? 0)}</button>
       </div>
       <div class="sw-tabbody">
+        <Show when={tab() === "adopt"}>
+          <div id="swarm-adopt" class="sw-page" role="tabpanel" aria-labelledby="swarm-adopt-tab">
+            <div class="row">
+              <Dropdown class="field grow" aria-label={tr("Computer to adopt this catalog")} value={adoptionAlias()} disabled={adoptionBusy()} onChange={setAdoptionAlias} options={(adoptionView()?.aliases ?? []).map((value) => ({ value, label: value }))} />
+              <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_preview || !adoptionAlias()} onClick={() => void adoption.preview(adoptionAlias())}>{tr("Check adoption")}</button>
+            </div>
+            <Show when={adoptionView()?.preview}>
+              <p class="sw-msg">{adoptionView()!.preview!.reason}</p>
+              <p class="muted">{tr("Drive folders stay uninitialized without a real reverse peer. Project history and session membership still copy.")}</p>
+            </Show>
+            <div class="row">
+              <button class="btn primary" disabled={adoptionBusy() || !adoptionView()?.can_adopt || adoptionView()?.preview?.alias !== adoptionAlias()} onClick={() => void adoption.adopt()}>{tr("Adopt this catalog")}</button>
+              <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_resume} onClick={() => void adoption.status()}>{tr("Review original status")}</button>
+              <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_resume} onClick={() => void adoption.status()}>{tr("Review original outcome")}</button>
+            </div>
+          </div>
+        </Show>
         <Show when={tab() === "conflicts"}><div id="swarm-conflicts" class="sw-page" role="tabpanel" aria-labelledby="swarm-conflicts-tab"><Suspense><SwarmConflicts view={view} working={state.working} changed={state.changed} resolve={state.resolve} report={setReviewError} /></Suspense></div></Show>
         <Show when={tab() === "computers"}>
           <div id="swarm-computers" class="sw-page" role="tabpanel" aria-labelledby="swarm-computers-tab">
@@ -115,6 +147,6 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
         </Show>
       </div>
     </div>
-    <div class="dlg-foot"><span class="hint grow" classList={{ danger: !!reviewError() || !!state.error() || !!view()?.error }} title={reviewError() || state.error() || view()?.status} role="status">{reviewError() || state.error() || view()?.status}</span><button class="btn" disabled={changing()} onClick={() => void close()}>{tr("Close")}</button></div>
+    <div class="dlg-foot"><span class="hint grow" classList={{ danger: !!reviewError() || !!state.error() || !!view()?.error || !!adoptionView()?.error }} title={tab() === "adopt" ? adoptionView()?.status : reviewError() || state.error() || view()?.status} role="status">{tab() === "adopt" ? adoptionView()?.status : reviewError() || state.error() || view()?.status}</span><button class="btn" disabled={changing()} onClick={() => void close()}>{tr("Close")}</button></div>
   </dialog>;
 }

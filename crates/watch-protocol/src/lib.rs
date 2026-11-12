@@ -75,6 +75,8 @@ pub mod topic {
     /// rows: a client reads a team again with `hgs team` when its revision
     /// changes, instead of polling. One per stream.
     pub const TEAM: &str = "team";
+    /// The separately persisted, capable-only Windows drive-folder projection.
+    pub const DRIVE_FOLDERS: &str = "organization.drive_folders";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.

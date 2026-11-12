@@ -2,9 +2,14 @@
 //! place; it is never inferred from a label, recreated after loss, or published
 //! by this module. Duplicate-label creation remains a separate gated writer.
 use super::*;
+mod native_identity;
+#[cfg(test)]
+pub(in crate::state) use native_identity::{cache_path_for, complete_scan_count};
 
 const BYTES: u64 = 1 << 20;
 const RECORDS: usize = 5_000;
+#[cfg(test)]
+pub(in crate::state) const RECORDS_FOR_TEST: usize = RECORDS;
 
 #[derive(Clone, Copy)]
 pub(super) enum Provider {
@@ -13,6 +18,9 @@ pub(super) enum Provider {
 }
 
 impl Provider {
+    pub(super) fn native_caller(self, native: &str, home: &Path) -> Result<Option<Value>> {
+        native_identity::find(self, native, home)
+    }
     pub(super) fn named(name: &str) -> Option<Self> {
         match name.split('/').next() {
             Some("dsh") => Some(Self::DeepSeek),
@@ -229,7 +237,14 @@ impl Provider {
             }
             self.label_path(name)
         };
+        let before = native_identity::before_write(self);
         atomic(&path, &record.to_string())?;
+        // A write the index could not record stays unaccounted: the next
+        // lookup sees an unaccounted change instead of a clean ledger
+        // (zerus-8g1je).
+        if native_identity::note(self, record) {
+            native_identity::account(self, &before);
+        }
         session_index::note(record, self.kind(record));
         Ok(())
     }
@@ -247,7 +262,11 @@ impl Provider {
         } else {
             self.label_path(string(record, "name"))
         };
+        let before = native_identity::before_write(self);
         archive::remove_synced(&path)?;
+        if native_identity::retire(self, record) {
+            native_identity::account(self, &before);
+        }
         session_index::retire_provider(record, self.kind(record));
         // Stale supersets are safe. Do not wait in reverse lock order.
         if storage::in_id_layout(record) {

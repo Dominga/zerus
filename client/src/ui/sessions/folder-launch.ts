@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import type * as bridge from "../../bridge";
 import type { ComputerId, Folder, FolderOut, MachineMeta, PathStyle } from "../../types";
-import { absolute, native, of } from "./path-forms";
+import { absolute, native, selectedStyle } from "./path-forms";
 import { tr } from "../../i18n";
 
 // The Projects entries' state for a folder (ProjectsDialog.cpp 515-532,
@@ -68,7 +68,10 @@ export function createFolderLaunch(deps: FolderLaunchDeps) {
   function folderLaunch(folder: LaunchFolder, exists?: boolean): { problem: string; shown: string; local: boolean } {
     const local = deps.cards()[""];
     const localHost = local?.host ?? "";
-    const style = (machine: string) => of(local?.platform, !!machine && machine === localHost, buildStyle() ?? "posix");
+    const style = (machine: string) => {
+      const isLocal = !!machine && machine === localHost;
+      return selectedStyle((isLocal ? local : deps.cards()[machine])?.platform, isLocal, buildStyle() ?? "posix");
+    };
     const env = { localHost, online: deps.online, style };
     return { problem: folderLaunchProblem(folder, env, exists), shown: native(folder.path, style(folder.machine)), local: !!localHost && folder.machine === localHost };
   }

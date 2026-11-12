@@ -2,7 +2,7 @@ import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup, on
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon, ZerusMark } from "../lib/icons";
 import { Dropdown } from "../lib/Dropdown";
-import { tr } from "../../i18n";
+import { tr, trc } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
 import { BuildsPanel, HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
@@ -123,7 +123,7 @@ function statusLabel(kind: string): string {
   if (kind === "approved") return tr("Approved");
   if (kind === "draft") return tr("Draft");
   if (kind === "paused") return tr("Paused");
-  return tr("Open");
+  return trc("phase state", "Open");
 }
 
 function stored(key: string): string | null {

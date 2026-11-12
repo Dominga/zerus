@@ -387,6 +387,7 @@ pub(crate) fn launch(
         println!("Create native OpenCode session {name} in {cwd}");
         return Ok(());
     }
+    let parent = parent_link::launcher_link()?;
     let _writer = lock(None)?;
     let _guard = lock_bindings()?;
     if storage::label_taken(name) || live()?.contains_key(name) {
@@ -405,6 +406,7 @@ pub(crate) fn launch(
     }
     let existing = PROVIDER.existing_for_launch(name)?;
     let present = existing.is_some();
+    if present && parent_link::claimed_launch() { return Err("--parent applies only to new sessions; use hgs parent adopt for an existing session".into()); }
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }
@@ -445,6 +447,7 @@ pub(crate) fn launch(
         .map(|value| catalog::offered_model(&service, &cwd, value, effort.unwrap_or("")))
         .transpose()?;
     let mut record = json!({"backend":"opencode","service":"opencode2","agent":"opencode","name":name,"cwd":cwd,"launch_id":launch_id,"run_id":uuid::Uuid::new_v4().to_string(),"conversation_id":new_id("ses_"),"created":now(),"agent_home":config_home(),"creation_pending":true});
+    if let Some(parent) = parent { record["parent"] = parent; }
     let mut body = creation_body(&record);
     if let Some(model) = selected {
         body["model"] = model;
@@ -453,8 +456,26 @@ pub(crate) fn launch(
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
     save(&mut record)?;
+    // A child its proven parent launched starts in the parent's project,
+    // written after the state and bindings locks are released (zerus-d5twt).
+    let child = record
+        .get("parent")
+        .filter(|link| crate::swarm::placing_parent(link))
+        .map(|link| {
+            (
+                link.clone(),
+                string(&record, "run_id").to_owned(),
+                record["conversation_id"].clone(),
+            )
+        });
     finish_creation(&service, record, true)?;
-    if let Ok(config) = crate::config::Config::load() {
+    if let Some((parent, run, conversation)) = child {
+        drop(_guard);
+        drop(_writer);
+        if let Ok(config) = crate::config::Config::load() {
+            crate::swarm::place_child_session(&config, name, &cwd, &run, &conversation, &parent);
+        }
+    } else if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
     Ok(())
@@ -627,6 +648,7 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     if !string(record, "session_id").is_empty() {
         value["session_id"] = record["session_id"].clone();
     }
+    if let Some(parent) = parent_link::listed(record) { value["parent"] = parent; }
     let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
         "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),
         "terminal_attach_supported":cfg!(unix) && available && record["service"] == "opencode2",
@@ -659,6 +681,13 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         );
         provider_errors::apply(&mut value, &error);
     }
+    // A permission card is a tool approval, the person's to answer.
+    let approval = value["pending_questions"].as_array().is_some_and(|cards| {
+        cards
+            .iter()
+            .any(|card| card["kind"] == "opencode_permission")
+    });
+    parent_link::mark_human_request(&mut value, None, approval);
     value
 }
 /// A row without a reading of the session: no events, so clients keep the
@@ -821,7 +850,7 @@ fn parent_view(
     )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
-        result["attachment_messages"] = attachments::messages(record, "");
+        attachments::decorate(record, "", &mut result);
         result["voice_messages"] =
             conversation_history::inspected_voice_messages(record, &result, None);
     }
@@ -855,6 +884,53 @@ pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec
     if record["service"] != "opencode2" { return Err("baseline_unavailable".into()); }
     let service = service::connect().map_err(|_| "baseline_unavailable")?;
     notification_snapshot_with(&service, record, || history::fetch(&service, record))
+}
+/// Every read of one observation ends by the same absolute deadline.
+struct Bounded<'a> {
+    service: &'a service::Service,
+    deadline: Instant,
+}
+impl Native for Bounded<'_> {
+    fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+        service::request(&self.service.reg, method, path, body, self.deadline)
+    }
+    fn raw_until(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Response> {
+        service::request(
+            &self.service.reg,
+            method,
+            path,
+            body,
+            deadline.min(self.deadline),
+        )
+    }
+}
+/// Whether a claimed parent runs now: the same observation as its status, every
+/// read ending within `limit` of the service connection. No service is a
+/// definite no; a service that has not answered by then is busy, never live.
+/// (Windows reports a refused loopback connection only after about two seconds
+/// of SYN retries, so a service that vanishes mid-check can read as busy there.)
+pub(super) fn claim_live(record: &Value, limit: Duration) -> Result<bool> {
+    if record["service"] != "opencode2" {
+        return Ok(false);
+    }
+    let Ok(service) = service::connect() else {
+        return Ok(false);
+    };
+    claim_live_on(&service, record, Instant::now() + limit)
+}
+fn claim_live_on(service: &service::Service, record: &Value, deadline: Instant) -> Result<bool> {
+    let bounded = Bounded { service, deadline };
+    match notification_snapshot_with(&bounded, record, || history::fetch(&bounded, record)) {
+        Ok((row, _)) => Ok(row["state"] == "running" && row["process_state"] == "running"),
+        Err(_) if Instant::now() >= deadline => Err(parent_link::CLAIM_BUSY.into()),
+        Err(_) => Ok(false),
+    }
 }
 fn notification_snapshot_with(native: &dyn Native, record: &Value, history: impl FnOnce() -> Result<history::Page>) -> Result<(Value, Option<Vec<Value>>)> {
     let active = active_sessions(native)?;
@@ -994,6 +1070,19 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     waits::decorate(std::slice::from_mut(&mut value));
     session_state::decorate(std::slice::from_mut(&mut value));
     Ok(value)
+}
+/// `current_read` of an inspection (zerus-a4mub.24), from the same
+/// observation it shows, which is the view `hgs read` compares a mark with
+/// (`inspect`). Its questions are the forms and permissions it lists; its
+/// reply is the newest completed reply of the history it shows, so that
+/// reply's final text is shown. A row without an observation (no service, a
+/// failed read, an OpenCode 1 binding) has unknown attention and no reply.
+fn current_read_of(name: &str, view: &Value) -> Option<Value> {
+    let questions = view["pending_questions"]
+        .as_array()
+        .filter(|_| string(view, "phase") != "unknown")
+        .map(Vec::as_slice);
+    read_marks::native_current_read(name, view.clone(), questions)
 }
 /// The session's own state for delivery, answer, interrupt and lifecycle
 /// checks; unknown with its reason while the service is unavailable.
@@ -1257,7 +1346,7 @@ fn refuse_removed(ledger: &Ledger, record: &Value, message_id: &str) -> Result<(
     }
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(&path, &receipt.to_string())
+    receipt_index::persist(&path, &receipt)
 }
 /// A receipt whose message was confirmed removed becomes that definite
 /// non-delivery before anything else is read; nothing is sent for it.
@@ -1273,7 +1362,7 @@ fn apply_removal(ledger: &Ledger, record: &Value, receipt: &mut Value, path: &Pa
     let _guard = ledger.lock()?;
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(path, &receipt.to_string())
+    receipt_index::persist(path, receipt)
 }
 /// Resolve one message ID exactly from native state. It is never posted
 /// again: OpenCode 2.0.32 forgets an ID once its queued message is removed,
@@ -1364,7 +1453,7 @@ fn settle(
             receipt["reason"] = json!(reason);
         }
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, receipt)?;
     Ok(outcome)
 }
 pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
@@ -1497,7 +1586,7 @@ fn deliver(
         &json!({"request_id":request["request_id"],"conversation_id":record["conversation_id"]})
             .to_string(),
     )?;
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     let posted = native.raw(
         "POST",
         &session_path(record, "/prompt"),
@@ -1519,7 +1608,7 @@ fn deliver(
             // Keep the detailed first refusal local; a durable delivery
             // record needs only the confirmed HTTP status, not provider text.
             receipt["reason"] = json!(format!("HTTP {}", answer.status));
-            atomic(path, &receipt.to_string())?;
+            receipt_index::persist(path, &receipt)?;
             return Err(refused(&reason));
         }
         // A transport error or a 5xx leaves the admission unknown.
@@ -1533,7 +1622,7 @@ fn deliver(
     if queued {
         receipt["queued"] = json!(true);
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     Ok(receipt)
 }
 fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {
@@ -2067,7 +2156,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 ),
                 None => None,
             };
-            println!("{}", inspect(name, agent)?);
+            let mut value = inspect(name, agent)?;
+            // Only a main inspection names what a read mark may acknowledge.
+            if agent.is_none() && args.iter().any(|v| v == "--current-read") {
+                if let Some(current) = current_read_of(name, &value) {
+                    value["current_read"] = current;
+                }
+            }
+            println!("{value}");
         }
         "send" => {
             let request = checked_request(&record)?;
@@ -2146,6 +2242,90 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_claim_check_never_waits_past_its_bound_or_counts_silence_as_live() {
+        // zerus-p24ce: a service that accepts and never answers is busy.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let service = |port| service::Service {
+            reg: service::Registration {
+                id: String::new(),
+                version: String::new(),
+                port,
+                pid: 0,
+                password: None,
+            },
+        };
+        let record =
+            json!({"service":"opencode2","conversation_id":"ses_claim","cwd":"/tmp/example"});
+        let started = Instant::now();
+        let busy = claim_live_on(
+            &service(port),
+            &record,
+            started + Duration::from_millis(300),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(busy, Err(parent_link::CLAIM_BUSY.to_owned()));
+        // A service that closes the connection unanswered: a definite no,
+        // before the bound, on every platform.
+        let quitting = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let quit = quitting.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in quitting.incoming() {
+                drop(stream);
+            }
+        });
+        let started = Instant::now();
+        assert_eq!(
+            claim_live_on(&service(quit), &record, started + Duration::from_secs(2)),
+            Ok(false)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        // Nothing listening. Linux and macOS refuse a loopback connection at
+        // once: a definite no. Windows retries a refused SYN for about two
+        // seconds, so its refusal can arrive only at the bound and read as
+        // busy; it is never live and never outlasts the bound.
+        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = closed.local_addr().unwrap().port();
+        drop(closed);
+        let started = Instant::now();
+        let refused = claim_live_on(&service(free), &record, started + Duration::from_secs(2));
+        #[cfg(not(windows))]
+        {
+            assert_eq!(refused, Ok(false));
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                refused == Ok(false) || refused == Err(parent_link::CLAIM_BUSY.to_owned()),
+                "{refused:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+    }
     use super::*;
     use std::collections::HashMap;
 
@@ -3865,6 +4045,37 @@ mod tests {
         let value = normalize(&status_record(id), Some(&seen));
         assert_eq!(value["phase"], "input");
         assert_eq!(value["pending_questions"][0]["kind"], "opencode_permission");
+        assert!(
+            value.get("human_request").is_none(),
+            "only a supervised child carries it"
+        );
+        // zerus-lgr9s: a supervised child's permission request is the
+        // person's; its own question and its reply are its parent's.
+        let link = json!({"schema":1,"machine":"11111111-1111-4111-8111-111111111111","host":"arch",
+            "session_id":"22222222-2222-4222-8222-222222222222","name":"claude/p/lead",
+            "conversation_id":"c","run_id":"r","source":"launch","at":1});
+        let child = |id: &str| {
+            let mut record = status_record(id);
+            record["parent"] = link.clone();
+            record
+        };
+        assert_eq!(normalize(&child(id), Some(&seen))["human_request"], true);
+        let asked = opencode2("forms_question");
+        let mut questioned = observed("messages_question", true, no_inbox());
+        questioned.forms = asked["data"].clone();
+        let form = asked["data"][0]["sessionID"].as_str().unwrap();
+        let value = normalize(&child(form), Some(&questioned));
+        assert_eq!(
+            (&value["phase"], &value["human_request"]),
+            (&json!("input"), &json!(false)),
+            "{value}"
+        );
+        let value = normalize(&child("ses_A"), Some(&seen));
+        assert_eq!(
+            (&value["phase"], &value["human_request"]),
+            (&json!("idle"), &json!(false)),
+            "{value}"
+        );
         // Another session's request never needs this session's attention.
         let value = normalize(&status_record("ses_A"), Some(&seen));
         assert_eq!(value["phase"], "idle");
@@ -3887,6 +4098,78 @@ mod tests {
         let busy = normalize(&record, Some(&observed("messages_error", true, no_inbox())));
         assert_eq!(busy["phase"], "working");
         assert!(busy.get("provider_error").is_none());
+    }
+    /// The view `hgs read` compares a mark with: one observation, enriched as
+    /// `parent_view` does.
+    fn read_view(record: &Value, seen: &Observed) -> Value {
+        let mut view = normalize(record, Some(seen));
+        let questions = view["pending_questions"].as_array().cloned().unwrap_or_default();
+        read_marks::enrich(&mut view, &json!({}), string(record, "name"), Some(&questions));
+        view
+    }
+    fn questions(view: &Value) -> Option<Vec<Value>> {
+        view["pending_questions"].as_array().cloned()
+    }
+    /// zerus-a4mub.24: `current_read` names what the shown observation shows:
+    /// its newest settled reply in durable order and the requests it lists,
+    /// exactly what `hgs read` accepts on that observation.
+    #[test]
+    fn current_read_names_the_shown_settled_reply_and_listed_requests() {
+        let record = status_record("ses_A");
+        let name = string(&record, "name");
+        let mut seen = observed("messages", false, no_inbox());
+        // A newer reply still streams: it is shown, but never named.
+        seen.page.messages.push(json!({"id":"msg_9zzzzzzzzzzzzzzzzzzzzzzzzz","type":"assistant","time":{"created":1792271999000.0_f64},
+            "content":[{"type":"text","text":"Partial"}]}));
+        let view = read_view(&record, &seen);
+        let current = current_read_of(name, &view).unwrap();
+        let settled: Vec<&Value> = view["events"].as_array().unwrap().iter()
+            .filter(|row| row["type"] == "AgentMessage").collect();
+        assert_eq!(settled.last().unwrap()["streaming"], true);
+        let newest = settled.iter().rev().find(|row| row["streaming"] != true).unwrap();
+        assert_eq!(current["reply_id"], newest["reply_id"]);
+        assert_eq!(current["reply_id"], "msg_14bb2d63e001NhfRTKy4frROM8");
+        assert_eq!(current, json!({"schema":1,"run_id":"run","conversation_id":"ses_A","reply_id":newest["reply_id"],
+            "attention_signature":null,"attention_complete":true}));
+        assert_eq!(read_marks::accepts(&view, questions(&view).as_deref(), &current), (true, false));
+        // Once it completes, the earlier reply is no longer current.
+        seen.page.messages.last_mut().unwrap()["time"]["completed"] = json!(1792272000000.0_f64);
+        let settled = read_view(&record, &seen);
+        assert_eq!(settled["reply_id"], "msg_9zzzzzzzzzzzzzzzzzzzzzzzzz");
+        assert_eq!(read_marks::accepts(&settled, questions(&settled).as_deref(), &current), (false, false));
+
+        // A listed request is signed exactly as shown, and a newer one makes it stale.
+        let forms = opencode2("forms_question");
+        let record = status_record(forms["data"][0]["sessionID"].as_str().unwrap());
+        let mut seen = observed("messages_question", true, no_inbox());
+        seen.forms = forms["data"].clone();
+        let view = read_view(&record, &seen);
+        let current = current_read_of(string(&record, "name"), &view).unwrap();
+        assert_eq!(current["attention_complete"], true);
+        assert_eq!(current["attention_signature"], json!(read_marks::signature(&view, questions(&view).as_deref())));
+        assert_eq!(current["attention_signature"], view["attention_signature"]);
+        assert!(read_marks::accepts(&view, questions(&view).as_deref(), &current).1);
+        seen.permissions = opencode2("permissions")["data"].clone();
+        for permission in seen.permissions.as_array_mut().unwrap() {
+            permission["sessionID"] = record["conversation_id"].clone();
+        }
+        let newer = read_view(&record, &seen);
+        assert_ne!(newer["pending_questions"].as_array().unwrap().len(), view["pending_questions"].as_array().unwrap().len());
+        assert!(!read_marks::accepts(&newer, questions(&newer).as_deref(), &current).1);
+    }
+    /// Without an observation (no service, a failed read, an OpenCode 1
+    /// binding) nothing is known: no reply, attention never complete.
+    #[test]
+    fn current_read_of_an_unobserved_row_claims_nothing() {
+        let record = status_record("ses_A");
+        for row in [unavailable(&record, "OpenCode is not running on fixture".into()), legacy_row(&record)] {
+            let current = current_read_of("opencode/project/one", &row).unwrap();
+            assert_eq!((current["reply_id"].clone(), current["attention_complete"].clone()), (Value::Null, json!(false)));
+            assert_eq!(read_marks::accepts(&row, questions(&row).as_deref(), &current), (false, false));
+        }
+        let mut unbound = record.clone();
+        unbound["conversation_id"] = json!("");
+        assert!(current_read_of("opencode/project/one", &read_view(&unbound, &observed("messages", false, no_inbox()))).is_none());
     }
     #[test]
     fn an_unreadable_service_is_unknown_and_allows_only_forget() {

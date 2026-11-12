@@ -24,17 +24,17 @@ describe("Move to project for a selection (zerus-5wmh.18.1)", () => {
 });
 
 describe("barTools", () => {
-  it("shows only tools with a count, in Qt's order, with Qt's texts and hints", () => {
+  it("shows attention before row presentation, with each tool's count and hint", () => {
     const tools = barTools(counts({ terminate: 1, compact: 3, pause: 2, mark_read: 4 }), 5, false);
-    expect(tools.map((t) => t.action)).toEqual(["compact", "mark_read", "pause", "terminate"]);
-    expect(tools[0].text).toBe("Compact session rows (3)");
-    expect(tools[0].hint).toBe("Compact session rows — 3 of 5 selected sessions");
+    expect(tools.map((t) => t.action)).toEqual(["mark_read", "compact", "pause", "terminate"]);
+    expect(tools[1].text).toBe("Compact session rows (3)");
+    expect(tools[1].hint).toBe("Compact session rows — 3 of 5 selected sessions");
     expect(tools[3].text).toBe("Terminate (1)");
     expect(tools.every((t) => !/\.|Esc/.test(t.hint.replace("sessions", "")))).toBe(true);
   });
   it("keeps the order of the actions", () => {
     const all = Object.fromEntries(SELECTION_ACTIONS.map((a) => [a, 1]));
-    expect(barTools(counts(all), 2, false).map((t) => t.action)).toEqual(["compact", "expand", "mark_read", "review_later", "mute", "pause", "resume", "archive", "move", "forget", "terminate"]);
+    expect(barTools(counts(all), 2, false).map((t) => t.action)).toEqual(["mark_read", "review_later", "mute", "compact", "expand", "pause", "resume", "archive", "move", "forget", "terminate"]);
   });
   it("offers Mute notifications while any selected session is unmuted, else Unmute (zerus-qhtxf)", () => {
     const mixed = barTools(counts({ mute: 2, unmute: 1 }), 3, false, true);

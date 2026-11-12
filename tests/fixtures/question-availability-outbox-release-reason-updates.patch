@@ -1,0 +1,26 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+index 283c8f46e..a65c36346 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+@@ -386,6 +386,7 @@ class MainActivity : ComponentActivity() {
+         ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
+         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+             Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation for confirmation."
++                else if (message.error.isNotBlank()) message.error
+                 else "This message was not accepted. Review it before trying again.")
+             if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
+             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index afdb4855b..75ba5c5be 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -3288,7 +3288,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+             failed = { status, failure ->
+                 try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = status, error = failure) } }) }
+                 catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
+-            })
++            },
++            release = { api.releaseReservedOutgoing(connection, id) })
+         try { send.run() } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
+     }
+     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject) {

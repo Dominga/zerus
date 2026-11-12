@@ -496,8 +496,12 @@ fn records_of(rows: &[Listed], limit: u64) -> Result<Vec<Value>> {
         .collect::<Result<Vec<_>>>()
 }
 
-/// The page's session summaries, at most 250,000 bytes of them: read after
-/// the catalog lock is released.
+const SUMMARY_PAGE_BYTES: usize = 250_000;
+/// One valid preference can exceed the ordinary page budget. Return that row
+/// alone, leaving room below 1 MiB for cursors and query metadata.
+const SINGLE_SUMMARY_BYTES: usize = 768 * 1024;
+
+/// The page's bounded session summaries: read after the catalog lock is released.
 fn sessions_of(rows: &[Listed], records: &[Value]) -> Result<Vec<Value>> {
     // The relay's preference ledger refuses a known conversation whose row
     // lacks its preferences, so archived rows carry them exactly as `ls` does.
@@ -518,8 +522,12 @@ fn sessions_of(rows: &[Listed], records: &[Value]) -> Result<Vec<Value>> {
     let mut bytes = 0;
     for row in summaries {
         let size = serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
-        if bytes + size > 250_000 {
+        if bytes + size > SUMMARY_PAGE_BYTES {
             if sessions.is_empty() {
+                if size <= SINGLE_SUMMARY_BYTES {
+                    sessions.push(row);
+                    break;
+                }
                 return Err("archived session summary exceeds page limit".into());
             }
             break;

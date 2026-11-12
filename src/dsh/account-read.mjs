@@ -38,8 +38,11 @@ try {
       result.api_key_configured = true;
       result.status = 'configured';
       result.identity = {auth_method: 'API key', account_id: await keyId(key)};
-      const [balances, models] = await Promise.all([apiBalance(key), apiModels(key)]);
-      if (balances) { result.balances = balances; result.status = 'ok'; }
+      // account-balance.mjs: the official reply, which hgs validates and
+      // projects into the balance rows; a failed read keeps the status.
+      const listed = apiModels(key);
+      try { result.api_balance = await apiBalance(key); } catch {}
+      const models = await listed;
       if (models) result.models = models;
     }
   }
@@ -92,21 +95,6 @@ async function apiKey(home, ref) {
 async function keyId(key) {
   const {createHash} = await import('node:crypto');
   return 'api-key:' + createHash('sha256').update('deepseek-api-key\0' + key).digest('hex');
-}
-
-// GET https://api.deepseek.com/user/balance: {is_available, balance_infos:
-// [{currency, total_balance, granted_balance, topped_up_balance}]}.
-async function apiBalance(key) {
-  try {
-    const response = await fetch('https://api.deepseek.com/user/balance', {
-      headers: {Authorization: 'Bearer ' + key, Accept: 'application/json'}, redirect: 'error', signal: AbortSignal.timeout(6000)});
-    if (!response.ok) return null;
-    const data = await response.json();
-    const balances = (Array.isArray(data?.balance_infos) ? data.balance_infos : [])
-      .filter(v => ['USD','CNY'].includes(v?.currency) && /^-?\d+(\.\d+)?$/.test(String(v.total_balance)))
-      .map(v => ({currency: v.currency, balance: String(v.total_balance), kind: 'API'}));
-    return balances.length ? balances : null;
-  } catch { return null; }
 }
 
 // Public model fallback when no resident host can serve its richer catalog.

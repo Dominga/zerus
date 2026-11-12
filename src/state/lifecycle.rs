@@ -169,7 +169,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let permission_override: Option<String>;
     // The launch's binding is written under the state lock; a fork's inherited
     // project waits until after it.
-    let (fork_project, session_id) = {
+    let (fork_project, child_project, session_id) = {
         let _guard = lock(None)?;
         let actual_name = backend::current()
             .pane_info(
@@ -386,10 +386,16 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 eprintln!("hgs: {name}: the replaced session stays in the ID layout: {error}");
             }
         }
+        // A child its proven parent launched is placed after the state lock
+        // is released, like a fork (zerus-d5twt).
+        let child_project = record
+            .get("parent")
+            .filter(|link| infer_project && crate::swarm::placing_parent(link))
+            .map(|link| (link.clone(), record["conversation_id"].clone()));
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's
         // inference. The swarm lock is nonblocking and Git shares one 3s cap.
-        if infer_project {
+        if infer_project && child_project.is_none() {
             if let Ok(config) = crate::config::Config::load() {
                 crate::swarm::infer_new_session(&config, &name, &cwd);
             }
@@ -397,8 +403,19 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let fork_project = fork_source
             .filter(|(source, _)| !source.is_empty())
             .map(|(source, archive)| (source, archive, record["conversation_id"].clone()));
-        (fork_project, string(&record, "session_id").to_owned())
+        (
+            fork_project,
+            child_project,
+            string(&record, "session_id").to_owned(),
+        )
     };
+    // A child starts in its parent's project, waiting for a busy catalog
+    // outside the state lock while this run still holds its binding.
+    if let Some((parent, conversation)) = child_project {
+        if let Ok(config) = crate::config::Config::load() {
+            crate::swarm::place_child_session(&config, &name, &cwd, &token, &conversation, &parent);
+        }
+    }
     // A fork's inherited project waits for a busy catalog outside the state
     // lock, writing only while this run still holds its binding (zerus-wx3k).
     if let Some((source, archive, conversation)) = fork_project {
@@ -453,11 +470,16 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         eprintln!("hgs: tracking needs trusted hooks (review /hooks if prompted)");
     }
+    let mut theme = claude_theme::Ticket::new(&agent, &session_id, &token);
     if !first.is_empty() {
         let started = Instant::now();
-        let mut child = spawn_agent(&first, &name, &token)?;
-        let child_id = child.id();
-        let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
+        let mut spawned = spawn_agent(&first, &name, &token)?;
+        let child_id = spawned.child.id();
+        let status = if let Some(ticket) = theme.as_mut() {
+            claude_theme::wait(&mut spawned, ticket)?
+        } else {
+            kimi_launch::wait(&mut spawned.child, &name, &token, launch_prompt.as_mut())?
+        };
         let confirmed = {
             let _guard = lock(None)?;
             let current =
@@ -494,11 +516,15 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             write(&mut current)?;
         }
     }
-    let mut child = spawn_agent(&base, &name, &token)?;
-    let child_id = child.id();
+    let mut spawned = spawn_agent(&base, &name, &token)?;
+    let child_id = spawned.child.id();
     // The same in-memory ticket survives a definite early resume failure. Once
     // a submission is attempted, even a refusal can never authorize a replay.
-    let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
+    let status = if let Some(ticket) = theme.as_mut() {
+            claude_theme::wait(&mut spawned, ticket)?
+        } else {
+            kimi_launch::wait(&mut spawned.child, &name, &token, launch_prompt.as_mut())?
+        };
     supervisor::finish(&name, &token, child_id, status)?;
     Ok(ExitInfo::of(status).exit_code())
 }
@@ -510,7 +536,7 @@ fn nonempty_value(record: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<std::process::Child> {
+fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<supervisor::Spawned> {
     match supervisor::spawn(argv, name, run_id) {
         Ok(child) => Ok(child),
         Err(error) => {

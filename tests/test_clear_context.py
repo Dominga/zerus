@@ -25,7 +25,7 @@ try:
   for c in value:
    if c==13:
     if text=='/clear':
-     p=next((root/'state').glob('*.json'));r=json.loads(p.read_text())
+     p=pathlib.Path((root/'session-record-path').read_text());r=json.loads(p.read_text())
      if (root/'defer-clear-hook').exists():(root/'native-cleared').touch()
      else:r['conversation_id']=str(uuid.uuid4())
      # Match real hooks: readers must see a complete binding during confirmation.
@@ -104,6 +104,8 @@ class ClearContext(unittest.TestCase):
   original=test_input.FAKE_AGENT;test_input.FAKE_AGENT=AGENT
   try:test_input.InputTransport.setUp(self)
   finally:test_input.FAKE_AGENT=original
+  # Other state JSON (including locator metadata) is not a session record.
+  (self.root/'session-record-path').write_text(str(self.record_path))
  def clear(self,payload=None,success=True,remote=False):
   payload=payload or dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id)
   r=subprocess.run([str(test_input.HGS),*(['@remote'] if remote else []),'clear-context',self.name,'--json'],env=self.env,input=json.dumps(payload),text=True,capture_output=True,timeout=12)
@@ -142,6 +144,14 @@ class ClearContext(unittest.TestCase):
   self.assertFalse(before['compact_context_supported'])
   self.assertEqual(self.clear()['status'],'confirmed')
   self.assertEqual(self.received(),b'/clear\r')
+
+ def test_clear_fixture_changes_only_its_bound_session_record(self):
+  metadata=self.state/'receipt-index-attempt.json'
+  original=json.dumps(dict(at=time.time(),fixture='unrelated metadata')).encode()
+  metadata.write_bytes(original)
+  self.assertEqual(self.clear()['status'],'confirmed')
+  self.assertNotEqual(json.loads(self.record_path.read_text())['conversation_id'],self.conversation_id)
+  self.assertEqual(metadata.read_bytes(),original)
 
  def test_standalone_error_and_newer_native_work_never_authorize_clear(self):
   for kind,newer in [('error',False),('task_complete',True)]:

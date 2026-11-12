@@ -14,6 +14,7 @@ use std::io::Write;
 use std::time::Duration;
 
 mod diagnostic;
+mod settle;
 pub(crate) mod task_refusal;
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -299,9 +300,7 @@ pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
     {
         return Readiness::Ended;
     }
-    let unconfirmed = record["input_pending_at"]
-        .as_f64()
-        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending);
+    let unconfirmed = input_unconfirmed(record);
     if resume_input::pending(record)
         || !string(record, "expected_id").is_empty()
         || string(record, "activity") != "idle"
@@ -314,6 +313,18 @@ pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
         return Readiness::Starting;
     }
     Readiness::Ready
+}
+
+/// Whether the agent has not confirmed the last input hgs typed (zerus-iitw8).
+/// Only an input-acceptance event (UserPromptSubmit, a queued prompt, a turn or
+/// task start) or hgs's own native proof sets `input_seen_at`; a busy agent's
+/// later tool events never do. A record written before this rule has no
+/// `input_seen_at` and keeps the event rule it was written under.
+pub(crate) fn input_unconfirmed(record: &Value) -> bool {
+    let seen = if record.get("input_seen_at").is_some() { "input_seen_at" } else { "last_event_at" };
+    record["input_pending_at"]
+        .as_f64()
+        .is_some_and(|pending| record[seen].as_f64().unwrap_or(0.0) <= pending)
 }
 
 fn checked_input(
@@ -423,14 +434,14 @@ fn checked_input(
 
 pub(super) const UNCONFIRMED: &str = "previous input has not been confirmed by the agent; inspect Terminal before sending again";
 
-/// U35: the agent has taken the previous input. Any native event after it
-/// confirms it: UserPromptSubmit at once for an idle Claude or Codex, Kimi's
-/// UserPromptQueued while it works (dsh confirms in its own RPC). A working
+/// U35: the agent has taken the previous input. An input-acceptance event after
+/// it confirms it (`input_unconfirmed`, zerus-iitw8): UserPromptSubmit at once for an
+/// idle Claude or Codex, Kimi's UserPromptQueued while it works (dsh confirms in
+/// its own RPC). A working
 /// Claude or Codex queues the text in its TUI and reports UserPromptSubmit only
 /// when that turn ends, so there the text shown in its queue panel confirms it.
 fn input_confirmed(record: &Value) -> bool {
-    let Some(pending) = record["input_pending_at"].as_f64() else { return true };
-    if record["last_event_at"].as_f64().unwrap_or(0.0) > pending {
+    if !input_unconfirmed(record) {
         return true;
     }
     if !["claude", "codex"].contains(&string(record, "agent")) {
@@ -460,6 +471,14 @@ fn queued_on_screen(agent: &str, screen: &str, text: &str) -> bool {
 /// sent text it is not a first message, so a new session keeps its first
 /// message state; a later native event settles it.
 pub(super) fn settings_unconfirmed(record: &Value) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        match effort::picker_own_marker(record) {
+            Ok(true) => return false,
+            Err(_) => return true,
+            Ok(false) => {},
+        }
+    }
     record["settings_unconfirmed_at"]
         .as_f64()
         .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)
@@ -620,6 +639,40 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
     }
 }
 
+/// Kimi's startup progress frame: its spinner-led preparation banner is the
+/// first non-blank row and the rest of the frame holds only the bordered
+/// progress box. A live session has content above its composer and its status
+/// footer below the box, so a transcript row that quotes the banner cannot
+/// make the session look like it is still preparing.
+fn kimi_preparing(screen: &str) -> bool {
+    let rows: Vec<String> = screen
+        .lines()
+        .map(|row| styled_row(row).iter().map(|(ch, _)| ch).collect())
+        .collect();
+    let Some(first) = rows.iter().position(|row| !row.trim().is_empty()) else {
+        return false;
+    };
+    spinner_banner(&rows[first])
+        && rows[first + 1..].iter().all(|row| {
+            let row = row.trim();
+            row.is_empty() || progress_box_row(row)
+        })
+}
+
+/// The preparation banner's own row: a spinner cell, then its progress line.
+fn spinner_banner(row: &str) -> bool {
+    let row = row.trim();
+    let mut chars = row.chars();
+    matches!(chars.next(), Some(ch) if ('\u{2800}'..='\u{28ff}').contains(&ch))
+        && chars.as_str().trim_start().starts_with("Preparing Kimi Code")
+}
+
+/// A row of the startup progress box: its borders and the bordered `> ` row.
+fn progress_box_row(row: &str) -> bool {
+    row.starts_with(['╭', '│', '╰'])
+        && row.chars().all(|ch| ch.is_whitespace() || "╭╮╰╯─│>".contains(ch))
+}
+
 /// Cursor at the start is not evidence that the entire composer is empty: a
 /// multiline draft can continue underneath it. Scan until the provider's input
 /// boundary, preserving ANSI state across rows as tmux capture-pane does.
@@ -743,6 +796,13 @@ pub(super) fn codex_footer_model(record: &Value) -> Option<&str> {
 }
 
 fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y: usize, model: Option<&str>) -> bool {
+    // Kimi's startup progress screen draws its own bordered `> ` box before
+    // the TUI opens a session (zerus-vg4mm). Its row and borders match the
+    // boxed composer below, but nothing can be typed into it: the launch
+    // prompt would be sent into a frame that is about to be replaced.
+    if agent == "kimi" && kimi_preparing(screen) {
+        return false;
+    }
     let lines: Vec<_> = screen.lines().collect();
     let Some(row) = lines.get(cursor_y) else {
         return false;
@@ -860,6 +920,16 @@ fn checked_send_terminal(record: &Value) -> Result<()> {
 }
 
 fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
+    terminal_check_on(record, empty, sending, backend::current())
+}
+
+/// The same native floor using this operation's explicit owned backend.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn checked_terminal_on(record: &Value, empty: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
+    terminal_check_on(record, empty, false, terminal)
+}
+
+fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
     terminating::check_mutation(record)?;
     let pane = string(record, "pane");
     if !pane
@@ -868,7 +938,6 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     {
         return Err("invalid tracked pane".into());
     }
-    let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
         // The pane's session is the record's own terminal (P3b).
@@ -879,8 +948,15 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     };
     let state = terminal.input_state(&claim)?;
     if empty {
-        let screen = terminal.capture(pane, backend::Capture::Styled)?;
-        let screen = String::from_utf8_lossy(&screen);
+        // Kimi replaces its progress screen with the session while the launch
+        // prompt waits, so its decision frame must be one read (zerus-vg4mm).
+        let (state, screen) = if string(record, "agent") == "kimi" {
+            stable_frame(terminal, &claim, state)?
+        } else {
+            let screen = terminal.capture(pane, backend::Capture::Styled)?;
+            (state, String::from_utf8_lossy(&screen).into_owned())
+        };
+        let screen = screen.as_str();
         let cursor_y: usize = state
             .cursor_y
             .parse()
@@ -897,13 +973,13 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
         } else { true };
         if !stable || !composer_empty_for_model(
             string(record, "agent"),
-            &screen,
+            screen,
             cursor_x,
             cursor_y,
             codex_footer_model(record),
         ) {
             if sending {
-                diagnostic::save(record, &screen, cursor_x, cursor_y, stable);
+                diagnostic::save(record, screen, cursor_x, cursor_y, stable);
                 if matches!(string(record, "agent"), "codex" | "claude")
                     && string(record, "activity") == "busy"
                     && matches!(string(record, "phase"), "idle" | "working" | "tool" | "compacting")
@@ -931,6 +1007,34 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One decision frame for Kimi: its cursor and styled screen from the same
+/// read. The TUI redraws the composer as its progress screen is replaced
+/// (zerus-vg4mm), so the pair is re-read until the cursor stops moving,
+/// bounded: a terminal that keeps moving is refused rather than guessed.
+/// `first` is the cursor read taken before the empty check; each retry takes
+/// only the after-capture read and reuses it as the next attempt's before, so
+/// a stable frame costs one read beyond that first one (zerus-0vjx5).
+fn stable_frame(
+    terminal: &dyn backend::TerminalBackend,
+    claim: &backend::InputClaim,
+    first: backend::InputState,
+) -> Result<(backend::InputState, String)> {
+    const ATTEMPTS: usize = 5;
+    let mut before = first;
+    for attempt in 0..ATTEMPTS {
+        let screen = terminal.capture(claim.pane, backend::Capture::Styled)?;
+        let after = terminal.input_state(claim)?;
+        if before.cursor_x == after.cursor_x && before.cursor_y == after.cursor_y {
+            return Ok((before, String::from_utf8_lossy(&screen).into_owned()));
+        }
+        before = after;
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    Err("the terminal redrew while its prompt was read; nothing was submitted".into())
 }
 
 const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
@@ -1502,7 +1606,7 @@ fn submit_core(
     let receipt_path = root
         .join("input_receipts")
         .join(format!("{request_id}.json"));
-    let _guard = lock(None).map_err(unknown)?;
+    let guard = lock(None).map_err(unknown)?;
     match existing(&receipt_path, &digest, name, matches!(origin, Origin::Held)) {
         Existing::Absent => {}
         Existing::Submitted(receipt) => return Ok(receipt),
@@ -1654,7 +1758,7 @@ fn submit_core(
         record["keep_warm_pending"] = json!({"request_id":request_id,"ping":id,"submitted_at":submitted_at});
     }
     // The marker may be published even when its write reports an error.
-    if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
+    if let Err(error) = receipt_index::persist(&receipt_path, &receipt) {
         cleanup();
         return Err(unknown(error));
     }
@@ -1667,6 +1771,10 @@ fn submit_core(
     if let Some(fields) = record.as_object_mut() {
         fields.remove("unsent_paste");
     }
+    // From this send on the record follows the acceptance rule.
+    if record.get("input_seen_at").is_none() {
+        record["input_seen_at"] = json!(0.0);
+    }
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(unknown(error));
@@ -1675,11 +1783,35 @@ fn submit_core(
     // Task 98: the composer's draft right after our own paste. When the Enter
     // does not go, this hash is how Zerus later knows the leftover is its own.
     let mut pasted_draft: Option<String> = None;
+    // zerus-iitw8: Claude needs native proof; its transcript is read from here.
+    let native = settle::applies(string(&record, "agent"));
+    let transcript = native.then(|| settle::transcript(&record)).flatten();
+    let claim = backend::InputClaim {
+        pane,
+        name: terminal_name(&record),
+        run_id: string(&record, "run_id"),
+        agent: string(&record, "agent"),
+        pid: record["pid"].as_u64(),
+    };
+    // One window for the settle and the proof, set once after the paste.
+    let mut deadline = std::time::Instant::now() + settle::WINDOW;
+    let mut residue: Option<String> = None;
     let result: Result<()> = (|| {
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
-        // Let bracketed-paste handlers finish before Enter. Never send a second
-        // Enter as a retry: that could approve a new dialog or duplicate a turn.
-        std::thread::sleep(Duration::from_millis(180));
+        deadline = std::time::Instant::now() + settle::WINDOW;
+        if native {
+            // Enter only once the composer shows the paste settled: an Enter
+            // while Claude still processes pasted images submits nothing.
+            if let Err(composer) = settle::settle(terminal, &claim, deadline) {
+                residue = composer;
+                return Err("Claude's composer never showed the pasted message settled; no Enter was pressed".into());
+            }
+        } else {
+            // Let bracketed-paste handlers finish before Enter.
+            std::thread::sleep(Duration::from_millis(180));
+        }
+        // Never send a second Enter as a retry: that could approve a new
+        // dialog or duplicate a turn.
         #[cfg(windows)]
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
@@ -1719,19 +1851,68 @@ fn submit_core(
                 }
             }
         }
-        receipt["status"] = json!("submitted");
-        atomic(&receipt_path, &receipt.to_string())?;
+        if !native {
+            receipt["status"] = json!("submitted");
+            receipt_index::persist(&receipt_path, &receipt)?;
+        }
         Ok(())
     })();
     cleanup();
+    let uncertain = |receipt: &mut Value, error: String, residue: Option<String>| {
+        // The receipt stays `in_progress` (never resent) and names why and
+        // what the composer held, bounded text only.
+        receipt["delivery"] = json!("uncertain");
+        receipt["uncertain_reason"] = json!(error);
+        receipt["composer"] = json!(residue);
+        let _ = receipt_index::persist(&receipt_path, receipt);
+        crate::analytics::adapters::delivery(&root, &record, receipt, crate::analytics::adapters::Delivery::Uncertain);
+        let shown = residue
+            .map(|text| {
+                let short: String = text.chars().take(200).collect();
+                format!("; the composer holds: {short}{}", if text.chars().count() > 200 { "…" } else { "" })
+            })
+            .unwrap_or_default();
+        unknown(format!("delivery uncertain: {error}{shown}; inspect Terminal before retrying"))
+    };
     if let Err(error) = result {
         if let Some(hash) = &pasted_draft {
             record_unsent_paste(name, &receipt_path, &mut receipt, &request_id, hash);
         }
-        crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
-        return Err(unknown(format!(
-            "delivery uncertain: {error}; inspect Terminal before retrying"
-        )));
+        return Err(uncertain(&mut receipt, error, residue));
+    }
+    if native {
+        // Claude runs its UserPromptSubmit hook, which takes this lock, before
+        // it records the message: wait for the proof without holding it. The
+        // record's unconfirmed input keeps other sends out meanwhile.
+        drop(guard);
+        let proof = settle::confirm(terminal, &claim, transcript.as_ref(), &text, deadline);
+        let _guard = lock(None).map_err(unknown)?;
+        match proof {
+            Ok(proof) => {
+                receipt["status"] = json!("submitted");
+                receipt["native"] = json!(proof.name());
+                receipt_index::persist(&receipt_path, &receipt).map_err(unknown)?;
+                // A submitted row follows Claude's UserPromptSubmit hook, which
+                // already marked the input accepted; a busy queue has no hook
+                // until it is dequeued, so its enqueue confirms the input here
+                // (`input_unconfirmed`).
+                if proof == settle::Proof::Queued {
+                    if let Ok(mut current) = read(name) {
+                        if string(&current, "run_id") == string(&record, "run_id") {
+                            current["input_seen_at"] = json!(now());
+                            let _ = write(&mut current);
+                        }
+                    }
+                }
+            }
+            Err(composer) => {
+                return Err(uncertain(
+                    &mut receipt,
+                    "Claude recorded no submission of this message".into(),
+                    composer,
+                ))
+            }
+        }
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
@@ -2516,5 +2697,101 @@ mod tests {
         );
         // A folder-trust dialog is no composer.
         assert!(kimi_draft(include_str!("../../tests/fixtures/kimi-folder-trust.txt"), 5).is_none());
+    }
+
+    /// zerus-vg4mm: Kimi's startup progress screen draws its own bordered `> `
+    /// box that matches the composer. A launch prompt decided from it is sent
+    /// into the frame the TUI is already replacing.
+    #[test]
+    fn kimi_startup_progress_box_is_not_the_prompt() {
+        let splash = "\n ⠋ Preparing Kimi Code…\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n";
+        assert!(!composer_empty("kimi", splash, 5, 4));
+        // The real capture styles the spinner and the cursor cell.
+        let styled = "\n  \x1b[38;2;79;168;255m⠋\x1b[39m Preparing Kimi Code…\n\n ╭────────────╮\n \x1b[38;2;90;90;90m│\x1b[39m > \x1b[7m \x1b[0m          \x1b[38;2;90;90;90m│\x1b[39m\n ╰────────────╯\n";
+        assert!(!composer_empty("kimi", styled, 5, 4));
+        // The same box is the prompt once the progress screen is gone.
+        let settled = "\n\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n";
+        assert!(composer_empty("kimi", settled, 5, 4));
+        // A transcript that merely quotes the words is not the progress screen.
+        let quoted = " Preparing Kimi Code… was quoted\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n";
+        assert!(composer_empty("kimi", quoted, 5, 3));
+        // A transcript row that quotes the spinner banner inside a live session
+        // is not the startup frame: content is above it and the status footer
+        // is below the composer (zerus-hh0ky).
+        let transcript = "\n ╭────────────────────────────╮\n │  Welcome to Kimi Code!     │\n ╰────────────────────────────╯\n   ⠋ Preparing Kimi Code…\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n Never Ask  fixture  ~/project with spaces\n                          context: 0% (0/32k)\n";
+        assert!(composer_empty("kimi", transcript, 5, 7));
+        // A session frame that still shows the preparation banner above the
+        // composer keeps its status footer, so it is not the startup frame.
+        let late_banner = "  ⠋ Preparing Kimi Code…\n\n ╭────────────╮\n │ >          │\n ╰────────────╯\n Never Ask  fixture  ~/project with spaces\n                          context: 0% (0/32k)\n";
+        assert!(composer_empty("kimi", late_banner, 5, 3));
+    }
+
+    /// zerus-vg4mm: a Kimi decision read must not pair the cursor of one frame
+    /// with the screen of another. A real draft and a screen that never settles
+    /// are still refused.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn kimi_decision_frame_is_read_until_the_cursor_settles() {
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Frames {
+            cursors: Mutex<VecDeque<(&'static str, &'static str)>>,
+            screens: Mutex<VecDeque<&'static str>>,
+            reads: AtomicUsize,
+            captures: AtomicUsize,
+        }
+        impl Frames {
+            fn new(cursors: Vec<(&'static str, &'static str)>, screens: Vec<&'static str>) -> Self {
+                Self {
+                    cursors: Mutex::new(VecDeque::from(cursors)),
+                    screens: Mutex::new(VecDeque::from(screens)),
+                    reads: AtomicUsize::new(0),
+                    captures: AtomicUsize::new(0),
+                }
+            }
+            fn counts(&self) -> (usize, usize) {
+                (self.reads.load(Ordering::Relaxed), self.captures.load(Ordering::Relaxed))
+            }
+        }
+        impl backend::TerminalBackend for Frames {
+            fn input_state(&self, _claim: &backend::InputClaim) -> Result<backend::InputState> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                let (x, y) = self.cursors.lock().unwrap().pop_front().expect("extra cursor read");
+                Ok(backend::InputState { cursor_x: x.into(), cursor_y: y.into() })
+            }
+            fn capture(&self, _pane: &str, _mode: backend::Capture) -> Result<Vec<u8>> {
+                self.captures.fetch_add(1, Ordering::Relaxed);
+                Ok(self.screens.lock().unwrap().pop_front().expect("extra capture").as_bytes().to_vec())
+            }
+        }
+        let empty = " ╭────────────╮\n │ >          │\n ╰────────────╯";
+        let draft = " ╭────────────╮\n │ > hello    │\n ╰────────────╯";
+        let record = json!({"name": "kimi/p/initial", "agent": "kimi", "run_id": "run-1", "pane": "%1"});
+        // The progress screen's cursor row (4) then the session's (1): the
+        // first pair is torn, the next agrees, so the launch proceeds.  The
+        // check reads the cursor once before the empty branch (reused as the
+        // first attempt's before) and once after each capture: 3 reads, 2
+        // captures for one retry (zerus-0vjx5).
+        let frames = Frames::new(
+            vec![("5", "4"), ("5", "1"), ("5", "1")],
+            vec![empty, empty],
+        );
+        terminal_check_on(&record, true, false, &frames).unwrap();
+        assert_eq!(frames.counts(), (3, 2), "the first cursor read is reused");
+        // A stable draft still refuses with the draft reason: one cursor read
+        // before and one after the capture.
+        let frames = Frames::new(vec![("5", "1"), ("5", "1")], vec![draft]);
+        assert_eq!(terminal_check_on(&record, true, false, &frames).unwrap_err().to_string(), DRAFT);
+        assert_eq!(frames.counts(), (2, 1));
+        // A screen that never settles is refused after the bounded reads:
+        // one cursor read before and one after each of the five captures.
+        let frames = Frames::new(
+            vec![("5", "1"), ("5", "4"), ("5", "1"), ("5", "4"), ("5", "1"), ("5", "4")],
+            vec![empty; 5],
+        );
+        let refusal = terminal_check_on(&record, true, false, &frames).unwrap_err().to_string();
+        assert!(refusal.contains("redrew"), "{refusal}");
+        assert_eq!(frames.counts(), (6, 5));
     }
 }

@@ -761,7 +761,8 @@ impl Grouping {
             | Intent::Reorder { .. }
             | Intent::Renamed { .. }
             | Intent::AddFolder { .. }
-            | Intent::Folder { .. } => {}
+            | Intent::Folder { .. }
+            | Intent::FolderStyled { .. } => {}
             Intent::CreateFolder { .. } => {}
         }
         self.revision = None;

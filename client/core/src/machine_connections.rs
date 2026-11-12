@@ -247,6 +247,124 @@ pub fn prepare(list: &Value, request: &Request) -> Result<Invocation, String> {
     })
 }
 
+/// Could not confirm a saved reconnect timings change.
+pub const TIMINGS_UNCERTAIN: &str = "Could not confirm the reconnect timings change. Refresh to check the saved timings before trying again.";
+
+/// The reconnect timings of `hgs machine retry-delays` (and `machine ls`):
+/// the seconds in effect for this computer's desktop, the defaults, where
+/// they come from (`default`, `file`, or `invalid`, a saved file that is
+/// kept but not used) and why an invalid file is not used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryDelays {
+    pub delays_seconds: [u64; 4],
+    pub defaults: [u64; 4],
+    pub source: String,
+    pub diagnostic: Option<String>,
+}
+
+impl RetryDelays {
+    /// A checked report; None for an older CLI or one that does not check.
+    pub fn parse(value: &Value) -> Option<Self> {
+        let four = |value: &Value| -> Option<[u64; 4]> {
+            let seconds: Vec<u64> = value
+                .as_array()?
+                .iter()
+                .map(Value::as_u64)
+                .collect::<Option<_>>()?;
+            crate::stream::checked_restart_delays(&seconds).ok()?;
+            <[u64; 4]>::try_from(seconds).ok()
+        };
+        let source = value["source"]
+            .as_str()
+            .filter(|source| matches!(*source, "default" | "file" | "invalid"))?;
+        let diagnostic = match &value["diagnostic"] {
+            Value::Null => None,
+            Value::String(text) => Some(text.chars().take(512).collect()),
+            _ => return None,
+        };
+        Some(Self {
+            delays_seconds: four(&value["delays_seconds"])?,
+            defaults: four(&value["defaults"])?,
+            source: source.into(),
+            diagnostic,
+        })
+    }
+
+    pub fn delays(&self) -> [Duration; 4] {
+        self.delays_seconds.map(Duration::from_secs)
+    }
+}
+
+/// A reconnect timings change: four seconds to save, or None to reset to
+/// the defaults.
+pub type RetryDelaysChange = Option<[u64; 4]>;
+
+/// `hgs machine retry-delays`; with a change, `--set` or `--reset`.
+pub fn retry_delays_call(change: Option<RetryDelaysChange>) -> Result<Invocation, String> {
+    let mut args: Vec<String> = vec!["machine".into(), "retry-delays".into()];
+    match change {
+        None => {}
+        Some(None) => args.push("--reset".into()),
+        Some(Some(seconds)) => {
+            crate::stream::checked_restart_delays(&seconds).map_err(|_| {
+                "Use four whole numbers of seconds from 1 to 3600, each at least the one before."
+                    .to_owned()
+            })?;
+            args.push("--set".into());
+            args.extend(seconds.iter().map(u64::to_string));
+        }
+    }
+    Ok(Invocation {
+        args,
+        stdin: None,
+        timeout: Duration::from_secs(10),
+        request_id: None,
+    })
+}
+
+/// The reply of [`retry_delays_call`]. A change is confirmed only when the
+/// timings now reported are exactly the requested ones; anything else is
+/// uncertain and never starts another call.
+pub fn retry_delays_checked(
+    exit: Exit,
+    change: Option<RetryDelaysChange>,
+) -> Result<RetryDelays, String> {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => {
+            if stdout.len() > RESPONSE_BYTES {
+                return Err(TIMINGS_UNCERTAIN.into());
+            }
+            let reply: Value =
+                serde_json::from_slice(&stdout).map_err(|_| TIMINGS_UNCERTAIN.to_owned())?;
+            let saved = RetryDelays::parse(&reply).ok_or(TIMINGS_UNCERTAIN)?;
+            let confirmed = match change {
+                None => true,
+                Some(None) => saved.source == "default",
+                Some(Some(seconds)) => saved.source == "file" && saved.delays_seconds == seconds,
+            };
+            if confirmed && reply.get("dry_run").and_then(Value::as_bool) == Some(false) {
+                Ok(saved)
+            } else {
+                Err(TIMINGS_UNCERTAIN.into())
+            }
+        }
+        Exit::Code { stderr, .. } => {
+            let detail: String = stderr.trim().chars().take(2000).collect();
+            Err(if detail.is_empty() {
+                TIMINGS_UNCERTAIN.into()
+            } else {
+                detail
+            })
+        }
+        Exit::StartFailed(_) => {
+            Err("Could not start HGS. The reconnect timings were not changed.".into())
+        }
+        Exit::Abnormal { .. } | Exit::TimedOut | Exit::WriteFailed => Err(TIMINGS_UNCERTAIN.into()),
+    }
+}
+
 /// A lost/invalid reply is explicitly uncertain and never starts another call.
 pub fn checked(exit: Exit, alias: &str) -> Result<(), String> {
     match exit {
@@ -504,5 +622,65 @@ mod tests {
             checked(Exit::TimedOut, "fixture-peer"),
             Err(UNCERTAIN.into())
         );
+    }
+
+    #[test]
+    fn reconnect_timings_calls_are_bounded_and_confirmed_exactly() {
+        let args = |change| retry_delays_call(change).unwrap().args;
+        assert_eq!(args(None), ["machine", "retry-delays"]);
+        assert_eq!(args(Some(None)), ["machine", "retry-delays", "--reset"]);
+        assert_eq!(
+            args(Some(Some([1, 2, 5, 10]))),
+            ["machine", "retry-delays", "--set", "1", "2", "5", "10"]
+        );
+        for bad in [[0, 2, 5, 10], [5, 2, 5, 10], [1, 2, 5, 3601]] {
+            assert!(retry_delays_call(Some(Some(bad))).is_err(), "{bad:?}");
+        }
+        let exit = |v: Value| Exit::Code {
+            code: 0,
+            stdout: serde_json::to_vec(&v).unwrap(),
+            stderr: String::new(),
+        };
+        let saved = |seconds: [u64; 4], source: &str| {
+            json!({"delays_seconds":seconds,"defaults":[1,2,5,10],"source":source,
+                "diagnostic":null,"dry_run":false})
+        };
+        let set = Some(Some([2, 4, 8, 30]));
+        let ok = retry_delays_checked(exit(saved([2, 4, 8, 30], "file")), set).unwrap();
+        assert_eq!(ok.delays(), [2, 4, 8, 30].map(Duration::from_secs));
+        // Another value, a dry run or a default report never confirms a set.
+        for value in [
+            saved([2, 4, 8, 31], "file"),
+            saved([2, 4, 8, 30], "default"),
+            json!({"delays_seconds":[2,4,8,30],"defaults":[1,2,5,10],"source":"file","diagnostic":null,"dry_run":true}),
+            json!({}),
+        ] {
+            assert_eq!(
+                retry_delays_checked(exit(value), set),
+                Err(TIMINGS_UNCERTAIN.into())
+            );
+        }
+        assert!(retry_delays_checked(exit(saved([1, 2, 5, 10], "default")), Some(None)).is_ok());
+        assert!(retry_delays_checked(exit(saved([1, 2, 5, 10], "file")), Some(None)).is_err());
+        // A read reports an invalid saved file with its diagnostic.
+        let mut invalid = saved([1, 2, 5, 10], "invalid");
+        invalid["diagnostic"] = json!("reconnect.local.json is not valid.");
+        let read = retry_delays_checked(exit(invalid), None).unwrap();
+        assert_eq!(read.source, "invalid");
+        assert!(read.diagnostic.unwrap().contains("not valid"));
+        assert_eq!(
+            retry_delays_checked(Exit::TimedOut, set),
+            Err(TIMINGS_UNCERTAIN.into())
+        );
+        let refused = Exit::Code {
+            code: 1,
+            stdout: Vec::new(),
+            stderr:
+                "reconnect.local.json is not valid. Reset the reconnect timings to replace it.\n"
+                    .into(),
+        };
+        assert!(retry_delays_checked(refused, set)
+            .unwrap_err()
+            .starts_with("reconnect.local.json"));
     }
 }

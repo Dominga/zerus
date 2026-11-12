@@ -9,6 +9,7 @@ unreaped suite child does not establish detached descendants' quiescence.
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,7 @@ METHODS = (
     'test_kimi_native.NativeKimi.test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded',
     'test_kimi_native.NativeKimi.test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume',
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
+    'test_kimi_native.NativeKimi.test_busy_attachment_send_is_typed_once_and_delivered_once',
     'test_kimi_native.NativeKimi.test_pause_and_resume_keep_the_conversation',
     'test_kimi_native.NativeKimi.test_rolling_window_429_recovers_in_the_same_conversation',
     'test_kimi_questions_native.NativeKimiTrust.test_a_short_unviewed_pane_grows_until_the_whole_prompt_shows_then_trusts_once',
@@ -42,6 +44,8 @@ METHODS = (
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_long_other_is_confirmed_from_the_complete_review',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_explicit_retry_resumes_the_existing_other_editor',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_foreign_other_is_preserved_without_submission',
+    'test_kimi_native.NativeKimi.test_id_settings_before_first_message_preserves_empty_conversation_and_defaults',
+    'test_kimi_native.NativeKimi.test_id_effort_preserves_raw_request_identity_and_shared_defaults',
 )
 LOG_LIMIT = 64 * 1024**2
 IMAGE_LIMIT = 256 * 1024**2
@@ -260,6 +264,8 @@ def hosted_paths(args, env):
         raise ValueError('the checkout is not the declared workspace')
     if any(not path.resolve().is_relative_to(temporary) for path in (args.hgs, args.tmux)):
         raise ValueError('hgs and tmux must be private runner-temporary builds')
+    if getattr(args,'effort_seed_receipt',None) is None or not args.effort_seed_receipt.resolve().is_relative_to(temporary):
+        raise ValueError('private Effort seed receipt must stay in runner temporary builds')
     if not args.output.resolve().is_relative_to(workspace / 'artifacts' / 'test-results'):
         raise ValueError('results must stay in the checkout artifact directory')
 
@@ -275,6 +281,20 @@ def environment(runtime, helpers, hgs):
         path.mkdir(mode=0o700)
         env[key] = str(path)
     return env
+
+
+def seed_helper():
+    spec=importlib.util.spec_from_file_location('native_effort_seed',Path(__file__).with_name('native-effort-seed.py'))
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def seed_input(args):
+    value=seed_helper().verify(ROOT,args.effort_seed_receipt,args.hgs)
+    if not Path(value['image']['path']).resolve(strict=True).is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve()):
+        raise ValueError('private Effort seed image must stay in runner temporary builds')
+    return value
 
 
 def record_roots(case, destination):
@@ -441,9 +461,11 @@ def main():
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--hgs', required=True, type=Path)
     parser.add_argument('--tmux', required=True, type=Path)
+    parser.add_argument('--effort-seed-receipt', type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
     hosted_paths(args, os.environ)
+    effort_seed=seed_input(args)
     os.umask(0o077)
     if not re.fullmatch('[0-9a-f]{40}', args.source_sha):
         raise ValueError('an exact source SHA is required')
@@ -466,11 +488,13 @@ def main():
     hgs = args.hgs.resolve(strict=True)
     hgs.chmod(0o500)
     env = environment(runtime, helpers, hgs)
+    env.update(seed_helper().environment(effort_seed))
     source, hgs_sha = source_map(), digest(hgs)
     tools = {str(path): digest(path) for path in (Path(sys.executable).resolve(), args.tmux.resolve(), Path('/usr/bin/cc'))}
     write(evidence / 'plan.json', dict(source_sha=args.source_sha, platform=platform_id, methods=METHODS,
           native_cases=len(METHODS), mac_shim_compiles=len(METHODS) if platform_id == 'darwin-arm64' else 0,
           hgs_sha256=hgs_sha, tools=tools, environment=env, runtime=str(runtime), no_retries=True))
+    write(evidence / 'effort-seed.json',effort_seed)
     write(evidence / 'source-before.json', source)
     records, custody, success = [], [], False
     try:
@@ -479,7 +503,7 @@ def main():
         selected_seals = {str(path): digest(path) for path in (image, record_path, images / 'manifest.json')}
         write(evidence / 'reservation.json', dict(state='SPENT', versions=[version], native_cases=len(METHODS),
               selected_release=release, time=time.time()))
-        if source_map() != source or digest(hgs) != hgs_sha:
+        if source_map() != source or digest(hgs) != hgs_sha or seed_input(args)!=effort_seed:
             raise ValueError('source or hgs changed before native execution')
         case_evidence = evidence / ('native-' + version)
         case_evidence.mkdir(mode=0o700)
@@ -500,7 +524,8 @@ def main():
         if not outcome(value, code):
             raise ValueError(failure_summary(value))
         records.append(value)
-        if source_map() != source or digest(hgs) != hgs_sha or any(digest(path) != sha for path, sha in tools.items()):
+        if (source_map() != source or digest(hgs) != hgs_sha or seed_input(args)!=effort_seed
+                or any(digest(path) != sha for path, sha in tools.items())):
             raise ValueError('source/binary/tool post-seal changed')
         if any(digest(path) != sha for path, sha in selected_seals.items()):
             raise ValueError('a staged image changed')

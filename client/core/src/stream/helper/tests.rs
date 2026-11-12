@@ -63,10 +63,52 @@ impl Fixture {
             {
                 break;
             }
+            // Signalled members that exited stay in the group as zombies
+            // until their new parent reaps them; a PID 1 that never reaps
+            // (CI's `tail -f /dev/null`) keeps them. Only a running member
+            // keeps the group alive.
+            if !group_has_running_member(group) {
+                break;
+            }
             assert!(Instant::now() < end, "owned helper group still exists");
             thread::sleep(Duration::from_millis(5));
         }
     }
+}
+
+/// Whether any process in `group` is running, i.e. present and not a zombie,
+/// from /proc/PID/stat (state and process group follow the last `)`).
+#[cfg(target_os = "linux")]
+fn group_has_running_member(group: libc::pid_t) -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            let Some((_, rest)) = stat.rsplit_once(')') else {
+                return false;
+            };
+            let mut fields = rest.split_whitespace();
+            let state = fields.next();
+            let pgrp = fields
+                .nth(1)
+                .and_then(|field| field.parse::<libc::pid_t>().ok());
+            pgrp == Some(group) && !matches!(state, Some("Z" | "X"))
+        })
+    })
+}
+
+/// macOS hands orphans to launchd, which reaps them; killpg stays the proof.
+#[cfg(not(target_os = "linux"))]
+fn group_has_running_member(_group: libc::pid_t) -> bool {
+    true
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -137,7 +179,7 @@ fn watch_stop_kills_only_its_group_and_next_probe_needs_no_orphan_timeout() {
         Timing {
             silence: Duration::from_secs(2),
             stop_grace: Duration::from_millis(25),
-            restart: [Duration::from_secs(30); 4],
+            restart: [Duration::from_secs(30); 4].into(),
             ..Timing::default()
         },
         tx,

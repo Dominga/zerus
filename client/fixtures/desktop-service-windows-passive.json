@@ -75,5 +75,6 @@
   "pending_read_import": null,
   "reconnecting": false,
   "task_message_inputs": null,
-  "fleet_computers": null
+  "fleet_computers": null,
+  "fleet_retry_delays": null
 }

@@ -65,6 +65,10 @@ internal interface WorkspaceJournal {
         return envelope.open(state.identity,sender,expected)
     }
     fun settle(connection:Connection,id:String)
+    /** Releases the exact reservation of a request proven never enqueued (no
+     *  transport marker). It removes the retained ciphertext, its blob and its
+     *  quota share; a marked request keeps its reservation as unknown evidence. */
+    fun release(connection:Connection,id:String)
     fun forget(connection:Connection)
 }
 
@@ -204,6 +208,19 @@ internal class AndroidWorkspaceJournal(context:Context):WorkspaceJournal {
         try {
             val bytes=db.rawQuery("SELECT COALESCE(envelope_bytes,0) FROM outgoing WHERE connection=? AND request_id=?",arrayOf(connection.id,id)).use { if(it.moveToFirst()) it.getLong(0) else 0L }
             db.execSQL("UPDATE outgoing SET envelope_bytes=NULL WHERE connection=? AND request_id=?",arrayOf(connection.id,id))
+            db.execSQL("DELETE FROM workspace_blobs WHERE connection=? AND kind='request' AND object_id=?",arrayOf(connection.id,id))
+            db.execSQL("UPDATE outgoing_quota SET bytes=bytes-? WHERE id=1 AND bytes>=?",arrayOf(bytes,bytes))
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+    override fun release(connection:Connection,id:String)=synchronized(LOCK) {
+        WorkspaceProtocol.identifier(id)
+        db.beginTransaction()
+        try {
+            // The retained reservation added envelope + header + 256 to the quota;
+            // a settled row (NULL envelope) has nothing left to release.
+            val bytes=db.rawQuery("SELECT CASE WHEN envelope_bytes IS NULL THEN 0 ELSE envelope_bytes+length(header)+256 END FROM outgoing WHERE connection=? AND request_id=?",arrayOf(connection.id,id)).use { if(it.moveToFirst()) it.getLong(0) else 0L }
+            db.execSQL("DELETE FROM outgoing WHERE connection=? AND request_id=?",arrayOf(connection.id,id))
             db.execSQL("DELETE FROM workspace_blobs WHERE connection=? AND kind='request' AND object_id=?",arrayOf(connection.id,id))
             db.execSQL("UPDATE outgoing_quota SET bytes=bytes-? WHERE id=1 AND bytes>=?",arrayOf(bytes,bytes))
             db.setTransactionSuccessful()

@@ -1,20 +1,93 @@
-//! Dormant per-effect facade, NOT a native driver or a receipt admission.
+//! The original ID input scope and its owned Effort/Settings controllers.
+//! The borrowed facade retains its Cut A contract.
 //!
-//! No production controller calls this. A later caller must supply its SAME
-//! original native/process/pane/panel checks and original receipt rules. These
-//! callbacks are trusted Rust call sites, never decoded commands or permits.
+//! The fixed driver reuses the SAME native/process/pane/panel checks and raw
+//! request receipt rules. Borrowed callbacks remain trusted Rust call sites,
+//! never decoded commands or permits.
 //! The one logical deadline vetoes later effects; it cannot bound synchronous
 //! helper drain or justify releasing its original physical resources.
 use super::*;
 use crate::state::{
     repositories::directory::Directory,
     storage::{
+        Guard, ID_RECORD_BYTES,
         native_domain::{Fresh, InputKind, KindProof},
         owner_transfer::input_domain::Input,
-        Guard, ID_RECORD_BYTES,
     },
 };
 use std::os::unix::fs::{FileExt, MetadataExt};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod helper;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod host;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod driver;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod caller;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn remember_caller_machine(config: &crate::config::Config, expected: &str) {
+    caller::remember(config, expected);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn custodian_entry() -> Result<i32> {
+    host::entry()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn front(name: &str, raw: &[u8]) -> Option<Result<i32>> {
+    driver::front(name, raw)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn front_settings(name: &str, raw: &[u8]) -> Option<Result<i32>> {
+    driver::front_settings(name, raw)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn native_checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
+    driver::checked(name, request, empty)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn close_claude_model(name: &str, request: &Request) -> Result<()> {
+    driver::close_claude_model(name, request)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) use driver::read::Call as ReadCall;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn helper_read(
+    call: ReadCall,
+    args: &[String],
+) -> Option<Result<std::process::Output>> {
+    driver::helper_read(call, args)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn entered() -> bool {
+    driver::entered()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn refuse<T>(error: String) -> Result<T> {
+    driver::refuse(error)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn own_marker(record: &Value) -> Result<bool> {
+    driver::own_marker(record)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn deadline(until: Instant) -> Result<Instant> {
+    driver::deadline(until)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Receipts {
@@ -120,7 +193,7 @@ const BINDING_FIELDS: &[&str] = &[
     "layout_transition",
 ];
 
-fn same_target(left: &Value, right: &Value) -> bool {
+pub(super) fn same_target(left: &Value, right: &Value) -> bool {
     BINDING_FIELDS
         .iter()
         .all(|key| left.get(*key) == right.get(*key))
@@ -151,7 +224,7 @@ impl Binding {
 /// A failed method never drops any of them, even after possible delivery.
 /// Nested work borrows this object; it cannot reacquire it or renew its clock.
 pub(super) struct Scope<'a> {
-    writer: &'a Guard,
+    writer: Writer<'a>,
     writer_file: Original,
     state: Directory,
     sessions: Directory,
@@ -164,6 +237,22 @@ pub(super) struct Scope<'a> {
     until: Instant,
     may_have_sent: bool,
     refused: Option<String>,
+    // LAST: its completion is sent only after every original above is dropped.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    host: Option<host::Hold>,
+}
+
+enum Writer<'a> {
+    Borrowed(&'a Guard),
+    Owned(Guard),
+}
+impl Writer<'_> {
+    fn get(&self) -> &Guard {
+        match self {
+            Self::Borrowed(writer) => writer,
+            Self::Owned(writer) => writer,
+        }
+    }
 }
 
 impl<'a> Scope<'a> {
@@ -175,12 +264,21 @@ impl<'a> Scope<'a> {
         receipts: Receipts,
         until: Instant,
     ) -> Result<Self> {
+        Self::acquire(Writer::Borrowed(writer), expected, receipts, until)
+    }
+
+    fn acquire(
+        writer: Writer<'a>,
+        expected: &Value,
+        receipts: Receipts,
+        until: Instant,
+    ) -> Result<Self> {
         check_time(until)?;
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         let writer_file = Original::open(&state, ".lock".into())?;
         if crate::platform::FileIdentity::of(&writer_file.file).map_err(|e| e.to_string())?
-            != writer.identity().map_err(|e| e.to_string())?
+            != writer.get().identity().map_err(|e| e.to_string())?
         {
             return Err("The actual picker state writer changed".into());
         }
@@ -218,6 +316,8 @@ impl<'a> Scope<'a> {
             until,
             may_have_sent: false,
             refused: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            host: None,
         };
         scope.current()?;
         Ok(scope)
@@ -227,6 +327,10 @@ impl<'a> Scope<'a> {
         if let Some(error) = &self.refused {
             return Err(error.clone());
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = &self.host {
+            host.check()?;
+        }
         check_time(self.until)?;
         for directory in [&self.state, &self.sessions, &self.inputs, &self.receipts] {
             directory.verify()?;
@@ -235,7 +339,7 @@ impl<'a> Scope<'a> {
             }
         }
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
-            || self.writer.identity().map_err(|e| e.to_string())?
+            || self.writer.get().identity().map_err(|e| e.to_string())?
                 != crate::platform::FileIdentity::of(&self.writer_file.file)
                     .map_err(|e| e.to_string())?
         {
@@ -249,6 +353,10 @@ impl<'a> Scope<'a> {
             return Err("The original picker binding changed".into());
         }
         check_time(self.until)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = &self.host {
+            host.check()?;
+        }
         Ok(record)
     }
 
@@ -285,7 +393,7 @@ impl<'a> Scope<'a> {
 
     /// Fresh original data and pinned target, never a stale admission snapshot.
     /// The callback remains responsible for its existing native write rules.
-    /// No production callback is installed by this leaf.
+    /// The owned driver uses typed staged commits outside the Scope mutex.
     pub(super) fn record_commit(
         &mut self,
         native: impl FnOnce(&Value) -> Result<()>,
@@ -320,6 +428,15 @@ impl<'a> Scope<'a> {
     /// Monotonic DATA, never a historical no-start or delivery receipt.
     pub(super) fn may_have_sent(&self) -> bool {
         self.may_have_sent
+    }
+}
+
+impl Scope<'static> {
+    /// Transfer the SAME actual writer, never a reopened or cloned lock guard.
+    /// The caller must acquire it with its existing bounded writer method.
+    /// Only this owned form may outlive a cancelled helper's original caller.
+    fn owned(writer: Guard, expected: &Value, receipts: Receipts, until: Instant) -> Result<Self> {
+        Self::acquire(Writer::Owned(writer), expected, receipts, until)
     }
 }
 

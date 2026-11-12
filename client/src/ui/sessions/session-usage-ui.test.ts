@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { footerUsageSummary, sessionUsageView, usageStripVisible } from "./session-usage-ui";
+import { footerUsageSummary, footerUsageTitle, sessionUsageView, usageStripVisible } from "./session-usage-ui";
 import { toSession } from "../../store/catalog";
 import { emptyUsage } from "../../types";
 import { setSystemLocale } from "./usage-number";
@@ -17,6 +17,11 @@ describe("SessionUsage::html projection", () => {
     expect(usageStripVisible("sessions", { ...s, tracked: false }, undefined)).toBe(false);
     expect(footerUsageSummary({ ...emptyUsage(), status: "unavailable" })).toBe("limits n/a");
     expect(footerUsageSummary({ ...emptyUsage("opencode"), status: "configured" })).toBe("Configured");
+    const funded = { ...emptyUsage("dsh"), status: "configured", balances: [{ kind: "Total", balance: "6.20", currency: "USD" }, { kind: "Topped up", balance: "6.20", currency: "USD" }] };
+    expect(footerUsageSummary(funded)).toBe("$6.20");
+    expect(footerUsageTitle(funded)).toBe("Balance: 6.20 USD\nTopped up: 6.20 USD");
+    // "limits n/a" over a cached balance is not explained as a balance.
+    expect(footerUsageTitle({ ...funded, status: "offline" })).toBe("");
   });
   it("keeps Qt's rows, notes, context and partial explanation", () => {
     const view = sessionUsageView({

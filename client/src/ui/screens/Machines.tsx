@@ -24,6 +24,7 @@ import { setMachineFilter, setPage } from "../../store/ui";
 import { machineSetupEditor as setup } from "../../store/machineSetup";
 import { MachinesPhones } from "./settings/Mobile";
 import { LOCAL, hostTestLine, localState, peerState, placeholders, summary, testEnabled, type LocalState, type PeerState } from "./machines-ui";
+import { ReconnectSchedule, ReconnectStatus } from "./MachineReconnect";
 
 // Machines (MachinesPage.cpp), ported from design/webui/src/screens/Machines.tsx:
 // this computer and the saved peers of `hgs machine ls`, each with its stream
@@ -114,6 +115,13 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
         </div>
         <Show when={colorEditor()}>{(editor) => <MachineColorDialog alias={editor().alias} origin={editor().origin} close={() => setColorEditor(undefined)} />}</Show>
       </section>
+
+      <Show when={!editor.isNew() && (isLocal() || row()?.enabled)}>
+        <section class="mach-section">
+          <h3>{tr("Connection status")}</h3>
+          <ReconnectStatus computer={isLocal() ? "" : selected()} />
+        </section>
+      </Show>
 
       <Show when={!formHidden()}>
         <section class="mach-section">
@@ -221,6 +229,8 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
         <Show when={!editor.notice() && !setupResult() && check()}>{(c) => <Status kind={c().pending ? "busy" : c().error ? "error" : "muted"}><Lines text={c().text} /></Status>}</Show>
         <Show when={setupResult()?.output}><pre class="mach-log" aria-label={tr("Setup output")}>{setupResult()!.output}</pre></Show>
       </section>
+
+      <Show when={!editor.isNew()}><ReconnectSchedule view={view()} /></Show>
 
       <Show when={!formHidden()}>
         <div class="mach-foot">

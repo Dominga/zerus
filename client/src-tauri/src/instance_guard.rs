@@ -19,6 +19,26 @@ pub fn directory() -> PathBuf {
     }))
 }
 
+/// The guard directory of this start. Only a measurement start
+/// (`ZERUS_CLIENT_PERF`) may name a private root (`ZERUS_CLIENT_GUARD_ROOT`,
+/// absolute); `acquire` applies the same ownership and mode checks there.
+/// Every other start keeps the canonical directory whatever its environment,
+/// so a changed HOME or TMPDIR still cannot create a second GUI (zerus-5a99f).
+pub fn directory_for(measurement: bool, root: Option<&std::ffi::OsStr>) -> io::Result<PathBuf> {
+    match root.filter(|root| !root.is_empty()) {
+        Some(root) if measurement => {
+            let root = PathBuf::from(root);
+            if !root.is_absolute() {
+                return Err(io::Error::other(
+                    "ZERUS_CLIENT_GUARD_ROOT must be an absolute path",
+                ));
+            }
+            Ok(root)
+        }
+        _ => Ok(directory()),
+    }
+}
+
 pub struct Guard {
     file: File,
     pub socket: PathBuf,
@@ -117,6 +137,22 @@ impl Drop for Guard {
 mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
+    #[test]
+    fn only_a_measurement_start_names_a_private_guard_root() {
+        let private = std::ffi::OsStr::new("/tmp/zguard-private");
+        assert_eq!(
+            directory_for(true, Some(private)).unwrap(),
+            PathBuf::from("/tmp/zguard-private")
+        );
+        // An ordinary start ignores it: a changed environment still finds the owner.
+        assert_eq!(directory_for(false, Some(private)).unwrap(), directory());
+        assert_eq!(directory_for(true, None).unwrap(), directory());
+        assert_eq!(
+            directory_for(true, Some(std::ffi::OsStr::new(""))).unwrap(),
+            directory()
+        );
+        assert!(directory_for(true, Some(std::ffi::OsStr::new("relative/root"))).is_err());
+    }
     #[test]
     fn canonical_lock_is_close_on_exec() {
         let root = PathBuf::from("/tmp").join(format!("zguard-{}", uuid::Uuid::new_v4().simple()));

@@ -2329,6 +2329,14 @@ pub(super) fn pending_mut<'a>(
     pending.filter(|p| p.revision == revision)
 }
 
+/// The start continuation `revision` of `key`, read-only.
+fn pending_of<'a>(hub: &'a Hub, key: &str, revision: u64) -> Option<&'a Pending> {
+    hub.start
+        .as_ref()
+        .map(|(p, _)| p)
+        .filter(|p| p.key == key && p.revision == revision)
+}
+
 /// Takes the continuation `revision` of `key` out of the hub.
 fn take_pending(hub: &mut Hub, key: &str, start: bool, revision: u64) -> Option<Pending> {
     pending_mut(hub, key, start, revision)?;
@@ -2402,6 +2410,22 @@ impl Composers {
     /// inspectionReady). The identities must still match the listed row.
     pub fn clear_control_for(&self, session: SessionRef) -> Option<ClearControl> {
         let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        // The listed row's durable ID names its composer's draft key, as the
+        // webview opened it (zerus-fsht5).
+        if let (Some(caller), Some(listed)) =
+            (session.session_id.as_deref(), row.session_id.as_deref())
+        {
+            if caller != listed {
+                return None;
+            }
+        }
+        let session = SessionRef {
+            session_id: row
+                .session_id
+                .clone()
+                .or_else(|| session.session_id.clone()),
+            ..session
+        };
         let target = Target {
             computer: session.computer.clone(),
             name: session.name.clone(),
@@ -2415,7 +2439,9 @@ impl Composers {
             return None;
         }
         let hub = self.lock();
-        let key = session.key.clone();
+        // The composer's draft key, the one `hub.clearing` and the sending
+        // check use; the catalog key never names a composer.
+        let key = super::session_draft_key(&session);
         let clearing = (self.0.deps.facts)(&session.computer, &session.name, &target.run_id)
             == Some(WriteKind::Clear)
             || hub.clearing.as_ref() == Some(&key);
@@ -2804,6 +2830,16 @@ impl Composers {
     /// `read` is the reading the answer came from (`inspected`): the
     /// compaction after a start and the send at the end name its identity.
     fn step(&self, key: &str, start: bool, revision: u64, step: Step, read: Option<&Arc<Value>>) {
+        if start {
+            let ready = match &step {
+                Step::Send { run_id, .. } => Some(run_id.as_str()),
+                Step::Compact(..) => read.map(|read| text(read, "run_id")),
+                _ => None,
+            };
+            if ready.is_some_and(|run| self.listing_behind(key, revision, run)) {
+                return;
+            }
+        }
         match step {
             Step::Idle => {}
             Step::Cancelled(text) => self.cancel(key, start, revision, &text),
@@ -2825,6 +2861,26 @@ impl Composers {
                 read,
             ),
         }
+    }
+
+    /// zerus-77ljy: a started run can read ready (an inspect, or the
+    /// followed details) before the listing replaces the stopped row. Judged
+    /// against that stale row, which still asks to resume, the waiting
+    /// message would end with CHANGED. Until the listed row shows the ready
+    /// run the start keeps waiting: its next reading or the poll decides
+    /// again, within its limit. A missing row is not waited for, and the
+    /// send's own checks (`still_valid`) stay as they are.
+    fn listing_behind(&self, key: &str, revision: u64, run: &str) -> bool {
+        let hub = self.lock();
+        let session = match (&hub.open, hub.open_key.as_deref()) {
+            (Some(open), Some(open_key)) if open_key == key => open.clone(),
+            _ => match pending_of(&hub, key, revision) {
+                Some(pending) => pending.session.clone(),
+                None => return false,
+            },
+        };
+        (self.0.deps.rows)(&session.computer, &session.key, &session.name)
+            .is_some_and(|(row, _)| row.run_id.as_deref().unwrap_or("") != run)
     }
 
     /// The start or compaction call (Qt's `resumeSession`,
@@ -3521,6 +3577,17 @@ impl Composers {
             name: captured.target.name.clone(),
             ..SessionRef::default()
         };
+        // The capture names no durable ID: take the listed row's, so the key
+        // is the open composer's own `id:` draft key, not its name key
+        // (zerus-fsht5). With the name key the sending check missed it, its
+        // view never showed the clear running, and the clear answered as if
+        // the session had closed.
+        let session_id = (self.0.deps.rows)(&session.computer, &session.key, &session.name)
+            .and_then(|(row, _)| row.session_id);
+        let session = SessionRef {
+            session_id,
+            ..session
+        };
         let Some(control) = self.clear_control_for(session.clone()) else {
             return SendReply::Busy;
         };
@@ -3727,7 +3794,9 @@ pub async fn clear_context(
 pub(crate) mod tests {
     use super::*;
     use crate::composer::tests::{dir, drafts, hold, session, until, Scratch, KEY};
-    use crate::composer::{lock, ComposerView, Composers, Config, Deps, Job, Spawn, SubagentRef};
+    use crate::composer::{
+        lock, ComposerView, Composers, Config, Deps, Job, Rows, Spawn, SubagentRef,
+    };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -3749,6 +3818,7 @@ pub(crate) mod tests {
         pub(crate) now: Mutex<f64>,
         pub(crate) inspected: Mutex<Option<Value>>,
         pub(crate) inspects: AtomicUsize,
+        pub(crate) inspected_targets: Mutex<Vec<Target>>,
         reconnects: Mutex<Vec<String>>,
         pub(crate) online: Mutex<bool>,
         pub(crate) write: Mutex<Option<WriteKind>>,
@@ -3782,13 +3852,14 @@ pub(crate) mod tests {
 
     /// `send_hub_on` with the test's own `spawn`.
     pub(crate) fn send_hub_with(store: &Arc<DraftStore>, spawn: Spawn) -> (Composers, Arc<Fake>) {
-        send_hub_reconnecting(store, spawn, None)
+        send_hub_reconnecting(store, spawn, None, None)
     }
 
     fn send_hub_reconnecting(
         store: &Arc<DraftStore>,
         spawn: Spawn,
         reconnect: Option<super::super::Reconnect>,
+        rows: Option<Rows>,
     ) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
             row: Mutex::new(row("claude/sample-project/review")),
@@ -3796,6 +3867,7 @@ pub(crate) mod tests {
             now: Mutex::new(1_793_000_100.0),
             inspected: Mutex::new(None),
             inspects: AtomicUsize::new(0),
+            inspected_targets: Mutex::new(Vec::new()),
             reconnects: Mutex::new(Vec::new()),
             online: Mutex::new(true),
             write: Mutex::new(None),
@@ -3817,12 +3889,14 @@ pub(crate) mod tests {
                 spawn,
                 notify: Arc::new(|| {}),
                 clock: Arc::new(move || *lock(&f1.now)),
-                rows: Arc::new(move |_, _, _| {
-                    if *lock(&f2.listed) {
-                        Some((lock(&f2.row).clone(), *lock(&f2.online)))
-                    } else {
-                        None
-                    }
+                rows: rows.unwrap_or_else(|| {
+                    Arc::new(move |_, _, _| {
+                        if *lock(&f2.listed) {
+                            Some((lock(&f2.row).clone(), *lock(&f2.online)))
+                        } else {
+                            None
+                        }
+                    })
                 }),
                 facts: Arc::new(move |_, _, _| *lock(&f4.write)),
                 reconnect: reconnect.unwrap_or_else(|| {
@@ -3830,8 +3904,9 @@ pub(crate) mod tests {
                         lock(&f6.reconnects).push(computer.to_owned());
                     })
                 }),
-                inspect: Arc::new(move |_, _, _| {
+                inspect: Arc::new(move |target, _, _| {
                     f3.inspects.fetch_add(1, Ordering::SeqCst);
+                    lock(&f3.inspected_targets).push(target.clone());
                     lock(&f3.inspected)
                         .clone()
                         .ok_or_else(|| "timed out".to_owned())
@@ -3851,6 +3926,17 @@ pub(crate) mod tests {
 
     pub(crate) fn send_hub(root: &Scratch) -> (Composers, Arc<Fake>) {
         send_hub_on(&drafts(root))
+    }
+
+    pub(crate) fn send_hub_on_rows(root: &Scratch, rows: Rows) -> (Composers, Arc<Fake>) {
+        send_hub_reconnecting(
+            &drafts(root),
+            Arc::new(|job: Job| {
+                std::thread::spawn(job);
+            }),
+            None,
+            Some(rows),
+        )
     }
 
     pub(crate) fn ready() -> Value {
@@ -4609,6 +4695,7 @@ pub(crate) mod tests {
                 entered.send(computer.to_owned()).unwrap();
                 lock(&held).recv_timeout(Duration::from_secs(2)).unwrap();
             })),
+            None,
         );
         *lock(&fake.online) = false;
         c.open(Some(session()));
@@ -6770,7 +6857,7 @@ pub(crate) mod tests {
 mod continuations {
     use super::tests::{
         ended, eventually, failed_send, held_spawn, next_job, opened, other_session, ready,
-        receipt, send_hub, send_hub_on, send_hub_with, state, Fake, Held,
+        receipt, row, send_hub, send_hub_on, send_hub_on_rows, send_hub_with, state, Fake, Held,
     };
     use super::*;
     use crate::composer::tests::{dir, drafts, hold, session, until, KEY};
@@ -8351,6 +8438,68 @@ mod continuations {
         assert!(view.text.is_empty() && !view.cancel_send);
     }
 
+    /// zerus-77ljy: the resumed run can read ready (an inspect, or the
+    /// followed details) before the listing replaces the stopped row. The
+    /// waiting message is not judged against that stale row, which still
+    /// asks to resume and would end it with CHANGED: it waits until the
+    /// listing shows the ready run, then goes once, to that run.
+    #[test]
+    fn a_resumed_send_waits_for_the_listing_to_show_the_ready_run() {
+        let root = dir("start-listing-behind");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        let mut details = ready();
+        details["runtime_state"] = json!("stopped");
+        details["process_state"] = json!("exited");
+        let view = opened(&c, details);
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "after resume".into(),
+            12,
+            12,
+        ) else {
+            panic!("no question")
+        };
+        let choice = StartChoice::Resume;
+        assert_eq!(
+            c.answer(token, Answer::Start { choice }),
+            SendReply::Sending
+        );
+        until(&c, |v| v.waiting.as_deref() == Some(WAITING_START));
+        until(&c, |_| called(&fake, &Action::Resume));
+        // The new run reads ready while the listing still shows the
+        // stopped run: nothing is sent and the draft keeps waiting.
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        c.observe(&state(after.clone()));
+        c.observe(&state(after.clone()));
+        std::thread::sleep(Duration::from_millis(200));
+        let view = c.current().unwrap();
+        assert!(
+            sends(&fake).is_empty(),
+            "sent before the listing showed the new run"
+        );
+        assert_ne!(view.status, CHANGED);
+        assert_eq!(view.waiting.as_deref(), Some(WAITING_START));
+        assert_eq!(view.text, "after resume");
+        // The listing catches up: the next reading sends the exact draft once.
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        c.observe(&state(after.clone()));
+        c.observe(&state(after));
+        until(&c, |v| v.waiting.is_none() && !v.sending);
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0.run_id, "run-2");
+        let view = c.current().unwrap();
+        assert!(view.text.is_empty() && view.status != CHANGED);
+    }
+
     /// zerus-dhnd: Start fresh opens Codex without a conversation, and Codex
     /// reports no status before the first message creates one. The waiting
     /// message must go through the first-message path, not wait forever.
@@ -8906,6 +9055,229 @@ mod continuations {
         );
     }
 
+    /// zerus-fsht5: a confirmed Clear of the open session keyed by its durable
+    /// ID guards and answers that open composer, not a name key.
+    #[test]
+    fn confirmed_clear_of_the_open_id_keyed_session_answers_its_notice_and_guards_its_composer() {
+        const ID: &str = "11111111-2222-4333-8444-555555555555";
+        let root = dir("clear-captured-id");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).session_id = Some(ID.into());
+        let id_session = SessionRef {
+            session_id: Some(ID.into()),
+            ..session()
+        };
+        c.open(Some(id_session));
+        c.observe(&state(ready()));
+        until(&c, |v| v.loaded);
+        let open_key = c.lock().open_key.clone().unwrap();
+        assert!(open_key.contains(ID), "the webview opens the id key");
+        *lock(&fake.inspected) = Some(ready());
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        // The open composer of that session is sending: nothing is cleared.
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("cleared while sending")),
+            SendReply::Busy
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+        // Details read by inspection, so the refresh after the clear is visible.
+        c.lock().followed.streamed = false;
+        let before = fake.inspects.load(Ordering::SeqCst);
+        let mut clearing = None;
+        let reply = c.clear_captured_using(&captured, |_, _, _| {
+            clearing = c.lock().clearing.clone();
+            Ok(Outcome::Done {
+                receipt: json!({"status": "confirmed"}),
+                cleanup: None,
+            })
+        });
+        assert_eq!(
+            reply,
+            SendReply::Notice {
+                text: CLEARED.into(),
+                error: false
+            }
+        );
+        assert_eq!(clearing.as_deref(), Some(open_key.as_str()));
+        assert!(c.lock().clearing.is_none());
+        // One inspection checks the control, then one refresh reads the details again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while fake.inspects.load(Ordering::SeqCst) < before + 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        while c.lock().followed.inspecting.is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), before + 2);
+        // A row's own control (named without its ID) sees its composer's send
+        // under the same draft key: Clear stays disabled while it sends.
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        let control = c
+            .clear_control_for(SessionRef {
+                session_id: None,
+                ..session()
+            })
+            .unwrap();
+        assert!(
+            !control.enabled,
+            "a sending composer disables its row's Clear"
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+    }
+
+    #[test]
+    fn clear_control_refuses_a_caller_id_that_disagrees_with_the_listed_row() {
+        const ROW_ID: &str = "11111111-2222-4333-8444-555555555555";
+        const CALLER_ID: &str = "66666666-7777-4333-8444-888888888888";
+        let root = dir("clear-control-row-id");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).session_id = Some(ROW_ID.into());
+        *lock(&fake.inspected) = Some(ready());
+        assert!(c
+            .clear_control_for(SessionRef {
+                session_id: Some(CALLER_ID.into()),
+                ..session()
+            })
+            .is_none());
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn delayed_clear_of_a_renamed_row_uses_its_run_and_durable_draft_key() {
+        const ID: &str = "11111111-2222-4333-8444-555555555555";
+        let root = dir("clear-captured-renamed");
+        let listed = Arc::new(Mutex::new({
+            let mut row = row(&session().name);
+            row.session_id = Some(ID.into());
+            row
+        }));
+        let rows = Arc::clone(&listed);
+        let (c, fake) = send_hub_on_rows(
+            &root,
+            Arc::new(move |_, key, name| {
+                let row = lock(&rows).clone();
+                (key == format!("run:{}", row.run_id.as_deref().unwrap_or_default())
+                    || name == row.name)
+                    .then_some((row, true))
+            }),
+        );
+        let id_session = SessionRef {
+            session_id: Some(ID.into()),
+            ..session()
+        };
+        c.open(Some(id_session));
+        c.observe(&state(ready()));
+        until(&c, |v| v.loaded);
+        let open_key = c.lock().open_key.clone().unwrap();
+        assert!(open_key.contains(ID));
+        lock(&listed).name = "claude/sample-project/renamed".into();
+        *lock(&fake.inspected) = Some(ready());
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        c.lock().composers.get_mut(&open_key).unwrap().sending = true;
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("cleared while sending")),
+            SendReply::Busy
+        );
+        c.lock().composers.get_mut(&open_key).unwrap().sending = false;
+        let mut clearing = None;
+        let reply = c.clear_captured_using(&captured, |target, action, _| {
+            assert_eq!(target, captured.target);
+            assert_eq!(action, captured.action);
+            clearing = c.lock().clearing.clone();
+            Ok(Outcome::Done {
+                receipt: json!({"status": "confirmed"}),
+                cleanup: None,
+            })
+        });
+        assert_eq!(
+            reply,
+            SendReply::Notice {
+                text: CLEARED.into(),
+                error: false
+            }
+        );
+        assert_eq!(clearing.as_deref(), Some(open_key.as_str()));
+        assert!(c.lock().clearing.is_none());
+        assert!(lock(&fake.inspected_targets)
+            .iter()
+            .all(|target| target.name == captured.target.name));
+    }
+
+    #[test]
+    fn delayed_clear_with_an_absent_run_does_not_touch_the_reused_name() {
+        const OTHER_ID: &str = "66666666-7777-4333-8444-888888888888";
+        let root = dir("clear-captured-absent-run");
+        let mut other_row = row(&session().name);
+        other_row.run_id = Some("run-2".into());
+        other_row.conversation_id = Some("conv-2".into());
+        other_row.session_id = Some(OTHER_ID.into());
+        let listed = other_row.clone();
+        let (c, fake) = send_hub_on_rows(
+            &root,
+            Arc::new(move |_, key, name| {
+                (key == "run:run-2" || (key == "run:run-1" && name == listed.name))
+                    .then_some((listed.clone(), true))
+            }),
+        );
+        c.open(Some(SessionRef {
+            key: "run:run-2".into(),
+            session_id: Some(OTHER_ID.into()),
+            ..session()
+        }));
+        let other_key = c.lock().open_key.clone().unwrap();
+        assert!(other_key.contains(OTHER_ID));
+        until(&c, |v| v.loaded);
+        let before = c.current().unwrap();
+        let mut details = ready();
+        details["run_id"] = json!("run-2");
+        details["conversation_id"] = json!("conv-2");
+        *lock(&fake.inspected) = Some(details);
+        let captured = zerus_client_core::end_action::Captured {
+            target: Target {
+                computer: session().computer,
+                name: session().name,
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+            },
+            action: Action::ClearContext {
+                dismiss_prompt: false,
+            },
+            state: "running".into(),
+        };
+        assert_eq!(
+            c.clear_captured_using(&captured, |_, _, _| panic!("reused name dispatched")),
+            SendReply::Busy
+        );
+        assert_eq!(c.current().unwrap(), before);
+        assert!(c.lock().clearing.is_none());
+        assert!(lock(&fake.calls).is_empty());
+    }
+
     #[test]
     fn clear_context_runs_with_the_identity_the_dialog_showed() {
         let root = dir("clear");
@@ -9458,6 +9830,61 @@ mod continuations {
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0.run_id, "run-2");
         assert_eq!(sends[0].1.as_deref(), Some("cmp-2"));
+    }
+
+    /// zerus-77ljy: "Resume, compact and send" also waits for the listing to
+    /// show the ready run before it asks for the compaction of that run.
+    #[test]
+    fn resume_compact_waits_for_the_listing_to_show_the_ready_run() {
+        let root = dir("resume-compact-listing-behind");
+        let (c, fake) = send_hub(&root);
+        stopped(&fake);
+        compacts_as(&fake, "cmp-3");
+        let view = opened(&c, ready());
+        let SendReply::Start { token, .. } = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "compact after the listing".into(),
+            0,
+            0,
+        ) else {
+            panic!()
+        };
+        c.answer(
+            token,
+            Answer::Start {
+                choice: StartChoice::ResumeCompact,
+            },
+        );
+        until(&c, |v| v.waiting.is_some());
+        until(&c, |_| called(&fake, &Action::Resume));
+        let mut after = ready();
+        after["run_id"] = json!("run-2");
+        c.observe(&state(after.clone()));
+        c.observe(&state(after.clone()));
+        std::thread::sleep(Duration::from_millis(200));
+        let view = c.current().unwrap();
+        assert!(
+            !called(&fake, &Action::CompactContext),
+            "compacted before the listing showed the new run"
+        );
+        assert!(!view.compacting && view.waiting.is_some() && view.status != CHANGED);
+        {
+            let mut row = lock(&fake.row);
+            row.state = "running".into();
+            row.run_id = Some("run-2".into());
+        }
+        c.observe(&state(after.clone()));
+        until(&c, |v| v.compacting);
+        until(&c, |_| called(&fake, &Action::CompactContext));
+        assert_eq!(call_of(&fake, &Action::CompactContext).run_id, "run-2");
+        after["compact_context_request"] = json!({"request_id": "cmp-3", "status": "completed"});
+        c.observe(&state(after));
+        until(&c, |v| !v.sending && !v.compacting && v.waiting.is_none());
+        let sends = sends(&fake);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0.run_id, "run-2");
     }
 
     /// zerus-le5s: Compact and resume on Codex, which refuses /compact until

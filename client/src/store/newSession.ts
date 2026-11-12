@@ -15,7 +15,7 @@ import { folderLaunches, onlineOf } from "../ui/sessions/newsession-view";
 import { markFavorite } from "../ui/sessions/opencode-models";
 import { array, object, string, type Json } from "../ui/lib/json";
 import { createOpenCode, type OpenCodeView } from "./newSessionOpencode";
-import { absolute, clean, matchingProjectFolder, native, of, prefillTarget, restoredFolder } from "../ui/sessions/paths";
+import { absolute, clean, matchingProjectFolder, native, selectedStyle, prefillTarget, restoredFolder } from "../ui/sessions/paths";
 import { catalog } from "./catalog";
 import { machineCards, requestMachine } from "./machines";
 import { defaultProject as organizationDefault, groupOf, grouping, setProjectToShow } from "./organization";
@@ -332,8 +332,8 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   const localCard = () => cards()[""];
   const localHostName = () => localCard()?.host ?? "";
   const host = () => machines[machineIndex]?.target ?? "";
-  /** Qt's folderStyle: this computer's platform for this computer, POSIX for a peer. */
-  const style = (computer: string): PathStyle => of(localCard()?.platform, computer === "", context.build_style);
+  /** The selected computer's reported Windows style, with the existing local/build and unknown-peer fallback. */
+  const style = (computer: string): PathStyle => selectedStyle(cards()[computer]?.platform, computer === "", context.build_style);
   const online = (computer: string) => deps.online(computer);
   const fleet = (): Fleet => ({ local: localCard(), peers: deps.peers(), online });
   const projectRow = () => projectList[projectIndex];
@@ -537,19 +537,19 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     return true;
   }
 
-  function selectPath(target: string, automaticWorktree = true) {
-    prefillRequest = 0;
+  function selectPath(target: string, automaticWorktree = true): boolean {
     const st = style(host());
-    if (!absolute(target, st)) return;
+    if (!absolute(target, st) || /[\r\n\0]/u.test(target)) return false;
+    prefillRequest = 0;
     if (!automaticWorktree) autoPreferred = false;
     browsed.delete(host());
     loadFolders(clean(target, st));
+    return true;
   }
 
   function applyBrowsedFolder(target: string, project: string, chosen: string) {
     if (!chosen || host() !== target || projectId() !== project) return;
-    selectPath(chosen);
-    browsed.set(target, clean(chosen, style(target)));
+    if (selectPath(chosen)) browsed.set(target, clean(chosen, style(target)));
   }
 
   // The repository source (590-639).
@@ -1226,15 +1226,15 @@ export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaun
 }
 
 /**
- * What the open dialog reads of the fleet: the computers, whose card is ok
- * and its host name, and this computer's platform, local sessions and session
- * host (`can_enable_local_sessions`, launch.rs 178-185). A change runs setFleet.
+ * What the open dialog reads of the fleet: the computers, whose card is ok,
+ * host name and platform, and this computer's local sessions and session host
+ * (`can_enable_local_sessions`, launch.rs 178-185). A change runs setFleet.
  */
 export function fleetKey(cards: Record<ComputerId, MachineMeta>, peers: string[], online: (computer: ComputerId) => boolean): string {
   const local = cards[""];
   return JSON.stringify([
-    peers, ["", ...peers].map((id) => [online(id), cards[id]?.host ?? null]),
-    local?.platform ?? null, local?.local_sessions ?? null, local?.local_host ?? null,
+    peers, ["", ...peers].map((id) => [online(id), cards[id]?.host ?? null, cards[id]?.platform ?? null]),
+    local?.local_sessions ?? null, local?.local_host ?? null,
   ]);
 }
 

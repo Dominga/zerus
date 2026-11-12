@@ -978,6 +978,11 @@ pub trait Start {
         None
     }
     fn claim(&mut self) -> io::Result<()>;
+    /// Why this start must not even try to forward: a measurement start
+    /// that finds another GUI answering. Nothing is sent to it.
+    fn refuse_forward(&mut self) -> Option<String> {
+        None
+    }
     fn pause(&mut self, pause: Duration);
     fn elapsed(&self) -> Duration;
     fn report(&mut self, line: &str);
@@ -1008,6 +1013,10 @@ pub fn start(
                 lockable = false;
                 effects.report(&why);
             }
+        }
+        if let Some(why) = effects.refuse_forward() {
+            effects.unlock();
+            return Outcome::Failed(why);
         }
         if effects.forward(activation.clone()) {
             effects.unlock();
@@ -1045,6 +1054,26 @@ pub fn start(
     }
 }
 
+/// A measurement or test start (`ZERUS_CLIENT_PERF`): it may own a GUI, but
+/// never activates one it did not start (zerus-5a99f).
+fn measurement_start() -> bool {
+    std::env::var_os("ZERUS_CLIENT_PERF").is_some_and(|mode| !mode.is_empty())
+}
+const NEVER_FORWARDS: &str =
+    "a measurement start (ZERUS_CLIENT_PERF) never forwards to a GUI it did not start";
+
+/// Whether an instance listens at `socket`. Only connects: nothing is sent.
+fn answers(socket: &Path) -> bool {
+    (|| -> io::Result<()> {
+        let connection = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        connection.connect_timeout(
+            &socket2::SockAddr::unix(socket)?,
+            Duration::from_millis(200),
+        )
+    })()
+    .is_ok()
+}
+
 /// Hands the activation to an instance that answers (`SingleInstance.cpp:22-31`).
 pub fn forward(socket: &Path, activation: Activation) -> bool {
     let line = activation.line();
@@ -1075,6 +1104,8 @@ struct UnixStart<'a> {
     lock: Option<StartLock>,
     started: Instant,
     listener: Option<UnixListener>,
+    /// False for a measurement start: it never activates another GUI.
+    forwards: bool,
 }
 
 impl Start for UnixStart<'_> {
@@ -1114,10 +1145,23 @@ impl Start for UnixStart<'_> {
     }
 
     fn forward(&mut self, activation: Activation) -> bool {
-        forward(&self.paths.socket, activation)
+        self.forwards && forward(&self.paths.socket, activation)
+    }
+
+    fn refuse_forward(&mut self) -> Option<String> {
+        (!self.forwards && answers(&self.paths.socket)).then(|| {
+            format!(
+                "{NEVER_FORWARDS}: another GUI answers at {}",
+                self.paths.socket.display()
+            )
+        })
     }
 
     fn service(&mut self) -> Service {
+        // A measurement start never waits for the person's service socket.
+        if !self.forwards {
+            return Service::default();
+        }
         #[cfg(target_os = "linux")]
         let systemd = systemd_now;
         #[cfg(not(target_os = "linux"))]
@@ -1219,14 +1263,18 @@ pub fn claim(
     reply: Option<Reply>,
     admitted: impl FnOnce(),
 ) -> Claim {
-    claim_in(
-        name,
-        label,
-        activation,
-        reply,
-        &canonical::directory(),
-        admitted,
-    )
+    let directory = match canonical::directory_for(
+        measurement_start(),
+        std::env::var_os("ZERUS_CLIENT_GUARD_ROOT").as_deref(),
+    ) {
+        Ok(directory) => directory,
+        Err(error) => {
+            let failed = Claim::Failed(error.to_string());
+            crate::startup_log::guard(&failed);
+            return failed;
+        }
+    };
+    claim_in(name, label, activation, reply, &directory, admitted)
 }
 
 fn claim_in(
@@ -1250,11 +1298,18 @@ fn claim_inner(
     directory: &Path,
     admitted: impl FnOnce(),
 ) -> Claim {
+    let forwards = !measurement_start();
     let guard = if name == "hgs-tray" {
-        match canonical_claim(directory, activation.clone()) {
+        match canonical_claim(directory, activation.clone(), forwards) {
             Ok(CanonicalClaim::Owner(guard)) => Some(guard),
             Ok(CanonicalClaim::Forwarded) => return Claim::Forwarded,
             Ok(CanonicalClaim::Busy) => return Claim::Duplicate("canonical_owner_unresponsive"),
+            Ok(CanonicalClaim::Refused) => {
+                return Claim::Failed(format!(
+                    "{NEVER_FORWARDS}: the GUI guard {} is held",
+                    directory.display()
+                ))
+            }
             Err(error) => return Claim::Failed(error.to_string()),
         }
     } else {
@@ -1273,7 +1328,7 @@ fn claim_inner(
         &LockInfo::own(),
         &Timing::default(),
         reply,
-        (guard, admitted),
+        (guard, forwards, admitted),
     )
 }
 
@@ -1281,13 +1336,20 @@ enum CanonicalClaim {
     Owner(canonical::Guard),
     Forwarded,
     Busy,
+    /// Held by a GUI this measurement start did not start: nothing was sent.
+    Refused,
 }
-fn canonical_claim(directory: &Path, activation: Activation) -> io::Result<CanonicalClaim> {
-    canonical_claim_observed(directory, activation, || {})
+fn canonical_claim(
+    directory: &Path,
+    activation: Activation,
+    forwards: bool,
+) -> io::Result<CanonicalClaim> {
+    canonical_claim_observed(directory, activation, forwards, || {})
 }
 fn canonical_claim_observed(
     directory: &Path,
     activation: Activation,
+    forwards: bool,
     mut busy: impl FnMut(),
 ) -> io::Result<CanonicalClaim> {
     // A concurrent start may still be opening its listeners. Failure to focus
@@ -1296,6 +1358,9 @@ fn canonical_claim_observed(
     loop {
         if let Some(guard) = canonical::acquire(directory)? {
             return Ok(CanonicalClaim::Owner(guard));
+        }
+        if !forwards {
+            return Ok(CanonicalClaim::Refused);
         }
         busy();
         if forward(&directory.join("gui.sock"), activation.clone()) {
@@ -1328,7 +1393,15 @@ fn claim_with_reply(
     timing: &Timing,
     reply: Option<Reply>,
 ) -> Claim {
-    claim_guarded(paths, label, activation, own, timing, reply, (None, || {}))
+    claim_guarded(
+        paths,
+        label,
+        activation,
+        own,
+        timing,
+        reply,
+        (None, true, || {}),
+    )
 }
 
 fn claim_guarded(
@@ -1338,9 +1411,11 @@ fn claim_guarded(
     own: &LockInfo,
     timing: &Timing,
     reply: Option<Reply>,
-    admission: (Option<canonical::Guard>, impl FnOnce()),
+    // The canonical guard this start owns, whether it may forward (false for
+    // a measurement start) and what runs once it is admitted.
+    admission: (Option<canonical::Guard>, bool, impl FnOnce()),
 ) -> Claim {
-    let (mut guard, admitted) = admission;
+    let (mut guard, forwards, admitted) = admission;
     let mut effects = UnixStart {
         paths,
         own,
@@ -1348,6 +1423,7 @@ fn claim_guarded(
         lock: None,
         started: Instant::now(),
         listener: None,
+        forwards,
     };
     match start(&mut effects, activation, own.pid, timing) {
         Outcome::Forwarded => Claim::Forwarded,

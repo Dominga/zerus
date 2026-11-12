@@ -455,6 +455,9 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
 /// root pin, seen through a thread's table, is not the leader's excluded pin.
 /// The production holder is a single-threaded hgs child, and that refusal
 /// fails closed.
+///
+/// The macOS census's thread residual (a live thread whose TSD base changes
+/// mid-read) is documented at `thread_cwds` in macos.rs (zerus-q0cd5).
 fn same_tasks(before: &[Task], after: &[Task]) -> bool {
     before
         .iter()
@@ -802,11 +805,14 @@ pub(super) fn programs_with_holder(
 pub(crate) mod roster {
     use std::{
         cell::RefCell,
+        collections::BTreeSet,
         path::{Path, PathBuf},
     };
 
     thread_local! {
         static OWNED: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static REQUESTED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
+        static COMPLETED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
         static AFTER_PLAN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static AFTER_LIST: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static AFTER_READ: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
@@ -878,15 +884,32 @@ pub(crate) mod roster {
     /// through its own real /proc entry.
     pub(crate) struct Owned {
         dir: tempfile::TempDir,
+        requested: BTreeSet<u32>,
     }
     impl Owned {
         /// The roster directory, for a control's synthetic entry.
         pub(crate) fn path(&self) -> &Path {
             self.dir.path()
         }
+        pub(crate) fn assert_completed(&self) {
+            assert!(
+                !self.requested.is_empty(),
+                "an owned roster cannot be empty"
+            );
+            COMPLETED.with(|completed| {
+                let completed = completed.borrow();
+                let missing: Vec<_> = self.requested.difference(&completed).collect();
+                assert!(
+                    missing.is_empty(),
+                    "owned processes did not complete native membership and identity checks: {missing:?}"
+                );
+            });
+        }
     }
     impl Drop for Owned {
         fn drop(&mut self) {
+            REQUESTED.with(|requested| requested.borrow_mut().clear());
+            COMPLETED.with(|completed| completed.borrow_mut().clear());
             OWNED.with(|owned| *owned.borrow_mut() = None);
             AFTER_PLAN.with(|hook| *hook.borrow_mut() = None);
             AFTER_LIST.with(|hook| *hook.borrow_mut() = None);
@@ -895,7 +918,18 @@ pub(crate) mod roster {
         }
     }
 
+    pub(crate) fn completed(pid: u32) {
+        REQUESTED.with(|requested| {
+            if requested.borrow().contains(&pid) {
+                COMPLETED.with(|completed| {
+                    completed.borrow_mut().insert(pid);
+                });
+            }
+        });
+    }
+
     pub(crate) fn owned(pids: &[u32]) -> Owned {
+        let requested: BTreeSet<_> = pids.iter().copied().collect();
         let dir = tempfile::tempdir().unwrap();
         for pid in pids {
             std::os::unix::fs::symlink(format!("/proc/{pid}"), dir.path().join(pid.to_string()))
@@ -904,9 +938,13 @@ pub(crate) mod roster {
         OWNED.with(|owned| {
             let mut owned = owned.borrow_mut();
             assert!(owned.is_none(), "one owned roster per test thread");
+            REQUESTED.with(|current| {
+                *current.borrow_mut() = requested.clone();
+            });
+            COMPLETED.with(|completed| completed.borrow_mut().clear());
             *owned = Some(dir.path().to_path_buf());
         });
-        Owned { dir }
+        Owned { dir, requested }
     }
 }
 
@@ -974,6 +1012,12 @@ fn collect_programs(
             if before != after {
                 return Err(limit());
             }
+            #[cfg(test)]
+            let membership = membership.inspect(|membership| {
+                if membership.is_some() {
+                    roster::completed(pid);
+                }
+            });
             if membership? != Some(true) {
                 return Ok(None);
             }

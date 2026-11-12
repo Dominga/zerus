@@ -163,6 +163,48 @@ async fn heartbeat(f: &Fixture, row: &Value) -> zerus_relay::error::Result<()> {
         .await
 }
 
+#[tokio::test]
+async fn archived_preview_must_carry_the_known_native_notification_revision() {
+    let f = Fixture::new().await;
+    let mut live = row();
+    live["name"] = json!("codex/example/archived");
+    live["notification_preferences"]["muted"] = json!(true);
+    live["notification_preferences"]["revision"] = json!(1);
+    f.beat(&json!({"sessions":[live.clone()]})).await;
+
+    let mut archived = live;
+    archived["state"] = json!("archived");
+    archived["archive_id"] = json!("00000000-0000-4000-8000-000000000010");
+    archived["archived_at"] = json!(10.0);
+    for unknown in [false, true] {
+        let mut omitted = archived.clone();
+        if unknown {
+            omitted["notification_preferences"] = Value::Null;
+        } else {
+            omitted
+                .as_object_mut()
+                .unwrap()
+                .remove("notification_preferences");
+        }
+        let snapshot = json!({"sessions":[omitted]});
+        let error = f
+            .store
+            .heartbeat(
+                &f.node,
+                &json!({"snapshot":snapshot}),
+                &canonical(&snapshot).unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, zerus_relay::error::Error::CONFLICT.0);
+    }
+    f.beat(&json!({"sessions":[archived.clone()]})).await;
+    archived["notification_preferences"]["muted"] = json!(false);
+    archived["notification_preferences"]["revision"] = json!(2);
+    f.beat(&json!({"sessions":[archived]})).await;
+    f.close().await;
+}
+
 #[test]
 fn payload_is_a_strict_mutation_not_a_read_or_acknowledgement() {
     let request = json!({"request_id":"00000000-0000-4000-8000-000000000001","computer_id":"00000000-0000-4000-8000-000000000002","operation":"session_notifications","session":"codex/example/session","payload":{"run_id":"r","conversation_id":"c","muted":true,"expected_revision":0}});

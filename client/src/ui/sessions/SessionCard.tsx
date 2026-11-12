@@ -11,7 +11,7 @@ import { machineAppearance } from "../../store/machineAppearance";
 import { sessionMark, type AccountMark } from "../../store/accountMarks";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 import type { TeamSummary } from "../../types";
-import type { Team } from "./group-rows";
+import type { Container, Team } from "./group-rows";
 import type { LogoPath } from "../lib/agent-logos";
 import { currentChildren, workingChildren } from "./subagents";
 import { presentState, stateFacts, STATE_GLYPH, type Shown, type StateIcon } from "./session-states";
@@ -255,6 +255,18 @@ export function AgentTile(props: { agent: AgentKind; size?: number }) {
   );
 }
 
+function TeamBadge(props: { kind: "asking" | "needs"; count: number }) {
+  const asking = () => props.kind === "asking";
+  const label = () => asking() ? tr("Asking: %1", props.count) : tr("Needs you: %1", props.count);
+  const tooltip = () => asking() ? tr("Child sessions waiting for their parent's answer") : tr("Child sessions with a request only you can answer");
+  return (
+    <span class={`team-badge ${asking() ? "team-asking" : "team-needs"}`} role="img" aria-label={label()} title={tooltip()}>
+      <Icon name={asking() ? "question" : "attention"} size={12} />
+      <span aria-hidden="true">{props.count}</span>
+    </span>
+  );
+}
+
 /** A parent's child sessions: working of all, collapsing them (spec 3.3). */
 export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
   return (
@@ -266,8 +278,8 @@ export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
         <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
       </svg>
       <span>{tr("%1 of %2", props.team.working, props.team.total)}</span>
-      <Show when={props.team.asking}><span class="team-asking" title={tr("Child sessions waiting for their parent's answer")}>{tr("Asking: %1", props.team.asking ?? 0)}</span></Show>
-      <Show when={props.team.needsYou}><span class="team-needs" title={tr("Child sessions with a request only you can answer")}>{tr("Needs you: %1", props.team.needsYou ?? 0)}</span></Show>
+      <Show when={props.team.asking}><TeamBadge kind="asking" count={props.team.asking ?? 0} /></Show>
+      <Show when={props.team.needsYou}><TeamBadge kind="needs" count={props.team.needsYou ?? 0} /></Show>
       <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
     </button>
   );
@@ -788,9 +800,9 @@ export function teamSummary(team: Team): string[] {
 
 /**
  * A compact parent's second line: its child sessions at a glance, collapsing
- * them. The chevron keeps its place; on a narrow row the counters shorten to
- * their numbers (zerus-sa9qn.11), and the button and row descriptions keep
- * every count in words.
+ * them. The chevron keeps its place; on a narrow row the working and error
+ * counters shorten to their numbers (zerus-sa9qn.11), and the button and row
+ * descriptions keep every count in words.
  */
 /**
  * Whether the summary shows short counters (zerus-sa9qn.12): it shortens once
@@ -821,7 +833,7 @@ function CompactTeam(props: { team: Team; onToggle?: () => void }) {
     onCleanup(() => observer.disconnect());
   });
   // Other counts or language: measure the long labels again.
-  createEffect(on(() => [props.team.working, props.team.total, props.team.needsYou, props.team.asking, props.team.errors, tr("Asking: %1", 0)], () => {
+  createEffect(on(() => [props.team.working, props.team.total, props.team.needsYou, props.team.asking, props.team.errors, tr("Errors: %1", 0)], () => {
     fit = { narrow: false, needed: 0 };
     setNarrow(false);
     queueMicrotask(measure);
@@ -842,8 +854,8 @@ function CompactTeam(props: { team: Team; onToggle?: () => void }) {
           <span class="long">{tr("%1 of %2 working", props.team.working, props.team.total)}</span>
           <span class="short" aria-hidden="true">{tr("%1 of %2", props.team.working, props.team.total)}</span>
         </span>
-        {counter("team-needs", props.team.needsYou, tr("Needs you: %1", props.team.needsYou ?? 0))}
-        {counter("team-asking", props.team.asking, tr("Asking: %1", props.team.asking ?? 0))}
+        <Show when={props.team.needsYou}><TeamBadge kind="needs" count={props.team.needsYou ?? 0} /></Show>
+        <Show when={props.team.asking}><TeamBadge kind="asking" count={props.team.asking ?? 0} /></Show>
         {counter("team-errors", props.team.errors, tr("Errors: %1", props.team.errors ?? 0))}
       </span>
       <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
@@ -863,6 +875,39 @@ function CompactTeam(props: { team: Team; onToggle?: () => void }) {
  */
 export function compactDescription(s: Session): string {
   return [s.title, s.name !== s.title ? s.name : "", statusCaption(s, false), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
+}
+
+/** The ended parent container's tooltip (zerus-sa9qn.17): what it is and what it is not. */
+export function containerDescription(c: Container): string {
+  const what = c.state === "archived"
+    ? tr("%1 is archived. It stays here while its child sessions are live.", c.name)
+    : c.key ? tr("%1 has ended. It stays here while its child sessions are live.", c.name)
+    : tr("%1 has ended and is no longer listed. It stays here while its child sessions are live.", c.name);
+  return `${what}\n${tr("It is shown for its child sessions only and has no live actions.")}`;
+}
+
+/**
+ * An ended parent kept as its live children's container (zerus-sa9qn.17): a
+ * dimmed compact row with the parent's tile, title and Ended or Archived
+ * state, its machine and its children's line. Presentational: no status,
+ * attention, account or unread marks of a running session.
+ */
+export function ContainerCard(props: { container: Container; selected: boolean; team?: Team; onToggleTeam?: () => void }) {
+  const c = () => props.container;
+  const described = steadyTitle(() => containerDescription(c()));
+  return (
+    <div class="scard compact ended-parent" classList={{ selected: props.selected, two: !!props.team }}
+      aria-description={containerDescription(c())}>
+      <div class="cc-line">
+        <span class="cc-tile"><AgentTile agent={c().agent} size={22} /></span>
+        <span class="sc-title ell" style={titleReserve(c().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{c().title}</span>
+        <StatusBadge kind="neutral" caption={c().state === "archived" ? tr("Archived") : tr("Ended")} />
+        <span class="grow" />
+        <MachineBadge alias={c().machine} computer={c().computer} offline={computerOffline(c().computer)} />
+      </div>
+      <Show when={props.team}>{(team) => <CompactTeam team={team()} onToggle={props.onToggleTeam} />}</Show>
+    </div>
+  );
 }
 
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void;

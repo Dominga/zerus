@@ -13,6 +13,8 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 pub(crate) mod maintenance;
 #[path = "rollback_backup.rs"]
 pub(super) mod rollback_backup;
+#[path = "store_startup.rs"]
+mod startup;
 
 pub const SCHEMA: i64 = super::creation_worktree::SLOTS_SCHEMA;
 pub struct HandoffLock {
@@ -334,6 +336,9 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
 
 pub struct Store {
     pub(super) db: Connection,
+    // On Windows the connection closes before its original handle. Unix's
+    // registry keeps that one original descriptor for the whole process.
+    _startup_pin: Option<std::sync::Arc<fs::File>>,
     pub generation: u64,
     recovery_error: bool,
     read_recovery_error: bool,
@@ -360,56 +365,77 @@ pub struct Store {
     resume_custody: super::session_resume::Recovery,
 }
 impl Store {
-    /// The only production opener. Keep these SAME original exclusions from
-    /// the read-only version probe through rollback backup and migration.
+    /// All production callers retain their same real service-owner guard.
+    /// Handoff is needed for existing-data migration, not passive startup.
     pub fn open_owned(
         location: &Location,
         epoch: &str,
         owner: &platform::FileLock,
     ) -> Result<Self> {
-        let handoff = location.handoff_lock()?;
-        let original = rollback_backup::Original::new(location, owner, &handoff)?;
-        let store = Self::open_inner(location, epoch, Some(&original))?;
-        original.verify()?;
+        let startup = startup::Startup::observe(location, owner)?;
+        let handoff = match startup.mode() {
+            startup::Mode::Migrate(_) => Some(location.handoff_lock()?),
+            _ => None,
+        };
+        let original = handoff
+            .as_ref()
+            .map(|held| rollback_backup::Original::new(location, owner, held))
+            .transpose()?;
+        startup.reobserve()?;
+        if let (Some(original), startup::Mode::Migrate(version)) = (&original, startup.mode()) {
+            #[cfg(windows)]
+            original.prepare(Some(version)).context("preserve desktop rollback backup before schema 35; keep the backup for review and see docs/desktop-schema-35-rollback.md")?;
+            #[cfg(not(windows))]
+            original
+                .prepare(Some(version))
+                .context("preserve desktop rollback backup before schema 35")?;
+        }
+        let store = Self::open_inner(location, epoch, original.as_ref(), Some(&startup))?;
+        startup.verify()?;
+        if let Some(original) = original {
+            original.verify()?;
+        }
         Ok(store)
     }
     // Unit fixtures without a service still exercise the migration itself;
     // rollback controls use open_owned with both real original locks.
     #[cfg(test)]
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
-        Self::open_inner(location, epoch, None)
+        Self::open_inner(location, epoch, None, None)
     }
     fn open_inner(
         location: &Location,
         epoch: &str,
         original: Option<&rollback_backup::Original<'_>>,
+        startup: Option<&startup::Startup<'_>>,
     ) -> Result<Self> {
         let path = location.root.join("state.sqlite3");
         database_files(location)?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         // A newer schema is probed read-only before any PRAGMA or migration write.
-        let previous = schema_before_write(&path, SCHEMA)?;
-        // The read-only connection and every statement above have dropped.
-        // Backup's raw DB/WAL handles also all close before the RW open below.
-        if let Some(original) = original {
-            original
-                .prepare(previous)
-                .context("preserve desktop rollback backup before schema 35")?;
+        if startup.is_none() {
+            schema_before_write(&path, SCHEMA)?;
         }
+        // Production's original RO observations have fully closed. Backup
+        // positional reads used the retained pin; other copy handles closed.
         // On Unix, closing any descriptor of this file drops this process's
         // POSIX locks on it, including those of every live SQLite connection
         // to it. So the file is created and checked through its path only, and
         // the connection is bound to that file after the open (zerus-hpat).
         #[cfg(unix)]
         let identity = {
-            crate::sqlite_file::create(&path)?;
+            if startup.is_none() {
+                crate::sqlite_file::create(&path)?;
+            }
             crate::sqlite_file::private(&path).map_err(|_| {
                 anyhow::anyhow!("desktop state must be private single-link regular files")
             })?
         };
         // Windows locks belong to the handle that took them.
         #[cfg(not(unix))]
-        drop(private_file(&path, true)?);
+        if startup.is_none() {
+            drop(private_file(&path, true)?);
+        }
         #[cfg(all(test, unix))]
         around_open(&path, false);
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -419,30 +445,36 @@ impl Store {
         crate::sqlite_file::bind_private(&db, &path, identity).context("desktop state changed")?;
         super::counts::register(&db)?;
         db.busy_timeout(Duration::from_secs(2))?;
-        let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // Validate the empty shape before SQLite itself creates its rollback
+        // journal. The deferred snapshot and its upgrade remain one atomic
+        // transaction; a competing writer refuses the upgrade, never adopts.
+        let initial = db.transaction()?;
+        if let Some(startup) = startup {
+            startup.bind(&initial)?;
+        }
+        let version: i64 = initial.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version == 0 {
-            let tables: i64 = db.query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            let tables: i64 = initial.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
                 [],
                 |row| row.get(0),
             )?;
             ensure!(tables == 0, "unversioned desktop state is not empty");
-            let tx = db.transaction()?;
-            tx.execute_batch("CREATE TABLE service (id INTEGER PRIMARY KEY CHECK(id=1), configuration TEXT NOT NULL, generation INTEGER NOT NULL, epoch TEXT NOT NULL); PRAGMA user_version=1;")?;
-            tx.execute(
+            initial.execute_batch("CREATE TABLE service (id INTEGER PRIMARY KEY CHECK(id=1), configuration TEXT NOT NULL, generation INTEGER NOT NULL, epoch TEXT NOT NULL); PRAGMA user_version=1;")?;
+            initial.execute(
                 "INSERT INTO service VALUES(1,?1,0,'')",
                 [&location.configuration],
             )?;
-            tx.commit()?;
         }
         let configuration: String =
-            db.query_row("SELECT configuration FROM service WHERE id=1", [], |row| {
+            initial.query_row("SELECT configuration FROM service WHERE id=1", [], |row| {
                 row.get(0)
             })?;
         ensure!(
             configuration == location.configuration,
             "desktop state belongs to another configuration"
         );
+        initial.commit()?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA max_page_count=131072; PRAGMA journal_size_limit=67108864;")?;
         if version < 2 {
             let tx = db.transaction()?;
@@ -700,6 +732,7 @@ impl Store {
         platform::sync_dir(&location.root)?;
         Ok(Self {
             db,
+            _startup_pin: startup.map(|startup| startup.pin().file()),
             generation,
             recovery_error: false,
             read_recovery_error,
@@ -795,8 +828,9 @@ impl Store {
                 compact,
                 resume,
             )) => {
-                let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
-                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer)+unsettled(&compact)+unsettled(&resume),"undrained":undrained,
+                let unsettled = checked_unsettled(totals.unsettled,
+                    [&clone,&worktree,&launch,&message,&send,&answer,&compact,&resume]);
+                serde_json::json!({"unsettled":unsettled,"undrained":undrained,
                 "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer,"compact_to_send":compact,"session_resume":resume},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
@@ -1051,8 +1085,22 @@ fn around_open(path: &Path, opened: bool) {
     });
 }
 
+fn checked_unsettled<'a>(initial: u64, leaves: impl IntoIterator<Item=&'a serde_json::Value>) -> Option<u64> {
+    leaves.into_iter().try_fold(initial, |sum, leaf| sum.checked_add(leaf["unsettled"].as_u64()?))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incomplete_or_invalid_operation_counts_never_become_zero() {
+        use serde_json::json;
+        assert_eq!(super::checked_unsettled(3,[&json!({"unsettled":2})]),Some(5));
+        for leaf in [json!({}),json!({"unsettled":null}),json!({"unsettled":-1}),json!({"unsettled":0.5}),json!({"unsettled":"0"})] {
+            assert_eq!(super::checked_unsettled(3,[&leaf]),None);
+        }
+        assert_eq!(super::checked_unsettled(u64::MAX,[&json!({"unsettled":1})]),None);
+        assert_eq!(super::checked_unsettled(u64::MAX,[&json!({"unsettled":0})]),Some(u64::MAX));
+    }
     use super::*;
     use rusqlite::params;
 

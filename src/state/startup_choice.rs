@@ -86,6 +86,10 @@ fn hinted(panel: &[&str]) -> Option<Choice> {
     })
 }
 
+/// Pure recognition only, used to end startup observation at a manual choice.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn recognized(screen: &str) -> bool { parse(screen).is_some() }
+
 fn parse(screen: &str) -> Option<Choice> {
     let rows: Vec<&str> = screen.lines().map(str::trim_end).collect();
     let end = rows.iter().rposition(|row| !row.trim().is_empty())? + 1;
@@ -185,6 +189,10 @@ fn native_input(record: &Value) -> PathBuf {
 /// Held while Zerus itself drives a native picker in this session, such as the
 /// model picker before the first message. That picker is not a startup wait.
 pub(super) fn driving(record: &Value) -> Result<Guard> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        return effort::picker_refuse("The original picker keeper cannot reacquire native input".into());
+    }
     lock(Some(&native_input(record)))
 }
 
@@ -245,7 +253,11 @@ pub(super) fn current(record: &Value) -> Option<Value> {
         return None;
     }
     let record = kimi_tui_choice::identity(record).ok()?;
-    card(&record, &parse(&kimi_tui_choice::capture(&record).ok()?)?)
+    let screen = kimi_tui_choice::capture(&record).ok()?;
+    if let Some(theme) = claude_theme::card(&record, &screen) {
+        return Some(theme);
+    }
+    card(&record, &parse(&screen)?)
 }
 
 pub(super) fn detail(record: &Value, question: &Value) -> String {

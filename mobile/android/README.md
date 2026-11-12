@@ -801,6 +801,29 @@ card from a screenshot and checks the card limit, the whole answer field, the
 footer gap, scrolling to the last option and a compact short question. It sends
 no answers.
 
+The conversation shows one fixed-height status strip above its messages
+(zerus-a4mub.10): a time-bound primary line such as **Updated 3 min ago**,
+**Saved copy · 2 h ago**, **Refreshing…**, **Offline · updated 5 min ago** or
+**Read not synced · …**, with the compact unread count and Questions on the
+right. Tapping it opens the details: the messages' source and observation time,
+the read in flight or its failure, the recent window, history pagination, the
+viewport position and the shared read acknowledgement (pending, confirmed or
+failed), plus an explicit **Refresh now**. It never says the conversation is
+current, and it is presentation only: answering, sending and read marks keep
+their own verified-frame checks. An explicit refresh shows progress at once; an
+automatic one stays quiet for its delay, so polling never flickers. The paths
+that decide `mark_read` report their observed outcome through
+`ZerusViewModel.noteSharedRead`; `ConversationSyncStatus` is plain Kotlin with
+JVM tests.
+
+`ConversationStatusSmokeInstrumentation` uses the same build, install and
+fresh-data steps against a synthetic relay. It covers delayed, failing and refused
+refreshes, reconnecting, a truncated history, shared read outcomes, background
+and foreground, and the keyboard, and checks that the messages, the draft and
+the editor keep their positions. Pass `-e pass narrow` after `wm density 540`
+and `settings put system font_scale 1.3` for the narrow, large-text run; the
+screenshots are written to the app's external files directory. It sends nothing.
+
 Multi-part questions show **Question 1/2** and an explicit **Next** action after
 the current answer is valid. Only the final **Send all** submits the complete
 request. The Other field's keyboard action follows the same steps. Earlier

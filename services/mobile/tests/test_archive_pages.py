@@ -11,6 +11,19 @@ from zerus_mobile.context import READ_OPERATIONS, READ_SQL
 from zerus_mobile.server import validate_request
 
 class ArchiveValidation(unittest.TestCase):
+    def test_preview_retains_exact_notification_preferences_and_unknown(self):
+        preference=dict(conversation_id='conversation',muted=True,revision=7,
+                        suppressed=dict(reply_id=None,attention_signature=None,optional_question_ids=[],main_attention=None,child_attention={}))
+        rows=[dict(name='codex/example/archived',archive_id='00000000-0000-4000-8000-000000000010',state='archived',archived_at=20,notification_preferences=preference),
+              dict(name='codex/example/other',archive_id='00000000-0000-4000-8000-000000000020',state='archived',archived_at=10,notification_preferences=None)]
+        page=dict(version=1,sessions=rows,total=2,next_cursor='',**{'from':0,'until':253402300800,'query':''})
+        preview,metadata=archives.preview(page)
+        self.assertEqual(preview[0].get('notification_preferences'),preference)
+        self.assertIn('notification_preferences',preview[1])
+        self.assertIsNone(preview[1]['notification_preferences'])
+        self.assertEqual(metadata['loaded'],2)
+        rows[0]['notification_preferences']={'padding':'x'*(128*1024)}
+        self.assertEqual(archives.preview(page)[0],[],'An oversized row stays outside the bounded preview')
     def test_read_class_strict_bounds_and_sessionless_envelope(self):
         self.assertIn('archive_list',READ_OPERATIONS);self.assertNotIn('archive_list',READ_SQL)
         for payload in ({},{'from':10,'until':11,'limit':1},{'query':'Русский %_'}):

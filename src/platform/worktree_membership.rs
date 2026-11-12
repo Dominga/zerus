@@ -121,6 +121,8 @@ pub(crate) use linux::{kcmp_available, roster as test_roster};
 pub(super) use linux::sample;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::roster as test_roster;
 #[cfg(target_os = "macos")]
 pub(super) use macos::sample;
 

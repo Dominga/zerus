@@ -21,7 +21,8 @@ struct ConversationView: View {
     @State private var discard: Draft?
     @State private var searching = false
     @State private var notice = ""
-    @State private var visible: [String] = []
+    /// The items the shared readable-visibility rule shows (zerus-a4mub.31), for reading.
+    @State private var readLayout = ConversationReadLayout()
     @State private var historyProgress = false
     /// The conversation whose opening reads have settled; until then its first refresh shows at once.
     @State private var openedTarget = ""
@@ -39,6 +40,16 @@ struct ConversationView: View {
         if let selected = model.selected { return selected }
         return app.sessions.first { $0.target == route.target } ??
             Session(target: route.target, title: route.target.session, agent: "", status: "", project: "", preview: "", pendingCount: 0, raw: [:])
+    }
+
+    private func currentQuestions(_ target: Target) -> [Question] {
+        !target.archiveId.isEmpty || app.demo ? [] : model.questions
+    }
+
+    private func questionPresence(questions: [Question], available: Bool) -> QuestionPresenceView? {
+        QuestionPresencePolicies.resolve(display, questions: questions, verified: model.activityVerified, available: available,
+                                         checking: model.detailBusy, checkedAtMillis: model.questionCheckedAt,
+                                         nowMillis: ConversationModel.monotonicMillis(), complete: model.questionProjectionComplete)
     }
 
     var body: some View {
@@ -67,6 +78,9 @@ struct ConversationView: View {
         let keys = Self.keys(events: events, questions: questions, warning: warning, bounded: bounded, unreadBoundary: unreadBoundary, loading: loading)
         let online = model.activityVerified || app.demo
         let available = online && model.activityVerified && !model.contextBlocked(target)
+        // zerus-a4mub.25: the expanded question's verified presence. Only a resolved card is a sheet; every obsolete
+        // state is an inline notice, so an unrelated delivery Review stays reachable. It never enables an answer.
+        let presence = questionPresence(questions: questions, available: available)
 
         VStack(spacing: 0) {
             ProgressView()
@@ -89,40 +103,40 @@ struct ConversationView: View {
             ZStack(alignment: .bottomTrailing) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        earlierRow(target: target, events: events, historyReason: historyReason, loading: loading).id("history:earlier")
-                        statusRow(session: session, raw: raw, events: events, loading: loading, online: online).id("history:status")
-                        if !warning.isEmpty { Text(warning).font(.footnote).foregroundStyle(Theme.amber).id("history:warning") }
-                        if !bounded.isEmpty { Text(bounded).font(.footnote).foregroundStyle(Theme.muted).id("history:bounded") }
+                        earlierRow(target: target, events: events, historyReason: historyReason, loading: loading).readingItem("history:earlier", readLayout)
+                        statusRow(session: session, raw: raw, events: events, loading: loading, online: online).readingItem("history:status", readLayout)
+                        if !warning.isEmpty { Text(warning).font(.footnote).foregroundStyle(Theme.amber).readingItem("history:warning", readLayout) }
+                        if !bounded.isEmpty { Text(bounded).font(.footnote).foregroundStyle(Theme.muted).readingItem("history:bounded", readLayout) }
                         Group {
                             if unavailableSaved {
                                 Text("Your saved reading position is outside the loaded messages. Showing the earliest available messages.")
                                     .font(.footnote).foregroundStyle(Theme.muted)
                             } else { Color.clear.frame(height: 0) }
-                        }.id("history:missing-anchor")
+                        }.readingItem("history:missing-anchor", readLayout)
                         // A fork's inherited rows: each source under its label, then where the fork begins.
                         ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                             let source = event.inheritedFrom ?? ""
                             if source != (index > 0 ? events[index - 1].inheritedFrom ?? "" : "") {
                                 inheritedDivider(source.isEmpty ? "Forked here: this session's own activity continues below"
                                     : "Inherited from \(source): the history this fork began from")
-                                    .id("history:inherited:" + event.id)
+                                    .readingItem("history:inherited:" + event.id, readLayout)
                             }
-                            if event.id == unreadBoundary { unreadDivider.id("history:unread") }
+                            if event.id == unreadBoundary { unreadDivider.readingItem("history:unread", readLayout) }
                             MessageBubble(event: event, target: target, agent: agentName(session, raw), outgoing: model.outgoing.first { $0.requestId == event.outgoingId },
                                           onReviewOutgoing: { reviewOutgoing = $0 })
-                                .id("event:" + event.id)
+                                .readingItem("event:" + event.id, readLayout)
                         }
                         if events.isEmpty && !loading {
                             Text(raw != nil || app.demo ? "No messages yet." : "No recent messages are available. Refresh to load activity.")
-                                .foregroundStyle(Theme.muted).id("history:empty")
+                                .foregroundStyle(Theme.muted).readingItem("history:empty", readLayout)
                         }
-                        newerRow(target: target, historyReason: historyReason).id("history:newer")
-                        if !archived { NativeInputQueueCard(target: target).id("history:queue") }
+                        newerRow(target: target, historyReason: historyReason).readingItem("history:newer", readLayout)
+                        if !archived { NativeInputQueueCard(target: target).readingItem("history:queue", readLayout) }
                         if !questions.isEmpty {
                             QuestionsPane(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
-                                .id("history:questions")
+                                .readingItem("history:questions", readLayout)
                         }
-                        Color.clear.frame(height: 1).id("history:tail")
+                        Color.clear.frame(height: 1).readingItem("history:tail", readLayout)
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
@@ -146,7 +160,6 @@ struct ConversationView: View {
                     }
                     if new == .idle { follow = ConversationViewport.settled(follow, atEnd: atEnd, hasNewer: model.hasNewer) }
                 }
-                .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { ids in visible = ids }
                 .refreshable { model.refreshActivity(explicit: true) }
 
                 if loading {
@@ -160,6 +173,14 @@ struct ConversationView: View {
                 if (!follow.following || model.hasNewer || latestPending) && (!events.isEmpty || !questions.isEmpty) && !atEnd {
                     latestButton(target: target, unread: unread, keys: keys)
                 }
+            }
+            if let presence, !presence.modal {
+                QuestionPresenceNotice(view: presence, checkedAt: model.questionCheckedAt,
+                                       onClose: { display = display.close() },
+                                       onRefresh: { model.refreshActivity(explicit: true) },
+                                       onOpen: { display = display.open($0) })
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
             }
             if archived {
                 VStack(alignment: .leading, spacing: 6) {
@@ -179,8 +200,13 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(!target.agentId.isEmpty)
         .toolbar { toolbar(session: session, raw: raw) }
-        .sheet(isPresented: Binding(get: { display.expanded }, set: { if !$0 { display = display.close() } })) {
-            ExpandedQuestionSheet(target: target, questions: questions, available: available, display: $display, onReview: { review = $0 })
+        // Dismissing a resolved card closes it; a card that stops resolving leaves the sheet and keeps its
+        // identity for the inline notice.
+        .sheet(isPresented: Binding(get: { presence?.modal == true },
+                                    set: { if !$0 && questionPresence(questions: currentQuestions(target), available: available)?.modal == true {
+                                        display = display.close() } })) {
+            ExpandedQuestionSheet(target: target, questions: questions, available: available, presence: presence, display: $display,
+                                  onReview: { review = $0 })
         }
         .sheet(isPresented: $searching) {
             ConversationSearchSheet(events: events) { id in jump(to: id, events: model.events, target: target) }
@@ -217,14 +243,19 @@ struct ConversationView: View {
                                        boundary: unreadBoundary, ready: readReady, newer: model.hasNewer, questions: questions.count)) {
             applyContent(target: target, keys: keys, events: events, questions: questions, unreadBoundary: unreadBoundary, readReady: readReady)
         }
-        .task(id: VisibilityKey(ids: visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling,
-                                following: follow.following && !model.hasNewer)) {
+        .task(id: VisibilityKey(ids: readLayout.visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling,
+                                following: follow.following && !model.hasNewer, current: model.currentReadKey(target),
+                                newest: model.newestDisplayedEventId(target))) {
             guard scenePhase == .active, follow.opened, readReady, !userScrolling, !app.demo else { return }
+            // The values and newest row this dwell observes; a change restarts it.
+            let current = model.currentReadKey(target), newest = model.newestDisplayedEventId(target)
             // A transient row during initial positioning or a fling is not a deliberate read.
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
-            let ids = Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
+            let visible = readLayout.visible
+            let ids = ConversationReadViewport.eventIds(visible)
             model.visibleMessages(target, ids)
+            model.visibleCurrent(target, key: current, flags: ConversationReadViewport.flags(visible: visible, newestId: newest))
             if let first = visible.first(where: { $0.hasPrefix("event:") }) {
                 model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0, following: follow.following && !model.hasNewer)
             }
@@ -499,6 +530,9 @@ private struct VisibilityKey: Equatable {
     let ids: [String]
     let readable: Bool
     let following: Bool
+    /// The open inspection's current read values and newest displayed row (zerus-a4mub.9).
+    let current: String
+    let newest: String
 }
 
 /// Searches loaded messages only; results never advance read state.

@@ -117,6 +117,7 @@ export function createActivity(port: ActivityPort) {
   const revs = new Map<string, number>();
   let span = OLDER_SPAN;
   let olderFrom: number | undefined;
+  let olderAfter = 0;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
   /** The next `before` of a page read, from the last `older` answer. */
   let olderCursor: number | undefined;
@@ -273,7 +274,7 @@ export function createActivity(port: ActivityPort) {
     if (olderFrom === undefined) return;
     clearTimeout(olderTimer);
     const oldest = oldestSeq();
-    const asked = Math.max(0, olderFrom - span);
+    const asked = olderAfter;
     if (oldest === undefined || oldest >= olderFrom) {
       if (asked === 0) setOlderDone(true);
       span *= 2;
@@ -282,22 +283,27 @@ export function createActivity(port: ActivityPort) {
     setLoadingOlder(false);
   };
 
-  /** The previous way: resume the subscription from further back by a guessed span. */
-  function legacyOlder(t: FollowTarget, oldest: number) {
+  /** The previous way: resume the subscription from further back, by a guessed span or from a visited window's start. */
+  function legacyOlder(t: FollowTarget, oldest: number, savedAfter?: number) {
     olderFrom = oldest;
     setLoadingOlder(true);
-    const after = Math.max(0, oldest - span);
+    const after = savedAfter !== undefined && Number.isSafeInteger(savedAfter)
+      ? Math.max(0, Math.min(oldest - 1, savedAfter)) : Math.max(0, oldest - span);
+    olderAfter = after;
     olderTimer = setTimeout(settleOlder, OLDER_TIMEOUT_MS);
     void port.follow(request(t, after)).catch(settleOlder);
   }
 
-  /** Reads the rows before the oldest one shown: one page read when the server offers it, else the legacy way. */
-  function loadOlder() {
+  /**
+   * Reads the rows before the oldest one shown: one page read when the server
+   * offers it, else the legacy way; a visited window is restored the legacy way.
+   */
+  function loadOlder(savedAfter?: number) {
     const t = target();
     const oldest = oldestSeq();
     if (!t || subscribed !== t || loadingOlder() || olderDone() || oldest === undefined) return;
     if (oldest <= 1) { setOlderDone(true); return; }
-    if (!port.older) { legacyOlder(t, oldest); return; }
+    if (!port.older || savedAfter !== undefined) { legacyOlder(t, oldest, savedAfter); return; }
     const token = {};
     const mine = attempt;
     paging = token;

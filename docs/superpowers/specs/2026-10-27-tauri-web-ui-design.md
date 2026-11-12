@@ -106,8 +106,8 @@ tagged by `t`; `Control` tagged by `op`), documented in `docs/reference.md`,
 - One stream per computer whose CLI prints the marker. While it is live the
   client stops polling that computer's listing and follows the selected
   session's Activity through it. A stream that fails or stays silent for 30 s
-  restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the client polls
-  meanwhile. The existing `ZERUS_EVENT_STREAM=0` and `dataPlane/eventStream=false`
+  restarts after the reconnect schedule (by default 1 s, 2 s, 5 s, then every
+  10 s; configurable, see docs/reference.md), and the client polls meanwhile. The existing `ZERUS_EVENT_STREAM=0` and `dataPlane/eventStream=false`
   switches keep it on polling.
 - The server re-lists all rows every 5 s as a safety net (owner decision,
   2026-10-27), so the client needs no listing poll of its own while live.

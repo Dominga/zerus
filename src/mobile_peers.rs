@@ -622,12 +622,19 @@ fn validate(request: &LocalRequest) -> Result<()> {
             );
             let flags = options(
                 &rest[1..],
-                &["--skip-processes"],
+                &["--skip-processes", "--current-read"],
                 &["--archive", "--agent", "--after"],
             )?;
             if let Some(after) = flags.get("--after") {
                 ensure!(after.parse::<u64>().is_ok(), "invalid history cursor");
             }
+            // As in the CLI, only a main inspection names what a read mark
+            // may acknowledge now.
+            ensure!(
+                !flags.contains_key("--current-read")
+                    || !(flags.contains_key("--archive") || flags.contains_key("--agent")),
+                "current read is only for a main inspection"
+            );
             if let Some(id) = flags.get("--archive") {
                 ensure!(uuid(id), "invalid archive UUID");
             }
@@ -1463,6 +1470,49 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    /// A peer connector learns `--current-read` from the peer's own help and
+    /// adds it to every main inspection (zerus-a4mub.9). Like the CLI, which
+    /// names a current read only for a main inspection, an archive or
+    /// subagent inspection never carries it.
+    #[test]
+    fn a_main_inspection_may_name_its_current_read() {
+        let sid = "11111111-1111-4111-8111-111111111111";
+        for argv in [
+            vec!["inspect", "codex/project", "--current-read"],
+            vec!["inspect", "dsh/project", "--after", "12", "--current-read"],
+            vec!["inspect", "opencode/project", "--skip-processes", "--current-read"],
+            vec!["inspect", "codex/project", "--session-id", sid, "--current-read"],
+        ] {
+            validate(&request(&argv, None)).unwrap();
+            assert!(validate(&request(&argv, Some(scope()))).is_err(), "{argv:?}");
+        }
+        for argv in [
+            vec!["inspect", "codex/project", "--current-read", "--current-read"],
+            vec!["inspect", "codex/project", "--current-read", "yes"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
+    }
+
+    /// The scope check, not just the option list: each of these shapes is
+    /// valid without `--current-read`.
+    #[test]
+    fn an_archive_or_subagent_inspection_never_names_a_current_read() {
+        let sid = "11111111-1111-4111-8111-111111111111";
+        for (plain, current) in [
+            (vec!["inspect", "codex/project", "--archive", ID], vec!["inspect", "codex/project", "--archive", ID, "--current-read"]),
+            (vec!["inspect", "codex/project", "--archive", ID], vec!["inspect", "codex/project", "--current-read", "--archive", ID]),
+            (vec!["inspect", "codex/project", "--agent", "child", "--skip-processes"],
+             vec!["inspect", "codex/project", "--agent", "child", "--skip-processes", "--current-read"]),
+            (vec!["inspect", "codex/project", "--agent", "child"], vec!["inspect", "codex/project", "--current-read", "--agent", "child"]),
+            (vec!["inspect", "codex/project", "--session-id", sid, "--agent", "child"],
+             vec!["inspect", "codex/project", "--session-id", sid, "--agent", "child", "--current-read"]),
+        ] {
+            validate(&request(&plain, None)).unwrap();
+            assert!(validate(&request(&current, None)).is_err(), "{current:?}");
+        }
     }
 
     #[test]

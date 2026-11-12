@@ -16,11 +16,13 @@ mod claude_question;
 mod claude_statusline;
 mod claude_subagents;
 mod attachments;
+mod receipt_index;
 mod computer_files;
 pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod codex_clear_recovery;
+mod codex_sqlite;
 mod compact_context;
 mod continuations;
 mod cache_hint;
@@ -31,6 +33,8 @@ pub(crate) mod dsh;
 pub(crate) mod model_servers;
 pub(crate) mod opencode;
 mod effort;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod guarded_recovery;
 mod external_agents;
 mod fork;
 mod goals;
@@ -136,6 +140,7 @@ pub(crate) use session_action::{
 };
 mod shown_path;
 mod startup_choice;
+mod claude_theme;
 mod terminal;
 mod conversation_history;
 mod usage;
@@ -180,6 +185,15 @@ mod worktree_maintenance;
 /// Read the selected account's native catalog without starting an agent.
 pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {
     effort::account_models(provider, home)
+}
+/// The DeepSeek account's model catalog from its resident host, read only.
+pub(crate) fn dsh_account_models(home: &std::path::Path) -> serde_json::Value {
+    dsh::account_models(home)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn remember_picker_caller_machine(config:&crate::config::Config,expected:&str) {
+    effort::remember_picker_caller_machine(config,expected);
 }
 
 /// Explicit native copy snapshot; no session is created or modified.
@@ -769,10 +783,11 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
         .ok_or("invalid session")?
         .extend(summary.as_object().ok_or("invalid summary")?.clone());
     let questions = read_marks::pending_questions(&record, session, true, shared.budget);
-    if session.get("parent").is_some() {
-        let pending = questions.as_ref().ok().and_then(|questions| questions.as_deref());
-        session["human_request"] = json!(parent_link::human_request(session, pending));
-    }
+    let pending = questions
+        .as_ref()
+        .ok()
+        .and_then(|questions| questions.as_deref());
+    parent_link::mark_human_request(session, pending, false);
     read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
     phases.mark("questions");
     notifications::enrich(session, shared.preferences, journal::journal_name(&record));
@@ -1024,6 +1039,145 @@ pub(crate) fn resolve_reference(reference: &crate::session_reference::Reference)
     Ok(string(first, "name").to_owned())
 }
 
+/// Effort and Settings resolve metadata before their keeper; ordinary reference resolution
+/// acquires Root and refreshes presentation data, so it is not this lane.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn resolve_effort_reference(
+    reference: &crate::session_reference::Reference,
+) -> Result<String> {
+    local_sessions()?;
+    if !reference.archive.is_empty() {
+        return Err(
+            "The reference names an archived conversation; hgs effort needs a saved session".into(),
+        );
+    }
+    let records = if reference.session.is_empty() {
+        session_index::metadata_records_unrepaired()?
+    } else {
+        session_index::metadata_records_for_id_unrepaired(&reference.session)?
+    };
+    let mut matching = records
+        .iter()
+        .filter(|record| matches_reference(reference, record));
+    let first=matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
+    if matching.next().is_some() {
+        return Err(
+            "Ambiguous session reference: multiple saved bindings match this conversation".into(),
+        );
+    }
+    let name = string(first, "name").to_owned();
+    effort_select_metadata(
+        first,
+        if reference.conversation.is_empty() {
+            &reference.run
+        } else {
+            ""
+        },
+        &reference.conversation,
+    )?;
+    Ok(name)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn effort_first_metadata(name: &str) -> Result<Value> {
+    match provider_binding::Provider::named(name) {
+        Some(provider) => provider.read_label(name),
+        None => {
+            let path = storage::label_record_path(name);
+            let raw = labels::read_file(&path, storage::ID_RECORD_BYTES)
+                .map_err(|e| e.to_string())?
+                .ok_or("Metadata first holder is absent")?;
+            storage::verify_metadata_at(&path, name, &raw)
+        }
+    }
+}
+
+/// Reusing a metadata selector can add constraints, never erase a reference's
+/// original run/conversation or change its already selected ID route.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn effort_select_metadata(record: &Value, run: &str, conversation: &str) -> Result<()> {
+    let name = string(record, "name");
+    let id = string(record, "session_id");
+    let id = if session_id::canonical(id) { id } else { "" };
+    let prior = session_id::selected();
+    if (!run.is_empty() && string(record, "run_id") != run)
+        || (!conversation.is_empty() && string(record, "conversation_id") != conversation)
+        || prior.as_ref().is_some_and(|prior| {
+            prior.name != name
+                || (!prior.session_id.is_empty() && prior.session_id != id)
+                || (!prior.run.is_empty() && prior.run != string(record, "run_id"))
+                || (!prior.conversation.is_empty()
+                    && prior.conversation != string(record, "conversation_id"))
+                || (prior.id_layout && !storage::in_id_layout(record))
+        })
+    {
+        return Err("Original Effort selector identity or route changed".into());
+    }
+    let run = prior
+        .as_ref()
+        .map(|prior| prior.run.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(run);
+    let conversation = prior
+        .as_ref()
+        .map(|prior| prior.conversation.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(conversation);
+    session_id::select_guarded_route(name, id, run, conversation, storage::in_id_layout(record));
+    Ok(())
+}
+
+/// Exact-ID frontend selection is a metadata route, never native admission.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn resolve_effort_id(id: &str) -> std::result::Result<String, Unresolved> {
+    let records =
+        session_index::metadata_records_for_id_unrepaired(id).map_err(|text| Unresolved {
+            text,
+            value: None,
+            code: 1,
+        })?;
+    let mut names: Vec<_> = records
+        .iter()
+        .map(|record| string(record, "name").to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    let name = match names.as_slice() {
+        [] => {
+            return Err(Unresolved {
+                text: format!("No live or saved session has ID {id}"),
+                value: None,
+                code: 1,
+            })
+        }
+        [name] => name.clone(),
+        _ => {
+            return Err(Unresolved {
+                text: format!("Several sessions carry ID {id}: {}", names.join(", ")),
+                value: None,
+                code: session_id::AMBIGUOUS,
+            })
+        }
+    };
+    // The lookup retained the actual verified layout. Never re-probe and
+    // fall back to a first label holder after an ID file disappears.
+    let record = records
+        .iter()
+        .find(|record| storage::in_id_layout(record))
+        .or_else(|| records.first())
+        .ok_or_else(|| Unresolved {
+            text: "The metadata session route disappeared".into(),
+            value: None,
+            code: 1,
+        })?;
+    effort_select_metadata(record, "", "").map_err(|text| Unresolved {
+        text,
+        value: None,
+        code: 1,
+    })?;
+    Ok(name)
+}
+
 pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
     let name = resolve_reference(reference)?;
     let parent = reference_details(&name, &reference.archive, "")?;
@@ -1135,6 +1289,90 @@ pub(super) fn resolve_label_unrepaired(name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Same ambiguity/Request-guard disposition, with no pre-keeper tmux, Root,
+/// cache or external telemetry. A report cannot assert native liveness here.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn resolve_effort_label(
+    name: &str,
+    guard: LabelGuard,
+) -> std::result::Result<(), Unresolved> {
+    let fail = |text| Unresolved {
+        text,
+        value: None,
+        code: session_id::AMBIGUOUS,
+    };
+    let candidates = labels::candidates_metadata(name).map_err(fail)?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (_, []) => Ok(()),
+        (false, [only]) => {
+            effort_select_metadata(only, "", "").map_err(|text| Unresolved {
+                text,
+                value: None,
+                code: 1,
+            })?;
+            Ok(())
+        }
+        _ => {
+            let mut records = candidates.by_id;
+            if candidates.first {
+                records.insert(0, effort_first_metadata(name).map_err(fail)?);
+            }
+            let rows=records.iter().map(|record|json!({"session_id":record["session_id"],"run_id":record["run_id"],
+                "conversation_id":record["conversation_id"],"state":"unknown","cwd":record["cwd"],"created":record["created"]})).collect();
+            let report = session_id::ambiguity(name, rows);
+            match guard {
+                LabelGuard::None => Err(Unresolved::ambiguous(report)),
+                LabelGuard::Request => {
+                    session_id::defer(name, report.0, report.1);
+                    Ok(())
+                }
+                LabelGuard::Given { run, conversation } => {
+                    if run.is_empty() && conversation.is_empty() {
+                        return Err(Unresolved::ambiguous(report));
+                    }
+                    let chosen: Vec<_> = records
+                        .iter()
+                        .filter(|record| {
+                            (run.is_empty() || string(record, "run_id") == run)
+                                && (conversation.is_empty()
+                                    || string(record, "conversation_id") == conversation)
+                        })
+                        .collect();
+                    match chosen.as_slice() {
+                        [] => {
+                            if session_id::selected().is_none() {
+                                session_id::select_guarded_route(
+                                    name,
+                                    "",
+                                    &run,
+                                    &conversation,
+                                    false,
+                                );
+                            }
+                            Err(Unresolved {
+                                text: stale(name),
+                                value: None,
+                                code: 1,
+                            })
+                        }
+                        [only] => {
+                            effort_select_metadata(only, &run, &conversation).map_err(|text| {
+                                Unresolved {
+                                    text,
+                                    value: None,
+                                    code: 1,
+                                }
+                            })?;
+                            Ok(())
+                        }
+                        _ => Err(Unresolved::ambiguous(report)),
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), Unresolved> {
@@ -1403,6 +1641,21 @@ pub(crate) fn sandbox_read(args: &[String]) -> Option<Result<i32>> {
 }
 
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    // Fixed self-image owner, before any provider lookup or local writer. Its
+    // inherited endpoint/frame are synchronization and cancellation only; the
+    // fixed Effort/Settings operation preserves its original native authority.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
+        if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}
+        return effort::picker_custodian_entry();
+    }
+    if args.first().map(String::as_str)==Some("receipt-index-worker") {
+        if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
+        return receipt_index::worker();
+    }
+    if args.first().map(String::as_str)==Some("receipt-index-page") {
+        return attachments::page_dispatch(&args[1..]);
+    }
     if args.first().map(String::as_str)==Some("rules") { return iron_rules::dispatch(&args[1..]); }
     // Receipt observation needs neither a native host nor a state writer.
     if args.first().map(String::as_str)==Some("session-action-status") { return session_action::status_dispatch(&args[1..]); }
@@ -1542,16 +1795,18 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "inspect" => {
             let name = args
                 .first()
-                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation]")?;
+                .ok_or("usage: hgs inspect <session> [--archive ID] [--after cursor] [--skip-processes] [--read-observation] [--current-read]")?;
             let mut after = 0;
             let mut archive_id = None;
             let mut agent_id = None;
             let mut include_processes = true;
             let mut read_observation = false;
+            let mut current_read = false;
             let mut index = 1;
             while index < args.len() {
                 if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
                 if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
+                if args[index] == "--current-read" { current_read = true; index += 1; continue; }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -1571,7 +1826,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             let mut output = if let Some(id) = agent_id {
                 subagents::inspection(name, id, archive_id)?
             } else {
-                journal::inspection(name, after, archive_id, include_processes)?
+                journal::inspection_with(name, after, archive_id, include_processes, current_read)?
             };
             if read_observation && archive_id.is_none() && agent_id.is_none() {
                 read_marks::observation::enrich(&mut output);

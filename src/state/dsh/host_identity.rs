@@ -315,6 +315,50 @@ fn assess(dir: &Path) -> Result<Assessment> {
     })
 }
 
+/// Whether the recorded host owner is the same process, still running. A
+/// refused connect to its socket is then a saturated host, never a gone one
+/// (zerus-xt6re). An unreadable record, a recorded owner that exited or
+/// stopped, and a record from another boot are not a live owner.
+pub(super) fn owner_alive(dir: &Path) -> bool {
+    let Ok(Some((bytes, _))) = read(&dir.join(FILE), 1024) else {
+        return false;
+    };
+    let Ok(Record::Running(saved)) = parse_record(&bytes) else {
+        return false;
+    };
+    if !valid_running(&saved) {
+        return false;
+    }
+    if let Some(saved_boot) = saved.boot.as_deref() {
+        if boot().ok().as_deref() != Some(saved_boot) {
+            return false;
+        }
+    }
+    matches!(
+        crate::platform::process_state(saved.pid, Some(&saved.birth)),
+        Ok(crate::platform::ProcessState::Running)
+    )
+}
+
+/// A recorded running owner for the refused-connect fixture (zerus-xt6re).
+#[cfg(test)]
+pub(in crate::state) fn record_running_for_test(dir: &Path, pid: u32) -> Result<()> {
+    let identity = crate::platform::process_identity(pid)
+        .filter(|process| valid_birth(&process.birth))
+        .ok_or(UNVERIFIABLE)?;
+    let record = Record::Running(Running {
+        version: 1,
+        pid,
+        birth: identity.birth,
+        pid_file: Stamp(0, 0, 0, 0),
+        boot: None,
+    });
+    atomic(
+        &dir.join(FILE),
+        &serde_json::to_string(&record).map_err(|_| UNVERIFIABLE)?,
+    )
+}
+
 pub(super) fn before_start(dir: &Path) -> Result<()> {
     assess(dir).map(|_| ())
 }

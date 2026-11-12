@@ -1,5 +1,11 @@
 # Zerus Next release acceptance and Qt removal
 
+**Historical status.** Qt removal shipped in [v0.48.0](https://github.com/ufna/zerus/releases/tag/v0.48.0).
+The final [deletion gate](#deletion-pr-merge-gate) records the 2026-11-05 evidence
+and owner waivers. Earlier pending/draft statements and native Unknown/failure
+records below remain historical evidence. Current service, native and parity
+follow-ups are tracked separately; this record does not establish their completion.
+
 ## G3 scope for 0.48.0 — owner decision 2026-11-05
 
 Qt migration is limited to **projects/organization and accounts**. The existing

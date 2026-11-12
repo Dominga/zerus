@@ -19,6 +19,8 @@ import subprocess
 import sys
 import time
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,6 +77,7 @@ def worker(args):
     window = False
     observed = None
     with (base / 'app.log').open('wb') as log:
+        gui_sandbox.refuse_reachable_guard()
         app = subprocess.Popen([str(installed), '--sessions'], env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             until = time.monotonic() + 25
@@ -145,8 +148,9 @@ def main():
         subprocess.run(['systemd-run', '--user', '--wait', '--collect',
                         '--unit=zerus-private-startup-' + uuid.uuid4().hex,
                         '--property=RuntimeMaxSec=90', '--property=TimeoutStopSec=10',
-                        'dbus-run-session', '--', 'xvfb-run', '-a', '-s',
-                        '-screen 0 1440x900x24', sys.executable, *command],
+                        *gui_sandbox.sandboxed(['dbus-run-session', '--', 'xvfb-run', '-a', '-s',
+                                                '-screen 0 1440x900x24', sys.executable, *command],
+                                               keep=[args.output])],
                        stdout=log, stderr=subprocess.STDOUT, timeout=110, check=True)
     print((args.output / 'result.json').read_text())
 

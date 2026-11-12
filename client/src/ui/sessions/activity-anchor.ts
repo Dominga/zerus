@@ -59,6 +59,12 @@ export function createActivityAnchor(rows: ReadingRows, released: () => boolean,
   return {
     /** Keep a few visible successors only as fallbacks if a row is removed. */
     remember,
+    /** Adopt a saved viewport after its transcript and virtual extent return. */
+    restore(saved: readonly ReadingAnchor[]) {
+      cancel(); anchors = saved.slice(0, 8); corrected = undefined;
+      observedTop = rows.scrollTop?.();
+      changed();
+    },
     /** Run before reconciliation, so back-to-back changes cannot adopt drift. */
     beforeChange: correct,
     changed,

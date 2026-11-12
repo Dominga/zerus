@@ -40,7 +40,7 @@ fn an_offline_refresh_retries_only_its_computer_and_keeps_rows_and_follows() {
     let (tx, rx) = channel();
     let mut seen = Seen::new(rx);
     let mut timing = quick();
-    timing.restart = [Duration::from_secs(30); 4];
+    timing.restart = [Duration::from_secs(30); 4].into();
     timing.silence = Duration::from_secs(30);
     let fleet = Fleet::start_with(fake.path(), tx, timing);
     for computer in ["", "alpha", "beta"] {

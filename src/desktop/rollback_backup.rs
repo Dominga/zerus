@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{Read, Seek, Write},
+    io::Write,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -23,7 +24,8 @@ pub(super) struct Original<'a> {
     location: &'a Location,
     owner: &'a platform::FileLock,
     handoff: &'a HandoffLock,
-    root: Directory,
+    root: Arc<Directory>,
+    pin: super::startup::Pin,
     database: Option<(u64, u64)>,
 }
 impl<'a> Original<'a> {
@@ -32,24 +34,34 @@ impl<'a> Original<'a> {
         owner: &'a platform::FileLock,
         handoff: &'a HandoffLock,
     ) -> Result<Self> {
-        let root = Directory::open(&location.root).map_err(anyhow::Error::msg)?;
+        let root = Arc::new(Directory::open(&location.root).map_err(anyhow::Error::msg)?);
         ensure!(
             root.private().map_err(anyhow::Error::msg)?,
             "desktop backup root is not private"
         );
+        handoff.verify(location)?;
+        for (name, expected) in [
+            ("owner.lock", owner.identity()?),
+            (zerus_desktop_migration::HANDOFF_LOCK, handoff.identity()?),
+        ] {
+            super::startup::check_exclusion(&root, name, expected)?;
+        }
+        let pin = super::startup::Pin::existing(Arc::clone(&root))?;
+        let database = Some(pin.identity()?);
         let original = Self {
             location,
             owner,
             handoff,
             root,
-            database: platform::file_identity(&location.root.join(DATABASE))
-                .map(|v| (v.device, v.inode)),
+            pin,
+            database,
         };
         original.verify()?;
         Ok(original)
     }
     pub(super) fn verify(&self) -> Result<()> {
         self.root.verify().map_err(anyhow::Error::msg)?;
+        self.pin.verify()?;
         self.handoff.verify(self.location)?;
         // These are exclusion files, NEVER raw descriptors of a live SQLite
         // database. Closing them cannot release SQLite's POSIX record locks.
@@ -60,11 +72,7 @@ impl<'a> Original<'a> {
                 self.handoff.identity()?,
             ),
         ] {
-            let named = self.root.read_private(name).map_err(anyhow::Error::msg)?;
-            ensure!(
-                platform::FileIdentity::of(&named)? == expected,
-                "desktop backup exclusion changed"
-            );
+            super::startup::check_exclusion(&self.root, name, expected)?;
         }
         if let Some(original) = self.database {
             ensure!(
@@ -86,20 +94,16 @@ impl<'a> Original<'a> {
             remaining: READ_BUDGET,
         };
         let path = self.location.root.join(BACKUP);
+        let mut leftover = false;
         match fs::symlink_metadata(&path) {
             // Task #421: an EMPTY backup folder (no manifest, no file) is an
             // interrupted attempt's own leftover - on Windows the 166 install
-            // left one when its first file could not be published. It is
-            // retained under a new name, and the backup is made again. Any
-            // other content keeps the refusal below.
+            // left one when its first file could not be published. It holds
+            // nothing, so the backup is made in it, NOREPLACE as in a new one
+            // (the pinned root refuses a rename on Windows). Any other content
+            // keeps the refusal below.
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() && empty(&path)? => {
-                let retained = self
-                    .location
-                    .root
-                    .join(format!("{BACKUP}.empty-{}", uuid::Uuid::new_v4()));
-                fs::rename(&path, &retained)
-                    .context("retain an empty desktop rollback backup leftover")?;
-                self.verify()?;
+                leftover = true;
             }
             Ok(_) => {
                 return self.validate(
@@ -113,24 +117,24 @@ impl<'a> Original<'a> {
         // A fixed destination is published NOREPLACE. The final manifest is
         // published last, also NOREPLACE: a partially copied directory never
         // qualifies, and later starts never repair or overwrite it.
-        let backup = self
-            .root
-            .create(
-                BACKUP,
-                &format!(".schema-34-rollback-{}", uuid::Uuid::new_v4()),
-            )
-            .map_err(anyhow::Error::msg)?;
-        let mut db =
-            Input::open(&self.root, DATABASE)?.context("missing desktop backup database")?;
-        let mut wal = Input::open(&self.root, WAL)?;
-        ensure!(
+        let backup = if leftover {
+            self.root.child(BACKUP).map_err(anyhow::Error::msg)?
+        } else {
             self.root
-                .read_private_optional("state.sqlite3-journal")
+                .create(
+                    BACKUP,
+                    &format!(".schema-34-rollback-{}", uuid::Uuid::new_v4()),
+                )
                 .map_err(anyhow::Error::msg)?
-                .is_none(),
-            "desktop rollback journal requires recovery before backup"
-        );
+        };
+        // Never open/close an extra raw main-DB descriptor. Another local
+        // SQLite connection may hold process-scoped locks on that same inode.
+        let mut db = Input::pinned(&self.pin)?;
+        let mut wal = Input::open(&self.root, WAL)?;
+        no_journal(&self.root)?;
         let database = db.copy(&self.root, &backup, &mut budget)?;
+        #[cfg(all(test, windows))]
+        crash_backup("database");
         let wal_digest = wal
             .as_mut()
             .map(|v| v.copy(&self.root, &backup, &mut budget))
@@ -140,10 +144,7 @@ impl<'a> Original<'a> {
             wal.unchanged(&self.root, &mut budget, wal_digest.as_ref().unwrap())?;
         } else {
             ensure!(
-                self.root
-                    .read_private_optional(WAL)
-                    .map_err(anyhow::Error::msg)?
-                    .is_none(),
+                super::startup::absent(&self.root, WAL)?,
                 "desktop WAL appeared during backup"
             );
         }
@@ -168,6 +169,8 @@ impl<'a> Original<'a> {
             bytes.len() <= META_LIMIT as usize,
             "desktop backup manifest too large"
         );
+        #[cfg(all(test, windows))]
+        crash_backup("manifest");
         backup
             .write_new(MANIFEST, &bytes)
             .map_err(anyhow::Error::msg)?;
@@ -181,16 +184,19 @@ impl<'a> Original<'a> {
             backup.private().map_err(anyhow::Error::msg)?,
             "desktop backup is not private"
         );
-        let mut metadata = Input::open(backup, MANIFEST)?
+        let metadata = Input::open(backup, MANIFEST)?
             .context("incomplete desktop rollback backup; retain it and inspect before retrying")?;
         ensure!(
             metadata.version.len <= META_LIMIT,
             "desktop backup manifest too large"
         );
-        let mut bytes = Vec::new();
-        Read::by_ref(&mut metadata.file)
-            .take(META_LIMIT + 1)
-            .read_to_end(&mut bytes)?;
+        let mut bytes = vec![0u8; metadata.version.len as usize];
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let count = read_at(&metadata.file, &mut bytes[offset..], offset as u64)?;
+            ensure!(count > 0, "desktop backup manifest shrank");
+            offset += count;
+        }
         ensure!(
             bytes.len() <= META_LIMIT as usize,
             "desktop backup manifest too large"
@@ -247,6 +253,14 @@ fn empty(path: &std::path::Path) -> Result<bool> {
         .is_none())
 }
 
+fn no_journal(root: &Directory) -> Result<()> {
+    ensure!(
+        super::startup::absent(root, "state.sqlite3-journal")?,
+        "desktop rollback journal requires recovery before backup"
+    );
+    Ok(())
+}
+
 struct Budget {
     until: Instant,
     remaining: u64,
@@ -292,6 +306,9 @@ struct Version {
 }
 fn version(file: &File) -> Result<Version> {
     let (identity, metadata) = platform::FileIdentity::with_metadata(file)?;
+    Ok(metadata_version(identity, metadata))
+}
+fn metadata_version(identity: platform::FileIdentity, metadata: fs::Metadata) -> Version {
     #[cfg(unix)]
     let changed = {
         use std::os::unix::fs::MetadataExt;
@@ -299,22 +316,77 @@ fn version(file: &File) -> Result<Version> {
     };
     #[cfg(not(unix))]
     let changed = (0, 0);
-    Ok(Version {
+    Version {
         identity,
         len: metadata.len(),
         changed,
-    })
+    }
+}
+fn named_version(root: &Directory, name: &str) -> Result<Version> {
+    #[cfg(unix)]
+    {
+        let metadata = super::startup::named_stat(root, name)?
+            .context("desktop rollback backup input disappeared")?;
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Version {
+            identity: platform::FileIdentity {
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino as u64,
+                modified: metadata.st_mtime as i64,
+                modified_nanos: metadata.st_mtime_nsec as i64,
+            },
+            len: u64::try_from(metadata.st_size)?,
+            changed: (metadata.st_ctime as i64, metadata.st_ctime_nsec as i64),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let (identity, metadata) = platform::FileIdentity::at(&root.path.join(name))?;
+        Ok(metadata_version(identity, metadata))
+    }
+}
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_at(bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(bytes, offset)
+    }
 }
 struct Input {
     name: &'static str,
-    file: File,
+    file: Arc<File>,
+    pin: super::startup::Pin,
+    #[cfg(test)]
+    source: bool,
     version: Version,
 }
 impl Input {
+    fn pinned(pin: &super::startup::Pin) -> Result<Self> {
+        pin.verify()?;
+        let file = pin.file();
+        let version = version(&file)?;
+        ensure!(
+            version.len <= MAX_FILE,
+            "desktop rollback backup file exceeds its limit"
+        );
+        Ok(Self {
+            name: DATABASE,
+            file,
+            pin: pin.clone(),
+            #[cfg(test)]
+            source: true,
+            version,
+        })
+    }
     fn open(root: &Directory, name: &'static str) -> Result<Option<Self>> {
-        root.read_private_optional(name)
-            .map_err(anyhow::Error::msg)?
-            .map(|file| {
+        super::startup::Pin::input(root, name)?
+            .map(|pin| {
+                let file = pin.file();
                 let version = version(&file)?;
                 ensure!(
                     version.len <= MAX_FILE,
@@ -323,19 +395,29 @@ impl Input {
                 Ok(Self {
                     name,
                     file,
+                    pin,
+                    #[cfg(test)]
+                    source: false,
                     version,
                 })
             })
             .transpose()
     }
+
     fn verify(&self, root: &Directory) -> Result<()> {
         ensure!(
             version(&self.file)? == self.version,
             "desktop rollback backup input changed"
         );
-        let named = root.read_private(self.name).map_err(anyhow::Error::msg)?;
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_INPUT_NAME.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        self.pin.verify()?;
+        // Unix uses metadata only, never an extra raw alias open/close.
+        let named = named_version(root, self.name)?;
         ensure!(
-            version(&named)? == self.version,
+            named == self.version,
             "desktop rollback backup input replaced"
         );
         root.verify().map_err(anyhow::Error::msg)
@@ -347,16 +429,21 @@ impl Input {
         mut output: Option<&mut File>,
     ) -> Result<DigestRecord> {
         self.verify(root)?;
-        self.file.rewind()?;
         let mut hash = Sha256::new();
         let mut total = 0u64;
         let mut buffer = [0u8; 65536];
         loop {
             budget.read(0)?;
-            let count = self.file.read(&mut buffer)?;
+            let count = read_at(&self.file, &mut buffer, total)?;
             budget.read(count)?;
             if count == 0 {
                 break;
+            }
+            #[cfg(test)]
+            if self.source {
+                if let Some(hook) = DURING_SOURCE_COPY.with(|slot| slot.borrow_mut().take()) {
+                    hook();
+                }
             }
             total += count as u64;
             ensure!(
@@ -411,6 +498,21 @@ impl Input {
 
 #[cfg(test)]
 thread_local! { static INTERRUPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(all(test, windows))]
+thread_local! { static BACKUP_CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+#[cfg(all(test, windows))]
+fn crash_backup(phase: &'static str) {
+    if BACKUP_CRASH.with(std::cell::Cell::get) == Some(phase) {
+        // The exact owned fixture child exits without running Rust destructors.
+        std::process::exit(88);
+    }
+}
+#[cfg(test)]
+type CopyHook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! { static BEFORE_INPUT_NAME: std::cell::RefCell<Option<CopyHook>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+thread_local! { static DURING_SOURCE_COPY: std::cell::RefCell<Option<CopyHook>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]
 pub(in crate::desktop) fn after_slot_rename() {
     if INTERRUPT.with(std::cell::Cell::get) {

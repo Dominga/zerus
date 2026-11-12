@@ -21,6 +21,8 @@ import random
 import re
 import shutil
 import signal
+import shlex
+import sys
 import socket
 import string
 import subprocess
@@ -128,7 +130,9 @@ class Model(http.server.BaseHTTPRequestHandler):
         tool = None
         # Only an agent turn offers tools; a turn that just received a tool result replies.
         if tools and not any(m.get('role') == 'tool' for m in messages[-2:]):
-            if 'HOLD_NATIVE' in last_user:
+            if last_user.startswith('HGS_SELF_NATIVE_FIXTURE '):
+                tool = ('shell', {'command':last_user.removeprefix('HGS_SELF_NATIVE_FIXTURE '),'description':'Read fixture identity and launch a child'})
+            elif 'HOLD_NATIVE' in last_user:
                 self.server.holding.set()
                 self.server.release.wait(60)
             elif 'QUESTION_NATIVE' in last_user:
@@ -371,6 +375,44 @@ class OpenCodeNative(unittest.TestCase):
         self.launch(tag, '--model', 'fixture/local', *options)
         return self.hgs(['inspect', f'opencode/workspace/{tag}'])
 
+    def test_native_shell_self_and_explicit_child_parent_are_claimed(self):
+        parent = self.create()
+        tag = 'claimed-' + uuid.uuid4().hex[:8]
+        output = self.workspace / (tag + '.json')
+        script = ('import json,subprocess;from pathlib import Path;'
+                  f'identity=json.loads(subprocess.check_output({[str(HGS),"self","--json"]!r},text=True));'
+                  f'Path({str(output)!r}).write_text(json.dumps(identity));'
+                  f'subprocess.run({[str(HGS),"opencode",str(self.workspace),"--new","-n",tag,"-d","--parent"]!r}+'
+                  '[json.dumps(identity["parent_identity"])],check=True)')
+        self.hgs(['send',parent['name'],'--json'],self.payload(parent,text='HGS_SELF_NATIVE_FIXTURE '+shlex.join([sys.executable,'-c',script])))
+        pending = self.wait(parent['name'],lambda v:v['pending_questions'])
+        [card] = pending['pending_questions']
+        self.assertEqual(card['kind'],'opencode_permission')
+        self.hgs(['answer',parent['name'],'--json'],self.payload(parent,question_id=card['question_id'],
+            expected_question_hash=card['question_hash'],answers=[{'question_id':'permission','selected_option_ids':['once'],'text':''}]))
+        end = time.monotonic()+40
+        binding = self.binding_path(f'opencode/workspace/{tag}')
+        while time.monotonic()<end and not binding.exists():
+            time.sleep(.1)
+        if not binding.exists():
+            observed = self.hgs(['inspect', parent['name']])
+            trace = [{k:e.get(k) for k in ('type','tool','detail')} for e in observed.get('events',[])[-5:]]
+            self.fail('native shell did not create its fixture child: '+json.dumps({
+                'output_exists':output.exists(),'phase':observed.get('phase'),'events':trace,
+                'model_requests':self.model.requests[-2:]} )[:8000])
+        identity = json.loads(output.read_text())
+        self.assertEqual(identity['provider'],'opencode')
+        child = json.loads(binding.read_text())
+        self.assertEqual(identity['identity_source'],'claimed')
+        self.assertEqual(identity['session_id'],parent['session_id'])
+        self.assertEqual(identity['conversation_id'],parent['conversation_id'])
+        self.assertEqual(child['parent']['source'],'claimed')
+        self.assertEqual(child['parent']['session_id'],parent['session_id'])
+        expected = dict(expected_run_id=child['run_id'],expected_conversation_id=child['conversation_id'])
+        self.assertIsNone(self.hgs(['parent',child['name'],'--json'],dict(expected,action='clear'))['parent'])
+        adopted = self.hgs(['parent',child['name'],'--json'],dict(expected,action='adopt',parent=identity['parent_identity']))
+        self.assertEqual(adopted['parent']['source'],'claimed')
+
     def payload(self, binding, **extra):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **extra}
@@ -520,6 +562,10 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual(row['allowed_actions'], ['forget'])
         self.assertNotIn('events', row)
         self.assertFalse(row['send_supported'])
+        # Without an observation nothing is known: no reply, attention never complete.
+        current = self.hgs(['inspect', name, '--current-read'])['current_read']
+        self.assertEqual(current, dict(schema=1, run_id=binding['run_id'], conversation_id=binding['conversation_id'],
+                                       reply_id=None, attention_signature=None, attention_complete=False))
         listed = self.listing()[name]
         self.assertEqual((listed['state'], listed['phase']), ('unknown', 'unknown'))
         self.assertEqual(listed['inspection_reason'], NOT_RUNNING + ' on fixture')
@@ -888,6 +934,68 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'shell' and 'native-tool-output' in e['detail']
                             for e in final['events']), final['events'])
         self.assert_private(data, final)
+
+    def test_04_current_read_names_what_read_accepts_on_the_shown_observation(self):
+        """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts
+        on the observation the inspection shows, and inspecting acknowledges nothing."""
+        b = self.create()
+        name = b['name']
+        mark = lambda current: self.hgs(['read', name, '--json'], {key: current[key] for key in
+                                         ('run_id', 'conversation_id', 'reply_id', 'attention_signature')})
+        self.hgs(['send', name, '--json'], self.payload(b, text='QUESTION_NATIVE pick a color'))
+        self.wait(name, lambda v: v['pending_questions'])
+        shown = self.hgs(['inspect', name, '--current-read'])
+        asked = shown['current_read']
+        self.assertEqual(set(asked), {'schema', 'run_id', 'conversation_id', 'reply_id', 'attention_signature',
+                                      'attention_complete'})
+        self.assertEqual((asked['schema'], asked['run_id'], asked['conversation_id'], asked['attention_complete']),
+                         (1, b['run_id'], b['conversation_id'], True))
+        self.assertRegex(asked['attention_signature'], r'^[0-9a-f]{64}$')
+        self.assertEqual(asked['attention_signature'], shown['attention_signature'])
+        self.assertNotIn('current_read', self.hgs(['inspect', name]))
+        self.assertFalse((self.state / 'read-marks.json').exists())
+        self.assertEqual(mark(asked)['applied'], {'reply_id': False, 'attention_signature': True})
+        [card] = shown['pending_questions']
+        [item] = card['questions']
+        green = next(o['id'] for o in item['options'] if o['label'] == 'Green')
+        self.assertEqual(self.hgs(['answer', name, '--json'], self.payload(
+            b, question_id=card['question_id'], expected_question_hash=card['question_hash'],
+            answers=[{'question_id': item['id'], 'selected_option_ids': [green], 'text': ''}]))['status'], 'answered')
+        self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id'))
+        final = self.hgs(['inspect', name, '--current-read'])
+        replied = final['current_read']
+        # The named reply is the newest settled reply the inspection shows.
+        settled = [e for e in final['events'] if e['type'] == 'AgentMessage' and not e.get('streaming')]
+        self.assertEqual(replied['reply_id'], settled[-1]['reply_id'])
+        self.assertEqual((replied['attention_signature'], replied['attention_complete']), (None, True))
+        self.assertEqual(mark(asked)['applied'], {'reply_id': False, 'attention_signature': False})
+        self.assertEqual(mark(replied)['applied'], {'reply_id': True, 'attention_signature': False})
+
+    def test_05_id_settings_preserves_original_session_defaults_and_no_model_calls(self):
+        a, b = self.create('--effort', 'low'), self.create('--effort', 'low')
+        config = self.root / 'xdg-config/opencode/opencode.json'
+        defaults = config.read_bytes()
+        requests = len(self.model.requests)
+        original = self.session(a['conversation_id'])
+        uri = self.hgs(['reference', a['name'], '--json'])['uri']
+        self.assertTrue(uri.startswith('zerus://session?'))
+        for selector, model, effort in (([a['name'], '--session-id', a['session_id']], 'alternate', 'high'),
+                                        ([uri], 'local', 'low')):
+            with self.subTest(selector=selector):
+                request = self.payload(a, model='fixture/' + model, effort=effort)
+                applied = self.hgs(['settings', *selector, '--json'], request)
+                self.assertEqual((applied['status'], applied['model'], applied['effort']),
+                                 ('applied', 'fixture/' + model, effort))
+                current = self.hgs(['inspect', a['name'], '--session-id', a['session_id']])
+                self.assertEqual((current['session_id'], current['conversation_id'], current['run_id']),
+                                 (a['session_id'], a['conversation_id'], a['run_id']))
+                self.assertEqual(self.session(a['conversation_id'])['id'], original['id'])
+                self.assertEqual(self.session(a['conversation_id'])['model'],
+                                 {'providerID': 'fixture', 'id': model, 'variant': effort})
+                other = self.hgs(['inspect', b['name']])
+                self.assertEqual((other['settings_model'], other['effort']), ('fixture/local', 'low'))
+                self.assertEqual(config.read_bytes(), defaults)
+                self.assertEqual(len(self.model.requests), requests, 'Settings invoked the private model API')
 
     def test_05_model_effort_and_provider_error(self):
         b = self.create('--effort', 'low')

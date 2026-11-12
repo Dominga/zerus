@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSwarm, syncText, seedMappings, initialAlias, type Call, type SwarmView } from "./project-swarm";
+import { createSwarm, createAdoption, syncText, seedMappings, initialAlias, type Call, type SwarmView, type AdoptionView } from "./project-swarm";
 const tick = async () => { for (let i = 0; i < 12; ++i) await Promise.resolve(); };
 const frame = (): SwarmView => ({ id: "opaque-dialog", catalog: { swarm_id: "catalog", conflicts: 0, computers: [] }, projects: [], aliases: ["fixture-peer"], preview: null, status: "", error: false, busy: false, changing: false, can_sync: true, can_join: false, can_preview: true, mode: "config" });
 const port = (read: (command: string, args?: Record<string, unknown>) => Promise<unknown>): Call => async <T,>(command: string, args?: Record<string, unknown>) => await read(command, args) as T;
@@ -105,4 +105,87 @@ it("selects the notice's exact unconnected alias after choices arrive, with a sa
   expect(initialAlias(["already-connected", "new-peer"], "new-peer")).toBe("new-peer");
   expect(initialAlias(["already-connected"], "not-configured")).toBe("already-connected");
   expect(initialAlias([], "new-peer")).toBe("");
+});
+
+const adoptionFrame = (): AdoptionView => ({
+  id: "adoption-dialog", aliases: ["empty-peer"], preview: null,
+  status: "", error: false, busy: false, changing: false,
+  can_preview: true, can_adopt: false, can_resume: false, mode: "preview",
+  drive_status: "unsupported_uninitialized_without_reverse_peer",
+});
+
+describe("Project adoption controller", () => {
+  it("does not create an intent on open and adopts only an eligible explicit preview once", async () => {
+    const calls: { command: string; args?: Record<string, unknown> }[] = [];
+    const state = createAdoption(port(async (command, args) => {
+      calls.push({ command, args });
+      if (command === "project_adoption_open" || command === "project_adoption_view") return adoptionFrame();
+      if (command === "project_adoption_preview") return {
+        ...adoptionFrame(), can_adopt: true,
+        preview: { request_id: "original-request", alias: "empty-peer", eligible: true, reason: "Eligible" },
+      };
+      if (command === "project_adoption_adopt") return { ...adoptionFrame(), can_resume: false, status: "Settled" };
+    }));
+    await state.open();
+    expect(calls.map((call) => call.command)).toEqual(["project_adoption_open", "project_adoption_view"]);
+    expect(await state.adopt()).toBe(false);
+    expect(await state.preview("empty-peer")).toBe(true);
+    expect(await state.adopt()).toBe(true);
+    expect(await state.adopt()).toBe(false);
+    expect(calls.filter((call) => call.command === "project_adoption_adopt")).toHaveLength(1);
+    state.dispose();
+  });
+
+  it("keeps an ineligible destination out of mutation", async () => {
+    const state = createAdoption(port(async (command) => {
+      if (command === "project_adoption_open" || command === "project_adoption_view") return adoptionFrame();
+      if (command === "project_adoption_preview") return {
+        ...adoptionFrame(), can_adopt: false,
+        preview: { request_id: "review-only", alias: "empty-peer", eligible: false, reason: "Occupied" },
+      };
+      throw Error(`unexpected ${command}`);
+    }));
+    await state.open();
+    expect(await state.preview("empty-peer")).toBe(true);
+    expect(await state.adopt()).toBe(false);
+    expect(await state.resume()).toBe(false);
+    state.dispose();
+  });
+
+  it("closes while an original adoption is running without another request", async () => {
+    const calls: string[] = [];
+    const running = { ...adoptionFrame(), busy: true, changing: true, can_preview: false, status: "The original adoption call is still settling." };
+    const state = createAdoption(port(async (command) => {
+      calls.push(command);
+      if (command === "project_adoption_open" || command === "project_adoption_view") return running;
+      if (command === "project_adoption_close") return running;
+      throw Error(`unexpected ${command}`);
+    }));
+    await state.open();
+    expect(await state.adopt()).toBe(false);
+    expect(await state.close()).toBe(true);
+    expect(calls).toEqual(["project_adoption_open", "project_adoption_view", "project_adoption_close"]);
+    state.dispose();
+  });
+
+  it("allows explicit read-only status but never a resume mutation", async () => {
+    const calls: string[] = [];
+    const state = createAdoption(port(async (command) => {
+      calls.push(command);
+      if (command === "project_adoption_open" || command === "project_adoption_view") return {
+        ...adoptionFrame(), can_resume: true, mode: "reconcile",
+      };
+      if (command === "project_adoption_status") return {
+        ...adoptionFrame(), can_resume: true, mode: "reconcile", status: "Partial or unknown: review manually",
+      };
+      throw Error(`unexpected ${command}`);
+    }));
+    await state.open();
+    expect(await state.resume()).toBe(false);
+    expect(await state.status()).toBe(true);
+    expect(calls).not.toContain("project_adoption_resume");
+    expect(calls).not.toContain("project_adoption_adopt");
+    expect(calls.filter((call) => call === "project_adoption_status")).toHaveLength(1);
+    state.dispose();
+  });
 });

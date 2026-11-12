@@ -237,7 +237,7 @@ impl Binding {
             }
         }
         if kind == Kind::Model {
-            if !["codex", "claude", "kimi"].contains(&self.provider.as_str())
+            if !["codex", "claude", "kimi", "dsh"].contains(&self.provider.as_str())
                 || values.model.chars().count() > 256
                 || values.effort.chars().count() > 40
                 || values
@@ -374,6 +374,43 @@ mod tests {
                 "{mode}"
             );
         }
+    }
+    #[test]
+    fn a_model_edit_reaches_the_native_deepseek_account() {
+        let accounts = json!({"revision":"r1","profiles":[{"id":"native-dsh","provider":"dsh","home":"/accounts/deepseek","auth_revision":""},
+            {"id":"native-opencode","provider":"opencode","home":"/accounts/opencode","auth_revision":""}]});
+        let model = |id: &str| {
+            Binding::capture(
+                ComputerId("studio".into()),
+                "11111111-1111-4111-8111-111111111111".into(),
+                &accounts,
+                id,
+            )
+            .unwrap()
+            .edit_values(
+                Kind::Model,
+                &Values {
+                    model: "deepseek-official/deepseek-flash".into(),
+                    effort: "max".into(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            &model("native-dsh").unwrap().args[3..],
+            [
+                "account",
+                "model-defaults",
+                "native-dsh",
+                "--revision",
+                "r1",
+                "--model",
+                "deepseek-official/deepseek-flash",
+                "--effort",
+                "max"
+            ]
+        );
+        assert!(model("native-opencode").is_err());
     }
     #[test]
     fn a_scope_edit_names_shared_or_per_computer_only() {

@@ -102,7 +102,7 @@ fn snapshot(directory: &Path, provider: &str, program: &str) -> Result<Snapshot>
     let known = hooks::health_version(&path, program);
     let bytes = read_bounded(&path, CONFIG_MAX)?;
     let mut report = match std::str::from_utf8(bytes.as_deref().unwrap_or_default()) {
-        Ok(text) => hooks::health_document(text, provider, known),
+        Ok(text) => hooks::health_document(text, &path, provider, known),
         Err(_) => Err("Invalid hook configuration".into()),
     }
     .unwrap_or_else(|_| json!({"state":"invalid","compatibility":{"state":"unknown"}}));
@@ -301,6 +301,11 @@ pub(super) fn session_report(name: &str, input: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .unwrap_or("");
     let mut value = report(provider, &account, &directory, program, Some(&record));
+    // hooks-health-v1 keeps its configuration keys: phone connectors reject
+    // any other. The account report alone carries this flag (zerus-b64dl).
+    if let Some(configuration) = value["configuration"].as_object_mut() {
+        configuration.remove("unrecognised_tracking");
+    }
     value["request_id"] = json!(id);
     value["name"] = json!(name);
     value["run_id"] = record["run_id"].clone();
@@ -400,6 +405,12 @@ fn repair(config: &Config, account: &str, input: &Value) -> Result<Value> {
         }
         atomic(&path, content)?;
     }
+    // Still under the settings lock: record the program hgs wrote or kept.
+    hooks::record_written(
+        &current.path,
+        &provider,
+        merged.as_deref().unwrap_or(original),
+    );
     let mut result = report(&provider, account, &directory, &provider, None);
     result["request_id"] = json!(id);
     result["status"] = json!(if merged.is_some() {

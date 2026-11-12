@@ -31,7 +31,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled", "hooks", "functions"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.10"
 shell-words = "1"
 tempfile = "3"
@@ -110,7 +110,8 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 # Task #43 (team ede724c4): debug and test builds hash executables with an
 # optimized sha2. Unoptimized, hashing the 167 MB test binary that the
 # portable frontend tests bind ran past the record's 10 s deadline in a run
-# from an agent session ("pinned executable read deadline").
+# from an agent session ("pinned executable read deadline"). Upstream: test
+# builds also hash adoption bodies of up to 32 MiB many times.
 [profile.dev.package.sha2]
 opt-level = 3
 

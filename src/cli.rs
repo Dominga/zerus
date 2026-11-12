@@ -123,6 +123,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] hooks --account ID [--repair] --json   inspect or explicitly repair handlers
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] inspect <session> --read-observation   raw shared reads for a current journal-backed main session
+       hgs [@host] inspect <session> --current-read   with the reply and attention a read mark may acknowledge now
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
        hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks
@@ -256,6 +257,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        session-keep-warm-v1
        session-parent-v1
        launch-parent-v1
+       claimed-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] path-info --path <path>   whether a path exists, its kind and size (JSON schema 1); reads no content
@@ -749,6 +751,16 @@ pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
 }
 
 fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
+    // This self-image owner inherits the original caller's already-selected
+    // executable search/locale context. Repeating prepare_environment would
+    // prepend PATH again before its exact context check. The shared state
+    // entry still rejects extra argv and validates inherited objects/frame
+    // before Root; no ordinary command or Windows control lane changes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.first().map(String::as_str)==Some("__state")
+        && args.get(1).map(String::as_str)==Some("native-picker-custodian-v1") {
+        return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
+    }
     // Task 352: `hgs [@host] session switch-account` is `hgs switch-account`.
     let at = usize::from(args.first().is_some_and(|arg| arg.starts_with('@')));
     if args.get(at).is_some_and(|arg| arg == "session") && args.get(at + 1).is_some_and(|arg| arg == "switch-account") {
@@ -830,6 +842,11 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             } else {
                 "Mobile target identity changed; refresh computers"
             }));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if args.get(guarded_at).is_some_and(|a|a=="effort"||a=="settings")
+            || (args.get(guarded_at).is_some_and(|a|a=="__state")&&args.get(guarded_at+1).is_some_and(|a|a=="effort"||a=="settings")) {
+            state::remember_picker_caller_machine(&config,expected);
         }
         args.drain(..2);
         let command_at=if args.first().is_some_and(|a|a=="--client") {
@@ -940,8 +957,19 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             return Err(Error::new(1, "A local session reference cannot route to another computer"));
         }
         local_sessions()?;
-        let name = state::resolve_reference(&reference).map_err(|e| Error::new(1, e))?;
-        state::session_id::select_reference(&name, &reference.session, &reference.conversation, &reference.run);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if command=="effort"||command=="settings" {state::remember_picker_caller_machine(&config,&reference.machine);}
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let effort_name=if command=="effort"||command=="settings" {
+            Some(state::resolve_effort_reference(&reference).map_err(|e|Error::new(1,e))?)
+        } else {None};
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let effort_name:Option<String>=None;
+        let name=if let Some(name)=effort_name {name} else {
+            let name = state::resolve_reference(&reference).map_err(|e| Error::new(1, e))?;
+            state::session_id::select_reference(&name, &reference.session, &reference.conversation, &reference.run);
+            name
+        };
         let mut rest = vec![name];
         rest.extend_from_slice(&args[1..]);
         if !reference.archive.is_empty() {
@@ -1459,7 +1487,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
                 tag = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
-            "--launch-id" | "--permissions" | "--local-model" | "--parent-link" => i += 1,
+            "--launch-id" | "--permissions" | "--local-model" | "--parent-link" | "--parent" => i += 1,
             option if option.starts_with('-') => {}
             name if project.is_empty() => project = name.into(),
             _ => {}
@@ -1758,6 +1786,13 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
         return Ok(());
     };
     local_sessions()?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if command=="effort"||command=="settings" {
+        return state::resolve_effort_label(name,label_guard(command,args)).map_err(|refusal| {
+            if let Some(value)=refusal.value.filter(|_|args.iter().any(|arg|arg=="--json")) {println!("{value}");}
+            Error::new(refusal.code,refusal.text)
+        });
+    }
     state::resolve_label(name, label_guard(command, args)).map_err(|refusal| {
         if let Some(value) = refusal.value.filter(|_| args.iter().any(|arg| arg == "--json")) {
             println!("{value}");
@@ -1770,6 +1805,8 @@ fn resolve_label(command: &str, args: &[String]) -> Result<()> {
 /// current name. A name given before the flag must be that name; arguments
 /// after it are the command's own (a message, a new name, a path).
 fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if command=="effort"||command=="settings" {return select_picker_session(command,args);}
     let Some((at, id)) = session_id_flag(command, args)? else {
         return Ok(args.to_vec());
     };
@@ -1787,6 +1824,28 @@ fn select_session(command: &str, args: &[String]) -> Result<Vec<String>> {
     // Resolution names the session; the command's own reads under its lock
     // must still find this ID on the record they act on.
     state::session_id::select(&name, &id);
+    let mut rest = args.to_vec();
+    rest.drain(at..at + 2);
+    match args[..at].iter().find(|arg| !arg.starts_with('-')) {
+        Some(given) if *given != name => Err(Error::new(
+            1,
+            format!("Session ID {id} is {name}, not {given}"),
+        )),
+        Some(_) => Ok(rest),
+        None => {
+            rest.insert(0, name);
+            Ok(rest)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn select_picker_session(command: &str, args: &[String]) -> Result<Vec<String>> {
+    let Some((at, id)) = session_id_flag(command, args)? else {
+        return Ok(args.to_vec());
+    };
+    let name =
+        state::resolve_effort_id(&id).map_err(|refusal| Error::new(refusal.code, refusal.text))?;
     let mut rest = args.to_vec();
     rest.drain(at..at + 2);
     match args[..at].iter().find(|arg| !arg.starts_with('-')) {
@@ -2064,7 +2123,9 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'test-runner-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to run tests (test-runner-v1)' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
-    } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "fork") && machine.is_none())
+    } else if matches!(command, "claude" | "codex" | "kimi" | "dsh" | "opencode") && args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*claimed-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to claim a launch parent' >&2; exit 1; fi", platform::join(&remote_args)))
+    } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "dsh" | "opencode" | "fork") && machine.is_none())
         .then(state::parent_link::forwarded_argument)
         .flatten()
     {
@@ -2096,6 +2157,7 @@ fn remote_via(
             "path-info" => vec![("hgs [@host] path-info --path", false)],
             "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],
             "guide" => vec![("hgs [@host] guide", false)],
+            "claude" | "codex" | "kimi" | "dsh" | "opencode" if args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") => vec![("claimed-parent-v1", true)],
             _ => vec![],
         };
         if let Some(selected) = selector_markers(command, &args)? {
@@ -3005,6 +3067,10 @@ impl LaunchOptions {
                     state::parent_link::accept_forwarded(link).map_err(|e| Error::new(1, e))?;
                     i += 1;
                 }
+                "--parent" => {
+                    state::parent_link::accept_claimed(require(args, i + 1, "--parent needs a JSON identity")?).map_err(|e| Error::new(1, e))?;
+                    i += 1;
+                }
                 "--launch-id" => {
                     let id =
                         uuid::Uuid::parse_str(require(args, i + 1, "--launch-id needs a UUID")?)
@@ -3098,6 +3164,57 @@ impl LaunchOptions {
         Ok(options)
     }
 }
+/// Whether Claude has saved a conversation for `directory`. Claude names its
+/// history folder after its own working directory as the system reports it
+/// (process.cwd(): symlinks resolved, so /var/... is /private/var/... on
+/// macOS), not after the configured path, so a project configured through a
+/// symlink is looked up under its physical path as well (zerus-ngeih).
+fn claude_history_exists(history_root: &Path, directory: &str) -> bool {
+    let has = |directory: &str| {
+        fs::read_dir(history_root.join(claude_history_folder(directory)))
+            .ok()
+            .is_some_and(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            })
+    };
+    has(directory)
+        || fs::canonicalize(directory)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+            .is_some_and(|physical| physical != directory && has(&physical))
+}
+
+/// Claude Code 2.1.322's VL/Pe/sre rule: escape UTF-16 units, and above 200
+/// units append the base-36 absolute signed wrapping hash of the original path.
+fn claude_history_folder(directory: &str) -> String {
+    let mut escaped = String::with_capacity(208);
+    let mut length = 0;
+    let mut hash = 0_i32;
+    for unit in directory.encode_utf16() {
+        if length < 200 {
+            escaped.push(char::from_u32(u32::from(unit)).filter(char::is_ascii_alphanumeric).unwrap_or('-'));
+        }
+        length += 1;
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    if length > 200 {
+        let mut value = hash.unsigned_abs();
+        let mut digits = [b'0'; 7];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b"0123456789abcdefghijklmnopqrstuvwxyz"[(value % 36) as usize];
+            value /= 36;
+            if value == 0 { break; }
+        }
+        escaped.push('-');
+        escaped.extend(digits[at..].iter().copied().map(char::from));
+    }
+    escaped
+}
+
 fn resolve_project(
     config: &Config,
     command: &str,
@@ -3178,6 +3295,9 @@ fn launch(
         if crate::accounts::explicit_permissions(&command_name, &options.extra) {
             return Err(Error::new(1, "choose --permissions or the agent's own permission flags, not both"));
         }
+    }
+    if state::parent_link::claimed_launch() && !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
+        return Err(Error::new(1, "--parent is available for Claude, Codex, Kimi, DeepSeek and OpenCode launches"));
     }
     if command_name=="opencode" {
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
@@ -3297,6 +3417,9 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
+        return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
+    }
     if explicit_account
         && (existing || (!options.fresh && binding_exists(config, &session)?))
     {
@@ -3438,17 +3561,7 @@ fn launch(
                 .to_string_lossy()
                 .into_owned()
         });
-        let escaped: String = directory
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        auto = fs::read_dir(Path::new(&history_root).join(escaped))
-            .ok()
-            .is_some_and(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-            });
+        auto = claude_history_exists(Path::new(&history_root), &directory);
     }
     if !options.extra.is_empty() {
         match command_name.as_str() {
@@ -3666,9 +3779,9 @@ fn launch(
             ),
             format!("HGS_STATE_DIR={}", config.state.display()),
             format!("HGS_EXECUTABLE={executable}"),
-            // The live agent that runs this launch, proven by its process
-            // ancestry; empty otherwise (zerus-sa9qn.2).
-            format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value()),
+            // An explicit live parent claim, otherwise the process-proven
+            // launcher; empty without either (zerus-sa9qn.2, zerus-cgl5w).
+            format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value().map_err(|e| Error::new(1, e))?),
             "HGS_RESUME_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),
             "HGS_ARCHIVE_ID=".into(),
@@ -3737,6 +3850,60 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_history_uses_the_released_folder_cap_and_hash() {
+        // Golden folder names from VL/Pe/sre in Claude Code 2.1.322. Each
+        // case gets a separate history root so a cap-only implementation
+        // cannot accidentally find the 200-character boundary case's file.
+        let prefix = format!("-fixture-{}", "a".repeat(191));
+        let cases = [
+            (format!("/fixture/{}", "a".repeat(191)), prefix.clone()),
+            (format!("/fixture/{}", "a".repeat(192)), format!("{prefix}-ble0s5")),
+            (format!("/fixture/{}", "a".repeat(240)), format!("{prefix}-vis0vp")),
+            (format!("/fixture/{}b", "a".repeat(240)), format!("{prefix}-h9g0ab")),
+            (format!("/fixture/{}c", "a".repeat(240)), format!("{prefix}-h9g0aa")),
+            (format!("/fixture/{}", "😀".repeat(100)), format!("-fixture-{}-ix5129", "-".repeat(191))),
+        ];
+        for (directory, folder) in cases {
+            let history = tempfile::tempdir().unwrap();
+            assert!(!super::claude_history_exists(history.path(), &directory));
+            let path = history.path().join(folder);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("conversation.jsonl"), "{}\n").unwrap();
+            assert!(super::claude_history_exists(history.path(), &directory), "history not found for {directory}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_history_is_found_under_the_physical_path_of_a_symlinked_project() {
+        // zerus-ngeih: Claude names its folder after its physical cwd.
+        let root = tempfile::tempdir().unwrap();
+        let physical = root.path().join("real project");
+        std::fs::create_dir(&physical).unwrap();
+        let linked = root.path().join("linked");
+        std::os::unix::fs::symlink(&physical, &linked).unwrap();
+        let physical = std::fs::canonicalize(&physical).unwrap().to_string_lossy().into_owned();
+        let linked = linked.to_string_lossy().into_owned();
+        let history = root.path().join("projects");
+        let escape = |path: &str| path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+        assert!(!super::claude_history_exists(&history, &linked));
+        let folder = history.join(escape(&physical));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "").unwrap();
+        assert!(!super::claude_history_exists(&history, &linked), "only a saved conversation counts");
+        std::fs::write(folder.join("old.jsonl"), "{}\n").unwrap();
+        assert!(super::claude_history_exists(&history, &linked));
+        assert!(super::claude_history_exists(&history, &physical));
+        // History recorded under the configured path itself still counts.
+        let other = tempfile::tempdir().unwrap();
+        let raw = other.path().to_string_lossy().into_owned();
+        let folder = history.join(escape(&raw));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("old.jsonl"), "{}\n").unwrap();
+        assert!(super::claude_history_exists(&history, &raw));
+        assert!(!super::claude_history_exists(&history, &root.path().join("missing").to_string_lossy()));
+    }
     #[cfg(unix)]
     #[test]
     fn a_bounded_archive_page_falls_back_on_a_peer_without_the_marker() {

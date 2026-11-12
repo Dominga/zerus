@@ -60,6 +60,15 @@ impl Memberships {
         base: &Catalog,
         bytes: &std::result::Result<Vec<u8>, Unread>,
     ) -> Result<Self> {
+        Self::from_read_view(base, bytes).map(|(value, _)| value)
+    }
+    /// [`Self::from_read`] together with the view its single validation
+    /// produced (main-catalog redirects included), so a caller that also needs
+    /// the validated view does not validate the same graph twice.
+    pub(super) fn from_read_view(
+        base: &Catalog,
+        bytes: &std::result::Result<Vec<u8>, Unread>,
+    ) -> Result<(Self, Catalog)> {
         let value = match bytes {
             Ok(bytes) => Self {
                 graph: serde_json::from_slice(bytes)?,
@@ -67,8 +76,8 @@ impl Memberships {
             Err(Unread::Missing) => Self::empty(base),
             Err(reason) => anyhow::bail!("ID project membership unavailable: {reason:?}"),
         };
-        value.view(base)?;
-        Ok(value)
+        let view = value.view(base)?;
+        Ok((value, view))
     }
     /// Project liveness and machine redirects come from the already validated
     /// main catalog. They are context, never copied into this primary file or
@@ -101,6 +110,10 @@ impl Memberships {
             .into_iter()
             .filter(|(_, op)| matches!(op.key, Key::Session { .. }))
             .collect();
+    }
+    /// The raw graph's own operations, as parsed (a missing file is empty).
+    pub(super) fn operation_count(&self) -> usize {
+        self.graph.operations.len()
     }
     pub(super) fn is_empty(&self) -> bool {
         self.graph.operations.is_empty()

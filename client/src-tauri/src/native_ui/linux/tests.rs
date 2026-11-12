@@ -33,8 +33,8 @@ fn hooks(ready: Arc<AtomicUsize>) -> Hooks {
     }
 }
 
-/// Run explicitly with --ignored --test-threads=1 on the private test bus
-/// and Xvfb. A default unit-test invocation must never initialize GTK on the
+/// Run explicitly with --ignored --exact, one test per process (GTK keeps its
+/// first thread), on the private test bus and Xvfb. A default unit-test invocation must never initialize GTK on the
 /// owner's desktop. This fixture never loads a live DeepSeek host.
 #[test]
 #[ignore = "requires a private D-Bus, Xvfb and HOME/XDG/TMPDIR"]
@@ -137,4 +137,68 @@ fn child_guard_replaces_one_handler_and_preserves_the_primary_across_reload() {
     }
     stop.store(true, Ordering::Relaxed);
     server.join().unwrap();
+}
+
+/// Tauri's tree on Linux: the main window's box holds the primary webview and
+/// a new child, presented once by Tao, then `mount`'s two production halves.
+fn mounted() -> (gtk::Window, webkit2gtk::WebView, webkit2gtk::WebView) {
+    gtk::init().unwrap();
+    let view = || webkit2gtk::WebView::with_context(&webkit2gtk::WebContext::new_ephemeral());
+    let (primary, child) = (view(), view());
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    container.pack_start(&primary, true, true, 0);
+    container.pack_start(&child, true, true, 0);
+    window.add(&container);
+    window.show_all();
+    assert!(overlay_primary(&primary));
+    assert!(overlay_child(&child));
+    (window, primary, child)
+}
+
+/// zerus-06hh0: Tao answers every main-window Show (a notification, Open in
+/// Zerus, the tray, a second start) with gtk_widget_show_all. That re-showed a
+/// hidden native child over another session's Activity. Xvfb only, like above.
+#[test]
+#[ignore = "requires a private D-Bus, Xvfb and HOME/XDG/TMPDIR"]
+fn a_main_window_show_never_reveals_a_hidden_native_child() {
+    let (window, primary, child) = mounted();
+    assert!(!child.is_visible(), "mount leaves the child hidden");
+    window.show_all();
+    assert!(!child.is_visible(), "a Show while shown revealed the child");
+    window.hide();
+    window.show_all();
+    assert!(!child.is_visible(), "a Show after Close revealed the child");
+    assert!(primary.is_visible());
+}
+
+/// Placement is the only way the child appears, at its frame. A hide on a
+/// session or tab switch (Tauri's Webview::hide) survives later Shows, and
+/// a child placed for its own Native UI tab stays shown across them.
+#[test]
+#[ignore = "requires a private D-Bus, Xvfb and HOME/XDG/TMPDIR"]
+fn only_placement_shows_the_child_and_a_hide_survives_main_window_shows() {
+    let (window, _primary, child) = mounted();
+    assert!(place_widget(&child, 12.0, 34.0, 300.0, 200.0));
+    assert!(child.is_visible(), "placement did not show the child");
+    assert_eq!((child.margin_start(), child.margin_top()), (12, 34));
+    assert_eq!(child.size_request(), (300, 200));
+    window.hide();
+    window.show_all();
+    assert!(
+        child.is_visible(),
+        "the placed child lost its own visibility"
+    );
+    child.hide();
+    for _ in 0..2 {
+        window.show_all();
+        assert!(!child.is_visible(), "a Show undid the switch's hide");
+        window.hide();
+    }
+    let detached = webkit2gtk::WebView::with_context(&webkit2gtk::WebContext::new_ephemeral());
+    assert!(!place_widget(&detached, 0.0, 0.0, 10.0, 10.0));
+    assert!(
+        !detached.is_visible(),
+        "a child outside the overlay was shown"
+    );
 }

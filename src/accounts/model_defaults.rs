@@ -1,6 +1,43 @@
 //! Per-account launch choices. Native configuration and running sessions stay owned by the agent.
 use super::*;
 use std::io::Read;
+use serde_json::value::RawValue;
+
+/// Read entries leniently and keep each untouched JSON value verbatim. A
+/// future shape for the whole field is also retained, but cannot be edited.
+#[derive(Default)]
+pub(super) struct Stored {
+    entries: BTreeMap<String, Box<RawValue>>,
+    opaque: Option<Box<RawValue>>,
+}
+impl Stored {
+    pub(super) fn is_empty(&self) -> bool {
+        self.opaque.is_none() && self.entries.is_empty()
+    }
+    fn editable(&mut self) -> Result<&mut BTreeMap<String, Box<RawValue>>> {
+        if self.opaque.is_some() {
+            return Err(Error::new(1, "This build cannot edit the saved model defaults format."));
+        }
+        Ok(&mut self.entries)
+    }
+}
+impl Serialize for Stored {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match &self.opaque {
+            Some(raw) => raw.serialize(serializer),
+            None => self.entries.serialize(serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for Stored {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        Ok(match serde_json::from_str(raw.get()) {
+            Ok(entries) => Self { entries, opaque: None },
+            Err(_) => Self { entries: BTreeMap::new(), opaque: Some(raw) },
+        })
+    }
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,7 +48,29 @@ pub(super) struct Defaults {
     effort: String,
 }
 fn supported(provider: &str) -> bool {
-    ["codex", "claude", "kimi"].contains(&provider)
+    ["codex", "claude", "kimi", "dsh"].contains(&provider)
+}
+/// DeepSeek's native reasoning efforts. Saving narrows them to the chosen
+/// model's catalog entry; an unknown stored value fails closed.
+const DSH_EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
+fn valid_effort(provider: &str, effort: &str) -> bool {
+    effort.is_empty()
+        || match provider {
+            "codex" | "claude" => [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ]
+            .contains(&effort),
+            "dsh" => DSH_EFFORTS.contains(&effort),
+            _ => false,
+        }
+}
+/// DeepSeek selects a native route as `provider/model`, with exactly one slash.
+fn valid_model(provider: &str, model: &str) -> bool {
+    safe(model)
+        && (provider != "dsh"
+            || model.split_once('/').is_some_and(|(route, id)| {
+                !route.is_empty() && !id.is_empty() && !id.contains('/')
+            }))
 }
 fn safe(value: &str) -> bool {
     !value.is_empty()
@@ -26,29 +85,50 @@ fn provider_for<'a>(catalog: &'a Catalog, id: &'a str) -> Option<&'a str> {
         catalog.profiles.get(id).map(|p| p.provider.as_str())
     }
 }
-pub(super) fn validate_catalog(catalog: &Catalog) -> Result<()> {
-    for (id, value) in &catalog.model_defaults {
-        let provider = provider_for(catalog, id).unwrap_or("");
-        if !supported(provider)
-            || !safe(&value.model)
-            || (!value.effort.is_empty()
-                && (!["codex", "claude"].contains(&provider)
-                    || ![
-                        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-                    ]
-                    .contains(&value.effort.as_str())))
-        {
-            return Err(Error::new(1, "Invalid account model defaults."));
-        }
+fn validate(provider: &str, value: &Defaults) -> Result<()> {
+    if !supported(provider)
+        || !valid_model(provider, &value.model)
+        || !valid_effort(provider, &value.effort)
+    {
+        return Err(Error::new(1, "Invalid account model defaults."));
     }
     Ok(())
 }
+struct Choice {
+    defaults: Defaults,
+    status: &'static str,
+    reason: Option<&'static str>,
+}
+fn saved(catalog: &Catalog, id: &str) -> Choice {
+    let inherited = || Choice { defaults: Defaults::default(), status: "inherited", reason: None };
+    let ignored = |reason| Choice { defaults: Defaults::default(), status: "ignored", reason: Some(reason) };
+    if catalog.model_defaults.opaque.is_some() {
+        return ignored("This build does not support the saved model defaults format; it was kept unchanged.");
+    }
+    let Some(raw) = catalog.model_defaults.entries.get(id) else { return inherited(); };
+    let provider = provider_for(catalog, id).unwrap_or("");
+    if !supported(provider) {
+        return ignored("This build does not support model defaults for this agent; the entry was kept unchanged.");
+    }
+    let Ok(defaults) = serde_json::from_str::<Defaults>(raw.get()) else {
+        return ignored("This build does not support the saved model defaults fields; the entry was kept unchanged.");
+    };
+    if validate(provider, &defaults).is_err() {
+        return ignored("This build cannot validate the saved model or effort; the entry was kept unchanged.");
+    }
+    Choice { defaults, status: "saved", reason: None }
+}
+fn project(row: &mut Value, catalog: &Catalog, id: &str, key: &str) {
+    let choice = saved(catalog, id);
+    row[key] = json!(choice.defaults);
+    row["model_defaults_status"] = json!(choice.status);
+    if let Some(reason) = choice.reason { row["model_defaults_reason"] = json!(reason); }
+}
 pub(super) fn describe(row: &mut Value, catalog: &Catalog) {
-    let id = row["id"].as_str().unwrap_or("");
+    let id = row["id"].as_str().unwrap_or("").to_owned();
     let provider = row["provider"].as_str().unwrap_or("");
-    let defaults = catalog.model_defaults.get(id).cloned().unwrap_or_default();
     row["model_defaults_supported"] = json!(supported(provider));
-    row["model_defaults"] = json!(defaults);
+    project(row, catalog, &id, "model_defaults");
 }
 fn native(provider: &str, home: &Path) -> Defaults {
     let mut text = String::new();
@@ -115,30 +195,29 @@ pub(super) fn inspect(config: &Config, id: &str) -> Result<Value> {
             "This agent manages model defaults in its native settings.",
         ));
     }
-    let mut result = if profile.provider == "dsh" {
-        let mut result = crate::state::dsh::account_models(&home);
-        if result["models"].as_array().is_some_and(|models| models.is_empty()) {
-            let fallback = inspection::dsh(&home);
-            if fallback["models"].as_array().is_some_and(|models| !models.is_empty()) {
-                result["models"] = fallback["models"].clone();
-                result["truncated"] = json!(false);
-                result.as_object_mut().unwrap().remove("reason");
-            }
+    let mut result = models(&profile.provider, &home);
+    // WhiteWh fork: a host that lists no models yet falls back to what the
+    // account's own files show.
+    if profile.provider == "dsh" && result["models"].as_array().is_some_and(|models| models.is_empty()) {
+        let fallback = inspection::dsh(&home);
+        if fallback["models"].as_array().is_some_and(|models| !models.is_empty()) {
+            result["models"] = fallback["models"].clone();
+            result["truncated"] = json!(false);
+            result.as_object_mut().unwrap().remove("reason");
         }
-        result
+    }
+    // DeepSeek reports its native default (agent-default-model) with its catalog.
+    let provider_defaults = if profile.provider == "dsh" {
+        result["provider_defaults"].take()
     } else {
-        crate::state::account_models(&profile.provider, &home)
+        json!(native(&profile.provider, &home))
     };
     result["account_id"] = json!(id);
     result["provider"] = json!(profile.provider);
     result["revision"] = json!(revision(&bytes));
-    result["defaults"] = json!(catalog.model_defaults.get(id).cloned().unwrap_or_default());
-    result["provider_defaults"] = json!(if profile.provider == "dsh" {
-        Defaults::default()
-    } else {
-        native(&profile.provider, &home)
-    });
-    result["effort_supported"] = json!(["codex", "claude", "dsh"].contains(&profile.provider.as_str()));
+    project(&mut result, &catalog, id, "defaults");
+    result["provider_defaults"] = provider_defaults;
+    result["effort_supported"] = json!(effort_supported(&profile.provider));
     Ok(result)
 }
 pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> {
@@ -158,18 +237,22 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
     if !supported(&profile.provider) || catalog.hidden_profiles.contains(id) {
         return Err(Error::new(
             1,
-            "Choose an available Codex, Claude or Kimi account.",
+            "Choose an available Codex, Claude, Kimi or DeepSeek account.",
         ));
     }
     if model.is_empty() {
         if !effort.is_empty() {
             return Err(Error::new(1, "Choose a model before setting effort."));
         }
-        catalog.model_defaults.remove(id);
+        catalog.model_defaults.editable()?.remove(id);
     } else {
-        let models = crate::state::account_models(&profile.provider, &home);
+        let models = models(&profile.provider, &home);
         let selected=models["models"].as_array().into_iter().flatten().find(|entry|entry["id"]==model)
-            .ok_or_else(||Error::new(1,"The model is unavailable in this account's native catalog. Open the agent once and refresh."))?;
+            .ok_or_else(||Error::new(1,if profile.provider=="dsh" {
+                "The model is unavailable in the running DeepSeek host's catalog. Start or resume a DeepSeek session and refresh."
+            } else {
+                "The model is unavailable in this account's native catalog. Open the agent once and refresh."
+            }))?;
         if !effort.is_empty()
             && (!effort_supported(&profile.provider)
                 || !selected["effort_options"]
@@ -181,22 +264,37 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
                 "Effort is unavailable for the selected model.",
             ));
         }
-        catalog.model_defaults.insert(
-            id.into(),
-            Defaults {
-                model: model.into(),
-                effort: effort.into(),
-            },
-        );
+        let defaults = Defaults { model: model.into(), effort: effort.into() };
+        validate(&profile.provider, &defaults)?;
+        let raw = serde_json::value::to_raw_value(&defaults).map_err(|e| Error::new(1, e.to_string()))?;
+        catalog.model_defaults.editable()?.insert(id.into(), raw);
     }
-    validate_catalog(&catalog)?;
     if !dry {
         save(config, &catalog)?;
     }
     list(config)
 }
 fn effort_supported(provider: &str) -> bool {
-    ["codex", "claude"].contains(&provider)
+    ["codex", "claude", "dsh"].contains(&provider)
+}
+/// The account's model catalog. DeepSeek's comes from the resident host's
+/// read-only catalog method; reading Accounts never starts a host.
+fn models(provider: &str, home: &Path) -> Value {
+    if provider == "dsh" {
+        crate::state::dsh_account_models(home)
+    } else {
+        crate::state::account_models(provider, home)
+    }
+}
+/// The saved DeepSeek launch selection as (provider/model, effort). The launch
+/// applies it to a new session through the host's scoped settings method.
+pub(super) fn launch_selection(config: &Config, provider: &str) -> Result<Option<(String, String)>> {
+    if provider != "dsh" {
+        return Ok(None);
+    }
+    let catalog = decode(&read(config)?)?;
+    let choice = saved(&catalog, "native-dsh");
+    Ok((choice.status == "saved").then_some((choice.defaults.model, choice.defaults.effort)))
 }
 pub(super) fn apply(
     config: &Config,
@@ -210,13 +308,14 @@ pub(super) fn apply(
         account.into()
     };
     let catalog = decode(&read(config)?)?;
-    let Some(defaults) = catalog.model_defaults.get(&id) else {
+    let choice = saved(&catalog, &id);
+    if choice.status != "saved" {
         return Ok(());
-    };
+    }
     if provider_for(&catalog, &id) != Some(provider) {
         return Err(Error::new(1, "The account belongs to another provider."));
     }
-    apply_argv(provider, defaults, argv);
+    apply_argv(provider, &choice.defaults, argv);
     Ok(())
 }
 fn apply_argv(provider: &str, defaults: &Defaults, argv: &mut Vec<String>) {
@@ -267,6 +366,88 @@ fn apply_argv(provider: &str, defaults: &Defaults, argv: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deepseek_defaults_are_one_native_route_and_a_native_effort() {
+        let accepted = |id: &str, model: &str, effort: &str| {
+            let defaults = Defaults { model: model.into(), effort: effort.into() };
+            let bytes = serde_json::to_vec(&json!({"model_defaults":{(id):&defaults}})).unwrap();
+            let catalog = decode(&bytes).unwrap();
+            let allowed = validate(provider_for(&catalog, id).unwrap_or(""), &defaults).is_ok();
+            let choice = saved(&catalog, id);
+            assert_eq!(choice.status, if allowed { "saved" } else { "ignored" });
+            if allowed {
+                assert_eq!((choice.defaults.model.as_str(), choice.defaults.effort.as_str()), (model, effort));
+            }
+            allowed
+        };
+        let route = "deepseek-official/deepseek-flash";
+        assert!(accepted("native-dsh", route, ""));
+        for effort in DSH_EFFORTS {
+            assert!(accepted("native-dsh", route, effort));
+        }
+        for model in ["deepseek-flash", "/deepseek-flash", "deepseek-official/", "a/b/c", "-a/b", ""] {
+            assert!(!accepted("native-dsh", model, "max"), "{model}");
+        }
+        for effort in ["medium", "xhigh", "ultra", "none", "MAX", " max"] {
+            assert!(!accepted("native-dsh", route, effort), "{effort}");
+        }
+        // Other providers keep their own effort vocabularies.
+        assert!(accepted("native-codex", "fixture-model", "high"));
+        assert!(!accepted("native-codex", "fixture-model", "off"));
+        assert!(!accepted("native-kimi", "fixture-model", "high"));
+        assert!(!accepted("native-opencode", route, ""));
+        assert!(effort_supported("dsh") && supported("dsh"));
+    }
+    #[test]
+    fn reads_ignore_unusable_entries_and_round_trip_their_original_json() {
+        let future = r#"{ "route": ["future", 1.00, 1e+02], "effort": {"level":"new"} }"#;
+        let newer = r#"{ "model": "fixture-model", "effort": "future-effort" }"#;
+        let raw = format!(r#"{{"model_defaults":{{"native-future":{future},"native-kimi":{newer},
+            "native-codex":{{"model":"fixture-code","effort":"high"}},
+            "native-claude":{{"model":"fixture-claude","effort":"max"}}}}}}"#);
+        let catalog = decode(raw.as_bytes()).unwrap();
+        for id in ["native-future", "native-kimi"] {
+            let choice = saved(&catalog, id);
+            assert_eq!(choice.status, "ignored");
+            assert!(choice.reason.is_some());
+            assert!(choice.defaults.model.is_empty());
+        }
+        for (id, provider, model) in [("native-codex", "codex", "fixture-code"), ("native-claude", "claude", "fixture-claude")] {
+            let choice = saved(&catalog, id);
+            assert_eq!(choice.status, "saved");
+            let mut argv = vec![provider.into()];
+            apply_argv(provider, &choice.defaults, &mut argv);
+            assert!(argv.contains(&model.to_owned()));
+        }
+        let output = serde_json::to_string_pretty(&catalog).unwrap();
+        assert!(output.contains(future));
+        assert!(output.contains(newer));
+    }
+
+    #[test]
+    fn every_entry_shape_is_lenient_on_read_but_known_writes_are_strict() {
+        for value in [r#"{"model":"fixture","extra":true}"#, r#"{"model":42}"#,
+            r#"{"model":"fixture","effort":"future"}"#, r#"{"model":"-unsafe"}"#,
+            r#"{"model":"fixture","effort":null}"#, "null", "[]", "false", "42", r#""future-format""#] {
+            let raw = format!(r#"{{"model_defaults":{{"native-codex":{value}}}}}"#);
+            let catalog = decode(raw.as_bytes()).unwrap();
+            assert_eq!(saved(&catalog, "native-codex").status, "ignored", "{value}");
+            assert!(serde_json::to_string(&catalog).unwrap().contains(value));
+        }
+        for value in ["null", "[]", "42", r#""future-format""#] {
+            let raw = format!(r#"{{"model_defaults":{value}}}"#);
+            let mut catalog = decode(raw.as_bytes()).unwrap();
+            assert_eq!(saved(&catalog, "native-codex").status, "ignored");
+            assert!(catalog.model_defaults.editable().is_err());
+            assert!(serde_json::to_string(&catalog).unwrap().contains(value));
+        }
+        for (provider, model, effort) in [("codex", "-unsafe", ""), ("codex", "fixture", "future"),
+            ("kimi", "fixture", "high"), ("unknown", "fixture", ""), ("claude", "", "")] {
+            assert!(validate(provider, &Defaults { model: model.into(), effort: effort.into() }).is_err());
+        }
+        assert!(decode(br#"{"model_defaults":{"native-codex":broken}}"#).is_err());
+    }
+
     #[test]
     fn native_choices_and_prompt_text_keep_their_meaning() {
         let defaults = Defaults {

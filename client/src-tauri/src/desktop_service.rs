@@ -77,6 +77,7 @@ pub(crate) mod task_message_inputs;
 pub(crate) mod task_start_reconcile;
 use catalog::catalog_loop;
 mod details;
+mod fleet_requests;
 pub mod frontend;
 mod mode_transition;
 pub(crate) mod notification_controls;
@@ -1134,6 +1135,8 @@ impl Service {
     /// Nudge a non-live catalog, preserving healthy and already-pending reads.
     /// The local Refresh entry point also reaches halted peers: service mode
     /// has no legacy GUI peer listing for the tray/UI Refresh loops to visit.
+    /// The service's own supervisors of those computers end their restart
+    /// waits too (see [`Self::nudge_fleet`]).
     pub fn reconnect(&self, computer: &str) -> bool {
         if self.shared.stopped.load(Ordering::Acquire) {
             return false;
@@ -1144,6 +1147,7 @@ impl Service {
             self.retry();
             return true;
         }
+        self.nudge_fleet(fleet_requests::targets(&snapshot, computer));
         let mut dirty = self
             .shared
             .dirty

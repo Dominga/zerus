@@ -407,6 +407,30 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
+### Smokes and the single-instance guard
+
+A switch-identity build (`com.hgdev.hgs-tray`) keeps its single-instance guard at
+`/tmp/com.hgdev.hgs-tray-<uid>` (`src-tauri/src/instance_guard.rs`), whatever
+`HOME`, `TMPDIR` or XDG say, so that a changed environment cannot start a second
+GUI. A private test start outside isolation therefore reaches the running GUI.
+Two rules keep tests away from it (zerus-5a99f):
+
+- A measurement or test start (`ZERUS_CLIENT_PERF` non-empty) never forwards to
+  a GUI it did not start. If the guard is held, or another GUI answers at its
+  profile socket, it exits with code 3 and a message; nothing is sent. It never
+  waits for the service socket. Ordinary starts keep the single-instance rule
+  and forward as before.
+- Such a start may name a private guard root, `ZERUS_CLIENT_GUARD_ROOT=<absolute
+  0700 directory owned by the user>`, with the same ownership checks. Without
+  `ZERUS_CLIENT_PERF` the variable is ignored. On Windows a measurement start
+  fails while the canonical GUI runs; there is no private root.
+
+Every app-starting smoke in `client/scripts` starts through
+`scripts/gui_sandbox.py`: bwrap with a private `/tmp`, `/run/user/<uid>`,
+network and IPC, plus a refusal to start the app while a canonical guard is
+reachable. There is no unsandboxed mode. `scripts/test_gui_sandbox.py` requires
+every script that starts a display to use it or to state why not.
+
 ## New session
 
 The New session dialog (`src/store/newSession.ts`, `src/ui/sessions/NewSessionDialog.tsx`)
@@ -1416,6 +1440,9 @@ opener, keeps same-origin popups in place, and refuses new native windows.
 User-initiated `window.open` uses the same guarded browser handoff.
 Downloads require the exact foreground session and a native Save dialog.
 Its GTK overlay follows the measured frame and hides before menus or dialogs.
+Only that placement shows the child: it ignores `gtk_widget_show_all`, which
+Tao runs on every main-window Show, so a notification, Open in Zerus, the tray
+or a second start never reveals a hidden child over another session or tab.
 The GLib FFI block replaces Wry's single earlier navigation-policy
 handler on that owned child before its first URL load; an unexpected handler
 graph uses browser fallback. The primary view's policy is unchanged.
@@ -1430,14 +1457,21 @@ python3 client/scripts/native-ui-smoke.py \
   --output artifacts/validation/native-ui-proof
 ```
 
-The script always creates a private D-Bus, Xvfb and HOME/XDG/TMPDIR/TMUX_TMPDIR
-from a fresh environment, and uses only a local HTTP fixture and fake CLI.
+Like every app-starting smoke, the script runs only through
+`scripts/gui_sandbox.py` (bwrap with a private `/tmp`, `/run/user`, network and
+IPC), and it refuses to start the app while a canonical GUI guard
+(`/tmp/com.hgdev.hgs-tray-<uid>`) is reachable. That guard ignores HOME and
+TMPDIR, so an unsandboxed start forwards to the person's running GUI. Inside, it
+creates a private D-Bus, Xvfb and HOME/XDG/TMPDIR/TMUX_TMPDIR from a fresh
+environment, and uses only a local HTTP fixture and fake CLI.
 It records IPC and private-protocol refusals, native pointer gestures,
 download cancellation and exact saved bytes, profile eviction, explicit
-browser fallback, resize and activation, then the complete Phase 4 smoke.
-The ignored `native_ui::linux::tests` case separately qualifies the expected
-handler graph, primary-handler preservation and reload on that same private
-bus/display; run it explicitly with `--ignored --test-threads=1`.
+browser fallback, resize and activation, a hidden child staying hidden under
+Activity and another session across every main-window Show, then the complete
+Phase 4 smoke. The ignored `native_ui::linux::tests` cases separately qualify
+the expected handler graph, primary-handler preservation and reload, and the
+overlay's show rule, on a private bus/display; run each explicitly with
+`--ignored --exact`, one test per process.
 
 `scripts/make-fixture.py` deterministically generates the replay, including the
 warm and cold cache states, a paused resumable session, JSON and one-pixel PNG
@@ -1806,6 +1840,26 @@ batch is one reactive transaction: rows reconcile by `computer + "\n" + key`, so
 unchanged rows keep their identity and DOM. Only the selected session's Activity
 is followed (newest 100 events); scrolling to the top reads earlier events with
 `after`.
+
+Switching sessions or returning to the Activity tab restores the visible message
+and its viewport offset. A view left at the end continues following new events;
+Latest and Enter on a session row explicitly return to the end. Reading metadata
+is kept for 64 recently visited Activity targets in this window, including child
+targets separately. It contains at most eight row anchors and bounded visible
+disclosure state per target, never transcripts or DOM. If a saved row has left
+the initial tail, Activity requests a window around that message once by its
+saved journal cursor, never repeatedly reading older pages. Activity never
+restores an absolute scroll offset, because the transcript around a saved row
+can change while it is away. If none of the saved rows return after that one
+read, the nearest surviving message by journal sequence at or before the saved
+top row is placed at the top of the view, which stays released from the end. If
+no such message remains (a cleared or fully expired transcript), Activity goes
+to Latest and follows the end.
+
+The synthetic `scripts/activity-position-smoke.html` fixture exercises this with
+the real virtualizer and Markdown; serve it with Vite and run it through
+`scripts/menu-smoke.py --title "Zerus Activity reading position regression" --url
+http://127.0.0.1:<port>/scripts/activity-position-smoke.html` on its private Xvfb.
 
 While the window is hidden or minimised the pump asks for nothing and schedules
 no frame; a batch that arrives meanwhile waits, the Rust side keeps folding

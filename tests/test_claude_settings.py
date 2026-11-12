@@ -34,7 +34,9 @@ def show():
             screen += ('   ❯ ' if i == selected else '     ') + str(i + 1) + '. ' + mark.ljust(25) + description + '\r\n'
         name = LEVELS[level]
         screen += '\r\n   ' + GLYPHS[name] + ' ' + ('xHigh' if name == 'xhigh' else name.title()) + ' effort ←/→ to adjust\r\n\r\n'
-        screen += '   Enter to set as default · s to use this session only · Esc to cancel'
+        screen += '   Enter to set as default'
+        if not (root / 'no-session-only').exists(): screen += ' · s to use this session only'
+        screen += ' · Esc to cancel'
     elif stage == 'dialog':
         hook = dialog == 'hook'
         screen = '\x1b[2J\x1b[12;1H' + '▔' * 100 + '\r\n   Switch model?\r\n   ' + ('A PreModelSwitch hook asked you to confirm' if hook else 'Your next response will be slower and use more tokens')
@@ -75,6 +77,8 @@ def key(value):
         stage = 'picker'; text = ''; selected = current; level = LEVELS.index(effort)
     elif value[:1] != b'\x1b' and value != b'\r':
         text += value.decode('utf8', 'replace')
+        if text == '/model' and (root / 'replacement-picker').exists():
+            stage = 'picker'; text = ''; selected = current; level = LEVELS.index(effort)
     show()
 def external(*args):
     if (root / 'screen').exists(): os.write(1, (root / 'screen').read_bytes())
@@ -168,7 +172,7 @@ class ClaudeSettings(unittest.TestCase):
         info = self.inspect()
         self.assertTrue(info['settings_change_supported'], info['settings_change_reason'])
         self.assertEqual([m['id'] for m in info['model_options']],
-                         ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'])
+                         ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8'])
         self.assertEqual((info['model'], info['effort']), ('claude-opus-5-5', 'medium'))
         self.assertIn('re-reads the full history', info['settings_change_notice'])
         self.assertTrue(info['effort_change_supported'], info['effort_change_reason'])
@@ -226,6 +230,22 @@ class ClaudeSettings(unittest.TestCase):
         self.assertNotIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
         self.assertEqual(self.settings(self.payload('claude-sonnet-5-5', 'high'))['status'], 'applied')
         self.assertEqual(self.inspect()['model'], 'claude-sonnet-5-5')
+
+    def test_picker_without_session_only_action_cancels_before_selection(self):
+        (self.root / 'no-session-only').touch()
+        error = self.settings(self.payload('claude-sonnet-5-5', 'high'), success=False)
+        self.assertIn('does not offer a session-only choice', error)
+        self.assertEqual(self.received(), b'/model\r\x1b')
+        self.assertNotIn('Select model', self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.assertDefaultsUntouched()
+
+    def test_picker_replacing_the_command_is_not_cancelled_as_ours(self):
+        (self.root / 'replacement-picker').touch()
+        error = self.settings(self.payload('claude-sonnet-5-5', 'high'), success=False)
+        self.assertIn('provider did not confirm the expected change', error)
+        self.assertEqual(self.received(), b'/model', 'cleanup cancelled a picker we never opened')
+        self.assertIn('Select model', self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.assertDefaultsUntouched()
 
     def test_unconfirmed_change_is_not_replayed(self):
         (self.root / 'freeze').touch()

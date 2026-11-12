@@ -15,7 +15,7 @@ import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } fr
 import { createOverview, mainSessions, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
-import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, balanceTitle, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
 import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, metricsLoading, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
 import { tr } from "../../i18n";
@@ -107,7 +107,7 @@ function AccountCard(props: { a: Account; now: number }) {
         <span class="ell muted">{accountIdentity(props.a)}</span>
         <span class="grow" />
         <span class="ov-ausage tabular">
-          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} />
+          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} summaryTitle={balanceTitle(usage())} />
           <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
         </span>
       </span>

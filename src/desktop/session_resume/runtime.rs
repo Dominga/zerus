@@ -416,6 +416,13 @@ impl Runtime {
                 self.exclusion.as_ref(),
             )?;
             let consent = Consent::admitted(verified, lease.clone(), self.chain)?;
+            if original.is_none() {
+                // Invalid/incomplete accounting is not a capacity proof.
+                proof = Proof::Unprovable;
+                let capacity = ledger::capacity(&tx, &consent.original)?;
+                proof = Proof::NoRow;
+                ensure!(capacity, "session resume capacity unavailable");
+            }
             // From here on nothing proves the request was not admitted.
             proof = Proof::Admitting;
             let row = ledger::admit(
@@ -1230,6 +1237,14 @@ impl Runtime {
         self.wait = wait;
         self.poll_every = every;
         self.chain = chain;
+    }
+    /// `Some(None)` proves a live queued consent whose own turn has not
+    /// started its clock; `None` means no such original was admitted.
+    #[cfg(test)]
+    pub(super) fn fixture_chain_started(&self, id: &str) -> Option<Option<Instant>> {
+        self.admitted
+            .get(id)
+            .map(|consent| consent.fixture_chain_started())
     }
     #[cfg(test)]
     pub(super) fn fixture_mac_fence(&mut self, on: bool) {

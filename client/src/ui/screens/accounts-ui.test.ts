@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts, identityFields } from "./accounts-ui";
 import { NOW, projected, usageOf } from "../../store/testing";
 import { dayTime } from "../lib/usage";
 import { emptyAccounts, type Account, type Profile } from "../../types";
@@ -55,10 +55,10 @@ describe("accounts page", () => {
     expect(accountSignState(account([expired, signedIn], "mostly-in"), "*")).toBe("expired");
     expect(signedCounts(view, "*")).toEqual({ in: 1, out: 3 });
     expect(signedCounts(view, "studio")).toEqual({ in: 0, out: 2 });
-    expect(visibleAccounts(view, "*", "in").map((a) => a.key)).toEqual(["in"]);
-    expect(visibleAccounts(view, "*", "out").map((a) => a.key)).toEqual(["out", "expired", "mixed"]);
-    expect(visibleAccounts(view, "studio", "in")).toEqual([]);
-    expect(visibleAccounts(view, "*", "all")).toHaveLength(4);
+    expect(visibleAccounts(view, "*", { sign: "in" }).map((a) => a.key)).toEqual(["in"]);
+    expect(visibleAccounts(view, "*", { sign: "out" }).map((a) => a.key)).toEqual(["expired", "mixed", "out"]);
+    expect(visibleAccounts(view, "studio", { sign: "in" })).toEqual([]);
+    expect(visibleAccounts(view, "*", { sign: "all" })).toHaveLength(4);
     // The empty result says "No accounts match" only when accounts exist at all.
     expect(noAccountsMatch(view)).toBe(true);
     expect(noAccountsMatch(emptyAccounts())).toBe(false);
@@ -85,6 +85,22 @@ describe("accounts page", () => {
     expect(memberStateLabel("signed-out")).toBe("Sign-in needed");
   });
 
+  it("keeps reported identity visible even when it repeats the editable title", () => {
+    const withIdentity = (label: string, identity: Account["usage"]["identity"]) => ({
+      ...account([member()]), label, usage: usageOf({ identity }),
+    });
+    const empty = { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" };
+    expect(identityFields(withIdentity("Work", empty))).toEqual({ name: "", email: "", organization: "", plan: "", signIn: "" });
+    expect(identityFields(withIdentity("person@example.test", empty)).email).toBe("");
+    expect(identityFields(withIdentity("person@example.test", { ...empty, email: " person@example.test " })).email).toBe("person@example.test");
+    expect(identityFields(withIdentity("Work", { ...empty, email: "work@example.test", auth_method: "none" })))
+      .toEqual({ name: "", email: "work@example.test", organization: "", plan: "", signIn: "" });
+    expect(identityFields(withIdentity("Work", { ...empty, name: " Ада 例 ", email: "ada@example.test", organization: "Организация 例", plan: "Team", auth_method: "passkey" })))
+      .toEqual({ name: "Ада 例", email: "ada@example.test", organization: "Организация 例", plan: "Team", signIn: "passkey" });
+    expect(identityFields(withIdentity("ada@example.test", { ...empty, name: " Work ", email: "ADA@example.test", organization: "work" })))
+      .toEqual({ name: "Work", email: "ADA@example.test", organization: "work", plan: "", signIn: "" });
+  });
+
   it("words the summary as Qt does", () => {
     const view = { ...emptyAccounts(), snapshot: true, loaded_machines: 2, pending: 3 };
     expect(summaryLine(view, 1)).toBe("1 account, 2 machines loaded (Updating… 3 remaining)");
@@ -109,9 +125,50 @@ describe("accounts page", () => {
     const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
     const screen = fs.readFileSync(new URL("./Accounts.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
     expect(screen).toContain('aria-label={tr("Sign-in state")}');
-    expect(screen).toContain("visibleAccounts(view(), accountMachine(), signFilter())");
+    expect(screen).toContain("visibleAccounts(view(), accountMachine(), { query: query(), provider: provider(), sort: sort(), sign: signFilter() })");
     expect(screen).toContain("<SignPill state={sign()} />");
-    expect(screen).toContain('noAccountsMatch(view()) ? tr("No accounts match")');
+    expect(screen).toContain('filtered() && noAccountsMatch(view()) ? tr("No accounts match these filters.")');
     expect(screen).toContain('setSignFilter("all"); setAccountMachine("*")');
+  });
+});
+
+describe("account list sorting and filters", () => {
+  const row = (key: string, provider: string, label: string, host = "workstation"): Account => ({
+    ...account([member({ key: `${host}\u001f${key}`, host, machine: host, provider })], key), provider, label,
+  });
+  const view = (...accounts: Account[]) => ({ ...emptyAccounts(), accounts });
+
+  it("groups agents and alphabetizes each group by default without changing catalog order", () => {
+    const original = [row("k", "kimi", "Alpha"), row("cz", "codex", "Zulu"), row("clz", "claude", "Zulu"), row("ca", "codex", "alpha"), row("cla", "claude", "Alpha")];
+    const catalog = view(...original);
+    expect(visibleAccounts(catalog, "*").map((a) => a.key)).toEqual(["cla", "clz", "ca", "cz", "k"]);
+    expect(catalog.accounts).toEqual(original);
+    expect(visibleAccounts(view(...original.toReversed()), "*").map((a) => a.key)).toEqual(["cla", "clz", "ca", "cz", "k"]);
+  });
+
+  it("uses a deterministic key tie-break and natural account-number ordering", () => {
+    const catalog = view(row("ten", "codex", "Account 10"), row("b", "codex", "account 2"), row("a", "codex", "Account 2"));
+    expect(visibleAccounts(catalog, "*").map((a) => a.key)).toEqual(["a", "b", "ten"]);
+  });
+
+  it("offers name-only order without losing or merging equal labels from different agents", () => {
+    const catalog = view(row("cla", "claude", "Zulu"), row("co", "codex", "Alpha"), row("ki", "kimi", "Alpha"));
+    expect(visibleAccounts(catalog, "*", { sort: "name" }).map((a) => a.key)).toEqual(["co", "ki", "cla"]);
+  });
+
+  it("combines machine, provider and case-insensitive text filters", () => {
+    const catalog = view(row("one", "codex", "Work", "studio"), row("two", "claude", "Work", "studio"), row("three", "codex", "Work", "laptop"));
+    expect(visibleAccounts(catalog, "studio", { provider: "codex", query: "  wOrK  " }).map((a) => a.key)).toEqual(["one"]);
+    expect(visibleAccounts(catalog, "studio", { provider: "kimi" })).toEqual([]);
+    expect(visibleAccounts(catalog, "*", { query: "not found" })).toEqual([]);
+    expect(visibleAccounts(catalog, "*", { provider: "*", query: " " })).toHaveLength(3);
+  });
+
+  it("searches reported identity and machine labels without adding missing catalog accounts", () => {
+    const known = row("known", "kimi", "Personal", "studio");
+    known.usage = usageOf({ identity: { ...known.usage.identity, name: "Ада Example", email: "office@example.test", organization: "Research" } });
+    const catalog = view(known);
+    for (const query of ["АДА", "OFFICE@", "research", "studio", "Kimi"]) expect(visibleAccounts(catalog, "*", { query })).toEqual([known]);
+    expect(visibleAccounts(view(), "*", { query: "office@" })).toEqual([]);
   });
 });

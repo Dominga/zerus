@@ -117,6 +117,8 @@ export interface Session {
   /** Supervised by a live parent and holding no request only the person can answer. */
   quiet?: boolean;
   conversationId?: string;
+  /** Terminal staging preserves an explicitly reported empty conversation. */
+  terminalConversationId?: string;
   /** Exact/fallback device-local density identity, calculated in Rust. */
   compactKeys?: [string, string];
   // What the guarded actions read, copied flat from the core's row: a nested

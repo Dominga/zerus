@@ -1,8 +1,7 @@
 import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
-import { clean as cleanPath } from "../sessions/paths";
-import { absolute, of } from "../sessions/path-forms";
+import { absolute, clean as cleanPath, of, same } from "../sessions/paths";
 import { machineCards } from "../../store/machines";
 import { Icon } from "../lib/icons";
 import { FolderBrowserDialog } from "../components/FolderBrowser";
@@ -22,9 +21,9 @@ export default function ProjectFolderDialog(props: { prompt: FolderPrompt; busy:
   const [browsing, setBrowsing] = createSignal(false);
   const machine = () => place()?.computer || place()?.host || "";
   // N6: the path takes the selected computer's form (a local Windows drive or a UNC share names a folder too).
-  const style = () => of(machineCards[computer()]?.platform, computer() === "", "posix");
+  const style = () => place()?.style ?? of(machineCards[computer()]?.platform, computer() === "", "posix");
   const clean = (value: string) => cleanPath(value.trim(), style());
-  const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && clean(f.path) === clean(path()));
+  const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && same(clean(f.path), clean(path()), style()));
   const valid = () => !!place() && absolute(path().trim(), style()) && !/[\r\n\0]/u.test(path()) && !duplicate();
   let dialog!: HTMLDialogElement;
   onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[role="combobox"], input')?.focus()); });

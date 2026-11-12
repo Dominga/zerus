@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEffect, createRoot, on } from "solid-js";
+import { createStore } from "solid-js/store";
 import { machineMeta } from "./testing";
 import { fleetKey } from "./newSession";
 import { folder, NOT_LOADED, project, settle, setup, type Json, type World } from "./newSessionFake";
@@ -687,6 +689,37 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
     expect(fleetKey({ "": card }, ["mac"], (c) => c !== "mac")).not.toBe(fleetKey({ "": card }, ["mac"], () => true));
   });
 
+  it("the fleet key changes when only a peer platform arrives", () => {
+    const cards = { "": machineMeta("pc"), mac: machineMeta("mac", {}, { platform: null }) };
+    const before = fleetKey(cards, ["mac"], () => true);
+    expect(fleetKey(cards, ["mac"], () => true)).toBe(before);
+    cards.mac = machineMeta("mac", {}, { platform: "windows" });
+    expect(fleetKey(cards, ["mac"], () => true)).not.toBe(before);
+  });
+
+  it("republishes normalized rows and native form input when only the selected peer platform arrives", async () => {
+    await createRoot(async (dispose) => {
+      const [cards, setCards] = createStore({ "": machineMeta("pc"), mac: machineMeta("mac", {}, { platform: null }) });
+      const t = setup((w) => { w.cards = cards; w.projects = [project("work", "Work", [folder("main", "mac", "C:\\Work\\Main")], { is_default: true })]; });
+      createEffect(on(() => fleetKey(cards, ["mac"], () => true), () => t.store.fleetChanged(), { defer: true }));
+      try {
+        await t.open({ computer: "mac", agent: "codex" });
+        await t.choose("work");
+        const accountKeys = t.state().accounts.map((row) => row.key);
+        expect(t.state().style).toBe("posix");
+        setCards("mac", "platform", "windows");
+        await settle();
+        expect(t.state()).toMatchObject({ style: "windows", folderPath: "C:\\Work\\Main", accountId: "work" });
+        expect(t.state().accounts.map((row) => row.key)).toEqual(accountKeys);
+        const latestInput = t.world.of("newSessionForm").at(-1)!.args[0] as NewSessionFormInput;
+        expect(latestInput.form).toMatchObject({ style: "windows", path: "C:/Work/Main" });
+      } finally {
+        t.store.closeNewSession();
+        dispose();
+      }
+    });
+  });
+
   it("selectedHostTarget names a single peer filter only", () => {
     const t = setup();
     expect(t.store.selectedHostTarget()).toBe("");
@@ -947,6 +980,45 @@ describe("the child dialogs' answers (Task 4)", () => {
     expect(t.world.creating()).toEqual([]);
   });
 
+  it("publishes a remote Windows Browse choice immediately with its own style", async () => {
+    const t = setup((w) => { world(w); w.cards.mac = machineMeta("mac", {}, { platform: "windows" }); });
+    await t.open({ project: "work", computer: "mac" });
+    expect(t.state()).toMatchObject({ host: "mac", style: "windows" });
+    t.act.applyBrowsedFolder("mac", "work", "C:\\Work\\Project\\");
+    expect(t.state()).toMatchObject({ folderPath: "C:\\Work\\Project", style: "windows" });
+    expect(t.state().folders[t.state().folder].path).toBe("C:/Work/Project");
+    await settle();
+    let input = t.world.of("newSessionForm").at(-1)?.args[0] as NewSessionFormInput;
+    expect(input.form).toMatchObject({ path: "C:/Work/Project", style: "windows" });
+
+    t.act.applyBrowsedFolder("mac", "work", "\\\\server\\share\\Project");
+    expect(t.state().folderPath).toBe("\\\\server\\share\\Project");
+    expect(t.state().folders[t.state().folder].path).toBe("//server/share/Project");
+    await settle();
+    input = t.world.of("newSessionForm").at(-1)?.args[0] as NewSessionFormInput;
+    expect(input.form).toMatchObject({ path: "//server/share/Project", style: "windows" });
+    t.act.applyBrowsedFolder("", "work", "C:/Stale/Computer");
+    t.act.applyBrowsedFolder("mac", "docs", "C:/Stale/Project");
+    expect(t.state().folderPath).toBe("\\\\server\\share\\Project");
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("does not publish or cache an invalid remote Windows Browse choice", async () => {
+    const t = setup((w) => { world(w); w.cards.mac = machineMeta("mac", {}, { platform: "windows" }); });
+    await t.open({ project: "work", computer: "mac" });
+    const before = t.state().folderPath;
+    for (const chosen of ["relative", "C:Work", "\\Work", "\\\\?\\C:\\Work", "C:\\Work\\bad\n", "C:\\Work\\bad\0"]) {
+      t.act.applyBrowsedFolder("mac", "work", chosen);
+      expect(t.state().folderPath).toBe(before);
+      t.act.chooseComputer(t.state().computers.findIndex((c) => c.target === ""));
+      await settle();
+      t.act.chooseComputer(t.state().computers.findIndex((c) => c.target === "mac"));
+      await settle();
+      expect(t.state().folderPath).toBe(before);
+    }
+    expect(t.world.creating()).toEqual([]);
+  });
+
   it("Choose existing… sets None and selects the folder, only in its own context", async () => {
     const t = setup(world);
     await t.open({ project: "work", folder: "f1" });
@@ -1042,6 +1114,21 @@ describe("what the dialog view reads (Task 3)", () => {
     expect(await t.store.folderExists(f1)).toBe(false);
     expect(t.world.of("localFolderExists").map((c) => c.args)).toEqual([["/srv/a"]]);
     expect(t.store.newSession()).toBeUndefined();
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("opens and presents a remote Windows project folder with its own metadata", async () => {
+    const remote = folder("f2", "mac", "C:/Work/Project");
+    const t = setup((w) => {
+      w.cards.mac = machineMeta("mac", {}, { platform: "windows" });
+      w.projects = [project("work", "Work", [remote], { is_default: true })];
+    });
+    expect(t.store.folderLaunch(remote)).toEqual({ problem: "", shown: "C:\\Work\\Project", local: false });
+    expect(await t.store.folderExists(remote)).toBeUndefined();
+    expect(await t.store.openFolderSession("work", remote)).toBe("");
+    await settle();
+    expect(t.state()).toMatchObject({ host: "mac", style: "windows", folderPath: "C:\\Work\\Project" });
+    expect(t.world.of("localFolderExists")).toEqual([]);
     expect(t.world.creating()).toEqual([]);
   });
 

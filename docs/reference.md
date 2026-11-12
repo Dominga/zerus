@@ -246,11 +246,23 @@ unknown reference field.
 same URI and readable identity fields. Optional `--run ID --conversation ID`
 guards ensure a copy action still addresses the selected conversation.
 
-An agent obtains its own reference with `hgs self [--json]`. The caller must run
-inside a live tracked native agent: like an agent-originated send, the binding is
-proven through that agent's process ancestry, never through `HGS_SESSION` alone.
-The reply carries the current name after a rename, the `reference` fields and
-`provider`. It never routes to a peer and refuses `--dry-run`.
+An agent obtains its own reference with `hgs self [--json]`. Terminal agents are
+identified through their native process ancestry, never `HGS_SESSION` alone.
+DeepSeek and OpenCode tool shells already receive their native conversation ID
+as [`DSH_SESSION_ID`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/shell/shell-env/README.md)
+or [`OPENCODE_SESSION_ID`](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/shell.ts).
+Without a proven terminal caller, `self` resolves that claim against the native
+home and a live local binding. Its JSON reply distinguishes `identity_source`
+`process` from `claimed`, includes the durable `session_id`, and supplies
+`parent_identity` with the exact session, run and conversation for parent commands.
+The native lookup uses a derived index with authoritative rereads; its cold
+metadata scan is bounded to 5000 entries, 64 MiB and two seconds, and incomplete
+or ambiguous coverage refuses. A missing, stale, archived or unavailable native
+session refuses too. Current names follow renames. Native hosts need access to
+the same Zerus state/config paths; new OpenCode services retain only those two
+HGS path variables, never HGS session/run identity. `self` never routes to a peer
+and refuses `--dry-run`. Claimed identity never enters send/graph attribution,
+task ownership or permission proof.
 
 `hgs [@host] guide [send|wait|launch|stop]` prints compact instructions for
 agents that read, message, wait for, launch or stop other sessions. The text is
@@ -832,7 +844,14 @@ replacement GUI must respect their still-charged global generation.
 registration without running the agent. Use another exact account ID for an
 isolated profile. The report contains provider/account identifiers, configuration
 and path fingerprints, expected/present/missing/duplicate event names and cached version
-compatibility, never settings, commands, prompts or credentials. DeepSeek and
+compatibility, never settings, commands, prompts or credentials.
+`unrecognised_tracking` is true when an entry runs `PROGRAM __state hook` or
+`PROGRAM __state answer-channel` for an unrecorded program whose basename
+contains `hgs` (case insensitive), but is neither an hgs basename nor the current
+runner. The name is ambiguity evidence only, never ownership. Unrelated programs
+using these arguments remain personal hooks and do not block repair; the report
+never names them. This flag is only in the account
+report; `hgs hooks SESSION --json` keeps its hooks-health-v1 fields. DeepSeek and
 OpenCode report `not_applicable`: they use their native APIs instead of tracking
 hooks. An unavailable or changed executable-version cache means compatibility
 `unknown`; inspection never runs `--version` or refreshes that cache.
@@ -853,8 +872,12 @@ Explicit configuration repair is native-only:
 `request_id`, `expected_provider`, `expected_account_id`,
 `expected_config_sha256` and `expected_path_id` copied from the inspected account
 report. Repair refuses changed content, account/path/symlink identity, malformed
-or oversized files and unknown/incompatible native-version evidence. It merges
-only missing HGS tracking registrations under the existing hook lock and atomic backup
+or oversized files and unknown/incompatible native-version evidence. It also
+refuses, without writing, while `unrecognised_tracking` is true: run it with
+`HGS_EXECUTABLE` set to that wrapper, or use a supervised launch with that
+runner to record it. Otherwise review or remove the ambiguous entry manually.
+Repair migrates recorded tracking/channel entries to the current runner and merges
+missing HGS tracking registrations under the existing hook lock and atomic backup
 rules, preserving personal settings/hooks and trusted legacy commands. It never
 trusts hooks, enables/widens answer channels, changes permissions, restarts a provider or retrofits running
 agents. If compatibility is unknown, explicit repair is unavailable. The current cache is
@@ -946,6 +969,28 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+hgs recognises its own entries by the program they run: a path named `hgs` or
+`hgs.exe`, a legacy `hgs_state.py`, exactly the current `HGS_EXECUTABLE`,
+which a wrapper may name differently, or a program hgs recorded for that
+settings file. A later launch therefore adds no duplicate registrations.
+After a launch or explicit repair leaves an hgs entry that runs the current
+program, hgs records that exact program for the resolved settings file in
+private state (`hook-owners/` below the state directory, up to 8 programs of up
+to 4 KiB each, written atomically under the settings lock). Health and repair
+from a shell without that `HGS_EXECUTABLE` therefore still recognise the
+entries a wrapper wrote. When the current runner changes (including a different
+`HGS_EXECUTABLE`), the next install or compatible explicit repair rewrites those
+exact recorded tracking/channel entries to the current runner and records it.
+Shell migration accepts only the exact standalone form hgs writes; composed
+commands, comments and alternative quoting remain byte-for-byte unchanged.
+Other entry fields, personal hooks and trusted legacy commands are preserved.
+An unrecorded old wrapper is never silently claimed or deleted: use the exact
+wrapper as `HGS_EXECUTABLE` for a repair or supervised launch to record it first.
+Nothing is recorded for a program hgs did not write.
+Earlier versions added another group for a wrapper at each launch. Exact copies
+of such a group are removed once, and Codex may ask to review that change. A
+group that holds any personal hook is kept as it is, and a command for another
+program is never treated as hgs's.
 Codex can request **Hooks need review** before both a new session and a saved
 conversation's resume or archive restore. Activity shows that exact native
 decision; messages remain blocked while it is open. Only the person's explicit
@@ -971,17 +1016,37 @@ process exit. A live process without verified activity shows **Status unknown**;
 
 ### Child sessions
 
-A session that a live tracked agent launches, or forks, on the same computer is
-that agent's child. The launching `hgs` proves its caller by native process
-ancestry, exactly as `hgs self` does, and passes it to the new session as
+A new session that a live tracked agent launches on the same computer is
+that agent's child. Terminal-agent forks also record their launching caller. The launching `hgs` proves its caller by native process
+ancestry, as the process-proven mode of `hgs self` does, and passes it to the new session as
 `HGS_PARENT`; it always sets the variable, empty when no live agent owns the
 launch, so an inherited or typed value never reaches the record. The new
 session's first record keeps it as `parent`: the parent's machine UUID and
 durable `session_id`, its name, conversation and run as hints, `source`
-(`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
+(`launch`, `adopt`, `manual`, `claimed` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
-Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
+Codex, Kimi, DeepSeek and OpenCode sessions can be children and manually chosen
+parents. New DeepSeek and OpenCode bindings record the proven launcher directly,
+before native creation; they never trust an inherited `HGS_PARENT` value.
+DeepSeek and OpenCode agents cannot prove process ownership from their shared
+host. They can explicitly claim a parent identity: `adopt` may also name
+`parent` with an exact `session_id`, `run_id` and `conversation_id` (optional
+name hint). The parent must freshly match a live session on this computer;
+the recorded source is `claimed`, distinct from process-proven `adopt`.
+The same choice is accepted by new `hgs claude/codex/kimi/dsh/opencode` launches
+as `--parent JSON`, for example `--parent "$(hgs self --json | jq -c .parent_identity)"`.
+This explicit choice overrides automatic launcher detection, must still match
+at launch, and never reparents an existing/resumed session. Use `hgs parent`
+for an existing session. The installed help marker is `claimed-parent-v1`;
+explicit peer launches require it. The selected computer checks the claim
+against its own sessions, so the claimed parent must be live there: a claim
+copied from an agent on another computer (`hgs @peer dsh … --parent "$(hgs self
+…)"`) is refused and nothing is recorded. `hgs self` never routes to a peer.
+A DeepSeek or OpenCode parent must confirm it is live within 2 seconds; a host
+that has not answered by then is refused as busy, never counted as live.
+Claimed links are presentation/attention metadata like manual links and grant
+no operation or permission authority.
 A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
 run by a proven agent passes that agent's link to the peer as
 `--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
@@ -1013,8 +1078,8 @@ answer, approval, stop or removal, and never change project membership.
 `hgs wait` dependencies, native subagents, names and folders never create one.
 
 On the desktop the session menu offers **Set parent…** (a searchable list of
-the computer's other Claude, Codex and Kimi sessions, never the session's own
-descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
+the computer's other Claude, Codex, Kimi, DeepSeek and OpenCode sessions, never
+the session's own descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
 onto the middle of another card on the same computer frames it and asks to
 make the dragged session its child; the upper and lower parts of a card still
 reorder. Every change is confirmed in a dialog, which names a parent it
@@ -1046,6 +1111,21 @@ level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
+An ended parent with live child sessions stays in the live list as their
+container (zerus-sa9qn.17): a dimmed compact row with the parent's tile, title,
+**Ended** or **Archived** state and its children's line, the children nested
+under it. A stopped or paused parent that the filters hide is shown this way
+from its own row; a terminated or archived parent, or one no longer listed on
+the child's own computer, from its children's recorded link. The container is
+presentational: it counts as no session, takes no keyboard step, drag target,
+selection range or attention, and its menu offers only **Open**, **Resume** or
+**Restore** and **Move to archive** of its own listed row, or **Open in
+Archive** for a parent known only from the link. It leaves the list by itself
+once no live (non-archived) child remains, and it is shown only for children
+the filters show. A parent that still runs, is listed in another project, or
+is missing on another computer keeps its children at top level with **from
+PARENT**, as before. The containers come from the same one-pass resolution and
+hash maps as the nesting; there is no extra read per row.
 Cards show a large agent tile at the left: the agent's mark from the owner's
 design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
 its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The
@@ -1069,14 +1149,19 @@ A child is supervised when its own computer lists its parent as `live`; rows
 with a parent then also carry `human_request`, true while the child holds a
 request only the person can answer: a tool or permission approval, its own or
 a native subagent's, a folder or Codex hooks trust prompt, or signing in (an
-authentication failure or **Sign in required**). A supervised child is quiet
+authentication failure or **Sign in required**). DeepSeek and OpenCode rows
+carry it as well; their tool and permission approvals, listed as pending
+questions, count as approvals. A supervised child is quiet
 only when its host reports `human_request: false` and the row itself shows no
 such approval or sign-in; a host that does not report it keeps every request
 visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
 count, and gray badges and edge, while its status, Activity, unread reply,
-questions and approvals stay as they are and it remains in the Active and
-Needs attention filters. Nothing is marked read. Review later, the person's
-own mark, still counts. A person-only request notifies as for any session.
+questions and approvals stay as they are. Nothing is marked read. Unlike a
+muted session, it leaves the **Needs attention** filter, and **Active** unless
+it is working, in Background, Scheduled or has a draft: its unread reply, retry
+or provider limit waits for the parent (zerus-sa9qn.18), on desktop, Android
+and iOS alike (zerus-sa9qn.19). Review later, the person's own mark, still
+counts and lists it. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
@@ -1184,6 +1269,15 @@ changes or five minutes expire. Native identity checks and the existing fresh
 snapshot gate remain in force for that window. Updated Android ignores this
 compatibility window when page operations are supported; an old relay can still
 show it while the system updates. Full Archive browsing needs the updated client.
+Archive rows carry the current host-owned `notification_preferences`, using the
+original journal and native conversation identity. Both connectors retain the
+complete preference or explicit unknown value in their bounded previews; a
+known relay conversation never silently loses its preference revision when it
+is archived. Corrupt host preferences remain unknown. Native pages keep their
+250,000-byte summary budget; one larger row is returned alone if it fits
+768 KiB, within the 1 MiB response bound, so a valid 384 KiB preference can still
+be read. The compatibility preview remains capped at 128 KiB and omits an
+oversized row.
 The legacy `ls --json` default remains compatible. The native, read-only ABI is:
 
 ```sh
@@ -1368,7 +1462,7 @@ identities, so a device that missed the muted interval does not announce those
 old events when it reconnects. This does not mark the underlying work as read.
 **Unmute** restores future notifications without replaying events seen while
 muted or acknowledging pending work. Muted sessions remain available in the
-Needs attention filter.
+Needs attention filter, and its tab count includes them.
 
 A team member on this computer is muted on every device by default. While a
 session on this computer is a non-lead member of an active team (planning,
@@ -1985,8 +2079,13 @@ name moves to it.
 
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
-each session once. Desktop and Android use the same filter IDs and membership
-rules; drafts remain local to each device. Drafts for visible subagents also keep
+each session once. Each status filter's tab count is the number of sessions it
+lists before the text search, scoped like the list, and a parent or child that
+fails the filter is never listed for its relative. Archive counts and lists the
+same loaded date window. Desktop, Android and iOS use the same filter IDs and
+membership rules, pinned by one shared case table
+(`mobile/android/app/src/test/resources/session-filter-contract.json`); drafts
+remain local to each device. Drafts for visible subagents also keep
 their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
@@ -4541,6 +4640,38 @@ bounded history window and disappears when it no longer matches, including on
 edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
 equality is never request-ID receipt evidence and never clears or retries input.
 
+Recent attachment delivery projection uses the private, rebuildable
+`delivery-receipts-v1.sqlite3` locator in the state directory. A refresh reads
+at most 100 original receipts for the selected provider, conversation and child;
+older receipts use an opaque cursor bound to that scope and an index snapshot.
+New receipts cannot displace rows in an existing page chain. The locator stores
+identities and bindings, not message bodies or attachment bytes. Original JSON
+receipts remain authoritative for delivery, attachment access and no-replay
+checks; a missing locator never permits another send.
+
+The inspection's `receipt_projection` reports index coverage, its next cursor
+and explicit missing, corrupt or changed-original gaps. An unavailable or still
+building index is unknown coverage, not evidence that no message was sent.
+Legacy discovery runs in one coalesced background worker per state directory,
+with transactions limited to 64 directory entries or 25 ms and a pause between
+batches. An interrupted worker retains committed locators and their sequence
+numbers; discovery reopens in the background. It never deletes or rewrites
+receipt history. New sends retain the original atomic receipt write and update
+the locator on a best-effort basis afterward.
+
+Older caches remain unverified until the worker reconciles their originals.
+Removing a locator or changing its indexed identity invalidates coverage and
+snapshot cursors. Every worker restart reconciles the original directory even
+when its modification time is unchanged; inspection never does that walk.
+
+The same locator exposes exact name, run and conversation pages for question
+recovery. Deadline-bounded inspection never walks the question receipt directory;
+incomplete coverage keeps recovery unknown. An explicit answer authority read
+can reconcile that family synchronously, then must validate every original and
+drain a complete snapshot before treating recovery as complete. A cursor from an
+incomplete snapshot requires a fresh chain after migration finishes. Locator
+coverage alone never proves an answer's submission.
+
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
 pending and clears when that read completes or fails. Switching sessions shows
@@ -5131,6 +5262,15 @@ Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
 Back cancels opening the folder without saving trust and keeps Codex running;
 Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
+For a new Claude run on Linux or macOS, the original `hgs` supervisor confirms
+the complete first-run text-style panel automatically when both the native focus
+and current-selection mark name **Auto (match terminal)** or **Dark mode**. It
+preserves that selection and sends Enter once after checking the stable panel
+and the original process. An uncertain result never causes another Enter.
+Recognized manual theme choices, including Light mode and Dark mode with ANSI
+colors, appear in Activity with **Open Terminal**. Windows and runs whose original
+supervisor predates this feature keep the read-only theme card. Login, workspace
+trust, auto-mode consent and permission questions still require an explicit choice.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
 Keychain notice. These notices do not change the request identity or appear in
@@ -5250,11 +5390,14 @@ Missing or invalid priorities follow ranked entries in their original order;
 a legacy catalog without priorities keeps its source order. This shared catalog
 order applies to both desktop and Android without changing the current model.
 
-Claude options are the models its `/model` picker lists, from the catalog Claude
-Code caches in the account's profile. Zerus selects the model and effort in that
-picker and applies them with its session-only choice (`s`). Its Enter, and a typed
-`/model NAME` or `/effort LEVEL`, would save new defaults and are never used. The
-change is confirmed by Claude's receipt in the exact conversation transcript and by
+Claude options are the models its `/model` picker lists, including **More models**,
+from the catalog Claude Code caches in the account's profile. Zerus expands a
+section only when the native picker advertises that action, selects the model
+and effort, and applies them with its session-only choice (`s`). Enter on a model
+row saves new defaults; Zerus never uses that action or the typed `/model NAME`
+and `/effort LEVEL` shortcuts for a session change. An unconfirmed selection
+closes the recognized model picker with Escape while its original input authority
+is still valid. The change is confirmed by Claude's receipt in the exact conversation transcript and by
 its effort indicator when shown. In a conversation that already has replies, Claude
 warns that the next message re-reads the full history and uses more tokens: the
 selector states this before **Apply**, and Zerus then accepts only that built-in
@@ -5789,6 +5932,18 @@ existing catalog; resume, adoption,
 manual assignments and explicit unassignment are never reassigned. A fork
 takes its source's project instead ([Fork session…](#fork-session)). This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
+A new session that a live tracked agent on the same computer launches (its
+parent link proven from process ancestry) starts in that parent's project,
+for Claude, Codex, Kimi, DeepSeek and OpenCode alike. The parent's project wins
+over folder inference, so a session tree stays together. A parent whose project
+no longer exists gives the child an explicit Inbox membership. A parent in Inbox,
+without a membership or with an unresolved project choice leaves the child to
+folder inference, as does a claimed, adopted or forwarded parent. The membership
+is written like a fork's: after the child's binding is saved, retrying a busy
+catalog for up to 3 seconds without holding the session state or provider
+binding locks, and only while the child's binding is still the same run and
+conversation. A child name that already has a membership keeps it. Existing
+sessions, including children placed before this rule, are never moved.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer
@@ -6026,6 +6181,131 @@ catalog and session access. It does not deny inbound exchange from an existing
 member; SSH controls transport access. `HGS_SWARM_SERVICE=0 ./install.sh` skips
 worker installation.
 
+### Empty-peer adoption
+
+`hgs swarm adoption-preview PEER --json` checks whether the configured empty
+computer can adopt the local catalog without opening its desktop UI. The
+destination accepts either an untouched store (`imported=false`, no operations
+or pending marker) or the narrow first-read bootstrap: a valid same-node v1
+`gui-import-pending.json`, only the current self machine-name operation, the
+initial empty-peer membership and empty/missing sidecars. Peers, other product
+history, foreign or unreadable data, an existing drive store, or a
+present/unreadable Qt store refuses. The pending marker is preserved byte for
+byte, and the later missing-only GUI import retains adopted values, tombstones
+and concurrent heads.
+
+`hgs swarm adopt PEER --json` performs the explicitly previewed original
+request. It copies the complete catalog, primary session memberships and twins,
+including every raw operation and parent. Canonical full-body hashes are bound
+to raw file presence (`missing`, `valid_empty` or `nonempty`), swarm identity and
+pre/post receipts. An absent file's zero bytes are not a valid empty JSON
+component. The aggregate request is at most 32 MiB including every component;
+preview, status and mutation receipts are at most 64 KiB. Disk read ceilings do
+not widen wire limits. Journals and the registry are bounded and directly
+indexed by original UUID; one adoption is active per catalog.
+
+The destination keeps its own node and self bindings and gets no reverse peer
+or source-local binding. Only the source adds the configured destination peer
+and calls `sync_peer` for that peer, preserving existing peers and unrelated
+synchronization. Without real reverse enrollment, drive-folder import remains
+unsupported and the drive component stays `Uninitialized`; preview and
+settlement disclose this rather than claiming every component is shared.
+
+`hgs swarm adoption-status PEER --json` returns the bounded original phase and
+receipts without repairing anything. Main, primary and twins commit separately
+under the destination catalog lock, with write-ahead phases and fresh-read
+receipts. The durable `adoption-pending.json` guard blocks capable ordinary
+loaders and savers after every partial phase, including before directory/lock
+creation. It is removed with a parent barrier only after all components verify;
+`remote_committed` follows that removal. Ordinary loaders and savers also
+refuse a bounded registry whose role/phase pairs are invalid, whose unfinished
+request is not the active one, whose active entry is not in an active phase, or
+whose active request has no matching durable journal (one direct read by UUID).
+A crash or unknown result before the terminal receipt remains partial/unknown
+and read-only. The lock-free organization read and its watch keep showing the
+main catalog but add `adoption` (`state` `partial`, `pending` or `unknown`,
+`ordinary_writes`, original `request_id`, `role` and `phase`) whenever a guard
+exists or a request is active, and follow the guard and registry files; with
+neither, the projection is unchanged. Older binaries are not
+claimed to honor the guard.
+
+Exactly two continuations exist, and only within the original live CLI call: a
+durable original `refused_not_started` with zero product effects plus fresh
+identical proof, or a terminal `remote_committed` with an explicitly unstarted
+local source-membership phase. Both require the original native owner,
+request/body, configuration, source preimages, per-UUID lease, and actual child
+exit plus both physical pipe EOFs within the original 25-second deadline. A
+receipt, idle output, byte count, or serialized drain claim is not drain proof.
+A distinct or restarted CLI has only original-status and fully validated
+committed-receipt lookup; it cannot continue mutation. A lost reply, changed
+context, active or unknown writer, restarted owner, missing receipt, or stranded
+guard is `Partial`/`Unknown` and status-only. No new UUID, remote replay after
+an unknown result, duplicate cleanup, or third destination repair is permitted.
+The native dialog binds the original to independently observed Live machine
+cards for this computer and the destination (computer, host and machine UUID
+equal to the preview node) and refuses a stopped hub. It rechecks those cards,
+the original generation, configuration, ticket and resource custody at the
+queued invocation barrier, at each preflight result, at the mutation's drained
+result and before native settlement. A refusal is sticky: a restored card or
+configuration never revives that original. Its later review action is
+read-only, not another adoption call.
+
+Each original remote call keeps the same ssh child (and its Windows job),
+request writer and both pipe readers until they physically settle. After any
+failure the child may exit by itself until the original deadline; then only
+that owned child is stopped and its exit confirmed by wait. No process group,
+descendant or name-based kill is used, and a PID whose status is no longer
+trusted is never signalled. The CLI then waits for the writer and both pipe
+EOFs before it reports the call as unknown, so a descendant that still holds a
+pipe keeps the call, and its native accounting, retained. A call whose exit
+cannot be confirmed stays pinned and admits no other call in that process. The
+adoption ssh passes `-o ControlPath=none` ahead of the configured connection
+options, so a user's `ControlMaster`/`ControlPersist` setting cannot start a
+background mux master that inherits stderr. Its uncached remote-shell discovery
+probe does the same. Every other remote operation's discovery probe keeps the
+configured connection sharing unchanged. The desktop runs the call beside
+its organization worker: other organization work continues, the dialog can be
+closed and reopened onto the same original, and after the original deadline it
+reports that the original is still settling with an unknown result. Only new
+adoption actions wait, and no failure or timeout settles or replays it.
+
+The desktop runs only its three fixed adoption calls (`adoption-preview`,
+`adopt` and `adoption-status`) with the CLI as the leader of a private process
+group it creates for that one call; its local reads keep the ordinary runner.
+It observes the leader's exit with `waitid(WNOWAIT)`, so the unreaped leader pins
+the group, and only then, or on its own timeout, sends `SIGKILL` to that exact
+group and reaps the leader. It never signals after reaping, and a shared group,
+a process scan or a name or path match is never an authority to signal. So when
+anything kills the CLI, the original ssh and its in-group descendants (such as
+a ProxyCommand) are stopped and reaped before the dialog settles. The accounted
+resources stay held until the leader is reaped and both of its pipes reach EOF.
+The result stays unknown and status-only, the ticket stays held, and nothing is
+retried or continued. Windows keeps its per-child kill-on-close jobs.
+Processes that leave the group (setsid or a process group of their own) stay
+outside it and are never signalled by it. Two boundaries remain: if the
+desktop has crashed, a later kill of the CLI is not accounted by anyone; and
+after a desktop restart the dialog cannot reopen the original. It can still
+review it read-only: when the organization read discloses an adoption request
+and the dialog holds no original of its own, **Review original status** reads
+this computer's journal for that request (`hgs swarm adoption-status --json`)
+and, for a source original whose recorded peer is configured here, the
+destination's status. Nothing creates a ticket, continues the original or
+sends a mutation, and a mismatched request or an unconfigured peer refuses
+before any remote call.
+
+Adoption-specific raw JSON rejects duplicate object keys recursively before a
+typed map is constructed. The source catalog and sidecars must match their
+declared source and source-node machine operation. The original destination is
+validated independently against its own empty preimage, whose swarm may differ
+from the source. The complete main/primary/twins candidate, cross-component
+closure, aggregate operations, parent edges and encoded wire size are checked
+before any journal, guard or product effect. Primary counts come from the
+membership view validated with the main catalog's machine redirects, so a valid
+causal edge from an old machine key to its canonical child is accepted. Terminal and settlement receipts
+must match the full original request and all component preimages and postimages;
+a same-UUID or hash-shaped response is insufficient. `guard_cleared` is durable
+before `remote_committed`; a crash between them remains manual/status-only.
+
 ### Phone notification timing
 
 `hgs swarm preference get --json` prints `{"mobile_delivery": "away"}`;
@@ -6173,6 +6453,16 @@ restart, unfinished cards require explicit **Continue setup**; recovered
 preparation is revalidated before startup. A definitely ended startup can retry
 only startup with a new launch identity. **Edit choices** opens a reviewed new
 request while preserving the original attempt and resources.
+
+A failed repository verification after a successful worktree receipt keeps the
+already-created checkout, branch and original receipt. Its message distinguishes
+that read failure from creation failure. One bounded private
+`last_catalog_failure` records the read stage, sanitized state/detail and typed
+staleness, completeness and sample time (null means unavailable), and remains
+after later continuation. A catalog timeout does not establish repository
+corruption. **Continue setup** revalidates the retained checkout and can then
+start the session; it is not a read-only check and never repeats an unknown
+original effect.
 
 A matching service receipt with a fully drained, unsuccessful launch-command
 exit shows **Creation failed** and its reason. Its dispatched launch identity
@@ -6769,6 +7059,31 @@ names; the wire reply is capped at 64 KiB and expires after five minutes. Actual
 permission denials are omitted only from this explicit-Remove discovery; a
 readable cwd or open file still establishes membership. The existing generic
 worktree review and background cleanup keep their conservative process policy.
+
+On macOS these reads include each thread's own working directory, not just
+the process directory. The native thread-path API selects by user TSD value
+(`cthread_self`), not a stable thread ID, and returns the first match. Every
+unique value, including zero, is read. Any repeated value, zero or nonzero,
+leaves the observation unsettled: at most four attempts within the existing
+deadline, then incomplete coverage, never an empty census. Raw Mach threads
+can share zero while holding different working directories; the thread-ID64
+API supplies no path to resolve that ambiguity. No TSD mutation, suspension
+or elevated task port is used. The accepted residual is a live thread changing
+its TSD between listing and read: an ESRCH can be taken as an exited thread,
+or a reused value can address a different thread. Process birth checks do not
+close that per-thread window. This follows the pinned [XNU thread-path
+implementation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/proc_info.c)
+and the coordinator's zerus-q0cd5 addressability ruling. Private fixture PID
+tests qualify their own processes only; a full-host diagnostic reporting a
+limit remains incomplete and does not qualify full-host Remove.
+Native vnode evidence is retained independently of its pathname: XNU may
+return a filled vnode while path reconstruction fails. Exact object membership
+still applies, while the generic sampler refuses an empty or relative path.
+A path without interpretable native vnode metadata is unsettled. The native
+zeroed reported-no-vnode response is accepted only as that observation: XNU
+uses it both for no own cwd and for a failed vnode acquisition during churn,
+which the API cannot distinguish. This additional kernel-acquisition residual
+does not prove perpetual absence or exempt aliased thread handles.
 
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,
@@ -7692,6 +8007,32 @@ not change configuration; **Discard draft** removes the draft explicitly.
 Zerus lists a machine's sessions and connection state under its alias, even when
 that machine calls itself something else (its `HGS_SELF` or host name).
 
+**Connection status** shows the selected machine's connection and, while it is
+not connected, the time to its next automatic attempt. The time comes from the
+connection supervisor that actually waits (the background service's, or the
+app's own without it): each wait publishes the deadline that ends it, measured
+on that process's monotonic clock and anchored once per wait in the view, so
+status updates never restart or extend a countdown. **Reconnect now** ends only
+that machine's current wait in its existing supervisor; the catalog stays as
+last known, follows and source identity are kept, repeated clicks join the
+running attempt, and nothing restarts the background service, a source or an
+agent. Disabled and removed machines have no supervisor and no button.
+
+**Reconnect schedule** sets this computer's delays for every machine: the first,
+second and third retry, then every later one, each 1 to 3600 whole seconds and
+never shorter than the one before. The defaults are 1 s, 2 s, 5 s, then every
+10 s, so a computer that starts later is found within seconds. A change applies
+to each machine's next wait. `hgs machine retry-delays [--set FIRST SECOND THIRD
+LATER | --reset]` reads or writes `~/.config/hgs/reconnect.local.json`
+(`{"version":1,"delays_seconds":[...]}`) under the machines lock; `hgs machine
+ls` reports the same as `retry_delays`. A missing file means the defaults. An
+unreadable or invalid file is kept as it is and reported: readers use the
+defaults, a running background service keeps the last schedule it read (one
+that starts with such a file uses the defaults and keeps running), and only
+`--reset` replaces it. The background service reads the file when it starts and
+again on the desktop's request after a change, so the schedule stays in effect
+without the desktop.
+
 **Phones**, below the machines and in Settings → Mobile connection, lists the
 phones paired with every workspace this computer reaches: through its own mobile
 connection, or through one enabled peer that has one (one hop, like phones reach
@@ -7757,13 +8098,27 @@ conversations with the selected account. One account has one model and effort
 account, the selected one first, and lists where it saved and where it failed,
 such as an offline computer. When the computers differ, the account shows
 **Differs between computers** with **Use everywhere**, which saves the selected
-computer's choice on all of them. Codex and Claude offer
+computer's choice on all of them. Codex, Claude and DeepSeek offer
 only models and effort levels from the selected computer's native catalog; each
 other computer checks the choice against its own catalog. Open the agent
 once and refresh Accounts if its catalog is empty. **Provider settings** removes
 the Zerus override; the dialog also shows readable native account defaults.
 Kimi supports a launch model choice; its effort remains controlled by Kimi's
-native settings. OpenCode and DeepSeek continue to manage their defaults natively.
+native settings. OpenCode continues to manage its defaults natively.
+
+The native DeepSeek account (`native-dsh`, zerus-v7tqa) saves a native route
+`provider/model` with exactly one slash, such as
+`deepseek-official/deepseek-flash` (shown as **DeepSeek-V4.1-Flash
+(DeepSeek)**), and an effort of `off`, `low`, `high` or `max` that the chosen
+model's catalog entry offers. Its catalog and native default
+(`agent-default-model`) come from the running DeepSeek host's read-only catalog
+method; Accounts never starts a host, so start or resume a DeepSeek session and
+refresh when the list is empty. Zerus applies the choice to each session it
+creates, from `hgs dsh FOLDER --new` and from New session, as described in
+[Official DeepSeek Harness](#official-deepseek-harness). An older `hgs` refuses
+an account catalog that holds a DeepSeek choice ("Invalid account model
+defaults"), which stops its launches on that computer: clear the DeepSeek
+choice (`--model ''`) before installing an older CLI build.
 Existing conversations, saved resumes and forks keep their own choices. Explicit
 native launch options after `--` take precedence. Nothing rewrites native account
 configuration or changes a running agent.
@@ -7782,6 +8137,17 @@ transport's bundled models, each named as dsh names it (for example
 carries `"source":"dsh-profile"`. New team's member rows offer these models, and
 a DeepSeek member's model is applied after its session starts, as
 `provider/model` or as a bare id (`deepseek-flash`) that one provider offers.
+
+Model-default entries are read independently. An unknown provider, unfamiliar
+field shape or model/effort value this build cannot validate is preserved
+verbatim and unused, so it cannot block other accounts or launches.
+`account ls` and `model-settings` report `model_defaults_status` as `inherited`,
+`saved` or `ignored`, with `model_defaults_reason` for an ignored choice.
+Saving a choice still checks the selected account's native catalog and supported
+values; setting or clearing one choice preserves all other entries unchanged.
+Invalid JSON still refuses the catalog. This compatibility applies only to
+builds with the lenient reader: older builds can still reject a newer saved
+choice, so clear that choice (`--model ''`) before rolling back to them.
 
 Without a choice, a Claude, Codex or Kimi account bypasses permissions (owner,
 2026-11-07, T-6hcfnu): each provider's own bypass switch is added at launch
@@ -8271,13 +8637,22 @@ Zerus reviewed `0.2.1-rc.2` and `0.2.1-rc.5`; any other release starts with a
 note naming them and `harness-unreviewed` in the host's folder, since the bridge
 uses harness internals and a feature may fail there. Only a harness that reports
 no version is refused, before any session exists. Install a reviewed release on the agent host,
-sign in and choose **DeepSeek Harness** in New session:
+apply its reviewed security overrides (docs/installation.md#agents), sign in and
+choose **DeepSeek Harness** in New session:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+npm pkg set --prefix "$(npm root -g)/@deepseek-ai/dsh" \
+  'overrides.@modelcontextprotocol/client=2.3.0' 'overrides.fflate=0.8.3'
+npm install --omit=dev --prefix "$(npm root -g)/@deepseek-ai/dsh"
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
+
+Current upstream still pins MCP client 2.2.0 and nested fflate 0.8.2. The two
+overrides fix their cross-origin redirect and malformed-ZIP64 issues without
+changing other agents in the npm prefix; a bare global install retains those
+risks. Other dependency advisories remain subject to normal review.
 
 Zerus launches the official native engine and its tools, access rules and history.
 A versioned adapter connects its Session Controller through a private Unix socket.
@@ -8367,6 +8742,66 @@ Accounts and New session show the balance of an API key from DeepSeek's
 `DSH_HOME/.credentials.yaml` holds, also while no native host runs. The key goes
 only to `api.deepseek.com`; Zerus keeps an opaque hash of it as the identity.
 
+An API-key account shows its balance in place of limit windows. When the key
+comes from the native credentials file (`DSH_HOME/.credentials.yaml`), `hgs account
+inspect native-dsh` reads the official `GET https://api.deepseek.com/user/balance`
+at the usual account-status refresh, with no additional polling. The private
+Node.js reader parses the key with the installed harness and sends it only to
+`api.deepseek.com` as a bearer token: redirects are refused, the request times out
+after 5 seconds and the reply is bounded to 64 KiB. The key is never logged,
+cached or returned. Per currency (USD or CNY), the inspection reports a `Total`
+balance and its `Topped up` and `Granted` parts as `balances` rows, plus
+`balance_available: false` when DeepSeek says the balance no longer covers API
+calls. The status stays `configured`. Accounts, Overview, New session and the
+session footer show the Total as a bare amount such as `$6.20` (`¥` for CNY;
+another currency keeps its code). Its tooltip and accessible label name it in
+full, for example `Balance: 6.20 USD` with the Topped up and Granted parts. The
+account's usage panel lists all three amounts and warns about an insufficient
+balance. An unreachable API or a rejected key leaves `configured` without a
+balance. A
+DeepSeek account sign-in keeps its `Wallet` and `Bonus` balances from the native
+web host. DeepSeek publishes no usage or cost endpoint for API keys.
+
+Each refresh with an API-key balance also records that reading in a private
+journal (`account-spend/` in the hgs configuration directory), kept per account
+profile and key identity. It makes no additional network requests. The usage
+panel shows **Spent today** and **Spent this month** across the whole account
+(every key, tool and computer), computed from balance decreases since the first
+reading:
+- An interval in which the topped-up balance rose contains a top-up, so it is
+  left out.
+- A decrease in the granted balance counts as spend but is named separately,
+  because an expiring grant looks the same.
+- An interval without readings is counted on the day it ends, and the panel
+  names the previous reading.
+- A currency missing from one reading keeps its previous baseline, so its
+  spend counts from its own last reading.
+
+The journal keeps the last reading and up to 400 days of daily totals. Days
+follow the computer's local time.
+
+The panel also lists requests and cache-read, uncached-input and output tokens
+per model. It shows today, this month and each of the last 31 days, from this
+computer's native session logs (`DSH_HOME/sessions`). hgs only reads these logs:
+- A private index (`account-usage/`) remembers each log's identity, size,
+  modification time and last complete Zstandard frame. A refresh reads only
+  appended frames, newest logs first, within 32 MiB and 2.5 seconds. That budget
+  also covers the identity check (up to 4 KiB per new or changed log). The rest
+  follows on later refreshes, and meanwhile the panel says totals may grow. A
+  log whose check waits keeps its previous counts.
+- A malformed or unreadable log is set aside until it changes. The panel says
+  how many logs could not be read and are not counted.
+- A forked session counts only after its inherited prefix (`session/end-seed`
+  with `inherited: true`). Only each session's current format generation
+  counts. A log is read again from its start when it is replaced or shortened,
+  rewritten without growing, or rewritten in its first 4 KiB or in the 4 KiB
+  before the counted offset.
+- Logs untouched for 31 days are not opened.
+
+Other computers and tools using the same key are not included. No cost is
+estimated from token counts, because peak hours, holidays and price changes make
+such estimates brittle; the balance journal records real spend.
+
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange
 supplies authentication, and ports/tunnels are discovered automatically. The
@@ -8396,7 +8831,29 @@ by 0.2.0-rc.2 and cancelled before its first step stays listed with an empty
 view. A child without a valid identity reports native corruption. A
 child view shows the child's own model, which reading never changes. Request
 receipts prevent duplicate submission. Uncertain delivery requires inspection.
-Model changes do not replace profile defaults. A child keeps the model it
+Model changes do not replace profile defaults.
+
+Account launch defaults (zerus-v7tqa): when the DeepSeek account has a saved
+model and effort, Zerus applies them to a session it has just created, after
+creation and permission setup and before any message, through the same scoped
+`settings` method as a per-session change. It binds the exact session identity
+and host generation, so a resident host keeps its adapter and is never reloaded;
+a host that changed in between is not asked, because that call would resume the
+session. The binding records the outcome as `account_defaults` with `status`
+`applied`, `failed` (the host never applied it) or `uncertain` (the reply was
+lost, so it may have applied), and `hgs inspect SESSION` reports it. A failed or
+uncertain application never fails the launch or blocks the session: `hgs`
+reports it on standard error once and never retries it, and the session keeps
+the native default. The desktop marks such a session's model and effort
+selector with a warning sign and explains the outcome, the account's choice and
+the reason in its **Model and effort** dialog (zerus-fw3g5); an applied or still
+pending outcome shows nothing, and the dialog never re-applies the choice. Relaunching an existing name or resuming a session never
+applies account defaults, and the native profile default stays unchanged.
+Without an account choice, a new session starts on the native default
+including its configured effort; a session's own recorded selection still wins
+when it resumes. A settings change that resumes a paused session applies the
+account permission mode, as **Resume** does (hosts started by this version).
+A child keeps the model it
 inherits and takes messages only through its parent; the adapter refuses model
 changes, messages, compaction and interrupts addressed to the child itself.
 Stopping one session does not terminate neighboring agents or the shared host.
@@ -8756,8 +9213,26 @@ would expand inside double quotes. Remote drops first copy files to the session 
 files, 10 MiB each and 20 MiB total. The copy is bound to the session's run and
 conversation. An untracked shell (`hgs sh -d`) has neither: its copy is bound to
 the live session's creation time and refused when a tracked run owns the session.
-Changing tab, session or connection during transfer cancels insertion.
+Changing tab, session or connection during transfer cancels insertion. Zerus
+Next on Linux and macOS frames the quoted paths as one literal terminal paste,
+so path characters are not individual native approval shortcuts. It still sends
+no Enter. Generic typing, text paste and Windows file-drop framing are unchanged.
 **Open externally** and **Copy connect command** retain access from other clients.
+
+In Zerus Next on Linux and macOS, an image-bearing browser paste event stays in
+the selected Terminal. On Arch with WebKitGTK, use **Shift+Insert** for an image
+on the clipboard; Ctrl+Shift+V retains the engine's text-paste behavior and
+Ctrl+V remains the native agent's key. Its captured image is normalized to PNG (at most 10 MiB
+before and after conversion, and 32 megapixels), then copied through the same
+run/conversation-bound staging command even for a local session. One quoted
+retained image-file path is inserted without Enter; the composer and Activity
+are unchanged. Accompanying text is not inserted. Unreadable image data, unknown
+identity, a changed/hidden/remounted terminal or an unconfirmed transfer inserts
+nothing and is never retried automatically. This inserts a file reference; it
+does not prove the native agent imported the image. Windows image-event staging
+and non-POSIX peer paths are unsupported. The quoted image path uses the same
+literal-paste framing as POSIX file drops. Existing text paste, native Ctrl+V
+keys and the text-only application Paste menu are unchanged.
 
 On Unix, **Terminate** can close an untracked Shell row after confirmation. The
 confirmation captures the tmux socket and server, session ID and creation time,
@@ -9739,6 +10214,44 @@ These fields are not supplied for archives, subagents or other provider-specific
 inspection paths. No shared-read file, lock, delivery or background worker is
 created or changed by this observer.
 
+`hgs inspect NAME --current-read` adds `current_read` for a current tracked main
+session with a conversation: `schema` 1, `run_id`, `conversation_id`, `reply_id`
+(or null) and `attention_signature` (or null), the values `hgs read` would accept
+now, plus `attention_complete`. These come from the same inspection a device
+displays. The reply is captured before provider messages are read, so its final
+message is in that read or an earlier one. The questions it signs are read
+before the inspection lists its own, so every signed question that is still
+pending was listed. When questions cannot be indexed within the shared one-second
+question budget, `attention_complete` is false and the signature matches nothing
+`hgs read` accepts. A recurring job keeps its already read reply current, as
+`hgs read` does. Its only extra work is that bounded question check, plus the marks
+file read for a recurring job. It acknowledges nothing and is absent without the
+flag and for archives and subagents. A
+device acknowledges these values only after it has shown them; `hgs read` still
+applies each one only while it is current.
+
+DeepSeek and OpenCode main inspections name the same fields from the view `hgs
+read` compares a mark with for that provider, owned by the session's name.
+- DeepSeek captures that view from one extra host `list` before it reads the
+  page it shows. Its reply is the turn outline's settled response, which the
+  host commits at `turn/end` after the turn's final message. From dsh 0.2.2 the
+  host's list no longer carries that outline (`summary: false`), so an idle
+  row's failure read, the same cached read, supplies it from the session's
+  projections; a running or stopped row keeps the outline last read for its
+  run. `hgs read` takes its view the same way. Its requests are
+  signed through `attention_id` before the page lists its own. The capture's
+  host reads, including an idle row's failure read, share a 7-second budget,
+  so a stalled host delays the inspection by at most about that much. The
+  field is absent when any of those reads fails or runs out of time, or when
+  another host generation served the page. A host row without its pending
+  requests leaves `attention_complete` false. DeepSeek has no archive
+  inspection: `hgs inspect NAME --archive ID` refuses with "DeepSeek archives
+  are unavailable" instead of answering for the live session.
+- OpenCode names the observation it shows: the forms and permissions it lists
+  and the newest completed reply of its history, never a streaming one. A row
+  without an observation (no service, a failed read, an OpenCode 1 binding) has
+  no reply, and its `attention_complete` is false.
+
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances
 the cursor. Reset it when conversation ID changes. `history_truncated` discloses
@@ -9783,10 +10296,25 @@ the available full roster. Profile groups without individual IDs remain groups.
 place attachments at their first marker; otherwise they append. IDs come from a
 fresh inspection. `status: submitted` confirms native input delivery, not a model
 reply. Saved receipts make identical requests idempotent. An uncertain result
-needs manual inspection before another request. `agent_id` is supported only for
-verified DeepSeek continuable children.
+needs manual inspection before another request.
 
-The agent confirms an input with its next native event: UserPromptSubmit at once
+Claude Code attaches a pasted line that is only an image path asynchronously:
+until it has read the image its composer is empty with a `Pasting…` footer, and
+an Enter then submits nothing (zerus-iitw8). For Claude the single Enter
+therefore waits until the composer shows the paste settled, and `submitted`
+requires Claude's own transcript to record the message: a new user row
+(`native: transcript`) or, while it works, a queue `enqueue` (`native: queue`).
+A new conversation with no transcript yet counts its settled composer emptying
+after Enter (`native: composer`). Both waits share one 8-second window from the
+paste. Otherwise the receipt stays `in_progress` with `delivery: uncertain`, its
+reason and the composer's text (at most 2,000 characters, never image bytes),
+and the error names that text; it is never retyped. Codex and Kimi show a paste
+at once, so their Enter still confirms the receipt. A busy agent's tool events
+never confirm the previous input: only an input-acceptance event (a submitted
+or queued prompt, a turn or task start) or that native proof lets the next
+request through.
+
+The agent confirms an input with an input-acceptance event: UserPromptSubmit at once
 for an idle Claude or Codex, UserPromptQueued for Kimi while it works (DeepSeek
 confirms in its own request). A working Claude or Codex holds the text in its own
 queue and reports it only when that turn ends, so there the text shown in its
@@ -9800,8 +10328,27 @@ message's receipt ends `submitted`, `cancelled` or `failed`. `hgs [@host]
 send-cancel SESSION --json` with `{"request_id"}` cancels one still held; a
 cancelled message is never sent. After an uncertain delivery nothing more is sent
 automatically, and a held message is never replayed. Dialogs, drafts and unknown
-prompts still refuse a direct send; open the terminal there. Questions carry request identity/hash
+prompts still refuse a direct send; open the terminal there. `agent_id` is
+supported only for verified DeepSeek continuable children. Questions carry
+request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
+
+An inspection indexes the Codex question transcript and recovers earlier
+submitted answers from this session's question receipts within one shared
+one-second budget, saving its progress so the next inspection resumes. Its
+recent messages never wait for that work, and it never scans a long transcript
+or every question receipt unbounded: recovery reads one bounded page of the
+session's receipts at a time through the receipt locator. While the index or
+recovery is incomplete, or held by another process, `pending_questions_complete`
+is `false`, `pending_questions` lists no optional Codex question and
+`pending_questions_error` says the questions are still being indexed. That is
+unknown, never an empty list, and nothing becomes answerable from it. A
+completed earlier check grants nothing: each inspection and each answer checks
+the locator's current coverage again from its head. A receipt indexed since is
+recovered, and a gap the locator records (a receipt it cannot attribute) makes
+`pending_questions_error` say earlier answers cannot all be checked. An answer
+first completes the index and recovery, and refuses while earlier answers
+cannot all be checked. An older hgs omits `pending_questions_complete`.
 
 Messages may begin with an absolute file path, including a directory named like
 a command (`/help/capture.png`). A first token of `/name` without another slash,
@@ -9837,6 +10384,18 @@ fleet runtime. The actor applies its watch packets and publishes catalog/count
 updates through the same endpoint. It keeps each original event's ingress permit
 through the database transaction; UI-supplied feed packets cannot enter the owned
 observation path. Failed frames invalidate their exact source until resnapshot.
+Each connection row of its status (`background_runtime.connections`) carries the
+source `incarnation` and its supervisor's `retry` (`idle`, `waiting` with
+`delay_ms` and the `remaining_ms` measured from the supervisor's own deadline,
+or `attempting`), plus the `retry_delays` in use; a change also publishes an
+early `fleet_connections` frame (at most every 250 ms) between heartbeats.
+Display only: no source generation or writer authority. The `desktop request`
+operations `fleet_reconnect` (`computers`: 1 to 64 `{computer, incarnation?}`,
+answering `requested`, `pending`, `connected`, `not_configured`,
+`not_admitted`, `source_changed` or `stopping` for each) and
+`fleet_retry_delays_reload` end an existing supervisor's wait or re-read the
+saved reconnect timings; neither starts, restarts or activates anything, and a
+passive service answers `fleet_unavailable`.
 Plain `serve` and fresh registrations stay passive. On Linux and macOS, the maintained
 installer supports explicit `--mode background|passive` after the authenticated
 frontend handoff; see [Linux mode selection](linux-distribution.md#select-the-desktop-service-mode)
@@ -9847,6 +10406,23 @@ for caller admission, passive bootstrap, retained task-instance custody and
 unknown-result handling.
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
+
+Operation-ledger rows and bytes reserve outstanding original work, not every
+historical receipt. The first durable physical drain returns that original's
+reservation exactly once, including an Unknown result. Its outcome, UUID,
+source, custody records and lookup history remain retained; returned capacity
+never grants replay. A two-child operation keeps its full reservation between
+children. Task-message staging inputs retain their separate charge until their
+existing exact removal/review rules release it; creation scheduling slots keep
+their separate predecessor protections.
+
+Owned startup may convert earlier cumulative accounting only after complete,
+bounded validation of its exact original charge formula and active roster.
+Corrupt, mismatched or incompletely covered accounting refuses admission; it is
+never reset or approximated. Status covers at most 4096 historical metadata rows
+plus one overflow sentinel. A larger history reports `history_complete:false`
+and null historical `rows`/`unsettled`, with null propagated to the aggregate.
+The bounded outstanding roster and physical custody remain checked separately.
 
 Background mode also owns one presence sampler/writer outside the actor. It
 samples every two seconds and uses the existing `desktop-presence.json` format.
@@ -10464,6 +11040,51 @@ each `next` is the cursor of that stage's next page for `hgs task list --stage
 STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
 window that is not 1 to 200 is a non-fatal `bad_request`.
 
+#### Shared drive-folder component
+
+Remote Windows drive-absolute project links use `hgs swarm drive-folders
+get|apply|inventory|exchange --json` and the independent `drive_folders_v1`
+capability, not a new main-catalog key kind. `get --operation UUID --json` is the
+only result-reconciliation query. Ordinary get/watch/apply/export, closed legacy
+exchange envelopes, mobile/API v1, project inference and launch readers retain
+their POSIX/legacy contracts. A stored link grants no filesystem, worktree,
+account or session-launch authority.
+
+`drive-folders.json` and immutable `drive-folders-init.json` live beside
+`catalog.json`. The graph has at most 64 MiB, 100000 raw operations and 1024
+parents per operation; exchange is at most 8 MiB and 128 causally ordered
+operations per round, with complete parent closure in retained history plus the
+batch. A bounded native observation has at most 200 folders and includes only
+current records, raw-head frontiers and review states, never a growing renderer
+journal. Both files absent is UNINITIALIZED, not an empty authority. Only a
+validated first trusted Add or explicitly negotiated initial import creates the
+witness and then the graph. A partial, corrupt, foreign, nonregular, oversized or
+changed pair is UNAVAILABLE: its bytes remain, with no empty reset, automatic
+repair or assumed write result. Main and drive saves report independent
+outcomes; no two-file atomicity is claimed. Backups record both originals and
+hashes or explicit incompleteness.
+
+Operations are immutable `{id,actor,clock,folder_id,parents,value}` records with
+canonical nonnil UUIDs. A value is `{project,machine,path,name}` or a retained
+historical tombstone. Paths are canonical drive-absolute Windows paths, at most
+8192 bytes; project/name limits remain 128/320 bytes and controls are refused.
+Only fresh locally-known-unused UUID Add and same-kind live Edit are admitted.
+Edit retains project and ID and requires fresh native source and destination
+Windows cards. Remove, Transfer, clone, resurrection and cross-representation or
+cross-swarm rehome are outside this cut. Cross-swarm enrollment refuses a
+nonempty, initialized-empty or unavailable component before any membership
+mutation. Raw records received before their project/machine context remain
+unavailable rather than being discarded or shown as current.
+
+Complete local main+drive histories, including tombstones, prove known-unused
+IDs. They cannot prevent an unaware old/offline writer from creating a colliding
+legacy ID later. Such a collision preserves both histories and quarantines only
+that logical identity: no winner, erasure, cross-kind causal edge or
+whole-catalog failure. Unrelated legacy edits and other drive IDs continue.
+Absolute global exclusion is therefore not claimed.
+
+#### Drive-folder watch topic
+
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
 worker thread reads the stored catalog without its lock, never saving it and
@@ -10507,6 +11128,20 @@ up. A read that fails, such as a store held by a writer, sends a non-fatal
 `team_failed`. A peer whose `hello` does not list `team` answers the
 subscription with `unsupported_topic`; read its teams with `hgs team` as
 before.
+
+The separately negotiated `organization.drive_folders` topic follows the capable
+Windows drive-folder projection with `{"op":"subscribe","topic":"organization.drive_folders"}`.
+It never initializes, saves or repairs the catalog or either drive file. The
+`drive_folders` summary row carries the bounded source/store identity, status,
+operation query result and record/conflict IDs. `record:<id>` rows carry the
+current records, `version:<token>` rows their raw-head frontiers, and
+`conflict:<id>:<n>` rows at most 16 retained raw variants each. Unavailable and
+incomplete states are data, never an empty known frontier. The legacy
+`organization` topic, its file set and all legacy apply/export envelopes remain
+unchanged by this component. Drive reads run on their own bounded worker when
+either drive file changes, with the same cancellation, paging and resnapshot
+rules as the organization topic. A client without this topic keeps polling
+`hgs swarm drive-folders get --json` instead.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
@@ -10566,8 +11201,8 @@ first complete snapshot, after a `gap` or `team_failed`, while the stream is
 down, and on a peer without the topic they are polled every 3 s as before.
 Listings are applied at most every
 2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
-restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
-meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
+restarts after the reconnect schedule (by default 1 s, 2 s, 5 s, then every
+10 s; see Machines and accounts), and the desktop polls meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
 keeps the desktop on polling.
 
 ## Validation

@@ -126,7 +126,7 @@ internal class ComputerFiles(private val application: Application, private val a
         val gateway = connection(target.connectionId) ?: throw AttachmentOpenException("Reconnect to the gateway, then try again.")
         val receipt = try {
             api.await(gateway, api.submit(gateway, target, ComputerFileProtocol.OPERATION,
-                ComputerFileProtocol.payload(target, reference, id, offset, length, first), id), maxPolls = 150, pollDelayMs = 300)
+                ComputerFileProtocol.payload(target, reference, id, offset, length, first), id, SendAttempt()), maxPolls = 150, pollDelayMs = 300)
         } catch (error: RelayException) {
             throw AttachmentOpenException(when (error.status) {
                 400, 409 -> ComputerFileProtocol.UPDATE_REQUIRED

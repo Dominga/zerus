@@ -590,6 +590,10 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         notices("error", typeof e === "string" ? e : String(e), true);
         return;
       }
+      // Rust answers a Clear with Sending only when its composer was no longer
+      // open. A clear starts no send, so it must never arm the send lock: no
+      // view would release it (zerus-fsht5).
+      if (r.kind === "sending") return;
       reply(r, h, at, false);
     },
     async cancelSend() { const h = handle(); if (h !== undefined) await port.cancelSend(h).catch(() => {}); },

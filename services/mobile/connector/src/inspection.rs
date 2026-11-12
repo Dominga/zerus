@@ -183,6 +183,75 @@ pub fn bound_inspection(
     Ok(value)
 }
 
+/// The newest `at` over every history stream and how many rows carry it,
+/// or None without rows. Bounding drops whole oldest rows (the newest own
+/// message last), so the newest rows survive exactly when this is unchanged.
+pub fn newest_rows(result: &Map<String, Value>) -> PyResult<Option<(PyNumber, usize)>> {
+    let mut newest: Option<(PyNumber, usize)> = None;
+    for name in STREAMS {
+        let Some(Value::Array(items)) = result.get(name) else {
+            continue;
+        };
+        for row in items {
+            let at = at(row)?;
+            newest = Some(match newest {
+                None => (at, 1),
+                Some((current, count)) => match compare_numbers(&at, &current) {
+                    Some(Ordering::Greater) => (at, 1),
+                    Some(Ordering::Equal) => (current, count + 1),
+                    _ => (current, count),
+                },
+            });
+        }
+    }
+    Ok(newest)
+}
+
+/// Whether a main inspection's `current_read` names exactly its checked
+/// session: schema 1, exactly the native fields, the inspection's own run and
+/// conversation (which the caller has already matched to any requested ones),
+/// values a `mark_read` may carry, and a boolean `attention_complete`.
+/// Anything else is dropped, never repaired.
+pub fn current_read_bound(result: &Map<String, Value>) -> bool {
+    const KEYS: [&str; 6] = [
+        "schema",
+        "run_id",
+        "conversation_id",
+        "reply_id",
+        "attention_signature",
+        "attention_complete",
+    ];
+    let Some(current) = result.get("current_read").and_then(Value::as_object) else {
+        return false;
+    };
+    fn text(value: Option<&Value>) -> Option<&str> {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    }
+    let (run, conversation) = (
+        text(current.get("run_id")),
+        text(current.get("conversation_id")),
+    );
+    let payload = json!({
+        "run_id": current.get("run_id"),
+        "conversation_id": current.get("conversation_id"),
+        "reply_id": current.get("reply_id"),
+        "attention_signature": current.get("attention_signature"),
+    });
+    current.len() == KEYS.len()
+        && KEYS.iter().all(|key| current.contains_key(*key))
+        && current.get("schema") == Some(&json!(1))
+        && current
+            .get("attention_complete")
+            .is_some_and(Value::is_boolean)
+        && run.is_some()
+        && run == text(result.get("run_id"))
+        && conversation.is_some()
+        && conversation == text(result.get("conversation_id"))
+        && crate::validate::validate_mark_read(&payload).is_ok()
+}
+
 fn omitted_value(omitted: &[usize; 4]) -> Value {
     let mut map = Map::new();
     for (stream, name) in STREAMS.iter().enumerate() {

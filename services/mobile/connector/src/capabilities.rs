@@ -374,6 +374,9 @@ pub struct Flags {
     pub peer_session_id: bool,
     /// Complete current-session reads and ID project membership, not just mutation selection.
     pub session_labels: bool,
+    /// `inspect <session> --current-read`: a main inspection names the reply
+    /// and attention a read mark may acknowledge now. Not an operation.
+    pub current_read: bool,
 }
 
 impl Flags {
@@ -398,6 +401,7 @@ impl Flags {
             worktree: has("Mobile worktree ABI: worktrees-v1"),
             directory_create: has("dirs --create <path>"),
             read: has("read <session> --json"),
+            current_read: has("inspect <session> --current-read"),
             session_notifications: help
                 .lines()
                 .any(|line| line.trim() == crate::session_notifications::HELP_MARKER),

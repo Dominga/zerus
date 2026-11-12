@@ -17,7 +17,7 @@ use zerus_client_core::{
 };
 
 const OWNER: &str = r#"#!/usr/bin/python3
-import json,os,pathlib,sys
+import json,os,pathlib,sys,time,uuid
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 assert args.pop(0)=='--desktop-helper-rendezvous-v1'
@@ -29,6 +29,13 @@ first=json.loads(sys.stdin.buffer.readline())
 manifest=json.loads((root/'program-manifest').read_text())
 print(json.dumps(dict(op='ready',abi='worktree-program-custody-v1',pipeline=first['pipeline'],manifest=manifest,
     holder=dict(pid=os.getpid(),parent=os.getppid(),birth='fixture-data',audit=None),socket='/tmp/example/pins')),flush=True)
+# A gated holder's detached descendant keeps its output open until released,
+# even after the holder replies Closed or is killed.
+if (root/'program-holder-gate').exists() and os.fork()==0:
+    os.setsid()
+    until=time.monotonic()+20
+    while not (root/'program-holder-release').exists() and time.monotonic()<until:time.sleep(.005)
+    os._exit(0)
 while True:
     frame=json.loads(sys.stdin.buffer.readline());op=frame['op']
     with (root/'program-controls').open('a') as out:out.write(op+'\n')
@@ -37,6 +44,9 @@ while True:
         binding=json.loads((root/'program-binding').read_text())
         print(json.dumps(dict(op='armed',binding=binding)),flush=True)
     elif op=='joined':print(json.dumps(dict(op='retired',binding=frame['binding'])),flush=True)
+    elif op=='observe':
+        current=dict(manifest);current['id']=str(uuid.uuid4())
+        print(json.dumps(dict(op='observed',pipeline=first['pipeline'],observation=frame['observation'],manifest=current)),flush=True)
     elif op=='close':
         print(json.dumps(dict(op='closed',pipeline=first['pipeline'])),flush=True);break
     else:raise AssertionError(op)
@@ -223,13 +233,13 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 request_id: None,
             };
             // The actual runner, not a Boolean/read receipt, owns these references.
-            let result = run::run_accounted_frozen(
+            let result = run::run_accounted_frozen_with_completion(
                 &f.0.join("mutator"),
                 &inv,
                 source.context.environment(),
                 1024,
                 &AtomicBool::new(false),
-                resources,
+                (resources, Some(mutation.completion.clone())),
                 move |command| {
                     inherited.inherit(command)?;
                     command.spawn()
@@ -291,20 +301,237 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 actions.begin(key.clone(), &Action::Terminate).is_none(),
                 "the identified read-only source remains charged"
             );
-            source.close().unwrap();
-            assert!(
-                !source.current(),
-                "closed original custody cannot become current again"
-            );
+            let initial_completion = Arc::new(run::Completion::new());
+            let initial = run::run_accounted_frozen_with_completion(
+                &f.0.join("mutator"),
+                &inv,
+                source.context.environment(),
+                1024,
+                &AtomicBool::new(false),
+                (source.clone(), Some(initial_completion.clone())),
+                move |command| command.spawn(),
+            )
+            .unwrap();
+            assert!(matches!(initial, Exit::Code { code: 0, .. }));
+            eventually("initial native call I/O joined", || {
+                initial_completion.join() == run::Retirement::Retired
+            })
+            .await;
+            // zerus-1y897.5/.7: unarmed phases, each with its own real child,
+            // pipes and loan; they stay unsettled until the control retires them.
+            let mut loan: Option<Arc<dyn Send + Sync>> = None;
+            let mut lock: Option<Arc<dyn Send + Sync>> = None;
+            let unarmed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(|index| {
+                let (unarmed, resources) = Mutation::new(source.clone(), &input);
+                unarmed.armed.store(false, Ordering::Release);
+                if index == 7 {
+                    // zerus-1y897.8: extra references to this phase's loan and to
+                    // its inherited descendant lock keep it undrained.
+                    loan = Some(resources.clone());
+                    lock = Some(resources.descendants.clone());
+                }
+                let inherited = resources.descendants.clone();
+                let exit = run::run_accounted_frozen_with_completion(
+                    &f.0.join("mutator"),
+                    &inv,
+                    source.context.environment(),
+                    1024,
+                    &AtomicBool::new(false),
+                    (resources, Some(unarmed.completion.clone())),
+                    move |command| {
+                        inherited.inherit(command)?;
+                        command.spawn()
+                    },
+                )
+                .unwrap();
+                assert!(matches!(exit, Exit::Code { code: 0, .. }));
+                unarmed
+            });
+            let never_ran = [(); 3].map(|()| Mutation::new(source.clone(), &input).0);
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,
                 input,
+                initial_completion,
                 mutation,
+                unarmed,
+                (loan.unwrap(), lock.unwrap(), never_ran),
+            );
+            assert!(
+                !source.current(),
+                "closed original custody cannot become current again"
             );
             drop(source);
             assert!(actions.begin(key, &Action::Terminate).is_some());
             service.join().await.unwrap();
         }
+    });
+}
+
+/// zerus-1y897.6: a real source whose holder output stays open (a detached
+/// descendant holds it) until `program-holder-release` exists, with a settled
+/// refused-stop phase and a joined original call. `not_after` shortens the
+/// source's own deadline.
+fn gated_refusal(
+    root: &Path,
+    context: Arc<Context>,
+    not_after: Option<Instant>,
+) -> (Arc<Source>, stop::Input, Arc<run::Completion>, Mutation) {
+    let manifest = manifest();
+    let pipeline = uuid::Uuid::new_v4().to_string();
+    let input = stop::Input {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        confirmation_id: uuid::Uuid::new_v4().to_string(),
+        source: stop::Source::Service {
+            epoch: context.scope.service_epoch.clone(),
+        },
+        original: serde_json::to_string(&json!({"request_id": uuid::Uuid::new_v4().to_string(),
+            "action": "terminate", "expected_run_id": manifest.capture.target.run_id,
+            "expected_conversation_id": manifest.capture.target.conversation_id}))
+        .unwrap(),
+        manifest: manifest.clone(),
+        archive_id: uuid::Uuid::new_v4().to_string(),
+        stop: stop::Kind::Normal,
+    };
+    let binding = custody::Binding::for_input(&pipeline, &input);
+    fs::write(
+        root.join("program-manifest"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("program-binding"), binding.bytes().unwrap()).unwrap();
+    fs::write(root.join("program-holder-gate"), b"gate").unwrap();
+    let _ = fs::remove_file(root.join("program-holder-release"));
+    // The mutator's forked reader ends at once; only the holder is gated.
+    fs::write(root.join("program-release"), b"release").unwrap();
+    executable(&root.join("holder"), OWNER);
+    executable(&root.join("mutator"), MUTATOR);
+    let mut owner = Owner::begin(
+        &root.join("holder"),
+        Control::Open {
+            presentation: false,
+            pipeline: pipeline.clone(),
+            discovery: Discovery {
+                capture: manifest.capture.clone(),
+            },
+        },
+        manifest.configuration.clone(),
+        context.environment.clone(),
+        context.clone(),
+        Arc::new(Command::spawn),
+    )
+    .unwrap();
+    let not_after = not_after.unwrap_or(owner.deadline());
+    let Reply::Ready { holder, socket, .. } = owner.ready().unwrap() else {
+        panic!("Ready")
+    };
+    owner
+        .arm(
+            &input,
+            NativeChild {
+                pid: 99999,
+                parent: std::process::id(),
+                birth: "fixture-data".into(),
+                audit: None,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+    let source = Arc::new(Source {
+        presentation: None,
+        context: Arc::new(Origin::Service(context)),
+        owner: Mutex::new(owner),
+        manifest,
+        pipeline,
+        holder,
+        socket,
+        not_after,
+        normal_consumed: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+    });
+    let inv = Invocation {
+        args: Vec::new(),
+        stdin: None,
+        timeout: Duration::from_secs(5),
+        request_id: None,
+    };
+    let (mut mutation, resources) = Mutation::new(source.clone(), &input);
+    let inherited = resources.descendants.clone();
+    let stop_run = run::run_accounted_frozen_with_completion(
+        &root.join("mutator"),
+        &inv,
+        source.context.environment(),
+        1024,
+        &AtomicBool::new(false),
+        (resources, Some(mutation.completion.clone())),
+        move |command| {
+            inherited.inherit(command)?;
+            command.spawn()
+        },
+    )
+    .unwrap();
+    assert!(matches!(stop_run, Exit::Code { code: 0, .. }));
+    let until = Instant::now() + Duration::from_secs(10);
+    while !mutation.try_retire().unwrap() {
+        assert!(Instant::now() < until, "the stop phase settled");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let completion = Arc::new(run::Completion::new());
+    let original = run::run_accounted_frozen_with_completion(
+        &root.join("mutator"),
+        &inv,
+        source.context.environment(),
+        1024,
+        &AtomicBool::new(false),
+        (source.clone(), Some(completion.clone())),
+        move |command| command.spawn(),
+    )
+    .unwrap();
+    assert!(matches!(original, Exit::Code { code: 0, .. }));
+    while completion.join() != run::Retirement::Retired {
+        assert!(Instant::now() < until, "the original call joined");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    (source, input, completion, mutation)
+}
+
+/// zerus-1y897.6: a known refusal's Check again while its holder close is
+/// delayed, through the production publish, passive watcher and Check.
+#[test]
+fn a_refused_check_waits_for_a_delayed_holder_close_and_reviews_once() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let actions = crate::actions::Actions::new(f.0.join("marks"));
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let _release = Release(f.0.clone());
+        for expired in [false, true] {
+            let hold = Arc::new(
+                actions
+                    .begin(key.clone(), &Action::Terminate)
+                    .expect("the previous source released its hold"),
+            );
+            let context = Context::new_supported(service.clone(), hold).unwrap();
+            let not_after = expired.then(|| Instant::now() + Duration::from_secs(3));
+            let (source, input, completion, mutation) = gated_refusal(&f.0, context, not_after);
+            let root = f.0.clone();
+            super::super::pipeline::assert_delayed_close(
+                source,
+                input,
+                completion,
+                mutation,
+                expired,
+                move || fs::write(root.join("program-holder-release"), b"release").unwrap(),
+            );
+        }
+        assert!(
+            actions.begin(key, &Action::Terminate).is_some(),
+            "a held source outlived its control"
+        );
+        service.join().await.unwrap();
     });
 }

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -162,6 +162,42 @@ pub fn run_cancellable(
 /// A retained pipe keeps its copy after this bounded call returns. Unverified
 /// child exit pins a copy until host exit; the host must cap admissions.
 /// No journal, execution authorization or effect retry is provided here.
+/// [`run_accounted`] with the child as the leader of a private process group
+/// this call creates (`helper_group::prepare`), used only for the desktop's
+/// three fixed adoption invocations (adoption-preview, adopt, adoption-status).
+///
+/// The leader's exit is observed with waitid(WNOWAIT), so its unreaped PID pins
+/// the group. Only then, or when the call must stop (timeout or cancel), is
+/// that exact group signalled (killpg SIGKILL) and the leader reaped; nothing
+/// is signalled after reaping. A shared group, a process scan or a name/path
+/// match is never an authority to signal, and setsid-detached children stay
+/// outside. The original adoption ssh and its in-group descendants are thus
+/// stopped and reaped even when something else SIGKILLed the CLI, before the
+/// resources settle: the leader must be reaped and both pipes reach EOF.
+/// Windows keeps its per-child kill-on-close jobs; `prepare` is a no-op there.
+/// This never retries or replays a call.
+pub fn run_accounted_group(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+) -> Result<Exit, Stopped> {
+    accounted(
+        hgs,
+        inv,
+        parent_env,
+        stdout_cap,
+        cancel,
+        resources,
+        Pipes {
+            group: true,
+            ..Pipes::default()
+        },
+    )
+}
+
 pub fn run_accounted(
     hgs: &Path,
     inv: &Invocation,
@@ -237,6 +273,27 @@ pub fn run_accounted_frozen(
     resources: Arc<dyn Send + Sync>,
     spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
 ) -> Result<Exit, Stopped> {
+    run_accounted_frozen_with_completion(
+        hgs,
+        inv,
+        environment,
+        stdout_cap,
+        cancel,
+        (resources, None),
+        spawn,
+    )
+}
+
+pub fn run_accounted_frozen_with_completion(
+    hgs: &Path,
+    inv: &Invocation,
+    environment: &FrozenEnvironment,
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    custody: (Arc<dyn Send + Sync>, Option<Arc<Completion>>),
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+) -> Result<Exit, Stopped> {
+    let (resources, completion) = custody;
     let environment = environment.clone();
     accounted(
         hgs,
@@ -247,6 +304,7 @@ pub fn run_accounted_frozen(
         resources,
         Pipes {
             clear_environment: true,
+            completion,
             spawn: Some(Box::new(move |command| {
                 environment.apply(command);
                 spawn(command)
@@ -267,7 +325,11 @@ fn accounted(
     if cancel.load(Ordering::Acquire) {
         return Err(Stopped::Cancelled);
     }
-    let child_exited = Arc::new(AtomicBool::new(false));
+    let child_exited = pipes
+        .completion
+        .as_ref()
+        .map(|completion| completion.child())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let _child = ChildCharge {
         resources: Some(resources.clone()),
         exited: child_exited.clone(),
@@ -316,6 +378,105 @@ type StreamOutput = Box<dyn FnOnce(ChildStdout) -> bool + Send>;
 type Spawn = fn(&mut Command) -> std::io::Result<Child>;
 type GuardedSpawn = Box<dyn FnOnce(&mut Command) -> std::io::Result<Child> + Send>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retirement {
+    Retired,
+    Pending,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoState {
+    Running,
+    Closed,
+    Eof,
+    Failed,
+}
+
+struct IoWorker {
+    handle: thread::JoinHandle<()>,
+    status: Arc<Mutex<IoState>>,
+}
+
+#[derive(Default)]
+pub struct Completion {
+    workers: Mutex<Vec<IoWorker>>,
+    children: Mutex<Vec<Arc<AtomicBool>>>,
+    outcome: Mutex<Option<Retirement>>,
+}
+
+impl Completion {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn child(&self) -> Arc<AtomicBool> {
+        let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if children.len() >= 2 {
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(Retirement::Failed);
+        }
+        let child = Arc::new(AtomicBool::new(false));
+        children.push(child.clone());
+        child
+    }
+
+    pub fn track(&self, child: Arc<AtomicBool>) {
+        let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if !children.iter().any(|current| Arc::ptr_eq(current, &child)) {
+            if children.len() >= 2 {
+                *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(Retirement::Failed);
+            }
+            children.push(child);
+        }
+    }
+
+    fn register(&self, handle: thread::JoinHandle<()>, status: Arc<Mutex<IoState>>) {
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        if workers.len() >= 6 {
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(Retirement::Failed);
+            return;
+        }
+        workers.push(IoWorker { handle, status });
+    }
+
+    fn finish(&self, result: Retirement) -> Retirement {
+        let mut outcome = self.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+        if outcome.is_none() {
+            *outcome = Some(result);
+        }
+        outcome.expect("terminal completion recorded")
+    }
+
+    pub fn join(&self) -> Retirement {
+        if let Some(result) = *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) {
+            return result;
+        }
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        if workers.iter().any(|worker| !worker.handle.is_finished()) {
+            return Retirement::Pending;
+        }
+        for worker in workers.drain(..) {
+            if worker.handle.join().is_err() {
+                return self.finish(Retirement::Failed);
+            }
+            let status = *worker.status.lock().unwrap_or_else(PoisonError::into_inner);
+            match status {
+                IoState::Closed | IoState::Eof => {}
+                IoState::Failed => return self.finish(Retirement::Failed),
+                IoState::Running => return self.finish(Retirement::Failed),
+            }
+        }
+        drop(workers);
+        let children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if children.is_empty() || children.iter().any(|child| !child.load(Ordering::Acquire)) {
+            return self.finish(Retirement::Failed);
+        }
+        drop(children);
+        self.finish(Retirement::Retired)
+    }
+}
+
 #[derive(Default)]
 struct Pipes {
     input: Option<StreamInput>,
@@ -328,6 +489,9 @@ struct Pipes {
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
     clear_environment: bool,
+    completion: Option<Arc<Completion>>,
+    /// The child leads a private group this call created ([`run_accounted_group`]).
+    group: bool,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
     /// Runs in the writer thread right after it signals completion.
@@ -337,6 +501,7 @@ struct Pipes {
 
 struct StopContext {
     exited: Option<Arc<AtomicBool>>,
+    group: bool,
     #[cfg(any(windows, test))]
     hidden: Option<Arc<hidden::State>>,
 }
@@ -665,6 +830,7 @@ fn run_inner(
 ) -> Result<Exit, Stopped> {
     let stop_context = StopContext {
         exited: pipes.child_exited.clone(),
+        group: pipes.group,
         #[cfg(any(windows, test))]
         hidden: pipes.hidden_stop.clone(),
     };
@@ -704,6 +870,10 @@ fn run_inner(
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if pipes.group {
+        crate::stream::helper::prepare(&mut command);
+    }
+    let group = pipes.group;
     let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(spawn_helper))(&mut command) {
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
@@ -711,6 +881,9 @@ fn run_inner(
     if pipes.require_complete
         && (child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none())
     {
+        if let Some(completion) = &pipes.completion {
+            completion.finish(Retirement::Failed);
+        }
         return Ok(stop(
             child,
             Exit::Abnormal {
@@ -721,6 +894,7 @@ fn run_inner(
     }
     let deadline = Instant::now() + inv.timeout;
 
+    let completion = pipes.completion.clone();
     let stdin = child.stdin.take();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
@@ -729,9 +903,13 @@ fn run_inner(
     } else {
         None
     };
+    let writer_state = completion
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(IoState::Running)));
+    let writer_state_for_thread = writer_state.clone();
     #[cfg(test)]
     let after_written = pipes.after_written;
-    thread::spawn(move || {
+    let writer = thread::spawn(move || {
         let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
@@ -742,12 +920,18 @@ fn run_inner(
         // The pipe is closed: release the group before signalling, as the
         // readers do, so a completed exchange holds no hidden admission.
         drop(input_guard);
+        if let Some(state) = &writer_state_for_thread {
+            *state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Closed;
+        }
         let _ = write_tx.send(ok);
         #[cfg(test)]
         if let Some(hook) = after_written {
             hook();
         }
     });
+    if let Some(completion) = &completion {
+        completion.register(writer, writer_state.expect("completion state"));
+    }
     let (done_tx, done_rx) = mpsc::channel();
     let over = Arc::new(AtomicBool::new(false));
     let limit = (stdout_cap < usize::MAX).then(|| (stdout_cap, Arc::clone(&over)));
@@ -757,16 +941,27 @@ fn run_inner(
         let done = done_tx.clone();
         let completed = decoded.clone();
         let guard = pipes.readers.clone();
-        thread::spawn(move || {
+        let state = completion
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(IoState::Running)));
+        let output_state = state.clone();
+        let worker = thread::spawn(move || {
             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 stdout.is_some_and(consume)
             }))
             .unwrap_or(false);
             // Release the pipe group before waking a possible replacement.
             drop(guard);
+            if let Some(state) = &output_state {
+                *state.lock().unwrap_or_else(PoisonError::into_inner) =
+                    if ok { IoState::Eof } else { IoState::Failed };
+            }
             completed.store(if ok { 1 } else { 2 }, Ordering::Release);
             let _ = done.send(ok);
         });
+        if let Some(completion) = &completion {
+            completion.register(worker, state.expect("completion state"));
+        }
         Arc::default()
     } else {
         reader(
@@ -783,6 +978,7 @@ fn run_inner(
             } else {
                 None
             },
+            completion.clone(),
         )
     };
     let err = reader(
@@ -791,6 +987,7 @@ fn run_inner(
         done_tx,
         strict_outputs.then(|| (stderr_cap, Arc::clone(&over))),
         pipes.readers,
+        completion,
     );
     let too_large = |err: &Shared| {
         Stopped::TooLarge(TooLarge {
@@ -836,7 +1033,14 @@ fn run_inner(
             drain(&done_rx);
             return Ok(exit);
         }
-        match child.try_wait() {
+        // A group leader's exit is seen unreaped; its pinned group is then
+        // signalled and the leader reaped before the status is returned.
+        let waited = if group {
+            crate::stream::helper::try_wait(&mut child)
+        } else {
+            child.try_wait()
+        };
+        match waited {
             Ok(Some(status)) => {
                 if let Some(exited) = &pipes.child_exited {
                     exited.store(true, Ordering::Release);
@@ -976,6 +1180,16 @@ fn stop(mut child: Child, exit: Exit, context: &StopContext) -> Exit {
     if let Some(state) = &context.hidden {
         return state.stop(child, exit, context.exited.clone());
     }
+    if context.group {
+        // killpg on the still-pinned private group, then reap; an unverified
+        // wait leaves the exit unconfirmed (the resources stay pinned).
+        if crate::stream::helper::terminate(&mut child).is_ok() {
+            if let Some(exited) = &context.exited {
+                exited.store(true, Ordering::Release);
+            }
+        }
+        return exit;
+    }
     let _ = child.kill();
     if child.wait().is_ok() {
         if let Some(exited) = &context.exited {
@@ -1002,10 +1216,15 @@ fn reader(
     done: Sender<bool>,
     limit: Option<(usize, Arc<AtomicBool>)>,
     guard: Option<Arc<dyn Send + Sync>>,
+    completion: Option<Arc<Completion>>,
 ) -> Shared {
     let buffer: Shared = Arc::default();
     let shared = Arc::clone(&buffer);
-    thread::spawn(move || {
+    let state = completion
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(IoState::Running)));
+    let reader_state = state.clone();
+    let worker = thread::spawn(move || {
         let mut eof = false;
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 8192];
@@ -1033,9 +1252,113 @@ fn reader(
             }
         }
         drop(guard);
+        if let Some(state) = &reader_state {
+            *state.lock().unwrap_or_else(PoisonError::into_inner) =
+                if eof { IoState::Eof } else { IoState::Failed };
+        }
         let _ = done.send(eof);
     });
+    if let Some(completion) = completion {
+        completion.register(worker, state.expect("completion state"));
+    }
     buffer
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn settle(completion: &Completion) -> Retirement {
+        let until = Instant::now() + Duration::from_secs(1);
+        loop {
+            let result = completion.join();
+            if result != Retirement::Pending || Instant::now() >= until {
+                return result;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn unknown_child_exit_is_sticky_failed() {
+        let completion = Completion::new();
+        completion.child();
+        let worker = thread::spawn(|| {});
+        completion.register(worker, Arc::new(Mutex::new(IoState::Eof)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+        assert_eq!(completion.join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn a_read_error_is_not_eof() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let worker = thread::spawn(|| {});
+        completion.register(worker, Arc::new(Mutex::new(IoState::Failed)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+    }
+
+    #[test]
+    fn an_empty_completion_is_not_a_physical_witness() {
+        assert_eq!(Completion::new().join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn a_panicked_worker_is_not_eof() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let worker = thread::spawn(|| panic!("synthetic worker panic"));
+        completion.register(worker, Arc::new(Mutex::new(IoState::Eof)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_required_pipe_is_sticky_failed() {
+        let completion = Arc::new(Completion::new());
+        let child_exited = completion.child();
+        let invocation = Invocation {
+            args: Vec::new(),
+            stdin: None,
+            timeout: Duration::from_secs(1),
+            request_id: None,
+        };
+        let result = run_inner(
+            Path::new("/bin/true"),
+            &invocation,
+            &[],
+            &[],
+            1024,
+            None,
+            Pipes {
+                require_complete: true,
+                child_exited: Some(child_exited),
+                completion: Some(completion.clone()),
+                spawn: Some(Box::new(|command| command.stdin(Stdio::null()).spawn())),
+                ..Pipes::default()
+            },
+        );
+        assert!(matches!(result, Ok(Exit::Abnormal { .. })));
+        assert_eq!(completion.join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn pending_completion_becomes_retired_without_a_second_join() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let state = Arc::new(Mutex::new(IoState::Running));
+        let worker_state = state.clone();
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            release_rx.recv().unwrap();
+            *worker_state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Eof;
+        });
+        completion.register(worker, state);
+        assert_eq!(completion.join(), Retirement::Pending);
+        release_tx.send(()).unwrap();
+        assert_eq!(settle(&completion), Retirement::Retired);
+        assert_eq!(completion.join(), Retirement::Retired);
+    }
 }
 
 #[cfg(test)]
@@ -1552,5 +1875,256 @@ mod hidden_tests {
             modules.replace('/', "\\").to_lowercase()
         );
         assert_eq!(&after[1..], ["", "None"]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod group_tests {
+    use super::*;
+
+    /// A python3 leader that starts an in-group stand-in for its ssh child
+    /// (private streams, same process group), records its PID, then `rest`.
+    fn leader(pid_file: &Path, rest: &str, timeout: Duration) -> Invocation {
+        let code = format!(
+            "import os, subprocess, sys, time\n\
+             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n\
+             open({path:?}, 'w').write(str(child.pid))\n\
+             {rest}\n",
+            path = pid_file.display().to_string(),
+        );
+        Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    /// A private scratch folder, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "zerus-run-group-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn stand_in(pid_file: &Path) -> libc::pid_t {
+        fs_pid(pid_file).expect("the leader recorded its child")
+    }
+
+    fn fs_pid(path: &Path) -> Option<libc::pid_t> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
+    /// The kernel's state for `pid` is zombie (or dead), from /proc/PID/stat.
+    /// A container whose PID 1 never reaps (CI's `tail -f /dev/null`) keeps
+    /// such zombies: they run no code and hold no pipes.
+    #[cfg(target_os = "linux")]
+    fn zombie(pid: libc::pid_t) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| matches!(state, 'Z' | 'X'))
+        })
+    }
+
+    /// macOS hands orphans to launchd, which reaps them.
+    #[cfg(not(target_os = "linux"))]
+    fn zombie(_pid: libc::pid_t) -> bool {
+        false
+    }
+
+    /// Running: present and not a zombie.
+    fn running(pid: libc::pid_t) -> bool {
+        let present = unsafe { libc::kill(pid, 0) } == 0;
+        present && !zombie(pid)
+    }
+
+    /// Gone: stopped, whether already reaped or left as a zombie.
+    fn gone(pid: libc::pid_t) -> bool {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !running(pid) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn run(inv: &Invocation, resources: Arc<dyn Send + Sync>) -> Exit {
+        run_accounted_group(
+            Path::new("python3"),
+            inv,
+            &[],
+            1 << 20,
+            &AtomicBool::new(false),
+            resources,
+        )
+        .unwrap()
+    }
+
+    /// The boundary: processes that left the private group (setsid or a
+    /// group of their own) are never signalled by it.
+    fn escaped_leader(directory: &Path, rest: &str, timeout: Duration) -> Invocation {
+        let code = format!(
+            "import os, subprocess, sys, time\n\
+             def start(path, **escape):\n\
+             \x20   child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+             \x20       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **escape)\n\
+             \x20   open(path, 'w').write(str(child.pid))\n\
+             start({inside:?})\n\
+             start({session:?}, start_new_session=True)\n\
+             start({group:?}, preexec_fn=os.setpgrp)\n\
+             {rest}\n",
+            inside = directory.join("inside").display().to_string(),
+            session = directory.join("session").display().to_string(),
+            group = directory.join("group").display().to_string(),
+        );
+        Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    /// Kills an escaped fixture process this test started (by its exact
+    /// recorded PID, while it is still alive), so nothing outlives the test.
+    fn clean_up(pid: libc::pid_t) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    #[test]
+    fn processes_outside_the_private_group_survive_its_signal() {
+        for (name, rest, timeout) in [
+            ("normal exit", "print('done')", Duration::from_secs(20)),
+            (
+                "external kill",
+                "import signal\nos.kill(os.getpid(), signal.SIGKILL)",
+                Duration::from_secs(20),
+            ),
+            ("timeout", "time.sleep(30)", Duration::from_millis(1500)),
+        ] {
+            let temp = Scratch::new();
+            let exit = run(&escaped_leader(&temp.0, rest, timeout), Arc::new(()));
+            let inside = stand_in(&temp.0.join("inside"));
+            let session = stand_in(&temp.0.join("session"));
+            let group = stand_in(&temp.0.join("group"));
+            assert!(
+                gone(inside),
+                "{name}: the in-group stand-in survived ({exit:?})"
+            );
+            let session_alive = running(session);
+            let group_alive = running(group);
+            clean_up(session);
+            clean_up(group);
+            assert!(session_alive, "{name}: a setsid process was signalled");
+            assert!(group_alive, "{name}: an own-group process was signalled");
+        }
+    }
+
+    #[test]
+    fn a_leader_that_exits_leaves_no_group_member_running() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(&pid_file, "print('done')", Duration::from_secs(20));
+        let exit = run(&inv, Arc::new(()));
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(
+            gone(stand_in(&pid_file)),
+            "an in-group member outlived the call"
+        );
+    }
+
+    #[test]
+    fn an_externally_killed_leader_has_its_group_stopped_and_is_reaped() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(
+            &pid_file,
+            "import signal\nos.kill(os.getpid(), signal.SIGKILL)",
+            Duration::from_secs(20),
+        );
+        let resources: Arc<dyn Send + Sync> = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let exit = run(&inv, resources);
+        assert!(matches!(exit, Exit::Abnormal { .. }), "{exit:?}");
+        assert!(
+            gone(stand_in(&pid_file)),
+            "the killed leader's group survived"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "the confirmed reap releases the accounted resources"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_leader_has_its_whole_group_stopped() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        let inv = leader(&pid_file, "time.sleep(30)", Duration::from_millis(1500));
+        let started = Instant::now();
+        let exit = run(&inv, Arc::new(()));
+        assert_eq!(exit, Exit::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert!(
+            gone(stand_in(&pid_file)),
+            "the timed-out leader's group survived"
+        );
+    }
+
+    #[test]
+    fn a_member_holding_the_leader_pipes_is_stopped_with_the_group() {
+        let temp = Scratch::new();
+        let pid_file = temp.0.join("child");
+        // This member inherits the leader's own stdout and stderr.
+        let code = format!(
+            "import os, subprocess, sys\n\
+             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n\
+                 stdin=subprocess.DEVNULL)\n\
+             open({path:?}, 'w').write(str(child.pid))\n\
+             print('done')\n",
+            path = pid_file.display().to_string(),
+        );
+        let inv = Invocation {
+            args: vec!["-c".into(), code],
+            stdin: None,
+            timeout: Duration::from_secs(20),
+            request_id: None,
+        };
+        let resources: Arc<dyn Send + Sync> = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let started = Instant::now();
+        let exit = run(&inv, resources);
+        assert!(matches!(exit, Exit::Code { code: 0, .. }), "{exit:?}");
+        assert!(gone(stand_in(&pid_file)));
+        let until = Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "both pipes reach EOF once the group is stopped"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 }

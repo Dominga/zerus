@@ -235,7 +235,7 @@ pub struct DeskState {
     _attention_owner: attention_barrier::Owner,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     focused: Arc<AtomicBool>,
 }
 
@@ -391,7 +391,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAt
         sender: Mutex::new(sender),
         _attention_owner: owner,
         inbox: Mutex::new(Inbox::default()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
@@ -408,8 +408,9 @@ pub fn sender(app: &AppHandle) -> Option<InputSender> {
 }
 
 /// Whether Zerus is the active app (`Qt::ApplicationActive`): an active
-/// Zerus consumes attention edges without banners.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Zerus consumes attention edges without banners. Windows reports it from
+/// `active_app` (zerus-5wmh.13.14.1).
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn set_focused(app: &AppHandle, focused: bool) {
     if let Some(state) = app.try_state::<DeskState>() {
         state.focused.store(focused, Ordering::Relaxed);
@@ -1137,20 +1138,30 @@ pub fn deliver_waiting(
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub(crate) fn tooltip_title() -> String {
+    crate::cli::version_line(&crate::cli::BUILD)
+        .trim_end()
+        .to_owned()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn tooltip_body(desk: &Desk) -> String {
+    crate::native_text::lines(&desk.tooltip())
+}
+
 fn publish(app: &AppHandle, desk: &Desk) {
+    #[cfg(any(target_os = "macos", windows))]
+    let title = tooltip_title();
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let body = tooltip_body(desk);
     #[cfg(target_os = "linux")]
-    crate::platform::linux_tray::offer(
-        app,
-        desk.face(),
-        crate::native_text::lines(&desk.tooltip()),
-        desk.menu(),
-        desk.badge(),
-    );
+    crate::platform::linux_tray::offer(app, desk.face(), body, desk.menu(), desk.badge());
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) = (
             desk.face(),
-            crate::native_text::lines(&desk.tooltip()),
+            format!("{title}\n{body}"),
             desk.menu(),
             desk.badge(),
         );
@@ -1163,7 +1174,7 @@ fn publish(app: &AppHandle, desk: &Desk) {
     crate::platform::windows::tray::offer(
         app,
         desk.face(),
-        crate::native_text::lines(&desk.tooltip()),
+        crate::windows_shell::versioned_tooltip::<128>(&title, &body),
         desk.menu(),
         desk.badge(),
     );

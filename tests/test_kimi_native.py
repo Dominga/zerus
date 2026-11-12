@@ -18,6 +18,7 @@ the copy in the same process with exactly those. A child's environment is then t
 proven byte for byte by that process's argument area, read between two
 identical samples of its PID, start, image and supervisor; anything else fails.
 """
+import base64
 import hashlib
 import http.server
 import json
@@ -541,6 +542,10 @@ class Model(http.server.BaseHTTPRequestHandler):
             self.wfile.write(error)
             self.wfile.flush()
             return
+        # A test may hold the turn busy until it releases it (zerus-iitw8).
+        hold = getattr(self.server, 'hold', None)
+        if hold is not None and len(self.server.requests) == 1:
+            hold.wait(120)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -849,6 +854,69 @@ class NativeKimi(lifecycle.Harness):
                 found.append(content)
         return found.count(text)
 
+    def test_id_settings_before_first_message_preserves_empty_conversation_and_defaults(self):
+        import native_effort_id as identity
+        import native_settings_id as settings_contract
+        config = self.home / 'config.toml'
+        text = config.read_text()
+        self.assertEqual(text.count('max_context_size = 32768\n'), 1)
+        text = text.replace('max_context_size = 32768\n', 'max_context_size = 32768\ncapabilities = ["thinking"]\n')
+        text += '\n[models.fixture_next]\nprovider = "fixture"\nmodel = "fixture-next"\nmax_context_size = 32768\ncapabilities = ["thinking"]\n'
+        config.write_text(text)
+        name = self.launch()
+        record = self.binding(name)
+        self.assertFalse(record.get('conversation_id'), 'do not prime a first turn for empty-CID settings')
+        before, requests = config.read_bytes(), len(self.requests)
+        record, path, legacy = identity.moved_record(self, name, record)
+        attempts = identity.key_log(self)
+        settings_contract.change_and_replay(self, name, record, path, 'fixture_next', 'on', attempts)
+        self.assertIn('fixture-next', self.screen(name).lower())
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(len(self.requests), requests, 'settings submitted a first model turn')
+        self.assertFalse(legacy.exists())
+
+    def test_id_effort_preserves_raw_request_identity_and_shared_defaults(self):
+        import native_effort_id as contract
+        config = self.home / 'config.toml'
+        text = config.read_text()
+        self.assertEqual(text.count('max_context_size = 32768\n'), 1)
+        config.write_text(text.replace('max_context_size = 32768\n',
+                                       'max_context_size = 32768\ncapabilities = ["thinking"]\n'))
+        name = self.launch()
+        initial_text = 'Establish the native ID effort fixture.'
+        initial = self.send(name, self.payload(name, initial_text))
+        self.until(lambda: settled_recorded_turn(self.inspect(name), initial, initial_text), name)
+        record = self.binding(name)
+        self.assertTrue(record['conversation_id'])
+        before = config.read_bytes()
+        record, path, legacy = contract.moved_record(self, name, record)
+        attempts = contract.key_log(self)
+        current = self.inspect(name)
+        self.assertTrue(current['effort_change_supported'], current['effort_change_reason'])
+        self.assertIn(current['effort'], ('on', 'off'), self.screen(name))
+        first = 'off' if current['effort'] == 'on' else 'on'
+        requests = len(self.requests)
+        for wanted in (first, 'on' if first == 'off' else 'off'):
+            self.assertIn(wanted, current['effort_options'])
+            record = contract.change_and_replay(self, name, record, path, wanted, attempts)
+            screen = self.screen(name).lower()
+            if wanted == 'on':
+                self.assertIn('fixture thinking', screen)
+            else:
+                self.assertNotIn('fixture thinking', screen)
+            self.assertEqual(self.inspect(name)['effort'], wanted)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(len(self.requests), requests, 'the picker sent a model request')
+        followup_text = 'Confirm the moved native session still receives its hooks.'
+        followup = self.send(name, self.payload(name, followup_text))
+        settled = self.until(lambda: settled_recorded_turn(self.inspect(name), followup, followup_text), name)
+        self.assertEqual(settled['conversation_id'], record['conversation_id'])
+        actual = json.loads(path.read_bytes())
+        for key in ('session_id', 'run_id', 'conversation_id', 'pid', 'supervisor'):
+            self.assertEqual(actual.get(key), record.get(key), key)
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse(legacy.exists(), 'a native hook recreated the retired legacy record')
+
     def test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume(self):
         name, text = 'kimi/p/initial', 'Initial launch message\\'
         launch = str(uuid.uuid4())
@@ -948,6 +1016,33 @@ class NativeKimi(lifecycle.Harness):
             time.sleep(1)
             self.assertEqual(len(self.requests), requests)
             self.assertEqual(self.held(text), 1)
+
+    def test_busy_attachment_send_is_typed_once_and_delivered_once(self):
+        # zerus-iitw8: Kimi shows pasted image paths as text and its paste
+        # placeholder at once (no asynchronous attachment as in Claude), so a
+        # busy-time send keeps its single Enter and its submitted receipt.
+        name = self.launch()
+        hold = threading.Event()
+        self.model_server.hold = hold
+        self.addCleanup(hold.set)
+        first = 'Start the held fixture turn.'
+        self.send(name, self.payload(name, first))
+        self.until(lambda: self.inspect(name).get('activity') == 'busy' and len(self.requests) >= 1, name)
+        image = base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(64)).decode()
+        text = 'Peer report while busy.\n' + '\n'.join('- Line %d of the report.' % n for n in range(1, 26))
+        payload = dict(self.payload(name, text), attachments=[dict(name='row-dark.png', mime='image/png', data_base64=image),
+                                                              dict(name='row-light.png', mime='image/png', data_base64=image)])
+        receipt = self.send(name, payload)
+        self.assertEqual(receipt['status'], 'submitted')
+        self.assertEqual(self.send(name, payload), receipt)
+        hold.set()
+        submitted = receipt['submitted_text']
+        def delivered():
+            return sum(any(m.get('role') == 'user' and submitted in str(m.get('content')) for m in request.get('messages', []))
+                       for request in self.requests[-1:])
+        self.until(delivered, name)
+        self.until(lambda: self.settled(name, receipt), name)
+        self.assertEqual(self.held(submitted), 1)
 
     def test_pause_and_resume_keep_the_conversation(self):
         name = self.launch()

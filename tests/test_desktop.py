@@ -1190,11 +1190,11 @@ finally:
                 self.assertFalse((self.desktop / 'service.sock').exists())
             finally:
                 db.rollback()
-        deadline = time.monotonic() + 5
-        while not self.cli('desktop', 'status', '--json')['running']:
-            self.assertIsNone(process.poll(), 'original startup exited after releasing the schema transaction')
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.01)
+            deadline = time.monotonic() + 5
+            while not self.cli('desktop', 'status', '--json')['running']:
+                self.assertIsNone(process.poll(), 'original startup exited after releasing the schema transaction')
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
 
     @unittest.skipIf(os.name == 'nt', 'Windows preview requires an installed stable CLI')
     def test_registration_preview_preserves_selected_paths_without_installing(self):
@@ -1640,6 +1640,58 @@ finally:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assert_passive_import('handoff_unavailable')
         self.assert_passive_import('delegation_required')
+
+    def test_held_handoff_allows_fresh_empty_and_current_passive_startup(self):
+        original_env = dict(self.env)
+        for shape in ('missing', 'empty', 'current'):
+            with self.subTest(shape=shape):
+                base = self.root / shape
+                base.mkdir(mode=0o700)
+                self.state, self.config = base / 'state', base / 'config'
+                self.desktop = self.state / 'desktop'
+                self.config.mkdir(mode=0o700)
+                self.state.mkdir(mode=0o700)
+                self.desktop.mkdir(mode=0o700)
+                self.env = dict(original_env, HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.state))
+                database = self.desktop / 'state.sqlite3'
+                if shape == 'empty':
+                    fd = os.open(database, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    os.close(fd)
+                elif shape == 'current':
+                    service, _ = self.serve()
+                    self.stop(service)
+                lock_path = self.desktop / 'handoff.lock'
+                with lock_path.open('a+b') as hold:
+                    lock_path.chmod(0o600)
+                    if os.name == 'nt':
+                        import msvcrt
+                        msvcrt.locking(hold.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    original = lock_path.stat()
+                    service, status = self.serve()
+                    self.assertTrue(status['lifecycle']['ipc_ready'])
+                    self.assertFalse(status['writers_enabled'])
+                    self.assertFalse((self.desktop / 'schema-34-rollback').exists())
+                    self.assertEqual((lock_path.stat().st_dev, lock_path.stat().st_ino),
+                                     (original.st_dev, original.st_ino))
+                    # The original hold is still physically held, including
+                    # across the passive service's normal cleanup.
+                    self.stop(service)
+                    with lock_path.open('r+b') as contender:
+                        with self.assertRaises(OSError):
+                            if os.name == 'nt':
+                                msvcrt.locking(contender.fileno(), msvcrt.LK_NBLCK, 1)
+                            else:
+                                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if os.name == 'nt':
+                        hold.seek(0)
+                        msvcrt.locking(hold.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(hold, fcntl.LOCK_UN)
+                with closing(sqlite3.connect(database)) as db:
+                    self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], SCHEMA)
 
     def test_two_clients_share_epoch_and_eof_detaches_only_one(self):
         service, status = self.serve()

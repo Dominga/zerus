@@ -83,6 +83,8 @@
 //!   or `resume` when the agent arguments resume a conversation), `prompt`,
 //!   `reason` (`--end-reason TEXT`, default `other`) and, with
 //!   `--transcript-dir DIR`, a `transcript_path` that holds the session ID line.
+//!   With Claude's hooks, each submitted prompt is then appended to it as a
+//!   `{"type":"user"}` row after UserPromptSubmit, as Claude Code records it.
 //!   `--session-id ID` fixes the ID; otherwise agent arguments `--resume ID`,
 //!   `-r ID`, `--session ID`, `resume ID` (resumed) or `--session-id ID` choose
 //!   it, else a random UUID.
@@ -1644,6 +1646,9 @@ struct Agent {
     session_id: String,
     resumed: bool,
     transcript: Option<PathBuf>,
+    /// Record each submitted prompt in the transcript as Claude Code does
+    /// (zerus-iitw8): set when the hooks are Claude's and a transcript exists.
+    claude_rows: bool,
     stop_at: Option<Instant>,
     exit_at: Option<(Instant, i32, String)>,
     exit_now: Option<(i32, String)>,
@@ -1881,6 +1886,17 @@ impl Agent {
             return;
         }
         self.hook("submit", Some(&prompt));
+        // Claude Code writes the user row after its UserPromptSubmit hook.
+        if self.claude_rows {
+            if let Some(path) = &self.transcript {
+                let row = json!({"type": "user", "message": {"role": "user", "content": prompt}});
+                if let Err(error) = fs::OpenOptions::new().append(true).open(path).and_then(|mut file| {
+                    std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes())
+                }) {
+                    record(json!({"kind": "error", "transcript": path.to_string_lossy(), "error": error.to_string()}));
+                }
+            }
+        }
         match self.config.turn {
             Some(turn) if turn.is_zero() => self.hook("stop", None),
             Some(turn) => self.stop_at = self.stop_at.or(Some(Instant::now() + turn)),
@@ -2198,11 +2214,13 @@ fn main() {
         }
         path
     });
-    let (hooks, info) = match config.hooks.clone().unwrap_or_else(|| {
+    let style = config.hooks.clone().unwrap_or_else(|| {
         ["claude", "codex", "kimi"]
             .contains(&config.name.as_str())
             .then(|| config.name.clone())
-    }) {
+    });
+    let claude_rows = style.as_deref() == Some("claude") && transcript.is_some();
+    let (hooks, info) = match style {
         Some(agent) => {
             let (hooks, info) = load_hooks(&agent);
             (hooks, Some(info))
@@ -2245,6 +2263,7 @@ fn main() {
         session_id,
         resumed,
         transcript,
+        claude_rows,
         stop_at: None,
         exit_at: None,
         exit_now: None,

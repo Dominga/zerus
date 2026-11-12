@@ -125,7 +125,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, approvals.GoalCases, a
                          os.path.normcase(str(bash)), 'only the exact installed Git Bash may resolve')
         approvals.make_private_folders(self.env)
         (self.home / 'config.toml').write_text(
-            approvals.model_config(self.server.server_port, self.goal_mode or 'default'))
+            approvals.model_config(self.server.server_port, self.goal_mode or 'manual'))
         (self.home / 'tui.toml').write_text(approvals.tui_config(self._testMethodName))
         portable = self.root / 'portable'
         portable.mkdir()
@@ -144,6 +144,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, approvals.GoalCases, a
         self.name = 'kimi/p/approval'
         self.names.append(self.name)  # Custody is reserved even if launch times out.
         self.launch_acknowledged = False
+        approvals.prepare_provider_permissions(self)
         self.hgs('kimi', str(self.project), '--new', '-n', 'approval', '-d')
         self.launch_acknowledged = True
         self.until(lambda: self.binding(self.name).get('pid'))

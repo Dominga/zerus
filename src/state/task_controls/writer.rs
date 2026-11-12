@@ -30,6 +30,11 @@ pub(in crate::state) fn test_open(root: &Path, until: Instant) -> Result<Writer>
     Writer::open_enabled(root, until)
 }
 impl Writer {
+    #[cfg(windows)]
+    pub(in crate::state) fn deadline(&self) -> Instant {
+        self.until
+    }
+
     fn open_enabled(root: &Path, until: Instant) -> Result<Self> {
         if Instant::now() >= until {
             return Err("The native task-control admission expired".into());

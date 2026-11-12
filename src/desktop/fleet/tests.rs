@@ -829,3 +829,253 @@ fn a_live_peer_stays_available_when_the_local_watch_reconnects() {
     assert_eq!(status["all_sources_ready"], false);
     assert!(peer_accepting);
 }
+
+impl Fake {
+    fn start_waiting(&self, epoch: &str, restart: Duration) -> Runtime {
+        let mut runtime = self.start(epoch);
+        runtime.set_restart_delays([restart; 4]);
+        runtime
+    }
+    fn probes(&self, host: &str) -> usize {
+        self.log()
+            .iter()
+            .filter(|entry| entry["host"] == host && entry["args"] == json!(["-h"]))
+            .count()
+    }
+}
+
+fn connection(runtime: &Runtime, id: &str) -> Value {
+    runtime.status()["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn poll_until(runtime: &mut Runtime, what: &str, done: impl Fn(&Runtime) -> bool) {
+    let until = Instant::now() + Duration::from_secs(15);
+    while !done(runtime) {
+        drop(runtime.poll());
+        assert!(Instant::now() < until, "{what}: {}", runtime.status());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_peer_wait_is_shown_with_its_source_and_reconnect_ends_only_that_wait() {
+    let fake = Fake::new(json!({
+        "":{"runs":[[{"lines":[hello(),snapshot(0,true,vec![]),meta(json!(["slow.example"]))]},{"serve":true}]]},
+        "slow.example":{"runs":[[{"exit":1}]]}
+    }));
+    let mut runtime = fake.start_waiting("epoch", Duration::from_secs(3600));
+    let before = runtime.connections_revision();
+    poll_until(&mut runtime, "the peer's first wait", |runtime| {
+        connection(runtime, "slow.example")["retry"]["serial"] == 1
+            && runtime.computers[&ComputerId::local()].status == ComputerStatus::Live
+    });
+    assert!(runtime.connections_revision() > before);
+    let row = connection(&runtime, "slow.example");
+    assert_eq!(row["status"], "reconnecting");
+    assert_eq!(row["retry"]["phase"], "waiting");
+    assert_eq!(row["retry"]["delay_ms"], 3_600_000);
+    assert!(row["retry"]["remaining_ms"].as_u64().unwrap() <= 3_600_000);
+    assert_eq!(connection(&runtime, "")["retry"]["phase"], "idle");
+    let incarnation = row["incarnation"].as_u64().unwrap();
+    // Control: the hour-long wait starts nothing by itself.
+    std::thread::sleep(Duration::from_millis(200));
+    drop(runtime.poll());
+    assert_eq!(fake.probes("slow.example"), 1);
+
+    assert_eq!(
+        runtime.reconnect("slow.example", Some(incarnation + 1)),
+        "source_changed"
+    );
+    assert_eq!(runtime.reconnect("unknown.example", None), "not_configured");
+    assert_eq!(runtime.reconnect("", None), "connected");
+    assert_eq!(
+        runtime.reconnect("slow.example", Some(incarnation)),
+        "requested"
+    );
+    assert_eq!(
+        runtime.reconnect("slow.example", Some(incarnation)),
+        "pending"
+    );
+    poll_until(&mut runtime, "the peer's next wait", |runtime| {
+        connection(runtime, "slow.example")["retry"]["serial"] == 2
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    drop(runtime.poll());
+    assert_eq!(fake.probes("slow.example"), 2, "exactly one extra attempt");
+    // The same supervisor kept its source; no other was started.
+    assert_eq!(
+        connection(&runtime, "slow.example")["incarnation"],
+        incarnation
+    );
+
+    let reply = request(
+        &mut runtime,
+        &json!({"op":"fleet_reconnect","request_id":"r-1",
+        "computers":[{"computer":"slow.example","incarnation":incarnation},{"computer":""}]}),
+    );
+    assert_eq!(reply["accepted"], true);
+    assert_eq!(
+        reply["results"][0],
+        json!({"computer":"slow.example","code":"requested"})
+    );
+    assert_eq!(reply["results"][1]["code"], "connected");
+    assert_eq!(reply["connections"]["display_only"], true);
+    assert_eq!(reply["connections"]["authority"], false);
+    for bad in [
+        json!({"op":"fleet_reconnect","computers":[{"computer":"slow.example"}]}),
+        json!({"op":"fleet_reconnect","request_id":"r","computers":[]}),
+        json!({"op":"fleet_reconnect","request_id":"r","computers":[{"computer":"-oProxyCommand=x"}]}),
+        json!({"op":"fleet_reconnect","request_id":"r","computers":[{"computer":"a"},{"computer":"a"}]}),
+        json!({"op":"fleet_reconnect","request_id":"r","computers":[{"computer":"a","incarnation":"7"}]}),
+        json!({"op":"fleet_reconnect","request_id":"r","computers":
+            (0..65).map(|n| json!({"computer":format!("p{n}")})).collect::<Vec<_>>()}),
+    ] {
+        assert_eq!(
+            request(&mut runtime, &bad)["code"],
+            "invalid_request",
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        request(
+            &mut runtime,
+            &json!({"op":"fleet_restart","request_id":"r"})
+        )["code"],
+        "unknown_request"
+    );
+    stop(&mut runtime);
+    assert_eq!(runtime.reconnect("slow.example", None), "stopping");
+}
+
+#[test]
+fn a_stale_source_cannot_publish_a_schedule() {
+    let fake = Fake::new(json!({"":{"runs":[[{"exit":1}]]}}));
+    let mut runtime = fake.start_waiting("epoch", Duration::from_secs(3600));
+    poll_until(&mut runtime, "the local wait", |runtime| {
+        connection(runtime, "")["retry"]["phase"] == "waiting"
+    });
+    let current = runtime.computers[&ComputerId::local()].retry;
+    let mut stale = runtime.computers[&ComputerId::local()]
+        .handle
+        .identity()
+        .clone();
+    stale.incarnation += 100;
+    let revision = runtime.connections_revision();
+    assert!(runtime
+        .convert(source::Event::Retry {
+            source: stale,
+            generation: u64::MAX,
+            retry: Retry::Idle,
+        })
+        .is_none());
+    assert_eq!(runtime.computers[&ComputerId::local()].retry, current);
+    assert_eq!(runtime.connections_revision(), revision);
+    stop(&mut runtime);
+}
+
+#[test]
+fn saved_retry_delays_apply_and_an_invalid_file_keeps_the_last_valid_schedule() {
+    use crate::machines::retry_delays::FILE;
+    let fake = Fake::new(
+        json!({"":{"runs":[[{"lines":[hello(),snapshot(0,true,vec![])]},{"serve":true}]]}}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE);
+    let seconds = |runtime: &Runtime| runtime.restart_delays().map(|d| d.as_secs());
+    let mut runtime = fake.start("epoch");
+
+    // The cold start step of `Runtime::start`: no saved file, the defaults.
+    let missing = runtime.configure_retry_delays(dir.path().to_owned());
+    assert_eq!(missing["source"], "default");
+    assert!(missing["diagnostic"].is_null());
+    assert_eq!(seconds(&runtime), [1, 2, 5, 10]);
+
+    fs::write(&path, r#"{"version":1,"delays_seconds":[2,4,8,30]}"#).unwrap();
+    assert_eq!(runtime.reload_retry_delays()["source"], "file");
+    assert_eq!(seconds(&runtime), [2, 4, 8, 30]);
+
+    let invalid = r#"{"version":1,"delays_seconds":[30,4,8,2]}"#;
+    fs::write(&path, invalid).unwrap();
+    let revision = runtime.connections_revision();
+    let kept = request(
+        &mut runtime,
+        &json!({"op":"fleet_retry_delays_reload","request_id":"r"}),
+    );
+    assert_eq!(kept["accepted"], true);
+    assert_eq!(kept["retry_delays"]["source"], "kept");
+    assert!(kept["retry_delays"]["diagnostic"]
+        .as_str()
+        .unwrap()
+        .contains(FILE));
+    assert_eq!(
+        seconds(&runtime),
+        [2, 4, 8, 30],
+        "the last valid schedule stays"
+    );
+    assert!(runtime.connections_revision() > revision);
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        invalid,
+        "the file is never changed"
+    );
+    assert_eq!(runtime.status()["retry_delays"]["source"], "kept");
+    assert_eq!(
+        runtime.connections()["retry_delays"]["delays_seconds"],
+        json!([2, 4, 8, 30])
+    );
+
+    fs::remove_file(&path).unwrap();
+    assert_eq!(runtime.reload_retry_delays()["source"], "default");
+    assert_eq!(seconds(&runtime), [1, 2, 5, 10]);
+    stop(&mut runtime);
+
+    // A cold start with an invalid file keeps serving with the defaults and
+    // says why. It applies them itself: this fixture began with the scaled
+    // millisecond delays, which a cold start must not inherit.
+    fs::write(&path, "not json").unwrap();
+    let mut cold = fake.start("epoch-2");
+    assert_eq!(
+        seconds(&cold),
+        [0, 0, 0, 0],
+        "control: the fixture's own delays"
+    );
+    let view = cold.configure_retry_delays(dir.path().to_owned());
+    assert_eq!(view["source"], "default");
+    assert!(view["diagnostic"]
+        .as_str()
+        .is_some_and(|diagnostic| diagnostic.contains(FILE)));
+    assert_eq!(seconds(&cold), [1, 2, 5, 10]);
+    assert_eq!(cold.status()["state"], "running");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
+    // Once a usable file was read, a later failed reload keeps that one.
+    fs::write(&path, r#"{"version":1,"delays_seconds":[3,3,3,60]}"#).unwrap();
+    assert_eq!(cold.reload_retry_delays()["source"], "file");
+    fs::write(&path, "not json").unwrap();
+    assert_eq!(cold.reload_retry_delays()["source"], "kept");
+    assert_eq!(seconds(&cold), [3, 3, 3, 60]);
+    stop(&mut cold);
+}
+
+#[test]
+fn early_connection_frames_follow_changes_at_a_bounded_rate() {
+    let mut publication = Publication::default();
+    let at = Instant::now();
+    assert!(!publication.due(0, at), "nothing changed yet");
+    assert!(publication.due(1, at));
+    assert!(
+        !publication.due(1, at + Duration::from_secs(5)),
+        "unchanged"
+    );
+    assert!(
+        !publication.due(2, at + Duration::from_millis(100)),
+        "too soon"
+    );
+    assert!(publication.due(2, at + CONNECTIONS_GAP));
+    assert!(!publication.due(3, at + CONNECTIONS_GAP + Duration::from_millis(10)));
+}

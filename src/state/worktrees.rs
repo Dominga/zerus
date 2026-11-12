@@ -6,6 +6,8 @@ use std::fs::{self, OpenOptions};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod creation_cli;
+
 const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_TREES: usize = 512;
 const TTL: f64 = 30.0;
@@ -336,7 +338,52 @@ pub(super) fn list(
 pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
     catalog_until(path, refresh, Instant::now() + Duration::from_secs(3))
 }
+// Only a publication newer than this forced request can replace its own
+// refresh. This is repository-list evidence, never the selected path's identity.
+fn refreshed_while_waiting(
+    value: &Value,
+    previous: Option<&Value>,
+    common: &Path,
+    started: f64,
+) -> bool {
+    let Some(sample) = value["sampled_at"]
+        .as_f64()
+        .filter(|sample| sample.is_finite())
+    else {
+        return false;
+    };
+    let age = now() - sample;
+    value["state"] == "ok"
+        && value["partial"] == false
+        && value["common_dir"] == json!(common)
+        && started.is_finite()
+        && sample > started
+        && (0.0..TTL).contains(&age)
+        && previous.is_none_or(|old| {
+            old["sampled_at"]
+                .as_f64()
+                .is_some_and(|old| old.is_finite() && sample > old)
+        })
+        && value["worktrees"].as_array().is_some_and(|rows| {
+            !rows.is_empty()
+                && rows.len() <= MAX_TREES
+                && rows.iter().all(|row| {
+                    row["path"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).is_absolute())
+                        && row["available"].is_boolean()
+                        && matches!(row["kind"].as_str(), Some("main" | "linked" | "bare"))
+                        && ["head", "branch", "locked_reason", "prunable_reason"]
+                            .iter()
+                            .all(|key| row.get(*key).is_none_or(Value::is_string))
+                        && ["bare", "detached", "locked", "prunable"]
+                            .iter()
+                            .all(|key| row.get(*key).is_none_or(Value::is_boolean))
+                })
+        })
+}
 pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Value {
+    let started = now();
     let requested = path.to_string_lossy();
     let path_cache = cache_file("path", &requested);
     let previous = load(&path_cache);
@@ -367,37 +414,79 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
         if refresh || !snapshot.as_ref().is_some_and(fresh) {
             let _ = private_dir(cache.parent().unwrap());
             let guard = lock_file(&cache.with_extension("lock")).ok();
+            let mut coalesced = false;
             let _lock = match guard {
                 Some(guard) => {
-                    while guard.try_lock_exclusive().is_err() {
-                        if Instant::now() >= deadline {
-                            return Err(error("timeout", "Catalog is being refreshed"));
+                    let mut waited = false;
+                    loop {
+                        match guard.try_lock_exclusive() {
+                            Ok(()) => break,
+                            Err(e) if crate::platform::lock_contended(&e) => {
+                                waited = true;
+                                if Instant::now() >= deadline {
+                                    return Err(error("timeout", "Catalog is being refreshed"));
+                                }
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(e) => return Err(error("metadata_error", e.to_string())),
                         }
-                        std::thread::sleep(Duration::from_millis(10));
                     }
                     if !refresh {
                         snapshot = load(&cache);
+                    } else if waited {
+                        if let Some(current) = load(&cache).filter(|value| {
+                            refreshed_while_waiting(value, snapshot.as_ref(), &common, started)
+                        }) {
+                            snapshot = Some(current);
+                            coalesced = true;
+                        }
                     }
                     Some(crate::platform::FileLock::held(guard))
                 }
                 None => None,
             };
-            if refresh || !snapshot.as_ref().is_some_and(fresh) {
+            if Instant::now() >= deadline {
+                return Err(error("timeout", "Catalog verification timed out"));
+            }
+            if (refresh && !coalesced) || !snapshot.as_ref().is_some_and(fresh) {
                 let (trees, partial) = list(&path, &common, deadline)?;
                 let value = json!({"state":"ok","common_dir":common,"worktrees":trees,"partial":partial,"sampled_at":now()});
                 let _ = atomic(&cache, &value.to_string());
                 snapshot = Some(value);
             }
+            if coalesced {
+                // The selected checkout may have changed while its repository
+                // lock was held elsewhere. Never borrow another path's proof.
+                let current = git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"], deadline)?;
+                let current = std::str::from_utf8(&current)
+                    .map_err(|_| error("metadata_error", "Invalid repository path"))?;
+                let current = crate::platform::canonical(current.trim_end_matches('\n'))
+                    .map_err(|e| error("metadata_error", e.to_string()))?;
+                if current != common {
+                    return Err(error("metadata_error", "Repository changed during catalog refresh"));
+                }
+            }
         }
         let mut snapshot =
             snapshot.ok_or_else(|| error("metadata_error", "No worktree snapshot"))?;
+        if Instant::now() >= deadline {
+            return Err(error("timeout", "Catalog verification timed out"));
+        }
         // Discovery is on the agent's machine and identifies nested cwd and symlinks.
-        snapshot["selected_root"] = git(&path, &["rev-parse", "--show-toplevel"], deadline)
+        let selected_root = match git(&path, &["rev-parse", "--show-toplevel"], deadline) {
+            Err(e) if e.state == "timeout" => return Err(e),
+            other => other,
+        };
+        snapshot["selected_root"] = selected_root
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
             .map(|p| json!(canonical(p.trim_end_matches('\n'))))
             .unwrap_or(Value::Null);
-        snapshot["selected_branch"] = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"], deadline)
+        let selected_branch = match git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"], deadline) {
+            Err(e) if e.state == "timeout" => return Err(e),
+            other => other,
+        };
+        snapshot["selected_branch"] = selected_branch
             .ok().and_then(|bytes|String::from_utf8(bytes).ok())
             .map(|branch|json!(branch.trim_end_matches('\n'))).unwrap_or(Value::Null);
         snapshot["path"] = json!(path);
@@ -406,6 +495,9 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
         // cached with the listing: a reader reviews the repository for them.
         if let Ok(count) = super::worktree_maintenance::removal_count(&common) {
             snapshot["leftovers"] = json!(count);
+        }
+        if Instant::now() >= deadline {
+            return Err(error("timeout", "Catalog verification timed out"));
         }
         Ok::<_, GitError>(snapshot)
     })();
@@ -479,7 +571,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     {
         let value = match action {
             "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
-            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => super::worktree_requests::create_direct(&args[1..])?,
+            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => creation_cli::outcome(super::worktree_requests::create_direct(&args[1..])?)?,
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,

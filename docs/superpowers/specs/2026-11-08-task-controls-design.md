@@ -40,6 +40,52 @@ inactive runtime leaf owns service actor/worker wiring, Start acknowledgement
 mode, final C3 refusals and native control/import boundaries. Neither support
 review nor its preview completes `.4.7` or qualifies activation.
 
+### Inactive service admission and negative settlement
+
+The next source cut connects only the local actor admission/status lane behind
+that same false gate. It is inactive runtime wiring, requiring independent
+review and the coordinator's Arch/Mac preview. It is not the dormant/no-caller
+preview exemption. The service starts no task-control ledger, worker or native
+read at startup. While off, the marker is absent, the CLI does not connect,
+and a task_control Hello keeps the original unsupported-operation frame bytes.
+
+A bounded in-memory claim precedes native qualification. Before qualification
+the actor may only read an already-existing canonical ledger: malformed or
+unproven commands cannot create its tables or reserve a durable request. One
+worker observes the exact indexed executor and captures Stop objects under the
+original native exclusion, then releases that exclusion before returning its
+held peer/resident and retained-object proof. The worker owns no SQLite
+connection. The actor rechecks the proof, namespace, original SQLite/VFS
+binding, service custody and every retained Stop byte under its transaction.
+Only a qualified original receives atomic whole-page Stop import plus a durable
+before-effect refusal. No provider, acknowledgement, slot mutation, native
+input, task history, floor or controller is called. Plan and Begin stay explicitly
+unqualified. Person over the CLI bridge still refuses.
+
+Exactly matching durable requests, including Reserved and Unknown, are lookup
+only, never another worker or import. In-flight duplicates consult bounded
+memory; changed immutable admissions refuse. A crash before durable admission
+is neither an effects receipt nor a settled/no-start result. An uncertain
+commit/reply stays Unknown; status never initializes, repairs, imports or
+reserves anything and never starts a worker. Its bounded same-UID, trusted-CLI
+read is not an Executor/Person/effect grant. The total in-flight bound is the
+existing PENDING=16, with one native worker and the existing connection limit.
+The original client budget includes connect, probe, partial reads/writes and
+reply; a single server deadline includes ingress, queue, worker and settlement.
+
+The store guard hashes the independently selected configuration and original
+Unix VFS device/inode under zerus-task-control-store-unix-v1 followed by NUL.
+It excludes transient service image/epoch and is checked without opening or
+closing any raw descriptor of the live database. Namespace checks and SQLite's
+HAS_MOVED guard remain mandatory. The Linux CLI image guard hashes the held
+executable object's device/inode/size/change+modify times under its own v1
+domain; it excludes the particular CLI PID. The resident guard separately binds
+the actual supervisor/agent births, held images and argv. Matching digests bind
+data only. An unqualified store/image platform refuses; this cut supplies Linux
+guards, not Mac/Windows runtime qualification or activation evidence. Existing
+Mac audit-token and Windows held-process support is not promoted by typechecks.
+The coordinator's dr2h1 repair gates preview installation independently.
+
 The desktop Start plan captures a gated acknowledgement mode before hashing.
 The field is omitted byte-for-byte while off and grants no floor authority.
 The final C3 result must agree: managed uses one pinned begin; positively

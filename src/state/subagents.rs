@@ -1,7 +1,7 @@
 //! Read-only child Activity. The parent roster is the authority for membership;
 //! an arbitrary thread ID or filesystem path is never an inspection target.
 use super::*;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -73,6 +73,7 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
     } else {
         native_messages(&record, id)
     };
+    let mut source_truncated = false;
     match messages {
         Ok(Some((messages, cwd, truncated))) if !messages.is_empty() => {
             // Native messages replace hook excerpts; tool events retain their
@@ -86,7 +87,7 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
             if !cwd.is_empty() {
                 output["cwd"] = json!(cwd);
             }
-            output["history_truncated"] = json!(truncated);
+            source_truncated = truncated;
             output["history_scope"] = json!("Native subagent history");
         }
         Err(_) => {
@@ -94,6 +95,9 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
                 json!("Recorded events; native subagent history is unavailable");
         }
         _ => {}
+    }
+    if merge_activity_events(&mut events, source_truncated) {
+        output["history_truncated"] = json!(true);
     }
     if events.is_empty() && !string(child, "detail").is_empty() {
         events.push(json!({"type":"AgentMessage","agent_id":"","at":child["updated"],"detail":child["detail"],"source":"subagent_summary"}));
@@ -104,6 +108,18 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
         output["session_usage"] = usage::read(&native_record);
     }
     Ok(output)
+}
+
+fn merge_activity_events(events: &mut Vec<Value>, mut truncated: bool) -> bool {
+    fn at(value: &Value) -> f64 {
+        value["at"].as_f64().unwrap_or_default()
+    }
+    events.sort_by(|a, b| at(a).total_cmp(&at(b)));
+    if events.len() > 200 {
+        events.drain(..events.len() - 200);
+        truncated = true;
+    }
+    truncated
 }
 
 fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, String, bool)>> {
@@ -124,11 +140,8 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
             if uuid::Uuid::parse_str(id).is_err() {
                 return Ok(None);
             }
-            let db = Connection::open_with_flags(
-                native_home.join("state_5.sqlite"),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|e| e.to_string())?;
+            let db = codex_sqlite::NativeConnection::open(native_home.join("state_5.sqlite"))
+                .map_err(|e| e.to_string())?;
             db.busy_timeout(std::time::Duration::from_millis(20))
                 .map_err(|e| e.to_string())?;
             let row = db
@@ -146,7 +159,9 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
             PathBuf::from(path)
         }
         "claude" => {
-            let Some(path) = claude_subagents::paths(record, &[id]).remove(id) else { return Ok(None); };
+            let Some(path) = claude_subagents::paths(record, &[id]).remove(id) else {
+                return Ok(None);
+            };
             path
         }
         "kimi" => {
@@ -220,4 +235,61 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
         messages.drain(..messages.len() - 200);
     }
     Ok(Some((messages, cwd, truncated)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(at: i64, kind: &str) -> Value {
+        json!({"at":at,"type":kind,"detail":format!("{kind} {at}")})
+    }
+
+    #[test]
+    fn merged_page_keeps_the_latest_two_hundred_in_stable_order() {
+        let mut events = (1..=150)
+            .map(|at| event(at, "hook"))
+            .chain((101..=250).map(|at| event(at, "native")))
+            .collect::<Vec<_>>();
+        assert!(merge_activity_events(&mut events, false));
+        assert_eq!(events.len(), 200);
+        assert_eq!(events.first().unwrap()["at"], 101);
+        assert_eq!(events.last().unwrap()["at"], 250);
+        assert!(events.iter().any(|event| event["type"] == "hook"));
+        assert!(events.iter().any(|event| event["type"] == "native"));
+        let hook = events
+            .iter()
+            .position(|event| event["at"] == 101 && event["type"] == "hook")
+            .unwrap();
+        let native = events
+            .iter()
+            .position(|event| event["at"] == 101 && event["type"] == "native")
+            .unwrap();
+        assert!(hook < native, "equal timestamps retain source order");
+    }
+
+    #[test]
+    fn exactly_two_hundred_does_not_infer_truncation() {
+        let mut events = (1..=100)
+            .map(|at| event(at, "hook"))
+            .chain((101..=200).map(|at| event(at, "native")))
+            .collect::<Vec<_>>();
+        assert!(!merge_activity_events(&mut events, false));
+        assert_eq!(events.len(), 200);
+        assert_eq!(events.first().unwrap()["at"], 1);
+        assert_eq!(events.last().unwrap()["at"], 200);
+    }
+
+    #[test]
+    fn native_truncation_is_retained_and_ties_keep_source_order() {
+        let mut events = vec![event(1, "first"), event(1, "second"), event(1, "third")];
+        assert!(merge_activity_events(&mut events, true));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+    }
 }

@@ -138,7 +138,7 @@ class NativeGraphTimeout(unittest.TestCase):
 import os, pathlib, subprocess, sys, time
 root=pathlib.Path(__file__).parent
 child=subprocess.Popen([sys.executable, '-c',
-    "import os,pathlib,sys; print('child-out',flush=True); print('child-err',file=sys.stderr,flush=True); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); sys.stdin.read()", str(root/'child')], stdin=subprocess.PIPE)
+    "import os,pathlib,sys; print('child-out',flush=True); print('child-err',file=sys.stderr,flush=True); pid=pathlib.Path(sys.argv[1]); pending=pid.with_suffix('.tmp'); pending.write_text(str(os.getpid())); pending.replace(pid); sys.stdin.read()", str(root/'child')], stdin=subprocess.PIPE)
 while not (root/'child').exists(): time.sleep(.001)
 print('root-out',flush=True); print('root-err',file=sys.stderr,flush=True)
 (root/'ready').touch()

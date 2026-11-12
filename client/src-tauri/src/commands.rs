@@ -51,6 +51,19 @@ impl AppState {
     pub fn refresh(&self) -> usize {
         self.live.refresh()
     }
+    /// Machines > Reconnect now for one computer; see [`live::Live::reconnect_now`].
+    pub async fn reconnect_now(
+        &self,
+        computer: &str,
+        incarnation: Option<u64>,
+    ) -> Result<String, String> {
+        self.live.reconnect_now(computer, incarnation).await
+    }
+    /// Applies saved reconnect timings to the running supervisors; see
+    /// [`live::Live::apply_retry_delays`].
+    pub async fn apply_retry_delays(&self, delays: [std::time::Duration; 4]) -> Value {
+        self.live.apply_retry_delays(delays).await
+    }
 
     /// The change pump, whose mirror is the screens hub's view of the fleet.
     pub fn pump(&self) -> crate::pump::Pump {
@@ -291,6 +304,35 @@ mod live {
                 .map_err(|_| "Background source is not accepting changes.".into())
         }
     }
+    /// Reads this computer's saved reconnect timings (`hgs machine
+    /// retry-delays`) off the UI thread and gives them to the fleet's
+    /// supervisors, unless timings were applied meanwhile. An unreadable or
+    /// older CLI leaves the fast defaults.
+    fn saved_retry_delays(hgs: std::path::PathBuf, restart: zerus_client_core::RestartDelays) {
+        use zerus_client_core::machine_connections;
+        let initial = restart.get();
+        let _ = std::thread::Builder::new()
+            .name("hgs-retry-delays".into())
+            .spawn(move || {
+                let Ok(call) = machine_connections::retry_delays_call(None) else {
+                    return;
+                };
+                let Ok(exit) = zerus_client_core::run_limited(
+                    &hgs,
+                    &call,
+                    &[],
+                    machine_connections::RESPONSE_BYTES,
+                ) else {
+                    return;
+                };
+                if let Ok(saved) = machine_connections::retry_delays_checked(exit, None) {
+                    if restart.get() == initial {
+                        restart.set(saved.delays());
+                    }
+                }
+            });
+    }
+
     pub(crate) use barrier::FrozenFleet;
     pub(crate) mod barrier;
 
@@ -383,6 +425,66 @@ mod live {
                 _ => 0,
             }
         }
+        /// Ends one computer's restart wait in the supervisor that owns it:
+        /// this app's own fleet, or the background service's (bound to the
+        /// `incarnation` the person saw). Never starts, restarts or activates
+        /// a source, the service or an agent. Returns the outcome code
+        /// (`requested`, `pending`, `connected`, `source_changed`, ...).
+        pub async fn reconnect_now(
+            &self,
+            computer: &str,
+            incarnation: Option<u64>,
+        ) -> Result<String, String> {
+            let service = {
+                let Ok(_admission) = self.admit() else {
+                    return Err("Background source is not accepting changes.".into());
+                };
+                match self
+                    .source
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    Some(Source::Fleet(fleet)) => {
+                        let requested = fleet.reconnect(&ComputerId::from(computer));
+                        return Ok(if requested { "requested" } else { "pending" }.into());
+                    }
+                    Some(Source::Service(service)) => service.clone(),
+                    Some(Source::Replay(_)) | None => {
+                        return Err("No connection source is running.".into())
+                    }
+                }
+            };
+            service
+                .fleet_reconnect(computer, incarnation)
+                .await
+                .map_err(str::to_owned)
+        }
+
+        /// Saved reconnect timings reach the running supervisors: an
+        /// in-process fleet takes them for its next waits; the background
+        /// service re-reads its saved file and reports what it uses.
+        pub async fn apply_retry_delays(&self, delays: [Duration; 4]) -> Value {
+            let service = match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => {
+                    fleet.set_restart_delays(delays);
+                    return serde_json::json!({"by":"app",
+                        "delays_seconds":delays.map(|delay| delay.as_secs())});
+                }
+                Some(Source::Service(service)) => service.clone(),
+                Some(Source::Replay(_)) | None => return serde_json::json!({"by":"none"}),
+            };
+            match service.reload_retry_delays().await {
+                Ok(retry_delays) => serde_json::json!({"by":"service","retry_delays":retry_delays}),
+                Err(code) => serde_json::json!({"by":"service","error":code}),
+            }
+        }
+
         pub fn reconnect(&self, computer: &str) -> bool {
             let Ok(_admission) = self.admit() else {
                 return false;
@@ -524,6 +626,7 @@ mod live {
                 }
                 None => {
                     let hgs = hgs();
+                    let saved_hgs = hgs.clone();
                     #[cfg(unix)]
                     let fleet = Fleet::start_accounted(
                         hgs,
@@ -533,6 +636,7 @@ mod live {
                     );
                     #[cfg(not(unix))]
                     let fleet = Fleet::start(hgs, sink);
+                    saved_retry_delays(saved_hgs, fleet.restart_handle());
                     let _ = self.core_control.set(fleet.control());
                     // An already admitted start can register after freeze.
                     // It must see the sticky close before following anything.

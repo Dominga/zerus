@@ -2,11 +2,10 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
-import { contentScale, selected, setDetailTab, setMenu, toast } from "../../store/ui";
+import { contentScale, selected, setMenu, toast } from "../../store/ui";
 import { copyVerbatim, pasteText } from "../../bridge";
 import { platform } from "../../store/shortcuts";
-import { clipboardKeyHandler, terminalMenu } from "./terminal-clipboard";
-import { composer } from "../../store/composer";
+import { clipboardKeyHandler, normalizeTerminalImage, terminalMenu } from "./terminal-clipboard";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
 import { tr } from "../../i18n";
@@ -23,6 +22,16 @@ const encoder = new TextEncoder();
 const webgl = typeof navigator !== "undefined" && /Mac|Windows/.test(navigator.userAgent);
 const SCROLLBACK = 5000;
 
+function imagePasteFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  switch (message) {
+    case "Pasting an image needs the desktop app.": return tr("Pasting an image needs the desktop app.");
+    case "Pasting image files into Terminal is not supported on this computer.": return tr("Pasting image files into Terminal is not supported on this computer.");
+    case "Terminal changed or image bytes changed before transfer; nothing was pasted.": return tr("Terminal changed or image bytes changed before transfer; nothing was pasted.");
+    default: return message;
+  }
+}
+
 function theme() {
   const css = getComputedStyle(document.documentElement);
   const v = (name: string) => css.getPropertyValue(name).trim();
@@ -33,11 +42,12 @@ export function TerminalTab() {
   let host!: HTMLDivElement;
   const [live, setLive] = createSignal<{ term: XTerm; measure: () => void } | undefined>();
   const [folds, setFolds] = createSignal<ReturnType<typeof mountTerminalNotices> | undefined>();
-  const [imagePasteUnavailable, setImagePasteUnavailable] = createSignal(false);
+  const [imagePasteError, setImagePasteError] = createSignal("");
+  let inputScreen: Screen | undefined;
   let gone = false;
   let teardown: (() => void) | undefined;
   // Registered synchronously: the owner is gone once the imports below resolve.
-  onCleanup(() => { gone = true; teardown?.(); });
+  onCleanup(() => { gone = true; inputScreen = undefined; teardown?.(); });
 
   // Reactive inputs apply once the terminal exists.
   createEffect(() => {
@@ -58,21 +68,23 @@ export function TerminalTab() {
   const onPaste = (event: ClipboardEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    const data = event.clipboardData;
-    const items = [...(data?.items ?? [])];
-    const imageItems = items.filter((item) => item.kind === "file" && item.type.startsWith("image/"));
-    const image = imageItems[0]?.getAsFile()
-      ?? [...(data?.files ?? [])].find((file) => file.type.startsWith("image/"));
-    if (image || imageItems.length || [...(data?.types ?? [])].some((type) => type.startsWith("image/"))) {
-      if (image && composer.canAttach()) {
-        // The existing composer captures its original handle before any await.
-        // Stage in the draft, never write image data or Enter to the terminal.
-        void composer.pasteImage(image);
-        setDetailTab("activity");
-      } else setImagePasteUnavailable(true);
-      return;
-    }
-    terminal.paste(data?.getData("text/plain") ?? "");
+    try {
+      const data = event.clipboardData;
+      const lease = inputScreen && !gone ? terminal.captureImage(inputScreen) : undefined;
+      const items = [...(data?.items ?? [])];
+      const imageItems = items.filter((item) => item.kind === "file" && item.type.startsWith("image/"));
+      const image = imageItems[0]?.getAsFile()
+        ?? [...(data?.files ?? [])].find((file) => file.type.startsWith("image/"));
+      if (image || imageItems.length || [...(data?.types ?? [])].some((type) => type.startsWith("image/"))) {
+        setImagePasteError("");
+        if (!image || !lease) setImagePasteError(tr("Could not read the pasted image."));
+        else void normalizeTerminalImage(image).then((png) => lease.paste(png)).catch((error) => {
+          if (!gone && lease.current()) setImagePasteError(imagePasteFailure(error));
+        });
+        return;
+      }
+      terminal.paste(data?.getData("text/plain") ?? "");
+    } catch { setImagePasteError(tr("Could not read the pasted image.")); }
   };
 
   // Qt's copySelection and pasteClipboard: the selection exactly as shown,
@@ -134,9 +146,10 @@ export function TerminalTab() {
     term.onResize(({ cols, rows }) => terminal.resized(cols, rows));
     const observer = new ResizeObserver(measure);
     observer.observe(host);
+    inputScreen = screen;
     const fold = mountTerminalNotices(term, foldMode as NoticeMode);
     setFolds(fold);
-    teardown = () => { fold.dispose(); setFolds(undefined); terminal.hide(); observer.disconnect(); term.dispose(); };
+    teardown = () => { inputScreen = undefined; fold.dispose(); setFolds(undefined); terminal.hide(); observer.disconnect(); term.dispose(); };
     setLive({ term, measure });
     terminal.show(screen);
     term.focus();
@@ -178,11 +191,10 @@ export function TerminalTab() {
           <Icon name={connected() ? "unplug" : "plug"} size={15} />
         </button>
       </div>
-      <Show when={imagePasteUnavailable()}>
+      <Show when={imagePasteError()}>
         <div class="term-image-paste" role="status">
-          <span>{tr("Images go through Activity. Open Activity and paste again when the message field is ready.")}</span>
-          <button class="btn small" onClick={() => setDetailTab("activity")}>{tr("Open Activity")}</button>
-          <button class="icon-btn small" aria-label={tr("Dismiss")} onClick={() => setImagePasteUnavailable(false)}><Icon name="x" size={14} /></button>
+          <span>{imagePasteError()}</span>
+          <button class="icon-btn small" aria-label={tr("Dismiss")} onClick={() => setImagePasteError("")}><Icon name="x" size={14} /></button>
         </div>
       </Show>
       <div class="term-host" data-shortcut-context="terminal" ref={host} onContextMenu={onContextMenu} />

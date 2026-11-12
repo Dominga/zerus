@@ -77,7 +77,7 @@ export interface SelectionTool {
 }
 
 /**
- * The bar's visible tools in Qt's order: a tool shows when its count is above
+ * The bar's visible tools in menu order: a tool shows when its count is above
  * 0. `unmuted` says whether any selected session is unmuted (`anyUnmuted`);
  * `moveRefusal` why the organization takes no edit now (zerus-5wmh.18.1).
  */

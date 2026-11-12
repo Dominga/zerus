@@ -861,6 +861,24 @@ export async function machineChange(request: import("./types").MachineChangeRequ
   return invoke<void>("machine_change", { request });
 }
 
+/** What saving reconnect timings did: the saved timings, then who applies them (`app`, `service` or `none`). */
+export interface RetryDelaysOutcome {
+  saved: import("./types").RetryDelays;
+  applied: { by: "app" | "service" | "none"; retry_delays?: import("./types").FleetRetryDelays | null; error?: string };
+}
+
+/** Saves four seconds, or with null resets to the defaults; no retry after an unknown result. */
+export async function machineRetryDelays(delays: [number, number, number, number] | null): Promise<RetryDelaysOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<RetryDelaysOutcome>("machine_retry_delays", { delays });
+}
+
+/** Ends one computer's restart wait ("" is this computer); resolves to the supervisor's code. */
+export async function machineReconnect(computer: string, incarnation?: number): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<string>("machine_reconnect", { computer, incarnation: incarnation ?? null });
+}
+
 /** Uses the configured terminal and existing hgs machine ssh route. */
 export async function machineSsh(reference: import("./types").MachineReference): Promise<string | null> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
@@ -1050,6 +1068,13 @@ export interface DropTarget { computer: string; name: string; machine: string; r
 export async function terminalDrop(view: string, generation: number, target: DropTarget, paths: string[]): Promise<string | null> {
   if (!inTauri()) throw "Dropping files needs the desktop app.";
   return invoke<string | null>("terminal_drop", { view, generation, target, paths });
+}
+/** Only event PNG bytes; Rust owns staging, exact attach checks and the final path write. */
+export async function terminalPasteImage(view: string, generation: number, target: TerminalTarget, png: Uint8Array): Promise<void> {
+  if (!inTauri()) throw "Pasting an image needs the desktop app.";
+  const guard = JSON.stringify({ computer: target.computer, name: target.name, run_id: target.run_id, conversation_id: target.conversation_id })
+    .replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  await invoke("terminal_paste_image", png, { headers: { "x-zerus-view": view, "x-zerus-generation": String(generation), "x-zerus-image-target": guard } });
 }
 /** Whether every dropped path names a file (Qt's LocalFile::readable); a folder refuses the drop. */
 export async function droppedFiles(paths: string[]): Promise<boolean> {

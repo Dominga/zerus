@@ -352,3 +352,78 @@ fn a_check_without_the_kind_knows_nothing_and_each_call_uses_its_lane() {
         service.join().await.unwrap();
     });
 }
+
+/// The real Store/actor controls pin accounting recovery. This maintained
+/// Service/GUI transport fixture checks the corresponding client boundary:
+/// an older Unknown stays lookup-only while a distinct manual send can settle.
+#[test]
+fn a_retained_unknown_does_not_block_a_distinct_manual_send() {
+    if !private_case("desktop_service::deferred_send::fixture_tests::a_retained_unknown_does_not_block_a_distinct_manual_send") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (old_checkpoint, old_stdin) = original("original remains unknown");
+        let old = verified(&service, &old_checkpoint, &old_stdin).await;
+        let unknown = receipt(&old, wire::Phase::Unknown, true, wire::RECEIPT_INVALID);
+        let admission = |v: &wire::Verified, receipt: Value| {
+            json!({"abi":wire::ABI,
+            "request_id":v.plan.request_id,"scope":v.intent.scope,"accepted":true,
+            "durable":true,"code":"","receipt":receipt})
+        };
+        answers(&f.0, Some(admission(&old, unknown.clone())), &[]);
+        assert_eq!(
+            send(service.clone(), SESSION, old_checkpoint, old_stdin).await,
+            SendAnswer::Unconfirmed(UNCONFIRMED.into())
+        );
+        let (checkpoint, stdin) = original("distinct fresh manual send");
+        let fresh = verified(&service, &checkpoint, &stdin).await;
+        assert_ne!(fresh.plan.request_id, old.plan.request_id);
+        answers(
+            &f.0,
+            Some(admission(
+                &fresh,
+                receipt(&fresh, wire::Phase::Recorded, true, ""),
+            )),
+            &[],
+        );
+        assert!(matches!(
+            send(service.clone(), SESSION, checkpoint, stdin).await,
+            SendAnswer::Recorded(_)
+        ));
+        let offers = count(&f.0, "deferred_send");
+        assert_eq!(offers, 2);
+        answers(&f.0, None, &[unknown]);
+        let s = service.clone();
+        let plan = old.plan.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || check(Some(s), &plan))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            Checked::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into()))
+        );
+        assert_eq!(
+            count(&f.0, "deferred_send"),
+            offers,
+            "checking the old UUID never sends"
+        );
+        let calls = std::fs::read_to_string(f.0.join("send-calls")).unwrap();
+        let originals: Vec<Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|c| c["value"]["request"]["op"] == "deferred_send")
+            .collect();
+        assert_eq!(originals.len(), 2);
+        assert_eq!(
+            originals[0]["value"]["request"]["intent"]["request_id"],
+            old.plan.request_id
+        );
+        assert_eq!(
+            originals[1]["value"]["request"]["intent"]["request_id"],
+            fresh.plan.request_id
+        );
+        service.join().await.unwrap();
+    });
+}

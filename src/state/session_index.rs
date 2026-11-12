@@ -225,6 +225,53 @@ pub(super) fn note(record: &Value, kind: Kind) {
     changed(write_entry(id, name, kind));
 }
 
+/// The same optional index policy under the original recovery owner. Its
+/// concrete JSON write goes through Effects, and a refused selected effect
+/// propagates as well as tripping this process's existing write-error latch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn note_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    record: &Value,
+    kind: Kind,
+) -> Result<()> {
+    view.check()?;
+    let (id, name) = (string(record, "session_id"), string(record, "name"));
+    if !session_id::canonical(id)
+        || name.is_empty()
+        || !string(record, "archive_id").is_empty()
+        || record["rename_shadow"] == true
+    {
+        return Ok(());
+    }
+    if !writable(id) {
+        return view.check();
+    }
+    let previous = view
+        .read(&path(id), ENTRY_BYTES)?
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if previous.as_ref().is_some_and(|entry| {
+        entry["version"] == 1
+            && string(entry, "name") == name
+            && Kind::parse(string(entry, "kind")) == Some(kind)
+    }) {
+        return view.check();
+    }
+    #[cfg(test)]
+    {
+        CHANGES.fetch_add(1, Ordering::SeqCst);
+        if FAIL_CHANGES.load(Ordering::SeqCst) {
+            trip();
+            return Err("injected failure".into());
+        }
+    }
+    let value = json!({"version":1,"name":name,"kind":kind.as_str()});
+    let result = view.atomic(&path(id), format!("{value}\n").as_bytes());
+    if result.is_err() {
+        trip();
+    }
+    result
+}
+
 /// Removes `record`'s entry while it still names that label as a record: the
 /// archive or forget that just retired the label, under the writer lock it
 /// holds, so `ids/` does not keep an entry for every session ever made.
@@ -274,6 +321,129 @@ pub(super) fn find(id: &str) -> Option<Found> {
         Kind::OpenCodeId => opencode::read_id(id).ok()?,
     };
     carries(&record, id, &name).then_some(Found { name, kind, record })
+}
+
+/// Same fixed route proof without presentation projections or index repair.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn find_metadata(id: &str) -> Option<Found> {
+    let (name, kind) = entry(id)?;
+    let record = fixed_metadata(&name, kind, id).ok()?;
+    carries(&record, id, &name).then_some(Found { name, kind, record })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fixed_metadata(name: &str, kind: Kind, id: &str) -> Result<Value> {
+    use provider_binding::Provider;
+    match kind {
+        Kind::Record | Kind::IdRecord => {
+            let path = if kind == Kind::IdRecord {
+                storage::id_record_path(id).ok_or("Invalid metadata session ID")?
+            } else {
+                storage::label_record_path(name)
+            };
+            let raw = labels::read_file(&path, storage::ID_RECORD_BYTES)
+                .map_err(|e| e.to_string())?
+                .ok_or("Metadata binding is absent")?;
+            storage::verify_metadata_at(&path, name, &raw)
+        }
+        Kind::DeepSeek => Provider::DeepSeek.read_label(name),
+        Kind::DeepSeekId => Provider::DeepSeek.read_id(id),
+        Kind::OpenCode => Provider::OpenCode.read_label(name),
+        Kind::OpenCodeId => Provider::OpenCode.read_id(id),
+    }
+}
+
+/// Keep the actual validated route with the lookup result; a vanished ID file
+/// must never turn a previously selected ID route into a label-holder lookup.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn metadata_records_for_id_unrepaired(id: &str) -> Result<Vec<Value>> {
+    if !session_id::canonical(id) {
+        return Err("A session ID must be a canonical UUID".into());
+    }
+    if let Some(found) = find_metadata(id) {
+        return Ok(vec![found.record]);
+    }
+    scanned();
+    scan_metadata(Some(id))
+}
+
+/// Active authoritative metadata for an old reference without a SID. The
+/// caller still matches its exact conversation/run; archived references are
+/// refused by Effort before this route. No cache, telemetry or Root repair.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn metadata_records_unrepaired() -> Result<Vec<Value>> {
+    scanned();
+    scan_metadata(None)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn scan_metadata(wanted: Option<&str>) -> Result<Vec<Value>> {
+    use std::time::{Duration, Instant};
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    let mut records = Vec::new();
+    for namespace in storage::BINDING_DIRS {
+        let folder = root().join(namespace);
+        let entries = match fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        for entry in entries {
+            if count >= 5000 || Instant::now() >= until {
+                return Err(
+                    "The metadata ID lookup exceeded its bound; no route was selected".into(),
+                );
+            }
+            count += 1;
+            let file = entry.map_err(|e| e.to_string())?.path();
+            let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if file.extension().is_none_or(|s| s != "json")
+                || !storage::binding_stem(namespace, stem)
+            {
+                continue;
+            }
+            let raw = labels::read_file(&file, storage::ID_RECORD_BYTES)
+                .map_err(|e| e.to_string())?
+                .ok_or("A metadata binding disappeared during lookup")?;
+            bytes = bytes
+                .checked_add(raw.len())
+                .ok_or("Metadata lookup bytes overflow")?;
+            if bytes > 64 << 20 {
+                return Err("The metadata ID lookup exceeded its byte bound".into());
+            }
+            let value: Value = serde_json::from_slice(&raw)
+                .map_err(|e| format!("A metadata binding could not be read: {e}"))?;
+            if wanted.is_some_and(|id| string(&value, "session_id") != id)
+                || !string(&value, "archive_id").is_empty()
+                || value["rename_shadow"] == true
+            {
+                continue;
+            }
+            let name = string(&value, "name");
+            let id = string(&value, "session_id");
+            let kind = match namespace {
+                "" | "bindings" => Kind::Record,
+                "sessions" => Kind::IdRecord,
+                "dsh/bindings" => Kind::DeepSeek,
+                "dsh/sessions" => Kind::DeepSeekId,
+                "opencode/bindings" => Kind::OpenCode,
+                "opencode/sessions" => Kind::OpenCodeId,
+                _ => return Err("Unknown fixed metadata namespace".into()),
+            };
+            let record = fixed_metadata(name, kind, id)?;
+            if carries(&record, id, name) {
+                records.push(record);
+            }
+        }
+    }
+    if Instant::now() >= until {
+        return Err("The metadata ID lookup exceeded its original bound".into());
+    }
+    Ok(records)
 }
 
 /// After a scan for `id` found `found` (label and kind, at most one label for

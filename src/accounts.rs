@@ -12,6 +12,8 @@ pub(crate) mod marks;
 mod install;
 mod deepseek;
 mod local_model;
+mod deepseek_spend;
+mod deepseek_usage;
 use crate::{
     cli::{Error, Result},
     config::Config,
@@ -48,8 +50,8 @@ struct Catalog {
     permission_modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     defaults: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    model_defaults: BTreeMap<String, model_defaults::Defaults>,
+    #[serde(default, skip_serializing_if = "model_defaults::Stored::is_empty")]
+    model_defaults: model_defaults::Stored,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -96,7 +98,6 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
-    model_defaults::validate_catalog(&catalog)?;
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
@@ -1664,6 +1665,10 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
 /// Apply saved model defaults only when creating a new conversation.
 pub fn apply_model_defaults(config: &Config, account: &str, provider: &str, argv: &mut Vec<String>) -> Result<()> {
     model_defaults::apply(config, account, provider, argv)
+}
+/// The DeepSeek account's saved launch selection as (provider/model, effort).
+pub fn launch_selection(config: &Config, provider: &str) -> Result<Option<(String, String)>> {
+    model_defaults::launch_selection(config, provider)
 }
 
 #[cfg(test)]

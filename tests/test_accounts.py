@@ -129,6 +129,43 @@ class Accounts(unittest.TestCase):
         self.assertEqual(json.loads(self.run_hgs('account','model-settings','code').stdout)['defaults'],dict(model='',effort=''))
         self.assertEqual((home/'config.toml').read_bytes(),original)
 
+    def test_model_defaults_reads_ignore_newer_entries_and_writes_preserve_them_verbatim(self):
+        self.add('code','codex')
+        home=self.config/'accounts/code'
+        (home/'models_cache.json').write_text(json.dumps({'models':[{'slug':'fixture-smart','visibility':'list',
+            'supported_reasoning_levels':[{'effort':'high'},{'effort':'xhigh'}]}]}))
+        path=self.config/'accounts.json'
+        catalog=json.loads(path.read_text())
+        future='{ "route": ["future",1.00,1e+02], "options": {"new":true} }'
+        newer='{ "model": "fixture-claude", "effort": "future-effort" }'
+        extra='{ "model": "fixture", "new_field": [1, 2] }'
+        path.write_text(json.dumps(catalog)[:-1]+',"model_defaults":{"native-future":'+future+
+            ',"native-claude":'+newer+',"native-kimi":'+extra+
+            ',"code":{"model":"fixture-smart","effort":"high"}}}')
+        rows={p['id']:p for p in self.ls()['profiles']}
+        self.assertEqual(rows['code']['model_defaults_status'],'saved')
+        for who in ('native-claude','native-kimi'):
+            self.assertEqual(rows[who]['model_defaults_status'],'ignored')
+            self.assertTrue(rows[who]['model_defaults_reason'])
+            self.assertEqual(rows[who]['model_defaults'],dict(model='',effort=''))
+        settings=json.loads(self.run_hgs('account','model-settings','native-claude').stdout)
+        self.assertEqual(settings['model_defaults_status'],'ignored')
+        self.assertEqual(settings['defaults'],dict(model='',effort=''))
+        # Ignored values do not reach launch arguments.
+        launch=self.run_hgs('--dry-run','claude',str(self.root),'-n','ignored','-d').stdout
+        self.assertNotIn(b'fixture-claude',launch)
+        self.assertNotIn(b'future-effort',launch)
+        before=path.read_bytes()
+        self.run_hgs('account','model-defaults','code','--model','fixture-smart','--effort','future-effort',ok=False)
+        self.assertEqual(path.read_bytes(),before)
+        self.run_hgs('account','model-defaults','code','--model','fixture-smart','--effort','xhigh')
+        for value in (future,newer,extra):
+            self.assertIn(value,path.read_text())
+        self.run_hgs('account','model-defaults','native-claude','--model','')
+        self.assertNotIn('native-claude',json.loads(path.read_text())['model_defaults'])
+        for value in (future,extra):
+            self.assertIn(value,path.read_text())
+
     def test_native_opencode_login_dry_run_never_invokes_auth(self):
         fake=self.bin
         binary=fake/"opencode";marker=self.root/"opencode-auth-marker"
@@ -587,7 +624,7 @@ for line in sys.stdin:
     def test_explicit_agent_install_is_allowlisted_and_failed_download_never_runs(self):
         # Unix runs npm or the vendors' install.sh; Windows gets install.ps1 (src/accounts/install.rs).
         for provider,package,url in (('codex','@openai/codex',''),('claude','','https://claude.ai/install.sh'),
-                                     ('kimi','','https://code.kimi.com/kimi-code/install.sh'),('dsh','@deepseek-ai/dsh@0.2.1-rc.2','')):
+                                     ('kimi','','https://code.kimi.com/kimi-code/install.sh'),('dsh','@deepseek-ai/dsh@0.2.2-rc.1','')):
             result=json.loads(self.run_hgs('account','install',provider,'--dry-run').stdout)
             self.assertEqual(result,{'provider':provider,'package':package,'installer_url':url,'dry_run':True})
         self.run_hgs('account','install','arbitrary-command',ok=False)

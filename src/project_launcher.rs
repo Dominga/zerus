@@ -397,7 +397,17 @@ mod tests {
                 for name in ["HOME","USERPROFILE","APPDATA","LOCALAPPDATA","TEMP","TMP","HGS_CONFIG_DIR","HGS_STATE_DIR"] {
                     let path=root.path().join(name);std::fs::create_dir_all(&path).unwrap();command.env(name,path);
                 }
-                let output=crate::platform::output_until(&mut command,Duration::from_secs(20)).unwrap();
+                // The bound only guards a hang.  A hosted runner's first start of
+                // each shell is cold: .NET's first-use work plus a signed module's
+                // certificate check, which waits on the certificate revocation
+                // list and can take 15 s on its own (Microsoft's PowerShell startup
+                // guidance); the fresh user directories this fixture gives the
+                // child leave no local answer, and the suite's 2600+ tests keep the
+                // runner busy.  Two PR runs failed here with `Stopped` at 20 s.
+                // The launcher itself waits for the person's script with no
+                // deadline, so no product deadline is relaxed, and the contract
+                // assertions below are unchanged.
+                let output=crate::platform::output_until(&mut command,Duration::from_secs(60)).unwrap();
                 assert_eq!(output.status.code(),Some(expected),"{shell}: {}",String::from_utf8_lossy(&output.stderr));
                 if expected==7 {let value:serde_json::Value=serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();assert_eq!(value["args"],serde_json::json!(values));assert_eq!(value["cleared"],true);}
             }

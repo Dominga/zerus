@@ -6,6 +6,8 @@ The default development-mode binary expects a separately running dev server.
 """
 import argparse, ctypes, json, os, re, signal, subprocess, sys, tempfile, time
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
 REPO = Path(__file__).resolve().parents[2]
 MACHINE = '11111111-1111-4111-8111-111111111111'
 if '--worker' not in sys.argv:
@@ -143,7 +145,7 @@ raise RuntimeError(args)
     if args.undo_ui:env['ZERUS_CLIENT_QUERY']='page=sessions&skin=zerus-light&end-action-ui-smoke=1'
     (root/'environment.json').write_text(json.dumps(env))
     print('Private Archive recovery walk:' if args.recovery else 'Private Terminate cleanup walk:', root, flush=True)
-    child = subprocess.Popen(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app),*(['recovery'] if args.recovery else [])],env=env,start_new_session=True)
+    child = subprocess.Popen(gui_sandbox.sandboxed(['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app),*(['recovery'] if args.recovery else [])],keep=[root]),env=env,start_new_session=True)
     try: result=child.wait(timeout=95)
     except subprocess.TimeoutExpired:
         os.killpg(child.pid,signal.SIGTERM);child.wait(timeout=5);raise
@@ -167,6 +169,7 @@ x.XFlush.argtypes=[ctypes.c_void_p];t.XTestFakeKeyEvent.argtypes=[ctypes.c_void_
 x.XSetInputFocus.argtypes=[ctypes.c_void_p,ctypes.c_ulong,ctypes.c_int,ctypes.c_ulong]
 display=x.XOpenDisplay(None);assert display
 with (root/'app.log').open('wb') as log:
+    gui_sandbox.refuse_reachable_guard()
     child=subprocess.Popen([str(app)],env=env,stdout=log,stderr=log,cwd=REPO/'client')
     stages=set();deadline=time.monotonic()+85
     try:

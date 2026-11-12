@@ -6,6 +6,7 @@ Message another session (hgs guide send)
      jq -n --arg id "$(uuidgen)" --arg run RUN --arg conv CONVERSATION --arg text "..." \
        '{request_id:$id, expected_run_id:$run, expected_conversation_id:$conv, text:$text}' |
        hgs [@h] send SESSION --json
+   Put code, logs and diffs in fenced code blocks (```) so Zerus shows them as code.
    Reuse a request_id only to retry the identical payload. Optional
    attachments: [{name, mime, data_base64}]; [Image #1] or [File #2] in the
    text places them.

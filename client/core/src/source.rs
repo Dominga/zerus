@@ -72,6 +72,12 @@ pub enum Event {
         status: ComputerStatus,
         observed_at: Instant,
     },
+    /// The supervisor's restart schedule; display only, never authority.
+    Retry {
+        source: Identity,
+        generation: u64,
+        retry: crate::Retry,
+    },
 }
 pub struct Item {
     event: Event,
@@ -519,6 +525,8 @@ impl Handle {
     pub fn identity(&self) -> &Identity {
         &self._slot.identity
     }
+    /// Ends this source's restart wait now, keeping its rows, follows and
+    /// generation. False while connected, attempting or already requested.
     pub fn reconnect(&self) -> bool {
         self.stream.reconnect()
     }
@@ -664,6 +672,26 @@ impl Endpoint {
             return false;
         };
         self.status_reserved(generation, status, permit)
+    }
+    /// Sends the restart schedule under the same bounded admission as a status.
+    pub fn retry(&self, generation: u64, retry: crate::Retry, stop: &AtomicBool) -> bool {
+        let Some(permit) = self
+            .sender
+            .reserve_with(512, stop, INGRESS_BYTES, INGRESS_ITEMS, None)
+        else {
+            return false;
+        };
+        self.sender
+            .tx
+            .send(Item {
+                event: Event::Retry {
+                    source: self.identity.clone(),
+                    generation,
+                    retry,
+                },
+                _permit: permit,
+            })
+            .is_ok()
     }
     pub fn status_reserved(&self, generation: u64, status: ComputerStatus, permit: Permit) -> bool {
         self.sender

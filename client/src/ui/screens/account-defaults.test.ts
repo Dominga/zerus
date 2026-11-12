@@ -21,6 +21,14 @@ describe("account-specific defaults",()=>{
     expect(accountModelView(catalog,"").effortEnabled).toBe(false);
     expect(accountModelView({...catalog,effort_supported:false},"example")).toMatchObject({efforts:[],effortEnabled:false,hint:"Kimi manages effort in its native settings. This choice sets the model for new conversations."});
     expect(accountModelView({...catalog,models:[]},"").hint).toBe("Open this account's agent once, then refresh to load its models.");
+    expect(accountModelView({...catalog,models:[]},"","dsh").hint).toBe("Start or resume a DeepSeek session, then refresh to load its models.");
+  });
+  it("offers DeepSeek routes with their native efforts (zerus-v7tqa)",()=>{
+    const deepseek:AccountModelCatalog={models:[{id:"deepseek-official/deepseek-flash",label:"DeepSeek-V4.1-Flash (DeepSeek)",effort_options:["off","low","high","max"]}],
+      defaults:{model:"deepseek-official/deepseek-flash",effort:"max"},provider_defaults:{model:"deepseek-official/deepseek-flash",effort:""},effort_supported:true};
+    expect(accountModelChoices(deepseek).map(m=>m.label)).toEqual(["DeepSeek-V4.1-Flash (DeepSeek)"]);
+    expect(accountModelView(deepseek,"deepseek-official/deepseek-flash","dsh")).toMatchObject({efforts:["off","low","high","max"],effortEnabled:true,canSave:true,
+      hint:"Choose the reasoning effort for the selected model, or keep its provider default."});
   });
   it("explains the captured provider permission scope",()=>{
     const view={provider:"codex",machine:"studio",permission_mode:"provider",permission_detail:"Configured by the provider."} as AccountEditView;

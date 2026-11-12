@@ -11,6 +11,7 @@ import threading
 import unittest
 import uuid
 
+import receipt_locator
 import test_input as fixtures
 
 HGS = fixtures.HGS
@@ -125,6 +126,71 @@ class ReadMarks(unittest.TestCase):
                 self.assertNotIn('read', row)
                 self.assertNotIn('read_observation', row)
         self.assertEqual(path.read_bytes(), original)
+
+    def inspect(self, *args):
+        result = subprocess.run([str(HGS), 'inspect', self.name, *args], env=self.env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_current_read_names_exactly_what_read_accepts_now(self):
+        first = self.reply(100.5)
+        self.waiting()
+        row = self.listing()
+        self.assertEqual(row['reply_id'], first)
+        self.assertRegex(row['attention_signature'], HEX)
+        expected = dict(schema=1, run_id=self.run_id, conversation_id=self.conversation_id, reply_id=first,
+                        attention_signature=row['attention_signature'], attention_complete=True)
+        for args in ([], ['--after', '0', '--skip-processes']):
+            with self.subTest(args=args):
+                self.assertEqual(self.inspect(*args, '--current-read')['current_read'], expected)
+        for args in ([], ['--after', '0', '--skip-processes'], ['--read-observation']):
+            with self.subTest(args=args):
+                self.assertNotIn('current_read', self.inspect(*args))
+        self.assertFalse((self.state / 'read-marks.json').exists())  # Inspecting acknowledges nothing.
+        current = self.inspect('--current-read')['current_read']
+        self.assertEqual(self.mark(reply_id=current['reply_id'], attention_signature=current['attention_signature'])['applied'],
+                         {'reply_id': True, 'attention_signature': True})
+        # A newer reply and request make the earlier values stale; they are never applied.
+        self.reply(200.5)
+        self.waiting('call-2')
+        self.assertEqual(self.mark(reply_id=current['reply_id'], attention_signature=current['attention_signature'])['applied'],
+                         {'reply_id': False, 'attention_signature': False})
+        newer = self.inspect('--current-read')['current_read']
+        self.assertNotEqual((newer['reply_id'], newer['attention_signature']),
+                            (current['reply_id'], current['attention_signature']))
+        self.assertEqual(self.mark(reply_id=newer['reply_id'], attention_signature=newer['attention_signature'])['applied'],
+                         {'reply_id': True, 'attention_signature': True})
+
+    def test_current_read_never_signs_unindexed_questions(self):
+        self.codex_question()
+        known = self.listing()['attention_signature']
+        self.assertRegex(known, HEX)
+        self.assertEqual(self.inspect('--current-read')['current_read']['attention_signature'], known)
+        digest = hashlib.sha256(json.dumps([None, self.conversation_id], separators=(',', ':')).encode()).hexdigest()
+        path = self.state / 'codex_questions' / f'{digest}.lock'
+        # Hold the question index longer than the one-second budget, then let the
+        # inspection's own (unbudgeted) question listing finish. A slow start can
+        # reach the signed read after the release: then it must be complete and
+        # equal to the known signature, and a longer hold is tried.
+        for hold in (2.5, 5.0, 10.0):
+            with self.subTest(hold=hold), path.open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                child = subprocess.Popen([str(HGS), 'inspect', self.name, '--current-read'], env=self.env,
+                                         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                time.sleep(hold)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                out, err = child.communicate(timeout=60)
+                self.assertEqual(child.returncode, 0, err)
+                current = json.loads(out)['current_read']
+                if current['attention_complete']:
+                    self.assertEqual(current['attention_signature'], known)
+                    continue
+                self.assertNotIn(current['attention_signature'], (known, None))
+                self.assertFalse(self.mark(attention_signature=current['attention_signature'])['applied']['attention_signature'])
+                break
+        else:
+            self.fail('the signed question read never ran while the index was held')
 
     def test_signature_ignores_status_updates_and_changes_for_a_new_request(self):
         self.waiting()
@@ -407,6 +473,10 @@ class ReadMarks(unittest.TestCase):
         rollout.write_text(''.join(json.dumps(line) + '\n' for line in lines))
         self.record.update(transcript=str(rollout), phase='working', activity='busy')
         self.write_record()
+        # Question recovery reads the receipt locator (zerus-a4mub.8); a fresh
+        # state lists the questions as unknown until it exists, which these
+        # read-mark tests do not measure.
+        receipt_locator.settle(HGS, self.env)
 
     def test_unindexed_questions_are_never_acknowledged(self):
         self.codex_question()
@@ -447,6 +517,24 @@ class ReadMarks(unittest.TestCase):
         self.assertIsNone(row['optional_questions'])
         self.assertIsNone(row['attention_signature'])
         self.assertEqual(row['phase'], 'working')
+
+    def test_current_read_reports_an_unreadable_question_index_as_incomplete(self):
+        self.codex_question()
+        self.assertTrue(self.inspect('--current-read')['current_read']['attention_complete'])
+        # zerus-a4mub.28: an index that cannot be read leaves the questions unknown.
+        # The listing and `hgs read` keep counting it as none.
+        rollout = Path(self.record['transcript'])
+        lines = rollout.read_text().splitlines(keepends=True)
+        rollout.write_text(json.dumps(dict(type='session_meta', payload=dict(id=str(uuid.uuid4())))) + '\n'
+                           + ''.join(lines[1:]))
+        self.assertIsNone(self.listing()['attention_signature'])
+        row = self.inspect('--current-read')
+        self.assertIn('pending_questions_error', row)
+        current = row['current_read']
+        self.assertFalse(current['attention_complete'])
+        self.assertRegex(current['attention_signature'], HEX)
+        self.assertFalse(self.mark(attention_signature=current['attention_signature'])['applied']['attention_signature'])
+        self.assertFalse((self.state / 'read-marks.json').exists())
 
     def test_saved_session_lists_no_optional_questions(self):
         self.codex_question()

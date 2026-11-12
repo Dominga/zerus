@@ -2,16 +2,16 @@ import type { LaunchProject } from "../../types";
 import { array, object, string, type Json } from "../lib/json";
 import { absolute, chars, drive, server, share, slashes, type Style } from "./path-forms";
 
-export { absolute, native, of, type Style } from "./path-forms";
+export { absolute, native, of, selectedStyle, type Style } from "./path-forms";
 
 // Folder paths in the form of the computer they belong to, and New session's
 // folder helpers: a line-for-line port of client/core/src/paths.rs (`of`,
 // `absolute`, `clean`, `same`, `within`, `leaf`, `native`, `split`, `join`) and of
 // client/core/src/launch.rs `matching_project_folder`, `prefill_target` and
 // `restored_folder`, with the same names where JavaScript allows. `of`,
-// `absolute`, `native` and the root helpers they share live in path-forms.ts,
-// which the start-up chunk loads for the Projects entries (folder-launch.ts);
-// this module re-exports them and loads with New session.
+// `selectedStyle`, `absolute`, `native` and the root helpers they share live in
+// path-forms.ts, which the start-up chunk loads for the Projects entries
+// (folder-launch.ts); this module re-exports them and loads with New session.
 //
 // A scoped exception to "rules the core already has are called, never
 // rewritten in TypeScript" (plan 2026-10-28-tauri-client-new-session-dialog,

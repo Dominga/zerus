@@ -213,7 +213,7 @@ internal suspend fun RelayApi.encryptedEvents(connection:Connection,after:Long,w
     return WorkspaceNotifications.events(connection,records,page,after,System.currentTimeMillis()/1000.0)
 }
 
-internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObject):JSONObject=withContext(Dispatchers.IO) {
+internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObject,attempt:SendAttempt):JSONObject=withContext(Dispatchers.IO) {
     val state=synchronizeWorkspace(connection);val membership=state.requireActive();val journal=journal()
     val id=WorkspaceProtocol.string(body,"request_id");WorkspaceProtocol.identifier(id)
     val computer=WorkspaceProtocol.string(body,"computer_id");val previous=journal.recordedRequest(connection,id)
@@ -226,10 +226,10 @@ internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObjec
     // Retain every identity at the endpoint; read hints never authorize native replay.
     val header=WorkspaceHeader(membership.workspaceId,state.identity.device.deviceId,recipient.deviceId,state.identity.device.keyGeneration,
         recipient.keyGeneration,route.gatewayId,route.routeId,id,"request",WorkspaceProtocol.operationClass(body.string("operation")),nowSeconds()+300,membership.revision,membership.head)
-    val envelope=RelayReadTiming.measure(RelayReadTiming.Stage.Seal) { WorkspaceEnvelope.seal(state.identity,recipient,header,plaintext) }
+    val envelope=RelayReadTiming.measure(RelayReadTiming.Stage.Seal) { sealEnvelope(state.identity,recipient,header,plaintext) }
     val hash=WorkspaceProtocol.encode(MessageDigest.getInstance("SHA-256").digest(plaintext))
     val retained=RelayReadTiming.measure(RelayReadTiming.Stage.Reserve) { journal.reserve(connection,id,hash,envelope) }
-    val result=call(connection.url,connection.token,"/v2/requests",JSONObject().put("envelope",retained.json()))
+    val result=call(connection.url,connection.token,"/v2/requests",JSONObject().put("envelope",retained.json()),attempt=attempt)
     decodeEncryptedReceipt(connection,state,result,id,retained.header)
 }
 

@@ -7,6 +7,12 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state::effort::picker_scope) mod helper;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod effort;
+
 fn control(case: &str) {
     let private = tempfile::tempdir().unwrap();
     let output = tempfile::tempfile().unwrap();
@@ -138,12 +144,18 @@ fn record() -> Value {
         "future":{"opaque":[1,2,3]},"model":"before"})
 }
 
-fn setup(kind: &str) -> (Guard, Value) {
+pub(in crate::state::effort::picker_scope) fn setup(kind: &str) -> (Guard, Value) {
+    setup_agent(kind, "claude")
+}
+
+pub(in crate::state::effort::picker_scope) fn setup_agent(kind: &str, agent: &str) -> (Guard, Value) {
     let writer = lock(None).unwrap();
     for name in ["sessions", "effort_receipts", "settings_receipts"] {
         private_dir(&root().join(name)).unwrap();
     }
     let mut record = record();
+    record["agent"] = json!(agent);
+    record["name"] = json!(format!("{agent}/example/shared"));
     if kind == "fresh" {
         record["layout"] = json!("id");
         publish_new_id(&writer, &mut record).unwrap();
@@ -159,7 +171,7 @@ fn setup(kind: &str) -> (Guard, Value) {
     (writer, record)
 }
 
-fn input(record: &Value) -> File {
+pub(in crate::state::effort::picker_scope) fn input(record: &Value) -> File {
     fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -275,6 +287,11 @@ fn fixture() {
     }
     let (kind, case) = case.split_once(':').unwrap();
     let (writer, mut current) = setup(kind);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(case) = case.strip_prefix("helper:") {
+        helper::fixture(writer, current, case);
+        return;
+    }
     if case == "empty" {
         current["conversation_id"] = json!("");
         save(&current);

@@ -660,13 +660,13 @@ impl Desk {
         (count > 0).then(|| count.to_string())
     }
 
-    /// Qt's tooltip, one Text per line; a stream has no poll age to show.
+    /// The tooltip body, one Text per line; a stream has no poll age to show.
     pub fn tooltip(&self) -> Vec<Text> {
         if let Some(error) = self.error() {
             return vec![crate::text!("Zerus: %1", error.to_string())];
         }
-        let (attention, total) = (self.attention(), self.total());
-        let mut lines = vec![crate::text!(
+        let (active, attention, total) = (self.active(), self.attention(), self.total());
+        let summary = crate::text!(
             "%1%2",
             if attention == 1 {
                 crate::text!("1 needs attention")
@@ -678,7 +678,8 @@ impl Desk {
             } else {
                 crate::text!(", %1 sessions total", total)
             },
-        )];
+        );
+        let mut lines = vec![crate::text!("%1 active, %2", active, summary)];
         let local = self.local();
         if local.is_none_or(|computer| computer.local_sessions) {
             let here = local
@@ -1039,6 +1040,10 @@ mod tests {
             "6",
             "the icon's upper number is the active count"
         );
+        assert!(
+            tip(&desk).starts_with("6 active, "),
+            "the tooltip uses the same global Active count"
+        );
         // An acknowledged subagent question: an idle parent leaves Active, a busy one stays.
         let acked = |name: &str, after: &str| ViewRow {
             child_attention: true,
@@ -1283,7 +1288,7 @@ mod tests {
         );
         assert_eq!(
             tip(&desk),
-            "2 need attention, 2 sessions total\n2 here\nstudio: not polled yet"
+            "2 active, 2 need attention, 2 sessions total\n2 here\nstudio: not polled yet"
         );
         assert_eq!(desk.badge().as_deref(), Some("2"));
         desk.set_marks(DeviceMarks::default());
@@ -1477,11 +1482,14 @@ mod tests {
         );
         assert_eq!(
             tip(&desk),
-            "1 needs attention, 2 sessions total\n1 here\n1 on mac\nstudio: not polled yet\nwin: unreachable"
+            "1 active, 1 needs attention, 2 sessions total\n1 here\n1 on mac\nstudio: not polled yet\nwin: unreachable"
         );
         let mut empty = Desk::default();
         host(&mut empty, "", "arch", true);
-        assert_eq!(tip(&empty), "0 need attention, 0 sessions total\n0 here");
+        assert_eq!(
+            tip(&empty),
+            "0 active, 0 need attention, 0 sessions total\n0 here"
+        );
     }
 
     #[test]
@@ -1589,7 +1597,7 @@ mod tests {
                 Entry::Quit,
             ]
         );
-        assert_eq!(tip(&desk), "0 need attention, 0 sessions total");
+        assert_eq!(tip(&desk), "0 active, 0 need attention, 0 sessions total");
     }
 
     #[test]

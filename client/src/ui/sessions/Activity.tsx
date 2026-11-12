@@ -3,6 +3,7 @@ import { withoutHeld } from "./held-message";
 import { tr, trNoop } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
+import { activityAnchorSeq, activityNearestRow, activityPositionCursor, activityPositions, type ActivityPosition } from "./activity-position";
 import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
@@ -29,7 +30,7 @@ import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
-import type { LocalMessage } from "../../types";
+import type { ActivityEvent, LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { replyVisible } from "../../store/viewedReply";
 import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
@@ -856,6 +857,8 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
   const [placed, setPlaced] = createSignal(false);
+  const [restoring, setRestoring] = createSignal<ActivityPosition>();
+  let restoredPage = false, windowEvents: readonly ActivityEvent[] = [], showingPreview = false;
   const [layoutHeld, setLayoutHeld] = createSignal(false);
   // Measure new/changed loaded rows while the layout gate is idle. A first
   // estimate correction above the viewport must never move an active reader.
@@ -892,11 +895,13 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
       setMeasuring(items.flatMap((item, index) => pending.has(item.id) || content.get(item.id) !== measuredContent.get(item.id) ? [index] : []));
       measuredContent = content;
       for (const key of virtualizer.itemSizeCache.keys()) if (!content.has(String(key))) virtualizer.itemSizeCache.delete(key);
-      const disclosures = Object.fromEntries(Object.entries(expanded).filter(([key]) => content.has(key)));
+      const saved = restoring();
+      const disclosures = Object.fromEntries(Object.entries({ ...expanded, ...saved?.expanded }).filter(([key]) => content.has(key)));
       setExpanded(reconcile(disclosures));
-      setMore(reconcile(Object.fromEntries(Object.entries(more).filter(([key]) => content.has(key.slice(0, key.lastIndexOf("#")))))));
+      setMore(reconcile(Object.fromEntries(Object.entries({ ...more, ...saved?.more }).filter(([key]) => content.has(key.slice(0, key.lastIndexOf("#")))))));
       setView("items", reconcile(items, { key: "id" }));
       setView({ expired, loaded, pane, tool });
+      windowEvents = source().events();
       reading.changed(); end.changed();
     }));
   });
@@ -1058,6 +1063,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     end.release(); setFollowing(false); reading.remember();
   };
   const latest = () => {
+    setRestoring(undefined);
     holdSelection();
     if (motion.active()) { latestAfterScroll = true; return; }
     reading.reset(); end.pin();
@@ -1145,6 +1151,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     onCleanup(() => { widths.dispose(); document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", fontChanged); });
   });
   onCleanup(() => {
+    savePosition();
     end.dispose(); reading.dispose(); motion.dispose();
     activityTexts.delete(scroller);
     activityAll.delete(scroller);
@@ -1170,10 +1177,20 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   };
   let sendIds: Set<string> | undefined;
   let layoutTarget: string | undefined | null = null;
+  const savePosition = () => {
+    if (!layoutTarget || !placed() || showingPreview) return;
+    const anchors = activityReadingRows(scroller).visible();
+    activityPositions.set(layoutTarget, { following: end.active(), anchors,
+      after: activityPositionCursor(windowEvents, anchors), seq: activityAnchorSeq(windowEvents, anchors), expanded, more });
+  };
   const resetTarget = () => {
     const target = displayTarget();
     if (layoutTarget === target) return;
+    savePosition();
     layoutTarget = target;
+    const saved = activityPositions.get(target);
+    setRestoring(saved && !saved.following ? saved : undefined);
+    restoredPage = false; windowEvents = [];
     // An explicit session switch ends its old selection. Do this before the
     // first new projection, so a held range cannot defer a cached first page.
     if (selectionInside()) document.getSelection()?.removeAllRanges();
@@ -1185,22 +1202,74 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
     heights.clear();
     virtualizer.measure();
-    setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
+    setFollowing(!restoring()); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
-    end.pin();
+    if (restoring()) end.release(); else end.pin();
   };
   createEffect(on(displayTarget, resetTarget));
+  createEffect(() => {
+    const saved = restoring();
+    if (!saved || !view.loaded || measuring().length || !markdownReady()) return;
+    const hasAnchor = saved.anchors.some(anchor => view.items.some(item => `item-${item.id}` === anchor.key));
+    const shown = source();
+    // A session visit starts with the newest tail. Re-read the saved
+    // reading window once, using its cursor; never keep transcripts per session
+    // or chase missing/expired rows through repeated older reads.
+    const windowStart = activityPositionCursor(windowEvents, []);
+    if (!hasAnchor && !restoredPage && saved.after !== undefined && windowStart !== undefined
+      && saved.after < windowStart && readsOlder(shown)) {
+      restoredPage = true;
+      shown.loadOlder(saved.after);
+      return;
+    }
+    if (shown.loadingOlder()) return;
+    const target = displayTarget();
+    const frame = requestAnimationFrame(() => {
+      if (target !== displayTarget() || restoring() !== saved) return;
+      let top: number | undefined, anchors = saved.anchors;
+      for (const anchor of saved.anchors) {
+        const offset = measuredOffset(anchor.key);
+        if (offset !== undefined) { top = scroller.scrollTop + offset - anchor.offset; break; }
+      }
+      if (top === undefined) {
+        // No saved row came back. The transcript around it changed, so never
+        // restore its old pixel offset: put the nearest surviving message at
+        // or before the saved top row at the top, still released. With none
+        // left (a cleared or fully expired transcript), follow Latest.
+        const key = activityNearestRow(windowEvents, view.items.map(item => `item-${item.id}`), saved.seq);
+        const offset = key === undefined ? undefined : measuredOffset(key);
+        if (key === undefined || offset === undefined) {
+          batch(() => { setRestoring(undefined); setFollowing(true); setUnseen(0); });
+          reading.reset(); end.pin();
+          return;
+        }
+        top = scroller.scrollTop + offset; anchors = [{ key, offset: 0 }];
+      }
+      scroller.scrollTo({ top, behavior: "instant" });
+      virtualizer.scrollOffset = scroller.scrollTop;
+      // The offset alone recomputes nothing. A scroll event reports a changed
+      // offset only after this paint, and an unchanged one (a position clamped
+      // at the end) never: recompute the window now, so the restored position
+      // is never revealed with the previous window's rows (zerus-2n2vk).
+      virtualizer.measure();
+      reading.restore(anchors);
+      batch(() => { setRestoring(undefined); setPlaced(true); });
+    });
+    onCleanup(() => cancelAnimationFrame(frame));
+  });
   createEffect(on(local, (rows) => {
     const sends = newLocalSends(sendIds, rows.map((row) => row.id));
     sendIds = sends.baseline;
     if (sends.added.length) jumpToLatest();
   }));
   createEffect(on(preview, (match) => {
+    showingPreview = !!match;
     if (match) {
+      setRestoring(undefined);
       setPlaced(true);
       motion.reset(); setLayoutHeld(false); end.release(); reading.reset(); setFollowing(false);
       requestAnimationFrame(() => { if (!motion.active() && !selectionInside()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
-    } else { setFollowing(true); end.pin(); }
+    } else if (!restoring()) { setFollowing(true); end.pin(); }
   }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {

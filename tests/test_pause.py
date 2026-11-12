@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """End-to-end lifecycle tests: private tmux socket, fake agents, no model calls."""
 import hashlib
+import hook_command_fixtures as shell_probes
+import receipt_locator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
+import tomllib
 import os
 from pathlib import Path
 import pty
@@ -980,6 +983,13 @@ class Harness(unittest.TestCase):
                 return r
         return {}
 
+    def archive_inspection(self, name, archive_id, *extra):
+        # `receipt_projection` reports the rebuildable locator's coverage, which
+        # moves from unknown to indexed as its background worker finishes
+        # (zerus-a4mub.11). Compared inspections read a settled locator.
+        receipt_locator.settle(HGS, self.env)
+        return json.loads(self.hgs("inspect", name, "--archive", archive_id, *extra))
+
     def assertInspectionEqual(self, actual, expected):
         # Process sampling is a fresh observation, even for immutable archives.
         # Compare every durable field and job, allowing only its sampling clock.
@@ -1879,6 +1889,148 @@ exec {tmux} "$@"
 
 
 class Lifecycle(Harness):
+    def wrapped_hooks(self, agent, wrapper):
+        """hgs's tracking entries per event, and answer channels, that run `wrapper`."""
+        if agent == "kimi":
+            hooks = tomllib.loads((self.root / ".kimi-code/config.toml").read_text())["hooks"]
+            pairs = [(h["event"], h["command"]) for h in hooks]
+        else:
+            path = self.root / (".claude/settings.json" if agent == "claude" else ".codex/hooks.json")
+            hooks = json.loads(path.read_text())["hooks"]
+            pairs = [(event, h["command"]) for event, groups in hooks.items() for g in groups for h in g["hooks"]]
+        counts = {}
+        for event, command in pairs:
+            if wrapper in command:
+                key = event + (" channel" if command.endswith("answer-channel") else "")
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def test_wrapper_named_hgs_executable_keeps_one_hook_entry_per_event(self):
+        # zerus-s3wax: an HGS_EXECUTABLE that is not named hgs (a wrapper) must
+        # still recognise its own entries, so a later launch adds none.
+        wrapper = self.bin / "hgs-wrapper"
+        log = self.root / "wrapper-hooks"
+        wrapper.write_text(f"""#!/usr/bin/env python3
+import json, os, subprocess, sys
+HGS = {str(HGS)!r}
+if sys.argv[1:] == ["__state", "hook"]:
+    data = sys.stdin.read()
+    try:
+        kind = json.loads(data).get("hook_event_name", "?")
+    except ValueError:
+        kind = "?"
+    with open({str(log)!r}, "a") as f:
+        f.write(os.environ.get("HGS_SESSION", "?") + " " + kind + "\\n")
+    sys.exit(subprocess.run([HGS, *sys.argv[1:]], input=data, text=True).returncode)
+os.execv(HGS, [HGS, *sys.argv[1:]])
+""")
+        wrapper.chmod(0o755)
+        log.write_text("")
+        self.env["HGS_EXECUTABLE"] = str(wrapper)
+        for agent in ("claude", "codex", "kimi"):
+            with self.subTest(agent=agent):
+                name = self.start(agent, "wrapped")
+                first = self.wrapped_hooks(agent, str(wrapper))
+                self.assertTrue(first and set(first.values()) == {1}, first)
+                # zerus-b64dl: entries an older hgs wrote carry no record; a
+                # later launch that changes nothing records their program.
+                shutil.rmtree(Path(self.env["HGS_STATE_DIR"]) / "hook-owners")
+                for _ in range(2):
+                    self.hgs("pause", name)
+                    self.resume(name)
+                self.assertEqual(self.wrapped_hooks(agent, str(wrapper)), first)
+                self.hgs("pause", name)
+                self.assertEqual(log.read_text().splitlines().count(name + " SessionStart"), 3,
+                                 "one SessionStart delivery for each of three launches")
+                # zerus-b64dl: from a shell without the wrapper, health and
+                # repair still recognise the entries the wrapper wrote.
+                plain = {k: v for k, v in self.env.items() if k != "HGS_EXECUTABLE"}
+                account = "native-" + agent
+                hooks = lambda *extra, body="": subprocess.run(
+                    [str(HGS), "hooks", "--account", account, *extra, "--json"], env=plain, input=body,
+                    capture_output=True, text=True, timeout=20)
+                status = hooks()
+                self.assertEqual(status.returncode, 0, status.stderr)
+                status = json.loads(status.stdout)["configuration"]
+                self.assertEqual(status["state"], "configured", status)
+                self.assertFalse(status["unrecognised_tracking"])
+                if agent == "claude":
+                    settings = self.root / ".claude/settings.json"
+                    before = settings.read_bytes()
+                    request = json.dumps({"request_id": str(uuid.uuid4()), "expected_provider": agent,
+                                          "expected_account_id": account, "expected_config_sha256": status["sha256"],
+                                          "expected_path_id": status["path_id"]})
+                    self.env["HGS_EXECUTABLE"] = str(wrapper)
+                    plain["HGS_EXECUTABLE"] = str(wrapper)
+                    repaired = hooks("--repair", body=request)
+                    self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                    self.assertEqual(json.loads(repaired.stdout)["status"], "unchanged")
+                    self.assertEqual(settings.read_bytes(), before)
+        # Copies that earlier launches left behind collapse at the next launch,
+        # before the agent reads its settings; a personal hook stays.
+        name, settings = "claude/p/wrapped", self.root / ".claude/settings.json"
+        data = json.loads(settings.read_text())
+        ours = [g for g in data["hooks"]["SessionStart"] if str(wrapper) in json.dumps(g)]
+        personal = {"hooks": [{"type": "command", "command": "true"}]}
+        data["hooks"]["SessionStart"] = ours * 3 + [personal]
+        settings.write_text(json.dumps(data))
+        before = log.read_text().splitlines().count(name + " SessionStart")
+        self.resume(name)
+        self.assertEqual(json.loads(settings.read_text())["hooks"]["SessionStart"], ours + [personal])
+        self.hgs("pause", name)
+        self.assertEqual(log.read_text().splitlines().count(name + " SessionStart") - before, 1)
+
+    def test_launch_migrates_the_recorded_hook_runner(self):
+        a=self.bin/'runner A';b=self.bin/'runner B'
+        for wrapper in [a,b]:
+            wrapper.write_text('#!/bin/sh\nexec '+shlex.quote(str(HGS))+' "$@"\n');wrapper.chmod(0o755)
+        self.env['HGS_EXECUTABLE']=str(a)
+        for agent in ['claude','codex','kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE']=str(a)
+                path=self.root/('.kimi-code/config.toml' if agent=='kimi' else '.codex/hooks.json' if agent=='codex' else '.claude/settings.json')
+                path.parent.mkdir(exist_ok=True)
+                foreign=dict(type='command',command='true __state hook',custom=17)
+                if agent=='kimi':
+                    path.write_text('model = "keep"\n# personal comment\n[[hooks]]\nevent = "Stop"\ncommand = "true __state hook"\ncustom = 17\n')
+                else:
+                    path.write_text(json.dumps(dict(model='keep',hooks=dict(Stop=[dict(matcher='personal',hooks=[foreign])]))))
+                name=self.start(agent,'migrate')
+                first=self.wrapped_hooks(agent,str(a));self.assertTrue(first)
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(b)
+                self.resume(name)
+                self.assertEqual(self.wrapped_hooks(agent,str(a)),{})
+                self.assertEqual(self.wrapped_hooks(agent,str(b)),first)
+                if agent=='kimi':
+                    doc=tomllib.loads(path.read_text());self.assertIn('# personal comment',path.read_text())
+                    self.assertEqual(doc['hooks'][0],dict(event='Stop',command='true __state hook',custom=17))
+                else:
+                    doc=json.loads(path.read_text());self.assertEqual(doc['hooks']['Stop'][0],dict(matcher='personal',hooks=[foreign]))
+                self.assertEqual(doc['model'],'keep')
+                self.hgs('pause',name)
+                self.env['HGS_EXECUTABLE']=str(a)
+
+    def test_launch_preserves_composed_and_custom_quoted_recorded_hooks(self):
+        a = self.bin / 'hgs-wrapper'
+        b = self.bin / 'new runner'
+        for path in [a, b]:
+            shell_probes.runner(path, HGS)
+        for agent in ['claude', 'codex', 'kimi']:
+            with self.subTest(agent=agent):
+                self.env['HGS_EXECUTABLE'] = str(a)
+                name = self.start(agent, 'composed')
+                self.hgs('pause', name)
+                path = self.root / ('.kimi-code/config.toml' if agent == 'kimi' else '.codex/hooks.json' if agent == 'codex' else '.claude/settings.json')
+                probes = shell_probes.composed(self.root, a)
+                shell_probes.preserves_and_runs(self, probes, [v for _, v in probes], self.env)
+                shell_probes.append(path, agent, probes)
+                self.env['HGS_EXECUTABLE'] = str(b)
+                self.resume(name)
+                actual = shell_probes.commands(path, agent, len(probes))
+                shell_probes.preserves_and_runs(self, probes, actual, self.env)
+                self.hgs('pause', name)
+
     def test_directory_browser(self):
         folder = self.root / "browse ' test"
         folder.mkdir()
@@ -3681,7 +3833,7 @@ class Archive(Harness):
         return [row for row in self.rows(name) if row.get("state") == "archived"]
 
     def archive_info(self, name, archive_id, *extra):
-        info = json.loads(self.hgs("inspect", name, "--archive", archive_id, *extra))
+        info = self.archive_inspection(name, archive_id, *extra)
         # These fields come from current native history, not the saved archive.
         # Deleting that history may change its availability but not the archive.
         for key in ("goal", "goal_observed_at", "goal_source", "provider_messages", "provider_messages_error", "session_usage"):
@@ -4568,24 +4720,24 @@ exec {tmux} "$@"
         self.hgs("pause", old_name)
         self.hgs("archive", old_name)
         first = next(row for row in self.rows() if row.get("state") == "archived")
-        before = json.loads(self.hgs("inspect", old_name, "--archive", first["archive_id"]))
+        before = self.archive_inspection(old_name, first["archive_id"])
         self.start("codex")
         self.hgs("pause", old_name)
         self.hgs("archive", old_name)
         second = next(row for row in self.rows() if row["archive_id"] != first["archive_id"])
-        second_before = json.loads(self.hgs("inspect", old_name, "--archive", second["archive_id"]))
+        second_before = self.archive_inspection(old_name, second["archive_id"])
         new_name = "codex/p/archived-review"
         self.hgs("rename", old_name, new_name, "--archive", first["archive_id"], "--dry-run")
-        self.assertInspectionEqual(json.loads(self.hgs("inspect", old_name, "--archive", first["archive_id"])), before)
+        self.assertInspectionEqual(self.archive_inspection(old_name, first["archive_id"]), before)
         self.hgs("rename", old_name, new_name, "--archive", first["archive_id"])
-        renamed = json.loads(self.hgs("inspect", new_name, "--archive", first["archive_id"]))
+        renamed = self.archive_inspection(new_name, first["archive_id"])
         for key in ("archive_id", "archived_at", "run_id", "conversation_id", "prompt", "events"):
             self.assertEqual(renamed[key], before[key], key)
-        self.assertInspectionEqual(json.loads(self.hgs("inspect", old_name, "--archive", second["archive_id"])), second_before)
+        self.assertInspectionEqual(self.archive_inspection(old_name, second["archive_id"]), second_before)
         self.hgs("resume", new_name, "--archive", first["archive_id"], "-d")
         self.wait(lambda: self.binding(new_name).get("conversation_id") == before["conversation_id"])
         self.assertEqual(self.binding(new_name)["conversation_id"], before["conversation_id"])
-        self.assertInspectionEqual(json.loads(self.hgs("inspect", old_name, "--archive", second["archive_id"])), second_before)
+        self.assertInspectionEqual(self.archive_inspection(old_name, second["archive_id"]), second_before)
 
     def test_archive_rename_can_coexist_with_live_and_saved_names(self):
         old_name = self.start()

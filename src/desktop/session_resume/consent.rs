@@ -45,6 +45,11 @@ impl Consent {
     pub fn chain(&self) -> Instant {
         self.clock.deadline()
     }
+    /// Observe the clock without starting it.
+    #[cfg(test)]
+    pub(super) fn fixture_chain_started(&self) -> Option<Instant> {
+        self.clock.fixture_started()
+    }
     /// The same live original, lease and writer as the row; with a ticket,
     /// exactly `child`'s own reservation.
     pub fn check(&self, row: &ledger::Row, reserved: Option<(Child, &Ticket)>) -> Result<()> {

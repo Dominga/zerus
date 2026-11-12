@@ -5,23 +5,24 @@ import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { MachineLabel } from "../components/MachineLabel";
 import { Actions, Spinner, Status } from "../components/Status";
-import { AccountMarkCircle, AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { AccountMarkCircle, AgentBadge, AgentTile } from "../sessions/SessionCard";
 import { accountAppearance, accountMark } from "../../store/accountMarks";
 import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
-import type { Account } from "../../types";
+import type { Account, LocalUsage, ModelUsage, Spend } from "../../types";
 import { agentKind, catalog } from "../../store/catalog";
 import { machineCards } from "../../store/machines";
 import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccountMachine, setRequestedProfile } from "../../store/accounts";
 import { connectionOf, osOf } from "../../store/overview";
 import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
-import { clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
+import { balanceCompact, balanceKind, balanceLow, balanceTitle, clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
+import { compactCount, exactCount, localUsageGroups, localUsageNotes, spendNotes, spendRows } from "../lib/deepseek-usage";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
-import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts, type SignFilter } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts, type SignFilter, identityFields, type AccountSort } from "./accounts-ui";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
 
@@ -65,8 +66,8 @@ function ProfileTag(props: { tag?: string; id: string }) {
   return <Show when={props.tag}><span class="acct-pid tabular" title={tr("Profile %1", props.id)}>{props.tag}</span></Show>;
 }
 
-function AccountRow(props: { a: Account; now: number }) {
-  const on = () => selectedAccount() === props.a.key;
+function AccountRow(props: { a: Account; now: number; selected: boolean }) {
+  const on = () => props.selected;
   const tags = createMemo(() => profileTags(props.a));
   const sign = () => accountSignState(props.a, accountMachine());
   const pick = () => {
@@ -76,9 +77,10 @@ function AccountRow(props: { a: Account; now: number }) {
   };
   return (
     <button class="acct-row" classList={{ on: on() }} aria-current={on()} title={props.a.members.map((m) => `${m.machine}${tags().has(m.key) ? ` ${tags().get(m.key)}` : ""}: ${trText(m.permission_label)}`).join("\n")} onClick={pick}>
-      {/* The session card's 34 px leading column, holding the provider tile. */}
-      <span class="acct-av"><span class="acct-ptile" style={{ "--agent": `var(--z-agent-${agentKind(props.a.provider)})` }}><ProviderGlyph agent={agentKind(props.a.provider)} size={18} /></span></span>
+      {/* Keep the same large agent tile and small account mark as session cards. */}
+      <span class="acct-av"><AgentTile agent={agentKind(props.a.provider)} /></span>
       <span class="acct-l1">
+        <AccountMarkCircle mark={accountMark(props.a, settings)} />
         <b class="ell grow">{props.a.label}</b>
         <SignPill state={sign()} />
         <AgentBadge agent={agentKind(props.a.provider)} />
@@ -91,10 +93,12 @@ function AccountRow(props: { a: Account; now: number }) {
         <span class="grow" />
         <span class="acct-perm" classList={{ bypass: props.a.members.length > 0 && props.a.members.every((m) => m.permission === "bypass") }}>{trText(props.a.permission)}</span>
       </span>
-      {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%. */}
-      <Show when={props.a.usage.windows.length}>
-        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} /></span>
+      {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%.
+          An account without windows but with a balance (a DeepSeek API key) shows the balance there instead. */}
+      <Show when={props.a.usage.windows.length || balanceCompact(props.a.usage)}>
+        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceCompact(props.a.usage)} summaryTitle={balanceTitle(props.a.usage)} /></span>
       </Show>
+      <Show when={balanceLow(props.a.usage)}><span class="acct-balance-low">{tr("Balance too low for API calls")}</span></Show>
       <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>
     </button>
   );
@@ -137,14 +141,92 @@ function UsagePanel(props: { a: Account }) {
           </div>
         );
       }}</For>
-      <For each={u().balances}>{(b) => <p>{`${b.kind}: ${b.balance} ${b.currency}`}</p>}</For>
+      <Show when={balanceLow(u())}><Status kind="warn">{tr("DeepSeek reports the balance is too low for API calls.")}</Status></Show>
+      <For each={u().balances}>{(b) => (
+        <div class="row acct-balance" classList={{ total: b.kind === "Total" }}>
+          <span>{balanceKind(b.kind)}</span>
+          <span class="grow" />
+          <span class="tabular">{`${b.balance} ${b.currency}`}</span>
+        </div>
+      )}</For>
+      <Show when={u().spend}>{(spend) => <SpendSection spend={spend()} />}</Show>
+      <Show when={u().local_usage}>{(usage) => <LocalUsageSection usage={usage()} />}</Show>
       <Show when={creditsText(u().credits)}>{(text) => <p>{text()}</p>}</Show>
     </section>
   );
 }
 
+/** Account-wide spend from the DeepSeek balance readings. */
+function SpendSection(props: { spend: Spend }) {
+  return (
+    <div class="acct-spend">
+      <h4>{tr("Spending")}</h4>
+      <For each={spendRows(props.spend)}>{(row) => (
+        <div class="row acct-balance"><span>{row.label}</span><span class="grow" /><span class="tabular" title={row.title}>{row.value}</span></div>
+      )}</For>
+      <For each={spendNotes(props.spend)}>{(note) => <p class="muted acct-note">{note}</p>}</For>
+    </div>
+  );
+}
+
+function UsageRows(props: { rows: ModelUsage[] }) {
+  const cell = (n: number) => <td class="tabular" title={exactCount(n)}>{compactCount(n)}</td>;
+  return <For each={props.rows}>{(m) => <tr><th scope="row" class="ell" title={m.model}>{m.model}</th>{cell(m.requests)}{cell(m.cache_hit)}{cell(m.cache_miss)}{cell(m.output)}</tr>}</For>;
+}
+
+/** Requests and tokens of this computer's DeepSeek sessions, from their local logs. */
+function LocalUsageSection(props: { usage: LocalUsage }) {
+  const groups = createMemo(() => localUsageGroups(props.usage));
+  const head = (first: string) => (
+    <thead><tr><th scope="col">{first}</th><th scope="col">{tr("Requests")}</th><th scope="col">{tr("Cache read")}</th><th scope="col">{tr("Uncached input")}</th><th scope="col">{tr("Output")}</th></tr></thead>
+  );
+  return (
+    <div class="acct-local">
+      <h4>{tr("This computer's DeepSeek sessions")}</h4>
+      <p class="muted acct-note">{tr("Requests and tokens from session logs on this computer. Other computers and tools are not included.")}</p>
+      <For each={localUsageNotes(props.usage)}>{(note) => <p class="muted acct-note">{note}</p>}</For>
+      <Show when={groups().month.length} fallback={<p class="muted acct-note">{tr("No requests on this computer this month.")}</p>}>
+        <table class="acct-usage-table">
+          {head(tr("Model"))}
+          <tbody>
+            <tr class="group"><th scope="colgroup" colSpan={5}>{tr("Today")}</th></tr>
+            <Show when={groups().today.length} fallback={<tr><td colSpan={5} class="muted">{tr("No requests today.")}</td></tr>}>
+              <UsageRows rows={groups().today} />
+            </Show>
+            <tr class="group"><th scope="colgroup" colSpan={5}>{tr("This month")}</th></tr>
+            <UsageRows rows={groups().month} />
+          </tbody>
+        </table>
+        <details class="acct-days">
+          <summary>{tr("By day")}</summary>
+          <table class="acct-usage-table">
+            {head(tr("Day"))}
+            <tbody><UsageRows rows={groups().days} /></tbody>
+          </table>
+        </details>
+      </Show>
+    </div>
+  );
+}
+
+function MetadataValue(props: { kind: string; label: string; value: string }) {
+  return <span class="acct-meta-value ell" classList={{ muted: !props.value }} data-meta={props.kind} title={props.value || tr("Unavailable")} aria-label={`${props.label}: ${props.value || tr("Unavailable")}`}>{props.value || "—"}</span>;
+}
+
 function Detail(props: { a: Account }) {
   const m = () => memberOf(props.a, selectedProfile(), accountMachine())!;
+  const fields = createMemo(() => identityFields(props.a));
+  const identityNote = createMemo(() => {
+    const f = fields();
+    return !f.name && !f.email && !f.organization && !f.plan && !f.signIn && props.a.identity_note ? trText(props.a.identity_note) : "";
+  });
+  const metadata = createMemo(() => [
+    { kind: "name", label: tr("Name"), value: fields().name },
+    { kind: "email", label: tr("Email"), value: fields().email },
+    { kind: "organization", label: tr("Organization"), value: fields().organization },
+    { kind: "plan", label: tr("Plan"), value: fields().plan },
+    { kind: "sign-in", label: tr("Sign-in"), value: fields().signIn },
+  ].filter((field) => !!field.value));
   const [moreOpen, setMoreOpen] = createSignal(false);
   const [moreQuery, setMoreQuery] = createSignal("");
   let moreButton: HTMLButtonElement | undefined, moreInput: HTMLInputElement | undefined;
@@ -185,21 +267,23 @@ function Detail(props: { a: Account }) {
   return (
     <div class="acct-detail">
       <div class="acct-title">
-        <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
-        <h2 class="ell">{props.a.label}</h2>
-        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden">{tr("Hidden on session cards")}</span></Show>
-        <span class="grow" />
-        <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
-        <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
+        <div class="acct-title-main">
+          <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
+          <h2 class="ell" title={props.a.label} aria-label={props.a.label}>{props.a.label}</h2>
+          <AgentBadge agent={agentKind(props.a.provider)} />
+          <SignPill state={signState(m())} />
+          <span class="dim am-hidden" classList={{ shown: accountAppearance(settings, props.a.members).hidden }} title={tr("Hidden on session cards")} aria-label={tr("Hidden on session cards")} aria-hidden={!accountAppearance(settings, props.a.members).hidden}>{tr("Hidden on session cards")}</span>
+        </div>
+        <div class="acct-title-actions">
+          <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
+          <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
+        </div>
       </div>
       <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
-      <div class="row acct-identity">
-        <AgentBadge agent={agentKind(props.a.provider)} />
-        <SignPill state={signState(m())} />
-        <div class="col selectable">
-          <For each={props.a.identity_lines}>{(line) => <span>{trText(line)}</span>}</For>
-          <Show when={props.a.identity_note}>{(note) => <span class="muted">{trText(note())}</span>}</Show>
-        </div>
+      <div class="acct-identity selectable">
+        <Index each={metadata()} fallback={<div class="acct-meta-note muted" data-meta="note" title={identityNote() || tr("Unavailable")} aria-label={`${tr("Identity")}: ${identityNote() || tr("Unavailable")}`}>{identityNote() || tr("Unavailable")}</div>}>
+          {(field) => <div class="acct-meta-field"><span class="acct-meta-label" title={field().label}>{field().label}</span><MetadataValue kind={field().kind} label={field().label} value={field().value} /></div>}
+        </Index>
       </div>
 
       <section class="acct-card box">
@@ -333,10 +417,20 @@ function Detail(props: { a: Account }) {
 export function AccountsScreen() {
   onCleanup(closeManagement);
   const view = accountsPage;
-  const visible = createMemo(() => visibleAccounts(view(), accountMachine(), signFilter()));
+  const [query, setQuery] = createSignal("");
+  const [provider, setProvider] = createSignal("*");
+  const [sort, setSort] = createSignal<AccountSort>("agent");
+  const providerOptions = createMemo(() => {
+    const values = new Set(view().accounts.map((a) => a.provider));
+    if (provider() !== "*") values.add(provider());
+    return [...values].sort((a, b) => providerName(a).localeCompare(providerName(b)));
+  });
+  const filtered = () => !!query().trim() || provider() !== "*" || accountMachine() !== "*" || signFilter() !== "all";
+  const changed = () => { closeManagement(); clearManagementNotice(); };
+  /** "Clear filters": every machine, agent and sign-in state again, and no search (AccountsPage.cpp:315-318). */
+  const clearFilters = () => { changed(); setQuery(""); setProvider("*"); setSignFilter("all"); setAccountMachine("*"); };
+  const visible = createMemo(() => visibleAccounts(view(), accountMachine(), { query: query(), provider: provider(), sort: sort(), sign: signFilter() }));
   const counts = createMemo(() => signedCounts(view(), accountMachine()));
-  /** "Clear filters": every machine and every sign-in state again (AccountsPage.cpp:315-318). */
-  const clearFilters = () => { setSignFilter("all"); setAccountMachine("*"); };
   // The rows' reset times re-render every 15 s; one timer serves every row.
   const now = useNow(15_000);
   // An Overview card asks for a profile: select its account once it is listed.
@@ -344,6 +438,8 @@ export function AccountsScreen() {
     const key = requestedProfile();
     const account = key ? view().accounts.find((a) => a.members.some((m) => m.key === key)) : undefined;
     if (!account) return;
+    // Explicit account navigation must not be hidden by this pane's text/agent filters.
+    setQuery(""); setProvider("*");
     closeManagement();accountManagement.clearNotice();
     setSelectedAccount(account.key);
     setSelectedProfile(key);
@@ -386,17 +482,22 @@ export function AccountsScreen() {
           <p class="muted acct-summary">{tr("Your accounts across all machines. Choose an account to manage where it is available.")}</p>
           <For each={view().notices}>{(notice) => <Status kind="warn">{notice}</Status>}</For>
           <Show when={!view().no_hosts}>
-            <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => {closeManagement();clearManagementNotice();setAccountMachine(value);}} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
-            <div class="acct-signs" role="group" aria-label={tr("Sign-in state")}>
-              <button type="button" class="btn small" classList={{ on: signFilter() === "all" }} aria-pressed={signFilter() === "all"}
-                onClick={() => setSignFilter("all")}>{tr("All")}</button>
-              <button type="button" class="btn small" classList={{ on: signFilter() === "in" }} aria-pressed={signFilter() === "in"}
-                onClick={() => setSignFilter("in")}>{tr("Signed in %1", counts().in)}</button>
-              <button type="button" class="btn small" classList={{ on: signFilter() === "out" }} aria-pressed={signFilter() === "out"}
-                onClick={() => setSignFilter("out")}>{tr("Signed out %1", counts().out)}</button>
+            <div class="acct-filters">
+              <TextInput class="field acct-search" type="search" aria-label={tr("Search accounts")} placeholder={tr("Search accounts")} value={query()} onInput={(event) => { changed(); setQuery(event.currentTarget.value); }} />
+              <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => { changed(); setAccountMachine(value); }} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
+              <Dropdown class="field acct-provider-filter" aria-label={tr("Agent")} value={provider()} onChange={(value) => { changed(); setProvider(value); }} options={[{ value: "*", label: tr("All agents") }, ...providerOptions().map((value) => ({ value, label: providerName(value) }))]} />
+              <Dropdown class="field acct-sort" aria-label={tr("Sort accounts")} value={sort()} onChange={(value) => { changed(); setSort(value === "name" ? "name" : "agent"); }} options={[{ value: "agent", label: tr("Agent type, then name") }, { value: "name", label: tr("Account name") }]} />
+              <div class="acct-signs" role="group" aria-label={tr("Sign-in state")}>
+                <button type="button" class="btn small" classList={{ on: signFilter() === "all" }} aria-pressed={signFilter() === "all"}
+                  onClick={() => setSignFilter("all")}>{tr("All")}</button>
+                <button type="button" class="btn small" classList={{ on: signFilter() === "in" }} aria-pressed={signFilter() === "in"}
+                  onClick={() => setSignFilter("in")}>{tr("Signed in %1", counts().in)}</button>
+                <button type="button" class="btn small" classList={{ on: signFilter() === "out" }} aria-pressed={signFilter() === "out"}
+                  onClick={() => setSignFilter("out")}>{tr("Signed out %1", counts().out)}</button>
+              </div>
             </div>
             <Show when={view().snapshot}>
-              <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell">{summaryLine(view(), visible().length)}</span></div>
+              <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell grow">{summaryLine(view(), visible().length)}</span><Show when={filtered()}><button class="btn small" onClick={clearFilters}>{tr("Clear filters")}</button></Show></div>
             </Show>
           </Show>
           <div class="acct-scroll" ref={list} role="list" aria-label={tr("Agent accounts")} onKeyDown={step}>
@@ -404,11 +505,11 @@ export function AccountsScreen() {
               <Show when={view().snapshot} fallback={<div class="acct-loading"><div class="row"><Spinner /><span>{tr("Loading accounts…")}</span></div><p class="muted">{tr("Checking accounts across your machines.")}</p></div>}>
                 <Show when={visible().length} fallback={
                   <div class="acct-none">
-                    <p class="muted">{noAccountsMatch(view()) ? tr("No accounts match") : accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>
-                    <Show when={noAccountsMatch(view())}><button type="button" class="btn small" onClick={clearFilters}>{tr("Clear filters")}</button></Show>
+                    <p class="muted">{filtered() && noAccountsMatch(view()) ? tr("No accounts match these filters.") : accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>
+                    <Show when={filtered() && noAccountsMatch(view())}><button type="button" class="btn small" onClick={clearFilters}>{tr("Clear filters")}</button></Show>
                   </div>
                 }>
-                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} /></div>}</Index>
+                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} selected={current()?.key === a().key} /></div>}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{tr("%1 more accounts are not shown.", view().truncated)}</p></Show>
               </Show>

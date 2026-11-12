@@ -3,6 +3,7 @@ import { createComputed, createRoot } from "solid-js";
 import { agentKind, createCatalog, rowId, statusOf, toSession } from "./catalog";
 import { createMarks, marks as appMarks } from "./marks";
 import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
+import { createTerminal, type TerminalPort } from "./terminal";
 
 const view = (name: string, extra: Partial<ViewRow> = {}): ViewRow => ({
   name, title: name.split("/").pop(), agent: "claude", status: "ready", phase: "idle", attention: false, unread: false,
@@ -11,6 +12,32 @@ const view = (name: string, extra: Partial<ViewRow> = {}): ViewRow => ({
 });
 const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer = ""): RowOut => ({ computer, key, row: view(name, extra) });
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
+
+it("preserves real watch-row empty conversation DATA for Terminal while other consumers stay unchanged", async () => {
+  for (const value of ["", "cid", undefined, null, 42]) {
+    const s = toSession("", "sample", view("claude/sample/review", { run_id: "run", conversation_id: value } as Partial<ViewRow>));
+    expect(s.conversationId).toBe(value === "cid" ? "cid" : undefined);
+    expect(s.terminalConversationId).toBe(typeof value === "string" ? value : undefined);
+    const images: unknown[] = [];
+    const port: TerminalPort = {
+      connect: async () => ({ generation: 1, status: "connected", reused: false }),
+      disconnect: async () => null, retarget: async () => true, write: async () => {}, resize: async () => {}, ack() {}, shown() {},
+      pasteImage: async (...args) => { images.push(args); },
+    };
+    const t = createTerminal(port, undefined, { hidden: () => false, onChange: () => () => {} });
+    // This is SessionDetail's actual optional-data mapping, never ?? "".
+    await t.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", machine: s.machine,
+      conversation_id: s.terminalConversationId ?? s.conversationId },
+    { supported: true, available: true, reason: "", idle: "", connecting: "", disconnected: "" });
+    const screen = { write: (_bytes: Uint8Array, done: () => void) => done(), reset() {}, size: () => ({ cols: 80, rows: 24 }) };
+    t.show(screen); for (let i = 0; i < 10; i++) await Promise.resolve();
+    const lease = t.captureImage(screen);
+    expect(!!lease).toBe(typeof value === "string");
+    await lease?.paste(new Uint8Array([1]));
+    expect(images).toHaveLength(typeof value === "string" ? 1 : 0);
+    if (images.length) expect((images[0] as unknown[])[2]).toMatchObject({ conversation_id: value });
+  }
+});
 
 describe("applyBatch", () => {
   it("Task 235: marks a computer's cached rows stale until its live listing replaces them", () => {
@@ -338,6 +365,32 @@ describe("setDraftKeys", () => {
       expect(catalog.rows[rowId("mac", "run:a")].draft, "a child's draft").toBe(true);
       setDraftKeys([`mac\nid:${id.replace("3f", "4f")}`]);
       expect(catalog.rows[rowId("mac", "run:a")].draft, "another session's ID").toBe(false);
+      dispose();
+    });
+  });
+});
+
+describe("restart schedules of this app's own supervisors", () => {
+  it("anchor once per wait, survive status updates and leave with an ended computer", () => {
+    createRoot((dispose) => {
+      const clock = vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { catalog, applyBatch } = createCatalog(createMarks());
+      const wait = (serial: number, remaining: number) => ({ computer: "studio", phase: "waiting", serial, attempt: 1, delay_ms: 2000, remaining_ms: remaining });
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "reconnecting", attempt: 1 }], retries: [wait(1, 2000)] }));
+      expect(catalog.computers.studio.retry).toMatchObject({ phase: "waiting", serial: 1, dueAt: 3000 });
+      // An unrelated status update and a replayed report of the same wait keep it.
+      clock.mockReturnValue(1500);
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "reconnecting", attempt: 1 }] }));
+      applyBatch(batchOf({ retries: [wait(1, 2000)] }));
+      expect(catalog.computers.studio.retry?.dueAt).toBe(3000);
+      applyBatch(batchOf({ retries: [{ computer: "studio", phase: "attempting", serial: 1, attempt: 1 }] }));
+      expect(catalog.computers.studio.retry?.phase).toBe("attempting");
+      applyBatch(batchOf({ computers: [{ computer: "studio", status: "ended", attempt: 0 }] }));
+      expect(catalog.computers.studio.retry).toBeUndefined();
+      // A schedule for a computer the catalog does not know adds nothing.
+      applyBatch(batchOf({ retries: [{ ...wait(2, 1000), computer: "other" }] }));
+      expect(catalog.computers.other).toBeUndefined();
+      clock.mockRestore();
       dispose();
     });
   });

@@ -13,6 +13,9 @@ import subprocess
 import sys
 import wave
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gui_sandbox  # noqa: E402  (shared GUI isolation, zerus-5a99f)
+
 
 CLIENT = Path(__file__).resolve().parent.parent
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -87,7 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=CLIENT / "src-tauri/target/release/zerus-client")
     parser.add_argument("--scratch", type=Path, required=True, help="a new directory; logs are kept here")
-    parser.add_argument("--only", help="run one named phase4 step")
+    parser.add_argument("--only", help="run one named phase4 step, or a comma-separated subset in sequence order")
     parser.add_argument("--native-wheel", action="store_true", help="drive variable-scroll with trusted wheel events in its private Xvfb")
     parser.add_argument("--static-wheel", action="store_true", help="no appends; separate wheel gestures with long idle pauses")
     parser.add_argument("--renderer", choices=("shm", "dmabuf"), default="shm")
@@ -183,7 +186,7 @@ def main():
     child = [str(app), "--sessions"]
     if args.native_wheel:
         child = [sys.executable, str(CLIENT / "scripts/phase4-wheel-driver.py"), *child]
-    command = ["dbus-run-session", "--", "xvfb-run", "-a", "-s", "-screen 0 1440x900x24", *child]
+    command = gui_sandbox.sandboxed(["dbus-run-session", "--", "xvfb-run", "-a", "-s", "-screen 0 1440x900x24", *child], keep=[scratch])
     app_log = scratch / "app.log"
     print("GDK_BACKEND=x11 WAYLAND_DISPLAY=zerus-none DISPLAY=<unset>", flush=True)
     with app_log.open("w", encoding="utf-8") as output:

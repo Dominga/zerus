@@ -273,6 +273,7 @@ struct Encrypted {
     state: PathBuf,
     revision: String,
     scratch: Scratch,
+    stderr_attempt: std::cell::Cell<u32>,
 }
 
 impl Encrypted {
@@ -333,6 +334,7 @@ impl Encrypted {
             state,
             revision,
             scratch,
+            stderr_attempt: std::cell::Cell::new(0),
         }
     }
 
@@ -340,20 +342,56 @@ impl Encrypted {
     /// child inherits the handles of the call that launched it.
     fn call(&self, action: &str, input: &serde_json::Value) -> (i32, serde_json::Value) {
         let reply = tempfile::NamedTempFile::new_in(self.scratch.1.path()).unwrap();
-        let mut call = Command::new(CONNECTOR)
+        let mut command = Command::new(CONNECTOR);
+        command
             .args(["--workspace", action, "--config"])
             .arg(&self.config)
             .stdin(Stdio::piped())
             .stdout(reply.reopen().unwrap())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        #[cfg(feature = "test-hooks")]
+        if action == "start" {
+            command.env(
+                zerus_mobile_connector::hooks::STARTUP_STDERR,
+                self.fresh_stderr_path(),
+            );
+        }
+        let mut call = command.spawn().unwrap();
         let mut stdin = call.stdin.take().unwrap();
         stdin.write_all(input.to_string().as_bytes()).unwrap();
         drop(stdin);
         let code = call.wait().unwrap().code().unwrap();
         let bytes = std::fs::read(reply.path()).unwrap();
         (code, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn stderr_path(&self) -> PathBuf {
+        self.scratch.0.join(format!(
+            "fixture-startup-{}.stderr",
+            self.stderr_attempt.get()
+        ))
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn fresh_stderr_path(&self) -> PathBuf {
+        self.stderr_attempt
+            .set(self.stderr_attempt.get().checked_add(1).unwrap());
+        self.stderr_path()
+    }
+
+    fn startup_diagnostics(&self) -> String {
+        use std::io::Read;
+        use zerus_mobile_connector::startup::{redacted_stderr, STDERR_LIMIT};
+        let mut bytes = Vec::new();
+        if let Ok(file) = std::fs::File::open(self.stderr_path()) {
+            let _ = file.take(STDERR_LIMIT as u64).read_to_end(&mut bytes);
+        }
+        let diagnostics = redacted_stderr(&bytes);
+        if diagnostics.is_empty() {
+            "no recognized startup diagnostic".into()
+        } else {
+            diagnostics.join("; ")
+        }
     }
 
     fn generation(&self) -> Option<String> {
@@ -367,11 +405,22 @@ impl Encrypted {
     /// the last run's generation (zerus-vsfy0), so every launch after the first must pass
     /// it. Prints each change in what status says: that's the evidence on a machine where
     /// these timings can't be watched.
-    fn running(&self, label: &str, previous: Option<&str>) -> String {
+    fn running(
+        &self,
+        label: &str,
+        previous: Option<&str>,
+        mut child: Option<&mut Child>,
+    ) -> String {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(60);
         let (mut stale, mut last) = (0, String::new());
         loop {
+            if let Some(exit) = child.as_mut().and_then(|child| child.try_wait().unwrap()) {
+                panic!(
+                    "{label}: connector exited before publishing ({exit}); {}",
+                    self.startup_diagnostics()
+                );
+            }
             let (code, status) = self.call("status", &json!({}));
             let reading = format!(
                 "exit {code}, state {}, running {}, generation {}, error {}",
@@ -399,7 +448,8 @@ impl Encrypted {
             }
             assert!(
                 Instant::now() < deadline,
-                "{label}: the connector never ran"
+                "{label}: the connector never ran; {}",
+                self.startup_diagnostics()
             );
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -462,17 +512,23 @@ impl Encrypted {
         previous: Option<&str>,
     ) -> String {
         let marker = self.marker();
-        let mut direct = Direct(
-            Command::new(CONNECTOR)
-                .args(arguments)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
+        let mut command = Command::new(CONNECTOR);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(feature = "test-hooks")]
+        {
+            let path = self.fresh_stderr_path();
+            let file = zerus_mobile_connector::hooks::create_stderr(&path).unwrap();
+            command
+                .env(zerus_mobile_connector::hooks::STARTUP_STDERR, path)
+                .stderr(file);
+        }
+        let mut direct = Direct(command.spawn().unwrap());
         println!("{label}: launched, previous generation {previous:?}");
-        let generation = self.running(label, previous);
+        let generation = self.running(label, previous, Some(&mut direct.0));
         self.report(label, "before Stop");
         let (code, reply) = self.stop(&generation);
         println!("{label}: Stop on {generation}: exit {code}, {reply}");
@@ -620,7 +676,7 @@ impl Drop for Encrypted {
 fn cleanup_ends_a_detached_connector_through_its_own_stop_marker() {
     let encrypted = Encrypted::new();
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
-    assert_eq!(code, 0, "{started}");
+    assert_eq!(code, 0, "{started}; {}", encrypted.startup_diagnostics());
     let private = encrypted.state.parent().unwrap();
     let bytes = std::fs::read(private.join("lifecycle").join(RECEIPT)).unwrap();
     let receipt: Receipt = serde_json::from_slice(&bytes).unwrap();
@@ -668,8 +724,8 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
     let second = encrypted.direct_launch_is_refused("bare config", &bare, Some(&first));
 
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
-    assert_eq!(code, 0, "{started}");
-    let generation = encrypted.running("full Start", Some(&second));
+    assert_eq!(code, 0, "{started}; {}", encrypted.startup_diagnostics());
+    let generation = encrypted.running("full Start", Some(&second), None);
     assert_eq!(started["generation"], generation.as_str());
     encrypted.report("full Start", "before Stop");
     let (code, stopped) = encrypted.stop(&generation);
@@ -687,8 +743,8 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
 
     // A full Start again gets its own receipt.
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
-    assert_eq!(code, 0, "{started}");
-    let again = encrypted.running("second full Start", Some(&generation));
+    assert_eq!(code, 0, "{started}; {}", encrypted.startup_diagnostics());
+    let again = encrypted.running("second full Start", Some(&generation), None);
     let (code, stopped) = encrypted.stop(&again);
     println!("second full Start: Stop on {again}: exit {code}, {stopped}");
     assert_eq!(code, 0, "{stopped}");

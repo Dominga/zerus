@@ -68,6 +68,129 @@ pub struct Credits {
     pub unlimited: bool,
 }
 
+/// One currency's spend in a period, from the account's balance readings.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SpendAmount {
+    pub currency: String,
+    /// Topped-up and granted spend together.
+    pub spent: String,
+    /// The granted part, which can also be grants expiring.
+    pub granted: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SpendPeriod {
+    /// `today` or `month`.
+    pub period: String,
+    pub amounts: Vec<SpendAmount>,
+    /// A check interval in this period had a top-up and is not counted.
+    pub top_up: bool,
+    /// The previous balance check, when the first counted interval began before the period.
+    pub gap_from: Option<f64>,
+}
+
+/// Account-wide DeepSeek spend from successive balance readings.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Spend {
+    /// The first reading in Unix seconds: spend before it is unknown.
+    pub since: f64,
+    /// The computer's local date of "today".
+    pub today: String,
+    pub periods: Vec<SpendPeriod>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub requests: u64,
+    pub cache_hit: u64,
+    pub cache_miss: u64,
+    pub output: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DayUsage {
+    pub day: String,
+    pub models: Vec<ModelUsage>,
+}
+
+/// Requests and tokens of this computer's DeepSeek sessions, per day, newest first.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LocalUsage {
+    /// The computer's local date of "today".
+    pub today: String,
+    /// The totals are incomplete: logs wait to be read, or some could not be read.
+    pub partial: bool,
+    /// Some session logs wait for a later refresh; totals may grow.
+    pub reading: bool,
+    /// Session logs that could not be read; their requests are not counted.
+    pub unreadable: u64,
+    pub days: Vec<DayUsage>,
+}
+
+/// The most days and per-day models a local usage keeps, as hgs reports them.
+const USAGE_DAYS: usize = 31;
+const USAGE_MODELS: usize = 8;
+
+fn spend(value: &Value) -> Option<Spend> {
+    let spend = value.get("spend").filter(|s| s.is_object())?;
+    Some(Spend {
+        since: number(spend, "since")?,
+        today: text(spend, "today"),
+        periods: items(spend, "periods")
+            .iter()
+            .take(2)
+            .map(|p| SpendPeriod {
+                period: text(p, "period"),
+                amounts: items(p, "amounts")
+                    .iter()
+                    .take(4)
+                    .map(|a| SpendAmount {
+                        currency: text(a, "currency"),
+                        spent: text(a, "spent"),
+                        granted: text(a, "granted"),
+                    })
+                    .collect(),
+                top_up: flag(p, "top_up"),
+                gap_from: number(p, "gap_from"),
+            })
+            .collect(),
+    })
+}
+
+fn local_usage(value: &Value) -> Option<LocalUsage> {
+    let usage = value.get("local_usage").filter(|u| u.is_object())?;
+    let partial = flag(usage, "partial");
+    Some(LocalUsage {
+        today: text(usage, "today"),
+        partial,
+        // Before hgs reported unreadable logs separately, partial meant reading.
+        reading: usage
+            .get("reading")
+            .and_then(Value::as_bool)
+            .unwrap_or(partial),
+        unreadable: whole(usage, "unreadable").unwrap_or(0),
+        days: items(usage, "days")
+            .iter()
+            .take(USAGE_DAYS)
+            .map(|d| DayUsage {
+                day: text(d, "day"),
+                models: items(d, "models")
+                    .iter()
+                    .take(USAGE_MODELS)
+                    .map(|m| ModelUsage {
+                        model: text(m, "model"),
+                        requests: whole(m, "requests").unwrap_or(0),
+                        cache_hit: whole(m, "cache_hit").unwrap_or(0),
+                        cache_miss: whole(m, "cache_miss").unwrap_or(0),
+                        output: whole(m, "output").unwrap_or(0),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
 /// One account's usage as the screens show it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Usage {
@@ -86,6 +209,13 @@ pub struct Usage {
     pub identity: Identity,
     pub windows: Vec<Window>,
     pub balances: Vec<Balance>,
+    /// DeepSeek's `is_available` with an API-key balance: false when the
+    /// balance no longer covers API calls; None when the provider says nothing.
+    pub balance_available: Option<bool>,
+    /// DeepSeek API-key spend from balance readings; None for other accounts and older peers.
+    pub spend: Option<Spend>,
+    /// This computer's DeepSeek session usage; None for other accounts and older peers.
+    pub local_usage: Option<LocalUsage>,
     pub credits: Option<Credits>,
     /// An inspect runs; the values shown are the previous ones.
     pub refreshing: bool,
@@ -246,6 +376,9 @@ pub fn usage(value: &Value) -> Usage {
                 currency: text(b, "currency"),
             })
             .collect(),
+        balance_available: value.get("balance_available").and_then(Value::as_bool),
+        spend: spend(value),
+        local_usage: local_usage(value),
         credits: value
             .get("credits")
             .filter(|c| c.as_object().is_some_and(|o| !o.is_empty()))
@@ -363,5 +496,97 @@ mod tests {
         assert_eq!(value["windows"][1]["resets_at"], json!(null));
         assert_eq!(value["windows"][2]["minutes"], json!(null));
         assert_eq!(usage(&json!({"status": "ok", "credits": {}})).credits, None);
+    }
+
+    #[test]
+    fn deepseek_spend_and_local_usage_are_kept_bounded() {
+        let days: Vec<Value> = (0..40)
+            .map(|i| json!({"day": format!("2026-10-{:02}", i % 28 + 1), "models": (0..12).map(|m| json!({"model": format!("m{m}"), "requests": 2, "cache_hit": 30.0, "cache_miss": 4, "output": 5})).collect::<Vec<_>>()}))
+            .collect();
+        let reply = json!({"status": "configured", "provider": "dsh",
+            "spend": {"since": 1793000000, "today": "2026-11-10", "periods": [
+                {"period": "today", "amounts": [{"currency": "USD", "spent": "0.14", "granted": "0.00"}], "top_up": false, "gap_from": null},
+                {"period": "month", "amounts": [{"currency": "USD", "spent": "1.20", "granted": "0.10"}], "top_up": true, "gap_from": 1792990000},
+                {"period": "year", "amounts": []}]},
+            "local_usage": {"today": "2026-11-10", "partial": true, "days": days}});
+        let u = usage(&reply);
+        let spend = u.spend.unwrap();
+        assert_eq!(spend.since, 1793000000.0);
+        assert_eq!(spend.periods.len(), 2);
+        assert_eq!(
+            spend.periods[1],
+            SpendPeriod {
+                period: "month".into(),
+                amounts: vec![SpendAmount {
+                    currency: "USD".into(),
+                    spent: "1.20".into(),
+                    granted: "0.10".into()
+                }],
+                top_up: true,
+                gap_from: Some(1792990000.0),
+            }
+        );
+        let local = u.local_usage.unwrap();
+        assert!(
+            local.partial && local.reading,
+            "an older hgs's partial means still reading"
+        );
+        assert_eq!(local.unreadable, 0);
+        let unreadable = usage(&json!({"local_usage": {"today": "2026-11-10", "partial": true, "reading": false, "unreadable": 2, "days": []}}))
+            .local_usage
+            .unwrap();
+        assert_eq!(
+            (
+                unreadable.partial,
+                unreadable.reading,
+                unreadable.unreadable
+            ),
+            (true, false, 2)
+        );
+        assert_eq!(local.days.len(), USAGE_DAYS);
+        assert_eq!(local.days[0].models.len(), USAGE_MODELS);
+        assert_eq!(
+            local.days[0].models[0],
+            ModelUsage {
+                model: "m0".into(),
+                requests: 2,
+                cache_hit: 30,
+                cache_miss: 4,
+                output: 5
+            }
+        );
+        let plain = usage(&json!({"status": "ok", "spend": "no", "local_usage": null}));
+        assert_eq!((plain.spend, plain.local_usage), (None, None));
+        assert_eq!(
+            usage(&json!({"spend": {"today": "2026-11-10"}})).spend,
+            None,
+            "a summary without its coverage start says nothing"
+        );
+    }
+
+    #[test]
+    fn deepseek_api_key_balance_keeps_its_availability() {
+        let reply = json!({"status": "configured", "provider": "dsh", "windows": [],
+            "identity": {"auth_method": "API key", "account_id": "api-key:abc"},
+            "balances": [{"kind": "Total", "balance": "6.20", "currency": "USD"},
+                         {"kind": "Topped up", "balance": "6.20", "currency": "USD"},
+                         {"kind": "Granted", "balance": "0.00", "currency": "USD"}],
+            "balance_available": false});
+        let u = usage(&reply);
+        assert_eq!(u.status, "configured");
+        assert_eq!(u.balances.len(), 3);
+        assert_eq!(u.balance_available, Some(false));
+        let value = serde_json::to_value(&u).unwrap();
+        assert_eq!(value["balance_available"], json!(false));
+        // Older peers and other providers report nothing: no claim either way.
+        assert_eq!(usage(&json!({"status": "ok"})).balance_available, None);
+        assert_eq!(
+            usage(&json!({"status": "ok", "balance_available": "no"})).balance_available,
+            None
+        );
+        assert_eq!(
+            serde_json::to_value(usage(&json!({"status": "ok"}))).unwrap()["balance_available"],
+            json!(null)
+        );
     }
 }

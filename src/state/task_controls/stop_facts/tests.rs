@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(windows)]
+#[path = "tests/capture_coexistence.rs"]
+mod capture_coexistence;
+
 use std::{fs, fs::OpenOptions, path::PathBuf};
 
 fn id(n: u64) -> String {
@@ -213,6 +217,7 @@ fn unexpected_links_special_files_and_replaced_writer_refuse() {
     assert!(Publisher::open_enabled(dir.path(), &guard, &executor(), true).is_err());
 }
 
+#[cfg(not(windows))]
 #[test]
 fn captured_stop_evidence_rechecks_retained_bytes_without_acquiring_the_native_writer() {
     let dir = fixture();
@@ -241,6 +246,76 @@ fn captured_stop_evidence_rechecks_retained_bytes_without_acquiring_the_native_w
     assert_eq!(fs::read(file).unwrap(), changed);
 }
 
+#[cfg(windows)]
+#[test]
+fn captured_stop_evidence_rechecks_retained_bytes_without_acquiring_the_native_writer() {
+    let parent = platform::canonical(std::env::temp_dir()).unwrap();
+    let dir = tempfile::tempdir_in(parent).unwrap();
+    platform::private_dir(dir.path()).unwrap();
+    platform::restrict_dir(dir.path()).unwrap();
+    // Existing-only native ownership needs an empty original lock object.
+    // This fixture handle is unlocked and closes before the first owner mint.
+    drop(
+        platform::private_open(OpenOptions::new().create_new(true).read(true).write(true))
+            .open(dir.path().join(".lock"))
+            .unwrap(),
+    );
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let owned = crate::state::task_controls::writer::test_open(dir.path(), until).unwrap();
+    let publisher = Publisher::open_enabled(
+        owned.root().unwrap(),
+        owned.guard().unwrap(),
+        &executor(),
+        true,
+    )
+    .unwrap();
+    publisher.publish(&fact(2)).unwrap();
+    drop(publisher);
+    let captured = crate::state::task_controls::Capture::owned(
+        crate::state::task_controls::capture_owned_stops(owned, &executor()).unwrap(),
+    );
+    {
+        captured.with_current(&executor(), |scope, facts, check| {
+            assert_eq!(facts, &[fact(2)]);
+            assert_eq!(scope, &executor());
+            check()
+        }).unwrap();
+    }
+    // The same second plain writer can coexist with the strict read lease.
+    // Reading never reacquires that exclusion or lends it to a transaction.
+    let held = writer(dir.path());
+    captured.with_current(&executor(), |scope, facts, check| {
+        assert_eq!(facts, &[fact(2)]);
+        assert_eq!(scope, &executor());
+        check()
+    }).unwrap();
+    drop(held);
+    let lock_bytes = fs::read(dir.path().join(".lock")).unwrap();
+    let record = dir.path().join("run.json");
+    storage::atomic(&record, r#"{"state":"live"}"#).unwrap();
+    captured.with_current(&executor(), |scope, facts, check| {
+        assert_eq!(facts, &[fact(2)]);
+        assert_eq!(scope, &executor());
+        check()
+    }).unwrap();
+    assert_eq!(fs::read(dir.path().join(".lock")).unwrap(), lock_bytes);
+    let file = path(dir.path(), &executor());
+    let original = fs::read(&file).unwrap();
+    let mut changed = original.clone();
+    let at = changed.iter().position(|b| *b == b'2').unwrap();
+    changed[at] = b'3';
+    fs::write(&file, &changed).unwrap(); // same-size in-place change
+    assert!(captured.with_current(&executor(), |_, _, check| check()).is_err());
+    assert_eq!(fs::read(file).unwrap(), changed);
+    drop(captured);
+    capture_coexistence::record(
+        capture_coexistence::ReportCase::SelectedOriginal,
+        capture_coexistence::ReportOutcome::Verified,
+        capture_coexistence::ReportReason::Complete,
+    )
+    .unwrap();
+}
+
 #[test]
 fn removed_oversized_replaced_or_overflowed_capture_refuses_for_review_without_repair() {
     for mode in ["removed", "oversized", "replaced", "overflow", "writer"] {
@@ -256,22 +331,53 @@ fn removed_oversized_replaced_or_overflowed_capture_refuses_for_review_without_r
         let captured = publisher.capture().unwrap();
         drop(guard);
         let file = path(dir.path(), &executor());
+        #[cfg(windows)]
+        let mut moved = None;
         match mode {
             "removed" => fs::remove_file(&file).unwrap(),
             "oversized" => fs::write(&file, vec![b' '; BYTES + 1]).unwrap(),
             "replaced" => {
                 let bytes = fs::read(&file).unwrap();
+                #[cfg(not(windows))]
                 fs::rename(&file, file.with_extension("kept")).unwrap();
+                #[cfg(windows)]
+                {
+                    let destination = file.with_extension("kept");
+                    moved = Some(
+                        captured
+                            .directory
+                            .move_private_for_fault(
+                                &captured.fact_file,
+                                &captured.name,
+                                destination.file_name().unwrap().to_str().unwrap(),
+                            )
+                            .unwrap(),
+                    );
+                }
                 platform::private_open(OpenOptions::new().write(true).create_new(true))
                     .open(&file)
                     .unwrap();
                 fs::write(&file, bytes).unwrap();
             }
             "writer" => {
+                #[cfg(not(windows))]
                 fs::rename(dir.path().join(".lock"), dir.path().join(".old-lock")).unwrap();
+                #[cfg(windows)]
+                {
+                    moved = Some(
+                        captured
+                            .root
+                            .move_private_for_fault(&captured.writer_file, ".lock", ".old-lock")
+                            .unwrap(),
+                    );
+                }
                 drop(writer(dir.path()));
             }
             _ => (),
+        }
+        #[cfg(windows)]
+        if let Some(token) = &moved {
+            token.verify_replacement().unwrap();
         }
         let bytes = fs::read(&file).ok();
         assert!(captured.verify().is_err(), "{mode}");
@@ -280,6 +386,10 @@ fn removed_oversized_replaced_or_overflowed_capture_refuses_for_review_without_r
             bytes,
             "{mode}: recheck must not repair"
         );
+        #[cfg(windows)]
+        if let Some(token) = &moved {
+            token.verify_replacement().unwrap();
+        }
     }
 }
 

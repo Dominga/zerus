@@ -245,16 +245,23 @@ fn print(reference: &Reference, as_json: bool, extra: Value) -> cli::Result<i32>
 
 /// `hgs self`: the reference of the agent whose process runs this CLI, under
 /// its current name. Verified native ancestry identifies the caller, or for a
-/// DeepSeek tool command (task #34) the binding of its DSH_SESSION_ID.
+/// DeepSeek tool command (task #34) the binding of its DSH_SESSION_ID. Native
+/// shell claims are explicitly distinguished from process proof and never enter
+/// caller(), the send/graph attribution path.
 pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
     let as_json = match args {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => return Err(Error::new(1, "usage: hgs self [--json]")),
     };
-    let (reference, provider) = caller(config)?
-        .ok_or_else(|| Error::new(1, "hgs self: no live Zerus session owns this process"))?;
-    print(&reference, as_json, json!({"provider": provider}))
+    let (record, source) = match state::session_graph::caller_record() {
+        Some(record) => (record, "process"),
+        None => (state::parent_link::native_self().map_err(|e| Error::new(1, e))?
+            .ok_or_else(|| Error::new(1, "hgs self: no live Zerus session owns this process"))?, "claimed"),
+    };
+    let (reference, provider) = from_record(config, &record)?;
+    let parent = json!({"session_id":record["session_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
+    print(&reference, as_json, json!({"provider":provider,"identity_source":source,"session_id":record["session_id"],"parent_identity":parent}))
 }
 
 /// The reference and provider of the live agent whose process runs this CLI,
@@ -263,6 +270,10 @@ fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
     let Some(record) = self_record() else {
         return Ok(None);
     };
+    from_record(config, &record).map(Some)
+}
+
+fn from_record(config: &Config, record: &Value) -> cli::Result<(Reference, String)> {
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_owned();
     let reference = Reference {
         machine: swarm::local_node_id(config).map_err(|e| Error::new(1, e.to_string()))?,
@@ -272,9 +283,11 @@ fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
         run: text("run_id"),
         archive: String::new(),
         agent: String::new(),
-        session: emitted_session(config, &record),
+        session: emitted_session(config, record),
     };
-    Ok(Some((reference, text("agent"))))
+    let provider = record["agent"].as_str().filter(|s| !s.is_empty())
+        .or_else(|| record["backend"].as_str()).unwrap_or_default().to_owned();
+    Ok((reference, provider))
 }
 
 /// The calling agent's record. Task #34: a DeepSeek tool command has no hgs

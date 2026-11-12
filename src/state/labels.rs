@@ -215,6 +215,172 @@ pub(super) fn remove(label: &str, id: &str) -> Result<()> {
     save(label, &ids)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod guarded {
+    use super::super::guarded_recovery::View;
+    use super::*;
+
+    fn manifest(view: &mut View<'_>) -> Result<Option<Manifest>> {
+        Ok(view
+            .read(&manifest_path(), MANIFEST_BYTES)?
+            .as_deref()
+            .and_then(parse_manifest))
+    }
+    fn write_manifest(view: &mut View<'_>, manifest: &Manifest) -> Result<()> {
+        view.atomic(
+            &manifest_path(),
+            format!("{}\n", json!({"version":1,"labels":manifest})).as_bytes(),
+        )
+    }
+    fn enumerate(view: &mut View<'_>) -> Result<Vec<(String, Value)>> {
+        let deadline = view.until().min(Instant::now() + SCAN_TIME);
+        let mut count = 0;
+        let mut found = Vec::new();
+        for (folder, provider) in id_directories() {
+            let paths = view.entries(&folder, SCAN_RECORDS - count)?;
+            count += paths.len();
+            for path in paths {
+                view.check()?;
+                if Instant::now() >= deadline {
+                    return Err("The guarded label scan exceeded its original budget".into());
+                }
+                if path.extension().is_none_or(|v| v != "json") {
+                    continue;
+                }
+                let Some(id) = path
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .filter(|id| session_id::canonical(id))
+                else {
+                    continue;
+                };
+                let raw = view
+                    .json(&path, storage::ID_RECORD_BYTES)?
+                    .ok_or("An indexed recovery record disappeared")?;
+                let record = match provider {
+                    // Explicit fixed namespace metadata reads; no selection,
+                    // native host or helper. The retained raw proof is checked
+                    // again before every effect, including after this read.
+                    Some(provider) => provider.read_id(id)?,
+                    None => view.record(&path, string(&raw, "name"))?,
+                };
+                view.check()?;
+                if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true {
+                    found.push((id.to_owned(), record));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("The guarded label scan exceeded its original budget".into());
+        }
+        view.check()?;
+        Ok(found)
+    }
+    fn ensure_manifest(view: &mut View<'_>) -> Result<()> {
+        if manifest(view)?.is_some() {
+            return Ok(());
+        }
+        let mut found: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+        for (id, record) in enumerate(view)? {
+            let label = string(&record, "name").to_owned();
+            found
+                .entry(key(&label))
+                .or_insert_with(|| (label, Vec::new()))
+                .1
+                .push(id);
+        }
+        for file in view.files(&root().join("labels"), SCAN_RECORDS)? {
+            let Some(stem) = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| s.len() == 64)
+            else {
+                continue;
+            };
+            let Some(bytes) = view.read(&file, INDEX_BYTES)? else {
+                continue;
+            };
+            let Some(label) = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .map(|v| string(&v, "label").to_owned())
+                .filter(|label| key(label) == stem)
+            else {
+                continue;
+            };
+            if let Some(ids) = parse_index(&label, &bytes) {
+                found
+                    .entry(stem.to_owned())
+                    .or_insert_with(|| (label, Vec::new()))
+                    .1
+                    .extend(ids);
+            }
+        }
+        let mut manifest = Manifest::new();
+        for (key, (label, mut ids)) in found {
+            ids.sort();
+            ids.dedup();
+            let text = format!("{}\n", json!({"version":1,"label":label,"ids":ids}));
+            view.atomic(&path(&label), text.as_bytes())?;
+            manifest.insert(key, digest(text.as_bytes()));
+        }
+        write_manifest(view, &manifest)
+    }
+    fn save(view: &mut View<'_>, label: &str, ids: &[String]) -> Result<()> {
+        let mut manifest =
+            manifest(view)?.ok_or("The guarded label index has no valid manifest")?;
+        if ids.is_empty() {
+            if manifest.remove(&key(label)).is_some() {
+                write_manifest(view, &manifest)?;
+            }
+            return view.remove(&path(label));
+        }
+        let text = format!("{}\n", json!({"version":1,"label":label,"ids":ids}));
+        view.atomic(&path(label), text.as_bytes())?;
+        manifest.insert(key(label), digest(text.as_bytes()));
+        write_manifest(view, &manifest)
+    }
+    pub(super) fn update(view: &mut View<'_>, label: &str, id: &str, add: bool) -> Result<()> {
+        ensure_manifest(view)?;
+        let manifest_bytes = view
+            .read(&manifest_path(), MANIFEST_BYTES)?
+            .ok_or("The guarded label manifest disappeared")?;
+        let index = view.read(&path(label), INDEX_BYTES)?;
+        let mut ids = match prove(label, &manifest_bytes, || index.clone()) {
+            Some(ids) => ids,
+            None => enumerate(view)?
+                .into_iter()
+                .filter(|(id, record)| holds(record, id, label))
+                .map(|(id, _)| id)
+                .collect(),
+        };
+        if add && !ids.iter().any(|known| known == id) {
+            ids.push(id.to_owned());
+            ids.sort();
+        }
+        if !add {
+            ids.retain(|known| known != id);
+        }
+        save(view, label, &ids)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn add_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    label: &str,
+    id: &str,
+) -> Result<()> {
+    guarded::update(view, label, id, true)
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn remove_guarded(
+    view: &mut guarded_recovery::View<'_>,
+    label: &str,
+    id: &str,
+) -> Result<()> {
+    guarded::update(view, label, id, false)
+}
+
 /// Makes the manifest valid, under the state writer lock: a valid one is
 /// kept; otherwise it is rebuilt from a bounded enumeration of `sessions/`,
 /// every session listed under its label, together with every IDs a label
@@ -413,6 +579,115 @@ pub(super) fn candidates(label: &str) -> Result<Candidates> {
     })
 }
 
+/// Effort's pre-admission resolver: the same complete index/scan proof without
+/// presentation refresh, native execution or repair writes. Actual native
+/// readiness belongs to the later admitted live Scope.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn candidates_metadata(label: &str) -> Result<Candidates> {
+    let deadline = Instant::now() + SCAN_TIME;
+    let mut by_id = Vec::new();
+    if let Some(ids) = listed(label) {
+        if ids.len() > SCAN_RECORDS {
+            return Err(
+                "The metadata label candidates exceed their bound; choose --session-id".into(),
+            );
+        }
+        let mut bytes = 0usize;
+        for id in ids {
+            if Instant::now() >= deadline {
+                return Err("The metadata label proof exceeded its budget".into());
+            }
+            let Some(path) = id_path_for_label(label, &id) else {
+                continue;
+            };
+            match std::fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.to_string()),
+                Ok(_) => {}
+            }
+            let record = match provider_binding::Provider::named(label) {
+                Some(provider) => provider.read_id(&id)?,
+                None => {
+                    let raw = read_file(&path, storage::ID_RECORD_BYTES)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("Metadata candidate is absent")?;
+                    let value: Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                    storage::verify_metadata_at(&path, string(&value, "name"), &raw)?
+                }
+            };
+            bytes = bytes
+                .checked_add(
+                    serde_json::to_vec(&record)
+                        .map_err(|e| e.to_string())?
+                        .len(),
+                )
+                .ok_or("Metadata label bytes overflow")?;
+            if bytes > 64 << 20 {
+                return Err("The metadata label proof exceeded its byte bound".into());
+            }
+            if holds(&record, &id, label) {
+                by_id.push(record);
+            }
+        }
+    } else {
+        let mut count = 0usize;
+        let mut bytes = 0usize;
+        for (folder, provider) in id_directories() {
+            let entries = match std::fs::read_dir(folder) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.to_string()),
+            };
+            for entry in entries {
+                if count >= SCAN_RECORDS || Instant::now() >= deadline {
+                    return Err("The metadata label scan exceeded its bound".into());
+                }
+                count += 1;
+                let path = entry.map_err(|e| e.to_string())?.path();
+                if path.extension().is_none_or(|v| v != "json") {
+                    continue;
+                }
+                let Some(id) = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|id| session_id::canonical(id))
+                else {
+                    continue;
+                };
+                let raw = read_file(&path, storage::ID_RECORD_BYTES)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("A metadata label binding disappeared")?;
+                bytes = bytes
+                    .checked_add(raw.len())
+                    .ok_or("Metadata label bytes overflow")?;
+                if bytes > 64 << 20 {
+                    return Err("The metadata label scan exceeded its byte bound".into());
+                }
+                let record = match provider {
+                    Some(provider) => provider.read_id(id)?,
+                    None => {
+                        let raw_value: Value =
+                            serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                        storage::verify_metadata_at(&path, string(&raw_value, "name"), &raw)?
+                    }
+                };
+                if holds(&record, id, label) {
+                    by_id.push(record);
+                }
+            }
+        }
+    }
+    let first = match std::fs::symlink_metadata(first_path(label)) {
+        Ok(_) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e.to_string()),
+    };
+    if Instant::now() >= deadline {
+        return Err("The metadata label lookup exceeded its budget".into());
+    }
+    Ok(Candidates { first, by_id })
+}
+
 /// Terminal launch exclusion is one namespace, not every native provider's
 /// binding under that label. Provider launch reconciliation must be able to
 /// find its own pending binding. The same complete index/scan still proves the
@@ -532,7 +807,7 @@ mod tests {
     fn binding_dirs_cover_the_id_layout() {
         // Task #61 (team ede724c4): this module runs only on Unix, so the
         // first Linux CI that ran it named two files added since.
-        const ALLOWED: [(&str, &str); 5] = [
+        const ALLOWED: [(&str, &str); 6] = [
             (
                 "src/state/builds.rs",
                 "only its test writes a DeepSeek binding fixture; it lists its own builds folder",
@@ -552,6 +827,10 @@ mod tests {
             (
                 "src/state/rename.rs",
                 "legacy rename routes, which the ID layout never writes",
+            ),
+            (
+                "src/state/guarded_recovery.rs",
+                "generic bounded traversal; bindings is one retained name_routes point read, while callers select their explicit ID namespaces",
             ),
         ];
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

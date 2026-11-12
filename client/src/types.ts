@@ -173,6 +173,19 @@ export interface KeyOut { computer: ComputerId; key: string; reason?: string | n
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
 export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "reconnecting" | "ended";
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
+/**
+ * A connection supervisor's restart schedule (core `RetryOut`): `waiting`
+ * carries the delay and the time left, measured from the supervisor's own
+ * monotonic deadline when the report was built; `serial` names the wait.
+ */
+export interface RetryReport { phase: "idle" | "waiting" | "attempting" | string; serial?: number; attempt?: number; delay_ms?: number | null; remaining_ms?: number | null }
+export interface RetryOut extends RetryReport { computer: ComputerId }
+/** One service connection row; `incarnation` and `retry` are absent from an older service. */
+export interface FleetComputer { id: string; status: string; attempt: number; incarnation?: number | null; retry?: RetryReport | null }
+/** The restart delays the background service uses: `default`, `file`, or `kept` when its saved file is not used. */
+export interface FleetRetryDelays { delays_seconds: [number, number, number, number]; source: string; diagnostic?: string | null }
+/** This computer's saved reconnect timings (`hgs machine retry-delays`); `invalid` keeps a file that is not used. */
+export interface RetryDelays { delays_seconds: [number, number, number, number]; defaults: [number, number, number, number]; source: "default" | "file" | "invalid" | string; diagnostic: string | null }
 export type ActivityKind = "events" | "replace" | "older" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
 /** The existing watch tasks topic; a list replaces the open project's board. */
@@ -280,7 +293,9 @@ export interface DesktopService {
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
   /** Configured connection presentation only, never source or action authority. */
-  fleet_computers?: null | { id: string; status: string; attempt: number }[];
+  fleet_computers?: null | FleetComputer[];
+  /** The restart delays the service's supervisors use; absent from an older service. */
+  fleet_retry_delays?: null | FleetRetryDelays;
   attention_counts: null | {
     epoch: string; scope: "shared_host_state"; display_only: true; authority: false; local_marks_included: false;
     aggregate: { complete: boolean; total: number | null; attention: number | null; known_total: number; known_attention: number };
@@ -309,6 +324,8 @@ export interface Batch {
   removes: KeyOut[];
   replaces: ReplaceOut[];
   computers: ComputerOut[];
+  /** Restart schedules of this app's own connection supervisors, after `computers`. */
+  retries?: RetryOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
   tasks?: TasksOut[];
@@ -557,11 +574,25 @@ export interface Usage {
   identity: Identity;
   windows: ProjectedWindow[];
   balances: { kind: string; balance: string; currency: string }[];
+  /** DeepSeek's API-key `is_available`: false once the balance no longer covers API calls; older peers omit it. */
+  balance_available?: boolean | null;
+  /** DeepSeek API-key spend from balance readings; other accounts and older peers omit it. */
+  spend?: Spend | null;
+  /** This computer's DeepSeek session usage; other accounts and older peers omit it. */
+  local_usage?: LocalUsage | null;
   credits: { balance: string; unlimited: boolean } | null;
   refreshing: boolean;
   refresh_error: boolean;
   offline: boolean;
 }
+export interface SpendAmount { currency: string; spent: string; granted: string }
+/** `period` is `today` or `month`; `gap_from` names the previous balance check when the first counted interval began earlier. */
+export interface SpendPeriod { period: string; amounts: SpendAmount[]; top_up: boolean; gap_from: number | null }
+export interface Spend { since: number; today: string; periods: SpendPeriod[] }
+export interface ModelUsage { model: string; requests: number; cache_hit: number; cache_miss: number; output: number }
+export interface DayUsage { day: string; models: ModelUsage[] }
+/** `partial`: the totals are incomplete. `reading`: logs wait for a later refresh. `unreadable`: logs set aside, not counted. */
+export interface LocalUsage { today: string; partial: boolean; reading: boolean; unreadable: number; days: DayUsage[] }
 export interface SessionUsageRef { host: ComputerId; name: string; run_id: string }
 export const emptyUsage = (provider = ""): Usage => ({
   status: "loading", provider, label: "", auth_status: "", checked_at: null, seeded: false,
@@ -652,6 +683,8 @@ export interface MachinesView {
   /** Exact configuration revision, separate from the hub computation order. */
   connection_revision?: string;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
+  /** This computer's saved reconnect timings; null from an older hgs. */
+  retry_delays?: RetryDelays | null;
 }
 
 /** The hgs-owned settings Settings > Sessions reads (SettingsPage.h:242-250). */
@@ -855,7 +888,7 @@ export interface LaunchAccounts {
 }
 
 // The Terminal tab (src-tauri/src/terminal.rs).
-export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
+export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string; conversation_id?: string }
 export interface TerminalConnected { generation: number; status: string; reused: boolean }
 export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
 /** The next raw output is history; parse it before accepting input. */

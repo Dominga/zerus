@@ -1404,6 +1404,97 @@ pub async fn dispatch_as(
     .await
 }
 
+/// The image seam cannot choose an action or runner. It uses ordinary StageFiles
+/// admission/classification, but refuses changed source bytes BEFORE helper start.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn dispatch_terminal_image_as(
+    state: &Actions,
+    target: Target,
+    path: PathBuf,
+    request_id: String,
+    original: Arc<[u8]>,
+    current: impl Fn() -> bool + Send + 'static,
+) -> Result<Outcome, String> {
+    dispatch_terminal_image_with(state, target, path, request_id, original, current, run).await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn dispatch_terminal_image_with(
+    state: &Actions,
+    target: Target,
+    path: PathBuf,
+    request_id: String,
+    original: Arc<[u8]>,
+    current: impl Fn() -> bool + Send + 'static,
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    use zerus_client_core::attachments::{Attachment, MAX_ATTACHMENT_BYTES};
+    if original.is_empty() || original.len() > MAX_ATTACHMENT_BYTES || target.run_id.is_empty() {
+        return Ok(failed("Invalid Terminal image"));
+    }
+    let expected = serde_json::to_vec(&serde_json::json!({
+        "request_id": request_id,
+        "expected_run_id": target.run_id,
+        "expected_conversation_id": target.conversation_id,
+        "attachments": [Attachment { name: "pasted-image.png".into(), mime: "image/png".into(), bytes: original, reference: String::new() }],
+    })).map_err(|e| e.to_string())?;
+    let mut args = Vec::new();
+    if !target.computer.is_empty() {
+        args.push(format!("@{}", target.computer));
+    }
+    args.extend([
+        "attachment".into(),
+        target.name.clone(),
+        "--stage".into(),
+        "--json".into(),
+    ]);
+    let expected_request = request_id.clone();
+    dispatch_with_plan(
+        state,
+        target,
+        Action::StageFiles {
+            paths: vec![path],
+            expected_created: None,
+        },
+        request_id,
+        move |hgs, inv, _| {
+            if !current()
+                || inv.args != args
+                || inv.request_id.as_deref() != Some(expected_request.as_str())
+                || inv.stdin.as_deref() != Some(expected.as_slice())
+            {
+                return zerus_client_core::Exit::StartFailed(
+                    "Terminal changed or image bytes changed before transfer; nothing was pasted."
+                        .into(),
+                );
+            }
+            runner(hgs, inv)
+        },
+        None,
+    )
+    .await
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) async fn terminal_image_test_dispatch(
+    state: &Actions,
+    target: Target,
+    path: PathBuf,
+    request_id: String,
+    original: Arc<[u8]>,
+    current: impl Fn() -> bool + Send + 'static,
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+) -> Result<Outcome, String> {
+    dispatch_terminal_image_with(state, target, path, request_id, original, current, runner).await
+}
+
 /// `dispatch_as` past its replay guard, with the runner that starts `hgs`:
 /// the core's `run`, or in tests a stand-in that starts no process.
 #[cfg(test)]
@@ -2396,6 +2487,48 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn terminal_image_adapter_keeps_the_existing_stage_write_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let actions = Actions::new(dir.path().join("marks.json"));
+        let target = Target {
+            computer: "peer".into(),
+            name: "claude/sample/image".into(),
+            run_id: "run".into(),
+            conversation_id: "cid".into(),
+        };
+        let path = dir.path().join("pasted-image.png");
+        let original: Arc<[u8]> = include_bytes!("../icons/32x32.png").as_slice().into();
+        std::fs::write(&path, &original).unwrap();
+        let action = Action::StageFiles {
+            paths: vec![path.clone()],
+            expected_created: None,
+        };
+        let held = actions.begin(Lane::key(&target, &action), &action).unwrap();
+        let out = tauri::async_runtime::block_on(dispatch_terminal_image_with(
+            &actions,
+            target.clone(),
+            path.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            Arc::clone(&original),
+            || true,
+            |_, _| panic!("busy cannot run"),
+        ));
+        assert_eq!(out, Err(BUSY.into()));
+        drop(held);
+        let out = tauri::async_runtime::block_on(dispatch_terminal_image_with(
+            &actions,
+            target,
+            path,
+            uuid::Uuid::new_v4().to_string(),
+            original,
+            || false,
+            |_, _| panic!("stale cannot run"),
+        ))
+        .unwrap();
+        assert!(matches!(out, Outcome::Failed { .. }));
+    }
     #[test]
     fn retained_queue_overlays_remain_read_only_after_gui_writer_admission_closes() {
         let path = std::env::temp_dir().join(format!(

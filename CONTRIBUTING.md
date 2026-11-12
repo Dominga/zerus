@@ -69,7 +69,11 @@ CMake build and its QtTest suites.
 never more than the CPU count; `1` runs them one after another);
 `ZERUS_PYTHON_JOBS` overrides it for the Python classes. Test logs and Python
 job durations live in ignored `artifacts/test-results/`. Set
-`ZERUS_BUILD_JOBS` to limit desktop build parallelism. Zerus tracks the newest
+`ZERUS_BUILD_JOBS` to limit desktop build parallelism. The Tauri host's drive-folder integration tests run the actual CLI from the
+same source: build it with `cargo +1.99.1 build --locked --bin hgs` and set
+`HGS_TEST_BIN` to that binary's absolute path; `scripts/ci/client-native.sh`
+does both in its own target directory.
+Zerus tracks the newest
 stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
@@ -175,6 +179,16 @@ Native integration tests may need separately installed agent CLIs or a real desk
 read each suite's setup before running it. Do not run tests against live agent state.
 Some platform tests only exist on macOS, Linux or Windows. Record any unavailable
 checks.
+
+The default Unix Claude/Codex native suites also require a private Rust test
+image for their ID-layout Effort fixture. From the exact clean, committed source,
+build the CLI and image together with `scripts/ci/native-effort-seed.py`; see the
+[native qualification commands](docs/ci-and-aur.md#native-agent-compatibility-and-upstream-review).
+The runner verifies the receipt's source tree and both executable hashes before
+and after execution. The fixture alone uses the ignored seed method to transfer
+its own saved record through the real owner-transfer code; Effort requests run
+the production CLI. The private test image is never included in product
+installers or release assets.
 
 The OpenCode 2 native suite needs an installed OpenCode 2.0.32 or newer 2.x. Run it
 locally on request; full Linux and macOS CI run it with the latest release. See
@@ -345,18 +359,18 @@ runs with one latest Claude Code and Codex package per agent, each against a loc
 API: [testing the Windows session host](docs/windows-host-testing.md).
 
 Kimi's optional native input, recovery, question and startup-trust fixtures are
-`test_kimi_native.NativeKimi` (three cases),
-`test_kimi_questions_native.NativeKimiQuestions` (three) and
-`test_kimi_questions_native.NativeKimiTrust` (three). Run them only with an
+`test_kimi_native.NativeKimi`,
+`test_kimi_questions_native.NativeKimiQuestions` and
+`test_kimi_questions_native.NativeKimiTrust`. Run them only with a
 privately selected `HGS_KIMI_TEST_BIN`, exact `HGS_KIMI_TEST_SHA256` and the runner's
 sealed `HGS_KIMI_TEST_RECORD` plus official manifest, a sealed
-`HGS_TEST_BIN`, private helper PATH and evidence directory; never point them at
+`HGS_TEST_BIN`, the exact-source Effort seed receipt, private helper PATH and evidence directory; never point them at
 the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
-shim per case, so they require both native and compiler resources. A current
-latest-release campaign runs twelve native cases, including long Other answers,
-explicit recovery of a retained editor, and preservation of a mismatching draft. Historical two-version receipts
+shim per case, so they require both native and compiler resources. The maintained
+inventory includes long Other answers, explicit recovery of a retained editor,
+preservation of a mismatching draft and ID-layout Effort changes. Historical two-version receipts
 do not define current selection. The seventeen R2 and seven question-fixture
 controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and
@@ -365,9 +379,10 @@ are synthetic integration tests, not pure controls. Historical native results
 do not qualify a newly composed candidate.
 
 The separate [latest Kimi native workflow](.github/workflows/kimi-native.yml)
-runs these eight cases on disposable standard Linux and macOS runners for
+runs these cases on disposable standard Linux and macOS runners for
 relevant PR changes or a manual run. It builds hgs once with Rust 1.99.1 and
-two jobs, runs the existing pinned tmux in a private prefix, resolves the official
+two jobs, seals the private Effort test image from the same source, runs the
+existing pinned tmux in a private prefix, resolves the official
 latest release once and verifies its versioned manifest, exact target, bounded
 size and SHA-256 before native
 execution. It receives no provider or publication credentials, uses no cache,

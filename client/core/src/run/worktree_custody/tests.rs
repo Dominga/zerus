@@ -38,6 +38,7 @@ while frame['op']=='observe':
     frame=json.loads(sys.stdin.buffer.readline())
 assert frame==dict(op='close',pipeline=first['pipeline'])
 if (root/'hold-output').exists() and os.fork()==0:
+    (root/'held').write_text('held')
     until=time.monotonic()+20
     while not (root/'release').exists() and time.monotonic()<until:time.sleep(.005)
     os._exit(0)
@@ -123,6 +124,24 @@ fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_cl
         panic!("ready")
     };
     assert!(!owner.worker_finished());
+    assert_eq!(
+        owner
+            .completion
+            .workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        6
+    );
+    assert_eq!(
+        owner
+            .completion
+            .children
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        2
+    );
     let observed = owner
         .observe(Instant::now() + Duration::from_secs(3))
         .unwrap();
@@ -134,8 +153,18 @@ fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_cl
         &fixture.calls()[1][2..],
         ["worktrees", "program-holder", "--json"]
     );
+    let extra = owner.resources.clone();
+    assert_eq!(owner.close(), Err(Error::Unsettled));
+    drop(extra);
     owner.close().unwrap();
     assert!(owner.worker_finished());
+    assert_eq!(owner.join(), Retirement::Retired);
+    owner.close().unwrap();
+    assert_eq!(
+        fixture.calls().len(),
+        2,
+        "repeated close sends no new frame"
+    );
     assert!(
         released.upgrade().is_some(),
         "the owner separately retains its original native source"
@@ -200,16 +229,49 @@ fn closed_reply_and_process_exit_cannot_release_a_real_held_reader_charge() {
     fs::write(fixture.0.join("hold-output"), b"hold").unwrap();
     let (mut owner, released) = fixture.owner();
     owner.ready().unwrap();
-    assert_eq!(owner.close(), Err(Error::Unsettled));
-    drop(owner);
-    assert!(
-        released.upgrade().is_some(),
-        "closed ACK is not physical EOF"
-    );
-    fs::write(fixture.0.join("release"), b"release").unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
-    while released.upgrade().is_some() && Instant::now() < until {
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let closing = thread::spawn(move || {
+        let result = owner.close();
+        let _ = done_tx.send((result, owner));
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while !fixture.0.join("held").exists() && Instant::now() < until {
         thread::sleep(POLL);
     }
+    assert!(fixture.0.join("held").exists());
+    assert!(done_rx.recv_timeout(Duration::from_millis(200)).is_err());
+    fs::write(fixture.0.join("release"), b"release").unwrap();
+    let (closed, mut owner) = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    closing.join().unwrap();
+    assert_eq!(closed, Ok(()));
+    assert_eq!(owner.join(), Retirement::Retired);
+    owner.close().unwrap();
+    assert_eq!(
+        fixture.calls().len(),
+        2,
+        "physical retirement repeats no close"
+    );
+    drop(owner);
     assert!(released.upgrade().is_none());
+}
+
+#[test]
+fn cancellation_retires_the_original_pipes_without_a_close_frame() {
+    let fixture = Fixture::new();
+    let (mut owner, _released) = fixture.owner();
+    owner.ready().unwrap();
+    owner.cancel();
+    let until = Instant::now() + Duration::from_secs(10);
+    while owner.join() == Retirement::Pending && Instant::now() < until {
+        thread::sleep(POLL);
+    }
+    assert_eq!(owner.join(), Retirement::Retired);
+    assert_eq!(fixture.calls().len(), 2, "expiry sends no close frame");
+    assert!(owner
+        .completion
+        .children
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .all(|child| child.load(Ordering::Acquire)));
 }

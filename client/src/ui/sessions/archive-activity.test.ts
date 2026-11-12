@@ -44,6 +44,7 @@ vi.mock("../../bridge", async (importOriginal) => ({
   terminalStatus: vi.fn(() => new Promise(() => {})),
   terminalConnect: vi.fn(async () => {}),
   terminalWrite: vi.fn(async () => {}),
+  terminalPasteImage: vi.fn(async () => {}),
   terminalResize: vi.fn(async () => {}),
   terminalAck: vi.fn(async () => {}),
   terminalDisconnect: vi.fn(async () => {}),

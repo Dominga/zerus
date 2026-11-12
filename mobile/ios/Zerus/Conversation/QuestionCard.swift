@@ -55,6 +55,9 @@ struct QuestionCard: View {
     @Binding var display: QuestionDisplayState
     let expanded: Bool
     let onReview: (Draft) -> Void
+    /// The expanded card's verified presence (zerus-a4mub.25): a mapped reason and the check age. It never enables
+    /// an answer; `question.canAnswer` and `available` alone do.
+    var presence: QuestionPresenceView? = nil
 
     @State private var options: [String: Set<String>] = [:]
     @State private var texts: [String: String] = [:]
@@ -201,8 +204,12 @@ struct QuestionCard: View {
             if !available {
                 Text("Refresh to verify this request. Your answer is kept.").font(.footnote).foregroundStyle(Theme.muted)
             } else if !question.canAnswer {
-                Text(question.unavailableReason.isEmpty ? "Complete this request on your machine." : question.unavailableReason)
+                Text(presence.map(\.detail).flatMap { $0.isEmpty ? nil : $0 }
+                     ?? (question.unavailableReason.isEmpty ? "Complete this request on your machine." : question.unavailableReason))
                     .font(.footnote).foregroundStyle(Theme.muted).textSelection(.enabled)
+            }
+            if let age = presence?.age, !age.isEmpty {
+                Text(age).font(.caption).foregroundStyle(Theme.muted)
             }
             if question.approval && !approvalSupported && !permission && !choices {
                 Text("This approval cannot be answered here. Continue on your machine.").font(.footnote).foregroundStyle(Theme.muted)
@@ -479,22 +486,57 @@ struct ExpandedQuestionSheet: View {
     let target: Target
     let questions: [Question]
     let available: Bool
+    let presence: QuestionPresenceView?
     @Binding var display: QuestionDisplayState
     let onReview: (Draft) -> Void
 
     var body: some View {
         NavigationStack {
             Group {
+                // The sheet is presented only while the exact request resolves; while it animates away after the
+                // request leaves, the conversation shows the inline presence notice instead.
                 if let question = display.resolve(questions) {
-                    QuestionCard(target: target, question: question, available: available, display: $display, expanded: true, onReview: onReview)
+                    QuestionCard(target: target, question: question, available: available, display: $display, expanded: true,
+                                 onReview: onReview, presence: presence)
                         .padding(8)
                 } else {
-                    ContentUnavailableView("Question unavailable", systemImage: "questionmark.bubble",
-                                           description: Text("This exact request is not in the loaded activity. Refresh the conversation to verify it. Your saved answer is kept."))
+                    Color.clear
                 }
             }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Close") { display = display.close() } } }
             .zerusScreen()
         }
+    }
+}
+
+/// An obsolete expansion (closed, replaced, checking or unavailable) is an inline notice: it never obscures the
+/// conversation or a delivery Review. Its actions only refresh, open the newer request or close the expansion.
+struct QuestionPresenceNotice: View {
+    let view: QuestionPresenceView
+    let checkedAt: Int64
+    let onClose: () -> Void
+    let onRefresh: () -> Void
+    let onOpen: (Question) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(view.title).font(.subheadline.weight(.semibold))
+            Text(view.detail).font(.footnote).foregroundStyle(Theme.muted)
+            // The age keeps counting while the notice stays; the presence itself changes only with a new projection.
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(QuestionPresencePolicies.age(checkedAt, now: ConversationModel.monotonicMillis()))
+                    .font(.caption).foregroundStyle(Theme.muted)
+            }
+            HStack(spacing: 12) {
+                if view.refresh { Button("Refresh", action: onRefresh) }
+                if let replacement = view.replacement { Button("Open new request") { onOpen(replacement) } }
+                Button("Close", action: onClose)
+            }
+            .font(.footnote.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(hex: 0x2B2923), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
     }
 }

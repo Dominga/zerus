@@ -272,9 +272,7 @@ impl Catalog {
                     .get(parent)
                     .ok_or_else(|| anyhow::anyhow!("missing causal parent"))?;
                 ensure!(
-                    p.clock < op.clock
-                        && Self::key_with_identities(&p.key, &identities)
-                            == Self::key_with_identities(&op.key, &identities),
+                    p.clock < op.clock && Self::same_identity(&p.key, &op.key, &identities),
                     "invalid causal parent"
                 );
             }
@@ -283,16 +281,30 @@ impl Catalog {
     }
 
     pub fn identities(&self) -> Result<BTreeMap<String, String>> {
-        let hidden: BTreeSet<_> = self
+        // Only machine-redirect heads matter. A redirect operation is hidden
+        // exactly when it is some operation's causal parent, so only parents
+        // that are redirects are collected (none at all without redirects),
+        // instead of every parent of every operation.
+        let redirects: Vec<&Operation> = self
+            .operations
+            .values()
+            .filter(|op| matches!(&op.key, Key::Machine { field, .. } if field == "redirect"))
+            .collect();
+        if redirects.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let redirect_ids: BTreeSet<&str> = redirects.iter().map(|op| op.id.as_str()).collect();
+        let hidden: BTreeSet<&str> = self
             .operations
             .values()
             .flat_map(|o| o.parents.iter())
+            .map(String::as_str)
+            .filter(|parent| redirect_ids.contains(parent))
             .collect();
         let mut selected: BTreeMap<String, &Operation> = BTreeMap::new();
-        for op in self
-            .operations
-            .values()
-            .filter(|op| !hidden.contains(&op.id))
+        for op in redirects
+            .into_iter()
+            .filter(|op| !hidden.contains(op.id.as_str()))
         {
             if let Key::Machine { id, field } = &op.key {
                 if field == "redirect"
@@ -322,6 +334,29 @@ impl Catalog {
         }
         Ok(result)
     }
+    /// `key_with_identities(a) == key_with_identities(b)` without cloning
+    /// either key: only Session machines are mapped, so two Session keys
+    /// compare by session and mapped machine, and anything else compares
+    /// as it is (a different variant is never equal).
+    fn same_identity(a: &Key, b: &Key, ids: &BTreeMap<String, String>) -> bool {
+        match (a, b) {
+            (
+                Key::Session {
+                    machine: left,
+                    session: left_session,
+                },
+                Key::Session {
+                    machine: right,
+                    session: right_session,
+                },
+            ) => {
+                left_session == right_session
+                    && ids.get(left).unwrap_or(left) == ids.get(right).unwrap_or(right)
+            }
+            _ => a == b,
+        }
+    }
+
     fn key_with_identities(key: &Key, ids: &BTreeMap<String, String>) -> Key {
         match key {
             Key::Session { machine, session } => Key::Session {
@@ -751,5 +786,169 @@ mod tests {
         catalog.operations.insert(op.id.clone(), op);
         assert!(catalog.validate().is_err());
         assert_eq!(catalog.preferences(), json!({"mobile_delivery": "away"}));
+    }
+
+    /// The previous `identities`, verbatim, as the equivalence reference.
+    fn identities_before(catalog: &Catalog) -> Result<BTreeMap<String, String>> {
+        let hidden: BTreeSet<_> = catalog
+            .operations
+            .values()
+            .flat_map(|o| o.parents.iter())
+            .collect();
+        let mut selected: BTreeMap<String, &Operation> = BTreeMap::new();
+        for op in catalog
+            .operations
+            .values()
+            .filter(|op| !hidden.contains(&op.id))
+        {
+            if let Key::Machine { id, field } = &op.key {
+                if field == "redirect"
+                    && selected.get(id).is_none_or(|old| {
+                        (old.clock, &old.actor, &old.id) < (op.clock, &op.actor, &op.id)
+                    })
+                {
+                    selected.insert(id.clone(), op);
+                }
+            }
+        }
+        let mut result = BTreeMap::new();
+        for id in selected.keys() {
+            let mut current = id.as_str();
+            let mut seen = BTreeSet::new();
+            while let Some(next) = selected.get(current) {
+                ensure!(
+                    seen.insert(current) && seen.len() <= 64,
+                    "machine identity redirect cycle"
+                );
+                current = next
+                    .value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid machine redirect"))?;
+            }
+            result.insert(id.clone(), current.to_owned());
+        }
+        Ok(result)
+    }
+
+    fn raw_op(clock: u64, actor: &str, key: Key, parents: &[&str], value: Value) -> Operation {
+        Operation {
+            id: new_id(),
+            actor: actor.into(),
+            clock,
+            key,
+            parents: parents.iter().map(|parent| (*parent).to_owned()).collect(),
+            value,
+        }
+    }
+
+    fn with(ops: Vec<Operation>) -> Catalog {
+        let mut catalog = Catalog::default();
+        for op in ops {
+            catalog.operations.insert(op.id.clone(), op);
+        }
+        catalog
+    }
+
+    /// zerus-fiyaa: `identities` only collects redirect parents now; it must
+    /// equal the previous all-parents implementation on every shape.
+    #[test]
+    fn identities_equal_the_previous_all_parents_implementation() {
+        let (a, b, c, z) = (new_id(), new_id(), new_id(), new_id());
+        let session = |machine: &str| Key::Session {
+            machine: machine.into(),
+            session: "s".into(),
+        };
+        let redirect = |id: &str| Key::machine(id, "redirect");
+        let plain_parent = raw_op(1, &a, session(&a), &[], json!("x"));
+        let plain_child = raw_op(2, &a, session(&a), &[&plain_parent.id], json!("y"));
+        let older = raw_op(9, &z, redirect(&a), &[], json!(b));
+        let newer = raw_op(2, &a, redirect(&a), &[&older.id], json!(c));
+        let hidden_by_foreign = raw_op(1, &a, redirect(&b), &[], json!(c));
+        let foreign_child = raw_op(2, &a, session(&b), &[&hidden_by_foreign.id], json!("z"));
+        let fixtures = vec![
+            ("empty", with(vec![])),
+            (
+                "no redirects",
+                with(vec![plain_parent.clone(), plain_child.clone()]),
+            ),
+            (
+                "one redirect",
+                with(vec![
+                    raw_op(1, &a, redirect(&a), &[], json!(b)),
+                    plain_child.clone(),
+                    plain_parent.clone(),
+                ]),
+            ),
+            (
+                "chain",
+                with(vec![
+                    raw_op(1, &a, redirect(&a), &[], json!(b)),
+                    raw_op(1, &a, redirect(&b), &[], json!(c)),
+                ]),
+            ),
+            // A superseded redirect that would win the tie-break if it were
+            // not hidden by its child.
+            ("superseded", with(vec![older.clone(), newer.clone()])),
+            (
+                "concurrent",
+                with(vec![
+                    raw_op(3, &a, redirect(&a), &[], json!(b)),
+                    raw_op(3, &z, redirect(&a), &[], json!(c)),
+                ]),
+            ),
+            // A redirect hidden by a non-redirect child.
+            (
+                "hidden by a foreign child",
+                with(vec![hidden_by_foreign, foreign_child]),
+            ),
+            (
+                "cycle",
+                with(vec![
+                    raw_op(1, &a, redirect(&a), &[], json!(b)),
+                    raw_op(1, &a, redirect(&b), &[], json!(a)),
+                ]),
+            ),
+            (
+                "invalid value",
+                with(vec![raw_op(1, &a, redirect(&a), &[], json!(7))]),
+            ),
+        ];
+        for (name, catalog) in fixtures {
+            let before = identities_before(&catalog).map_err(|error| error.to_string());
+            let after = catalog.identities().map_err(|error| error.to_string());
+            assert_eq!(after, before, "{name}");
+        }
+        // The superseded fixture really depends on hidden-parent handling.
+        let superseded = with(vec![older, newer]);
+        assert_eq!(superseded.identities().unwrap()[&a], c);
+    }
+
+    /// `same_identity` equals comparing the identity-mapped keys.
+    #[test]
+    fn same_identity_equals_comparing_mapped_keys() {
+        let (a, b) = (new_id(), new_id());
+        let ids = BTreeMap::from([(a.clone(), b.clone())]);
+        let session = |machine: &str, session: &str| Key::Session {
+            machine: machine.into(),
+            session: session.into(),
+        };
+        let keys = [
+            session(&a, "s"),
+            session(&b, "s"),
+            session(&a, "t"),
+            Key::machine(&a, "redirect"),
+            Key::project("p", "name"),
+            Key::project("p", "color"),
+        ];
+        for left in &keys {
+            for right in &keys {
+                assert_eq!(
+                    Catalog::same_identity(left, right, &ids),
+                    Catalog::key_with_identities(left, &ids)
+                        == Catalog::key_with_identities(right, &ids),
+                    "{left:?} vs {right:?}"
+                );
+            }
+        }
     }
 }

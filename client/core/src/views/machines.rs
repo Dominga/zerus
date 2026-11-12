@@ -83,6 +83,8 @@ pub struct MachinesView {
     pub check: Option<CheckResult>,
     /// A list read or a check runs (MachinesPage `busy`).
     pub busy: bool,
+    /// This computer's saved reconnect timings; None from an older `hgs`.
+    pub retry_delays: Option<crate::machine_connections::RetryDelays>,
 }
 
 /// The Machines reads so far.
@@ -336,6 +338,9 @@ impl MachinesState {
             local: list.map(|list| text(list, "local")).unwrap_or_default(),
             environment_override: environment,
             connection_revision: list.map(|list| text(list, "revision")).unwrap_or_default(),
+            retry_delays: list.and_then(|list| {
+                crate::machine_connections::RetryDelays::parse(&list["retry_delays"])
+            }),
             machines: list
                 .map(|list| {
                     items(list, "machines")

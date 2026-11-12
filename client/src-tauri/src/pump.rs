@@ -910,6 +910,17 @@ impl Pump {
             .and_then(|rows| rows.machine.clone())
     }
 
+    /// One coherent current card observation; reconnecting cards remain data
+    /// for presentation but cannot establish native action currentness.
+    pub(crate) fn live_machine(&self, computer: &ComputerId) -> Option<MachineMeta> {
+        let inner = self.lock();
+        let rows = inner.mirror.computers.get(&computer.0)?;
+        if rows.status != Some(ComputerStatus::Live) {
+            return None;
+        }
+        rows.machine.clone()
+    }
+
     /// The fleet as the screens see it: every computer whose status has not
     /// ended, this computer first (the mirror is keyed by the id's string,
     /// and "" sorts first), with its machine card's host, platform and the
@@ -1180,6 +1191,9 @@ type QuestionRows = HashMap<String, HashMap<String, HashMap<String, BTreeSet<Str
 struct Rows {
     archive_generation: u64,
     status: Option<ComputerStatus>,
+    /// The latest restart schedule, replayed after the status; an `ended`
+    /// status drops it.
+    retry: zerus_client_core::Retry,
     /// The latest card data; an `ended` status drops it.
     machine: Option<MachineMeta>,
     order: Vec<String>,
@@ -1366,7 +1380,11 @@ impl Mirror {
                     entry.notification_rows.clear();
                     entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
+                    entry.retry = zerus_client_core::Retry::Idle;
                 }
+            }
+            Change::Retry { computer, retry } => {
+                self.computers.entry(computer.0.clone()).or_default().retry = *retry;
             }
             Change::Machine { computer, machine } => {
                 self.computers
@@ -1391,6 +1409,12 @@ impl Mirror {
                 out.push(Change::Computer {
                     computer: ComputerId(computer.clone()),
                     status: *status,
+                });
+            }
+            if rows.retry != zerus_client_core::Retry::Idle {
+                out.push(Change::Retry {
+                    computer: ComputerId(computer.clone()),
+                    retry: rows.retry,
                 });
             }
             if let Some(machine) = &rows.machine {
@@ -1920,6 +1944,60 @@ mod tests {
             fleet[1].local_sessions && fleet[1].host.is_none(),
             "no card yet: local sessions assumed"
         );
+    }
+
+    #[test]
+    fn live_machine_returns_the_same_complete_identity_only_for_a_live_card() {
+        let pump = Pump::default();
+        let computer = ComputerId("selected".into());
+        assert!(pump.live_machine(&computer).is_none());
+        let card = MachineMeta {
+            machine_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            host: Some("selected-host".into()),
+            ok: Some(true),
+            ..MachineMeta::default()
+        };
+        pump.push(Change::Machine {
+            computer: computer.clone(),
+            machine: card.clone(),
+        });
+        assert_eq!(pump.machine(&computer), Some(card.clone()));
+        assert!(
+            pump.live_machine(&computer).is_none(),
+            "an unclassified cached card is not Live"
+        );
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        assert_eq!(pump.live_machine(&computer), Some(card));
+    }
+
+    #[test]
+    fn live_machine_refuses_reconnecting_and_ended_even_with_a_retained_card() {
+        let pump = Pump::default();
+        let computer = ComputerId("selected".into());
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(machine("selected", 10.0));
+        let held = pump.machine(&computer).unwrap();
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Reconnecting { attempt: 1 },
+        });
+        assert_eq!(
+            pump.machine(&computer),
+            Some(held),
+            "presentation keeps last-known data"
+        );
+        assert!(pump.live_machine(&computer).is_none());
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Ended,
+        });
+        assert!(pump.live_machine(&computer).is_none());
     }
 
     fn machine(computer: &str, cpu: f64) -> Change {

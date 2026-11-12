@@ -44,7 +44,7 @@ class RelaySafetyTest {
             val connection = Connection("gateway", "Test", server.url("/").toString().trimEnd('/'), "synthetic-token")
             val target = Target("machine", "native-session", "exact-run", "exact-conversation", "gateway")
             val payload = target.json().put("request_id", "request-one").put("text", "synthetic message")
-            val result = runCatching { api.submit(connection, target, "send", payload, "request-one") }
+            val result = runCatching { api.submit(connection, target, "send", payload, "request-one", SendAttempt()) }
             assertTrue(result.isFailure)
             assertEquals(1, server.requestCount)
             val captured = server.takeRequest()
@@ -115,7 +115,7 @@ class RelaySafetyTest {
             server.start()
             val connection = Connection("gateway", "Test", server.url("/").toString().trimEnd('/'), "synthetic")
             val target = Target("machine", "session", "run", "conversation", "gateway")
-            val result = runCatching { RelayApi().submit(connection, target, "send", target.json().put("request_id", "own"), "own") }
+            val result = runCatching { RelayApi().submit(connection, target, "send", target.json().put("request_id", "own"), "own", SendAttempt()) }
             assertTrue(result.isFailure)
             assertEquals(1, server.requestCount)
         }

@@ -62,6 +62,8 @@ check() {
     cd "$srcdir/zerus"
     export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$PWD/target"
     cargo test --frozen --release
+    # The drive-folder tests run the release CLI that build() made from this source.
+    HGS_TEST_BIN="$CARGO_TARGET_DIR/release/hgs" \
     cargo test --frozen --release --manifest-path client/src-tauri/Cargo.toml --features video --lib
     # The journal handoff tests need a Python connector with aiohttp; CI runs them.
     cargo test --frozen --release --manifest-path services/mobile/connector/Cargo.toml \

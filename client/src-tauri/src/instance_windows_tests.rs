@@ -199,7 +199,7 @@ fn a_normal_quit_finishing_during_the_handoff_wait_is_reacquired() {
     fs::write(fixture.0.join("exiting.stop"), b"").unwrap();
     fixture.wait_for("exiting.released", &mut owner);
     let mut observed = false;
-    let result = canonical_claim_observed(name, &Activation::Sessions, || {
+    let result = canonical_claim_observed(name, &Activation::Sessions, true, || {
         if !observed {
             observed = true;
             fs::write(fixture.0.join("exiting.exit"), b"").unwrap();

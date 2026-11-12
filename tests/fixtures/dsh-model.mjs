@@ -19,6 +19,7 @@ class Adapter extends LlmAdapter {
     return { provider,id:model,name:model,inputModalities: model === 'test-b' ? ['text'] : ['text','image'],
     reasoning:{efforts:[{id:'off',name:'Off'},{id:'high',name:'High'}],defaultEffort:'high'} }; }
   async *stream(options) {
+    if (this.holds) writeFileSync(join(this.holds, 'SETTINGS_MODEL_STREAMS'), '1\n', {flag:'a'});
     await new Promise(resolve => setTimeout(resolve, 120));
     const prompt = options.messages.filter(m => m.role === 'user' && m.source?.kind === 'user').at(-1);
     const text = prompt?.content?.filter(b => b.type === 'text').map(b => b.text).join('') ?? '';
@@ -43,6 +44,13 @@ class Adapter extends LlmAdapter {
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'guard-call',name,argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'guard-call',name,arguments:args}};
+      yield {type:'finish',reason:{kind:'tool-calls'}};return;
+    }
+    if (text.startsWith('HGS_SELF_NATIVE_FIXTURE ') && last?.role !== 'tool') {
+      const args=JSON.stringify({command:text.slice('HGS_SELF_NATIVE_FIXTURE '.length),description:'Read fixture native identity and launch a child'});
+      yield {type:'block-start',index:0,blockType:'tool-call'};
+      yield {type:'tool-call-delta',index:0,id:'self-call',name:'bash',argumentsDelta:args};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'self-call',name:'bash',arguments:args}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
     if ((text.includes('SHELL_BACKGROUND_FIXTURE') || text.includes('SHELL_FOREGROUND_FIXTURE')) && last?.role !== 'tool') {

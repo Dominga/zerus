@@ -11,6 +11,8 @@ mod action_delay;
 mod test_wait;
 #[cfg(feature = "live")]
 mod actions;
+#[cfg(all(any(windows, test), feature = "live"))]
+mod active_app;
 #[cfg(feature = "live")]
 mod analytics;
 #[cfg(feature = "live")]
@@ -1482,6 +1484,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, attention);
+                    // An active Zerus shows no attention banners (zerus-5wmh.13.14.1).
+                    active_app::start(app.handle());
                     // The service posts the toast and grants foreground; this GUI only routes the click.
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {
@@ -2091,6 +2095,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::swarm_dialog::project_swarm_join,
         organization::swarm_dialog::project_swarm_sync,
         organization::swarm_dialog::project_swarm_close,
+        organization::adoption_dialog::project_adoption_open,
+        organization::adoption_dialog::project_adoption_view,
+        organization::adoption_dialog::project_adoption_preview,
+        organization::adoption_dialog::project_adoption_adopt,
+        organization::adoption_dialog::project_adoption_status,
+        organization::adoption_dialog::project_adoption_resume,
+        organization::adoption_dialog::project_adoption_close,
         organization::swarm_dialog::conflicts::project_swarm_conflicts,
         organization::swarm_dialog::conflicts::project_swarm_conflict_review,
         organization::swarm_dialog::conflicts::project_swarm_resolve,
@@ -2135,6 +2146,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machine_check,
         screens::machine_test_host,
         screens::machine_change,
+        screens::machine_retry_delays,
+        screens::machine_reconnect,
         screens::machine_ssh,
         screens::machine_setup::machine_setup,
         screens::machine_setup::machine_pick_source,
@@ -2173,6 +2186,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_retarget,
         terminal::terminal_status,
         terminal::terminal_drop,
+        terminal::terminal_paste_image,
         terminal::terminal_shown,
         composer::composer_open,
         composer::composer_visibility,

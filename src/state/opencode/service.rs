@@ -711,10 +711,12 @@ fn may_start(
 /// the user's own configuration and state locations, the user's own
 /// `opencode` CLI would pass them too, and the service must register its
 /// `service.json` where `registration_path()` looks.
+/// Only HGS_STATE_DIR/HGS_CONFIG_DIR survive from HGS_*: they let a native
+/// tool shell address its Zerus catalog, and never assert a session identity.
 pub(super) fn start_environment(vars: Vec<(String, String)>) -> Vec<(String, String)> {
     vars.into_iter()
         .filter(|(k, _)| {
-            !(k.starts_with("HGS_")
+            !((k.starts_with("HGS_") && !["HGS_STATE_DIR", "HGS_CONFIG_DIR"].contains(&k.as_str()))
                 || k.starts_with("SSH_")
                 || k.starts_with("OPENCODE_SERVER_")
                 || k.starts_with("ZERUS_MOBILE_")
@@ -1349,6 +1351,11 @@ mod tests {
         let kept = start_environment(vec![
             ("PATH".into(), "/usr/bin".into()),
             ("HGS_SESSION".into(), "x".into()),
+            ("HGS_RUN_ID".into(), "run".into()),
+            ("HGS_SESSION_ID".into(), "session".into()),
+            ("HGS_CONVERSATION_ID".into(), "conversation".into()),
+            ("HGS_STATE_DIR".into(), "/tmp/example-state".into()),
+            ("HGS_CONFIG_DIR".into(), "/tmp/example-config".into()),
             ("SSH_AUTH_SOCK".into(), "/s".into()),
             ("SSH_CONNECTION".into(), "1".into()),
             ("OPENCODE_SERVER_PASSWORD".into(), "p".into()),
@@ -1365,6 +1372,8 @@ mod tests {
             names,
             vec![
                 "PATH",
+                "HGS_STATE_DIR",
+                "HGS_CONFIG_DIR",
                 "OPENCODE_CONFIG",
                 "OPENCODE_CONFIG_DIR",
                 "XDG_STATE_HOME",

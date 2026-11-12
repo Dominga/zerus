@@ -475,6 +475,15 @@ def desktop_request():
                           'original_request_id': value['original_request_id'], 'found': False, 'result': None}))
     elif op == 'catalog_close':
         print(json.dumps({'request_id': request_id, 'accepted': True, 'durable': False}))
+    elif op == 'fleet_reconnect':
+        code = config.get('fleet_reconnect_code', 'requested')
+        print(json.dumps({'request_id': request_id, 'accepted': True,
+                          'results': [{'computer': c['computer'], 'code': code} for c in value['computers']],
+                          'connections': {}}))
+    elif op == 'fleet_retry_delays_reload':
+        print(json.dumps({'request_id': request_id, 'accepted': True,
+                          'retry_delays': {'delays_seconds': [2, 4, 8, 30], 'source': 'file', 'diagnostic': None},
+                          'connections': {}}))
     else:
         raise SystemExit('Unexpected fixture operation')
 

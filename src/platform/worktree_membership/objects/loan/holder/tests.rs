@@ -62,16 +62,18 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
     // The census lists this test's own helper, not every process of this
     // user on the host, any of which can be caught while it exits
     // (zerus-89pkd). The assertions concern only the manifest's custody.
-    #[cfg(target_os = "linux")]
-    let roster = crate::platform::worktree_membership::test_roster::owned(&[fixture.child.id()]);
+    let next = Fixture::start("original");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let roster = crate::platform::worktree_membership::test_roster::owned(&[next.child.id()]);
     let observed = holder.observe(1001, until()).unwrap();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    roster.assert_completed();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     drop(roster);
     assert_eq!(observed.capture, input.manifest.capture);
     assert_eq!(observed.checkout, input.manifest.checkout);
     assert_eq!(observed.expires, input.manifest.expires);
     assert_ne!(observed.id, input.manifest.id);
-    let next = Fixture::start("original");
     assert!(
         holder.arm(&input, next.original(), 1000, until()).is_err(),
         "retired request never borrows again"
@@ -288,10 +290,12 @@ fn a_fresh_readonly_list_preserves_original_custody_but_never_expands_the_old_co
     );
     // The census lists this test's own occupant (zerus-89pkd); the
     // assertions concern only it and the original custody.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let roster = crate::platform::worktree_membership::test_roster::owned(&[child.0.id()]);
     let fresh = holder.observe(1001, until()).unwrap();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    roster.assert_completed();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     drop(roster);
     assert!(fresh.programs.iter().any(|p| p.pid == child.0.id()));
     assert_eq!(fresh.capture, input.manifest.capture);
@@ -368,4 +372,251 @@ fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
     }
     let error = holder.observe(1001, until()).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+}
+
+#[cfg(target_os = "linux")]
+fn native_descriptors(holder: &Holder) -> Vec<(i32, u64, u64)> {
+    use std::os::fd::AsRawFd;
+    holder
+        .scope
+        .native_descriptors()
+        .iter()
+        .map(|fd| {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) }, 0);
+            (fd.as_raw_fd(), stat.st_dev, stat.st_ino)
+        })
+        .collect()
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn admission_still_refuses_a_previously_pinned_peer_whose_leader_exited() {
+    use std::io::Write;
+    let (_dir, mut holder, input, _request) = holder();
+    let mut fixture = Fixture::start("original");
+    let peer = fixture.original(); // Genuine live SAME-image admission, BEFORE leader exit.
+    fixture.exit_leader();
+    assert!(!peer.exited().unwrap());
+    assert!(peer.current(&fixture.socket, until()).is_err());
+    // Actual production attachment path: a physical-only admission mutant
+    // would accept this original Peer, despite the unchanged old refusal.
+    assert!(holder.arm(&input, peer, 1000, until()).is_err());
+    assert!(holder.settled());
+    fixture
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"R")
+        .unwrap();
+    assert!(fixture.child.wait().unwrap().success());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn leader_exit_release_eof_and_closed_or_expired_admission_never_clear_a_live_phase() {
+    use std::io::{Read, Write};
+    for ending in ["open", "closed", "expired"] {
+        let (_dir, mut holder, input, request) = holder();
+        let mut fixture = Fixture::start("original");
+        holder
+            .arm(&input, fixture.original(), 1000, until())
+            .unwrap();
+        fixture.expect_loan(&input.manifest, &Request::decode(&request).unwrap());
+        holder.lend(&fixture.socket, &request).unwrap();
+        fixture.loan_received();
+        let original_objects = native_descriptors(&holder);
+        fixture.exit_leader(); // Worker retains ACTUAL received Scope objects.
+        assert!(!holder.phase.as_ref().unwrap().borrower.exited().unwrap());
+        assert!(holder
+            .phase
+            .as_ref()
+            .unwrap()
+            .borrower
+            .current(&fixture.socket, until())
+            .is_err());
+        assert!(holder.joined(&request).is_err());
+        let mut wrong = Request::decode(&request).unwrap();
+        wrong.request = uuid();
+        let wrong = wrong.bytes().unwrap();
+        assert!(holder.joined(&wrong).is_err());
+        fixture
+            .child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"A")
+            .unwrap();
+        let mut released = [0; 8];
+        fixture.socket.read_exact(&mut released).unwrap();
+        assert_eq!(&released, b"released");
+        assert!(
+            holder.joined(&request).is_err(),
+            "release ACK never retires a live process"
+        );
+        fixture
+            .child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"C")
+            .unwrap();
+        assert_eq!(fixture.socket.read(&mut [0]).unwrap(), 0);
+        assert!(
+            holder.joined(&request).is_err(),
+            "original loan socket EOF is not exit"
+        );
+        if ending == "closed" {
+            holder.close();
+        }
+        if ending == "expired" {
+            holder.until = Instant::now();
+            holder.phase.as_mut().unwrap().until = Instant::now();
+        }
+        assert!(!holder.settled());
+        assert!(holder.observe(1001, until()).is_err());
+        assert!(holder.joined(&request).is_err());
+        assert_eq!(native_descriptors(&holder), original_objects);
+        let other = Fixture::start("original");
+        let mut fresh = input.clone();
+        fresh.request_id = uuid();
+        assert!(holder.arm(&fresh, other.original(), 1000, until()).is_err());
+        assert!(holder.lend(&fixture.socket, &request).is_err());
+        assert!(!holder.settled());
+        fixture
+            .child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"R")
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while !holder.phase.as_ref().unwrap().borrower.exited().unwrap() {
+            assert!(Instant::now() < end);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !holder.settled(),
+            "exit fact alone cannot mint the owner's joined message"
+        );
+        assert!(holder.joined(&wrong).is_err());
+        assert!(
+            fixture.child.wait().unwrap().success(),
+            "observer must not consume owner wait"
+        );
+        assert!(holder.phase.as_ref().unwrap().borrower.exited().unwrap());
+        holder.joined(&request).unwrap();
+        assert!(holder.settled());
+        assert_eq!(native_descriptors(&holder), original_objects);
+        if ending != "open" {
+            assert!(holder.observe(1001, until()).is_err());
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_real_nonleader_exec_keeps_the_old_phase_until_actual_owner_join() {
+    use std::io::Write;
+    let (_dir, mut holder, input, request) = holder();
+    let mut fixture = Fixture::start("original");
+    holder
+        .arm(&input, fixture.original(), 1000, until())
+        .unwrap();
+    let original_objects = native_descriptors(&holder);
+    fixture
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"E")
+        .unwrap();
+    fixture.wait_replacement(&holder.phase.as_ref().unwrap().borrower);
+    assert!(holder.joined(&request).is_err());
+    assert!(!holder.settled());
+    assert!(holder.observe(1001, until()).is_err());
+    fixture.socket.shutdown(std::net::Shutdown::Both).unwrap();
+    assert!(holder.joined(&request).is_err());
+    assert_eq!(native_descriptors(&holder), original_objects);
+    fixture.child.kill().unwrap(); // Sole original owner cleanup, never the observer.
+    fixture.child.wait().unwrap();
+    assert!(holder.phase.as_ref().unwrap().borrower.exited().unwrap());
+    holder.joined(&request).unwrap();
+    assert!(holder.settled());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn physical_peer_exit_does_not_supply_the_owners_original_output_eof_or_join() {
+    use std::{
+        fs::File,
+        io::Read,
+        os::fd::FromRawFd,
+        process::{Command, Stdio},
+    };
+    fn pipe() -> (File, File) {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: these are the two fresh owned pipe descriptors from pipe2.
+        unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+    }
+    struct OutputOwner(std::process::Child);
+    impl Drop for OutputOwner {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    let (_dir, mut holder, input, request) = holder();
+    let (mut output, output_write) = pipe();
+    let (mut error, error_write) = pipe();
+    let mut fixture = Fixture::with_output(
+        Stdio::from(output_write.try_clone().unwrap()),
+        Stdio::from(error_write.try_clone().unwrap()),
+    );
+    let mut peer = OutputOwner(
+        Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(output_write))
+            .stderr(Stdio::from(error_write))
+            .spawn()
+            .unwrap(),
+    );
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        output.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        error.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    holder
+        .arm(&input, fixture.original(), 1000, until())
+        .unwrap();
+    drop(fixture.child.stdin.take()); // Native borrower exits; the two ORIGINAL streams stay held.
+    assert!(fixture.child.wait().unwrap().success());
+    assert!(holder.phase.as_ref().unwrap().borrower.exited().unwrap());
+    assert!(peer.0.try_wait().unwrap().is_none());
+    assert!(!out.is_finished() && !err.is_finished());
+    assert!(!holder.settled());
+    assert!(holder.observe(1001, until()).is_err());
+    // Do not lie to Holder::joined: its private owner precondition requires
+    // these ACTUAL original I/O workers and loan/resource owners to settle.
+    drop(peer.0.stdin.take());
+    assert!(peer.0.wait().unwrap().success());
+    let end = Instant::now() + Duration::from_secs(5);
+    while !out.is_finished() || !err.is_finished() {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    out.join().unwrap();
+    err.join().unwrap();
+    holder.joined(&request).unwrap();
+    assert!(holder.settled());
 }

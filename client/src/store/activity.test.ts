@@ -17,6 +17,18 @@ function setup() {
 }
 
 describe("activity store", () => {
+  it("reloads a saved reading window using the current session's routing", () => {
+    const { store, calls } = setup();
+    store.follow(target);
+    store.applyActivity([out("events", { events: [ev(1500)] })]);
+    store.loadOlder(99);
+    expect(calls.at(-1)).toMatchObject({ key: "run:a", after: 99, tail: 100 });
+    store.applyActivity([out("events", { events: [ev(100), ev(101)] })]);
+    expect(store.loadingOlder()).toBe(false);
+    expect(store.events().map(event => event.seq)).toEqual([100, 101, 1500]);
+    store.follow(undefined);
+  });
+
   it("changes routing immediately but waits for the native composer before subscribing", async () => {
     const { store, calls } = setup();
     store.follow({ ...target, conversationId: "conversation" });

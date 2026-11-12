@@ -55,7 +55,7 @@ export function createSessionModels(port: ModelsPort) {
   const canApply = () => {
     const v = view(), i = input();
     return !!v?.enabled && !!i && !changing() && opened() && popupScope === scope(targetOf(i))
-      && options().some((m) => m.id === model()) && efforts().some((e) => e.value === effort())
+      && options().some((m) => m.id === model()) && efforts().some((e) => e.value === effort() && !e.disabled)
       && (model() !== v.intendedModel || effort() !== v.intendedEffort || (v.pending && v.applyWhen === "now"));
   };
 
@@ -215,10 +215,14 @@ export function createSessionModels(port: ModelsPort) {
     async apply() {
       const i = input(); if (!i || !canApply()) return;
       const p: Pending = { key: i.row.key, target: targetOf(i), model: model(), effort: effort(), id: text(i.details?.pending_settings_id),
-        openCode: i.row.cmd === "opencode", attempted: false, scheduled: false, rearmed: false, blocked: false, applied: false };
+        openCode: i.row.cmd === "opencode", attempted: true, scheduled: false, rearmed: false, blocked: false, applied: false };
       if (pending.size >= 64 && !pending.has(p.key)) { port.notice(tr("Check pending model changes before applying another change.")); return; }
-      pending.set(p.key, p); publishKeys(); setOpened(false);
-      await send(p, false);
+      pending.set(p.key, p);
+      // send() claims the lane synchronously, before publishing the key can let
+      // observe() start another session's ready change.
+      const sending = send(p, false);
+      publishKeys(); setOpened(false);
+      await sending;
     },
   };
 }

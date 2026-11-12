@@ -2,7 +2,7 @@
 // through the table layout; no field separator is added.
 import type { Session } from "./types";
 import type { Usage } from "../../types";
-import { summaryText } from "../lib/usage";
+import { balanceTitle, summaryText } from "../lib/usage";
 import { tr, trNoop } from "../../i18n";
 import { numberText } from "./usage-number";
 
@@ -12,6 +12,8 @@ export function usageStripVisible(page: string, session: Session | undefined, su
 }
 
 export const footerUsageSummary = (usage: Usage) => !usage.status || usage.status === "unavailable" || usage.status === "offline" ? tr("limits n/a") : summaryText(usage);
+/** The footer summary's tooltip and accessible label when it shows a balance; empty otherwise. */
+export const footerUsageTitle = (usage: Usage) => footerUsageSummary(usage) === summaryText(usage) ? balanceTitle(usage) : "";
 
 export type UsageObject = Record<string, unknown>;
 const object = (value: unknown): UsageObject => value && typeof value === "object" && !Array.isArray(value) ? value as UsageObject : {};

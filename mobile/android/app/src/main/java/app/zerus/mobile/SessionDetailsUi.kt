@@ -45,7 +45,8 @@ import org.json.JSONObject
 @Composable internal fun SessionHeaderTitle(model: ZerusViewModel,session: Session,onDetails: () -> Unit) {
     val target = session.target
     val status = if (model.activity == null && !model.demo) "Checking…" else SelectedSessionPresentation.status(session,model.activity)
-    val freshness = if (model.demo) " / Preview" else if (model.activityVerified || model.activity == null) "" else " / Last known"
+    // Freshness is the conversation status strip's (zerus-a4mub.10); the header keeps the session state.
+    val freshness = if (model.demo) " / Preview" else ""
     val kind = if (model.activity == null && !model.demo) DesktopBadgeKind.Neutral
         else DesktopSessionPalette.badge(SelectedSessionPresentation.session(session,model.activity),true).kind
     val colors = DesktopSessionPalette.colors(kind,MaterialTheme.colorScheme.background.luminance() < .5f)

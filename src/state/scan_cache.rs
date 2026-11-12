@@ -23,6 +23,12 @@ fn dir() -> Option<PathBuf> {
 
 /// The cached result of `scan` over `path` for `key`, or a fresh scan stored for later.
 pub(super) fn cached(kind: &str, path: &Path, key: &str, scan: impl FnOnce() -> Option<Value>) -> Option<Value> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if effort::picker_entered() {
+        // Preserve the exact scan/readiness semantics, without an unguarded
+        // derived cache publication during an original keeper operation.
+        return scan();
+    }
     let (Some(dir), Ok((identity, meta))) = (dir(), crate::platform::FileIdentity::at(path)) else {
         return scan();
     };

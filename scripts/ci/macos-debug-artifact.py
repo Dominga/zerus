@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Transfer only the completed macOS unit/debug producer's two executables."""
+"""Transfer the completed debug producer's CLI, fake agent and private test image."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,10 +16,12 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_BINARY = 512 * 1024 * 1024
-FILES = {'hgs': 'target/debug/hgs', 'fake_agent': 'target/debug/examples/fake_agent'}
+MAX_BINARY = 1024 * 1024 * 1024
+FILES = {'hgs': 'target/debug/hgs', 'fake_agent': 'target/debug/examples/fake_agent',
+         'effort_seed': 'target/debug/hgs-effort-seed'}
 HELPERS = ('scripts/ci/cli.sh', 'scripts/ci/macos-debug-artifact.py',
-           'scripts/ci/agent-compatibility.py', 'scripts/ci/agent-compatibility.json')
+           'scripts/ci/agent-compatibility.py', 'scripts/ci/agent-compatibility.json',
+           'scripts/ci/native-effort-seed.py')
 ARCHES = {'arm64': ('aarch64-apple-darwin', 0x0100000C),
           'x86_64': ('x86_64-apple-darwin', 0x01000007)}
 
@@ -144,7 +147,8 @@ def seal(root, directory, bound, compiler):
         # copy and every downloaded artifact must still have one link.
         expected = identity(origin, allow_linked=True)
         macho(origin, bound['platform']['machine'])
-        # Exclusive output files; only these public compiled executables leave the job.
+        # Exclusive fixed debug handoff. effort_seed is test-only and never
+        # enters an installation, distributable or public release asset.
         with os.fdopen(os.open(origin, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as incoming, (directory / name).open('xb') as output:
             shutil.copyfileobj(incoming, output, 1024 * 1024)
         require(identity(directory / name) == expected, 'Producer copy changed')
@@ -215,10 +219,26 @@ def install(root, directory, data, check_rust=False):
                     shutil.copyfileobj(incoming, output, 1024 * 1024)
                 output.flush()
                 require(identity(temporary) == data['files'][name], 'Executable changed before publication')
-                os.fchmod(output.fileno(), 0o755)
+                os.fchmod(output.fileno(), 0o500 if name == 'effort_seed' else 0o755)
                 os.replace(temporary, destination)
             finally:
                 temporary.unlink(missing_ok=True)
+
+
+def seed_helper():
+    spec=importlib.util.spec_from_file_location('native_effort_seed',Path(__file__).with_name('native-effort-seed.py'))
+    helper=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def seed_receipt(root,data):
+    helper=seed_helper()
+    # Only called AFTER source/run/attempt/platform/helper/toolchain/native
+    # binary verification and installation of the fixed immutable handoff.
+    return helper.write_receipt(root,root/FILES['hgs'],root/FILES['effort_seed'],
+        root/'target/debug/hgs-effort-seed.json',data['source'],data['toolchain']['verbose'],
+        pins=dict(hgs=data['files']['hgs'],image=data['files']['effort_seed']))
 
 
 def main():
@@ -239,6 +259,11 @@ def main():
     require(args.directory is not None, 'Artifact directory is absent')
     if args.mode == 'seal':
         compiler = toolchain(bound['platform']['machine'])
+        seed=seed_helper().verify(ROOT,ROOT/'target/debug/hgs-effort-seed.json',ROOT/FILES['hgs'])
+        require(seed['rust_sha256']==hashlib.sha256(compiler['verbose'].encode()).hexdigest(),
+                'Seed compiler differs from the debug producer')
+        require(Path(seed['image']['path']).resolve(strict=True)==(ROOT/FILES['effort_seed']).resolve(strict=True),
+                'Private Effort seed differs from the fixed handoff')
         sha = seal(ROOT, args.directory, bound, compiler)
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
             output.write(f"manifest_sha256={sha}\nproducer_attempt={bound['attempt']}\nrust_release={compiler['release']}\n")
@@ -247,6 +272,7 @@ def main():
               os.environ.get('GITHUB_RUN_ATTEMPT', ''))
         data = verify(ROOT, args.directory, bound, args.manifest_sha256, args.producer_attempt, args.rust_release)
         install(ROOT, args.directory, data, args.check_rust)
+        seed_receipt(ROOT,data)
         receipt = dict(artifact_id=args.artifact_id, manifest_sha256=args.manifest_sha256,
                        source=bound['source'], repository=bound['repository'], run_id=bound['run_id'],
                        producer_attempt=data['producer_attempt'], consumer_attempt=bound['attempt'],

@@ -16,7 +16,7 @@ import { computerOffline } from "../../store/catalog";
 import { followedFor } from "../../store/actions";
 import { accountTooltip, exhausted, rateLimitNotice, usageRetryWaiting, usageChipView, usageLoading, windowsAt } from "../lib/usage";
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
-import { footerUsageSummary } from "./session-usage-ui";
+import { footerUsageSummary, footerUsageTitle } from "./session-usage-ui";
 import type { Session } from "./types";
 import { tr } from "../../i18n";
 
@@ -57,7 +57,7 @@ export function AccountUsageChip(props: { session: Session }) {
       <span class="session-usage-strip">
         <button ref={chip} type="button" class="sb-usage account-usage" title={accountTip.title()} onPointerEnter={accountTip.enter} onPointerLeave={accountTip.leave} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
-          <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
+          <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} summaryTitle={footerUsageTitle(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
           <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
         </button>
         <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}

@@ -97,6 +97,27 @@ fn parse_probe(bytes: &[u8]) -> Option<Login> {
 /// Process-local discovery cache, bound to alias, SSH program and connection
 /// overrides. Later CLI calls rediscover; no metadata/credentials are persisted.
 fn discover(config: &Config, peer: &str, deadline: Instant) -> Result<Login> {
+    discover_with(config, peer, deadline, Sharing::Configured)
+}
+
+/// Whether a discovery probe may use the user's SSH connection sharing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sharing {
+    /// Every ordinary remote operation: the configured ControlMaster and
+    /// ControlPath apply exactly as before.
+    Configured,
+    /// Only adoption's original call: `-o ControlPath=none` precedes the
+    /// configured connection options, exactly as on the adoption ssh itself,
+    /// so the probe can neither start nor join a background mux master.
+    Unshared,
+}
+
+fn discover_with(
+    config: &Config,
+    peer: &str,
+    deadline: Instant,
+    sharing: Sharing,
+) -> Result<Login> {
     available(deadline)?;
     static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, Login>>> = OnceLock::new();
     let mut key = vec![ssh_program().to_string_lossy().into_owned(), peer.into()];
@@ -108,7 +129,7 @@ fn discover(config: &Config, peer: &str, deadline: Instant) -> Result<Login> {
     }
     // `echo` is a builtin in each supported login shell. No new executable is
     // searched for on remote PATH merely to discover the platform.
-    let output = read(config, peer, WINDOWS_PROBE, deadline)?;
+    let output = read_with(config, peer, WINDOWS_PROBE, deadline, sharing)?;
     available(deadline)?;
     let value = if output.status.success() {
         parse_probe(&output.stdout)
@@ -155,7 +176,29 @@ pub(crate) fn hgs_within<S: AsRef<str>>(
     words: &[S],
     deadline: Instant,
 ) -> Result<String> {
-    let shell = discover(config, peer, deadline)?;
+    plan_within(config, peer, words, deadline, Sharing::Configured)
+}
+
+/// [`hgs_within`] for adoption's original call only: an uncached discovery
+/// probe passes `-o ControlPath=none`, matching the adoption ssh command.
+/// Every other remote operation keeps [`hgs_within`] and its sharing.
+pub(crate) fn hgs_within_unshared<S: AsRef<str>>(
+    config: &Config,
+    peer: &str,
+    words: &[S],
+    deadline: Instant,
+) -> Result<String> {
+    plan_within(config, peer, words, deadline, Sharing::Unshared)
+}
+
+fn plan_within<S: AsRef<str>>(
+    config: &Config,
+    peer: &str,
+    words: &[S],
+    deadline: Instant,
+    sharing: Sharing,
+) -> Result<String> {
+    let shell = discover_with(config, peer, deadline, sharing)?;
     let command = if matches!(shell, Login::Posix) {
         format!("~/.local/bin/hgs {}", platform::remote_join(words))
     } else {
@@ -281,6 +324,51 @@ fn read(
     command: &str,
     deadline: Instant,
 ) -> Result<std::process::Output> {
+    read_with(config, peer, command, deadline, Sharing::Configured)
+}
+
+/// The probe's ssh arguments, after the program. Configured sharing is the
+/// unchanged ordinary argv; Unshared only prefixes `-o ControlPath=none`.
+fn probe_args<'a>(
+    config: &Config,
+    peer: &'a str,
+    command: &'a str,
+    sharing: Sharing,
+) -> Vec<std::borrow::Cow<'a, str>> {
+    let mut args: Vec<std::borrow::Cow<str>> = Vec::new();
+    if sharing == Sharing::Unshared {
+        args.extend(["-o", "ControlPath=none"].map(Into::into));
+    }
+    args.extend(
+        crate::machines::ssh_options(config, peer)
+            .into_iter()
+            .map(Into::into),
+    );
+    args.extend(
+        [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "ServerAliveInterval=2",
+            "-o",
+            "ServerAliveCountMax=1",
+        ]
+        .map(Into::into),
+    );
+    args.push(peer.into());
+    args.push(command.into());
+    args
+}
+
+fn read_with(
+    config: &Config,
+    peer: &str,
+    command: &str,
+    deadline: Instant,
+    sharing: Sharing,
+) -> Result<std::process::Output> {
     let deadline = deadline.min(Instant::now() + PROBE_LIMIT);
     available(deadline)?;
     if peer.is_empty() || peer.starts_with('-') || peer.chars().any(char::is_whitespace) {
@@ -294,20 +382,12 @@ fn read(
     };
     #[cfg(not(test))]
     let mut cmd = crate::ssh_bytes::command(command)?;
-    cmd.args(crate::machines::ssh_options(config, peer))
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=3",
-            "-o",
-            "ServerAliveInterval=2",
-            "-o",
-            "ServerAliveCountMax=1",
-            peer,
-            command,
-        ])
-        .stdin(Stdio::null());
+    cmd.args(
+        probe_args(config, peer, command, sharing)
+            .iter()
+            .map(AsRef::<str>::as_ref),
+    )
+    .stdin(Stdio::null());
     available(deadline)?;
     let mut child = platform::spawn_ssh(platform::own_process_group(&mut cmd), false, true, true)?;
     let (tx, rx) = mpsc::channel();
@@ -365,12 +445,125 @@ fn read(
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
-    fn fixture(script: &str) -> (tempfile::TempDir, Config, ScopedSsh) {
+    use std::process::Command;
+
+    fn probe_config() -> Config {
+        let mut config = Config {
+            home: "/home/example".into(),
+            dir: "/home/example/.config/hgs".into(),
+            state: "/home/example/.local/state/hgs".into(),
+            selves: vec!["example-local".into()],
+            peers: vec!["example-peer".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        config.machines.insert(
+            "example-peer".into(),
+            crate::machines::Connection {
+                hostname: "peer.example.invalid".into(),
+                user: "example".into(),
+                port: Some(2222),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    fn argv(sharing: Sharing) -> Vec<String> {
+        probe_args(&probe_config(), "example-peer", "echo probe", sharing)
+            .into_iter()
+            .map(|arg| arg.into_owned())
+            .collect()
+    }
+
+    /// zerus-gy6vb: every ordinary remote operation's discovery probe keeps
+    /// its connection sharing byte for byte.
+    #[test]
+    fn ordinary_discovery_probes_keep_their_exact_argv() {
+        assert_eq!(
+            argv(Sharing::Configured),
+            [
+                "-o",
+                "HostName=peer.example.invalid",
+                "-l",
+                "example",
+                "-p",
+                "2222",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "-o",
+                "ServerAliveInterval=2",
+                "-o",
+                "ServerAliveCountMax=1",
+                "example-peer",
+                "echo probe",
+            ]
+        );
+    }
+
+    /// Only adoption's probe prefixes ControlPath=none, ahead of the
+    /// configured connection options, and changes nothing else.
+    #[test]
+    fn the_adoption_probe_only_prefixes_controlpath_none() {
+        let mut expected = vec!["-o".to_owned(), "ControlPath=none".to_owned()];
+        expected.extend(argv(Sharing::Configured));
+        assert_eq!(argv(Sharing::Unshared), expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_executable(program: &std::path::Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
+        // A parallel fork can retain our writer until its exec. Only the side
+        // file is written here; the executable's sole writer is the waited cp.
+        let source = program.with_extension("source");
+        std::fs::write(&source, script).unwrap();
+        match std::fs::remove_file(program) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => panic!("{error}"),
+            _ => {}
+        }
+        assert!(Command::new("/bin/cp")
+            .arg(&source)
+            .arg(program)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixture_replaces_the_original_with_a_retained_writer_before_execution() {
+        use std::os::unix::fs::MetadataExt;
         let root = tempfile::tempdir().unwrap();
         let program = root.path().join("ssh");
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Models the same open-for-write kernel object a parallel child could
+        // inherit; the retained descriptor must not refer to the new image.
+        let retained = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&program)
+            .unwrap();
+        write_executable(&program, "#!/bin/sh\nprintf 'fixture-ready\\n'\n");
+        let output = Command::new(&program).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fixture-ready\n");
+        assert_ne!(
+            retained.metadata().unwrap().ino(),
+            std::fs::metadata(&program).unwrap().ino()
+        );
+        assert_eq!(retained.metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture(script: &str) -> (tempfile::TempDir, Config, ScopedSsh) {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("ssh");
+        write_executable(&program, script);
         let previous = TEST_SSH.with(|value| value.replace(Some(program)));
         let config = Config {
             home: root.path().to_string_lossy().into_owned(),

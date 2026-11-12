@@ -7,7 +7,15 @@ pub(super) fn shutdown_requested() -> bool {
     crate::platform::shutdown_signal() != 0
 }
 
-pub(super) fn spawn(argv: &[String], name: &str, run_id: &str) -> Result<Child> {
+pub(super) struct Spawned {
+    pub(super) child: Child,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) record: Value,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) identity: Option<crate::platform::ProcessIdentity>,
+}
+
+pub(super) fn spawn(argv: &[String], name: &str, run_id: &str) -> Result<Spawned> {
     let _guard = lock(None)?;
     let mut record = read_own_run(name, run_id)?.ok_or("session changed while launching agent")?;
     terminating::check_mutation(&record)?;
@@ -15,13 +23,21 @@ pub(super) fn spawn(argv: &[String], name: &str, run_id: &str) -> Result<Child> 
     let child = crate::platform::agent_command(argv)
         .and_then(|mut command| command.spawn())
         .map_err(|error| format!("{}: {error}", argv[0]))?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let identity = crate::platform::process_identity(child.id());
     crate::platform::forward_shutdown(&child);
     record["pid"] = json!(child.id());
     record["process_start"] = json!(process_start(child.id()));
     record["supervisor"] =
         json!({"pid": std::process::id(), "start": process_start(std::process::id())});
     write(&mut record)?;
-    Ok(child)
+    Ok(Spawned {
+        child,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        record,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        identity,
+    })
 }
 
 pub(super) fn wait(child: &mut Child) -> Result<ExitStatus> {

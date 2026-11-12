@@ -238,6 +238,42 @@ fn incompatible_cli_stays_unavailable_until_one_explicit_retry_without_fallback(
     });
 }
 #[test]
+fn reconnect_now_reaches_the_service_supervisor_of_the_exact_source() {
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let fixture = Fixture::new(json!({}));
+        let (service, _) = fixture.start(true);
+        eventually("connected", || service.snapshot().connected).await;
+        assert_eq!(
+            service.fleet_reconnect("studio", Some(7)).await,
+            Ok("requested".to_owned())
+        );
+        let sent: Vec<Value> = fixture
+            .calls()
+            .into_iter()
+            .filter(|c| c["value"]["op"] == "fleet_reconnect")
+            .collect();
+        assert_eq!(sent.len(), 1, "one request, never repeated");
+        assert_eq!(sent[0]["args"], json!(["desktop", "request", "--json"]));
+        assert_eq!(
+            sent[0]["value"]["computers"],
+            json!([{"computer":"studio","incarnation":7}])
+        );
+        let applied = service.reload_retry_delays().await.unwrap();
+        assert_eq!(applied["delays_seconds"], json!([2, 4, 8, 30]));
+        fs::write(
+            fixture.0.join("fixture.json"),
+            json!({"fleet_reconnect_code":"pending"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            service.fleet_reconnect("", None).await,
+            Ok("pending".to_owned())
+        );
+        service.join().await.unwrap();
+    });
+}
+#[test]
 fn dirty_walk_finishes_its_cursor_and_coalesces_one_refresh_without_deleting_rows() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
@@ -1811,7 +1847,7 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
                     .map(|text| text.english())
                     .collect::<Vec<_>>(),
                 [
-                    "1 needs attention, 2 sessions total",
+                    "1 active, 1 needs attention, 2 sessions total",
                     "1 here",
                     "1 on studio"
                 ]

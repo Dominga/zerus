@@ -40,7 +40,7 @@ describe("OpenCode (NewSessionDialog.cpp 1145-1313)", () => {
     t.act.chooseModel("fixture/many");
     expect(t.state().effort).toBe("");
     await t.choose("work");
-    expect(t.state()).toMatchObject({ effortVisible: false, modelVisible: false });
+    expect(t.state()).toMatchObject({ effortVisible: false, modelVisible: true });
     await t.choose("native-opencode");
     t.act.chooseModel("fixture/local");
     t.act.chooseEffort("high");
@@ -378,5 +378,38 @@ describe("OpenCode (NewSessionDialog.cpp 1145-1313)", () => {
     await settle();
     await t.start();
     expect(t.choices()).toMatchObject({ path: "/workspace/other", model: "fixture/local" });
+  });
+
+  it("standardModelsStartWithTheSelectedEffort", async () => {
+    const t = setup();
+    await t.open({ agent: "codex", path: "/workspace/example" });
+    expect(t.world.of("teamRoleModels").map((call) => call.args)).toEqual([["", "codex", "other"]]);
+    expect(t.state()).toMatchObject({ modelVisible: true, openCode: false, modelEnabled: true });
+    expect(t.state().models.map((model) => model.value)).toEqual(["", "model-a", "model-b"]);
+    t.act.chooseModel("model-a");
+    expect(t.state()).toMatchObject({ model: "model-a", effort: "high", effortVisible: true });
+    expect(efforts(t)).toEqual(["Default", "Low", "High"]);
+    t.act.chooseEffort("low");
+    await settle();
+    await t.start();
+    expect(t.choices()).toMatchObject({ agent: "codex", account: "other", model: "model-a", effort: "low" });
+  });
+
+  it("standardAccountChangeResetsModelAndEffort", async () => {
+    const t = setup();
+    await t.open({ agent: "codex", path: "/workspace/example" });
+    t.act.chooseModel("model-a");
+    t.act.chooseEffort("low");
+    await t.choose("work");
+    expect(t.state()).toMatchObject({ model: "", effort: "" });
+    expect(t.world.of("teamRoleModels").at(-1)?.args).toEqual(["", "codex", "work"]);
+    expect(t.world.creating()).toEqual([]);
+  });
+
+  it("deepSeekKeepsItsNativeLaunchModelFlow", async () => {
+    const t = setup();
+    await t.open({ agent: "dsh", path: "/workspace/example" });
+    expect(t.state()).toMatchObject({ modelVisible: false, model: "", effort: "" });
+    expect(t.world.count("teamRoleModels")).toBe(0);
   });
 });

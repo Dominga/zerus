@@ -508,7 +508,7 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
     const before = t.world.calls.length;
     await t.start();
     const sent = t.world.calls.slice(before).map((c) => c.command).filter((c) => c !== "newSessionForm");
-    expect(sent).toEqual(["newSessionStart", "launchWarning", "newSessionStart", "newSessionPlan", "creationSubmit", "launchAccountsClose"]);
+    expect(sent).toEqual(["newSessionStart", "launchWarning", "newSessionStart", "teamRoleModels", "newSessionPlan", "creationSubmit", "launchAccountsClose"]);
     // The plan and Start read the same input, and the choices of the same turn.
     const [startInput] = t.world.of("newSessionStart")[1].args as [NewSessionFormInput];
     const [planInput, choices] = t.world.of("newSessionPlan")[0].args as [NewSessionFormInput, Json];
@@ -884,7 +884,7 @@ describe("reads only (Review Focus 1 and 2)", () => {
     await settle();
     expect(t.world.creating()).toEqual([]);
     const commands = new Set(t.world.calls.map((c) => c.command));
-    for (const command of commands) expect(["newSessionContext", "projectFolders", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
+    for (const command of commands) expect(["newSessionContext", "projectFolders", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "teamRoleModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
   });
 
   it("the prefill's late answer after a folder change does nothing", async () => {

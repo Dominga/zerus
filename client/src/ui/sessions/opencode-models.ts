@@ -150,7 +150,7 @@ export const updateText = (computer: string) => tr("Update Zerus on %1 to search
 // The dialog's model rows (NewSessionDialog.cpp 51-105).
 
 /** One row of the dialog's model list: its value, the text and label shown, and its validated variants. */
-export interface ModelOption { value: string; text: string; label: string; efforts: string[]; effortLabels: string[] }
+export interface ModelOption { value: string; text: string; label: string; efforts: string[]; effortLabels: string[]; defaultEffort?: string }
 
 /**
  * `addModelOptions`: valid model entries (value, else id) the list does not

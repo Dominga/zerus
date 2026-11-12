@@ -1,7 +1,7 @@
 # Provider account, model and effort selection unification
 
 Date: 2026-11-12
-Status: phases 1–4 implemented; non-OpenCode launch changes remain a separate follow-up
+Status: phases 1–4 and the non-OpenCode launch follow-up implemented; DeepSeek remains on its native/post-start model flow
 
 ## Summary
 
@@ -351,10 +351,11 @@ not necessarily identical presentation.
 
 ### Separate behavioral follow-up
 
-Enabling explicit non-OpenCode model/effort choices in New session requires a
-launch contract change: `client/core/src/launch.rs:1351` currently discards
-those choices. Specify and test provider-specific launch behavior separately,
-including precedence over saved account defaults and native flags.
+Implemented explicit New session model/effort choices for Claude, Codex and Kimi.
+The plan retains those values, and launch arguments pass them after `--` using
+the provider's existing mapping. Empty model keeps account/provider defaults.
+DeepSeek remains on its native/post-start model flow rather than being forced
+through the terminal-agent path.
 
 ## Concrete defects found during the audit
 
@@ -362,9 +363,9 @@ including precedence over saved account defaults and native flags.
    but built account choices without passing that computer, so it used local
    accounts. It now passes `props.computer`; `SwapMemberDialog.render.test.ts`
    proves that the dialog offers the remote computer's accounts.
-2. New session's common choice type suggests general model/effort support, but
-   the plan keeps it only for OpenCode (`client/core/src/launch.rs:1351-1380`).
-   Document this boundary until the separate launch follow-up changes it.
+2. **Fixed.** New session previously kept an explicit model only for OpenCode.
+   It now retains it for Claude, Codex and Kimi as well, with backend invocation
+   tests and standard-model store/render coverage.
 
 ## Test plan
 
@@ -427,10 +428,13 @@ project's standard client build and test commands for the final deliverable.
 
 ## Implementation outcome
 
-Phases 1–4 are implemented:
+Phases 1–4 and the non-OpenCode launch follow-up are implemented:
 
 - `client/src/ui/provider-selection.ts` owns account presentation, exact account
   references, model catalog normalization and account/model transitions.
+- `client/core/src/launch.rs` retains explicit models for Claude, Codex and Kimi
+  and passes them with effort after `--`; `newSessionProviderModels.ts` loads the
+  selected account's catalog, while DeepSeek keeps its native model flow.
 - `client/core/src/model_catalog.rs` is the shared bounded Rust projection used
   by account defaults and team-role model reads. It preserves aligned effort
   labels and the model's default effort.
@@ -453,9 +457,10 @@ Verification completed:
 - `npm run check` and `npm run build` pass.
 - Focused frontend suites pass, including the new provider-selection tests and
   the remote Swap member regression test.
-- Full frontend suite: 4,332 tests pass. The only failure is the pre-existing
+- Full frontend suite: 4,337 tests pass. The only failure is the pre-existing
   scrollbar coverage audit in `src/ui/styles/popups.test.ts` for
   `.nt-intro-lead`, `.tg-nav` and `.tg-article`, unrelated to this change.
+- `cargo test --locked --test launch`: all 32 launch integration tests pass.
 - Focused client-core model tests pass. The full client-core library suite has
   1,820 passing tests and two unrelated machine-dependent failures:
   `image::linux::tests::same_inode_native_rewrite_after_the_last_check_executes_the_immutable_original`

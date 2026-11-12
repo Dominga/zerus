@@ -78,7 +78,7 @@ const state = (view: string, appearance = "dark") => ({
   autoPreferred: true, worktrees: { catalog: {}, chooseVisible: true, createVisible: true },
   accounts, account: 0, accountStatus: "", refreshEnabled: true, agent: "claude", accountId: "a",
   name: "orbit-2", branch: "main", openTerminal: false, form, error: "", starting: false, submitted: false,
-  models: [], model: "", modelVisible: true, modelButton: "Native default model", modelEnabled: true, pickerOpen: false,
+  models: [], model: "", modelVisible: true, modelButton: "Native default model", modelEnabled: true, pickerOpen: false, openCode: true,
   picker: { groups: [], notice: "", all: { checked: false, enabled: false, tooltip: "" }, selected: undefined, query: "", favoritesAvailable: false },
   efforts: [{ value: "", label: "Default" }], effort: "", effortVisible: true,
   service: { visible: false, reason: "", offer: false, text: "", enabled: false, tooltip: "" },

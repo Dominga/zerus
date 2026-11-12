@@ -50,8 +50,8 @@ pub struct Intent {
 }
 
 /// The fixed effect: the existing detached launch, through the shared
-/// `launch::launch_invocation`. Model and effort reach only OpenCode's
-/// arguments, which this leaf never launches.
+/// `launch::launch_invocation`. This recovery leaf carries no model choice;
+/// the general launch path supports OpenCode, Claude, Codex and Kimi.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {

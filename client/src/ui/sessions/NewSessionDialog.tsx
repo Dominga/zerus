@@ -775,11 +775,16 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           </Show>
         </div>
         <span class="nsd-cap">{tr("Model")}</span>
-        <button type="button" id="ns-model" class="field nsd-model" data-keys="button" aria-label={tr("Model")} aria-haspopup="dialog" aria-expanded={s().pickerOpen}
-          disabled={!s().modelEnabled} title={s().modelButton}
-          onClick={() => (s().pickerOpen ? act.closeModelPicker() : act.openModelPicker())}>
-          <span class="ell">{s().modelButton}</span><Icon name="chevron-down" size={13} class="ns-choice-chevron" />
-        </button>
+        <Show when={s().openCode} fallback={
+          <Dropdown id="ns-model" class="field nsd-model" data-keys="select" aria-label={tr("Model")} value={s().model} disabled={!s().modelEnabled}
+            onChange={act.chooseModel} options={s().models.map((model) => ({ value: model.value, label: model.text || model.label }))} />
+        }>
+          <button type="button" id="ns-model" class="field nsd-model" data-keys="button" aria-label={tr("Model")} aria-haspopup="dialog" aria-expanded={s().pickerOpen}
+            disabled={!s().modelEnabled} title={s().modelButton}
+            onClick={() => (s().pickerOpen ? act.closeModelPicker() : act.openModelPicker())}>
+            <span class="ell">{s().modelButton}</span><Icon name="chevron-down" size={13} class="ns-choice-chevron" />
+          </button>
+        </Show>
         <span />
         <div class="nsd-right">
           <Show when={s().effortVisible}>
@@ -988,11 +993,16 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().modelVisible}>
           <div class="form-row">
             <label for="ns-model">{tr("Model")}</label>
-            <button type="button" id="ns-model" class="field ns-model-btn" data-keys="button" aria-label={tr("Model")} aria-haspopup="dialog" aria-expanded={s().pickerOpen}
-              title={tr("Models OpenCode offers on this computer. Native default uses OpenCode's configuration.")} disabled={!s().modelEnabled}
-              onClick={() => (s().pickerOpen ? act.closeModelPicker() : act.openModelPicker())}>
-              <span class="ell">{s().modelButton}</span><Icon name="chevron-down" size={14} class="ns-choice-chevron" />
-            </button>
+            <Show when={s().openCode} fallback={
+              <Dropdown id="ns-model" class="field ns-model-btn" data-keys="select" aria-label={tr("Model")} value={s().model} disabled={!s().modelEnabled}
+                onChange={act.chooseModel} options={s().models.map((model) => ({ value: model.value, label: model.text || model.label }))} />
+            }>
+              <button type="button" id="ns-model" class="field ns-model-btn" data-keys="button" aria-label={tr("Model")} aria-haspopup="dialog" aria-expanded={s().pickerOpen}
+                title={tr("Models OpenCode offers on this computer. Native default uses OpenCode's configuration.")} disabled={!s().modelEnabled}
+                onClick={() => (s().pickerOpen ? act.closeModelPicker() : act.openModelPicker())}>
+                <span class="ell">{s().modelButton}</span><Icon name="chevron-down" size={14} class="ns-choice-chevron" />
+              </button>
+            </Show>
           </div>
         </Show>
         <Show when={s().service.visible}>

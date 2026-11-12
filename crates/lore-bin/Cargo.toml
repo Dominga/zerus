@@ -19,12 +19,12 @@ cuda = ["zerus-lore/cuda"]
 # The one source of lore is CodeLore. To change lore: commit there, then move this
 # rev (and this package's Cargo.lock) to the new commit; see docs/lore.md.
 # The default features carry `atlas`, so the plain build answers `lore atlas`.
-zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "ccb4a9dd8ee5e0ef5dd803cfb49c9341aaac62f9" }
+zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "9de6304d4d14675c26edeb6d8f91b338f3b54409" }
 
 [target.'cfg(windows)'.dependencies]
 # `directml` embeds on any DirectX 12 GPU through ONNX Runtime's DirectML provider;
 # on Windows every build carries it, other platforms keep the plain dependency above.
-zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "ccb4a9dd8ee5e0ef5dd803cfb49c9341aaac62f9", features = ["directml"] }
+zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "9de6304d4d14675c26edeb6d8f91b338f3b54409", features = ["directml"] }
 
 [dev-dependencies]
 sha2 = "0.10"

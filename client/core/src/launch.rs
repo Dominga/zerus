@@ -124,9 +124,9 @@ pub struct Launch {
 }
 
 /// `hgs [@host] [--expect-machine M] AGENT TARGET --new -n NAME --launch-id
-/// ID`, `-d` unless DeepSeek or OpenCode, `--account A`, and for OpenCode
-/// `--model M` with its `--effort E` (hgs takes effort only with a model),
-/// 90 s. A guarded call runs through [`crate::worktrees::run_guarded`].
+/// ID`, `-d` unless DeepSeek or OpenCode, `--account A`, and an explicit model
+/// for OpenCode, Claude, Codex, Kimi and DeepSeek (hgs takes effort only with
+/// a model), 90 s. A guarded call runs through [`crate::worktrees::run_guarded`].
 pub fn launch_invocation(
     computer: &ComputerId,
     launch: &Launch,
@@ -155,10 +155,23 @@ pub fn launch_invocation(
     if !launch.account.is_empty() {
         args.extend(["--account".into(), launch.account.clone()]);
     }
-    if launch.agent == "opencode" && !launch.model.is_empty() {
+    // hgs's own launch options for OpenCode, and for DeepSeek, which applies
+    // them through its native settings after creating the session: hgs
+    // refuses native flags after `--` for a DeepSeek launch.
+    if ["opencode", "dsh"].contains(&launch.agent.as_str()) && !launch.model.is_empty() {
         args.extend(["--model".into(), launch.model.clone()]);
         if !launch.effort.is_empty() {
             args.extend(["--effort".into(), launch.effort.clone()]);
+        }
+    } else if ["claude", "codex", "kimi"].contains(&launch.agent.as_str()) && !launch.model.is_empty() {
+        args.push("--".into());
+        args.extend(["--model".into(), launch.model.clone()]);
+        if !launch.effort.is_empty() {
+            match launch.agent.as_str() {
+                "claude" => args.extend(["--effort".into(), launch.effort.clone()]),
+                "codex" => args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", launch.effort)]),
+                _ => {}
+            }
         }
     }
     guard(&mut args, expected_machine);
@@ -1345,12 +1358,13 @@ pub struct Plan {
 }
 
 /// The plan for the form's choices (`start` with background creation): a
-/// model only for OpenCode and an effort only with a model; a terminal only
-/// for a detached agent; a generated worktree's destination only for a
-/// folder; a finished clone's checkout as the target, already in place.
+/// model for OpenCode, Claude, Codex, Kimi and DeepSeek, and an effort only
+/// with a model; a terminal only for a detached agent; a generated worktree's
+/// destination only for a folder; a finished clone's checkout as the target,
+/// already in place.
 pub fn plan(choices: &Choices) -> Plan {
     let repository = choices.repository.as_ref();
-    let model = if choices.agent == "opencode" {
+    let model = if ["opencode", "claude", "codex", "kimi", "dsh"].contains(&choices.agent.as_str()) {
         choices.model.clone()
     } else {
         String::new()

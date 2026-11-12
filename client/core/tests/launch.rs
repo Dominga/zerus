@@ -73,13 +73,37 @@ fn launch_arguments_follow_launch_detached_session() {
         .iter()
         .any(|arg| arg == "--effort" || arg == "--model"));
 
-    // Another agent never passes a model.
+    // Claude takes model and effort after the native separator.
     let mut claude = launch_of("claude");
     claude.model = "m/x".into();
     claude.effort = "high".into();
-    assert!(!launch_invocation(&local, &claude, "")
-        .args
-        .contains(&"--model".to_owned()));
+    assert_eq!(
+        launch_invocation(&local, &claude, "").args,
+        ["claude", "/srv/repo", "--new", "-n", "fix", "--launch-id", "L-1", "-d", "--", "--model", "m/x", "--effort", "high"]
+    );
+    let mut codex = launch_of("codex");
+    codex.model = "m/x".into();
+    codex.effort = "high".into();
+    let codex_args = launch_invocation(&local, &codex, "").args;
+    assert!(codex_args.contains(&"-c".to_owned()));
+    assert!(codex_args.contains(&"model_reasoning_effort=\"high\"".to_owned()));
+    let mut kimi = launch_of("kimi");
+    kimi.model = "m/x".into();
+    kimi.effort = "high".into();
+    let kimi_args = launch_invocation(&local, &kimi, "").args;
+    assert!(kimi_args.contains(&"--model".to_owned()));
+    assert!(!kimi_args.contains(&"--effort".to_owned()));
+    let mut dsh = launch_of("dsh");
+    dsh.model = "m/x".into();
+    dsh.effort = "high".into();
+    let dsh_args = launch_invocation(&local, &dsh, "").args;
+    assert!(dsh_args.contains(&"--model".to_owned()));
+    assert!(dsh_args.contains(&"--effort".to_owned()));
+    assert!(!dsh_args.contains(&"-d".to_owned()));
+    // hgs's own options: a DeepSeek launch refuses native flags after `--`.
+    assert!(!dsh_args.contains(&"--".to_owned()), "{dsh_args:?}");
+    let at = dsh_args.iter().position(|arg| arg == "--model").unwrap();
+    assert_eq!(&dsh_args[at..at + 4], ["--model", "m/x", "--effort", "high"]);
 
     // A peer's alias comes first, the machine guard after it.
     let peer = launch_invocation(&ComputerId::from("box"), &launch_of("codex"), "m-1");
@@ -1212,10 +1236,10 @@ fn the_background_plan_follows_qt() {
     assert_eq!(value["destination"], "/srv/repo-work-1");
     assert_eq!(value["add_folder"], true);
     assert_eq!(value["terminal"], true);
-    // Only OpenCode keeps a model, and effort only with it.
+    // Supported agents keep a model, and effort only with it.
     assert_eq!(
         (value["model"].as_str(), value["effort"].as_str()),
-        (Some(""), Some(""))
+        (Some("m/x"), Some("high"))
     );
     assert!(value.get("url").is_none() && value.get("predecessor").is_none());
 
@@ -1228,6 +1252,8 @@ fn the_background_plan_follows_qt() {
         ("m/x", "high")
     );
     assert!(!opencode.terminal);
+    let dsh = launch::plan(&Choices { agent: "dsh".into(), ..choices() });
+    assert_eq!((dsh.model.as_str(), dsh.effort.as_str()), ("m/x", "high"));
 
     // None, or no verified catalog, plans no generated worktree.
     let direct = launch::plan(&Choices {

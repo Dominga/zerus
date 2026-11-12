@@ -411,6 +411,12 @@ fn class(error: &Value) -> &'static str {
             "econnrefused",
             "etimedout",
             "stream disconnected",
+            // DCB-svn report (2026-11-12): DeepSeek's own words for a request
+            // that its retries could not get through (code TRANSPORT).
+            "transport failed",
+            "transport error",
+            "fetch failed",
+            "socket hang up",
         ],
     ) {
         return "network";

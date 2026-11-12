@@ -7,6 +7,10 @@ use super::model::*;
 use super::ops::{self, Actor};
 use super::plan;
 use super::store::{self, canonical_uuid, Event, Store, PAGE};
+
+/// DCB-svn report (2026-11-12): the refusal names the shape a request_id has.
+pub(crate) const REQUEST_ID_REQUIRED: &str =
+    "A canonical request_id is required: a new lowercase UUID for each change (such as 3f2b8c1e-4d5a-4b6c-9e7f-0a1b2c3d4e5f), the same one to retry";
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
@@ -1780,7 +1784,7 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
 /// before this call.
 fn draft_start(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(super::store::canonical_uuid(&request), REQUEST_ID_REQUIRED);
     // C2: there is no team yet to prove a member by, so only you start one.
     let (dsh, session, run) = caller_identities();
     owner_without_team(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
@@ -2012,7 +2016,7 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
 /// members, their live sessions adopted, the old team kept.
 fn next_goal(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(super::store::canonical_uuid(&request), REQUEST_ID_REQUIRED);
     let mut store = Store::open(true)?;
     let value = next_goal_in(&mut store, &request, input)?;
     // N6/N8: the next team's lead gets its planning brief from the dispatcher.
@@ -2073,7 +2077,7 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
 /// install - that is the owner's, on the lead's install-tool card.
 fn decide_tool_lead(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(canonical_uuid(&request), REQUEST_ID_REQUIRED);
     let mut store = Store::open(true)?;
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let caller = actor(&team, "decide-tool", input)?;
@@ -2130,7 +2134,7 @@ fn tell_tool_outcome(store: &mut Store, team_id: &str, offer: &str, allowed: boo
 /// operation. A decided proposal is idempotent: a replay returns its state.
 fn decide_proposal(input: &Value) -> anyhow::Result<Value> {
     let store_path = text(input, "request_id").to_owned();
-    ensure!(super::store::canonical_uuid(&store_path), "A canonical request_id is required");
+    ensure!(super::store::canonical_uuid(&store_path), REQUEST_ID_REQUIRED);
     let mut store = Store::open(true)?;
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let caller = actor(&team, "decide-proposal", input)?;
@@ -2578,7 +2582,7 @@ fn owner_card(team_id: &str, op: &str, change: &Value, request: &str) -> anyhow:
 /// teams settings file.
 fn scratch_rule(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(canonical_uuid(&request), REQUEST_ID_REQUIRED);
     let mut store = Store::open(true)?;
     let team_id = text(input, "team").to_owned();
     let team = store.load(&team_id)?.context("Unknown team")?;
@@ -2648,7 +2652,7 @@ fn scratch_rules(input: &Value) -> anyhow::Result<Value> {
 /// lead on the owner's verified word, recorded at once.
 fn decide_command(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(canonical_uuid(&request), REQUEST_ID_REQUIRED);
     let team_id = text(input, "team").to_owned();
     let mut store = Store::open(true)?;
     let team = store.load(&team_id)?.context("Unknown team")?;
@@ -2986,7 +2990,7 @@ pub(crate) fn create_for_member(parent: &Team, member: &Member, input: &Value) -
 
 fn create_inner(input: &Value, scratch: Option<(Team, Member)>) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     // A replay returns the first receipt; a parent link is repaired first
     // (N25: the child may exist from a create whose parent mutate failed).
     // The computer's first team finds no store yet, so nothing to replay.
@@ -3476,7 +3480,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
 fn commit(input: &Value) -> anyhow::Result<Value> {
     // L1: a repeated request returns the stored receipt, never a second commit.
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     let store = Store::open(false)?;
     if let Some(receipt) = store.receipt(request, input)? {
         return Ok(receipt);
@@ -3497,7 +3501,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
 /// commit with the same code and checks.
 pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
         return Ok(receipt);
     }
@@ -4407,7 +4411,7 @@ pub(crate) fn read_messages(
 /// composer). `urgent` says so in the doorbell and rings again sooner.
 fn message_command(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
-    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    ensure!(canonical_uuid(&request), REQUEST_ID_REQUIRED);
     let team = if text(input, "team").is_empty() {
         caller_member(input)?.0
     } else {
@@ -5176,7 +5180,7 @@ fn queue_request(folder: &std::path::Path, request: Value, wait: bool) -> anyhow
 /// worker's outcome appears, and that outcome when the request was answered.
 pub(crate) fn queue_for_sandbox(caller: &Value, op: &str, request_id: &str, input: &Value) -> anyhow::Result<(std::path::PathBuf, Option<Value>)> {
     ensure!(matches!(op, "session-run" | "read"), "Unknown sandbox request {op}");
-    ensure!(super::store::canonical_uuid(request_id), "A canonical request_id is required");
+    ensure!(super::store::canonical_uuid(request_id), REQUEST_ID_REQUIRED);
     let store = Store::open(false)?;
     let teams = store.active_teams(ACTIVE_TEAMS)?;
     let (team, member_id) = teams
@@ -5769,7 +5773,7 @@ fn permission_question(child: &Team, member: &str, pending: &PendingQuestion) ->
 
 fn escalate(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     let mut store = Store::open(true)?;
     // N28: a replay returns the first receipt instead of duplicating the
     // parent question.
@@ -5961,7 +5965,7 @@ fn team_run(input: &Value, wait: bool) -> anyhow::Result<Value> {
 
 fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds: f64) -> anyhow::Result<Value> {
     let request_id = text(input, "request_id").to_owned();
-    ensure!(canonical_uuid(&request_id), "A canonical request_id is required");
+    ensure!(canonical_uuid(&request_id), REQUEST_ID_REQUIRED);
     let store = Store::open(false)?;
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let Actor::Member(member_id) = actor(&team, "run", input)? else {
@@ -6171,7 +6175,7 @@ fn safe_action_command(input: &Value) -> anyhow::Result<Value> {
 /// one by id. The team keeps only the key's hash.
 fn intake_key(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     let team_id = text(input, "team");
     ensure!(!team_id.is_empty(), "Name the team");
     let mut secret = None;
@@ -6582,7 +6586,7 @@ fn status_command(input: &Value) -> anyhow::Result<Value> {
 #[inline(never)]
 fn mutation_command(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    ensure!(canonical_uuid(request), REQUEST_ID_REQUIRED);
     let team_id = text(input, "team");
     let revision = expected_revision(op, input);
     // A member in a sandbox may not write the team's files: its report

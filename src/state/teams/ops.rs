@@ -912,7 +912,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
             .as_u64()
             .and_then(|n| u32::try_from(n).ok())
             .filter(|n| *n >= 2)
-            .context("A planned phase is numbered from 2")?;
+            .context("A planned phase is numbered from 2: phase 1 is the plan's own tasks (task \"phase\":1) and needs no record")?;
         ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
         let title = clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?;
         phases.push(Phase {
@@ -1113,7 +1113,7 @@ fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Re
                     .as_u64()
                     .and_then(|n| u32::try_from(n).ok())
                     .filter(|n| *n >= 2)
-                    .context("A planned phase is numbered from 2")?;
+                    .context("A planned phase is numbered from 2: phase 1 is the plan's own tasks (task \"phase\":1) and needs no record")?;
                 ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
                 let old = team.phases.iter().find(|old| old.n == n);
                 phases.push(Phase {
@@ -5928,7 +5928,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             ensure!(human || actor.is_lead(team), "Only the lead or you edit the draft");
             let revision = input["revision"].as_u64().context("A draft update carries the revision it read")?;
             ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
-            let set = input["set"].as_object().context("A draft update names the fields to set")?;
+            // DCB-svn report (2026-11-12): the changes go under "set"; "fields"
+            // is what a get answers.
+            let set = input["set"].as_object().with_context(|| {
+                format!(
+                    "A draft update puts the fields it changes under \"set\"{}: {{\"action\":\"update\",\"request_id\":\"UUID\",\"team\":\"ID\",\"revision\":N,\"set\":{{\"goal\":\"...\"}}}}",
+                    if input.get("fields").is_some() { ", not \"fields\"" } else { "" }
+                )
+            })?;
             let mut changed = Vec::new();
             let mut phases_changed = false;
             for (field, value) in set {
@@ -7548,6 +7555,8 @@ fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     let label = actor.label(team);
     if let Some(task) = team.task_mut(id) {
         task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });
+        // DCB-svn report (2026-11-12): its queued landing is over too.
+        super::merge_queue::drop_landed_entry(task);
     }
     events.push(Event::new("task_marked_landed", json!({"by":label,"task":id,"commit":commit})));
     Ok(json!({"status":"landed","task":id,"commit":commit}))

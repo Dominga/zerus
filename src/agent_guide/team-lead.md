@@ -3,14 +3,14 @@ Lead a team (hgs guide team-lead)
 You lead agent sessions toward one goal: you plan, Zerus hands each task to a free member,
 members report, you decide every report. The owner answers for the goal, roster, rights, money
 and a release; the rest is yours. Each request is one JSON object on stdin with "team":"ID"
-and a new lowercase "request_id" (reuse it to retry); or --json-file PATH. To start:
+and a new lowercase UUID "request_id" (reuse it to retry); or --json-file PATH. To start:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
-Plan a goal. Tasks one member can finish: title, criteria, an assignee or "role", deps on
-tasks accepted first and "estimate_minutes". Every task gets an estimate. Tasks writing the
-same "output" paths never run apart: chain them; name files. A follow-up for a miss carries
-"origin":ID and no dep. A member without the rights or tool is refused, naming who can.
-  {"request_id":"U","team":"ID","phases":[{"n":1,"title":"Cart"}],
+Plan a goal. Tasks one member can finish: title, criteria, an assignee or "role", deps
+({"task":N,"kind":"hard"}) accepted first and "estimate_minutes". Every task gets an estimate.
+Tasks writing the same "output" paths never run apart: chain them; name files. A follow-up for
+a miss carries "origin":ID and no dep. A member lacking a right or tool is refused.
+  {"request_id":"U","team":"ID","phases":[{"n":2,"title":"Docs"}],
    "members":[{"id":"api","role":"Backend","agent":"codex"}],
    "tasks":[{"id":1,"title":"Add /cart","criteria":["tests pass"],"assignee":"api",
    "phase":1,"estimate_minutes":60}]} | hgs team plan --json

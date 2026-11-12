@@ -280,19 +280,23 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     }
 
     // A queued merge that failed and was rolled back waits for the lead to fix
-    // the runner/tests map or to retry it.
+    // the runner/tests map or to retry it. DCB-svn report (2026-11-12): a
+    // landing the integration folder's own changes hold is named too once it
+    // waited MERGE_BUSY_ITEM, with that reason; a moment's edit is no item.
     if active {
+        let now = crate::state::now();
         for task in &team.tasks {
             let Some(entry) = task.merge.as_ref().filter(|entry| {
                 (entry.state == "queued" || entry.state == "blocked")
                     && !entry.note.is_empty()
-                    && entry.wait_reason != super::model::MergeWaitReason::Busy
+                    && (entry.wait_reason != super::model::MergeWaitReason::Busy || now - entry.at >= MERGE_BUSY_ITEM)
             }) else { continue };
             // Task #370: a blocked landing offers the cherry-pick of the task's own commit.
             let next = if entry.blocked {
                 "Land the task's own commit as a cherry-pick: the merge would carry a rejected attempt's commit.".to_owned()
             } else {
                 match entry.wait_reason {
+                super::model::MergeWaitReason::Busy => "Commit or put aside the changes in the integration folder; the queue lands it on its next tick.",
                 super::model::MergeWaitReason::Rollback => "The merge could not be rolled back; revert it, then retry or reject.",
                 super::model::MergeWaitReason::Runners => "Fix the runner or machine config, then accept or retry the merge.",
                 super::model::MergeWaitReason::Selection => "Fix the tests map, then accept or retry the merge.",
@@ -1552,6 +1556,35 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
+    // DCB-svn report (2026-11-12): a member whose turn ended on a provider
+    // error is one item from the first tick, with the error's words and what
+    // Zerus does about it.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+        let Some(failure) = &member.turn_failed else { continue };
+        let role = team.name_of(&member.id);
+        let continues = member.failure_continues.iter().filter(|at| failure.at - **at <= 3600.0).count();
+        let next = match failure.continued_at {
+            Some(at) => format!("; Zerus asked it to continue at {}", local_time(at)),
+            None if failure.temporary() && continues < super::dispatcher::FAILURE_CONTINUES_PER_HOUR => {
+                "; Zerus asks it to continue shortly if it holds work".to_owned()
+            }
+            None => "; it waits: send it a message, or relaunch it".to_owned(),
+        };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "member_turn_failed",
+            key: format!("member_turn_failed:{}:{}", member.id, failure.at),
+            task: None,
+            member: role.clone(),
+            since: failure.at,
+            summary: summary(&format!("{role}'s turn ended on a provider error: {}{next}", failure.detail.trim_end_matches('.'))),
+            command: format!(
+                "{} | hgs team message --json",
+                json!({"request_id":PLACEHOLDER,"to":member.id,"text":super::doorbell::CONTINUE})
+            ),
+            detail: summary(&failure.detail),
+        });
+    }
     // Task 160: a parked task whose condition failed is the lead's to decide;
     // one well past its estimate is named too.
     let now = crate::state::now();
@@ -2422,6 +2455,10 @@ pub(crate) fn full_run_text(proposal: &super::model::FullRunProposal) -> String 
 }
 
 /// #718: what a report's change does to the tests, on the lead's card.
+/// DCB-svn report (2026-11-12): how long a landing waits for the integration
+/// folder's own changes before the lead's inbox names it.
+const MERGE_BUSY_ITEM: f64 = 10.0 * 60.0;
+
 /// Task #406: the alarm for ready tasks behind a worker held by one phase.
 pub(crate) fn worker_stall(team: &Team, now: f64) -> Option<Item> {
     let ready = super::plan::ready(team);

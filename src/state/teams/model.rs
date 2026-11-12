@@ -871,6 +871,14 @@ pub(crate) struct Member {
     /// H1: the member's session is stopped by a usage limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limited: Option<MemberLimit>,
+    /// DCB-svn report (2026-11-12): the member's live session ended its turn
+    /// on a provider error other than a usage limit; the lead hears it at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_failed: Option<TurnFailure>,
+    /// When Zerus asked the member to continue after a temporary provider
+    /// error, within the last hour (at most FAILURE_CONTINUES_PER_HOUR).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_continues: Vec<f64>,
     /// H1: Zerus asked the recovery service to wait for this member's reset.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub limit_resume: bool,
@@ -1477,6 +1485,33 @@ pub(crate) struct ScratchChild {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<f64>,
+}
+
+/// DCB-svn report (2026-11-12): a member's turn that ended on a provider
+/// error while its session stays live: when, the error's words, its recovery
+/// class (network, service and rate_limit are temporary; manual is not) and
+/// whether Zerus already asked the member to continue after it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TurnFailure {
+    pub at: f64,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_at: Option<f64>,
+}
+
+impl TurnFailure {
+    /// The same failure as `other`, whatever Zerus did about it since.
+    pub(crate) fn same(&self, other: &TurnFailure) -> bool {
+        self.at == other.at && self.detail == other.detail && self.class == other.class
+    }
+
+    /// A temporary error that a new turn may get past.
+    pub(crate) fn temporary(&self) -> bool {
+        matches!(self.class.as_str(), "network" | "service" | "rate_limit")
+    }
 }
 
 /// A member's session stopped by a usage limit (H1); `resets_at` is present

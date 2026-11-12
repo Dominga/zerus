@@ -8,7 +8,11 @@ fn a_team_without_the_new_fields_hands_out_reports_stages_and_accepts_as_today()
     let root = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(root.path(), || {
         let (lead, dev) = stage_repo(root.path());
-        let team = stage_team(&lead, &dev, "docs", &|_| super::super::super::catalog::builtin());
+        let mut team = stage_team(&lead, &dev, "docs", &|_| super::super::super::catalog::builtin());
+        // DCB-svn report (2026-11-12): with the merge queue on (the default for a
+        // member in its own worktree) an automatic accept queues the landing;
+        // this team runs without the queue, as these teams did.
+        team.settings.tests = Some(json!({"merge_queue":{"enabled":false}}));
         let stored = serde_json::to_string(&team).unwrap();
         for key in ["land_allowed", "branch_per_task", "base_branch", "\"prepare\"", "\"waits\"", "\"exits\"", "\"command\"", "\"flaky\"", "\"outcome\""] {
             assert!(!stored.contains(key), "{key} in {stored}");

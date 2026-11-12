@@ -187,11 +187,29 @@ fn enter(team: &mut Team, id: u32, stage: usize, events: &mut Vec<Event>) -> any
 /// After the last stage: the lead (or sub-lead) decides, or `auto` accepts.
 fn final_acceptance(team: &mut Team, id: u32, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let lead = team.lead.clone();
+    // DCB-svn report (2026-11-12): with the merge queue on, an automatic
+    // accept queues the landing as the lead's does; the task stays undecided
+    // until the queue lands it, and the queue's accept carries this reason.
+    let landing = team
+        .task(id)
+        .and_then(|task| task.pipeline_run.as_ref())
+        .filter(|run| run.accept == "auto")
+        .map(|run| format!("Accepted by the pipeline {}", run.name))
+        .and_then(|reason| super::merge_queue::entry(team, id, "Pipeline", false, &reason));
     let task = team.task_mut(id).context("Unknown task")?;
     let run = task.pipeline_run.as_ref().context("The task has no pipeline")?;
     let (accept, name, round) = (run.accept.clone(), run.name.clone(), run.round);
     let title = task.title.clone();
     let attempt = reported_attempt(task);
+    if let Some(entry) = landing.filter(|_| accept == "auto") {
+        task.status = TaskStatus::Submitted;
+        let commit = entry.commit.clone();
+        if task.merge.is_none() {
+            task.merge = Some(entry);
+        }
+        events.push(Event::new("merge_queued", json!({"by":"Pipeline","task":id,"commit":commit})));
+        return Ok(json!({"status":"merge_queued","task":id,"attempt":attempt}));
+    }
     if accept == "auto" {
         task.status = TaskStatus::Accepted;
         task.decided_by = None;
@@ -1175,6 +1193,31 @@ mod tests {
         let attempt = hand(&mut team);
         report(&mut team, &attempt);
         assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "report"));
+    }
+
+    #[test]
+    fn an_auto_pipeline_with_the_merge_queue_on_queues_the_landing() {
+        // DCB-svn report (2026-11-12): a task the docs pipeline accepted got no
+        // merge entry, so nothing landed it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut team = team_with("docs", &builtin());
+        team.folder = dir.path().display().to_string();
+        team.settings.tests = Some(json!({"merge_queue":{"enabled":true}}));
+        team.members.iter_mut().find(|found| found.id == "dev").unwrap().folder = MemberFolder::Worktree;
+        let attempt = hand(&mut team);
+        report(&mut team, &attempt);
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().folder_head = "abc1234".into();
+        let mut events = Vec::new();
+        let stage = give_stage(&mut team, 1, "rev").unwrap();
+        let value = apply(&mut team, "report", &json!({"task":1,"attempt":stage,"verdict":"pass"}), &member("rev"), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(value["status"], "merge_queued", "{value}");
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Submitted, "undecided until the queue lands it");
+        let entry = task.merge.as_ref().expect("a landing");
+        assert_eq!((entry.state.as_str(), entry.commit.as_str()), ("queued", "abc1234"));
+        assert_eq!(entry.reason, "Accepted by the pipeline Docs: review, auto");
+        assert!(events.iter().any(|event| event.kind == "merge_queued" && event.payload["by"] == "Pipeline"), "{events:?}");
+        assert!(!events.iter().any(|event| event.kind == "accepted"), "{events:?}");
     }
 
     #[test]

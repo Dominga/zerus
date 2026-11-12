@@ -315,6 +315,11 @@ pub(crate) fn member_state(member: &teams::model::Member) -> (&'static str, Opti
     if member.seen_phase == "question" {
         session["phase"] = json!("input");
     }
+    // DCB-svn report (2026-11-12): an error phase names the error, never "".
+    if member.seen_phase == "error" {
+        let detail = member.turn_failed.as_ref().map(|failure| failure.detail.as_str()).filter(|detail| !detail.is_empty());
+        session["activity_summary"] = json!(detail.unwrap_or("Provider error"));
+    }
     compute(&session, None, now())
 }
 

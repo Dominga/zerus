@@ -137,8 +137,7 @@ pub(crate) const MEMBER_EXAMPLE: &str =
 /// refusal itself.
 pub(crate) const MEMBER_UPDATE_EXAMPLE: &str = r#"{"id":"dev","model":"opus","effort":"high"}"#;
 pub(crate) const LEAD_EXAMPLE: &str = r#"{"id":"lead","role":"Lead","agent":"claude","account":"work"}"#;
-pub(crate) const TASK_EXAMPLE: &str =
-    r#"{"id":1,"title":"Build the page","description":"What to do and how to check it","assignee":"dev"}"#;
+pub(crate) const TASK_EXAMPLE: &str = r#"{"id":2,"title":"Build the page","description":"What to do and how to check it","assignee":"dev","deps":[{"task":1,"kind":"hard"}]}"#;
 
 #[cfg(test)]
 mod tests {

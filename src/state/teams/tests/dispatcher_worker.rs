@@ -95,6 +95,83 @@ fn a_usage_limit_is_read_from_the_listing_and_named_to_the_lead() {
 }
 
 #[test]
+fn a_turn_that_ended_on_a_provider_error_is_named_at_once_and_continued_once() {
+    // DCB-svn report (2026-11-12): a DeepSeek member whose turn ended on
+    // "DeepSeek Messages transport failed" sat in "error" for 19 minutes with
+    // nobody told.
+    let listing = json!([{"sessions":[
+        {"name":"codex/x/dev","run_id":"r1","state":"running","activity":"attention","phase":"error",
+         "recovery_error_class":"network",
+         "provider_error":{"error_kind":"provider","detail":"DeepSeek Messages transport failed","at":100.0}},
+        {"name":"codex/x/dev2","run_id":"r3","state":"running","activity":"attention","phase":"error",
+         "activity_summary":"Resume to finish permission setup"}
+    ]}]);
+    let listed = seen(&listing);
+    let failed = listed.iter().find(|session| session.name == "codex/x/dev").and_then(|session| session.failed.clone()).expect("a failure");
+    assert_eq!((failed.detail.as_str(), failed.class.as_str(), failed.at), ("DeepSeek Messages transport failed", "network", 100.0));
+    assert!(listed.iter().find(|session| session.name == "codex/x/dev2").unwrap().failed.is_none(), "no provider error, no failure");
+    let mut base = team();
+    let task = base.tasks.iter_mut().find(|task| task.id == 1).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, sent_at: 10.0, delivered_at: Some(10.0), ..Default::default() });
+    let lead = session("claude/x/lead", "r0", true);
+    let mut dev = session("codex/x/dev", "r1", false);
+    dev.phase = "error".into();
+    dev.failed = Some(failed.clone());
+    let failure = TurnFailure { at: 100.0, detail: "DeepSeek Messages transport failed".into(), class: "network".into(), continued_at: None };
+    let continues = |team: &Team, dev: &Seen, at: f64| steps(team, &[lead.clone(), dev.clone()], at).contains(&Step::ContinueFailed { member: "dev".into() });
+    // The first sight stores it; nothing is sent yet.
+    let first = steps(&base, &[lead.clone(), dev.clone()], 120.0);
+    assert!(first.contains(&Step::TurnFailed { member: "dev".into(), failed: Some(failure.clone()) }), "{first:?}");
+    assert!(!continues(&base, &dev, 120.0));
+    base.members.iter_mut().find(|member| member.id == "dev").unwrap().turn_failed = Some(failure.clone());
+    // The lead's inbox names the error from the first tick.
+    let items = inbox::items(&base);
+    let item = items.iter().find(|item| item.kind == "member_turn_failed").expect("a member_turn_failed item");
+    assert!(item.summary.contains("DeepSeek Messages transport failed") && item.summary.contains("continue"), "{}", item.summary);
+    // A minute after the error the member is asked once to continue.
+    assert!(!continues(&base, &dev, 150.0));
+    assert!(continues(&base, &dev, 170.0));
+    let set = |team: &mut Team, failure: TurnFailure, times: Vec<f64>| {
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.turn_failed = Some(failure);
+        member.failure_continues = times;
+    };
+    let mut asked = base.clone();
+    set(&mut asked, TurnFailure { continued_at: Some(170.0), ..failure.clone() }, vec![170.0]);
+    assert!(!continues(&asked, &dev, 400.0), "once for this error");
+    // The shared recovery service already resumes it: Zerus waits.
+    let mut recovering = dev.clone();
+    recovering.failed.as_mut().unwrap().recovering = true;
+    assert!(!continues(&base, &recovering, 400.0));
+    // A permanent error is named, never continued.
+    let mut manual = base.clone();
+    set(&mut manual, TurnFailure { class: "manual".into(), ..failure.clone() }, Vec::new());
+    let mut manual_dev = dev.clone();
+    manual_dev.failed.as_mut().unwrap().class = "manual".into();
+    assert!(!continues(&manual, &manual_dev, 400.0));
+    // Three continues in the hour: no fourth.
+    let mut spent = base.clone();
+    set(&mut spent, failure.clone(), vec![110.0, 120.0, 130.0]);
+    assert!(!continues(&spent, &dev, 400.0));
+    // The member holds no work: nothing to continue.
+    let mut idle = base.clone();
+    idle.tasks.iter_mut().find(|task| task.id == 1).unwrap().attempts.clear();
+    assert!(!continues(&idle, &dev, 400.0));
+    // The error is over: the record goes.
+    let mut working = dev.clone();
+    working.failed = None;
+    working.phase = "working".into();
+    assert!(steps(&base, &[lead.clone(), working], 400.0).contains(&Step::TurnFailed { member: "dev".into(), failed: None }));
+    // The member's state reason names the error, never "".
+    let mut member = base.member("dev").unwrap().clone();
+    member.seen_phase = "error".into();
+    member.seen = Some(MemberSeen { at: 100.0, live: true });
+    let (_, reason) = crate::state::session_state::member_state(&member);
+    assert_eq!(reason.unwrap()["text"], "DeepSeek Messages transport failed");
+}
+
+#[test]
 fn the_team_setting_starts_resume_for_a_member_and_the_lead_but_not_a_deepseek_host() {
     let mut base = team();
     let mut dev = session("codex/x/dev", "r1", true);

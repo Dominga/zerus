@@ -2644,6 +2644,23 @@ queue. Task #370 (owner, 2026-11-08) adds three rules:
   (`hgs team land` also re-queues a landing with or without the cherry-pick).
 - A task whose reported commit is not in the integration repository at all
   (another project's work) never appears as unlanded.
+- DCB-svn report (2026-11-12): a landing `hgs team land` queued for a task that
+  is already accepted records the landing when the queue merges it
+  (`tasks_landed`), never a second accept. A task marked landed (by Zerus's
+  ancestry check or `hgs team landed`) loses its queued landing at once, and
+  the queue's next step drops any such entry saved before
+  (`merge_dropped_landed`): an accepted, landed task never holds the landings
+  queued behind it. A landed task leaves playbook rule (b).
+- A merge-queue step that fails writes nothing; its error goes to the worker
+  log, to the team's events (`merge_queue_failed`) and, as the reason of the
+  landing the step took, to the lead's inbox (`merge_waiting`), once per
+  distinct error in 30 minutes. A landing held by uncommitted changes in the
+  integration folder is a `merge_waiting` item with that reason once it has
+  waited ten minutes.
+- With the queue on, a pipeline that accepts by itself (`auto`, such as
+  Docs: review, auto) queues the landing as the lead's accept does: the task
+  stays undecided with a `merge` entry (`merge_queued` by Pipeline), and the
+  queue's accept carries the pipeline's reason.
 
 Task #443 (owner, 2026-11-09) adds the queue-off rule. With the merge queue off
 (no `integration_folder`, the owner's p92: a hand landing in the team's own
@@ -3524,6 +3541,10 @@ changes (the task waits "folder has changes"), then creates the branch in the
 member's folder from the base or checks it out; a returned or reopened task
 gets its existing branch. Branches are never deleted. Without `branch_per_task`
 a member keeps one branch, as before.
+A relaunch or a swap takes the member's own folder while it is on the task
+branch of a task that member holds or worked on (DCB-svn report, 2026-11-12):
+the next hand-out picks the task's branch itself. A folder on another member's
+task branch is still refused.
 
 Tasks that write the same files never run apart (owner, 2026-11-07). Two open
 tasks whose `output` paths overlap (one path contains the other, by
@@ -3763,6 +3784,20 @@ key grants nothing else: any other operation presenting a key is refused, and
 so is an unknown or revoked key or another team's. A team keeps at most eight
 keys; the owner revokes one by id (`"revoke":"i1"`). Without a key only the
 owner and the lead change a plan, as before.
+
+### A member's turn that ended on a provider error
+
+DCB-svn report (2026-11-12): a member whose live session ended its turn on a
+provider error other than a usage limit (the listing's `phase` `error` with a
+`provider_error`) is stored on the member (`turn_failed`: when, the error's
+words and its recovery class) and is a `member_turn_failed` inbox item from the
+first tick (`member_turn_failed` in the feed, `member_turn_recovered` when it is
+over). Its state reason names the error. After a temporary error (recovery
+class `network`, `service` or `rate_limit`; DeepSeek's "transport failed" is
+`network`) a member holding work is asked once to continue that task, a minute
+after the error (five after a rate limit), at most three times an hour, unless
+the shared recovery service already resumes the session
+(`failure_continued`). A permanent error waits for the lead or you.
 
 ### Restarting a crashed member
 
@@ -4427,6 +4462,13 @@ Child events preserve the parent's conversation, model and history; ephemeral
 children show their recorded request, tools and result. Unknown inherited
 SessionStart events cannot replace an established parent. `/new` and `/clear`
 still change the main native conversation.
+DCB-svn report (2026-11-12): Claude Code cancels a hook that runs past its 5 s
+timeout, and on a busy computer a new session's SessionStart was cancelled before
+it bound the conversation; every later event was then dropped and the session
+stayed "Status unavailable". The first main event (no `agent_id`) of a new Claude
+session that has no conversation yet binds it as that start would have. A resume,
+a fork, a restore or a fresh session that expects a conversation still waits for
+its own start.
 Claude's background service runs jobs in processes that inherited the run token
 of whichever session started the service. A hook names its Claude process and
 conversation (`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`); an event from a Claude

@@ -583,7 +583,10 @@ fn a_merge_waiting_item_names_its_cause() {
     assert!(detail(&team).contains("revert it, then retry or reject"), "{}", detail(&team));
     team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "the lead's folder has uncommitted changes".into();
     team.task_mut(1).unwrap().merge.as_mut().unwrap().wait_reason = MergeWaitReason::Busy;
-    assert!(!crate::state::teams::inbox::items_for(&team, "lead").iter().any(|item| item.kind == "merge_waiting"), "a Busy note is not an inbox item");
+    // DCB-svn report (2026-11-12): a fresh Busy note is no item; one that held
+    // the landing ten minutes is (a_landing_held_by_the_folders_changes_...).
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().at = crate::state::now();
+    assert!(!crate::state::teams::inbox::items_for(&team, "lead").iter().any(|item| item.kind == "merge_waiting"), "a fresh Busy note is not an inbox item");
 }
 
 #[test]
@@ -1863,6 +1866,75 @@ fn a_queued_landing_on_the_line_is_accepted_and_landed_by_itself() {
     assert!(!waits_for_landing(task));
 }
 
+
+/// DCB-svn report (2026-11-12): `hgs team land` queued a landing for a task
+/// already accepted; the queue's accept refused it ("has no report to decide")
+/// and every later landing waited behind it. Now that landing records the
+/// landing, and one for a task marked landed meanwhile leaves the queue.
+#[test]
+fn a_landing_queued_for_an_accepted_task_lands_or_leaves_and_holds_nothing_back() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let land = |team: &mut Team| {
+        let mut events = Vec::new();
+        ops::apply(team, "land", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap()
+    };
+    // Accepted outside the queue, then queued for landing.
+    let mut accepted = team(&repo);
+    accepted.tasks[0].status = TaskStatus::Accepted;
+    assert_eq!(land(&mut accepted)["status"], "queued");
+    let database = database(&repo);
+    let events = settle(&mut accepted, &database, &repo.lead);
+    let task = accepted.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted);
+    assert!(task.merge.is_none(), "the landing is over: {:?}", task.merge);
+    assert!(task.landed.as_ref().is_some_and(|landed| landed.by == "Zerus"), "{:?}", task.landed);
+    assert!(events.iter().any(|event| event.kind == "tasks_landed"), "{events:?}");
+    assert_eq!(run_git(&repo.lead, &["merge-base", "--is-ancestor", &commit, "HEAD"]), "");
+    // Queued, then landed by hand and marked: the entry leaves the queue at once.
+    let mut marked = team(&repo);
+    marked.tasks[0].status = TaskStatus::Accepted;
+    land(&mut marked);
+    let mut events = Vec::new();
+    let line = head(&repo);
+    ops::apply(&mut marked, "landed", &json!({"task":1,"commit":line}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert!(marked.task(1).unwrap().merge.is_none(), "marking it landed ends its queued landing");
+    // An entry saved that way before is dropped by the queue's next step.
+    let mut saved = marked.clone();
+    saved.tasks[0].merge = Some(MergeEntry { state: "queued".into(), author: "dev".into(), commit: commit.clone(), at: 1.0, ..Default::default() });
+    let mut events = Vec::new();
+    assert!(step_here(&mut saved, &database, 200.0, &mut events).unwrap());
+    assert!(saved.task(1).unwrap().merge.is_none());
+    assert!(events.iter().any(|event| event.kind == "merge_dropped_landed"), "{events:?}");
+}
+
+/// DCB-svn report (2026-11-12): a landing the integration folder's own changes
+/// hold is the lead's inbox item, with that reason, once it waited ten minutes.
+#[test]
+fn a_landing_held_by_the_folders_changes_reaches_the_inbox_with_its_reason() {
+    let repo = repo();
+    let mut team = team(&repo);
+    let now = crate::state::now();
+    let busy = |at: f64| MergeEntry {
+        state: "queued".into(),
+        author: "dev".into(),
+        commit: "abc1234".into(),
+        at,
+        note: "the lead's folder has uncommitted changes".into(),
+        wait_reason: MergeWaitReason::Busy,
+        ..Default::default()
+    };
+    let waiting = |team: &Team| crate::state::teams::inbox::items(team).into_iter().find(|item| item.kind == "merge_waiting");
+    team.tasks[0].merge = Some(busy(now - 30.0));
+    assert!(waiting(&team).is_none(), "a moment's edit is no item");
+    team.tasks[0].merge = Some(busy(now - 700.0));
+    let item = waiting(&team).expect("the held landing is named");
+    assert!(item.summary.contains("uncommitted changes"), "{}", item.summary);
+    assert!(item.detail.contains("Commit or put aside the changes"), "{}", item.detail);
+}
 
 /// Owner's team, 2026-11-10: a pipeline-returned attempt is the base of the
 /// rework on top of it, never a rejected attempt that blocks the landing.

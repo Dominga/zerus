@@ -201,7 +201,8 @@ pub(crate) fn breaches(team: &Team) -> Vec<Breach> {
     }
     // (b) accepted work unlanded: the queue's own record, no ancestry read.
     let queued = super::merge_queue::enabled(team);
-    for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted && !hand) {
+    // DCB-svn report (2026-11-12): a task marked landed has left it.
+    for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted && task.landed.is_none() && !hand) {
         match task.merge.as_ref() {
             Some(entry) if !matches!(entry.state.as_str(), "landed" | "merged" | "accepted") => {
                 found.push(Breach {

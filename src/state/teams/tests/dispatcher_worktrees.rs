@@ -690,6 +690,47 @@ fn an_existing_member_folder_is_reused_and_a_foreign_one_refused() {
 }
 
 #[test]
+fn a_member_folder_on_its_own_task_branch_is_reused() {
+    // DCB-svn report (2026-11-12): with branch_per_task the prepare step moves
+    // the member's folder to its task's branch; a relaunch then takes that
+    // folder as the member's, and a branch of another member's task is still
+    // refused.
+    let dir = tempfile::tempdir().unwrap();
+    set_git_ceiling(&dir.path().display().to_string());
+    let repo = folder_repo(dir.path(), "project");
+    let member = Member { id: "vcs".into(), role: "Dev".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+    let mut team = folder_team(&repo, member.clone());
+    team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
+    team.tasks.push(Task { id: 12, title: "Mine".into(), assignee: "vcs".into(), status: TaskStatus::InProgress, ..Default::default() });
+    team.tasks.push(Task { id: 13, title: "Another's".into(), assignee: "qa".into(), ..Default::default() });
+    let destination = member_folder_with(&team, &member, &|_, args| local_create(args)).unwrap();
+    git_in(Path::new(&destination), &["switch", "-q", "-c", "task/12"]);
+    let folder = member_folder_with(&team, &member, &|_, _| anyhow::bail!("no create"));
+    assert_eq!(folder.unwrap(), destination);
+    // A task of the member's that went to another member still counts by its attempt.
+    team.tasks[0].assignee = "qa".into();
+    team.tasks[0].attempts.push(Attempt { n: 1, member: "vcs".into(), ..Default::default() });
+    assert_eq!(member_folder_with(&team, &member, &|_, _| anyhow::bail!("no create")).unwrap(), destination);
+    git_in(Path::new(&destination), &["switch", "-q", "-c", "task/13"]);
+    let error = member_folder_with(&team, &member, &|_, _| anyhow::bail!("no create")).unwrap_err().to_string();
+    assert!(error.contains("is on task/13, not team/abcdef12/vcs"), "{error}");
+    // On another computer the catalog's branch is judged the same way.
+    let ok = std::process::Command::new("git").arg("--version").output().unwrap();
+    let remote = Member { computer: "devbox".into(), ..member.clone() };
+    let mut there = team.clone();
+    there.members.retain(|other| other.id != "vcs");
+    there.members.push(remote.clone());
+    let path = member_folder_path(&there, &remote).unwrap();
+    let catalog = |branch: &str| {
+        let stdout = json!({"state":"ok","selected_root":path,"worktrees":[{"path":path,"branch":branch}]}).to_string().into_bytes();
+        Output { status: ok.status, stdout, stderr: Vec::new() }
+    };
+    assert_eq!(member_folder_with(&there, &remote, &|_, _| Ok(catalog("task/12"))).unwrap(), path);
+    let error = member_folder_with(&there, &remote, &|_, _| Ok(catalog("task/13"))).unwrap_err().to_string();
+    assert!(error.contains("not this member's folder (on task/13"), "{error}");
+}
+
+#[test]
 fn a_member_on_another_computer_is_checked_there() {
     // C11: the folder of a member on another computer is not looked for
     // here; what is there is read there (`hgs @computer worktrees`).

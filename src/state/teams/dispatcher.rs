@@ -106,6 +106,9 @@ pub(crate) struct Seen {
     pub notify_revision: Option<u64>,
     /// H1: its session stopped by a usage limit.
     pub limited: Option<SeenLimit>,
+    /// DCB-svn report (2026-11-12): its turn ended on another provider error
+    /// while the session stays live.
+    pub failed: Option<SeenFailure>,
     /// When its session last reported any event.
     pub last_event_at: Option<f64>,
     /// #728: the tool call its turn is in, and when that call started.
@@ -227,6 +230,38 @@ pub(crate) struct SeenLimit {
     pub detail: String,
 }
 
+/// DCB-svn report (2026-11-12): a turn that ended on a provider error other
+/// than a usage limit: when, its words, the recovery class the listing gives
+/// it, and whether the shared recovery service already handles it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenFailure {
+    pub at: f64,
+    pub detail: String,
+    pub class: String,
+    pub recovering: bool,
+}
+
+/// The failure `record` (an `hgs ls` row) shows, if its turn ended on a
+/// provider error that is not a usage limit while the session lives.
+fn seen_failure(record: &Value, live: bool, limited: bool) -> Option<SeenFailure> {
+    let error = &record["provider_error"];
+    if !live || limited || record["phase"] != "error" || !error.is_object() {
+        return None;
+    }
+    let detail = [&error["detail"], &record["last_error"], &record["activity_summary"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|text| !text.is_empty())
+        .unwrap_or("Provider error");
+    Some(SeenFailure {
+        at: error["at"].as_f64().or(record["last_event_at"].as_f64()).unwrap_or(0.0),
+        detail: detail.chars().take(300).collect(),
+        class: record["recovery_error_class"].as_str().unwrap_or_default().to_owned(),
+        recovering: matches!(record["recovery"]["state"].as_str(), Some("waiting" | "dispatching" | "retrying")),
+    })
+}
+
 /// Task #7: whether a session record is idle and may take a message, the same
 /// test the listing's rows go through: live, activity idle, phase empty, idle
 /// or ready, no open optional questions, no auth wall and a send that works.
@@ -310,6 +345,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                     })
                 })
                 .flatten();
+            let failed = seen_failure(record, live, limited.is_some());
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -341,6 +377,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
                 limited,
+                failed,
                 model: field("model").to_owned(),
                 effort: field("effort").to_owned(),
                 account_id: field("account_id").to_owned(),
@@ -470,6 +507,12 @@ pub(crate) enum Step {
     /// H1: the member's session was stopped by a usage limit, or recovered
     /// from it (None).
     Limited { member: String, limited: Option<MemberLimit> },
+    /// DCB-svn report (2026-11-12): the member's turn ended on a provider
+    /// error (or that error is over); stored, and the lead hears it once.
+    TurnFailed { member: String, failed: Option<TurnFailure> },
+    /// DCB-svn report: after a temporary provider error the member holding
+    /// work is asked once to continue, at most FAILURE_CONTINUES_PER_HOUR.
+    ContinueFailed { member: String },
     /// H1: the team setting asks the recovery service to wait for this
     /// member's reset and continue it.
     StartLimitResume { member: String },
@@ -752,6 +795,12 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
 /// the window those restarts are counted over.
 const RESTARTS_PER_HOUR: usize = 3;
 const RESTART_WINDOW: f64 = 3600.0;
+/// DCB-svn report (2026-11-12): how many times an hour Zerus asks a member to
+/// continue after a temporary provider error, and how long after the error.
+pub(crate) const FAILURE_CONTINUES_PER_HOUR: usize = 3;
+pub(crate) const FAILURE_CONTINUE_AFTER: f64 = 60.0;
+/// A rate limit waits longer before the new turn.
+pub(crate) const RATE_LIMIT_CONTINUE_AFTER: f64 = 300.0;
 
 /// Task #42 (team ede724c4): whether Zerus runs a context action on `member`'s
 /// session for a hand-out now: the cold-context compaction before its next task
@@ -1378,6 +1427,45 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 // the member stays stopped until the next hour or a relaunch.
                 steps.push(Step::CrashStopped { member: member.id.clone() });
             }
+        }
+    }
+    // DCB-svn report (2026-11-12): a member whose live session ended its turn
+    // on a provider error sat in "error" with nobody told, and restart_crashed
+    // did nothing (the process had not crashed). The failure is stored and
+    // named to the lead at once; after a temporary one (a transport or network
+    // error, an overloaded service, a rate limit) a member holding work is
+    // asked once to continue, unless the shared recovery service already does.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.id != team.lead) {
+        let found = session_of(member, seen).filter(|found| found.live);
+        let failed = found.and_then(|found| found.failed.as_ref()).map(|failure| TurnFailure {
+            at: failure.at,
+            detail: failure.detail.clone(),
+            class: failure.class.clone(),
+            continued_at: None,
+        });
+        let same = match (&member.turn_failed, &failed) {
+            (None, None) => true,
+            (Some(old), Some(new)) => old.same(new),
+            _ => false,
+        };
+        if !same {
+            steps.push(Step::TurnFailed { member: member.id.clone(), failed });
+            continue;
+        }
+        let Some(failure) = member.turn_failed.as_ref() else { continue };
+        let recovering = found.and_then(|found| found.failed.as_ref()).is_some_and(|failure| failure.recovering);
+        let wait = if failure.class == "rate_limit" { RATE_LIMIT_CONTINUE_AFTER } else { FAILURE_CONTINUE_AFTER };
+        let continues = member.failure_continues.iter().filter(|at| now - **at <= RESTART_WINDOW).count();
+        if team.status == TeamStatus::Running
+            && member.state == MemberState::Active
+            && failure.temporary()
+            && failure.continued_at.is_none()
+            && !recovering
+            && now - failure.at >= wait
+            && continues < FAILURE_CONTINUES_PER_HOUR
+            && holds_work(team, &member.id)
+        {
+            steps.push(Step::ContinueFailed { member: member.id.clone() });
         }
     }
     // Task #227 (owner, 2026-11-07): an attempt a restart left unconfirmed goes
@@ -2492,6 +2580,47 @@ fn holds_work(team: &Team, member_id: &str) -> bool {
         .filter_map(|task| task.open_attempt())
         .any(|attempt| attempt.member == member_id && !(attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed")))
         || super::stages::busy(team).contains(&member_id)
+}
+
+/// DCB-svn report (2026-11-12): asks a member whose turn ended on a temporary
+/// provider error to continue its task, once for that error: a guarded send
+/// that is never retried; the lead's inbox item says what happened.
+fn continue_after_failure(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let Some(member) = team.member(member_id) else { return Ok(()) };
+    let Some(failure) = member.turn_failed.clone().filter(|failure| failure.continued_at.is_none()) else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let task = team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member_id).map(|_| task.id));
+    let header = match task {
+        Some(id) => format!("[Zerus team \u{b7} from: Zerus \u{b7} task: #{id}]"),
+        None => "[Zerus team \u{b7} from: Zerus]".to_owned(),
+    };
+    let text = format!(
+        "{header}\nYour last turn ended on a provider error: {}. {}",
+        failure.detail.trim_end_matches('.'),
+        super::doorbell::CONTINUE
+    );
+    let request = uuid::Uuid::new_v4().to_string();
+    let outcome = send(&session, &request, &text);
+    let at = now();
+    let error = match &outcome {
+        Sent::Refused(error) | Sent::Uncertain(error) => error.clone(),
+        Sent::Delivered => String::new(),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        // The send is never repeated for this failure, whatever its outcome.
+        if let Some(stored) = found.turn_failed.as_mut().filter(|stored| stored.same(&failure)) {
+            stored.continued_at = Some(at);
+        }
+        found.failure_continues.retain(|then| at - *then <= RESTART_WINDOW);
+        found.failure_continues.push(at);
+        events.push(Event::new(
+            "failure_continued",
+            json!({"member":role,"task":task,"detail":failure.detail,"certain":matches!(outcome, Sent::Delivered),"error":error}),
+        ));
+        Ok(())
+    })
 }
 
 /// U56/#728: interrupts a stuck member's session and resumes it in its own
@@ -5549,6 +5678,16 @@ fn worktree_busy(stderr: &str) -> bool {
     stderr.contains("Another worktree operation is running")
 }
 
+/// DCB-svn report (2026-11-12): `branch` is the task branch (U48) of a task
+/// this member holds or worked on, so a folder on it is still the member's.
+fn own_task_branch(team: &Team, member: &Member, branch: &str) -> bool {
+    !branch.is_empty()
+        && team.tasks.iter().any(|task| {
+            (task.assignee == member.id || task.attempts.iter().any(|attempt| attempt.member == member.id))
+                && task_branch(team, task.id, &member.id).is_some_and(|own| own == branch)
+        })
+}
+
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
 /// whole decision is tested without a second hgs.
 fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
@@ -5591,9 +5730,10 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     let clone = member.folder == MemberFolder::Clone;
     if remote {
         if let Some(found) = remote_checkout(run, &member.computer, &destination)? {
-            let unfinished = clone && !found.is_empty() && found != branch;
+            let own = found == branch || own_task_branch(team, member, &found);
+            let unfinished = clone && !found.is_empty() && !own;
             anyhow::ensure!(
-                found == branch || unfinished,
+                own || unfinished,
                 "{destination} already exists on {} and is not this member's folder ({})",
                 member.computer,
                 if found.is_empty() { "no checkout of its own".to_owned() } else { format!("on {found}, not {branch}") }
@@ -5611,6 +5751,15 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
             let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) else {
                 return Ok(destination);
             };
+            // DCB-svn report (2026-11-12): with branch_per_task the prepare
+            // step moved the folder to one of the member's own tasks; it is
+            // still the member's folder, and the next hand-out picks the
+            // task's branch itself.
+            if folder_problem(&destination, &folder, None).is_none()
+                && git_at(&destination, &["rev-parse", "--abbrev-ref", "HEAD"]).is_some_and(|current| own_task_branch(team, member, &current))
+            {
+                return Ok(destination);
+            }
             let unfinished = clone
                 && folder_problem(&destination, &folder, None).is_none()
                 && git_at(&destination, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none();
@@ -11587,6 +11736,21 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             found.limited = limited.clone();
             Ok(())
         }),
+        Step::TurnFailed { member, failed } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+            match failed {
+                Some(failure) => events.push(Event::new(
+                    "member_turn_failed",
+                    json!({"member":role,"detail":failure.detail,"class":failure.class,"at":failure.at}),
+                )),
+                None if found.turn_failed.is_some() => events.push(Event::new("member_turn_recovered", json!({"member":role}))),
+                None => {}
+            }
+            found.turn_failed = failed.clone();
+            Ok(())
+        }),
+        Step::ContinueFailed { member } => continue_after_failure(store, team, member),
         Step::StartLimitResume { member } => set_limit_resume(store, &team.id, member, true),
         // N30: a refresh on another computer is a 60 s `hgs` call; once a
         // minute is enough inside the request's expiry.
@@ -11832,6 +11996,7 @@ fn tick_teams(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         if within_budget("merge", &team.id, MERGE_BUDGET) {
             if let Err(error) = super::tick_clock::phase(&format!("merge queue: {}", team.name), || merge_queue_tick(store, &team.id, now())) {
                 eprintln!("hgs team worker: {}: merge queue: {error}", team.name);
+                merge_queue_failed(store, team, &format!("{error:#}"));
             }
         }
         // Task 174: queued suites run minutes (a merge's Qt suites tens of
@@ -11854,6 +12019,49 @@ const STEPS_BUDGET: Duration = Duration::from_secs(2);
 /// Task #406: a heavy phase skipped this many ticks in a row runs anyway, so
 /// a busy worker never starves it.
 const MAX_SKIPS: u32 = 5;
+
+/// DCB-svn report (2026-11-12): a merge-queue step that fails writes nothing,
+/// and its error went only to the worker's stderr, which nobody reads: the
+/// queue stood for an hour with no word. The error goes to the worker log and
+/// the team's events, once per distinct error in MERGE_FAILURE_REPEAT.
+fn merge_queue_failed(store: &mut Store, team: &Team, error: &str) {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    static TOLD: Mutex<BTreeMap<String, (String, f64)>> = Mutex::new(BTreeMap::new());
+    let at = now();
+    let error: String = error.chars().take(600).collect();
+    {
+        let Ok(mut told) = TOLD.lock() else { return };
+        if told.get(&team.id).is_some_and(|(last, then)| *last == error && at - then < MERGE_FAILURE_REPEAT) {
+            return;
+        }
+        told.insert(team.id.clone(), (error.clone(), at));
+    }
+    WorkerFiles::new(worker_dir()).log(&format!("{}: merge queue: {error}", team.name));
+    let _ = change(store, &team.id, |team, events| {
+        // The landing the step took (the one under test, else the oldest
+        // queued) carries the error as its reason, so the lead's inbox names it.
+        let testing = team.tasks.iter().position(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing"));
+        let oldest = || {
+            team.tasks
+                .iter()
+                .enumerate()
+                .filter_map(|(at, task)| task.merge.as_ref().filter(|entry| entry.state == "queued").map(|entry| (entry.at, at)))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, at)| at)
+        };
+        let task = testing.or_else(oldest);
+        if let Some(entry) = task.and_then(|at| team.tasks[at].merge.as_mut()).filter(|entry| entry.state == "queued") {
+            entry.note = format!("The merge queue's step failed: {error}");
+            entry.wait_reason = MergeWaitReason::Other;
+        }
+        events.push(Event::new("merge_queue_failed", json!({"error":error,"task":task.map(|at| team.tasks[at].id)})));
+        Ok(())
+    });
+}
+
+/// How often the same merge-queue error is told again.
+const MERGE_FAILURE_REPEAT: f64 = 30.0 * 60.0;
 
 /// Task #406: whether a heavy phase of `team` runs in this tick: while the
 /// tick is within `budget`, or once it was skipped `MAX_SKIPS` ticks in a row.

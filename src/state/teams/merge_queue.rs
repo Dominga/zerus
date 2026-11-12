@@ -277,12 +277,26 @@ pub(crate) fn record_landed(team: &mut Team, landed: &[(u32, String)], now: f64,
         }
         let Some(task) = team.task_mut(*id) else { continue };
         task.landed = Some(Landed { commit: commit.clone(), by: "Zerus".into(), at: now });
+        drop_landed_entry(task);
         changed = true;
     }
     if changed {
         events.push(Event::new("tasks_landed", json!({"by":"Zerus","tasks":landed.iter().map(|(id, _)| *id).collect::<Vec<_>>()})));
     }
     Ok(changed)
+}
+
+/// DCB-svn report (2026-11-12): a landing queued for an accepted task (`hgs
+/// team land`) that reached the line by another way is over: its entry goes,
+/// so the queue never merges it again. A merge under test keeps its entry.
+pub(crate) fn drop_landed_entry(task: &mut Task) -> bool {
+    let over = task.status == TaskStatus::Accepted
+        && task.landed.is_some()
+        && task.merge.as_ref().is_some_and(|entry| !matches!(entry.state.as_str(), "testing" | "conflict"));
+    if over {
+        task.merge = None;
+    }
+    over
 }
 
 /// Task #443: the accepted work waiting to land, as ONE line of the lead's
@@ -1045,6 +1059,19 @@ where
     // queue; nothing lands while a conflict waits for its resolve task.
     let released = release_conflicts(team);
     migrated = migrated || released;
+    // DCB-svn report (2026-11-12): the oldest entry was an accepted task the
+    // lead had marked landed; the queue merged it again every tick and every
+    // later landing waited behind it.
+    let mut dropped = Vec::new();
+    for task in &mut team.tasks {
+        if drop_landed_entry(task) {
+            dropped.push(task.id);
+        }
+    }
+    if !dropped.is_empty() {
+        events.push(Event::new("merge_dropped_landed", json!({"tasks":dropped})));
+        migrated = true;
+    }
     let legacy: Vec<_> = team.tasks.iter().filter_map(|task| task.merge.as_ref()
         .filter(|entry| matches!(entry.state.as_str(), "waiting" | "reverting"))
         .map(|entry| (task.id, task.status, entry.clone()))).collect();
@@ -1750,6 +1777,19 @@ fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: 
             reason.push(' ');
         }
         reason.push_str(&note);
+    }
+    // DCB-svn report (2026-11-12): `hgs team land` queues a landing for a task
+    // already accepted; its merge records the landing instead of a second
+    // accept, which refused ("has no report to decide") and rolled the whole
+    // step back every tick.
+    if team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted) {
+        let commit = if entry.merged.is_empty() || entry.prev == entry.merged { entry.commit.clone() } else { entry.merged.clone() };
+        if let Some(task) = team.task_mut(id) {
+            task.merge = None;
+            task.landed = Some(Landed { commit: commit.clone(), by: "Zerus".into(), at: now });
+        }
+        events.push(Event::new("tasks_landed", json!({"by":"Zerus","tasks":[id],"commit":commit})));
+        return Ok(());
     }
     let actor = if entry.by_owner { super::ops::Actor::Human } else { super::ops::Actor::Member(team.lead.clone()) };
     let input = json!({"task":id,"reason":reason,"merged":true});

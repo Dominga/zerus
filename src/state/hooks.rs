@@ -1391,6 +1391,27 @@ fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
+/// DCB-svn report (2026-11-12): Claude Code cancels a hook that runs past its
+/// 5 s timeout. On a busy computer a new session's SessionStart was cancelled
+/// before it bound the conversation, every later event was dropped as another
+/// conversation's, and the team member never showed Ready. The first main
+/// event of a new Claude session that has no conversation yet binds it as
+/// that start would have; a resume, a fork or a fresh session that expects a
+/// conversation still waits for its own start.
+fn late_start(record: &Value, event: &Value, agent: &str) -> bool {
+    let sid = string(event, "session_id");
+    agent == "claude"
+        && string(event, "hook_event_name") != "SessionStart"
+        && string(event, "agent_id").is_empty()
+        && !sid.is_empty()
+        && string(record, "conversation_id").is_empty()
+        && string(record, "expected_id").is_empty()
+        && string(record, "fork_parent_id").is_empty()
+        && string(record, "restore_archive_id").is_empty()
+        && string(&record["fresh_from"], "conversation_id") != sid
+        && string(record, "startup_kind") == "new"
+}
+
 fn clear_rules_proof(record: &mut Value, event: &Value) -> bool {
     if string(event,"hook_event_name") != "SessionStart" || !string(event,"agent_id").is_empty() { return false; }
     record["iron_rules_start_supported"] = json!(false);
@@ -1525,7 +1546,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     }
     let successor = codex_clear_recovery::observe(&record, &event)
         .or_else(|| codex_clear_recovery::terminal_start(&record, &event));
-    let main_start = (kind == "SessionStart" && string(&event, "agent_id").is_empty()) || successor.is_some();
+    let main_start = (kind == "SessionStart" && string(&event, "agent_id").is_empty())
+        || successor.is_some()
+        || late_start(&record, &event, &agent);
     let changed_conversation = main_start && sid != string(&record, "conversation_id");
     if main_start {
         // A previous accepted restore/clear hook may have synced the identity but
@@ -1817,6 +1840,42 @@ mod tests {
             let sent: Value = serde_json::from_slice(&output.bytes).unwrap();
             assert!(sent["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Keep this session rule"));
         });
+    }
+
+    #[test]
+    fn a_new_claude_session_whose_start_hook_was_cancelled_binds_on_its_next_event() {
+        // DCB-svn report (2026-11-12): Claude Code cancelled the SessionStart
+        // hook after 5 s; the prompt and the Stop that followed were dropped and
+        // the member never showed Ready.
+        for (key, value, binds) in [
+            ("startup_kind", json!("new"), true),
+            ("expected_id", json!("resumed-conversation"), false),
+            ("fork_parent_id", json!("source-conversation"), false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            super::super::with_test_state_root(directory.path(), || {
+                let mut record = pending_rules_start();
+                record["startup_kind"] = json!("new");
+                record[key] = value.clone();
+                write(&mut record).unwrap();
+                let prompt = json!({"hook_event_name":"UserPromptSubmit","session_id":"late-conversation","prompt":"You are Tester",
+                    "transcript_path":"C:/fixture/late-conversation.jsonl"});
+                crate::state::backend::with_fake(&StartupBackend, || {
+                    assert_eq!(track("claude/hooks/parent".into(), "parent-run".into(), prompt, &mut Vec::new()).unwrap(), 0);
+                    let stop = json!({"hook_event_name":"Stop","session_id":"late-conversation","last_assistant_message":"Ready."});
+                    assert_eq!(track("claude/hooks/parent".into(), "parent-run".into(), stop, &mut Vec::new()).unwrap(), 0);
+                });
+                let saved: Value = serde_json::from_slice(&fs::read(record_path("claude/hooks/parent")).unwrap()).unwrap();
+                if binds {
+                    assert_eq!(saved["conversation_id"], "late-conversation", "{key}");
+                    assert_eq!(saved["activity"], "idle", "{key}: {saved}");
+                    assert_eq!(saved["transcript"], "C:/fixture/late-conversation.jsonl");
+                } else {
+                    assert_eq!(saved["conversation_id"], "", "{key}");
+                    assert_eq!(saved["activity"], "unknown", "{key}");
+                }
+            });
+        }
     }
 
     #[test]

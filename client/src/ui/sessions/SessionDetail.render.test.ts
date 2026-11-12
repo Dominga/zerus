@@ -24,6 +24,8 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   buffer = { active: { baseY: 0, cursorY: 0, length: 0, getLine: () => undefined } };
   onWriteParsed() { return { dispose() {} }; } onRender() { return { dispose() {} }; } onScroll() { return { dispose() {} }; }
   registerMarker() { return undefined; } registerDecoration() { return undefined; }
+  // Terminal's own keys (terminal-keys.ts) follow the selection.
+  onSelectionChange() { return { dispose() {} }; } hasSelection() { return false; }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
   focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste() {}
 } }));

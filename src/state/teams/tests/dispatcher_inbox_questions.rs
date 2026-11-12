@@ -398,3 +398,33 @@ fn a_vanished_question_is_recorded_as_unknown() {
     assert_eq!(answers.last().unwrap()["decision"], "unknown");
     assert_eq!(answers.last().unwrap()["question_id"], "q25");
 }
+
+#[test]
+fn question_ids_stay_unique_across_stages_and_an_answer_finds_the_open_one() {
+    // DCB-svn report (2026-11-12): a review stage asked q6, a later attempt
+    // asked q6 again, and the answer went to the review's closed question.
+    let dir = tempfile::tempdir().unwrap();
+    let mut team = staged(&dir.path().display().to_string());
+    crate::state::teams::pipeline::give_stage(&mut team, 1, "rev").unwrap();
+    let mut events = Vec::new();
+    let asked = ops::apply(&mut team, "ask", &json!({"task":1,"text":"Is the review scope the API only?"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(asked["question"], "q1");
+    let task = team.task_mut(2).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.attempts.push(Attempt { n: 1, id: "a2".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    let asked = ops::apply(&mut team, "ask", &json!({"task":2,"text":"Keep the old field?"}), &Actor::Member("dev".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(asked["question"], "q2", "the stage's question counts");
+    // An id saved twice before this fix: the review's task is decided.
+    team.task_mut(2).unwrap().attempts[0].questions[0].id = "q1".into();
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    let reply = |team: &mut Team, input: Value| ops::apply(team, "reply", &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new());
+    for input in [json!({"question":"q1","text":"Keep it."}), json!({"question":"q1","task":2,"text":"Keep it."}), json!({"question":"2/q1","text":"Keep it."}), json!({"question":"#2:q1","text":"Keep it."})] {
+        let mut answered = team.clone();
+        reply(&mut answered, input.clone()).unwrap();
+        assert_eq!(answered.task(2).unwrap().attempts[0].questions[0].answer, "Keep it.", "{input}");
+    }
+    let error = reply(&mut team.clone(), json!({"question":"q1","task":1,"text":"Keep it."})).unwrap_err().to_string();
+    assert!(error.contains("Task #1 is decided; its question q1 is closed"), "{error}");
+    let error = reply(&mut team.clone(), json!({"question":"q1","task":3,"text":"Keep it."})).unwrap_err().to_string();
+    assert!(error.contains("Task #3 has no question q1"), "{error}");
+}

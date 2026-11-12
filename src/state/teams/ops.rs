@@ -5399,8 +5399,21 @@ pub(crate) fn ensure_tree_sessions(team: &Team, all: &[Team], added: usize) -> a
 /// removed, so an id names one question for the whole team (A3), which lets a
 /// reply name it without a task.
 fn next_question(team: &Team) -> String {
-    let asked: usize = team.tasks.iter().flat_map(|task| &task.attempts).map(|attempt| attempt.questions.len()).sum();
-    format!("q{}", asked + 1)
+    // DCB-svn report (2026-11-12): the count left out the stage runs'
+    // questions, so a review's q6 and a later attempt's q6 shared an id and the
+    // answer went to the closed one. The next id follows every question the
+    // team holds, on attempts and stage runs alike.
+    let number = |id: &str| id.strip_prefix('q').and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    let mut highest = 0;
+    let mut asked = 0;
+    for task in &team.tasks {
+        let stages = task.pipeline_run.iter().flat_map(|pipeline| &pipeline.runs).flat_map(|run| &run.questions);
+        for question in task.attempts.iter().flat_map(|attempt| &attempt.questions).chain(stages) {
+            highest = highest.max(number(&question.id));
+            asked += 1;
+        }
+    }
+    format!("q{}", highest.max(asked) + 1)
 }
 
 /// A member asks the lead about its open attempt (A3). The attempt stays open
@@ -5539,32 +5552,53 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(matches!(actor, Actor::Human | Actor::Member(_)), "Only the lead or you answer a member's question");
     // C7: a forwarded sub-team question is "sub:<team id>:<question id>",
     // once per level (at most 8 levels).
-    let question = clean(text(input, "question").trim(), 400, "A question id")?;
-    ensure!(!question.is_empty(), "A question id is required");
+    let named = clean(text(input, "question").trim(), 400, "A question id")?;
+    ensure!(!named.is_empty(), "A question id is required");
     let body = clean(text(input, "text").trim(), 4000, "An answer")?;
     let parks = input["park"].is_object();
     ensure!(!body.is_empty() || parks, "An answer needs text");
-    // A question id names one question of the team; it belongs to an attempt or
-    // to a stage run (#630 N6).
-    let mut found: Option<(usize, AskedWhere, usize)> = None;
-    'tasks: for (task, value) in team.tasks.iter().enumerate() {
+    // DCB-svn report (2026-11-12): a question may be named with its task
+    // ("19/q6", "19:q6", "#19:q6", or "task":19 beside it); a forwarded
+    // sub-team id ("sub:...") is never split.
+    let (in_task, question) = match named.split_once(['/', ':']).filter(|_| !named.starts_with("sub:")) {
+        Some((task, id)) if task.trim_start_matches('#').parse::<u32>().is_ok() => {
+            (task.trim_start_matches('#').parse::<u32>().ok(), id.trim().to_owned())
+        }
+        _ => (None, named.clone()),
+    };
+    let in_task = in_task.or_else(|| input["task"].as_u64().and_then(|id| u32::try_from(id).ok()));
+    // A question id names a question of the team on an attempt or a stage run
+    // (#630 N6). Ids saved before the fix may repeat: the named task decides,
+    // and an open question wins over a closed one.
+    let mut matches: Vec<(usize, AskedWhere, usize, bool)> = Vec::new();
+    for (task, value) in team.tasks.iter().enumerate() {
+        if in_task.is_some_and(|id| id != value.id) {
+            continue;
+        }
         for (attempt, value) in value.attempts.iter().enumerate() {
             if let Some(question_at) = value.questions.iter().position(|q| q.id == question) {
-                found = Some((task, AskedWhere::Attempt(attempt), question_at));
-                break 'tasks;
+                matches.push((task, AskedWhere::Attempt(attempt), question_at, value.questions[question_at].open()));
             }
         }
         if let Some(pipeline) = value.pipeline_run.as_ref() {
             for (run, value) in pipeline.runs.iter().enumerate() {
                 if let Some(question_at) = value.questions.iter().position(|q| q.id == question) {
-                    found = Some((task, AskedWhere::Stage(run), question_at));
-                    break 'tasks;
+                    matches.push((task, AskedWhere::Stage(run), question_at, value.questions[question_at].open()));
                 }
             }
         }
     }
-    let Some((task, where_at, question_at)) = found else {
-        bail!("Unknown question {question}")
+    let open = matches.iter().filter(|found| found.3 && !team.tasks[found.0].status.finished()).count();
+    ensure!(
+        open <= 1,
+        "{open} open questions are named {question}; name the task too: {{\"question\":\"{question}\",\"task\":N}}"
+    );
+    let pick = matches.iter().position(|found| found.3 && !team.tasks[found.0].status.finished()).unwrap_or(0);
+    let Some((task, where_at, question_at, _)) = (!matches.is_empty()).then(|| matches.swap_remove(pick)) else {
+        match in_task {
+            Some(id) => bail!("Task #{id} has no question {question}"),
+            None => bail!("Unknown question {question}"),
+        }
     };
     let asked_by = match where_at {
         AskedWhere::Attempt(attempt) => team.tasks[task].attempts[attempt].member.clone(),

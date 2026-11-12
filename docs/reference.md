@@ -4601,9 +4601,17 @@ or writes image data to the terminal. If the message field is not ready to accep
 attachments, Terminal shows an Open Activity action and asks you to paste again
 when it is ready. Text-only terminal pastes keep their normal behavior.
 
-In Terminal, Ctrl+Shift+C (⌘C on macOS) copies the selection exactly as shown,
-and Ctrl+Shift+V or Shift+Insert (⌘V) pastes; Ctrl+C and Ctrl+V stay the agent's
-keys. Right-click opens **Copy selection** and **Paste**. While the agent reads
+In Terminal, Ctrl+Shift+C or Ctrl+Insert (⌘C on macOS) copies the selection
+exactly as shown, and Ctrl+Shift+V or Shift+Insert (⌘V) pastes. On Windows,
+Ctrl+C over a selection copies it and clears it, as in Windows Terminal;
+without a selection, and elsewhere, Ctrl+C and Ctrl+V stay the agent's keys.
+Ctrl+Enter and Shift+Enter type a new line (a line feed, Ctrl+J, which Claude
+Code and Codex take as a new line in their input); Enter submits. Shift with an
+arrow, Home or End extends a keyboard selection from the cursor, and
+Ctrl+Shift+A (⌘A) selects everything. Shift+Page Up/Down scrolls a page,
+Ctrl+Shift+Up/Down a line and Ctrl+Shift+Home/End to the top or the bottom
+(`client/src/ui/sessions/terminal-keys.ts`). Every other key goes to the agent.
+Right-click opens **Copy selection** and **Paste**. While the agent reads
 the mouse, a right-click goes to the agent; hold Shift for the menu.
 
 Use **Reference an existing file** (the link button beside Attach, or its Files

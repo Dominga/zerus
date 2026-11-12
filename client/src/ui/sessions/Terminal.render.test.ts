@@ -32,6 +32,9 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   registerMarker() { return undefined; } registerDecoration() { return undefined; }
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) { fixture.keys = handler; }
   getSelection() { return fixture.selection; } hasSelection() { return !!fixture.selection; }
+  // Terminal's own keys (terminal-keys.ts) follow the selection and scroll.
+  onSelectionChange() { return { dispose() {} }; } clearSelection() { fixture.selection = ""; } selectAll() {}
+  select() {} scrollPages() {} scrollLines() {} scrollToTop() {} scrollToBottom() {} scrollToLine() {}
   get modes() { return { mouseTrackingMode: fixture.mouse }; }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
   focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste(text: string) { this.data?.(text); }
@@ -162,14 +165,26 @@ it("right-click without a selection disables Copy selection; an agent reading th
   expect(entry("Paste")).toBeDefined();
 });
 
-it("Ctrl+Shift+C copies the selection without typing, and Ctrl+C stays the agent's", async () => {
+it("Ctrl+Shift+C copies the selection without typing, and Ctrl+C stays the agent's without one", async () => {
   await mounted();
   fixture.selection = "selected output";
   const press = (init: KeyboardEventInit) => fixture.keys!(new KeyboardEvent("keydown", { key: "c", code: "KeyC", ...init }));
   expect(press({ key: "C", ctrlKey: true, shiftKey: true })).toBe(false);
   expect(fixture.copy).toHaveBeenCalledExactlyOnceWith("selected output");
+  const { platform } = await import("../../store/shortcuts");
+  // Windows Terminal's rule (owner, 2026-11-13): Ctrl+C over a selection copies it and clears it.
+  expect(press({ ctrlKey: true })).toBe(platform !== "windows");
+  expect(fixture.copy).toHaveBeenCalledTimes(platform === "windows" ? 2 : 1);
+  fixture.selection = "";
   expect(press({ ctrlKey: true })).toBe(true);
-  expect(fixture.copy).toHaveBeenCalledTimes(1);
+});
+
+it("Ctrl+Enter and Shift+Enter type a new line for the agent instead of submitting", async () => {
+  await mounted();
+  const press = (init: KeyboardEventInit) => fixture.keys!(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", ...init }));
+  expect(press({ ctrlKey: true })).toBe(false);
+  expect(press({ shiftKey: true })).toBe(false);
+  expect(press({})).toBe(true);
 });
 
 it.each([["during the clipboard read", false], ["before Paste is clicked", true]] as const)(

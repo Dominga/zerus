@@ -5,7 +5,8 @@ import { Icon } from "../lib/icons";
 import { contentScale, selected, setMenu, toast } from "../../store/ui";
 import { copyVerbatim, pasteText } from "../../bridge";
 import { platform } from "../../store/shortcuts";
-import { clipboardKeyHandler, normalizeTerminalImage, terminalMenu } from "./terminal-clipboard";
+import { normalizeTerminalImage, terminalMenu } from "./terminal-clipboard";
+import { moveFocus, selectionRange, terminalKey, type Cell } from "./terminal-keys";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
 import { tr } from "../../i18n";
@@ -139,8 +140,36 @@ export function TerminalTab() {
       write: (bytes, done) => term.write(bytes, done), paste: (text) => term.paste(text), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }),
       latest: () => screenShowsLatest(term),
     };
-    // The copy key never reaches the agent (Qt's copyKey); paste keys arrive as onPaste.
-    term.attachCustomKeyEventHandler(clipboardKeyHandler(platform, copySelection));
+    // Terminal's own keys (terminal-keys.ts): copy, a new line, keyboard
+    // selection, select all and scrolling never reach the agent; paste keys
+    // arrive as onPaste, and every other key goes to the agent as before.
+    let anchor: Cell | undefined, focus: Cell | undefined, selecting = false;
+    term.onSelectionChange(() => { if (!selecting) anchor = focus = undefined; });
+    const extend = (move: Parameters<typeof moveFocus>[1]) => {
+      const buffer = term.buffer.active;
+      if (!anchor || !focus || !term.hasSelection()) anchor = focus = { x: buffer.cursorX, y: buffer.baseY + buffer.cursorY };
+      focus = moveFocus(focus, move, term.cols, buffer.length, (y) => buffer.getLine(y)?.translateToString(true).length ?? 0);
+      const range = selectionRange(anchor, focus, term.cols);
+      selecting = true;
+      try { if (range) term.select(range.column, range.row, range.length); else term.clearSelection(); } finally { selecting = false; }
+      if (focus.y < buffer.viewportY) term.scrollToLine(focus.y);
+      else if (focus.y >= buffer.viewportY + term.rows) term.scrollToLine(focus.y - term.rows + 1);
+    };
+    term.attachCustomKeyEventHandler((event) => {
+      const action = terminalKey(event, platform, term.hasSelection());
+      if (action.kind === "pass") return true;
+      if (event.type !== "keydown") return false;
+      event.preventDefault();
+      if (action.kind === "copy") { copySelection(); if (action.clear) term.clearSelection(); }
+      else if (action.kind === "newline") terminal.input(encoder.encode("\n"), screen);
+      else if (action.kind === "select") extend(action.move);
+      else if (action.kind === "selectAll") term.selectAll();
+      else if (action.by === "page") term.scrollPages(action.up ? -1 : 1);
+      else if (action.by === "line") term.scrollLines(action.up ? -1 : 1);
+      else if (action.up) term.scrollToTop();
+      else term.scrollToBottom();
+      return false;
+    });
     term.onData((data) => terminal.input(encoder.encode(data), screen));
     term.onBinary((data) => terminal.input(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255), screen));
     term.onResize(({ cols, rows }) => terminal.resized(cols, rows));

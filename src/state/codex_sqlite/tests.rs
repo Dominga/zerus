@@ -191,11 +191,13 @@ fn writer_process() {
         "main_contains_child": main_contains_child,
         "stamps": stamps(&home),
     });
+    // Published whole: the test may read it the moment it appears.
     fs::write(
-        home.join("ready.json"),
+        home.join("ready.tmp"),
         serde_json::to_string(&ready).unwrap(),
     )
     .unwrap();
+    fs::rename(home.join("ready.tmp"), home.join("ready.json")).unwrap();
     // On request, the main file changes in place (same inode, new modification
     // time), as a live Codex writes: one commit and a PASSIVE checkpoint, or a
     // full rewrite (the child's new rollout path, VACUUM, TRUNCATE checkpoint).
@@ -374,6 +376,9 @@ fn busy_writer() {
         writer.home.join("rollout-child.jsonl").to_string_lossy()
     );
     let after = stamps(&writer.home);
+    // Stopped before its log is read, so no line is half written; the action
+    // that produced `after` logged its stamps after its write.
+    writer.finish();
     let actions = fs::read_to_string(writer.home.join("actions.jsonl")).unwrap();
     let actions: Vec<Value> = actions
         .lines()

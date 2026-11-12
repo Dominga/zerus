@@ -6275,5 +6275,8 @@
   "▸ Show report": "▸ Показать отчет",
   "▾ Hide report": "▾ Скрыть отчет",
   "● changed by the lead, not yet seen: click a mark when you have seen it": "● изменено лидом и ещё не просмотрено: нажмите на отметку, когда посмотрите",
-  "✓ %1": "✓ %1"
+  "✓ %1": "✓ %1",
+  "Fork build %1 is available. Open Updates.": "Доступна сборка форка %1. Открыть «Обновления».",
+  "Restart for build %1": "Перезапустить для сборки %1",
+  "Build %1 available": "Доступна сборка %1"
 }

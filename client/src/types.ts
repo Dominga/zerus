@@ -1165,6 +1165,8 @@ export interface UpdatesView {
 export interface ForkUpdatesView {
   supported: boolean; automatic: boolean; repository: string; installed_build: number; running_commit: string;
   status: Text; busy: boolean; offered_build: number; offered_commit: string; ready_build: number; installing: boolean;
+  /** The newer numbered build the feed published (downloading or failed); 0 for none. */
+  newer_build?: number;
 }
 
 export const emptyUpdatesView = (): UpdatesView => ({

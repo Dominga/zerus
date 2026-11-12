@@ -17,6 +17,7 @@ import { appLog } from "../../store/appLog";
 import { updates, updateCommands } from "../../store/updates";
 import { openAbout, openUpdates } from "../../store/desk";
 import { installedAppName, railVersion } from "../screens/settings/about-version";
+import { titleUpdate } from "./title-update";
 import { DesktopServiceStatus } from "./DesktopServiceStatus";
 import { BackgroundTasksChip } from "../screens/BackgroundTasks";
 import { CleanupChip } from "../screens/CleanupChip";
@@ -86,21 +87,44 @@ export function TitleBar(props: { mode?: () => BridgeMode | "starting"; logTitle
           <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>
         </Show>
         <DesktopServiceStatus />
-        <Show when={!updates().quiet && updates().available}>
-          <button type="button" class="chip-accent status-update" title={tr("Zerus %1 is available. Open Updates.", updates().version)}
-            aria-label={tr("Zerus %1 is available. Open Updates.", updates().version)} onClick={openUpdates}>{tr("Update available")}</button>
-        </Show>
-        <Show when={!updates().quiet && updates().restart_required}>
-          <button type="button" class="chip-accent status-restart" title={tr("Zerus was updated on disk. Drafts are kept; sessions keep running.")}
-            aria-label={tr("Zerus was updated on disk. Drafts are kept; sessions keep running.")}
-            onClick={() => { void updateCommands.restart().catch((error) => toast(tr("Updates"), String(error), "error", true)); }}>{tr("Restart to finish update")}</button>
-        </Show>
         <Show when={updates().login_item_deprioritized}>
           <button type="button" class="chip-accent warn-chip" title={tr("macOS limits background priority for this login item")} onClick={openUpdates}>{tr("Fix login item")}</button>
         </Show>
         <BackgroundTasksChip />
         <CleanupChip />
-        <button type="button" class="status-version tb-version" data-version data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
+        {/* Owner, 2026-11-13: the update button sits with the version at the
+            top right, as it sat at the bottom right of the status bar: it
+            appears once the server publishes a newer build (title-update.ts). */}
+        <span class="tb-version-group" classList={{ "has-update": titleUpdate(updates()).kind !== "none" }}>
+          <button type="button" class="status-version tb-version" data-version data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
+          {(() => {
+            const update = () => titleUpdate(updates());
+            const tip = () => {
+              const u = update();
+              if (u.kind === "restart") return u.build ? tr("Fork build %1 is ready. Restart Zerus to finish the update.", u.build) : tr("Zerus was updated on disk. Drafts are kept; sessions keep running.");
+              if (u.kind === "available") return u.build ? tr("Fork build %1 is available. Open Updates.", u.build) : tr("Zerus %1 is available. Open Updates.", u.version ?? "");
+              return "";
+            };
+            const label = () => {
+              const u = update();
+              if (u.kind === "restart") return u.build ? tr("Restart for build %1", u.build) : tr("Restart to finish update");
+              if (u.kind === "available") return u.build ? tr("Build %1 available", u.build) : tr("Update available");
+              return "";
+            };
+            return (
+              <Show when={update().kind !== "none"}>
+                <button type="button" class="chip-accent tb-update" classList={{ "status-update": update().kind === "available", "status-restart": update().kind === "restart" }}
+                  data-update={update().kind} title={tip()} aria-label={tip()}
+                  onClick={() => {
+                    if (update().kind === "restart") void updateCommands.restart().catch((error) => toast(tr("Updates"), String(error), "error", true));
+                    else openUpdates();
+                  }}>
+                  <Icon name={update().kind === "restart" ? "rotate-ccw" : "download"} size={12} />{label()}
+                </button>
+              </Show>
+            );
+          })()}
+        </span>
       </div>
       <div class="tb-group">
         <TeamHelpButton titlebar />

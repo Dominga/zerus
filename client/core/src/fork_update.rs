@@ -346,6 +346,11 @@ pub struct ForkView {
     /// A verified build waits for Restart; 0 for none.
     pub ready_build: u64,
     pub installing: bool,
+    /// The newer numbered build the fork's feed published, while it downloads
+    /// or after its download failed; 0 for none. The title bar's update button
+    /// shows it beside the version (owner, 2026-11-13).
+    #[serde(default)]
+    pub newer_build: u64,
 }
 
 /// A download the app runs: the feed entry and the folder it goes to.
@@ -375,6 +380,7 @@ pub struct ForkUpdater {
     offered_build: u64,
     ready_build: u64,
     ready_commit: String,
+    newer_build: u64,
 }
 
 impl ForkUpdater {
@@ -401,6 +407,7 @@ impl ForkUpdater {
             offered_build: 0,
             ready_build: 0,
             ready_commit: String::new(),
+            newer_build: 0,
         }
     }
 
@@ -452,6 +459,7 @@ impl ForkUpdater {
             },
             ready_build: self.ready_build,
             installing: self.installing,
+            newer_build: self.newer_build,
         }
     }
 
@@ -506,6 +514,8 @@ impl ForkUpdater {
         let build = feed.build;
         let commit = feed.commit.clone();
         self.feed = Some(feed);
+        // What the feed publishes now; a failed check keeps the last answer.
+        self.newer_build = if offer == Offer::Newer { build } else { 0 };
         match offer {
             Offer::Current => {
                 let status = if self.config.installed_build > 0 {

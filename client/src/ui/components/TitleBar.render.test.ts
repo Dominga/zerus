@@ -32,7 +32,7 @@ const STUBS: Record<string, string> = {
   // Task 409: the title bar's own new parts, read from the test's global state.
   "src/store/appLog": `export const appLog = { latest: () => globalThis.__bar.log ?? "", level: () => globalThis.__bar.logLevel ?? "connection", open: () => { globalThis.__bar.opened = (globalThis.__bar.opened ?? 0) + 1; }, record: () => {}, start: () => {}, stop: () => {} };`,
   "src/store/updates": `export const updates = () => ({ quiet: false, available: !!globalThis.__bar.update, restart_required: false,
-    login_item_deprioritized: false, version: "0.49.0" }); export const updateCommands = { restart: async () => {} };`,
+    login_item_deprioritized: false, version: "0.49.0", fork: globalThis.__bar.fork ?? null }); export const updateCommands = { restart: async () => {} };`,
   "src/ui/components/DesktopServiceStatus": `export const DesktopServiceStatus = () => "[service]";`,
   "src/ui/screens/BackgroundTasks": `export const BackgroundTasksChip = () => null;`,
   "src/ui/screens/CleanupChip": `export const CleanupChip = () => null;`,
@@ -71,7 +71,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await server?.close(); });
 
-const state = (value: { page: string; strip: boolean; log?: string; logLevel?: string; update?: boolean }) => { (globalThis as Record<string, unknown>).__bar = value; };
+const state = (value: { page: string; strip: boolean; log?: string; logLevel?: string; update?: boolean; fork?: Record<string, unknown> }) => { (globalThis as Record<string, unknown>).__bar = value; };
 const plain = (html: string) => html.replace(/<!--[^>]*-->/g, "");
 const order = (html: string, needles: string[]) => needles.map((needle) => html.indexOf(needle));
 
@@ -135,13 +135,35 @@ describe("the title bar's log line and version (task 409)", () => {
     const html = plain(render());
     expect(html).toContain("data-version");
     expect(html).toContain(">0.48<");
-    expect(html).toContain(">Update available<");
+    expect(html).toContain("Update available<");
     expect(html).toContain("Zerus 0.49.0 is available. Open Updates.");
+    // Owner, 2026-11-13: the update button joins the version at the top right.
+    const group = html.slice(html.indexOf("tb-version-group"));
+    expect(group.indexOf("data-version")).toBeLessThan(group.indexOf('data-update="available"'));
+    expect(html).toContain("tb-version-group has-update");
     // With no update the version stays and the notice is gone.
     state({ page: "sessions", strip: false, update: false });
     const calm = plain(render());
     expect(calm).toContain("data-version");
     expect(calm).not.toContain("Update available");
+    expect(calm).not.toContain("data-update");
+  });
+
+  it("shows the fork's published build beside the version, and Restart once it is ready", () => {
+    const fork = { supported: true, automatic: true, repository: "WhiteWh/zerus", installed_build: 191, running_commit: "",
+      status: { source: "" }, busy: true, offered_build: 0, offered_commit: "", ready_build: 0, installing: false, newer_build: 195 };
+    state({ page: "sessions", strip: false, fork });
+    const available = plain(render());
+    expect(available).toContain('data-update="available"');
+    expect(available).toContain("Build 195 available<");
+    expect(available).toContain("Fork build 195 is available. Open Updates.");
+    state({ page: "sessions", strip: false, fork: { ...fork, busy: false, ready_build: 195 } });
+    const ready = plain(render());
+    expect(ready).toContain('data-update="restart"');
+    expect(ready).toContain("Restart for build 195<");
+    // Nothing newer on the server: only the version.
+    state({ page: "sessions", strip: false, fork: { ...fork, busy: false, newer_build: 0 } });
+    expect(plain(render())).not.toContain("data-update");
   });
 
   it("leaves no status bar in the app shell", async () => {

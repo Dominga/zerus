@@ -36,6 +36,10 @@
   .titlebar .chip-accent { height: 20px; padding: 0 6px; font-size: 10.5px; }
   .titlebar .cleanup-result { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
   .titlebar .tb-version { height: 22px; }
+  /* Owner, 2026-11-13: the update button joins the version at the top right. */
+  .titlebar .tb-version-group { display: inline-flex; align-items: center; flex: none; }
+  .titlebar .tb-version-group.has-update .tb-version { border-top-right-radius: 0; border-bottom-right-radius: 0; color: var(--z-color-text); }
+  .titlebar .tb-version-group .tb-update { display: inline-flex; align-items: center; gap: 4px; height: 22px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .titlebar > .grow { flex: 1 1 0; align-self: stretch; }
   .tb-window { display: flex; align-self: stretch; flex: none; }
   .tb-win { width: 46px; display: grid; place-items: center; color: var(--z-color-text-3); }

@@ -143,8 +143,18 @@ A portable Windows build of the fork never takes an upstream zip: the upstream
 catalog check (`UpdateController`) does not offer the Windows portable build of
 `ufna/zerus` over it, since installing that would replace the fork.
 
-A verified build shows **Restart to finish update** in the tray menu and the
-sidebar, and posts one notification. Restarting quits Zerus as Quit does, so
+The update button sits with the version at the top right of the title bar
+(owner, 2026-11-13; it used to be at the bottom right of the status bar). Once
+the feed publishes a newer fork build, the button beside the version reads
+**Build N available** and opens Settings > Updates, also while that build
+downloads or after its download failed; an offered replacement of an unnumbered
+build shows there too. A verified build turns it into **Restart for build N**
+(`client/src/ui/components/title-update.ts`). Outside a fork build it follows
+upstream's channel: **Update available** and **Restart to finish update**.
+
+A verified build shows **Restart to finish update** in the tray menu and
+**Restart for build N** beside the version, and posts one notification.
+Restarting quits Zerus as Quit does, so
 drafts are saved. A PowerShell helper without a console window then shows a small
 banner in the lower right corner of the screen with each step and its progress
 (a click hides it) and:

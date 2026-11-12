@@ -200,6 +200,8 @@ fn a_newer_numbered_build_downloads_verifies_and_waits_for_restart() {
     let download = fork.feed_read(Ok(feed_json(6, COMMIT, zip.len() as u64, &hex(&sha(zip))))).expect("a newer build downloads");
     assert!(same(&download.folder, &fork.layout().stage));
     assert_eq!(fork.view().status.english(), "Downloading fork build 6…");
+    // The title bar's update button names it while it downloads.
+    assert_eq!(fork.view().newer_build, 6);
     fork.downloaded(&download, fetch(&download, zip), unpack_as(COMMIT));
     assert_eq!((fork.ready_build(), fork.view().busy), (6, false));
     assert_eq!(fork.view().status.english(), "Fork build 6 is ready. Restart Zerus to finish the update.");
@@ -244,12 +246,16 @@ fn a_build_that_does_not_match_its_feed_is_refused() {
     let download = fork.feed_read(Ok(feed_json(6, COMMIT, 3, &hex(&sha(zip))))).unwrap();
     fork.downloaded(&download, Err("timed out".into()), unpack_as(COMMIT));
     assert_eq!(fork.view().status.english(), "Fork build 6 did not download: timed out");
+    // A failed download keeps the published build in the title bar.
+    assert_eq!(fork.view().newer_build, 6);
     fork.begin_check(true).unwrap();
     assert!(fork.feed_read(Err("HTTP 404".into())).is_none());
     assert_eq!(fork.view().status.english(), "Fork update check failed: HTTP 404");
+    assert_eq!(fork.view().newer_build, 6, "a failed check keeps the last answer");
     // The current build is the newest.
     fork.begin_check(true).unwrap();
     assert!(fork.feed_read(Ok(feed_json(5, COMMIT, 3, &hex(&sha(zip))))).is_none());
+    assert_eq!(fork.view().newer_build, 0);
     assert_eq!(fork.view().status.english(), "Fork build 5 is the newest.");
     let _ = std::fs::remove_dir_all(&dir);
 }

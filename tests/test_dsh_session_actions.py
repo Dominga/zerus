@@ -11,6 +11,8 @@ import time
 import unittest
 import uuid
 
+import receipt_locator
+
 HGS = Path(os.environ.get("HGS_TEST_BIN", "target/debug/hgs")).resolve()
 
 
@@ -43,7 +45,11 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.env.update(TMUX_TMPDIR=str(self.root / "tmux"), HOME=str(self.root), HGS_STATE_DIR=str(self.root / "state"), HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
 
     def tearDown(self):
-        self.stop.set(); self.thread.join(timeout=2); self.server.close(); self.temp.cleanup()
+        self.stop.set(); self.thread.join(timeout=2); self.server.close()
+        # An inspection may have started the receipt locator's detached worker;
+        # it must finish before its state directory is removed (zerus-a4mub.11).
+        receipt_locator.idle(self.root / "state")
+        self.temp.cleanup()
 
     def serve(self):
         while not self.stop.is_set():

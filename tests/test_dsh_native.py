@@ -1096,6 +1096,54 @@ class NativeHarness(unittest.TestCase):
             self.rpc('answer', {'sessionId':b['conversation_id'],'id':question['question_id'],
                                 'generation':data['host_generation'],'answers':[]})
 
+    def test_inspect_refuses_an_archive_instead_of_the_live_session(self):
+        """zerus-a4mub.33: DeepSeek has no archive inspection, with or without --current-read."""
+        b = self.create()
+        archive = str(uuid.uuid4())
+        for extra in ([], ['--current-read']):
+            proc = self.hgs('inspect', b['name'], '--archive', archive, *extra)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn('DeepSeek archives are unavailable', proc.stderr)
+            self.assertNotIn('current_read', proc.stdout)
+        self.assertEqual(self.cli('inspect', b)['conversation_id'], b['conversation_id'])
+
+    def test_current_read_names_what_read_accepts_from_the_list_read_before_the_page(self):
+        """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts,
+        from the host list read before the page, and inspecting acknowledges nothing."""
+        b = self.create()
+        def inspect():
+            proc = self.hgs('inspect', b['name'], '--current-read')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        def mark(current):
+            proc = self.hgs('read', b['name'], '--json', request={key: current[key] for key in
+                            ('run_id', 'conversation_id', 'reply_id', 'attention_signature')})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)['applied']
+        self.cli('send', b, self.payload(b, text='QUESTION', attachments=[]))
+        data = self.wait(lambda: d if (d := inspect())['pending_questions'] and d['current_read']['attention_signature'] else None)
+        asked = data['current_read']
+        self.assertEqual(set(asked), {'schema', 'run_id', 'conversation_id', 'reply_id', 'attention_signature',
+                                      'attention_complete'})
+        self.assertEqual((asked['schema'], asked['run_id'], asked['conversation_id'], asked['attention_complete']),
+                         (1, b['run_id'], b['conversation_id'], True))
+        self.assertRegex(asked['attention_signature'], r'^[0-9a-f]{64}$')
+        self.assertNotIn('current_read', self.cli('inspect', b))
+        self.assertFalse((self.state / 'read-marks.json').exists())
+        self.assertTrue(mark(asked)['attention_signature'])
+        question = data['pending_questions'][0]
+        self.assertEqual(self.cli('answer', b, self.payload(
+            b, question_id=question['question_id'], expected_question_hash=question['question_hash'],
+            answers=[{'question_id': 'choice', 'selected_option_ids': ['1'], 'text': ''}]))['status'], 'answered')
+        final = self.wait(lambda: d if not (d := inspect())['pending_questions'] and d['current_read']['reply_id']
+                          and d['phase'] == 'idle' else None)
+        replied = final['current_read']
+        # The named turn's final message is in the page shown, under the same identity.
+        self.assertTrue(any(e['type'] == 'AgentMessage' and e.get('reply_id') == replied['reply_id']
+                            for e in final['events']), final['events'])
+        self.assertEqual(mark(asked), {'reply_id': False, 'attention_signature': False})
+        self.assertEqual(mark(replied), {'reply_id': True, 'attention_signature': False})
+
     def hgs(self, *args, request=None):
         return subprocess.run([str(HGS), *args], input=json.dumps(request) if request is not None else None,
                               env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)

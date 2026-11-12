@@ -839,7 +839,7 @@ fn parent_view(
     )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
-        result["attachment_messages"] = attachments::messages(record, "");
+        attachments::decorate(record, "", &mut result);
         result["voice_messages"] =
             conversation_history::inspected_voice_messages(record, &result, None);
     }
@@ -1058,6 +1058,19 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
     Ok(value)
+}
+/// `current_read` of an inspection (zerus-a4mub.24), from the same
+/// observation it shows, which is the view `hgs read` compares a mark with
+/// (`inspect`). Its questions are the forms and permissions it lists; its
+/// reply is the newest completed reply of the history it shows, so that
+/// reply's final text is shown. A row without an observation (no service, a
+/// failed read, an OpenCode 1 binding) has unknown attention and no reply.
+fn current_read_of(name: &str, view: &Value) -> Option<Value> {
+    let questions = view["pending_questions"]
+        .as_array()
+        .filter(|_| string(view, "phase") != "unknown")
+        .map(Vec::as_slice);
+    read_marks::native_current_read(name, view.clone(), questions)
 }
 /// The session's own state for delivery, answer, interrupt and lifecycle
 /// checks; unknown with its reason while the service is unavailable.
@@ -1312,7 +1325,7 @@ fn refuse_removed(ledger: &Ledger, record: &Value, message_id: &str) -> Result<(
     }
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(&path, &receipt.to_string())
+    receipt_index::persist(&path, &receipt)
 }
 /// A receipt whose message was confirmed removed becomes that definite
 /// non-delivery before anything else is read; nothing is sent for it.
@@ -1328,7 +1341,7 @@ fn apply_removal(ledger: &Ledger, record: &Value, receipt: &mut Value, path: &Pa
     let _guard = ledger.lock()?;
     receipt["status"] = json!("refused");
     receipt["reason"] = json!(REMOVED);
-    atomic(path, &receipt.to_string())
+    receipt_index::persist(path, receipt)
 }
 /// Resolve one message ID exactly from native state. It is never posted
 /// again: OpenCode 2.0.32 forgets an ID once its queued message is removed,
@@ -1419,7 +1432,7 @@ fn settle(
             receipt["reason"] = json!(reason);
         }
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, receipt)?;
     Ok(outcome)
 }
 pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
@@ -1552,7 +1565,7 @@ fn deliver(
         &json!({"request_id":request["request_id"],"conversation_id":record["conversation_id"]})
             .to_string(),
     )?;
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     let posted = native.raw(
         "POST",
         &session_path(record, "/prompt"),
@@ -1574,7 +1587,7 @@ fn deliver(
             // Keep the detailed first refusal local; a durable delivery
             // record needs only the confirmed HTTP status, not provider text.
             receipt["reason"] = json!(format!("HTTP {}", answer.status));
-            atomic(path, &receipt.to_string())?;
+            receipt_index::persist(path, &receipt)?;
             return Err(refused(&reason));
         }
         // A transport error or a 5xx leaves the admission unknown.
@@ -1588,7 +1601,7 @@ fn deliver(
     if queued {
         receipt["queued"] = json!(true);
     }
-    atomic(path, &receipt.to_string())?;
+    receipt_index::persist(path, &receipt)?;
     Ok(receipt)
 }
 fn verify_native(native: &dyn Native, record: &Value) -> Result<()> {
@@ -2122,7 +2135,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 ),
                 None => None,
             };
-            println!("{}", inspect(name, agent)?);
+            let mut value = inspect(name, agent)?;
+            // Only a main inspection names what a read mark may acknowledge.
+            if agent.is_none() && args.iter().any(|v| v == "--current-read") {
+                if let Some(current) = current_read_of(name, &value) {
+                    value["current_read"] = current;
+                }
+            }
+            println!("{value}");
         }
         "send" => {
             let request = checked_request(&record)?;
@@ -4026,6 +4046,78 @@ mod tests {
         let busy = normalize(&record, Some(&observed("messages_error", true, no_inbox())));
         assert_eq!(busy["phase"], "working");
         assert!(busy.get("provider_error").is_none());
+    }
+    /// The view `hgs read` compares a mark with: one observation, enriched as
+    /// `parent_view` does.
+    fn read_view(record: &Value, seen: &Observed) -> Value {
+        let mut view = normalize(record, Some(seen));
+        let questions = view["pending_questions"].as_array().cloned().unwrap_or_default();
+        read_marks::enrich(&mut view, &json!({}), string(record, "name"), Some(&questions));
+        view
+    }
+    fn questions(view: &Value) -> Option<Vec<Value>> {
+        view["pending_questions"].as_array().cloned()
+    }
+    /// zerus-a4mub.24: `current_read` names what the shown observation shows:
+    /// its newest settled reply in durable order and the requests it lists,
+    /// exactly what `hgs read` accepts on that observation.
+    #[test]
+    fn current_read_names_the_shown_settled_reply_and_listed_requests() {
+        let record = status_record("ses_A");
+        let name = string(&record, "name");
+        let mut seen = observed("messages", false, no_inbox());
+        // A newer reply still streams: it is shown, but never named.
+        seen.page.messages.push(json!({"id":"msg_9zzzzzzzzzzzzzzzzzzzzzzzzz","type":"assistant","time":{"created":1792271999000.0_f64},
+            "content":[{"type":"text","text":"Partial"}]}));
+        let view = read_view(&record, &seen);
+        let current = current_read_of(name, &view).unwrap();
+        let settled: Vec<&Value> = view["events"].as_array().unwrap().iter()
+            .filter(|row| row["type"] == "AgentMessage").collect();
+        assert_eq!(settled.last().unwrap()["streaming"], true);
+        let newest = settled.iter().rev().find(|row| row["streaming"] != true).unwrap();
+        assert_eq!(current["reply_id"], newest["reply_id"]);
+        assert_eq!(current["reply_id"], "msg_14bb2d63e001NhfRTKy4frROM8");
+        assert_eq!(current, json!({"schema":1,"run_id":"run","conversation_id":"ses_A","reply_id":newest["reply_id"],
+            "attention_signature":null,"attention_complete":true}));
+        assert_eq!(read_marks::accepts(&view, questions(&view).as_deref(), &current), (true, false));
+        // Once it completes, the earlier reply is no longer current.
+        seen.page.messages.last_mut().unwrap()["time"]["completed"] = json!(1792272000000.0_f64);
+        let settled = read_view(&record, &seen);
+        assert_eq!(settled["reply_id"], "msg_9zzzzzzzzzzzzzzzzzzzzzzzzz");
+        assert_eq!(read_marks::accepts(&settled, questions(&settled).as_deref(), &current), (false, false));
+
+        // A listed request is signed exactly as shown, and a newer one makes it stale.
+        let forms = opencode2("forms_question");
+        let record = status_record(forms["data"][0]["sessionID"].as_str().unwrap());
+        let mut seen = observed("messages_question", true, no_inbox());
+        seen.forms = forms["data"].clone();
+        let view = read_view(&record, &seen);
+        let current = current_read_of(string(&record, "name"), &view).unwrap();
+        assert_eq!(current["attention_complete"], true);
+        assert_eq!(current["attention_signature"], json!(read_marks::signature(&view, questions(&view).as_deref())));
+        assert_eq!(current["attention_signature"], view["attention_signature"]);
+        assert!(read_marks::accepts(&view, questions(&view).as_deref(), &current).1);
+        seen.permissions = opencode2("permissions")["data"].clone();
+        for permission in seen.permissions.as_array_mut().unwrap() {
+            permission["sessionID"] = record["conversation_id"].clone();
+        }
+        let newer = read_view(&record, &seen);
+        assert_ne!(newer["pending_questions"].as_array().unwrap().len(), view["pending_questions"].as_array().unwrap().len());
+        assert!(!read_marks::accepts(&newer, questions(&newer).as_deref(), &current).1);
+    }
+    /// Without an observation (no service, a failed read, an OpenCode 1
+    /// binding) nothing is known: no reply, attention never complete.
+    #[test]
+    fn current_read_of_an_unobserved_row_claims_nothing() {
+        let record = status_record("ses_A");
+        for row in [unavailable(&record, "OpenCode is not running on fixture".into()), legacy_row(&record)] {
+            let current = current_read_of("opencode/project/one", &row).unwrap();
+            assert_eq!((current["reply_id"].clone(), current["attention_complete"].clone()), (Value::Null, json!(false)));
+            assert_eq!(read_marks::accepts(&row, questions(&row).as_deref(), &current), (false, false));
+        }
+        let mut unbound = record.clone();
+        unbound["conversation_id"] = json!("");
+        assert!(current_read_of("opencode/project/one", &read_view(&unbound, &observed("messages", false, no_inbox()))).is_none());
     }
     #[test]
     fn an_unreadable_service_is_unknown_and_allows_only_forget() {

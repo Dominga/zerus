@@ -11,6 +11,7 @@ import threading
 import unittest
 import uuid
 
+import receipt_locator
 import test_input as fixtures
 
 HGS = fixtures.HGS
@@ -472,6 +473,10 @@ class ReadMarks(unittest.TestCase):
         rollout.write_text(''.join(json.dumps(line) + '\n' for line in lines))
         self.record.update(transcript=str(rollout), phase='working', activity='busy')
         self.write_record()
+        # Question recovery reads the receipt locator (zerus-a4mub.8); a fresh
+        # state lists the questions as unknown until it exists, which these
+        # read-mark tests do not measure.
+        receipt_locator.settle(HGS, self.env)
 
     def test_unindexed_questions_are_never_acknowledged(self):
         self.codex_question()

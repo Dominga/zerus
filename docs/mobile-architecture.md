@@ -712,7 +712,10 @@ keeps the field only when its run and conversation are the inspection's own and
 its values are ones a `mark_read` may carry. When the relay bound drops any of
 the newest rows, it removes the field, because a phone binds it to the newest
 row it displays. Older `hgs` versions and the legacy Python connector send no
-such field, so their phones keep the canonical-head requirement.
+such field, so their phones keep the canonical-head requirement. DeepSeek and
+OpenCode inspections carry the same field under the same gate. A peer's
+inspections, and those routed to this computer by machine, pass the mobile-peer
+entry, which admits `--current-read` only for a main inspection.
 
 Android Sessions publishes catalog rows with local read decoration in one
 background-prepared update and retains unchanged card identities. Its reply

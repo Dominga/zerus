@@ -2967,6 +2967,104 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
     scope.result_record(&record);Ok(())
 }
 
+/// A binding's rename, with its native title when `native`; the caller holds
+/// the bindings lock and has checked the new name.
+fn rename_binding(name: &str, record: &mut Value, new: &str, native: bool) -> Result<()> {
+    if legacy_fork_unconfirmed(record)? { return Err("Resolve the original legacy fork before renaming this session".into()); }
+    PROVIDER.prepare_label(record, new)?;
+    if native {
+        rpc(
+            record,
+            "rename",
+            json!({"sessionId":record["conversation_id"],"title":new.rsplit('/').next()}),
+        )?;
+    }
+    notifications::anchor(record);
+    record["name"] = json!(new);
+    if storage::in_id_layout(record) { recovery::rename_job_in_place(record,new)?; } else { recovery::rename_job(name,new,string(record,"run_id"))?; }
+    save(record)?;
+    if !storage::in_id_layout(record) { archive::remove_synced(&binding_path(name))?; }
+    // The token samples follow the name; losing them only turns old windows unknown.
+    let _ = usage_samples::rename(name, new);
+    // The rename is done; losing read marks only shows a reply as unread again.
+    if !storage::in_id_layout(record) { let _ = read_marks::rename_owner(name, new); }
+    Ok(())
+}
+
+/// What setting a replaced DeepSeek session aside gave.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Aside {
+    /// No DeepSeek session of that conversation holds the name any more.
+    Gone,
+    /// It is in a turn or waits on a question: it keeps the name for now.
+    Busy,
+    /// Paused (when it ran) and renamed to `target`.
+    Renamed { target: String, paused: bool },
+    /// Renamed to `target`, but the host refused to pause it (`error`): a turn
+    /// began meanwhile, or the native UI owns it.
+    StillRuns { target: String, error: String },
+}
+
+/// The phases of a running session that hold a turn: never paused under it.
+const TURN_PHASES: [&str; 5] = ["working", "tool", "compacting", "input", "approval"];
+
+/// RogueDOD (2026-11-12, team 75549318): a team member's DeepSeek session
+/// that a relaunch or a swap replaced is set aside the way a terminal session
+/// is: paused once its turn has ended and renamed to `<name>-replaced`, so the
+/// new session takes the member's name. Without it every new session failed
+/// with "This DeepSeek session name already exists" while the old one kept
+/// running. A given `conversation` must still be the binding's: a resume gives
+/// the session a new run id but keeps its conversation.
+pub(crate) fn set_aside(name: &str, conversation: &str) -> Result<Aside> {
+    let Ok(record) = binding(name) else { return Ok(Aside::Gone) };
+    if !conversation.is_empty() && string(&record, "conversation_id") != conversation {
+        return Ok(Aside::Gone);
+    }
+    // Read before the bindings lock is taken: an inspect may record upload
+    // state under it. A host that is down is started, as a launch would.
+    let current = match inspect(name, None) {
+        Ok(current) => current,
+        Err(_) => {
+            ensure_host(&record)?;
+            inspect(name, None)?
+        }
+    };
+    let running = current["state"] == "running";
+    if running && TURN_PHASES.contains(&string(&current, "phase")) {
+        return Ok(Aside::Busy);
+    }
+    let target = (1..=9)
+        .map(|n| if n == 1 { format!("{name}-replaced") } else { format!("{name}-replaced-{n}") })
+        .find(|candidate| !exists(candidate))
+        .ok_or("the old session's -replaced names are all taken; rename it or hgs kill it")?;
+    let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
+    let mut record = binding(name)?;
+    if record["conversation_id"] != current["conversation_id"] {
+        return Err("the old DeepSeek session changed while it was set aside".into());
+    }
+    // A native rename opens a stopped session in the host, where the bridge
+    // does not own it and cannot pause it: a stopped one is renamed in Zerus
+    // only (its native title stays). A running one is renamed while the bridge
+    // still owns it, then paused through the host's checked action, which
+    // refuses while a native turn runs (a plain pause would end that turn).
+    rename_binding(name, &mut record, &target, running)?;
+    if !running {
+        return Ok(Aside::Renamed { target, paused: false });
+    }
+    let answer = rpc(
+        &record,
+        "session-action",
+        json!({"sessionId":record["conversation_id"],"generation":current["host_generation"],"action":"pause","permissionMode":"provider"}),
+    )?;
+    if answer["status"] != "completed" || answer["sessionId"] != record["conversation_id"] {
+        let error = string(&answer, "error");
+        return Ok(Aside::StillRuns { target, error: if error.is_empty() { "the pause was not confirmed".into() } else { error.to_owned() } });
+    }
+    record["paused"] = json!(true);
+    save(&mut record)?;
+    Ok(Aside::Renamed { target, paused: true })
+}
+
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose a DeepSeek session")?;
     let _guard = if !["inspect", "exists", "schedules"].contains(&command) {
@@ -3249,22 +3347,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if args.iter().any(|v| v == "--dry-run") {
                 return Ok(0);
             }
-            if legacy_fork_unconfirmed(&record)? { return Err("Resolve the original legacy fork before renaming this session".into()); }
-            PROVIDER.prepare_label(&record, new)?;
-            rpc(
-                &record,
-                "rename",
-                json!({"sessionId":record["conversation_id"],"title":new.rsplit('/').next()}),
-            )?;
-            notifications::anchor(&mut record);
-            record["name"] = json!(new);
-            if storage::in_id_layout(&record) { recovery::rename_job_in_place(&record,new)?; } else { recovery::rename_job(name,new,string(&record,"run_id"))?; }
-            save(&mut record)?;
-            if !storage::in_id_layout(&record) { archive::remove_synced(&binding_path(name))?; }
-            // The token samples follow the name; losing them only turns old windows unknown.
-            let _ = usage_samples::rename(name, new);
-            // The rename is done; losing read marks only shows a reply as unread again.
-            if !storage::in_id_layout(&record) { let _ = read_marks::rename_owner(name, new); }
+            rename_binding(name, &mut record, new, true)?;
             println!(
                 "{}",
                 json!({"old_name":name,"name":new,"new_name":new,"run_id":record["run_id"],"conversation_id":record["conversation_id"]})
@@ -3284,6 +3367,12 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         }
         "exists" => return Ok(0),
         "schedules" => println!("{}", schedules(name, &record, &args[1..])?),
+        // RogueDOD (2026-11-12): the way to free a DeepSeek session's name.
+        "archive" => {
+            return Err(format!(
+                "A DeepSeek session has no archive: its conversation stays in the DeepSeek host. To free the name {name}, pause it (hgs pause {name}) and rename it (hgs rename {name} {name}-old); hgs kill {name} forgets it"
+            ))
+        }
         _ => {
             return Err(format!(
                 "{command} is not supported for native DeepSeek sessions yet"

@@ -274,6 +274,72 @@ fn the_lead_proposes_a_relaunch_for_a_stuck_member() {
     assert_eq!((proposal["kind"].as_str(), proposal["state"].as_str()), (Some("relaunch"), Some("open")));
 }
 
+/// RogueDOD (2026-11-12, team 75549318): the lead proposed relaunching sec2
+/// and sec3 when they stopped, and sec1 twice. The sessions came back by
+/// themselves, the cards stayed, and the owner's Allow of all of them
+/// replaced working sessions. One card per member; a card for a member that
+/// had stopped withdraws once it works again.
+#[test]
+fn a_relaunch_card_is_one_per_member_and_withdraws_once_the_member_works_again() {
+    use crate::state::teams::model::MemberSeen;
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    {
+        let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        qa.session = Some(SessionRef { name: "dsh/x/qa".into(), run_id: "r1".into(), ..Default::default() });
+        qa.seen = Some(MemberSeen { at: 1.0, live: false });
+    }
+    let card = json!({"kind":"relaunch","member":"qa","reason":"it stopped mid-task"});
+    apply(&mut team, "propose", &card, &lead, &none, &mut events).unwrap();
+    let id = team.proposals.last().unwrap()["id"].as_str().unwrap().to_owned();
+    let error = apply(&mut team, "propose", &card, &lead, &none, &mut events).unwrap_err().to_string();
+    assert!(error.starts_with(&format!("Card {id} already proposes relaunching")), "{error}");
+    // Still stopped: the card stays.
+    assert!(withdraw_inapplicable(&mut team, &mut events).is_empty());
+    // The session runs again after the card was made: the card withdraws.
+    let at = team.proposals.last().unwrap()["at"].as_f64().unwrap();
+    team.members.iter_mut().find(|member| member.id == "qa").unwrap().seen = Some(MemberSeen { at: at + 1.0, live: true });
+    assert_eq!(withdraw_inapplicable(&mut team, &mut events), vec![id.clone()]);
+    let withdrawn = team.proposals.iter().find(|proposal| proposal["id"] == id.as_str()).unwrap();
+    assert_eq!(withdrawn["state"], "withdrawn");
+    assert!(withdrawn["withdrawn_reason"].as_str().unwrap().contains("works again"), "{withdrawn}");
+    // A card for a member that runs (the owner wants a fresh conversation)
+    // stays, until the member is relaunched another way.
+    apply(&mut team, "propose", &card, &lead, &none, &mut events).unwrap();
+    let id = team.proposals.last().unwrap()["id"].as_str().unwrap().to_owned();
+    assert!(withdraw_inapplicable(&mut team, &mut events).is_empty());
+    apply(&mut team, "relaunch", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(withdraw_inapplicable(&mut team, &mut events), vec![id]);
+    let withdrawn = team.proposals.last().unwrap();
+    assert!(withdrawn["withdrawn_reason"].as_str().unwrap().contains("relaunched or swapped"), "{withdrawn}");
+}
+
+/// RogueDOD (2026-11-12): binding the session a member already has does not
+/// make it the session the swap replaced, so the launch never renames it.
+#[test]
+fn a_swap_that_binds_the_members_own_session_sets_nothing_aside() {
+    let mut team = running_team();
+    let own = SessionRef { name: "dsh/x/qa".into(), run_id: "r1".into(), ..Default::default() };
+    team.members.iter_mut().find(|member| member.id == "qa").unwrap().session = Some(own.clone());
+    let input = json!({"member":"qa","session":{"name":"dsh/x/qa","run_id":"r1"}});
+    apply(&mut team, "swap-member", &input, &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let qa = team.member("qa").unwrap();
+    assert_eq!((qa.session.as_ref().map(|session| session.name.as_str()), qa.replaced.as_ref()), (Some("dsh/x/qa"), None));
+    // A relaunch is setting it aside; the swap binds it again instead.
+    let mut team = running_team();
+    {
+        let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        qa.session = None;
+        qa.replaced = Some(own);
+        qa.replaced_busy = true;
+    }
+    apply(&mut team, "swap-member", &input, &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let qa = team.member("qa").unwrap();
+    assert_eq!((qa.session.is_some(), qa.replaced.is_none(), qa.replaced_busy), (true, true, false));
+}
+
 #[test]
 fn drain_waits_for_the_work_and_can_be_cancelled() {
     // U49: drain marks a member that then finishes its attempt and leaves;

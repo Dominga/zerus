@@ -5913,6 +5913,25 @@ fn set_aside_replaced(member: &Member) -> anyhow::Result<SetAside> {
     if let Some(stand_in) = test_set_aside() {
         return stand_in(&old.name);
     }
+    // RogueDOD (2026-11-12, team 75549318): a DeepSeek session is a binding of
+    // its own, not a terminal record; read as one, it looked gone, and every
+    // relaunch and swap of a DeepSeek member failed on its still-taken name.
+    if crate::state::dsh::exists(&old.name) {
+        use crate::state::dsh::Aside;
+        return match crate::state::dsh::set_aside(&old.name, &old.conversation_id) {
+            Ok(Aside::Gone) => Ok(SetAside::Done(None)),
+            Ok(Aside::Busy) => Ok(SetAside::Busy(old.name.clone())),
+            Ok(Aside::Renamed { target, paused: true }) => Ok(SetAside::Done(Some(format!("the replaced session was paused and saved as {target}")))),
+            Ok(Aside::Renamed { target, paused: false }) => Ok(SetAside::Done(Some(format!("the replaced session had stopped and was saved as {target}")))),
+            Ok(Aside::StillRuns { target, error }) => Ok(SetAside::Done(Some(format!(
+                "the replaced session was saved as {target} but still runs ({error}); stop it in Sessions"
+            )))),
+            Err(error) => Err(anyhow::anyhow!(
+                "the old session {} still holds the member's name and could not be set aside ({error}); pause and rename it (hgs pause, hgs rename), then hgs team relaunch",
+                old.name
+            )),
+        };
+    }
     let Ok(record) = crate::state::storage::read(&old.name) else {
         return Ok(SetAside::Done(None));
     };

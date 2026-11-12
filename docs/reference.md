@@ -2197,9 +2197,22 @@ nothing, is refused. One card swaps several members with
 `"members":[{"id":...},...]`. Before the new session starts, the session a swap
 replaced is paused when it can be (its conversation stays under Saved) and
 renamed to `<name>-replaced`, so the member's name is free even when the old
-session waits on a dialog. For a relaunch or a swap, the owner's word may name
+session waits on a dialog. A DeepSeek session is set aside through its host the
+same way: one in a turn or waiting on a question keeps its name and its task
+until the turn ends, then it is paused and renamed and the new session starts.
+A swap's `session` may be the name of a running session (`"session":"NAME"`);
+naming the session the member already has binds it again and sets nothing
+aside. For a relaunch or a swap, the owner's word may name
 the members together ("перезапусти их", "relaunch them all"); it then pays for
 one change per member.
+
+A team keeps one relaunch card per member. A card the lead proposed for a member
+that had stopped, was stuck or had failed to start withdraws by itself once that
+is over (the session runs again, it is no longer stuck, it started), and so does
+any relaunch card for a member relaunched or swapped since; the lead's inbox
+says why. A card for a member that ran normally stays until the owner decides.
+A DeepSeek session has no archive: its name is freed by pausing and renaming it
+(`hgs pause`, `hgs rename`), or `hgs kill` forgets it.
 
 An `account` in a swap or for a new member is an account's id or its label, as
 `hgs account ls` shows them (`"account":"additional"` names the profile

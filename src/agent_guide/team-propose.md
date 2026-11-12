@@ -11,8 +11,8 @@ Each kind sends its exact change:
   {"kind":"question","question":"...","options":["A","B"],"recommended":"A"}
   {"kind":"switch-setting","setting":"build_broker","value":true}
     (also base_branch "main", full_tests "allowed", max_members 8)
-  {"kind":"relaunch","member":"ID"} (failed to start: relaunch it yourself);
-  drain and remove-member the same
+  {"kind":"relaunch","member":"ID"} (not started: relaunch it yourself;
+  one card a member, withdrawn once it works); drain, remove-member the same
   {"kind":"rights","member":"ID","permissions_profile":"operate"}
   {"kind":"scale","role":"Tester","agent":"claude","count":2}
   {"kind":"approve"}; {"kind":"approve-phase","phase":N}
@@ -23,15 +23,15 @@ Each kind sends its exact change:
   {"kind":"iron-rules","scope":"project","project":"ID","rules":[...],
    "expected_revision":N} (or "scope":"session")
   {"kind":"switch-plan-mode","mode":"free","phase":N} (no phase: the team)
-  {"kind":"switch-memory-mode","mode":"team"}; swap-member, next-goal as before
+  {"kind":"switch-memory-mode","mode":"team"}; swap-member ("session":"NAME"
+  binds it), next-goal as before
   {"kind":"scratch-rule","folder":"ABS","agents":["claude"]}: no approval
-with "reason" and a request_id, piped to hgs team propose --json. An
-operation's fields may also go in "input":{...}.
+with "reason" and a request_id, piped to hgs team propose --json. Its
+fields may also go in "input":{...}.
 
 The receipt has the id and hash; Allow applies that change once. A
 Deny's reason reaches you; a typed owner word is not taken.
-"for_tasks":[N] keeps those tasks back until granted; cards reach a
-present owner as one batch.
+"for_tasks":[N] keeps those tasks back until granted.
 
 A question to the owner goes this way, never only in your reply: the
 owner's option or answer on the card reaches your inbox.

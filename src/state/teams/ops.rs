@@ -5125,12 +5125,23 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
     let mut changed = Vec::new();
     {
         let member = team.members.iter_mut().find(|member| member.id == id).unwrap();
+        // RogueDOD (2026-11-12): binding the session the member already has,
+        // or the one a relaunch is setting aside, binds it again; it is never
+        // set aside as the session this swap replaced.
+        let binds_own = |old: &SessionRef| session.as_ref().is_some_and(|new| new.name == old.name && new.host == old.host);
         if keep_session {
             from = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
         } else if let Some(old) = member.session.take() {
             from = old.name.clone();
             // Feedback 14: the new session needs the old one's name.
-            member.replaced = Some(old);
+            if !binds_own(&old) {
+                member.replaced = Some(old);
+            }
+        }
+        if !keep_session && member.replaced.as_ref().is_some_and(|old| binds_own(old)) {
+            member.replaced = None;
+            member.replaced_busy = false;
+            member.replaced_since = None;
         }
         let before_agent = member.agent.clone();
         let fields =
@@ -6460,6 +6471,20 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     };
     ensure!(change.to_string().len() <= 64 * 1024, "A proposal's change has at most 64 KiB");
     ensure!(team.proposals.iter().filter(|proposal| proposal["state"] == "open").count() < 50, "A team keeps at most 50 open proposals");
+    // RogueDOD (2026-11-12, team 75549318): one relaunch card per member; the
+    // owner allowed p12 and p13 for sec1 together and got two relaunches.
+    if kind == "relaunch" {
+        let id = text(&change["input"], "member");
+        if let Some(open) = team.proposals.iter().find(|proposal| {
+            proposal["state"] == "open" && proposal["kind"] == "relaunch" && proposal["change"]["input"]["member"] == id
+        }) {
+            bail!(
+                "Card {} already proposes relaunching {}; it waits for the owner, or withdraws by itself when the member works again",
+                open["id"].as_str().unwrap_or_default(),
+                team.name_of(id)
+            );
+        }
+    }
     // C8: a swap keeps its section 5 fields with the member, the way the
     // owner's decision runs it and the desktop shows it.
     let mut member = input["member"].clone();
@@ -6496,6 +6521,11 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         "mode":mode,"hash":hash,"change":change});
     if !for_tasks.is_empty() {
         proposal["for_tasks"] = json!(for_tasks);
+    }
+    if kind == "relaunch" {
+        if let Some(found) = team.member(text(&change["input"], "member")) {
+            proposal["member_then"] = member_condition(found);
+        }
     }
     // Task 156: the spec, files, tasks and forbidden terms the owner's answer
     // will carry as a decision.
@@ -6683,7 +6713,59 @@ pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
             None => Some("the team's settings already follow the project's mode".into()),
         };
     }
+    if kind == "relaunch" {
+        if let Some(why) = relaunch_outdated(team, proposal) {
+            return Some(why);
+        }
+    }
     trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
+}
+
+/// RogueDOD (2026-11-12): what a relaunch card's member was when the lead
+/// proposed it: its session, and whether it ran, was stuck or had failed to
+/// start.
+pub(crate) fn member_condition(member: &Member) -> Value {
+    // The session by its name: a conversation may change within one session
+    // (a new prompt, a compaction), and every relaunch or swap passes through
+    // a member with no session, which every team change re-checks.
+    json!({
+        "session": member.session.as_ref().map(|session| session.name.clone()),
+        "live": member.seen.is_some_and(|seen| seen.live),
+        "stuck": member.stuck.is_some(),
+        "failed": member.failed_to_start(),
+    })
+}
+
+/// RogueDOD (2026-11-12, team 75549318): a relaunch card proposed for a
+/// member that had stopped, was stuck or had failed to start no longer
+/// applies once that is over: sec3 was working on #245 again when the
+/// owner's Allow of an older card replaced its session. A card for a member
+/// already relaunched or swapped since withdraws too. A card for a member that
+/// ran normally (the owner wants a fresh conversation) stays. Cards stored
+/// before this check carry no condition and stay.
+fn relaunch_outdated(team: &Team, proposal: &Value) -> Option<String> {
+    let then = proposal.get("member_then").filter(|then| then.is_object())?;
+    let id = text(&proposal["change"]["input"], "member");
+    let member = team.member(id)?;
+    let name = team.name_of(id);
+    let session_then = &then["session"];
+    let session_now = member.session.as_ref().map(|session| json!(session.name)).unwrap_or(Value::Null);
+    if *session_then != session_now {
+        return Some(if session_then.is_null() {
+            format!("{name} started after this card was made")
+        } else {
+            format!("{name} was relaunched or swapped after this card was made")
+        });
+    }
+    let at = proposal["at"].as_f64().unwrap_or_default();
+    let live_since = member.seen.filter(|seen| seen.live).map(|seen| seen.at);
+    if then["live"] == false && then["failed"] != true && live_since.is_some_and(|since| since > at) && member.stuck.is_none() {
+        return Some(format!("{name} works again: its session came back after this card was made"));
+    }
+    if then["stuck"] == true && member.stuck.is_none() && live_since.is_some() {
+        return Some(format!("{name} is no longer stuck"));
+    }
+    None
 }
 
 /// Task 111: how long an Allow in progress keeps its proposal from the re-check.

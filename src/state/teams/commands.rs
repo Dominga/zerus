@@ -4811,6 +4811,14 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
         return Ok(());
     }
     let Ok(Some(team)) = store.load(text(input, "team")) else { return Ok(()) };
+    // RogueDOD (2026-11-12, team 75549318): a swap names the session to bind
+    // by its name too; a bare name was ignored and the swap launched a new
+    // session under the name the existing one still held.
+    if op == "swap-member" {
+        if let Some(name) = filled.get("session").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()) {
+            filled["session"] = json!({"name":name});
+        }
+    }
     let planned = op == "plan" && team.status == TeamStatus::Planning;
     // C3: a draft's members bind sessions under the same checks.
     let drafted = op == "draft" && text(input, "action") == "update" && team.status == TeamStatus::Draft;

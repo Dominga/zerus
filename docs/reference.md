@@ -815,6 +815,21 @@ level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
+An ended parent with live child sessions stays in the live list as their
+container (zerus-sa9qn.17): a dimmed compact row with the parent's tile, title,
+**Ended** or **Archived** state and its children's line, the children nested
+under it. A stopped or paused parent that the filters hide is shown this way
+from its own row; a terminated or archived parent, or one no longer listed on
+the child's own computer, from its children's recorded link. The container is
+presentational: it counts as no session, takes no keyboard step, drag target,
+selection range or attention, and its menu offers only **Open**, **Resume** or
+**Restore** and **Move to archive** of its own listed row, or **Open in
+Archive** for a parent known only from the link. It leaves the list by itself
+once no live (non-archived) child remains, and it is shown only for children
+the filters show. A parent that still runs, is listed in another project, or
+is missing on another computer keeps its children at top level with **from
+PARENT**, as before. The containers come from the same one-pass resolution and
+hash maps as the nesting; there is no extra read per row.
 Cards show a large agent tile at the left: the agent's mark from the owner's
 design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
 its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The
@@ -843,9 +858,12 @@ only when its host reports `human_request: false` and the row itself shows no
 such approval or sign-in; a host that does not report it keeps every request
 visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
 count, and gray badges and edge, while its status, Activity, unread reply,
-questions and approvals stay as they are and it remains in the Active and
-Needs attention filters. Nothing is marked read. Review later, the person's
-own mark, still counts. A person-only request notifies as for any session.
+questions and approvals stay as they are. Nothing is marked read. Unlike a
+muted session, it leaves the **Needs attention** filter, and **Active** unless
+it is working, in Background, Scheduled or has a draft: its unread reply, retry
+or provider limit waits for the parent (zerus-sa9qn.18), on desktop, Android
+and iOS alike (zerus-sa9qn.19). Review later, the person's own mark, still
+counts and lists it. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
@@ -1124,7 +1142,7 @@ identities, so a device that missed the muted interval does not announce those
 old events when it reconnects. This does not mark the underlying work as read.
 **Unmute** restores future notifications without replaying events seen while
 muted or acknowledging pending work. Muted sessions remain available in the
-Needs attention filter.
+Needs attention filter, and its tab count includes them.
 
 The desktop service accepts notification clicks only for a live, unblocked
 attention request on Linux, macOS and Windows. After a read, mute or resolution
@@ -1449,8 +1467,13 @@ name moves to it.
 
 The **Active** filter combines sessions currently working or Scheduled, those in
 **Needs attention**, and sessions with unsent text or attachment drafts, counting
-each session once. Desktop and Android use the same filter IDs and membership
-rules; drafts remain local to each device. Drafts for visible subagents also keep
+each session once. Each status filter's tab count is the number of sessions it
+lists before the text search, scoped like the list, and a parent or child that
+fails the filter is never listed for its relative. Archive counts and lists the
+same loaded date window. Desktop, Android and iOS use the same filter IDs and
+membership rules, pinned by one shared case table
+(`mobile/android/app/src/test/resources/session-filter-contract.json`); drafts
+remain local to each device. Drafts for visible subagents also keep
 their parent session active. Drafts and explicit review-later reminders remain
 active offline; stale work alone does not. Archives stay in Archive. Active also
 applies to desktop content search, and the Dashboard's Active counter opens this
@@ -5390,13 +5413,22 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
 `0.2.1-rc.2`, `0.2.1-rc.5` and `0.2.2-rc.1`. Install a reviewed release on the agent host,
-sign in and choose **DeepSeek Harness** in New session:
+apply its reviewed security overrides, sign in and choose **DeepSeek Harness**
+in New session:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+npm pkg set --prefix "$(npm root -g)/@deepseek-ai/dsh" \
+  'overrides.@modelcontextprotocol/client=2.3.0' 'overrides.fflate=0.8.3'
+npm install --omit=dev --prefix "$(npm root -g)/@deepseek-ai/dsh"
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
+
+Current upstream still pins MCP client 2.2.0 and nested fflate 0.8.2. The two
+overrides fix their cross-origin redirect and malformed-ZIP64 issues without
+changing other agents in the npm prefix; a bare global install retains those
+risks. Other dependency advisories remain subject to normal review.
 
 Zerus launches the official native engine and its tools, access rules and history.
 A versioned adapter connects its Session Controller through a private Unix socket.
@@ -6775,7 +6807,23 @@ the available full roster. Profile groups without individual IDs remain groups.
 place attachments at their first marker; otherwise they append. IDs come from a
 fresh inspection. `status: submitted` confirms native input delivery, not a model
 reply. Saved receipts make identical requests idempotent. An uncertain result
-needs manual inspection before another request. `agent_id` is supported only for
+needs manual inspection before another request.
+
+Claude Code attaches a pasted line that is only an image path asynchronously:
+until it has read the image its composer is empty with a `Pasting…` footer, and
+an Enter then submits nothing (zerus-iitw8). For Claude the single Enter
+therefore waits until the composer shows the paste settled, and `submitted`
+requires Claude's own transcript to record the message: a new user row
+(`native: transcript`) or, while it works, a queue `enqueue` (`native: queue`).
+A new conversation with no transcript yet counts its settled composer emptying
+after Enter (`native: composer`). Both waits share one 8-second window from the
+paste. Otherwise the receipt stays `in_progress` with `delivery: uncertain`, its
+reason and the composer's text (at most 2,000 characters, never image bytes),
+and the error names that text; it is never retyped. Codex and Kimi show a paste
+at once, so their Enter still confirms the receipt. A busy agent's tool events
+never confirm the previous input: only an input-acceptance event (a submitted
+or queued prompt, a turn or task start) or that native proof lets the next
+request through. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 

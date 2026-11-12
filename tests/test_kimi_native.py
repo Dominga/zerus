@@ -18,6 +18,7 @@ the copy in the same process with exactly those. A child's environment is then t
 proven byte for byte by that process's argument area, read between two
 identical samples of its PID, start, image and supervisor; anything else fails.
 """
+import base64
 import hashlib
 import http.server
 import json
@@ -541,6 +542,10 @@ class Model(http.server.BaseHTTPRequestHandler):
             self.wfile.write(error)
             self.wfile.flush()
             return
+        # A test may hold the turn busy until it releases it (zerus-iitw8).
+        hold = getattr(self.server, 'hold', None)
+        if hold is not None and len(self.server.requests) == 1:
+            hold.wait(120)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -1011,6 +1016,33 @@ class NativeKimi(lifecycle.Harness):
             time.sleep(1)
             self.assertEqual(len(self.requests), requests)
             self.assertEqual(self.held(text), 1)
+
+    def test_busy_attachment_send_is_typed_once_and_delivered_once(self):
+        # zerus-iitw8: Kimi shows pasted image paths as text and its paste
+        # placeholder at once (no asynchronous attachment as in Claude), so a
+        # busy-time send keeps its single Enter and its submitted receipt.
+        name = self.launch()
+        hold = threading.Event()
+        self.model_server.hold = hold
+        self.addCleanup(hold.set)
+        first = 'Start the held fixture turn.'
+        self.send(name, self.payload(name, first))
+        self.until(lambda: self.inspect(name).get('activity') == 'busy' and len(self.requests) >= 1, name)
+        image = base64.b64encode(b'\x89PNG\r\n\x1a\n' + bytes(64)).decode()
+        text = 'Peer report while busy.\n' + '\n'.join('- Line %d of the report.' % n for n in range(1, 26))
+        payload = dict(self.payload(name, text), attachments=[dict(name='row-dark.png', mime='image/png', data_base64=image),
+                                                              dict(name='row-light.png', mime='image/png', data_base64=image)])
+        receipt = self.send(name, payload)
+        self.assertEqual(receipt['status'], 'submitted')
+        self.assertEqual(self.send(name, payload), receipt)
+        hold.set()
+        submitted = receipt['submitted_text']
+        def delivered():
+            return sum(any(m.get('role') == 'user' and submitted in str(m.get('content')) for m in request.get('messages', []))
+                       for request in self.requests[-1:])
+        self.until(delivered, name)
+        self.until(lambda: self.settled(name, receipt), name)
+        self.assertEqual(self.held(submitted), 1)
 
     def test_pause_and_resume_keep_the_conversation(self):
         name = self.launch()

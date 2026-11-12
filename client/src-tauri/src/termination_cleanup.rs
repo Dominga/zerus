@@ -1890,7 +1890,10 @@ pub(crate) fn assert_real_refused_offer(stopped: programs::Stopped, lost: progra
     let mut model = lock(&state.0.model);
     assert!(!model.jobs[0].busy, "a lost offer left the row busy");
     assert!(model.jobs[0].lookup_only);
-    assert!(!model.jobs[0].physically_released, "a lost offer claimed physical release");
+    assert!(
+        !model.jobs[0].physically_released,
+        "a lost offer claimed physical release"
+    );
     assert!(model.jobs[0].programs.is_none());
     {
         let view = model.view();

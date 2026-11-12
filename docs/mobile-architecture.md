@@ -650,7 +650,14 @@ gateway's filesystem.
 Questions share one answer and page owner between the inline card and expanded
 form. Actions distinguish sending, submitted, known non-delivery and unknown
 delivery. An answer is saved before transport, with a bounded aggregate receipt
-wait and HTTP cancellation. A successful question receipt retains exact
+wait and HTTP cancellation. An expanded question keeps its exact id and hash: a
+verified projection that no longer resolves it shows an inline closed or
+replaced notice, while an unverified one is checking during a refresh and
+unavailable otherwise. Pending but unanswerable requests replace the native
+veto with a clear reason and the projection's check age. These notices keep the
+saved answer and submitted lock, never obscure an unrelated delivery review and
+never enable an answer; only a verified projection that still carries the exact
+question does. A successful question receipt retains exact
 target/question/hash/request/answer evidence before any inspection refresh; stale
 or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.
@@ -716,6 +723,32 @@ such field, so their phones keep the canonical-head requirement. DeepSeek and
 OpenCode inspections carry the same field under the same gate. A peer's
 inspections, and those routed to this computer by machine, pass the mobile-peer
 entry, which admits `--current-read` only for a main inspection.
+
+Android and iOS acknowledge those current values from the open conversation's
+verified inspection. This is separate from the canonical history that moves
+their private read position.
+- **Visible.** Both phones apply one rule to the canonical read and to these
+  values. After the settled dwell, an item counts as visible when its part
+  inside the viewport is at least the smallest of its height, its readable part
+  (48 dp on Android, 48 pt on iOS) and the viewport height. A short row must be
+  wholly visible; a taller row, or a questions pane of any height, needs its
+  readable part. The 1-unit tail sentinel counts when it starts inside the
+  viewport and ends at most 2 units past it (pixels on Android, points on iOS),
+  allowing for layout rounding.
+- **Reply.** It is sent after the same settled visibility dwell, with overlays
+  excluded, once the conversation shows its latest messages and either its tail
+  or its newest displayed row is visible.
+- **Attention signature.** It is sent only when `attention_complete` is true and
+  the listed questions were visible. Without questions, the same tail rule
+  applies, so a conversation that only asks a question is covered too.
+- **Source of values.** Values come only from that inspection, never from a
+  catalog row. An inspection with other values restarts the dwell.
+- **Mark read.** An explicit Mark read shares both values.
+- **What stays the same.** This never advances the private read position, the
+  unread divider or the counts. Read all still shares replies only. Both phones
+  share these rules, including partly visible layouts that pin the visibility
+  rule, through `mobile/fixtures/current-read.json`, and every
+  shared mark goes through one delivery path with the existing retries.
 
 Android Sessions publishes catalog rows with local read decoration in one
 background-prepared update and retains unchanged card identities. Its reply
@@ -926,7 +959,8 @@ every stale conversation has been tried, rather than waiting for later refreshes
 Read positions are private to the phone and follow the canonical conversation
 across a verified resume. Incoming agent messages count; tool events and the
 user's own messages do not. Automatic read progress advances only after
-content is actually visible in the active conversation, with overlays excluded.
+content is actually visible in the active conversation, with overlays excluded;
+a row is visible under the shared rule described for current values above.
 For authenticated canonical rows, the visible message position acknowledges
 incoming replies before it in the window's server order. A tall own message or
 compaction summary can therefore advance that incoming prefix without counting

@@ -847,6 +847,13 @@ fixtures retain the variable-path rm warning and exact directory fence using
 comparison form was refused. Timeout diagnostics retain bounded native tool
 results beside the screen so execution errors remain visible when Claude
 collapses a completed tool call.
+Claude 2.1.322 attaches a pasted line that is only an image path asynchronously
+and swallows an Enter while it shows `Pasting…` (zerus-iitw8). The busy input
+contracts send a message whose lines name two 6000x4000 screenshots, with two
+attachments, idle and during a running tool: Claude must settle, enter once and
+prove the submission in its transcript (`NativeHookedImagesClaude` also runs
+hgs's own UserPromptSubmit hook, which takes the state lock); Codex queues and
+delivers it once; Kimi delivers it once after a turn the fixture model holds.
 Claude offers a one-time default permission mode change; fixtures set
 `hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
 a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.

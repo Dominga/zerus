@@ -518,6 +518,24 @@ class ReadMarks(unittest.TestCase):
         self.assertIsNone(row['attention_signature'])
         self.assertEqual(row['phase'], 'working')
 
+    def test_current_read_reports_an_unreadable_question_index_as_incomplete(self):
+        self.codex_question()
+        self.assertTrue(self.inspect('--current-read')['current_read']['attention_complete'])
+        # zerus-a4mub.28: an index that cannot be read leaves the questions unknown.
+        # The listing and `hgs read` keep counting it as none.
+        rollout = Path(self.record['transcript'])
+        lines = rollout.read_text().splitlines(keepends=True)
+        rollout.write_text(json.dumps(dict(type='session_meta', payload=dict(id=str(uuid.uuid4())))) + '\n'
+                           + ''.join(lines[1:]))
+        self.assertIsNone(self.listing()['attention_signature'])
+        row = self.inspect('--current-read')
+        self.assertIn('pending_questions_error', row)
+        current = row['current_read']
+        self.assertFalse(current['attention_complete'])
+        self.assertRegex(current['attention_signature'], HEX)
+        self.assertFalse(self.mark(attention_signature=current['attention_signature'])['applied']['attention_signature'])
+        self.assertFalse((self.state / 'read-marks.json').exists())
+
     def test_saved_session_lists_no_optional_questions(self):
         self.codex_question()
         self.assertEqual(self.listing()['optional_questions']['count'], 1)

@@ -1098,6 +1098,40 @@ mod tests {
             "Which checks?":answer_text(&items[0], &answers[0]),"Anything else?":answer_text(&items[1], &answers[1])}}});
         assert!(response_matches(&card, &answers, &event));
     }
+    /// Only a question listing may grow an unviewed pane to fit a clipped
+    /// Claude approval (`claude_approval::listed`); guards read the screen as
+    /// it is. A deadline or a partial Codex index must never turn a listing
+    /// into a guard: batch 5 once dropped pane fitting from inspection() so.
+    #[test]
+    fn listings_fit_clipped_claude_approvals_and_guards_do_not() {
+        use super::super::claude_approval::LAST_FIT;
+        let pid = std::process::id();
+        // Idle and without a supervisor: every reader stays off the terminal
+        // and the state root, and the approval read still records its fit.
+        let record = json!({"agent":"claude","run_id":"run","conversation_id":"conversation","phase":"idle",
+            "pid":pid,"process_start":super::super::storage::process_start(pid)});
+        let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let fit = |read: &dyn Fn()| {
+            LAST_FIT.with(|last| last.set(None));
+            read();
+            LAST_FIT.with(std::cell::Cell::get)
+        };
+        assert_eq!(
+            fit(&|| drop(inspection(&record, true, deadline()).unwrap())),
+            Some(true),
+            "inspection() is a listing"
+        );
+        assert_eq!(
+            fit(&|| drop(current(&record).unwrap())),
+            Some(true),
+            "current() is a listing"
+        );
+        assert_eq!(
+            fit(&|| drop(current_until(&record, deadline()).unwrap())),
+            Some(false),
+            "current_until() is a guard"
+        );
+    }
     fn record() -> Value {
         json!({"agent":"kimi","run_id":"run","conversation_id":"session_test","active_tools":{"tool_test":{"name":"AskUserQuestion"}}})
     }

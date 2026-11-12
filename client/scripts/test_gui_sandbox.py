@@ -14,6 +14,7 @@ import gui_sandbox  # noqa: E402
 # Smokes that start a built app. Each wraps its outer command in the sandbox;
 # those with a Python worker also refuse a reachable guard before the app.
 APP_SMOKES = {
+    "attention-filter-smoke.py": True,
     "phase4-smoke.py": False,
     "updates-smoke.py": False,
     "file-reference-smoke.py": True,

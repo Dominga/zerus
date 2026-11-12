@@ -6,8 +6,9 @@ import { ChipPopover } from "./ChipPopover";
 import { UsageMeters, type UsageIndicator } from "../components/UsageMeter";
 import { useNow } from "../../store/latest";
 import { followSessionUsage, refreshSessionUsage, sessionUsage, startSessionUsage, stopSessionUsage } from "../../store/sessionUsage";
-import { setAccountMachine, setRequestedProfile, loadAccounts } from "../../store/accounts";
+import { accountsPage, setAccountMachine, setRequestedProfile, loadAccounts } from "../../store/accounts";
 import { requestAccountSwitch, switchable } from "../../store/accountSwitch";
+import { accountNameForId } from "../provider-selection";
 import { setPage } from "../../store/ui";
 import { openInspector } from "../../store/inspector";
 import { text } from "../../store/settings";
@@ -36,6 +37,12 @@ export function AccountUsageChip(props: { session: Session }) {
   let chip!: HTMLButtonElement;
   const online = () => !computerOffline(props.session.computer);
   const canSwitch = () => switchable(props.session.accountProvider || props.session.agent);
+  const accountName = () => {
+    const provider = props.session.accountProvider || props.session.agent;
+    const id = props.session.accountId || `native-${provider}`;
+    return accountNameForId(accountsPage(), props.session.computer, provider, id)
+      || u().id || props.session.accountId || tr("the native account");
+  };
   const openAccount = () => {
     setOpen(false);
     const s = props.session;
@@ -65,7 +72,7 @@ export function AccountUsageChip(props: { session: Session }) {
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
         <ChipPopover open={open()} anchor={chip} label={tr("Account usage")} keyboard={false} class="usage-limit-pop" onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>
-          <p class="muted">{tr("This session runs on %1.", u().id || props.session.accountId || tr("the native account"))}</p>
+          <p class="muted">{tr("This session runs on %1.", accountName())}</p>
           <div class="cache-actions">
             <Show when={canSwitch()}>
               <button type="button" class="btn small" onClick={openSwitch}>{tr("Switch this session's account…")}</button>

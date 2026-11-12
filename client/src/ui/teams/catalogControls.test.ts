@@ -70,10 +70,11 @@ describe("model and effort menus (Qt teamRoleModel, teamRoleEffort)", () => {
     expect(modelOptions({ agent: "codex", model: "custom" }, []).map((option) => option.id)).toEqual(["gpt-5.5-codex", "gpt-5.5", "custom"]);
   });
 
-  it("offers the chosen model's efforts, else the defaults, with the model's own first", () => {
+  it("offers the chosen model's own efforts and uses the static list only without a catalog", () => {
     expect(effortOptions("gpt-5.5", catalog)).toEqual(["", "low", "high"]);
-    expect(effortOptions("o4", catalog)).toEqual(["", "low", "medium", "high", "xhigh"]);
+    expect(effortOptions("o4", catalog)).toEqual([""]);
     expect(effortOptions("gpt-5.5", catalog, "max")).toEqual(["", "low", "high", "max"]);
+    expect(effortOptions("o4", undefined)).toEqual(["", "low", "medium", "high", "xhigh"]);
   });
 
   it("another agent takes its first model and the default account", () => {

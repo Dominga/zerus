@@ -3,6 +3,7 @@ import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { AgentLogo, Icon } from "../lib/icons";
 import { providerName } from "../lib/usage";
+import { accountNameForProfile } from "../provider-selection";
 import { sessionSwitchAccount, sessionSwitchPreview } from "../../bridge";
 import { accountsPage, loadAccounts } from "../../store/accounts";
 import { accountGroups, accountOf, consumeAccountSwitch, movable, moveOutcome, switchOutcome, switchRequest, takesSession } from "../../store/accountSwitch";
@@ -29,8 +30,8 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean; 
   const provider = () => props.session.accountProvider || props.session.agent || "";
   const current = () => accountOf(provider(), props.session.accountId ?? "");
   const groups = () => accountGroups(accountsPage(), props.session.computer, provider(), current());
-  const label = () => groups().find((group) => group.provider === provider())?.rows.find((row) => row.id === current())?.label
-    || props.session.accountId || tr("Native account");
+  const currentRow = () => groups().find((group) => group.provider === provider())?.rows.find((row) => row.id === current());
+  const label = () => accountNameForProfile(accountsPage(), currentRow()) || props.session.accountId || current();
   const others = () => groups().reduce((count, group) => count + group.rows.filter((row) => row.id !== current() || group.provider !== provider()).length, 0);
   const locked = () => props.locked ?? "";
   const crossing = () => !!target() && target()!.provider !== provider();
@@ -106,12 +107,13 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean; 
                       {(option) => {
                         const own = () => group.provider === provider() && option.id === current();
                         const ready = () => takesSession(option);
+                        const name = () => accountNameForProfile(accountsPage(), option) || option.id;
                         return (
                           <button type="button" role="menuitem" class="acct-switch-row" classList={{ blocked: !ready() }}
                             disabled={own() || !ready()} title={trText(option.detail)}
-                            onClick={() => ask({ id: option.id, label: option.label, provider: group.provider })}>
+                            onClick={() => ask({ id: option.id, label: name(), provider: group.provider })}>
                             <AgentLogo agent={group.provider} size={12} fallback={<Icon name="accounts" size={12} />} />
-                            <span class="ell">{option.label || option.id}</span>
+                            <span class="ell">{name()}</span>
                             <Show when={own()}><Icon name="check" size={12} /></Show>
                             <Show when={!own() && !ready()}><span class="dim">{tr("Unavailable account")}</span></Show>
                             <Show when={!own() && ready() && group.provider === provider()}><span class="dim">{option.usage.status}</span></Show>

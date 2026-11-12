@@ -4,6 +4,7 @@ import { array, object, string, type Json } from "../ui/lib/json";
 import {
   addModelOptions, catalogSupported, markCatalogFavorite, ModelPicker, updateText, type ModelOption, type PickerView,
 } from "../ui/sessions/opencode-models";
+import { effortOptions, normalizeModelCatalog, selectModel } from "../ui/provider-selection";
 
 // New session's OpenCode part (tray/src/NewSessionDialog.cpp 1145-1313 with
 // 328-339 and 397-453): the model list and its picker, efforts, the folder
@@ -165,12 +166,14 @@ export function createOpenCode(h: OpenCodeHost) {
 
   /** A changed model keeps the chosen effort only when it offers that variant too (1209-1219). */
   function updateEfforts() {
-    const selectedEffort = effortValue;
     const current = currentOption();
-    const offered = current?.efforts ?? [];
-    const enabled = opencode() && modelValue !== "" && offered.length > 0;
-    efforts = [defaultEffort(), ...(enabled ? offered.map((value, i) => ({ value, label: current?.effortLabels[i] ?? value })) : [])];
-    effortValue = efforts.some((e) => e.value === selectedEffort) ? selectedEffort : "";
+    const catalog = normalizeModelCatalog({ models: current ? [{
+      id: current.value, label: current.label, effort_options: current.efforts, effort_labels: current.effortLabels,
+    }] : [] });
+    const selected = selectModel(catalog, modelValue, effortValue);
+    const enabled = opencode() && modelValue !== "" && (current?.efforts.length ?? 0) > 0;
+    efforts = effortOptions(catalog, modelValue, selected.effortId, tr("Default")).map((effort) => ({ value: effort.id, label: effort.label }));
+    effortValue = selected.effortId;
     effortVisible = enabled;
   }
 

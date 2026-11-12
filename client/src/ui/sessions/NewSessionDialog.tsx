@@ -65,7 +65,7 @@ function rowOf<T>(find: () => T | undefined): () => T {
 // views.newSession is dense (the default).
 export type DenseKind = "subscription" | "balance" | "local" | "terminal";
 /** One account of a subscription agent: the chip's row. */
-export interface DenseAccount { index: number; email: string; connected: boolean; fiveHour: number; week: number; reset: string }
+export interface DenseAccount { index: number; label: string; connected: boolean; fiveHour: number; week: number; reset: string }
 /** One tile of the rail and what it shows over the next 12x2 meters (Agent in NewSessionDense.h). */
 export interface DenseAgent {
   key: string;
@@ -141,7 +141,7 @@ export function denseAgentsOf(rows: readonly AccountRow[], agent: string, accoun
       const accountWeek = accountWindows.find((window) => window.minutes === 10080);
       return {
         index: entry.index,
-        email: accountUsage?.identity.email || entry.row.name,
+        label: entry.row.name,
         connected: !SIGNED_OUT.has(accountUsage?.status ?? ""),
         fiveHour: accountFive?.used ?? -1,
         week: accountWeek?.used ?? -1,
@@ -420,18 +420,18 @@ function DenseTile(props: { agent: DenseAgent; machine: string; disabled: boolea
   );
 }
 
-/** The chosen account when an agent has several: its email, its 5h and week use and the 5h reset, opening the list. */
+/** The chosen account when an agent has several: its Accounts label, 5h and week use and the 5h reset, opening the list. */
 function DenseChip(props: { agent: DenseAgent; open: boolean; onOpen(open: boolean): void }) {
   const chosen = () => props.agent.accounts[props.agent.chosen];
   return (
     <button type="button" class="nsd-chip" classList={{ on: props.open }} aria-haspopup="listbox" aria-expanded={props.open}
-      aria-label={tr("Account: %1", chosen()?.email ?? "")}
+      aria-label={tr("Account: %1", chosen()?.label ?? "")}
       title={props.agent.accounts.map((account) => (account.connected
-        ? tr("%1 — 5h %2%, wk %3%", account.email, Math.round(Math.max(0, account.fiveHour)), Math.round(Math.max(0, account.week)))
-        : tr("%1 — not signed in", account.email))).join("\n")}
+        ? tr("%1 — 5h %2%, wk %3%", account.label, Math.round(Math.max(0, account.fiveHour)), Math.round(Math.max(0, account.week)))
+        : tr("%1 — not signed in", account.label))).join("\n")}
       onClick={() => props.onOpen(!props.open)}>
       <span class="nsd-count">{tr("%1 acc", props.agent.accounts.length)}</span>
-      <span class="nsd-chip-email ell">{chosen()?.email}</span>
+      <span class="nsd-chip-email ell">{chosen()?.label}</span>
       <Show when={chosen()?.connected} fallback={<span class="nsd-chip-absent">{tr("not signed in")}</span>}>
         <span class="nsd-meter"><i class="nsd-bar"><b style={{ width: `${Math.max(1, Math.min(100, chosen()!.fiveHour))}%`, "background-color": denseUsageColor(Math.max(0, chosen()!.fiveHour)) }} /></i><span>5h</span></span>
         <span class="nsd-meter"><i class="nsd-bar"><b style={{ width: `${Math.max(1, Math.min(100, chosen()!.week))}%`, "background-color": denseUsageColor(Math.max(0, chosen()!.week)) }} /></i><span>wk</span></span>
@@ -519,12 +519,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
       return { title: tr("%1 — not connected", current.name), details: tr("sign in to use this account"), tone: "warn" };
     }
     if (current.kind === "subscription") {
-      const email = current.accounts[current.chosen]?.email ?? "";
+      const accountLabel = current.accounts[current.chosen]?.label ?? "";
       const five = launchWindows(current.row >= 0 ? s().accounts[current.row]?.usage : undefined, denseMinute()).find((window) => window.minutes === 300);
       const parts: string[] = [];
       if (current.fiveHour >= 0) parts.push(tr("5h %1% used, resets in %2", Math.round(current.fiveHour), denseResetWords(five?.resetsIn)));
       if (current.week >= 0) parts.push(tr("week %1% used", Math.round(current.week)));
-      return { title: email ? `${current.name} — ${email}` : current.name, details: parts.join(", "), tone: "" };
+      return { title: accountLabel ? `${current.name} — ${accountLabel}` : current.name, details: parts.join(", "), tone: "" };
     }
     if (current.kind === "balance") return { title: current.name, details: current.balance ? tr("balance %1, pay-as-you-go", current.balance) : tr("API key configured"), tone: "" };
     if (current.key === "ollama") return { title: tr("Ollama"), details: tr("local on %1", s().host || machineCards[""]?.host || machine), tone: "" };
@@ -763,7 +763,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                 <li role="option" aria-selected={account.index === denseCurrent()!.row} classList={{ on: account.index === denseCurrent()!.row }}
                   onClick={() => { act.chooseAccount(account.index); setDenseListOpen(false); }}>
                   <Show when={account.index === denseCurrent()!.row}><Icon name="check" size={12} class="nsd-check" /></Show>
-                  <span class="ell nsd-acc-email">{account.email}</span>
+                  <span class="ell nsd-acc-email">{account.label}</span>
                   <Show when={account.connected} fallback={<span class="nsd-chip-absent">{tr("not signed in")}</span>}>
                     <span class="nsd-meter"><i class="nsd-bar"><b style={{ width: `${Math.max(1, Math.min(100, account.fiveHour))}%`, "background-color": denseUsageColor(Math.max(0, account.fiveHour)) }} /></i><span>{Math.round(Math.max(0, account.fiveHour))}%</span></span>
                     <span class="nsd-meter"><i class="nsd-bar"><b style={{ width: `${Math.max(1, Math.min(100, account.week))}%`, "background-color": denseUsageColor(Math.max(0, account.week)) }} /></i><span>{Math.round(Math.max(0, account.week))}%</span></span>

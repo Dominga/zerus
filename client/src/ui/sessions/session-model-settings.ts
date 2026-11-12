@@ -1,6 +1,7 @@
 import type { Session } from "./types";
 import { effortValid } from "./opencode-models";
 import { tr } from "../../i18n";
+import { effortOptions as sharedEffortOptions, normalizeModelCatalog } from "../provider-selection";
 
 export interface ModelChoice { id: string; label: string; effort_options: string[]; effort_labels: string[] }
 export interface ModelContext {
@@ -12,22 +13,15 @@ export interface ModelContext {
   answering?: boolean;
 }
 export const text = (value: unknown) => typeof value === "string" ? value : "";
-const short = (value: unknown, limit: number) => { const s = text(value); return s.length <= limit && !/\p{Cc}/u.test(s) ? s : ""; };
 
 /** The exact account's inspected catalog, in native order, with bounded choices. */
 export function modelChoices(value: unknown): ModelChoice[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  return value.slice(0, 256).flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const id = short(entry.value ?? entry.id, 256);
-    if (!id || seen.has(id)) return [];
-    seen.add(id);
-    const variants: unknown[] = Array.isArray(entry.effort_options) ? entry.effort_options.slice(0, 64) : [];
-    const labels = Array.isArray(entry.effort_labels) ? entry.effort_labels : [];
-    const efforts = variants.flatMap((v, i) => short(v, 40) ? [{ value: text(v), label: short(labels[i], 80) || text(v) }] : []);
-    return [{ id, label: short(entry.label, 160) || id, effort_options: efforts.map((e) => e.value), effort_labels: efforts.map((e) => e.label) }];
-  });
+  return normalizeModelCatalog(value).models.map((model) => ({
+    id: model.id,
+    label: model.label,
+    effort_options: model.efforts.map((effort) => effort.id),
+    effort_labels: model.efforts.map((effort) => effort.label),
+  }));
 }
 
 /** MessageComposer::setModelSettings/updateSettingsButton/updateSettingsApply. */
@@ -62,12 +56,13 @@ export function settingsView(input: ModelContext, changing = false) {
 
 /** Preserve the previous effort when offered; OpenCode's empty Default is explicit. */
 export function effortChoices(options: ModelChoice[], model: string, preferred: string, openCode: boolean, currentModel: string, currentEffort: string) {
-  const option = options.find((m) => m.id === model);
-  const choices: { value: string; label: string }[] = openCode ? [{ value: "", label: "Default" }] : [];
-  option?.effort_options.forEach((effort, i) => {
-    if ((!openCode || effortValid(effort)) && !choices.some((c) => c.value === effort)) choices.push({ value: effort, label: openCode ? option.effort_labels[i] || effort : effort });
-  });
-  if (openCode && model === currentModel && effortValid(currentEffort) && !choices.some((c) => c.value === currentEffort)) choices.push({ value: currentEffort, label: currentEffort });
-  if (!choices.length) choices.push({ value: "", label: tr("Provider default") });
-  return { choices, value: choices.some((c) => c.value === preferred) ? preferred : choices[0].value };
+  const catalog = normalizeModelCatalog(options);
+  if (openCode) {
+    for (const option of catalog.models) option.efforts = option.efforts.filter((effort) => effortValid(effort.id));
+  }
+  const current = openCode && model === currentModel && effortValid(currentEffort) ? currentEffort : "";
+  let choices = sharedEffortOptions(catalog, model, current, openCode ? "Default" : tr("Provider default"));
+  if (!openCode && catalog.models.some((option) => option.id === model && option.efforts.length)) choices = choices.filter((effort) => effort.id !== "");
+  const mapped = choices.map((effort) => ({ value: effort.id, label: effort.label }));
+  return { choices: mapped, value: mapped.some((choice) => choice.value === preferred) ? preferred : mapped[0].value };
 }

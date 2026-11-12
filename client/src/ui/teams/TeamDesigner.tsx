@@ -20,6 +20,7 @@ import { TeamCatalog } from "./TeamCatalog";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { DESIGNER_AGENTS, designerModelLabel, effortAllowed, effortLabel } from "./designerModels";
 import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import { TextArea } from "../lib/TextField";
 
 // Task #44: Qt's TeamDesignerPage. The designer's conversation (the running
@@ -209,8 +210,9 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
                             <button type="button" role="menuitem" classList={{ on: model() === option.id }}
                               data-designer-agent={agent()} data-designer-model={option.id}
                               onClick={() => {
-                                setModel(option.id);
-                                setEffort("");
+                                const next = selectModel(normalizeModelCatalog(modelCatalogs.get(modelRole()) ?? []), option.id, effort());
+                                setModel(next.modelId);
+                                setEffort(next.effortId);
                                 setModelMenu(false);
                               }}>
                               {option.id ? option.label : tr("Default model")}

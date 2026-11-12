@@ -53,6 +53,7 @@ pub mod machine;
 pub mod machine_connections;
 pub mod machine_probe;
 pub mod model_servers;
+pub mod model_catalog;
 pub mod macos_notify;
 pub mod maintenance;
 pub mod marks;

@@ -1,4 +1,5 @@
 import { tr } from "../i18n";
+import { accountOptions } from "../ui/provider-selection";
 import { parseCatalog, type Catalog, type CatalogTemplate } from "../ui/teams/catalog";
 import type { AccountsView, ComputerId, TeamList, TeamSummary } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -41,16 +42,12 @@ export interface AccountChoice { id: string; label: string; provider: string; si
  * on another computer is offered that computer's accounts.
  */
 export function accountChoices(view: Pick<AccountsView, "accounts"> | undefined, computer: ComputerId = ""): AccountChoice[] {
-  const out: AccountChoice[] = [];
-  const seen = new Set<string>();
-  for (const account of view?.accounts ?? []) {
-    for (const profile of account.members) {
-      if (profile.host !== computer || profile.native || !profile.id || seen.has(`${profile.provider}\n${profile.id}`)) continue;
-      seen.add(`${profile.provider}\n${profile.id}`);
-      out.push({ id: profile.id, label: profile.label || account.label || profile.id, provider: profile.provider === "deepseek" ? "dsh" : profile.provider, signedIn: profile.signed_in });
-    }
-  }
-  return out;
+  return accountOptions(view, { host: computer, includeNative: false }).map((option) => ({
+    id: option.ref.profileId,
+    label: option.label,
+    provider: option.ref.provider,
+    signedIn: option.signedIn,
+  }));
 }
 
 /** The selected local, live session that may lead (Qt's coordinator); none for a peer's or an archived one. */

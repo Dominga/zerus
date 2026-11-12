@@ -6,6 +6,7 @@ import { accountsPage, loadAccounts } from "../../store/accounts";
 import { accountChoices } from "../../store/newTeamSources";
 import { windowPort } from "./ProposalCards";
 import { createModelCatalogs } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import { SWAP_AGENTS, firstModel, swapChoice, swapMemberCall, swapOptions, swapSessions, type SwapChoice } from "./swapMember";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import { TextInput } from "../lib/TextField";
@@ -29,7 +30,7 @@ export function SwapMemberDialog(props: { computer: ComputerId; team: TeamView; 
   const catalogs = createModelCatalogs((computer, agentId, accountId) => teamRoleModels(computer, agentId, accountId), () => setTick((n) => n + 1));
   const role = () => props.member.role || props.member.id;
   const sessions = () => swapSessions(props.team, catalog.rows, catalog.order);
-  const accounts = () => accountChoices(accountsPage());
+  const accounts = () => accountChoices(accountsPage(), props.computer);
   const catalogOf = () => catalogs.get({ computer: props.computer, agent: agent(), account: account() });
   const options = () => (tick(), swapOptions(agent(), model(), account(), catalogOf(), accounts(), effort()));
   const models = () => options().models;
@@ -54,8 +55,14 @@ export function SwapMemberDialog(props: { computer: ComputerId; team: TeamView; 
     setEffort("");
   };
   const changeModel = (value: string) => {
-    setModel(value);
-    if (!efforts().includes(effort())) setEffort("");
+    const next = selectModel(normalizeModelCatalog(catalogOf() ?? []), value, effort());
+    setModel(next.modelId);
+    setEffort(next.effortId);
+  };
+  const changeAccount = (value: string) => {
+    setAccount(value);
+    setModel("");
+    setEffort("");
   };
   const choice = (): SwapChoice | undefined => {
     if (!fresh()) {
@@ -104,7 +111,7 @@ export function SwapMemberDialog(props: { computer: ComputerId; team: TeamView; 
             </select>
           </label>
           <label class="team-swap-field">{tr("Account")}
-            <select class="field" value={account()} disabled={!fresh()} onChange={(event) => setAccount(event.currentTarget.value)}>
+            <select class="field" value={account()} disabled={!fresh()} onChange={(event) => changeAccount(event.currentTarget.value)}>
               <option value="">{tr("Default account")}</option>
               <For each={accountOptions()}>{(found) => (
                 <option value={found.id}>{found.signedIn ? found.label || found.id : tr("%1 (signed out)", found.label || found.id)}</option>

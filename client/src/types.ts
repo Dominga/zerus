@@ -569,6 +569,9 @@ export const emptyUsage = (provider = ""): Usage => ({
   windows: [], balances: [], credits: null, refreshing: false, refresh_error: false, offline: false,
 });
 export type MemberState = "ready" | "offline" | "not-installed" | "apikey" | "signed-out" | "keychain" | "desktop" | "unavailable" | "expired" | "checking" | "unknown";
+export interface CatalogModel {
+  id: string; label: string; effort_options: string[]; effort_labels?: string[]; default_effort?: string;
+}
 export interface OpenCodeInfo { providers: { label: string; connection: string; models: string }[]; truncated: boolean; stale_catalog_at: number | null; stopped: boolean }
 export interface Profile {
   key: string; host: ComputerId; machine: string; id: string; label: string; provider: string;

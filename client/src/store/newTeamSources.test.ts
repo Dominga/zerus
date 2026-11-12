@@ -32,12 +32,12 @@ describe("New team sources", () => {
       { key: "b", label: "DeepSeek", provider: "deepseek", members: [profile({ id: "ds", label: "", provider: "deepseek", signed_in: false }), profile({})] },
     ] } as unknown as AccountsView;
     expect(accountChoices(view)).toEqual([
-      { id: "work", label: "Work", provider: "codex", signedIn: true },
+      { id: "work", label: "Codex", provider: "codex", signedIn: true },
       { id: "ds", label: "DeepSeek", provider: "dsh", signedIn: false },
     ]);
     expect(accountChoices(undefined)).toEqual([]);
     // Task 200 (Qt m_accounts[host]): a member on another computer gets that computer's accounts.
-    expect(accountChoices(view, "studio")).toEqual([{ id: "remote", label: "Work", provider: "codex", signedIn: true }]);
+    expect(accountChoices(view, "studio")).toEqual([{ id: "remote", label: "Codex", provider: "codex", signedIn: true }]);
   });
 
   it("finds the draft a session leads, and lists the drafts newest first (task 200)", () => {

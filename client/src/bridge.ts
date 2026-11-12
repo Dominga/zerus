@@ -122,7 +122,7 @@ export const catalogEditorImport = (computer: ComputerId) => teamsOnly<import(".
 export const catalogRoute = (computer: ComputerId, goal: string) => teamsOnly<Record<string, unknown>>("catalog_route", { computer, goal });
 /** Task 50: the models a catalog role's account offers (its account, or the agent's native one); empty outside the desktop app. */
 export const teamRoleModels = (computer: ComputerId, agent: string, account: string) =>
-  inTauri() ? invoke<{ id: string; label: string; effort_options: string[] }[]>("team_role_models", { computer, agent, account }) : Promise.resolve([]);
+  inTauri() ? invoke<import("./types").CatalogModel[]>("team_role_models", { computer, agent, account }) : Promise.resolve([]);
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
@@ -653,7 +653,7 @@ export async function accountsView(force = false): Promise<AccountsView> {
 }
 export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope" | "mark";
 export interface AccountModelCatalog {
-  models: {id:string;label:string;effort_options:string[]}[];
+  models: import("./types").CatalogModel[];
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string;color?:string;emoji?:string}

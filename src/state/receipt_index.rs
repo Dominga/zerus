@@ -116,7 +116,15 @@ fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 fn sql<T>(r: rusqlite::Result<T>) -> Result<T> {
-    r.map_err(|_| "Receipt index is unavailable".into())
+    // SQLite messages may contain filesystem paths or values. Numeric codes
+    // identify failures without exposing those details to callers.
+    r.map_err(|error| match error {
+        rusqlite::Error::SqliteFailure(code, _) => format!(
+            "Receipt index is unavailable (SQLite {:?}, extended {})",
+            code.code, code.extended_code
+        ),
+        _ => "Receipt index is unavailable (SQLite result conversion)".into(),
+    })
 }
 fn bounded_identity(value: &str, limit: usize) -> bool {
     value.len() <= limit && !value.chars().any(char::is_control)
@@ -302,9 +310,31 @@ pub(super) struct Catalog {
 }
 impl Catalog {
     fn open(state: &Path, create: bool) -> Result<Self> {
-        let path = state.join(DATABASE);
         if create {
             private_dir(state)?;
+        }
+        // SQLite NOFOLLOW rejects ancestor aliases too (macOS /var and /tmp).
+        // Resolve only ancestors: the state directory and database leaf remain
+        // in the no-follow path, including if either is replaced concurrently.
+        let state = match state.file_name() {
+            Some(name) => {
+                let parent = state
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                crate::platform::canonical(parent)
+                    .map_err(|_| "Receipt index is unavailable")?
+                    .join(name)
+            }
+            None => {
+                crate::platform::canonical(state).map_err(|_| "Receipt index is unavailable")?
+            }
+        };
+        if !fs::symlink_metadata(&state).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
+            return Err("Receipt index is unavailable".into());
+        }
+        let path = state.join(DATABASE);
+        if create {
             match crate::platform::private_open(OpenOptions::new().write(true).create_new(true))
                 .open(&path)
             {
@@ -390,11 +420,12 @@ impl Catalog {
             // ADD COLUMN and its seed leaves rows at change=0 without a
             // published frontier. Repair both in one transaction, so a reader
             // never sees a Complete frontier that does not cover its rows.
-            let columns: Vec<String> = sql(db.prepare("SELECT name FROM pragma_table_info('receipt_rows')"))?
-                .query_map([], |row| row.get(0))
-                .map_err(|_| "Receipt index is unavailable".to_owned())?
-                .collect::<std::result::Result<_, _>>()
-                .map_err(|_| "Receipt index is unavailable".to_owned())?;
+            let columns: Vec<String> =
+                sql(db.prepare("SELECT name FROM pragma_table_info('receipt_rows')"))?
+                    .query_map([], |row| row.get(0))
+                    .map_err(|_| "Receipt index is unavailable".to_owned())?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|_| "Receipt index is unavailable".to_owned())?;
             let has_stamp = columns.iter().any(|column| column == "stamp");
             let has_change = columns.iter().any(|column| column == "change");
             let unseeded = if has_change {
@@ -428,10 +459,14 @@ impl Catalog {
                 None
             };
             if !has_stamp {
-                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';"))?;
+                sql(db.execute_batch(
+                    "ALTER TABLE receipt_rows ADD COLUMN stamp TEXT NOT NULL DEFAULT '';",
+                ))?;
             }
             if !has_change {
-                sql(db.execute_batch("ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0;"))?;
+                sql(db.execute_batch(
+                    "ALTER TABLE receipt_rows ADD COLUMN change INTEGER NOT NULL DEFAULT 0;",
+                ))?;
             }
             if change_repair {
                 // Seed every unseeded original once; later allocations
@@ -490,7 +525,6 @@ impl Catalog {
                        UPDATE receipt_meta SET value=lower(hex(randomblob(16))) WHERE key='epoch';
                      END;",
                 ))?;
-
             }
             sql(db.execute(
                 "INSERT OR IGNORE INTO receipt_meta VALUES('epoch',?)",
@@ -932,7 +966,13 @@ impl Catalog {
         ))?;
         Ok((epoch, secret, current))
     }
-    fn changed_page(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<ChangedPage> {
+    fn changed_page(
+        &self,
+        scope: &Scope,
+        cursor: &str,
+        limit: usize,
+        files: bool,
+    ) -> Result<ChangedPage> {
         if !(1..=PAGE_LIMIT).contains(&limit) || cursor.len() > 2048 {
             return Err("Invalid receipt change page".into());
         }
@@ -943,7 +983,13 @@ impl Catalog {
         sql(transaction.commit())?;
         Ok(page)
     }
-    fn changed_page_snapshot(&self, scope: &Scope, cursor: &str, limit: usize, files: bool) -> Result<ChangedPage> {
+    fn changed_page_snapshot(
+        &self,
+        scope: &Scope,
+        cursor: &str,
+        limit: usize,
+        files: bool,
+    ) -> Result<ChangedPage> {
         if scope.run.is_empty() && scope.conversation.is_empty() {
             return Err("Invalid receipt change page".into());
         }
@@ -959,9 +1005,15 @@ impl Catalog {
                 .decode(cursor.split_once('.').map_or(cursor, |(body, _)| body))
                 .map_err(|_| CURSOR_REJECTED)?;
             let expected = cursor_mac(&secret, &bytes);
-            let signature = cursor.split_once('.').map(|(_, signature)| signature).unwrap_or("");
+            let signature = cursor
+                .split_once('.')
+                .map(|(_, signature)| signature)
+                .unwrap_or("");
             if signature.len() != expected.len()
-                || !signature.bytes().zip(expected.bytes()).fold(true, |same, (a, b)| same & (a == b))
+                || !signature
+                    .bytes()
+                    .zip(expected.bytes())
+                    .fold(true, |same, (a, b)| same & (a == b))
             {
                 return Err(CURSOR_REJECTED.into());
             }
@@ -1010,7 +1062,11 @@ impl Catalog {
                 params![
                     scope.source.key(),
                     scope.agent,
-                    if initial { &scope.run } else { &scope.conversation },
+                    if initial {
+                        &scope.run
+                    } else {
+                        &scope.conversation
+                    },
                     after,
                     upper,
                     limit
@@ -1045,7 +1101,11 @@ impl Catalog {
         // coverage_verified(): a cache without its invalidation guards proves
         // no coverage.
         let verified = self.coverage_verified();
-        let ready = verified && complete && current_directory.as_ref().is_ok_and(|value| *value == stamp);
+        let ready = verified
+            && complete
+            && current_directory
+                .as_ref()
+                .is_ok_and(|value| *value == stamp);
         let coverage = if ready && errors == 0 {
             Coverage::Complete
         } else if ready || (indexed > 0 && stamp == "absent") {

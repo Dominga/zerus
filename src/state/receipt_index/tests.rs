@@ -935,3 +935,6 @@ fn unseeded_rows_or_a_behind_frontier_are_not_complete_and_repair_restarts_curso
     assert_eq!(changed.rows.len(), 2);
     assert!(changed.drained);
 }
+
+#[path = "path_tests.rs"]
+mod paths;

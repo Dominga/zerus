@@ -460,8 +460,14 @@ mod snapshot {
                     SnapshotError::Missing => "Codex catalog is missing".to_owned(),
                     SnapshotError::Failed(error) => error,
                 })?;
-            let identity = main.version.identity;
-            if original.get_or_insert(identity) != &identity {
+            // Across attempts only another file at the path is a replacement:
+            // a live writer's commits and checkpoints change the same file in
+            // place (its modification time too), and that attempt is retried.
+            // Within an attempt the full identity, modification time included,
+            // still detects every change (`read_source`, `unchanged`, the WAL)
+            // (zerus-wa90v).
+            let file = (main.version.identity.device, main.version.identity.inode);
+            if original.get_or_insert(file) != &file {
                 return Err("Codex catalog was replaced during its read".into());
             }
             match attempt(home, ids, until) {

@@ -10323,7 +10323,11 @@ requires Claude's own transcript to record the message: a new user row
 (`native: transcript`) or, while it works, a queue `enqueue` (`native: queue`).
 A new conversation with no transcript yet counts its settled composer emptying
 after Enter (`native: composer`). Both waits share one 8-second window from the
-paste. Otherwise the receipt stays `in_progress` with `delivery: uncertain`, its
+paste. In the WhiteWh fork (owner, 2026-11-13) the composer's frames read the
+pane's own cursor, one cheap terminal read, instead of the console's full input
+evidence: under a build's load that evidence took so long that the window read
+no composer at all and a delivered paste stayed unsent. The input check still
+runs once before the Enter. Otherwise the receipt stays `in_progress` with `delivery: uncertain`, its
 reason and the composer's text (at most 2,000 characters, never image bytes),
 and the error names that text; it is never retyped. Codex and Kimi show a paste
 at once, so their Enter still confirms the receipt. A busy agent's tool events

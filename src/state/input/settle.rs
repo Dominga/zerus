@@ -103,16 +103,34 @@ pub(super) fn composer_text(agent: &str, screen: &str, cursor_y: usize) -> Optio
     Some(text.chars().take(RESIDUE_CHARS).collect())
 }
 
+/// The pane's cursor for a frame. WhiteWh fork (owner, 2026-11-13): the
+/// pane's own cursor fields, one cheap terminal read. `input_state` gathers
+/// the console's full evidence (its processes and their command lines, input
+/// modes) through the pane's supervisor, which under a build's load takes so
+/// long that an eight-second window read no composer at all and a delivered
+/// paste stayed unsent. The input judge still runs once before the Enter
+/// (`checked_terminal`); a backend without pane fields keeps `input_state`.
+fn cursor(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim) -> Option<(usize, usize)> {
+    use backend::PaneField::{CursorX, CursorY};
+    if let Ok(info) = terminal.pane_info(backend::Target::Pane(claim.pane), &[CursorX, CursorY]) {
+        if let Some((Ok(x), Ok(y))) = info.pair().map(|(x, y)| (x.parse(), y.parse())) {
+            return Some((x, y));
+        }
+    }
+    let state = terminal.input_state(claim).ok()?;
+    Some((state.cursor_x.parse().ok()?, state.cursor_y.parse().ok()?))
+}
+
 /// One composer frame: its styled screen and the cursor, read with the same
 /// cursor before and after the capture.
 fn frame(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim) -> Option<(String, usize, usize)> {
-    let before = terminal.input_state(claim).ok()?;
+    let before = cursor(terminal, claim)?;
     let screen = String::from_utf8_lossy(&terminal.capture(claim.pane, backend::Capture::Styled).ok()?).into_owned();
-    let after = terminal.input_state(claim).ok()?;
-    if before.cursor_x != after.cursor_x || before.cursor_y != after.cursor_y {
+    let after = cursor(terminal, claim)?;
+    if before != after {
         return None;
     }
-    Some((screen, after.cursor_x.parse().ok()?, after.cursor_y.parse().ok()?))
+    Some((screen, after.0, after.1))
 }
 
 /// The composer's text now, as evidence (bounded), or None.
@@ -339,6 +357,32 @@ mod tests {
     }
     fn soon(ms: u64) -> Instant {
         Instant::now() + Duration::from_millis(ms)
+    }
+
+    /// A pane whose cursor reads from its fields while `input_state` (the
+    /// console's full evidence) refuses, as a supervisor under load does.
+    struct Fields(Frames);
+    impl backend::TerminalBackend for Fields {
+        fn pane_info(&self, _target: backend::Target, _fields: &[backend::PaneField]) -> Result<backend::PaneInfo> {
+            let (_, x, y) = self.0.current();
+            Ok(backend::PaneInfo::new(format!("{x}\t{y}\n")))
+        }
+        fn input_state(&self, _claim: &backend::InputClaim) -> Result<backend::InputState> {
+            Err("console evidence timed out".into())
+        }
+        fn capture(&self, pane: &str, mode: backend::Capture) -> Result<Vec<u8>> {
+            self.0.capture(pane, mode)
+        }
+    }
+
+    #[test]
+    fn the_settle_reads_the_panes_cursor_without_the_consoles_evidence() {
+        // WhiteWh fork (owner, 2026-11-13): under a build's load the evidence
+        // read timed out and a delivered paste stayed unsent.
+        let settled = (screen("Reply with just OK.", "⏵⏵ bypass permissions on"), 21, 2);
+        let terminal = Fields(Frames::new(vec![settled]));
+        assert_eq!(settle(&terminal, &claim(), soon(2_000)), Ok(()));
+        assert_eq!(residue(&terminal, &claim()).as_deref(), Some("Reply with just OK."));
     }
 
     #[test]

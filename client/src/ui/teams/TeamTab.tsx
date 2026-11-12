@@ -487,7 +487,7 @@ function SideColumn(props: {
               folded={folded().has(node.member.id)} onFold={() => fold(node.member.id)} onTask={props.onTask} />
           )}</For>
         </div>
-        <Show when={adding()}><AddMemberDialog close={() => setAdding(false)} submit={(member) => void model.addMember(member)} /></Show>
+        <Show when={adding()}><AddMemberDialog computer={props.computer} close={() => setAdding(false)} submit={(member) => void model.addMember(member)} /></Show>
       </section>
       <Divider orientation="horizontal" label={tr("Members and coordinator")} layout={teamLayout}
         value={teamLayout.membersShare()} min={SHARE.min} max={SHARE.max}

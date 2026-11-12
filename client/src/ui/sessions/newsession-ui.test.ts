@@ -185,13 +185,13 @@ describe("account rows (updateAccounts 876-952)", () => {
   });
 
   // pairsAndLimitsLaunchExactProfile and unknownAndEndedWindowsStayUnavailable.
-  it("names each row by its identity and sums up its limits", () => {
+  it("names each row by its Accounts label and sums up its limits", () => {
     const limited = [account([member("work", "codex")], { identity: { ...usageOf().identity, email: "shared@example.invalid" }, windows: [window(17, 300), window(78, 10080)] })];
     const row = accountRows(limited, choice()).rows[0];
-    expect(row.name).toBe("shared@example.invalid");
+    expect(row.name).toBe("Work");
     expect(row.summary).toBe("5h 17% used  7d 78% used");
-    expect(row.tooltip).toBe("shared@example.invalid\n5h 17% used  7d 78% used");
-    expect(row.accessible).toBe("Codex shared@example.invalid\n5h 17% used  7d 78% used");
+    expect(row.tooltip).toBe("Work\n5h 17% used  7d 78% used");
+    expect(row.accessible).toBe("Codex Work\n5h 17% used  7d 78% used");
     expect(row.tooltip).not.toContain("Reset in");
     // A terse balance is named in full on hover and for assistive technology.
     const funded = [account([member("native-dsh", "dsh", { native: true })], { provider: "dsh", status: "configured", balances: [
@@ -201,10 +201,11 @@ describe("account rows (updateAccounts 876-952)", () => {
     expect(dsh.tooltip.split("\n").slice(1)).toEqual(["$6.20", "Balance: 6.20 USD", "Topped up: 6.20 USD", "Granted: 0.00 USD"]);
     expect(dsh.accessible).toContain("Balance: 6.20 USD");
     const unknown = accountRows([account([member("work", "codex", { label: "" })])], choice()).rows[0];
-    expect(unknown.tooltip).toBe("Account n/a\nlimits n/a");
-    expect(accountRows([account([member("d", "codex", { label: "Default account" })])], choice()).rows[0].name).toBe("Account n/a");
-    // The cached account status names it while the inspect has no identity.
-    expect(accountRows(catalog(), choice({ cachedEmail: (provider, id) => (id === "work" ? "cached@example.invalid" : "") })).rows[0].name).toBe("cached@example.invalid");
+    expect(unknown.tooltip).toBe("work\nlimits n/a");
+    expect(accountRows([account([member("d", "codex", { label: "Default account" })])], choice()).rows[0].name).toBe("Default account");
+    // The cached account status is a fallback when no configured name exists.
+    const unnamed = [account([member("work", "codex", { label: "" })])];
+    expect(accountRows(unnamed, choice({ cachedEmail: (provider, id) => (id === "work" ? "cached@example.invalid" : "") })).rows[0].name).toBe("cached@example.invalid");
   });
 
   it("tones a row by its severest current window, except offline or after a failed refresh", () => {

@@ -2,7 +2,7 @@ import { machineMeta, NOW, usageOf } from "./testing";
 import { createNewSessionStore, type NewSessionBridge, type NewSessionDeps, type NewSessionOptions } from "./newSession";
 import type {
   Account, CreationAdmission, Details, FolderOut, HeaderOut, LaunchAccounts, LaunchForm, LaunchShown, MachineMeta, NewSessionContext, NewSessionFormInput, Profile,
-  ProjectedWindow, RepositoryFields,
+  ProjectedWindow, RepositoryFields, CatalogModel,
 } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -65,6 +65,10 @@ export class World {
   groups: Record<string, string> = {};
   swarm = "";
   extraModel: Json | undefined;
+  standardModels: CatalogModel[] = [
+    { id: "model-a", label: "Model A", effort_options: ["low", "high"], effort_labels: ["Low", "High"], default_effort: "high" },
+    { id: "model-b", label: "Model B", effort_options: [], effort_labels: [] },
+  ];
   selection: { row: Session; details?: Details } | undefined;
   /** The selected creation row's destination project, if a card is selected. */
   creationProject: string | undefined;
@@ -221,6 +225,11 @@ export function bridgeOf(world: World): NewSessionBridge {
       if (world.flags.has("favorite-fails")) throw "Account catalog is busy. Retry after the current operation finishes.";
       world.favorites = [...world.favorites.filter((v) => v !== value), ...(favorite ? [value] : [])];
       return { status: "applied", model: value, favorite };
+    },
+    teamRoleModels: async (computer, agent, account) => {
+      record("teamRoleModels", computer, agent, account);
+      await world.wait("role-models");
+      return world.standardModels;
     },
     openCodeStart: async (computer) => { record("openCodeStart", computer); world.flags.delete("opencode-stopped"); return world.rowCatalog(computer); },
     launchAccounts: async (computer, refresh, agent = null) => {

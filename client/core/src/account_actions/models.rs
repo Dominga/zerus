@@ -1,41 +1,9 @@
 //! Closed, bounded account model-settings projection. Read only on open.
 use super::{Binding, Values, CHANGED};
 use crate::actions::{failure_detail, Exit};
-use serde::Serialize;
 use serde_json::Value;
-use std::{collections::BTreeSet, path::Path};
-pub const INVALID: &str = "Invalid account model settings response";
-#[derive(Clone, Debug, Default, Serialize, PartialEq)]
-pub struct Defaults {
-    pub model: String,
-    pub effort: String,
-}
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct Model {
-    pub id: String,
-    pub label: String,
-    pub effort_options: Vec<String>,
-}
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct Catalog {
-    pub models: Vec<Model>,
-    pub defaults: Defaults,
-    pub provider_defaults: Defaults,
-    pub effort_supported: bool,
-}
-fn short(value: &Value, limit: usize) -> String {
-    value
-        .as_str()
-        .filter(|s| s.chars().count() <= limit && !s.chars().any(char::is_control))
-        .unwrap_or("")
-        .into()
-}
-fn defaults(value: &Value) -> Defaults {
-    Defaults {
-        model: short(&value["model"], 256),
-        effort: short(&value["effort"], 40),
-    }
-}
+use std::path::Path;
+pub use crate::model_catalog::{Catalog, Defaults, Model, INVALID};
 impl Catalog {
     pub fn parse(binding: &Binding, value: &Value) -> Result<Self, String> {
         if value["account_id"] != binding.id
@@ -44,39 +12,7 @@ impl Catalog {
         {
             return Err(CHANGED.into());
         }
-        let rows = value["models"].as_array().ok_or(INVALID)?;
-        let mut seen = BTreeSet::new();
-        let mut models = Vec::new();
-        for row in rows.iter().take(256) {
-            let id = short(&row["id"], 256);
-            if id.is_empty() || !seen.insert(id.clone()) {
-                continue;
-            }
-            let label = short(&row["label"], 160);
-            let mut efforts = Vec::new();
-            for value in row["effort_options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(64)
-            {
-                let value = short(value, 40);
-                if !value.is_empty() && !efforts.contains(&value) {
-                    efforts.push(value);
-                }
-            }
-            models.push(Model {
-                id: id.clone(),
-                label: if label.is_empty() { id } else { label },
-                effort_options: efforts,
-            });
-        }
-        Ok(Self {
-            models,
-            defaults: defaults(&value["defaults"]),
-            provider_defaults: defaults(&value["provider_defaults"]),
-            effort_supported: value["effort_supported"] == true,
-        })
+        Self::from_value(value)
     }
     pub fn validate(&self, values: &Values) -> Result<(), String> {
         if values.model.is_empty() {
@@ -124,7 +60,7 @@ mod tests {
             "work",
         )
         .unwrap();
-        let reply = json!({"account_id":"work","provider":"codex","revision":"r1","effort_supported":true,"defaults":{"model":"missing","effort":"high"},"provider_defaults":{"model":"model-a","effort":"low"},"models":[{"id":"model-a","label":"Example model","effort_options":["low","high"]}],"private_unknown":"do not forward"});
+        let reply = json!({"account_id":"work","provider":"codex","revision":"r1","effort_supported":true,"defaults":{"model":"missing","effort":"high"},"provider_defaults":{"model":"model-a","effort":"low"},"models":[{"id":"model-a","label":"Example model","effort_options":["low","high"],"effort_labels":["Low","High"],"default_effort":"high"}],"private_unknown":"do not forward"});
         (binding, reply)
     }
     #[test]
@@ -133,6 +69,8 @@ mod tests {
         let parsed = Catalog::parse(&binding, &reply).unwrap();
         assert_eq!(parsed.defaults.model, "missing");
         assert_eq!(parsed.provider_defaults.effort, "low");
+        assert_eq!(parsed.models[0].effort_labels, ["Low", "High"]);
+        assert_eq!(parsed.models[0].default_effort, "high");
         assert!(!serde_json::to_string(&parsed)
             .unwrap()
             .contains("private_unknown"));

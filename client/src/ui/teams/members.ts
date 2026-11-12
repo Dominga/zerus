@@ -1,5 +1,6 @@
 import { tr } from "../../i18n";
-import type { TeamMemberView, TeamTaskView } from "../../types";
+import type { AccountsView, TeamMemberView, TeamTaskView } from "../../types";
+import { accountNameForId } from "../provider-selection";
 
 // Task 199 (owner, 2026-11-07: Tauri parity with Qt): the side column's
 // members as Qt's TeamWorkspace draws them: the tree of sub-leads and their
@@ -62,10 +63,11 @@ export const accountOf = (agent: string, account: string) => (!account || accoun
 /** The account its session runs on; before it has one, the configured one. */
 export const memberAccount = (found: Member) =>
   accountOf(found.agent, found.session && found.session_account != null ? found.session_account : found.account ?? "");
-/** Its label: the profile's, or "Default account" for the agent's own. */
-export function accountLabel(found: Member, labels: Record<string, string> = {}): string {
+/** Its Accounts label, else the configured label map or the recorded profile id. */
+export function accountLabel(found: Member, labels: Record<string, string> = {}, view?: Pick<AccountsView, "accounts">): string {
   const id = memberAccount(found);
-  return labels[id] || (id.startsWith("native-") ? tr("Default account") : id);
+  const resolved = view && accountNameForId(view, found.computer ?? "", found.agent, id);
+  return labels[id] || resolved || (id.startsWith("native-") ? tr("Default account") : id);
 }
 /** U53: only Claude and Codex change account in place. */
 export const movableAgent = (agent: string) => agent === "claude" || agent === "codex";

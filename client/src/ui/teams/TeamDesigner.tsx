@@ -1,12 +1,13 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { ActivityView } from "../sessions/Activity";
-import { teamAction } from "../../bridge";
+import { teamAction, teamRoleModels } from "../../bridge";
 import { orderedRows } from "../../store/catalog";
-import { groupOf, headerOf, defaultProject, INBOX } from "../../store/organization";
+import { groupOf, headerOf, INBOX } from "../../store/organization";
 import { loadProjects, projectsPage } from "../../store/projects";
+import { machineCards } from "../../store/machines";
 import { activity, designerActivity } from "../../store/session";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
 import { showCatalog, teams } from "../../store/teams";
@@ -17,7 +18,9 @@ import { designerChoices, designerProjects, designerRow, sessionContext, type De
 import { parseCatalog, proposalCounts } from "./catalog";
 import { TeamCatalog } from "./TeamCatalog";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
-import { DESIGNER_AGENTS, designerEfforts, designerModelLabel, effortAllowed, effortLabel, modelSections } from "./designerModels";
+import { DESIGNER_AGENTS, designerModelLabel, effortAllowed, effortLabel } from "./designerModels";
+import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import { TextArea } from "../lib/TextField";
 
 // Task #44: Qt's TeamDesignerPage. The designer's conversation (the running
@@ -46,10 +49,11 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
     const row = selected();
     const group = row ? groupOf(row.key) : undefined;
     const name = group && group !== INBOX ? headerOf(group)?.name : undefined;
-    const next = sessionContext(row, name, !!designer(), context());
-    if (next && (next.folder !== context().folder || next.project !== context().project)) setContext(next);
+    const current = untrack(context);
+    const next = sessionContext(row, name, !!designer(), current);
+    if (next && (next.folder !== current.folder || next.project !== current.project)) setContext(next);
   });
-  const choices = createMemo(() => designerChoices(designerProjects(projectsPage().projects), defaultProject(), context()));
+  const choices = createMemo(() => designerChoices(designerProjects(projectsPage().projects, machineCards[""]?.host ?? ""), context()));
   const chosen = () => { const { choices: all, chosen: index } = choices(); return index >= 0 ? all[index] : undefined; };
 
   // The conversation: its own follow unless it is the selected session.
@@ -67,6 +71,17 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
   const [effort, setEffort] = createSignal("");
   const [modelMenu, setModelMenu] = createSignal(false);
   const [effortMenu, setEffortMenu] = createSignal(false);
+  const [modelTick, setModelTick] = createSignal(0);
+  const modelCatalogs = createModelCatalogs((computer, agentId, account) => teamRoleModels(computer, agentId, account), () => setModelTick((n) => n + 1));
+  const modelRole = () => ({ computer: "", agent: agent(), account: "", model: model() });
+  const accountModels = () => {
+    modelTick();
+    const role = modelRole();
+    modelCatalogs.request(role);
+    const options = modelOptions(role, modelCatalogs.get(role));
+    return options.length ? options : [{ id: "", label: tr("Default model") }];
+  };
+  const accountEfforts = () => effortAllowed(agent()) ? effortOptions(model(), modelCatalogs.get(modelRole()), effort()) : [];
   const [goal, setGoal] = createSignal("");
   const [starting, setStarting] = createSignal(false);
   const [startError, setStartError] = createSignal("");
@@ -133,8 +148,11 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
         <label class="designer-project">
           <span>{tr("Project")}</span>
           <select aria-label={tr("Project for the Team designer")} disabled={!!designer()} title={designer() ? tr("The running designer keeps its original project") : tr("Choose the project the designer reads")}
-            value={String(choices().chosen)} onChange={(event) => { const pick = choices().choices[Number(event.currentTarget.value)]; if (pick) setContext({ folder: pick.folder, project: pick.name }); }}>
-            <Show when={choices().choices.length === 0}><option value="-1">{tr("No local project folders")}</option></Show>
+            value={String(choices().chosen)} onChange={(event) => {
+              const pick = choices().choices[Number(event.currentTarget.value)];
+              setContext(pick ? { folder: pick.folder, project: pick.name } : { folder: "", project: "" });
+            }}>
+            <option value="-1">{choices().choices.length === 0 ? tr("No local project folders") : ""}</option>
             <For each={choices().choices}>{(choice, index) => (
               <option value={String(index())} title={choice.folder}>{choice.folderName ? tr("%1 (%2)", choice.name || choice.folder, choice.folderName) : choice.name || choice.folder}</option>
             )}</For>
@@ -177,35 +195,28 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
                         <>
                           <button type="button" role="menuitem" class="designer-model-back" data-action="designer-effort-back"
                             onClick={() => setEffortMenu(false)}>‹ {effortLabel(effort())}</button>
-                          <For each={designerEfforts(agent(), effort())}>
+                          <For each={accountEfforts()}>
                             {(choice) => (
                               <button type="button" role="menuitem" classList={{ on: effort() === choice }} data-designer-effort={choice}
                                 onClick={() => { setEffort(choice); setModelMenu(false); setEffortMenu(false); }}>
-                                {choice}
+                                {choice || tr("Provider default")}
                               </button>
                             )}
                           </For>
                         </>
                       }>
-                        <For each={modelSections()}>
-                          {(section) => (
-                            <>
-                              <div class="designer-model-section">{section.label}</div>
-                              <For each={section.models}>
-                                {(id) => (
-                                  <button type="button" role="menuitem" classList={{ on: agent() === section.agent && model() === id }}
-                                    data-designer-agent={section.agent} data-designer-model={id}
-                                    onClick={() => {
-                                      setAgent(section.agent);
-                                      setModel(id);
-                                      if (!effortAllowed(section.agent)) setEffort("");
-                                      setModelMenu(false);
-                                    }}>
-                                    {id || tr("Default model")}
-                                  </button>
-                                )}
-                              </For>
-                            </>
+                        <For each={accountModels()}>
+                          {(option) => (
+                            <button type="button" role="menuitem" classList={{ on: model() === option.id }}
+                              data-designer-agent={agent()} data-designer-model={option.id}
+                              onClick={() => {
+                                const next = selectModel(normalizeModelCatalog(modelCatalogs.get(modelRole()) ?? []), option.id, effort());
+                                setModel(next.modelId);
+                                setEffort(next.effortId);
+                                setModelMenu(false);
+                              }}>
+                              {option.id ? option.label : tr("Default model")}
+                            </button>
                           )}
                         </For>
                         <button type="button" role="menuitem" class="designer-model-effort" data-action="designer-effort"

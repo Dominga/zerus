@@ -7,8 +7,8 @@ import type { Session } from "../ui/sessions/types";
 
 const session = (name: string, extra: Partial<Session> = {}): Session =>
   ({ key: `\nname:${name}`, catalogKey: `name:${name}`, computer: "", name, state: "running", cwdPath: "/work/orbit", cwdCanonical: "/work/orbit", ...extra }) as Session;
-const project = (id: string, name: string, folders: { path: string; name: string; computer?: string }[]): Project =>
-  ({ id, name, color: null, accessible: true, is_default: false, palette: 0, folders: folders.map((folder) => ({ id: "", key: folder.path, machine: "", computer: folder.computer ?? "", ...folder })) }) as Project;
+const project = (id: string, name: string, folders: { path: string; name: string; computer?: string; machine?: string }[]): Project =>
+  ({ id, name, color: null, accessible: true, is_default: false, palette: 0, folders: folders.map((folder) => ({ id: "", key: folder.path, machine: folder.machine ?? folder.computer ?? "workstation", computer: folder.computer ?? folder.machine ?? "workstation", ...folder })) }) as Project;
 
 describe("Team designer project (Qt showTeamDesigner)", () => {
   it("is the running local session named …/team-designer", () => {
@@ -23,21 +23,23 @@ describe("Team designer project (Qt showTeamDesigner)", () => {
       project("ungrouped", "Inbox", [{ path: "/tmp/x", name: "x" }]),
       project("p1", "Orbit", [{ path: "/work/orbit", name: "orbit" }, { path: "/remote/orbit", name: "orbit", computer: "studio" }]),
       project("p2", "Payments", [{ path: "/work/payments", name: "payments" }]),
-    ]);
+    ], "workstation");
     expect(projects.map((entry) => entry.folder)).toEqual(["/work/orbit", "/work/payments"]);
     // The selected local session gives its group's name and its folder.
     const context = sessionContext(session("claude/orbit/main"), "Orbit", false, { folder: "", project: "" })!;
     expect(context).toEqual({ folder: "/work/orbit", project: "Orbit" });
-    expect(designerChoices(projects, "p2", context).chosen).toBe(0);
+    expect(designerChoices(projects, context).chosen).toBe(0);
     // Without a group, the name's second segment; a remote row gives nothing.
     expect(sessionContext(session("claude/payments/fix", { cwdPath: "/work/payments" }), undefined, false, context)?.project).toBe("payments");
     expect(sessionContext(session("claude/orbit/main", { computer: "studio" }), "Orbit", false, context)).toBeUndefined();
     // A running designer keeps the project of its original brief.
     expect(sessionContext(session("claude/payments/fix"), "Payments", true, context)).toBeUndefined();
-    // A folder that no project lists becomes its own choice; no context: the default project.
-    const own = designerChoices(projects, "p2", { folder: "/work/other", project: "other" });
+    // A folder that no project lists becomes its own choice; no context: no choice.
+    const own = designerChoices(projects, { folder: "/work/other", project: "other" });
     expect(own.choices[own.chosen]).toMatchObject({ folder: "/work/other", name: "other" });
-    expect(designerChoices(projects, "p2", { folder: "", project: "" }).chosen).toBe(1);
+    const empty = designerChoices(projects, { folder: "", project: "" });
+    expect(empty.chosen).toBe(-1);
+    expect(empty.choices).toEqual(projects);
   });
 });
 

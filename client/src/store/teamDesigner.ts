@@ -21,12 +21,12 @@ export function designerRow(rows: Iterable<Session>): Session | undefined {
 }
 
 /** This computer's project folders, as Qt lists them (the ungrouped inbox left out). */
-export function designerProjects(projects: readonly Project[]): DesignerProject[] {
+export function designerProjects(projects: readonly Project[], localHost: string): DesignerProject[] {
   const out: DesignerProject[] = [];
   for (const project of projects) {
     if (project.id === "ungrouped") continue;
     for (const folder of project.folders) {
-      if (folder.computer === "" && folder.path) out.push({ id: project.id, name: project.name, folder: folder.path, folderName: folder.name });
+      if (folder.machine === localHost && folder.path) out.push({ id: project.id, name: project.name, folder: folder.path, folderName: folder.name });
     }
   }
   return out;
@@ -45,19 +45,14 @@ export function sessionContext(row: Session | undefined, groupName: string | und
 }
 
 /**
- * The choices and the chosen one: the listed folder that matches the context
- * (by folder, then project id or name); a context folder that is not listed
- * becomes its own choice; with no context, the default project's folder,
- * else the first.
+ * All project folders stay listed. The selected session's context chooses the
+ * initial folder; with no context, no project is chosen.
  */
-export function designerChoices(projects: readonly DesignerProject[], defaultProject: string, context: DesignerContext): { choices: DesignerProject[]; chosen: number } {
+export function designerChoices(projects: readonly DesignerProject[], context: DesignerContext): { choices: DesignerProject[]; chosen: number } {
   const choices = [...projects];
-  if (context.folder) {
-    const index = choices.findIndex((choice) => choice.folder === context.folder && (!context.project || choice.id === context.project || choice.name === context.project));
-    if (index >= 0) return { choices, chosen: index };
-    choices.push({ id: context.project, name: context.project, folder: context.folder, folderName: "" });
-    return { choices, chosen: choices.length - 1 };
-  }
-  const fallback = choices.findIndex((choice) => choice.id === defaultProject);
-  return { choices, chosen: fallback >= 0 ? fallback : choices.length ? 0 : -1 };
+  if (!context.folder) return { choices, chosen: -1 };
+  const index = choices.findIndex((choice) => choice.folder === context.folder && (!context.project || choice.id === context.project || choice.name === context.project));
+  if (index >= 0) return { choices, chosen: index };
+  choices.push({ id: context.project, name: context.project, folder: context.folder, folderName: "" });
+  return { choices, chosen: choices.length - 1 };
 }

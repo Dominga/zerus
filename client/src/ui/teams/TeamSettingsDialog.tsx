@@ -1,8 +1,10 @@
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
-import { teamAction } from "../../bridge";
+import { teamAction, teamRoleModels } from "../../bridge";
+import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import type { TeamMemberView, TeamView } from "../../types";
 import { checkTestConfig, overrideText, parseOverride, readTestConfig, sourceLine, testsLines, testsPatch, type TestConfig } from "./testsSettings";
 import "../styles/newteam.css";
@@ -52,6 +54,22 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     Object.fromEntries(modelMembers.map((member) => [member.id, [...(member.models ?? [])]])),
   );
   const [adding, setAdding] = createSignal<Record<string, { model: string; effort: string }>>({});
+  const [modelTick, setModelTick] = createSignal(0);
+  const catalogs = createModelCatalogs((computer, agent, account) => teamRoleModels(computer, agent, account), () => setModelTick((n) => n + 1));
+  const catalogItem = (member: TeamMemberView) => ({
+    computer: member.computer ?? "", agent: member.agent, account: member.account ?? "",
+    model: adding()[member.id]?.model ?? "", effort: adding()[member.id]?.effort ?? "",
+  });
+  createEffect(() => {
+    for (const member of modelMembers) catalogs.request({ ...catalogItem(member), model: "" });
+  });
+  const modelChoicesFor = (member: TeamMemberView) => (modelTick(), modelOptions(catalogItem(member), catalogs.get(catalogItem(member))));
+  const effortChoicesFor = (member: TeamMemberView) => (modelTick(), effortOptions(catalogItem(member).model, catalogs.get(catalogItem(member)), catalogItem(member).effort));
+  const changeAddingModel = (member: TeamMemberView, value: string) => {
+    const item = { ...catalogItem(member), model: value };
+    const next = selectModel(normalizeModelCatalog(catalogs.get(item) ?? []), value, item.effort);
+    setAdding({ ...adding(), [member.id]: { model: next.modelId, effort: next.effortId } });
+  };
   const addModel = (id: string) => {
     const entry = adding()[id];
     const model = entry?.model.trim() ?? "";
@@ -293,12 +311,12 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
               )}</For>
             </div>
             <div class="nt-line">
-              <TextInput placeholder={tr("+ model")} value={adding()[member.id]?.model ?? ""} data-field="model-add"
-                onInput={(event) => setAdding({ ...adding(), [member.id]: { model: event.currentTarget.value, effort: adding()[member.id]?.effort ?? "" } })} />
+              <TextInput placeholder={tr("+ model")} value={adding()[member.id]?.model ?? ""} data-field="model-add" list={`nt-member-models-${member.id}`}
+                onInput={(event) => changeAddingModel(member, event.currentTarget.value)} />
+              <datalist id={`nt-member-models-${member.id}`}><For each={modelChoicesFor(member)}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
               <select value={adding()[member.id]?.effort ?? ""}
                 onChange={(event) => setAdding({ ...adding(), [member.id]: { model: adding()[member.id]?.model ?? "", effort: event.currentTarget.value } })}>
-                <option value="">{tr("its effort")}</option>
-                <For each={["low", "medium", "high", "xhigh"]}>{(level) => <option value={level}>{level}</option>}</For>
+                <For each={effortChoicesFor(member)}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
               </select>
               <button type="button" class="btn ghost small" disabled={!(adding()[member.id]?.model ?? "").trim()} onClick={() => addModel(member.id)}>{tr("Add")}</button>
             </div>

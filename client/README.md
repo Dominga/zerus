@@ -1274,9 +1274,11 @@ pipeline changes what names it, as Qt does, and the confirmation names it.
 The Team designer page (`src/ui/teams/TeamDesigner.tsx`) shows the running
 local `…/team-designer` session's conversation and its draft's proposals. Its
 project follows the selected local session (the session's project, else the
-second segment of its name, and its folder) unless a designer already runs.
-Start sends `hgs team catalog designer` with the folder, the first message as
-the goal, the agent, model and effort, and the project's name.
+second segment of its name, and its folder) unless a designer already runs. The
+combo always lists every local project folder; with no selected session it
+starts with no project chosen. Start sends `hgs team catalog designer` with the
+folder, the first message as the goal, the agent, model and effort, and the
+project's name.
 
 ## Composer and Send
 

@@ -1,4 +1,6 @@
 import { tr } from "../../i18n";
+import type { CatalogModel } from "../../types";
+import { effortOptions as sharedEffortOptions, modelOptions as sharedModelOptions, normalizeModelCatalog } from "../provider-selection";
 import type { CatalogProposal } from "./catalog";
 
 // Task 50: Qt TeamCatalogEditor's role controls as pure rules - the palette's
@@ -130,7 +132,7 @@ export function includeBlock(role: Item, key: string, on: boolean): PromptChange
 // ---------------------------------------------------------------------------
 // Model and effort menus
 
-export interface ModelChoice { id: string; label: string; effort_options: string[] }
+export type ModelChoice = CatalogModel;
 
 /** Qt Teams::knownModels: offered until the account's catalog answers. */
 export const KNOWN_MODELS: Record<string, string[]> = {
@@ -139,7 +141,7 @@ export const KNOWN_MODELS: Record<string, string[]> = {
   kimi: ["kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed", "kimi-code/k3", "kimi-code/k3-256k", "kimi-code/k3.1-pro", "kimi-code/k3.1-pro-highspeed"],
 };
 
-/** The default efforts when the model names none. */
+/** The fallback efforts while no account catalog is available. */
 export const EFFORTS = ["low", "medium", "high", "xhigh"];
 
 /** Qt modelKey: one catalog per computer and account (or the agent's native account). */
@@ -147,20 +149,21 @@ export const modelKey = (role: Item) => `${str(role.computer)}\n${str(role.accou
 
 /** Qt fillModels: the account's models, else the known ones; the role's own model stays offered. */
 export function modelOptions(role: Item, catalog: readonly ModelChoice[] | undefined): { id: string; label: string }[] {
-  const options: { id: string; label: string }[] = catalog?.length
-    ? catalog.map((model) => ({ id: model.id, label: model.label && model.label !== model.id ? model.label : model.id }))
-    : (KNOWN_MODELS[str(role.agent) || "claude"] ?? []).map((id) => ({ id, label: id }));
+  if (catalog?.length) return sharedModelOptions(normalizeModelCatalog(catalog), str(role.model)).map((model) => ({ id: model.id, label: model.label }));
+  const options = (KNOWN_MODELS[str(role.agent) || "claude"] ?? []).map((id) => ({ id, label: id }));
   const own = str(role.model);
   if (own && !options.some((option) => option.id === own)) options.push({ id: own, label: own });
   return options;
 }
 
-/** The effort menu: the chosen model's own efforts when the catalog names them, else the defaults; "" is the model's own. */
+/** The selected model's variants; the static fallback is only for a missing/empty catalog. */
 export function effortOptions(model: string, catalog: readonly ModelChoice[] | undefined, current = ""): string[] {
-  const named = catalog?.find((found) => found.id === model)?.effort_options ?? [];
-  const options = ["", ...(named.length ? named : EFFORTS)];
-  if (current && !options.includes(current)) options.push(current);
-  return options;
+  if (!catalog?.length) {
+    const options = ["", ...EFFORTS];
+    if (current && !options.includes(current)) options.push(current);
+    return options;
+  }
+  return sharedEffortOptions(normalizeModelCatalog(catalog), model, current, "—").map((effort) => effort.id);
 }
 
 /** Another agent: its first known model and the default account (spec 11.3). */

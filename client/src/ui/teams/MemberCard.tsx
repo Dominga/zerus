@@ -4,6 +4,11 @@ import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind } from "../../store/catalog";
 import { memberRow } from "../../store/teams";
+import { accountsPage, loadAccounts } from "../../store/accounts";
+import { accountChoices } from "../../store/newTeamSources";
+import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
+import { teamRoleModels } from "../../bridge";
 import { composer } from "../../store/composer";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
 import { useModel, windowPort } from "./ProposalCards";
@@ -37,7 +42,6 @@ function pulseText(pulse: TeamPulseView): string {
 }
 
 const AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"];
-const EFFORTS = ["", "low", "medium", "high", "xhigh"];
 
 /**
  * The Tauri client sends a session message only from a composer: the member
@@ -184,8 +188,8 @@ export function MemberCard(props: {
             )}</Show>
             <Show when={props.team.status !== "draft"}>
               <span class="dim ell team-account" data-account={memberAccount(props.member)}
-                title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member)) : tr("Account: %1", accountLabel(props.member))}>
-                {accountLabel(props.member)}
+                title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member, {}, accountsPage())) : tr("Account: %1", accountLabel(props.member, {}, accountsPage()))}>
+                {accountLabel(props.member, {}, accountsPage())}
               </span>
             </Show>
           </div>
@@ -355,7 +359,7 @@ export function MemberCard(props: {
         <SwapMemberDialog computer={props.computer} team={props.team} member={props.member} close={() => setDialog(undefined)} />
       </Show>
       <Show when={dialog() === "move_account"}>
-        <MoveAccountDialog team={props.team} member={props.member} close={() => setDialog(undefined)}
+        <MoveAccountDialog computer={props.computer} team={props.team} member={props.member} close={() => setDialog(undefined)}
           submit={(to) => void model.moveAccount(props.member.agent, memberAccount(props.member), to)} />
       </Show>
     </div>
@@ -391,19 +395,24 @@ function ScaleDialog(props: { role: string; member: TeamMemberView; room: number
 }
 
 /** U54: Move to another account... (Qt accountMoveDialog): every member of this agent on its account moves, the lead included. */
-function MoveAccountDialog(props: { team: TeamView; member: TeamMemberView; close: () => void; submit: (to: string) => void }) {
+function MoveAccountDialog(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; close: () => void; submit: (to: string) => void }) {
   const modal = useModal(props.close);
   const from = memberAccount(props.member);
   const affected = moveAffected(props.team, props.member.agent, from).map((id) => props.team.members.find((found) => found.id === id)?.role || id);
   const [to, setTo] = createSignal("");
   const target = () => to().trim();
+  const targets = () => accountChoices(accountsPage(), props.computer).filter((account) => account.provider === props.member.agent && account.id !== from);
+  onMount(() => { void loadAccounts(); });
   return (
     <dialog ref={modal.ref} class="dlg team-member-dialog" onCancel={modal.cancel} onClick={(event) => event.stopPropagation()}>
       <div class="dlg-head"><h2>{tr("Move to another account")}</h2></div>
       <div class="dlg-body">
-        <p class="team-confirm-text">{tr("Moves every %1 member on %2 to another account: %3.", props.member.agent, accountLabel(props.member), affected.join(", "))}</p>
+        <p class="team-confirm-text">{tr("Moves every %1 member on %2 to another account: %3.", props.member.agent, accountLabel(props.member, {}, accountsPage()), affected.join(", "))}</p>
         <label class="dim">{tr("To account")}</label>
-        <TextInput class="field" value={to()} placeholder={tr("Account id")} onInput={(event) => setTo(event.currentTarget.value)} data-field="move-to" />
+        <select class="field" value={to()} onChange={(event) => setTo(event.currentTarget.value)} data-field="move-to">
+          <option value="">{tr("Account id")}</option>
+          <For each={targets()}>{(account) => <option value={account.id}>{account.signedIn ? account.label : tr("%1 (signed out)", account.label)}</option>}</For>
+        </select>
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
@@ -414,13 +423,28 @@ function MoveAccountDialog(props: { team: TeamView; member: TeamMemberView; clos
 }
 
 /** "+ Member" (Qt addMember): its role, agent, model, effort and account; it starts with the first task it gets. */
-export function AddMemberDialog(props: { close: () => void; submit: (member: Record<string, unknown>) => void }) {
+export function AddMemberDialog(props: { computer: ComputerId; close: () => void; submit: (member: Record<string, unknown>) => void }) {
   const modal = useModal(props.close);
   const [role, setRole] = createSignal("");
   const [agent, setAgent] = createSignal("claude");
   const [model, setModel] = createSignal("");
   const [effort, setEffort] = createSignal("");
   const [account, setAccount] = createSignal("");
+  const [modelTick, setModelTick] = createSignal(0);
+  const catalogs = createModelCatalogs((computer, agentId, accountId) => teamRoleModels(computer, agentId, accountId), () => setModelTick((n) => n + 1));
+  const selection = () => ({ computer: props.computer, agent: agent(), account: account(), model: model(), effort: effort() });
+  const accounts = () => accountChoices(accountsPage(), props.computer).filter((choice) => choice.provider === agent());
+  const models = () => (modelTick(), modelOptions(selection(), catalogs.get(selection())));
+  const efforts = () => (modelTick(), effortOptions(model(), catalogs.get(selection()), effort()));
+  createEffect(() => catalogs.request(selection()));
+  onMount(() => { void loadAccounts(); });
+  const changeAgent = (value: string) => { setAgent(value); setAccount(""); setModel(""); setEffort(""); };
+  const changeAccount = (value: string) => { setAccount(value); setModel(""); setEffort(""); };
+  const changeModel = (value: string) => {
+    const next = selectModel(normalizeModelCatalog(catalogs.get(selection()) ?? []), value, effort());
+    setModel(next.modelId);
+    setEffort(next.effortId);
+  };
   const add = () => {
     const member: Record<string, unknown> = { role: role().trim(), agent: agent() };
     if (model().trim()) member.model = model().trim();
@@ -437,17 +461,21 @@ export function AddMemberDialog(props: { close: () => void; submit: (member: Rec
         <label class="dim">{tr("Role")}</label>
         <TextInput class="field" value={role()} onInput={(event) => setRole(event.currentTarget.value)} data-field="member-role" />
         <label class="dim">{tr("Agent")}</label>
-        <select class="field" value={agent()} onChange={(event) => setAgent(event.currentTarget.value)} data-field="member-agent">
+        <select class="field" value={agent()} onChange={(event) => changeAgent(event.currentTarget.value)} data-field="member-agent">
           <For each={AGENTS}>{(name) => <option value={name}>{name}</option>}</For>
         </select>
         <label class="dim">{tr("Model")}</label>
-        <TextInput class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} />
+        <TextInput class="field" list="team-add-member-models" value={model()} onInput={(event) => changeModel(event.currentTarget.value)} />
+        <datalist id="team-add-member-models"><For each={models()}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
         <label class="dim">{tr("Effort")}</label>
         <select class="field" value={effort()} onChange={(event) => setEffort(event.currentTarget.value)}>
-          <For each={EFFORTS}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
+          <For each={efforts()}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
         </select>
         <label class="dim">{tr("Account")}</label>
-        <TextInput class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} />
+        <select class="field" value={account()} onChange={(event) => changeAccount(event.currentTarget.value)}>
+          <option value="">{tr("Default account")}</option>
+          <For each={accounts()}>{(choice) => <option value={choice.id}>{choice.signedIn ? choice.label : tr("%1 (signed out)", choice.label)}</option>}</For>
+        </select>
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>

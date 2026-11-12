@@ -2,6 +2,7 @@ import type { Account, FolderOut, HeaderOut, MachineMeta, PathStyle, Profile, Us
 import { balanceCompact, balanceTitle, current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
 import { clean, leaf, native, same } from "./paths";
 import { trNoop, tr } from "../../i18n";
+import { accountDisplayName } from "../provider-selection";
 
 // The New session dialog's rows, as Qt keeps them in its views
 // (tray/src/NewSessionDialog.cpp): computers (loadMachines 487-510),
@@ -169,9 +170,6 @@ export interface AccountRow {
   accessible: string;
 }
 
-// Core names compared in their source form, never shown.
-const UNNAMED = new Set(["", "Default account", "Native account"]);
-
 /**
  * AccountUsage::launchMeterData: the current windows with a value, used
  * clamped to 0..100; a window with a length shows only its duration. The
@@ -197,11 +195,9 @@ export function launchSummary(usage: Usage, now: number): string {
 }
 
 /** The row's texts (updateUsage 1002-1023). */
-function texts(profile: Profile, usage: Usage | undefined, choice: AccountChoice) {
-  let name = usage?.identity.email ?? "";
-  if (!name) name = choice.cachedEmail?.(profile.provider, profile.id) ?? "";
-  if (!name) name = profile.label;
-  if (UNNAMED.has(name)) name = tr("Account n/a");
+function texts(group: Account, profile: Profile, choice: AccountChoice) {
+  const usage = group.usage;
+  const name = accountDisplayName(group, profile, choice.cachedEmail?.(profile.provider, profile.id));
   const summary = usage ? launchSummary(usage, choice.now) : tr("limits n/a");
   // A terse balance ("$6.20") is named in full for the tooltip and assistive technology.
   const title = usage && balanceCompact(usage) ? balanceTitle(usage) : "";
@@ -246,7 +242,7 @@ export function accountRows(groups: Account[], choice: AccountChoice): { rows: A
     if (!chosen) continue;
     rows.push({
       key: `${chosen.provider}\n${chosen.id}`, id: chosen.id, provider: chosen.provider, host: choice.host, shell: false,
-      profile: chosen, members: group.members, usage: group.usage, ...texts(chosen, group.usage, choice),
+      profile: chosen, members: group.members, usage: group.usage, ...texts(group, chosen, choice),
     });
   }
   let defaultIndex = -1, lastIndex = -1, explicitIndex = -1, currentIndex = -1;
@@ -276,6 +272,6 @@ export function refreshRows(rows: AccountRow[], groups: Account[], choice: Accou
     const group = groups.find((g) => g.members.some((m) => m.provider === row.provider && m.id === row.id));
     if (!group) return row;
     const profile = group.members.find((m) => m.provider === row.provider && m.id === row.id) ?? row.profile;
-    return { ...row, profile, members: group.members, usage: group.usage, ...texts(profile, group.usage, choice) };
+    return { ...row, profile, members: group.members, usage: group.usage, ...texts(group, profile, choice) };
   });
 }

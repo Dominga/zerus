@@ -2,6 +2,7 @@ import type { Account, BindingEvidence } from "../../types";
 import type { Session } from "./types";
 import { same, type Style } from "./paths";
 import { tr } from "../../i18n";
+import { accountDisplayName } from "../provider-selection";
 
 /** Qt SessionAccounts::binding: lengths are UTF-16 code units in both clients. */
 export const accountBinding = (host: string, provider: string, id: string, home = "") =>
@@ -51,7 +52,7 @@ export function accountChoices(accounts: readonly Account[], evidence: readonly 
     const groups = homes.get(home) ?? new Set<string>(); groups.add(e.group); homes.set(home, groups);
   }
   const choices = accounts.map((a) => {
-    let label = a.label || tr("Unnamed account");
+    let label = accountDisplayName(a, undefined);
     const { email, organization } = a.usage.identity;
     if (email && !label.toLowerCase().includes(email.toLowerCase())) label += ` (${email})`;
     if (organization) label += ` (${organization})`;

@@ -8,23 +8,9 @@ import { Icon } from "../lib/icons";
 import "../styles/newsession.css";
 import { tr } from "../../i18n";
 
-export default function SettingsDialog(props: { anchor: () => HTMLButtonElement | undefined }) {
-  let dialog!: HTMLDialogElement;
+export function ModelSettingsContent(props: { close: () => void }) {
   const v = () => models.view()!;
   const native = () => v().terminal && !v().enabled;
-  onMount(() => {
-    dialog.showModal();
-    (dialog.querySelector<HTMLElement>(native() ? ".cmp-settings-terminal" : 'input,[role="combobox"]') ?? dialog.querySelector<HTMLElement>("button"))?.focus();
-  });
-  onCleanup(() => {
-    if (dialog.open) dialog.close();
-    queueMicrotask(() => props.anchor()?.focus());
-  });
-  const outside = (e: PointerEvent) => {
-    if (e.target !== dialog) return;
-    const box = dialog.getBoundingClientRect();
-    if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) models.close();
-  };
   const choices = () => {
     const all = models.options();
     return all.some((m) => m.id === models.model()) || !models.model() ? all
@@ -32,13 +18,9 @@ export default function SettingsDialog(props: { anchor: () => HTMLButtonElement 
   };
   const effortEnabled = () => v().enabled && models.options().some((m) => m.id === models.model())
     && (v().openCode ? models.efforts().length > 1 : models.efforts().some((e) => !!e.value && !e.disabled));
-  const openTerminal = () => { models.close(); terminal.opened(); setDetailTab("terminal"); };
+  const openTerminal = () => { props.close(); terminal.opened(); setDetailTab("terminal"); };
   return (
-    <dialog ref={dialog} class="dlg cmp-settings-dialog" aria-labelledby="cmp-settings-title" onPointerDown={outside}
-      onCancel={(e) => { e.preventDefault(); models.close(); }}>
-      <div class="dlg-head"><Icon name="sparkles" size={18} class="accent" /><h2 id="cmp-settings-title">{tr("Model and effort")}</h2><span class="grow" />
-        <button type="button" class="icon-btn" aria-label={tr("Close")} title={tr("Close")} onClick={() => models.close()}><Icon name="x" size={16} /></button>
-      </div>
+    <>
       <div class="dlg-body">
         <Show when={!native()}>
           <div class="form-row"><label for="session-model-choice">{tr("Model")}</label><Show when={v().openCode} fallback={
@@ -63,9 +45,36 @@ export default function SettingsDialog(props: { anchor: () => HTMLButtonElement 
       <div class="dlg-foot">
         <button type="button" class="btn ghost cmp-settings-terminal" onClick={openTerminal}>{tr("Open Terminal")}</button>
         <span class="spacer" />
-        <button type="button" class="btn" title={tr("Close without applying changes")} onClick={() => models.close()}>{tr("Cancel")}</button>
+        <button type="button" class="btn" title={tr("Close without applying changes")} onClick={props.close}>{tr("Cancel")}</button>
         <Show when={!native()}><button type="button" class="btn primary" disabled={!models.canApply()} onClick={() => { void models.apply(); }}>{v().applyLabel}</button></Show>
       </div>
+    </>
+  );
+}
+
+export default function SettingsDialog(props: { anchor: () => HTMLButtonElement | undefined }) {
+  let dialog!: HTMLDialogElement;
+  const native = () => models.view()!.terminal && !models.view()!.enabled;
+  onMount(() => {
+    dialog.showModal();
+    (dialog.querySelector<HTMLElement>(native() ? ".cmp-settings-terminal" : 'input,[role="combobox"]') ?? dialog.querySelector<HTMLElement>("button"))?.focus();
+  });
+  onCleanup(() => {
+    if (dialog.open) dialog.close();
+    queueMicrotask(() => props.anchor()?.focus());
+  });
+  const outside = (e: PointerEvent) => {
+    if (e.target !== dialog) return;
+    const box = dialog.getBoundingClientRect();
+    if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) models.close();
+  };
+  return (
+    <dialog ref={dialog} class="dlg cmp-settings-dialog" aria-labelledby="cmp-settings-title" onPointerDown={outside}
+      onCancel={(e) => { e.preventDefault(); models.close(); }}>
+      <div class="dlg-head"><Icon name="sparkles" size={18} class="accent" /><h2 id="cmp-settings-title">{tr("Model and effort")}</h2><span class="grow" />
+        <button type="button" class="icon-btn" aria-label={tr("Close")} title={tr("Close")} onClick={() => models.close()}><Icon name="x" size={16} /></button>
+      </div>
+      <ModelSettingsContent close={() => models.close()} />
     </dialog>
   );
 }

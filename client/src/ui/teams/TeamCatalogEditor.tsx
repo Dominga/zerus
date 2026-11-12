@@ -10,6 +10,7 @@ import {
   ICON_GLYPH, ROLE_ICONS, SWATCHES, agentChange, chosenIcon, chosenSwatch, createModelCatalogs, dropBlock, effortOptions, fieldDiff, iconValue,
   includeBlock, modelOptions, moveBlock, plateAnswers, promptBlocks, proposalMark, proposalOf, swatchColor, type ModelChoice, type PromptChange,
 } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import "../styles/catalog.css";
 import { TextInput, TextArea } from "../lib/TextField";
 
@@ -252,15 +253,20 @@ export function PromptOrder(props: { item: Item; apply: (change: PromptChange) =
 }
 
 /** Task 50 (Qt teamRoleModel/teamRoleEffort): the model as an editable menu of the account's models, the effort from that model's efforts. */
-export function ModelMenu(props: { item: Item; roles: RoleContext; value: string; onChange: (value: string) => void; label: string }) {
+export function ModelMenu(props: { item: Item; roles: RoleContext; value: string; effort: string; onChange: (value: string) => void; onEffortChange: (value: string) => void; label: string }) {
   const listId = `cat-models-${Math.random().toString(36).slice(2)}`;
   const options = () => (props.roles.tick(), modelOptions(props.item, props.roles.catalogs.get(props.item)));
   onMount(() => props.roles.catalogs.request(props.item));
   createEffect(on(() => `${str(props.item.computer)}\n${str(props.item.account)}\n${str(props.item.agent)}`, () => props.roles.catalogs.request(props.item), { defer: true }));
+  const choose = (value: string) => {
+    const next = selectModel(normalizeModelCatalog(props.roles.catalogs.get(props.item) ?? []), value, props.effort);
+    props.onChange(next.modelId);
+    props.onEffortChange(next.effortId);
+  };
   return (
     <>
       <TextInput class="cat-model" list={listId} value={props.value} placeholder={tr("default model")} aria-label={props.label}
-        onChange={(event) => props.onChange(event.currentTarget.value.trim())} />
+        onChange={(event) => choose(event.currentTarget.value.trim())} />
       <datalist id={listId}><For each={options()}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
     </>
   );
@@ -300,7 +306,7 @@ function ItemForm(props: { editor: CatalogEditorStore; kind: CatalogKind; item: 
       case "color":
         return <LookPicker item={props.item} dark={props.roles.dark} onColor={(name) => void setField("color", name)} onIcon={(value) => void setField("icon", value)} />;
       case "model":
-        return <ModelMenu item={props.item} roles={props.roles} value={str(props.item.model)} label={tr(spec.label)} onChange={(value) => void setField("model", value)} />;
+        return <ModelMenu item={props.item} roles={props.roles} value={str(props.item.model)} effort={str(props.item.effort)} label={tr(spec.label)} onChange={(value) => void setField("model", value)} onEffortChange={(value) => void setField("effort", value)} />;
       case "effort":
         return <EffortMenu item={props.item} roles={props.roles} model={str(props.item.model)} value={str(props.item.effort)} label={tr(spec.label)} onChange={(value) => void setField("effort", value)} />;
       case "prompt_order":
@@ -321,7 +327,8 @@ function ItemForm(props: { editor: CatalogEditorStore; kind: CatalogKind; item: 
       <Show when={props.proposal}>{(proposal) => <ProposalPlate proposal={proposal()} item={props.item} decide={props.decide} />}</Show>
       <For each={specs()}>{(spec) => (
         <Field editor={props.editor} spec={spec} value={props.item[spec.name]} custom={special(spec)} roleItem={props.kind === "role" ? props.item : undefined} roles={props.roles}
-          onChange={(value) => (props.kind === "role" && spec.name === "agent" ? changeAgent(value) : props.set(props.kind, id(), spec.name, value))} />
+          onChange={(value) => (props.kind === "role" && spec.name === "agent" ? changeAgent(value) : props.set(props.kind, id(), spec.name, value))}
+          onEffortChange={(value) => props.set(props.kind, id(), "effort", value)} />
       )}</For>
     </div>
   );
@@ -339,7 +346,7 @@ function references(editor: CatalogEditorStore, spec: CatalogFieldSpec): [string
 }
 
 /** One field, drawn from its schema type; each change goes to core at once. */
-function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: unknown; onChange: (value: unknown) => Promise<boolean> | void; compact?: boolean;
+function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; value: unknown; onChange: (value: unknown) => Promise<boolean> | void; onEffortChange?: (value: unknown) => Promise<boolean> | void; compact?: boolean;
   /** Task 50: a control drawn instead of the schema's plain one. */
   custom?: JSX.Element;
   /** Task 50: the role whose rows (Models) get the model and effort menus. */
@@ -351,7 +358,7 @@ function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; valu
     if (props.custom) return props.custom;
     // A Models row: the role's account models and that model's efforts.
     if (props.roleItem && props.roles && props.row && spec.name === "model")
-      return <ModelMenu item={props.roleItem} roles={props.roles} value={str(props.value)} label={label()} onChange={(value) => void props.onChange(value)} />;
+      return <ModelMenu item={props.roleItem} roles={props.roles} value={str(props.value)} effort={str(props.row.effort)} label={label()} onChange={(value) => void props.onChange(value)} onEffortChange={(value) => void props.onEffortChange?.(value)} />;
     if (props.roleItem && props.roles && props.row && spec.name === "effort")
       return <EffortMenu item={props.roleItem} roles={props.roles} model={str(props.row.model)} value={str(props.value)} label={label()} onChange={(value) => void props.onChange(value)} />;
     const refs = spec.type === "text" ? references(props.editor, spec) : undefined;

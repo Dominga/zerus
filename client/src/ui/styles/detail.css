@@ -776,6 +776,9 @@ dialog.session-file { width: min(520px, calc(100vw - 32px)); max-width: calc(100
   .cmp-model-name { min-width: 0; }
   .cmp-model-suffix, .cmp-model > svg { flex: none; white-space: pre; }
   .cmp-model > .cmp-model-warn { color: var(--z-color-warn); }
+  .provider-selection-button { max-width: 480px; }
+  .provider-selection-account-name { min-width: 0; color: var(--z-color-text-2); }
+  .provider-selection-account-row { padding-bottom: 0; }
   dialog.cmp-settings-dialog { width: min(420px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
   .cmp-settings-dialog .field { width: 100%; }
   .cmp-settings-models { border: 0; padding: 0; margin: 0; min-width: 0; }

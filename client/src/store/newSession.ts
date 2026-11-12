@@ -60,7 +60,7 @@ export interface NewSessionOptions {
 /** The commands the store sends (bridge.ts); tests record their own. */
 export type NewSessionBridge = Pick<typeof bridge,
   | "newSessionContext" | "newSessionForm" | "newSessionStart" | "newSessionPlan" | "launchWarning" | "repositoryFields" | "worktreeSnapshot"
-  | "worktreeCatalog" | "pickLocalFolder" | "localFolderExists" | "openCodeModels" | "openCodeFavorite" | "openCodeStart" | "launchAccounts"
+  | "worktreeCatalog" | "pickLocalFolder" | "localFolderExists" | "openCodeModels" | "openCodeFavorite" | "openCodeStart" | "teamRoleModels" | "launchAccounts"
   | "launchAccountRows" | "launchAccountsClose" | "onLaunchAccountsChanged" | "creationSubmit" | "taskExecutorSubmit" | "projectFolders">;
 
 export interface NewSessionDeps {
@@ -872,14 +872,17 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
 
   // OpenCode (1145-1313).
 
+  function accountProfile(): Json {
+    return accounts.find((p) => p.provider === agent() && p.id === account()) ?? EMPTY;
+  }
+
   function openCodeProfile(): Json {
-    if (agent() !== "opencode") return EMPTY;
-    return accounts.find((p) => p.provider === "opencode" && p.id === account()) ?? EMPTY;
+    return agent() === "opencode" ? accountProfile() : EMPTY;
   }
 
   // OpenCode's models, folder catalogs, favorites and service (1145-1313).
   const oc = createOpenCode({
-    bridge: b, host, path, agent, machineName, openCodeProfile, online, emit, updateForm,
+    bridge: b, host, path, agent, machineName, accountProfile, openCodeProfile, online, emit, updateForm,
     accountsLoading: () => accountRequest !== 0,
     reloadAccounts: () => loadAccounts(true),
     markRowFavorite(value, favorite) {

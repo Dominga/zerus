@@ -1,7 +1,7 @@
 import {describe,it,expect} from "vitest";
 import {accountModelChoices,accountModelView,computerList,permissionExplanation,savesOn} from "./account-defaults";
 import type {AccountModelCatalog,AccountEditView} from "../../bridge";
-const catalog:AccountModelCatalog={models:[{id:"example",label:"Example model",effort_options:["low","high"]}],defaults:{model:"example",effort:"high"},provider_defaults:{model:"native",effort:"low"},effort_supported:true};
+const catalog:AccountModelCatalog={models:[{id:"example",label:"Example model",effort_options:["low","high"],effort_labels:["Low","High"],default_effort:"high"}],defaults:{model:"example",effort:"high"},provider_defaults:{model:"native",effort:"low"},effort_supported:true};
 describe("account-specific defaults",()=>{
   it("names every computer an account edit saves on (zerus-f0uz8)",()=>{
     expect(computerList(["arch","mac","va-kids"],"en")).toBe("arch, mac, and va-kids");
@@ -16,8 +16,8 @@ describe("account-specific defaults",()=>{
     expect(accountModelChoices(missing).at(-1)?.label).toBe("old (currently unavailable)");
     expect(accountModelView(missing,"old").canSave).toBe(false);expect(accountModelView(missing,"").canSave).toBe(true);
   });
-  it("disables inherited and Kimi effort with Qt's hints",()=>{
-    expect(accountModelView(catalog,"example")).toMatchObject({efforts:["low","high"],effortEnabled:true,canSave:true});
+  it("uses labeled model efforts and disables inherited and Kimi effort with Qt's hints",()=>{
+    expect(accountModelView(catalog,"example")).toMatchObject({efforts:[{id:"",label:"Provider default"},{id:"low",label:"Low"},{id:"high",label:"High"}],effortEnabled:true,canSave:true});
     expect(accountModelView(catalog,"").effortEnabled).toBe(false);
     expect(accountModelView({...catalog,effort_supported:false},"example")).toMatchObject({efforts:[],effortEnabled:false,hint:"Kimi manages effort in its native settings. This choice sets the model for new conversations."});
     expect(accountModelView({...catalog,models:[]},"").hint).toBe("Open this account's agent once, then refresh to load its models.");
@@ -27,7 +27,7 @@ describe("account-specific defaults",()=>{
     const deepseek:AccountModelCatalog={models:[{id:"deepseek-official/deepseek-flash",label:"DeepSeek-V4.1-Flash (DeepSeek)",effort_options:["off","low","high","max"]}],
       defaults:{model:"deepseek-official/deepseek-flash",effort:"max"},provider_defaults:{model:"deepseek-official/deepseek-flash",effort:""},effort_supported:true};
     expect(accountModelChoices(deepseek).map(m=>m.label)).toEqual(["DeepSeek-V4.1-Flash (DeepSeek)"]);
-    expect(accountModelView(deepseek,"deepseek-official/deepseek-flash","dsh")).toMatchObject({efforts:["off","low","high","max"],effortEnabled:true,canSave:true,
+    expect(accountModelView(deepseek,"deepseek-official/deepseek-flash","dsh")).toMatchObject({efforts:[{id:"",label:"Provider default"},{id:"off",label:"off"},{id:"low",label:"low"},{id:"high",label:"high"},{id:"max",label:"max"}],effortEnabled:true,canSave:true,
       hint:"Choose the reasoning effort for the selected model, or keep its provider default."});
   });
   it("explains the captured provider permission scope",()=>{

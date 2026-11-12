@@ -132,7 +132,7 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
     await settle();
     expect(t.row("pc-claude")).toBe(0);
     expect(t.state().accounts.length).toBe(2);
-    expect(t.state().accounts[0].name).toBe("pc@example.invalid");
+    expect(t.state().accounts[0].name).toBe("Review");
     t.world.release("accounts:mac");
     await settle();
     expect(t.row("mac-claude")).toBe(-1);
@@ -141,7 +141,7 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
     expect(t.row("pc-claude")).toBe(-1);
     await settle();
     expect(t.row("mac-claude")).toBe(0);
-    expect(t.state().accounts[0].name).toBe("mac@example.invalid");
+    expect(t.state().accounts[0].name).toBe("Review");
   });
 
   it("pendingAccountsAllowShellOnlyWhenChosen", async () => {
@@ -169,11 +169,11 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
       expect(work.tooltip).toContain("5h");
       expect(work.tooltip).toContain("7d");
       expect(work.tooltip).not.toContain("Reset in");
-      expect(work.name).toBe("shared@example.invalid");
-      expect(rows[t.row("other")].name).toBe("shared@example.invalid");
+      expect(work.name).toBe("Work");
+      expect(rows[t.row("other")].name).toBe("Work");
       expect(work.tooltip.split("\n").length).toBe(2);
       expect(rows[t.state().account].id).toBe("other");
-      expect(rows[t.row("native-dsh")].tooltip).toBe("shared@example.invalid\nlimits n/a");
+      expect(rows[t.row("native-dsh")].tooltip).toBe("DeepSeek\nlimits n/a");
       expect(rows[rows.length - 1].name).toBe("Run shell");
       await t.choose("work");
       await t.start();
@@ -186,7 +186,7 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
     const t = setup((w) => w.flags.add("missing"));
     await t.open({ agent: "claude" });
     expect(t.world.of("launchAccounts").map((c) => c.args)).toEqual([["", false, "claude"]]);
-    expect(t.state().accounts[t.row("work")].tooltip).toBe("shared@example.invalid\nlimits n/a");
+    expect(t.state().accounts[t.row("work")].tooltip).toBe("Work\nlimits n/a");
     await t.choose("claude");
     const keys = t.state().accounts.map((r) => r.key);
     t.world.flags.delete("missing");
@@ -208,12 +208,12 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
   it("unknownAndEndedWindowsStayUnavailable", async () => {
     const t = setup((w) => w.flags.add("missing"));
     await t.open({ agent: "codex" });
-    expect(t.state().accounts[t.row("work")].tooltip).toBe("shared@example.invalid\nlimits n/a");
+    expect(t.state().accounts[t.row("work")].tooltip).toBe("Work\nlimits n/a");
     t.world.flags.delete("missing");
     t.world.flags.add("ended");
     t.act.refreshAccounts();
     await settle();
-    expect(t.state().accounts[t.row("work")].tooltip).toBe("shared@example.invalid\nlimits n/a");
+    expect(t.state().accounts[t.row("work")].tooltip).toBe("Work\nlimits n/a");
   });
 
   // 944-950: while the computer's catalog is not filed, the list keeps loading.
@@ -510,7 +510,7 @@ describe("Start (NewSessionDialog.cpp 743-786)", () => {
     const before = t.world.calls.length;
     await t.start();
     const sent = t.world.calls.slice(before).map((c) => c.command).filter((c) => c !== "newSessionForm");
-    expect(sent).toEqual(["newSessionStart", "launchWarning", "newSessionStart", "newSessionPlan", "creationSubmit", "launchAccountsClose"]);
+    expect(sent).toEqual(["newSessionStart", "launchWarning", "newSessionStart", "teamRoleModels", "newSessionPlan", "creationSubmit", "launchAccountsClose"]);
     // The plan and Start read the same input, and the choices of the same turn.
     const [startInput] = t.world.of("newSessionStart")[1].args as [NewSessionFormInput];
     const [planInput, choices] = t.world.of("newSessionPlan")[0].args as [NewSessionFormInput, Json];
@@ -917,7 +917,7 @@ describe("reads only (Review Focus 1 and 2)", () => {
     await settle();
     expect(t.world.creating()).toEqual([]);
     const commands = new Set(t.world.calls.map((c) => c.command));
-    for (const command of commands) expect(["newSessionContext", "projectFolders", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
+    for (const command of commands) expect(["newSessionContext", "projectFolders", "newSessionForm", "repositoryFields", "worktreeSnapshot", "worktreeCatalog", "pickLocalFolder", "openCodeModels", "teamRoleModels", "launchAccounts", "launchAccountsClose"]).toContain(command);
   });
 
   it("the prefill's late answer after a folder change does nothing", async () => {

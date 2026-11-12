@@ -967,6 +967,18 @@ class NativeHarness(unittest.TestCase):
                 self.assertEqual(calls.read_bytes(), before,
                                  'Settings invoked the private model stream')
 
+    def test_launch_applies_model_and_effort_to_new_session(self):
+        before = self.rpc('catalog')['default']
+        name = 'dsh/test/' + str(uuid.uuid4())[:8]
+        result = subprocess.run([str(HGS), 'dsh', str(self.workspace), '--new', '-n', name,
+                                 '--launch-id', str(uuid.uuid4()), '--model', 'hgs-test/test-b', '--effort', 'off'],
+                                env=self.env, cwd=REPO, text=True, capture_output=True, timeout=35)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inspection = self.cli('inspect', {'name': name})
+        self.assertEqual((inspection['model_provider'], inspection['model'], inspection['effort']),
+                         ('hgs-test', 'test-b', 'off'))
+        self.assertEqual(self.rpc('catalog')['default'], before)
+
     def test_model_settings_do_not_change_default_or_other_session(self):
         a, b = self.create(), self.create()
         before = self.rpc('catalog')['default']

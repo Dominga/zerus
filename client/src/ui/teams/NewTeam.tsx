@@ -13,7 +13,8 @@ import {
 } from "../../store/newTeamForm";
 import { setSetting, settings as settingsStore } from "../../store/settings";
 import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coordinatorLine, type AccountChoice } from "../../store/newTeamSources";
-import { createModelCatalogs, modelOptions } from "./catalogControls";
+import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
+import { normalizeModelCatalog, selectModel } from "../provider-selection";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
 import { TeamHelpButton } from "./TeamHelpButton";
@@ -58,7 +59,6 @@ export interface NewTeamProps {
 }
 
 const AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"];
-const EFFORTS = ["", "low", "medium", "high", "xhigh"];
 const PERMISSIONS: [string, () => string][] = [["", () => tr("Account")], ["auto", () => tr("Auto")], ["bypass", () => tr("Bypass")]];
 
 const FAVOURITES = "teams/templateFavourites";
@@ -262,10 +262,25 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   // Task 200 (Qt task #19): the models an agent's account offers on that computer, as the model field's list.
   const [modelTick, setModelTick] = createSignal(0);
   const models = createModelCatalogs((at, agent, account) => teamRoleModels(at, agent, account), () => setModelTick((n) => n + 1));
-  const modelsFor = (item: { computer: string; agent: string; account: string; model: string }) => {
+  interface ModelItem { [key: string]: unknown; computer: string; agent: string; account: string; model: string; effort: string }
+  const modelsFor = (item: ModelItem) => {
     modelTick();
     models.request(item);
     return modelOptions(item, models.get(item));
+  };
+  const effortsFor = (item: ModelItem) => {
+    modelTick();
+    models.request(item);
+    return effortOptions(item.model, models.get(item), item.effort);
+  };
+  const changedModel = (item: ModelItem, value: string) => {
+    const next = selectModel(normalizeModelCatalog(models.get(item) ?? []), value, item.effort);
+    return { model: next.modelId, effort: next.effortId };
+  };
+  const leadModelInput = (value: string) => setLead({ ...lead(), ...changedModel({ computer: "", ...lead(), model: value }, value) });
+  const memberModelInput = (index: number, value: string) => {
+    const item = members()[index];
+    setMember(index, changedModel({ ...item, model: value }, value));
   };
   // Task 200 (Qt buildLead): the lead pane's Chat, Goal and Plan.
   const [leadPage, setLeadPage] = createSignal<"chat" | "goal" | "phases" | "plan">("chat");
@@ -302,15 +317,15 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
               </Show>
               <label class="nt-check"><input type="radio" name="nt-lead" checked={lead().mode === "new"} onChange={() => setLead({ ...lead(), mode: "new" })} />{tr("A new session in the team folder")}</label>
               <div class="nt-row nt-lead-row">
-                <select value={lead().agent} disabled={lead().mode !== "new"} aria-label={tr("Agent")} onChange={(event) => setLead({ ...lead(), agent: event.currentTarget.value, account: "" })}>
+                <select value={lead().agent} disabled={lead().mode !== "new"} aria-label={tr("Agent")} onChange={(event) => setLead({ ...lead(), agent: event.currentTarget.value, account: "", model: "", effort: "" })}>
                   <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
                 </select>
-                <TextInput placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => setLead({ ...lead(), model: event.currentTarget.value })} />
-                <datalist id="nt-lead-models"><For each={modelsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
+                <TextInput placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => leadModelInput(event.currentTarget.value)} />
+                <datalist id="nt-lead-models"><For each={modelsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model, effort: lead().effort })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
                 <select value={lead().effort} disabled={lead().mode !== "new"} aria-label={tr("Effort")} onChange={(event) => setLead({ ...lead(), effort: event.currentTarget.value })}>
-                  <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
+                  <For each={effortsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model, effort: lead().effort })}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
                 </select>
-                <select value={lead().account} disabled={lead().mode !== "new"} aria-label={tr("Account")} onChange={(event) => setLead({ ...lead(), account: event.currentTarget.value })}>
+                <select value={lead().account} disabled={lead().mode !== "new"} aria-label={tr("Account")} onChange={(event) => setLead({ ...lead(), account: event.currentTarget.value, model: "", effort: "" })}>
                   <option value="">{tr("Default account")}</option>
                   <For each={accountsFor(lead().agent)}>{(account) => <option value={account.id} selected={account.id === lead().account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
                 </select>
@@ -452,22 +467,22 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           <For each={members()}>{(member, index) => (
             <div class="nt-row nt-member">
               <TextInput class="nt-role" placeholder={tr("Role")} value={member.role} onInput={(event) => setMember(index(), { role: event.currentTarget.value })} />
-              <select class="nt-agent" value={member.agent} onChange={(event) => setMember(index(), { agent: event.currentTarget.value, account: "" })}>
+              <select class="nt-agent" value={member.agent} onChange={(event) => setMember(index(), { agent: event.currentTarget.value, account: "", model: "", effort: "" })}>
                 <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
               </select>
-              <TextInput class="nt-model" placeholder={tr("default model")} value={member.model} list={`nt-models-${index()}`} onInput={(event) => setMember(index(), { model: event.currentTarget.value })} />
-              <datalist id={`nt-models-${index()}`}><For each={modelsFor(member)}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
+              <TextInput class="nt-model" placeholder={tr("default model")} value={member.model} list={`nt-models-${index()}`} onInput={(event) => memberModelInput(index(), event.currentTarget.value)} />
+              <datalist id={`nt-models-${index()}`}><For each={modelsFor({ ...member })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
               <select class="nt-effort" value={member.effort} aria-label={tr("Effort")} onChange={(event) => setMember(index(), { effort: event.currentTarget.value })}>
-                <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
+                <For each={effortsFor({ ...member })}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
               </select>
               <select class="nt-permissions" value={member.permissions} aria-label={tr("Permissions")} onChange={(event) => setMember(index(), { permissions: event.currentTarget.value })}>
                 <For each={PERMISSIONS}>{([value, label]) => <option value={value}>{label()}</option>}</For>
               </select>
-              <select class="nt-computer" value={member.computer} aria-label={tr("Computer")} onChange={(event) => setMember(index(), { computer: event.currentTarget.value, account: "" })}>
+              <select class="nt-computer" value={member.computer} aria-label={tr("Computer")} onChange={(event) => setMember(index(), { computer: event.currentTarget.value, account: "", model: "", effort: "" })}>
                 <option value="">{tr("this computer")}</option>
                 <For each={props.computers.filter((choice) => choice.alias)}>{(choice) => <option value={choice.alias}>{choice.label}</option>}</For>
               </select>
-              <select class="nt-account" value={member.account} aria-label={tr("Account")} onChange={(event) => setMember(index(), { account: event.currentTarget.value })}>
+              <select class="nt-account" value={member.account} aria-label={tr("Account")} onChange={(event) => setMember(index(), { account: event.currentTarget.value, model: "", effort: "" })}>
                 <option value="" selected={!member.account}>{tr("Default account")}</option>
                 <For each={accountsFor(member.agent, member.computer)}>{(account) => <option value={account.id} selected={account.id === member.account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
               </select>

@@ -4,6 +4,8 @@ import { array, object, string, type Json } from "../ui/lib/json";
 import {
   addModelOptions, catalogSupported, markCatalogFavorite, ModelPicker, updateText, type ModelOption, type PickerView,
 } from "../ui/sessions/opencode-models";
+import { effortOptions, normalizeModelCatalog, selectModel } from "../ui/provider-selection";
+import { createStandardModels } from "./newSessionProviderModels";
 
 // New session's OpenCode part (tray/src/NewSessionDialog.cpp 1145-1313 with
 // 328-339 and 397-453): the model list and its picker, efforts, the folder
@@ -13,9 +15,9 @@ import {
 // stays with its own computer and folder. Nothing here starts OpenCode
 // except its button.
 
-/** What the OpenCode part reads and asks of the rest of the dialog. */
+/** What the provider model selectors read and ask of the rest of the dialog. */
 export interface OpenCodeHost {
-  bridge: Pick<typeof bridge, "openCodeModels" | "openCodeFavorite" | "openCodeStart">;
+  bridge: Pick<typeof bridge, "openCodeModels" | "openCodeFavorite" | "openCodeStart" | "teamRoleModels">;
   /** The selected computer: "" or the alias. */
   host(): string;
   /** The selected folder, "" for none. */
@@ -23,6 +25,8 @@ export interface OpenCodeHost {
   agent(): string;
   /** The computer as the dialog names it: the alias, else this computer's host name. */
   machineName(): string;
+  /** The selected account row of the computer's catalog, `{}` for none. */
+  accountProfile(): Json;
   /** The selected OpenCode row of the computer's catalog, `{}` for none. */
   openCodeProfile(): Json;
   online(computer: string): boolean;
@@ -41,7 +45,7 @@ export interface OpenCodeHost {
 
 export interface EffortOption { value: string; label: string }
 
-/** What the dialog shows of OpenCode. */
+/** What the dialog shows of a provider's model selection. */
 export interface OpenCodeView {
   models: ModelOption[];
   /** The selected model, "" for the native default. */
@@ -55,6 +59,7 @@ export interface OpenCodeView {
   effort: string;
   effortVisible: boolean;
   service: { visible: boolean; reason: string; offer: boolean; text: string; enabled: boolean; tooltip: string };
+  openCode?: boolean;
 }
 
 const EMPTY: Json = Object.freeze({}) as Json;
@@ -68,6 +73,32 @@ const valueOf = (entry: unknown) => { const o = object(entry); return typeof o.v
 const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 
 export function createOpenCode(h: OpenCodeHost) {
+  const standard = createStandardModels(h), openCode = createOpenCodeOnly(h);
+  const current = () => ["claude", "codex", "kimi", "dsh"].includes(h.agent()) ? standard : openCode;
+  return {
+    updateModels() { current().updateModels(); },
+    model: () => current().model(),
+    effort: () => current().effort(),
+    dropUnready() { current().dropUnready(); },
+    restore(model: string, effort: string) { current().restore(model, effort); },
+    view: () => current().view(),
+    actions: {
+      chooseModel: (value: string) => current().actions.chooseModel(value),
+      chooseEffort: (value: string) => current().actions.chooseEffort(value),
+      openModelPicker: () => current().actions.openModelPicker(),
+      closeModelPicker: () => current().actions.closeModelPicker(),
+      useNativeModel: () => current().actions.useNativeModel(),
+      pickerClick: (value: string, star: boolean) => current().actions.pickerClick(value, star),
+      pickerSelect: (value: string) => current().actions.pickerSelect(value),
+      pickerToggleAll: () => current().actions.pickerToggleAll(),
+      pickerSearch: (text: string) => current().actions.pickerSearch(text),
+      startOpenCode: () => current().actions.startOpenCode(),
+    },
+    dispose() { standard.dispose(); openCode.dispose(); },
+  };
+}
+
+function createOpenCodeOnly(h: OpenCodeHost) {
   const b = h.bridge;
   let closed = false;
   let ticket = 0;
@@ -165,12 +196,14 @@ export function createOpenCode(h: OpenCodeHost) {
 
   /** A changed model keeps the chosen effort only when it offers that variant too (1209-1219). */
   function updateEfforts() {
-    const selectedEffort = effortValue;
     const current = currentOption();
-    const offered = current?.efforts ?? [];
-    const enabled = opencode() && modelValue !== "" && offered.length > 0;
-    efforts = [defaultEffort(), ...(enabled ? offered.map((value, i) => ({ value, label: current?.effortLabels[i] ?? value })) : [])];
-    effortValue = efforts.some((e) => e.value === selectedEffort) ? selectedEffort : "";
+    const catalog = normalizeModelCatalog({ models: current ? [{
+      id: current.value, label: current.label, effort_options: current.efforts, effort_labels: current.effortLabels, default_effort: current.defaultEffort,
+    }] : [] });
+    const selected = selectModel(catalog, modelValue, effortValue);
+    const enabled = opencode() && modelValue !== "" && (current?.efforts.length ?? 0) > 0;
+    efforts = effortOptions(catalog, modelValue, selected.effortId, tr("Default")).map((effort) => ({ value: effort.id, label: effort.label }));
+    effortValue = selected.effortId;
     effortVisible = enabled;
   }
 
@@ -391,7 +424,7 @@ export function createOpenCode(h: OpenCodeHost) {
         models, model: modelValue, modelVisible: opencode(),
         modelButton: modelValue === "" ? tr("Native default model") : currentOption()?.label || modelValue,
         modelEnabled: modelEnabled(), pickerOpen, picker: picker.view(),
-        efforts, effort: effortValue, effortVisible, service: service(),
+        efforts, effort: effortValue, effortVisible, service: service(), openCode: opencode(),
       };
     },
     actions: {

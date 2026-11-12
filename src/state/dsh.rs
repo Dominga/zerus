@@ -225,6 +225,26 @@ fn qualified_model(catalog: &Value, model: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// `mode` is the account permission mode a paused session resumes under.
+fn apply_model(record: &Value, model: &str, effort: &str, mode: &str) -> Result<(String, Value)> {
+    let selected = if model.contains('/') {
+        model.to_owned()
+    } else {
+        let catalog = rpc(record, "catalog", json!({}))?;
+        qualified_model(&catalog, model).ok_or("Choose a native provider and model")?
+    };
+    let selected = selected.as_str();
+    let (provider, model) = selected
+        .split_once('/')
+        .ok_or("Choose a native provider and model")?;
+    let mut params = json!({"sessionId":record["conversation_id"],"provider":provider,"model":model,"permissionMode":mode});
+    if !effort.is_empty() {
+        params["reasoningEffort"] = json!(effort);
+    }
+    let applied = rpc(record, "settings", params)?;
+    Ok((selected.to_owned(), applied["selected"].clone()))
+}
 /// One configured permission preset the installed harness actually offers.
 /// Only display metadata is kept; the native configuration never leaves the
 /// bounded discovery helper.
@@ -1757,10 +1777,12 @@ fn ensure_sandbox_folder(_: &Path) -> Result<()> {
 /// shortcuts (`provider`, `bypass`), a legacy `auto` (rejected for DeepSeek) or
 /// a `native:` control map. `None` keeps a binding's own override and otherwise
 /// falls back to the account default.
-pub(crate) fn launch_with_permissions(
+pub(crate) fn launch_with_model(
     name: &str,
     cwd: &str,
     launch_id: Option<&str>,
+    model: &str,
+    effort: &str,
     permissions: Option<&str>,
     dry: bool,
     new_only: bool,
@@ -1831,7 +1853,8 @@ pub(crate) fn launch_with_permissions(
     // is and count only what comes after it.
     mark_upload_start(&mut record);
     save(&mut record)?;
-    if let Some((model, effort)) = defaults {
+    // PR #33: a model named at launch wins over the account's launch defaults.
+    if let Some((model, effort)) = defaults.filter(|_| model.is_empty()) {
         let host = record.clone();
         if let Some(warning) = apply_account_defaults_with(
             &mut record,
@@ -1864,7 +1887,21 @@ pub(crate) fn launch_with_permissions(
     } else if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
+    if !model.is_empty() {
+        apply_model(&record, model, effort, &mode).map_err(|error| format!("DeepSeek session was created, but its model settings could not be applied: {error}"))?;
+    }
     Ok(())
+}
+
+pub(crate) fn launch_with_permissions(
+    name: &str,
+    cwd: &str,
+    launch_id: Option<&str>,
+    permissions: Option<&str>,
+    dry: bool,
+    new_only: bool,
+) -> Result<()> {
+    launch_with_model(name, cwd, launch_id, "", "", permissions, dry, new_only)
 }
 
 #[allow(dead_code)] // Kept for callers on the previous launch signature.
@@ -3587,28 +3624,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 } else {
                     string(&request, "model")
                 };
-                // Task #19: a bare model id takes the one provider that offers it.
-                let selected = if selected.contains('/') {
-                    selected.to_owned()
-                } else {
-                    let catalog = rpc(&record, "catalog", json!({}))?;
-                    qualified_model(&catalog, selected).ok_or("Choose a native provider and model")?
-                };
-                let selected = selected.as_str();
-                let (provider, model) = selected
-                    .split_once('/')
-                    .ok_or("Choose a native provider and model")?;
                 // A paused session resumes under the account permission mode.
                 let mode = crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,"native-dsh","dsh").map_err(|e|e.message)?;
-                let mut params = json!({"sessionId":record["conversation_id"],"provider":provider,"model":model,"permissionMode":mode});
-                if !string(&request, "effort").is_empty() {
-                    params["reasoningEffort"] = request["effort"].clone();
-                }
-                let applied = rpc(&record, "settings", params)?;
+                let (selected, selection) = apply_model(&record, &selected, string(&request, "effort"), &mode)?;
                 receipt["status"] = json!("applied");
                 receipt["scope"] = json!("session");
                 receipt["model"] = json!(selected);
-                receipt["effort"] = applied["selected"]["reasoningEffort"].clone();
+                receipt["effort"] = selection["reasoningEffort"].clone();
             }
             println!("{receipt}");
         }

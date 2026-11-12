@@ -10,6 +10,7 @@ import { orderedRows } from "./catalog";
 import { listRows, listedSessionIgnoringCollapse, machineChoices } from "../ui/sessions/model";
 import { statusCaption } from "../ui/sessions/SessionCard";
 import { GoToKind, recentSessionIds, type GoToItem } from "../ui/sessions/goTo";
+import { accountDisplayName } from "../ui/provider-selection";
 
 const SECTIONS: readonly [string, string][] = [
   ["go.overview", trNoop("Overview")], ["go.sessions", trNoop("Sessions")], ["go.projects", trNoop("Projects")],
@@ -43,7 +44,7 @@ export function goToItems(): GoToItem[] {
   }
   for (const account of accountsPage().accounts) {
     for (const profile of account.members) {
-      items.push({ kind: GoToKind.Account, id: profile.id, host: profile.host, title: profile.label || profile.id,
+      items.push({ kind: GoToKind.Account, id: profile.id, host: profile.host, title: accountDisplayName(account, profile),
         detail: [tr("Account"), profile.provider, profile.machine].filter((part): part is string => !!part), recency: -1 });
     }
   }

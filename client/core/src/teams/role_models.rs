@@ -4,30 +4,14 @@
 //! without an account names `native-<agent>`. Read only; bounded.
 use crate::actions::{failure_detail, Exit, Invocation};
 use crate::fleet::valid_alias;
-use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
 /// The agents whose accounts report a model catalog (Qt's list).
 pub const AGENTS: &[&str] = &["claude", "codex", "kimi", "dsh"];
 
-/// One model a role may name, with the efforts it takes.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct RoleModel {
-    pub id: String,
-    pub label: String,
-    pub effort_options: Vec<String>,
-}
-
-fn short(value: &Value, limit: usize) -> String {
-    value
-        .as_str()
-        .filter(|text| text.chars().count() <= limit && !text.chars().any(char::is_control))
-        .unwrap_or_default()
-        .to_owned()
-}
+pub type RoleModel = crate::model_catalog::Model;
 
 /// The account a role's models come from: its own, or the agent's native one.
 pub fn account_of(agent: &str, account: &str) -> Result<String, String> {
@@ -74,36 +58,7 @@ pub fn invocation(computer: &str, account: &str) -> Result<Invocation, String> {
 
 /// The reply's models: at most 256, each once, with at most 64 efforts.
 pub fn parse(value: &Value) -> Result<Vec<RoleModel>, String> {
-    let rows = value["models"]
-        .as_array()
-        .ok_or("Invalid account model settings response")?;
-    let mut seen = BTreeSet::new();
-    let mut models = Vec::new();
-    for row in rows.iter().take(256) {
-        let id = short(&row["id"], 256);
-        if id.is_empty() || !seen.insert(id.clone()) {
-            continue;
-        }
-        let label = short(&row["label"], 160);
-        let mut efforts: Vec<String> = Vec::new();
-        for value in row["effort_options"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(64)
-        {
-            let effort = short(value, 40);
-            if !effort.is_empty() && !efforts.contains(&effort) {
-                efforts.push(effort);
-            }
-        }
-        models.push(RoleModel {
-            label: if label.is_empty() { id.clone() } else { label },
-            id,
-            effort_options: efforts,
-        });
-    }
-    Ok(models)
+    crate::model_catalog::parse_models(value)
 }
 
 /// Reads one role's models.
@@ -158,12 +113,16 @@ mod tests {
                 RoleModel {
                     id: "gpt-5.5".into(),
                     label: "GPT-5.5".into(),
-                    effort_options: vec!["low".into(), "high".into()]
+                    effort_options: vec!["low".into(), "high".into()],
+                    effort_labels: vec!["low".into(), "high".into()],
+                    default_effort: String::new(),
                 },
                 RoleModel {
                     id: "o4".into(),
                     label: "o4".into(),
-                    effort_options: vec![]
+                    effort_options: vec![],
+                    effort_labels: vec![],
+                    default_effort: String::new(),
                 },
             ]
         );

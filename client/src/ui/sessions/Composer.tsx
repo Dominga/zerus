@@ -21,8 +21,7 @@ import { groupOf, INBOX } from "../../store/organization";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
-import { ModelSettingsButton } from "./ModelSettings";
-import { AccountSwitchChip } from "./AccountSwitchChip";
+import { ProviderSelectionButton } from "./ProviderSelectionButton";
 import { SettingsCheckBar } from "./SettingsCheckBar";
 import { DeliveryHistoryHint } from "./DeliveryHistoryHint";
 import { AttachmentsChip } from "./Attachments";
@@ -362,8 +361,7 @@ export function Composer() {
           <button type="button" class="btn ghost" title={tr("Check the terminal before sending again to avoid a duplicate message")}
             onClick={() => { void composer.allowRetry(); editor.focus(); }}><Icon name="refresh-cw" size={13} />{tr("Allow retry")}</button>
         </Show>
-        <Show when={!child()}><ModelSettingsButton /></Show>
-        <Show when={!child()}><AccountSwitchChip session={s()} compact={compact()} /></Show>
+        <Show when={!child()}><ProviderSelectionButton session={s()} compact={compact()} /></Show>
         <Show when={!child() && act().stop.shown}>
           <button type="button" class="btn" aria-label={tr("Stop current turn")} title={act().stop.hint ?? USUAL_STOP()} disabled={act().stop.disabled}
             onClick={() => { stopTurn(); }}><Icon name="square" size={12} />{tr("Stop")}</button>

@@ -1,7 +1,7 @@
 # Provider account, model and effort selection unification
 
 Date: 2026-11-12
-Status: phases 1–3 implemented; visual composition and non-OpenCode launch changes remain separate follow-ups
+Status: phases 1–4 implemented; non-OpenCode launch changes remain a separate follow-up
 
 ## Summary
 
@@ -339,13 +339,15 @@ changes preserve effort only when valid for the new model.
 
 ### Phase 4: compose the UI where it helps
 
-After the behavior is shared, consider a `ProviderSelectionFields` component
-for layouts that need the same three fields. Composer can then combine account,
-model and effort into one popover if that is the desired interaction.
+Implemented `ProviderSelectionButton` and `ProviderSelectionDialog` in Composer.
+The dialog combines the existing AccountSwitchChip with the extracted
+ModelSettingsContent, so account switch/move and model pending/apply behavior
+stay unchanged. Cancel restores focus to the button and Apply closes the
+combined dialog.
 
-Do not force New session's account/usage list, OpenCode's rich model picker and
-a compact team row into one visual component. The shared contract is the model
-and behavior, not necessarily identical presentation.
+New session's account/usage list, OpenCode's rich model picker and compact team
+rows keep their own presentation. The shared contract is the model and behavior,
+not necessarily identical presentation.
 
 ### Separate behavioral follow-up
 
@@ -425,7 +427,7 @@ project's standard client build and test commands for the final deliverable.
 
 ## Implementation outcome
 
-Phases 1–3 are implemented:
+Phases 1–4 are implemented:
 
 - `client/src/ui/provider-selection.ts` owns account presentation, exact account
   references, model catalog normalization and account/model transitions.
@@ -443,13 +445,15 @@ Phases 1–3 are implemented:
   longer invents generic effort variants for a model that reports none.
 - The unused `Native account` fallback and its Next-only translation were
   removed; the generated Russian catalog was refreshed.
+- Composer now opens one ProviderSelectionDialog for account, model and effort,
+  with render coverage for Cancel/focus restoration and Apply/close behavior.
 
 Verification completed:
 
 - `npm run check` and `npm run build` pass.
 - Focused frontend suites pass, including the new provider-selection tests and
   the remote Swap member regression test.
-- Full frontend suite: 4,330 tests pass. The only failure is the pre-existing
+- Full frontend suite: 4,332 tests pass. The only failure is the pre-existing
   scrollbar coverage audit in `src/ui/styles/popups.test.ts` for
   `.nt-intro-lead`, `.tg-nav` and `.tg-article`, unrelated to this change.
 - Focused client-core model tests pass. The full client-core library suite has

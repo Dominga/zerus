@@ -40,6 +40,36 @@ pub(in crate::teams::ops) fn person_attempt(
     }
     Ok(!own(ctx, node, &o.attempt_id)?)
 }
+/// Whether an observation of an accepted node's task shows the person's own
+/// execution that already ended its turn, superseding the team's accepted
+/// result: In review under an attempt the store never took in (neither the
+/// node's own nor an execution it remembered), In review with conflicting
+/// attempts, or Done with conflicting attempts under a branch integration.
+/// A current attempt the node itself took in keeps today's path.
+pub(in crate::teams::ops) fn supersedes_accepted(
+    ctx: &Context<'_>,
+    n: &Node,
+    o: &TaskObservation,
+) -> Result<bool> {
+    if o.cancelled || o.key != KeyState::Ours {
+        return Ok(false);
+    }
+    let Some((_, kind, state)) = ctx.pending(n.id)? else {
+        return Ok(false);
+    };
+    if kind != "accept" || !matches!(state, DecisionState::Ready | DecisionState::AwaitingOwner) {
+        return Ok(false);
+    }
+    match o.stage {
+        TaskStage::Done => Ok(o.attempt_conflict && super::super::decisions::needs_merge(ctx, n)),
+        TaskStage::InReview if o.attempt_conflict => Ok(true),
+        TaskStage::InReview => Ok(!o.attempt_id.is_empty()
+            && o.attempt_id != remembered(ctx, n.id)?
+            && !own(ctx, n.id, &o.attempt_id)?),
+        _ => Ok(false),
+    }
+}
+
 /// What the node took in with this observation, remembered: the node's own
 /// effect, whatever the task's stage, or a running person's execution that
 /// the observation took over or restored (its `person_override`).

@@ -4099,6 +4099,14 @@ REF any` to clear the key. When a key is cleared or replaced on another
 computer, the home service releases the node at its next observation; that
 sync and observation window is accepted.
 
+An accepted team result is the team's only while its task still shows the
+execution the node took in. If the task comes back In review under the
+person's own ended run, with conflicting attempts, or Done with conflicting
+attempts under a branch integration, the accepted result is superseded: the
+node ends without merging, its integration and held-step cards close, the lead
+gets one item naming the task, and the task document is untouched and stays In
+review under the person's attempt.
+
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
 hgs task add --project orchard --title "Task title" --request-id UUID < description.txt

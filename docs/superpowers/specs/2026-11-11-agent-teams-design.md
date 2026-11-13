@@ -543,6 +543,20 @@ When the task's pipeline has stages, they run between steps 1 and 2: the lead
 gets the inbox item after the last stage, or not at all when the pipeline
 accepts on its own.
 
+### A task the person took back
+
+An accepted result belongs to the team only while its task still shows the
+execution the node took in. If the task comes back In review under an execution
+the store never saw running, In review with conflicting attempts, or Done with
+conflicting attempts under a branch integration, the person's own run has
+already ended and replaced the team's accepted result. The store settles the
+acceptance, marks the node's open effects superseded, ends the node without
+merging, closes its integration and held-step cards, and gives the lead one
+item naming the task and saying the person's own run replaced the team's
+accepted result. The task document is not touched: it stays In review under
+the person's attempt. A task whose current attempt is the node's own keeps the
+ordinary finish and merge path.
+
 ## Pipelines
 
 A pipeline says what happens between a member's report and the end of a task.

@@ -415,3 +415,88 @@ fn a_departure_releases_uncertain_and_cutting_over_slots_without_retrying_delive
         );
     }
 }
+
+#[test]
+fn an_accepted_task_taken_back_by_the_person_ends_the_node_once() {
+    for (name, stage, conflict, other) in [
+        ("review", TaskStage::InReview, false, true),
+        ("conflict", TaskStage::InReview, true, false),
+        ("done conflict", TaskStage::Done, true, false),
+    ] {
+        let mut h = Harness::new();
+        let lead = h.bind("lead");
+        h.bind("m1");
+        h.settings(|s| s.delegations.merge_accepted = false);
+        let node = h.add(&person(), 1);
+        h.submit(node, "m1");
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        let decision = h.accept_decision(node);
+        assert!(h
+            .store
+            .cards(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|c| c.node == Some(node) && c.state == "open" && c.kind == "integration"), "{name}");
+        let mut o = h.observation(node, stage);
+        if other {
+            o.attempt += 1;
+            o.attempt_id = "person-attempt".into();
+        }
+        if conflict {
+            o.attempt += 1;
+            o.attempt_id.clear();
+            o.attempt_conflict = true;
+        }
+        let request = Request {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            team: TEAM.into(),
+            expected_revision: h.store.team(TEAM).unwrap().unwrap().revision,
+            operation: Operation::ObserveTask { node, observation: o },
+        };
+        apply(&mut h.store, &service(), &request, 1234).unwrap();
+        assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty(), "{name}");
+        let items: Vec<_> = h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|i| i.node == node && i.kind == "accepted_superseded")
+            .collect();
+        assert_eq!(items.len(), 1, "{name}");
+        assert!(items[0].text.contains("the person's own run replaced the team's accepted result"), "{name}");
+        let decided = h
+            .store
+            .decisions(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|d| d.seq == decision)
+            .unwrap();
+        assert_eq!(decided.state, DecisionState::Settled, "{name}");
+        assert!(!h
+            .store
+            .cards(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|c| c.node == Some(node) && c.state == "open"), "{name}");
+        let journal = h.store.journal(TEAM, 200, None).unwrap().rows.pop().unwrap();
+        assert_eq!(journal.kind, "accepted_superseded", "{name}");
+        assert!(journal.text.contains("nothing was merged"), "{name}");
+        apply(&mut h.store, &service(), &request, 1234).unwrap();
+        assert_eq!(
+            h.store
+                .inbox(TEAM, 200, None)
+                .unwrap()
+                .rows
+                .iter()
+                .filter(|i| i.node == node && i.kind == "accepted_superseded")
+                .count(),
+            1,
+            "{name}: replay wrote another item"
+        );
+    }
+}

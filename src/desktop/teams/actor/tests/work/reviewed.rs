@@ -74,19 +74,28 @@ fn retained_accepted_nodes_do_not_finish_against_a_conflicting_newest_observatio
         assert_eq!(p.finishes, 0);
     }
 }
+/// The person's own ended run replaced the accepted result: the node ends
+/// without a finish or merge, and the late original attempt does not revive it.
 #[test]
-fn an_accepted_review_resumes_once_when_its_original_attempt_is_current_again() {
-    let (mut h, node, id) = accepted();
+fn an_accepted_review_taken_back_by_the_person_is_superseded_not_resumed() {
+    let (mut h, node, _) = accepted();
     h.settings(|s| s.integration = Integration::None);
     observe(&mut h, node, TaskStage::InReview, "", true);
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
     let mut a = actor(&h);
     let mut p = Work::default();
     run(&mut h, &mut a, &mut p, 100);
-    assert_eq!(p.finishes, 0);
-    observe(&mut h, node, TaskStage::InReview, &id, false);
-    run(&mut h, &mut a, &mut p, 101);
-    run(&mut h, &mut a, &mut p, 102);
-    assert_eq!(p.finishes, 1);
+    assert_eq!((p.finishes, p.merges), (0, 0));
+    let items: Vec<_> = h
+        .store
+        .inbox(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .into_iter()
+        .filter(|i| i.node == node && i.kind == "accepted_superseded")
+        .collect();
+    assert_eq!(items.len(), 1);
+    assert!(items[0].text.contains("the person's own run replaced the team's accepted result"));
 }
 #[test]
 fn another_review_attempt_or_a_stop_never_finishes_the_earlier_acceptance() {
@@ -108,33 +117,23 @@ fn another_review_attempt_or_a_stop_never_finishes_the_earlier_acceptance() {
     assert_eq!((p.finishes, p.merges), (0, 0));
 }
 #[test]
-fn a_conflict_defers_a_new_merge_but_never_discards_a_known_merge_receipt() {
-    let (mut h, node, id) = accepted();
+fn a_conflict_over_an_accepted_result_ends_the_node_without_a_merge() {
+    let (mut h, node, _) = accepted();
+    observe(&mut h, node, TaskStage::InReview, "", true);
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
     let mut a = actor(&h);
-    let mut p = Work {
-        merge_reply: Some(MergeResult::Unknown {
-            reason: "lost receipt".into(),
-        }),
-        ..Default::default()
-    };
-    observe(&mut h, node, TaskStage::InReview, "", true);
+    let mut p = Work::default();
     run(&mut h, &mut a, &mut p, 100);
-    assert_eq!(p.merges, 0, "a new write used the retained reported stage");
-    observe(&mut h, node, TaskStage::InReview, &id, false);
-    run(&mut h, &mut a, &mut p, 101);
-    assert_eq!(p.merges, 1);
-    observe(&mut h, node, TaskStage::InReview, "", true);
-    p.contains = Some(true);
-    run(&mut h, &mut a, &mut p, 60_101);
-    assert!(h.store.integration_fact(TEAM, node).unwrap().is_some());
-    assert_eq!(
-        (p.merges, p.finishes),
-        (1, 0),
-        "receipt settlement is read-only authority"
-    );
-    observe(&mut h, node, TaskStage::InReview, &id, false);
-    run(&mut h, &mut a, &mut p, 60_102);
-    assert_eq!((p.merges, p.finishes), (1, 1));
+    assert_eq!((p.merges, p.finishes), (0, 0));
+    assert!(h.store.integration_fact(TEAM, node).unwrap().is_none());
+    assert!(h
+        .store
+        .decisions(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .iter()
+        .filter(|d| d.node == node && d.kind == "accept")
+        .all(|d| d.state == crate::teams::store::DecisionState::Settled));
 }
 
 #[test]

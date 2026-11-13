@@ -24,6 +24,10 @@ fn entry() {
         contracts::run();
         return;
     }
+    if mode == "superseded" {
+        contracts::superseded();
+        return;
+    }
     if mode == "stage-crash" {
         std::env::set_var("HGS_TEST_TEAM_STAGE_AFTER_SAVE", "1");
     }

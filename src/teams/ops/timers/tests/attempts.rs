@@ -1097,28 +1097,29 @@ fn a_late_merge_under_a_conflict_keeps_the_node_for_the_next_observation() {
     }
 }
 
-/// The same with a conflict of a task that is Done: the end is applied, but
-/// the attempts conflict, so the newest observation does not agree yet.
+/// Done under a conflict on an accepted node is the person's own ended run:
+/// the accepted result is superseded, the node ends without merging, and a
+/// late merge receipt has no authority.
 #[test]
-fn a_merge_under_a_conflict_of_a_done_task_keeps_the_node() {
-    let (mut h, lead, node, id) = handed();
+fn a_merge_under_a_conflict_of_a_done_task_is_superseded() {
+    let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
+    assert!(!in_queue(&h, node));
     let decision = h.accept_decision(node);
-    h.run(
-        &service(),
-        Operation::RecordIntegration {
-            decision,
-            node,
-            commit: COMMIT.into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(h.node(node).state, NodeState::Accepted);
-    assert!(in_queue(&h, node), "the attempts still conflict");
-    seen(&mut h, node, TaskStage::Done, 2, &id).unwrap();
-    assert!(!in_queue(&h, node), "the observation agrees");
+    let error = h
+        .run(
+            &service(),
+            Operation::RecordIntegration {
+                decision,
+                node,
+                commit: COMMIT.into(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code, code::INVALID_STATE);
+    assert!(h.store.integration_fact(TEAM, node).unwrap().is_none());
 }
 
 fn outcome(h: &Harness, decision: u64) -> Option<String> {
@@ -1487,12 +1488,14 @@ fn an_accepted_task_is_current_in_review_or_done() {
 
 #[test]
 fn an_accepted_task_is_not_current_otherwise() {
-    // Done with the conflict flag.
+    // Done with the conflict flag: the person's own run supersedes the
+    // accepted result, so the node leaves the live plan.
     let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
-    assert!(bound(&h, node));
+    assert!(!bound(&h, node), "Done with a conflict");
+    assert!(!in_queue(&h, node), "Done with a conflict");
     assert!(!accepted(&h, node, 1), "Done with a conflict");
     // Running, and To do.
     let (mut h, _, node, id) = handed();
@@ -1586,12 +1589,13 @@ fn an_own_task_is_current_at_any_stage_under_the_attempt_the_node_took_in() {
         seen(&mut h, node, TaskStage::InReview, 1, "another-attempt").unwrap();
         assert!(!own(&h, node, 1), "another current attempt");
     }
-    // A Done task under a conflict: applied as an end, still a conflict.
+    // A Done task under a conflict on an accepted node is superseded and the
+    // node ends; the read has no live node left to keep.
     let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
-    assert!(bound(&h, node));
+    assert!(!bound(&h, node));
     assert!(!own(&h, node, 1), "Done under a conflict");
     // No current attempt and no conflict: a refused first hand-out.
     let (mut h, _, node) = refused_hand_out();

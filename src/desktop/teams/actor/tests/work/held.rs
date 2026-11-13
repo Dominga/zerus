@@ -70,22 +70,13 @@ fn exercise(mut h: Harness, node: u32, own: String, step: &str, conflict: bool) 
 }
 #[test]
 fn held_accepts_and_reopens_make_one_card_by_time_and_recover_after_restart() {
-    for (stage, conflict, integration) in [
-        (TaskStage::InReview, false, Integration::None),
-        (TaskStage::InReview, true, Integration::None),
-        (TaskStage::Done, true, Integration::Branch),
-    ] {
+    for integration in [Integration::None, Integration::Branch] {
         let (mut h, node, own) = reviewed::accepted();
         if integration != Integration::Branch {
             h.settings(|s| s.integration = integration);
         }
-        reviewed::observe(
-            &mut h,
-            node,
-            stage,
-            if conflict { "" } else { "another" },
-            conflict,
-        );
+        // An empty attempt with no conflict still holds the accepted step.
+        reviewed::observe(&mut h, node, TaskStage::InReview, "", false);
         exercise(
             h,
             node,
@@ -95,7 +86,7 @@ fn held_accepts_and_reopens_make_one_card_by_time_and_recover_after_restart() {
             } else {
                 "finish"
             },
-            conflict,
+            false,
         );
     }
     for conflict in [false, true] {
@@ -130,17 +121,49 @@ fn held_accepts_and_reopens_make_one_card_by_time_and_recover_after_restart() {
     }
 }
 #[test]
-fn a_held_reason_change_keeps_the_card_until_the_new_reason_has_stood_for_the_period() {
+fn a_superseded_accept_closes_its_held_card_and_writes_one_item() {
     let (mut h, node, _) = reviewed::accepted();
     h.settings(|s| s.integration = Integration::None);
+    reviewed::observe(&mut h, node, TaskStage::InReview, "", false);
+    let mut a = actor(&h);
+    let mut p = Work::default();
+    for now in [100, 60_100, 180_100] {
+        run(&mut h, &mut a, &mut p, now);
+    }
+    assert_eq!(open(&h).len(), 1);
     reviewed::observe(&mut h, node, TaskStage::InReview, "", true);
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+    run(&mut h, &mut a, &mut p, 180_101);
+    run(&mut h, &mut a, &mut p, 180_102);
+    assert!(open(&h).is_empty());
+    assert!(a
+        .ledger
+        .get(TEAM, &format!("gate:held:finish:{node}"))
+        .unwrap()
+        .is_none());
+    assert_eq!((p.finishes, p.merges), (0, 0));
+    let items: Vec<_> = h
+        .store
+        .inbox(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .into_iter()
+        .filter(|i| i.node == node && i.kind == "accepted_superseded")
+        .collect();
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn a_held_reason_change_keeps_the_card_until_the_new_reason_has_stood_for_the_period() {
+    let (mut h, node, id, _) = hold("reopen");
+    reason(&mut h, node, &id, true);
     let mut a = actor(&h);
     let mut p = Work::default();
     for now in [100, 60_100, 180_100] {
         run(&mut h, &mut a, &mut p, now);
     }
     let old = open(&h)[0].seq;
-    reviewed::observe(&mut h, node, TaskStage::InReview, "another", false);
+    reason(&mut h, node, &id, false);
     for now in [180_101, 240_101, 300_101] {
         run(&mut h, &mut a, &mut p, now);
         let cards = open(&h);
@@ -161,7 +184,7 @@ fn archiving_the_node_closes_its_held_card_and_reclaims_the_retry_row_on_the_nex
     for answer in [None, Some("retry"), Some("acknowledged")] {
         let (mut h, node, _) = reviewed::accepted();
         h.settings(|s| s.integration = Integration::None);
-        reviewed::observe(&mut h, node, TaskStage::InReview, "", true);
+        reviewed::observe(&mut h, node, TaskStage::InReview, "", false);
         let mut a = actor(&h);
         let mut p = Work::default();
         for now in [100, 60_100, 180_100] {
@@ -192,9 +215,8 @@ fn archiving_the_node_closes_its_held_card_and_reclaims_the_retry_row_on_the_nex
 }
 #[test]
 fn dismissing_a_held_card_lasts_until_the_reason_changes() {
-    let (mut h, node, _) = reviewed::accepted();
-    h.settings(|s| s.integration = Integration::None);
-    reviewed::observe(&mut h, node, TaskStage::InReview, "", true);
+    let (mut h, node, id, _) = hold("reopen");
+    reason(&mut h, node, &id, true);
     let mut a = actor(&h);
     let mut p = Work::default();
     for now in [100, 60_100, 180_100] {
@@ -214,7 +236,7 @@ fn dismissing_a_held_card_lasts_until_the_reason_changes() {
     }
     assert!(open(&h).is_empty());
     assert_eq!(h.store.cards(TEAM, 200, None).unwrap().rows.len(), 1);
-    reviewed::observe(&mut h, node, TaskStage::InReview, "another", false);
+    reason(&mut h, node, &id, false);
     for now in [2_100_100, 2_160_100, 2_280_100] {
         run(&mut h, &mut a, &mut p, now);
     }
@@ -303,7 +325,7 @@ fn observation_churn_under_one_held_reason_never_advances_its_clock() {
         let mut a = actor(&h);
         let mut p = Work::default();
         for second in 0..30 {
-            reviewed::observe(&mut h, node, TaskStage::InReview, "", true);
+            reviewed::observe(&mut h, node, TaskStage::InReview, "", step == "reopen");
             if second == 10 {
                 drop(a);
                 a = actor(&h);
@@ -318,7 +340,7 @@ fn observation_churn_under_one_held_reason_never_advances_its_clock() {
             100
         );
         for now in [60_100, 180_100] {
-            reviewed::observe(&mut h, node, TaskStage::InReview, "", true);
+            reviewed::observe(&mut h, node, TaskStage::InReview, "", step == "reopen");
             run(&mut h, &mut a, &mut p, now);
         }
         assert_eq!(open(&h).len(), 1, "{step}");
@@ -374,7 +396,7 @@ fn minute(h: &mut Harness, a: &mut super::super::super::Runtime, p: &mut Work, m
 /// closes the card and the step runs once.
 #[test]
 fn a_reason_alternating_every_minute_for_an_hour_opens_one_card_at_the_holds_period() {
-    for step in ["finish", "merge", "reopen"] {
+    for step in ["reopen"] {
         let (mut h, node, id, _) = hold(step);
         let mut a = actor(&h);
         let mut p = Work::default();
@@ -443,7 +465,7 @@ fn a_reason_alternating_every_minute_for_an_hour_opens_one_card_at_the_holds_per
 
 #[test]
 fn a_dismissal_outlasts_a_reason_that_never_stands_for_the_period() {
-    let (mut h, node, id, _) = hold("finish");
+    let (mut h, node, id, _) = hold("reopen");
     let mut a = actor(&h);
     let mut p = Work::default();
     reason(&mut h, node, &id, true);
@@ -513,7 +535,7 @@ fn a_new_decision_is_a_new_hold_whose_card_waits_for_its_own_period() {
 #[test]
 fn a_reason_replacement_interrupted_at_each_durable_step_leaves_one_current_card() {
     for point in ["replacement_closed", "replacement_reset", "notice_reserved"] {
-        let (mut h, node, id, _) = hold("finish");
+        let (mut h, node, id, _) = hold("reopen");
         let mut a = actor(&h);
         let mut p = Work::default();
         reason(&mut h, node, &id, true);
@@ -544,7 +566,7 @@ fn a_reason_replacement_interrupted_at_each_durable_step_leaves_one_current_card
             2,
             "{point}"
         );
-        let key = format!("gate:held:finish:{node}");
+        let key = format!("gate:held:reopen:{node}");
         assert_eq!(
             a.ledger.get(TEAM, &key).unwrap().unwrap().data["card"],
             current[0].seq

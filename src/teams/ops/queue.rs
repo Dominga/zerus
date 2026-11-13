@@ -352,9 +352,14 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
         }
         return Ok(());
     }
+    let active = matches!(ctx.team.status, TeamStatus::Running | TeamStatus::Paused);
+    // An accepted node whose task came back under the person's own ended run
+    // is superseded, not restored: the person's result replaced the team's.
+    let superseded = active && table == "nodes" && timers::supersedes_accepted(ctx, &n, o)?;
     // A conflict of attempts of a task that runs or waits decides nothing: it
-    // is recorded as it came. An ended task's conflict is applied below.
-    if timers::conflict(o) {
+    // is recorded as it came. An ended task's conflict is applied below, and a
+    // conflict over an accepted result is superseded below.
+    if timers::conflict(o) && !superseded {
         return rows::record_observation(ctx.db, &ctx.team.id, *node, o, false);
     }
     // The node's own end counts as well as the stored observation's: a
@@ -363,17 +368,17 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
     // the end its node keeps.
     let ended = node_ended(ctx, table, *node)?;
     let was_terminal = observed_end || ended;
-    let active = matches!(ctx.team.status, TeamStatus::Running | TeamStatus::Paused);
     // A finished node takes today's restore below; a live one a person sent
     // again between two observations ends its attempt and is restored here.
-    if active && table == "nodes" && !was_terminal && timers::person_attempt(ctx, *node, o)? {
+    if !superseded && active && table == "nodes" && !was_terminal && timers::person_attempt(ctx, *node, o)? {
         timers::take_over(ctx, *node, &mut n)?;
     }
     pipeline::before_observation(ctx, &mut n, o, table == "nodes" && !was_terminal)?;
     if !active && table == "nodes" {
         archive_inactive(ctx, *node)?;
     }
-    if n.kind != NodeKind::Stage
+    if !superseded
+        && n.kind != NodeKind::Stage
         && (table == "node_archive" || was_terminal)
         && !o.cancelled
         && o.stage != TaskStage::Done
@@ -398,6 +403,9 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
         n.kind == NodeKind::Stage && (o.cancelled || o.stage == TaskStage::Done),
     )?;
     timers::remember(ctx, *node, o)?;
+    if superseded {
+        supersede_accepted(ctx, *node, &n, o)?;
+    }
     // A task back in To do without a reopen of its generation (a person's
     // run has no pipeline run to reopen), or a settled conflict: a waiting
     // Return or Reassign that lost its reason is settled here.
@@ -501,6 +509,43 @@ fn restore_row(ctx: &Context<'_>, node: u32) -> Result<()> {
         .map_err(storage)?;
     Ok(())
 }
+/// End an accepted node whose task the person took back in an execution the
+/// store never saw: the accepted result is superseded, nothing merges, the
+/// node leaves the plan and the lead gets one item. The task itself is not
+/// touched: it stays In review under the person's attempt.
+fn supersede_accepted(
+    ctx: &mut Context<'_>,
+    node: u32,
+    n: &Node,
+    o: &TaskObservation,
+) -> Result<()> {
+    ctx.settle(node)?;
+    ctx.db.execute(&format!("UPDATE effects SET state='superseded' WHERE team=?1 AND node=?2 AND state IN {OPEN_EFFECT_STATES}"),params![ctx.team.id,node]).map_err(storage)?;
+    ctx.close_inbox(node)?;
+    timers::drop_marks(ctx, node)?;
+    pipeline::task_ended(ctx, n, true)?;
+    ctx.db
+        .execute(
+            "DELETE FROM live_tasks WHERE team=?1 AND node=?2",
+            params![ctx.team.id, node],
+        )
+        .map_err(storage)?;
+    archive_inactive(ctx, node)?;
+    let title = if o.title.is_empty() { n.title.clone() } else { o.title.clone() };
+    let name = if title.is_empty() { String::new() } else { format!(" \"{title}\"") };
+    let task = n
+        .task
+        .as_ref()
+        .map(|t| format!(" {}/{}", t.project, t.uuid))
+        .unwrap_or_default();
+    let body = format!(
+        "Task {node}{name}{task}: the person's own run replaced the team's accepted result, so nothing was merged. The task stays In review under the person's attempt."
+    );
+    ctx.reply.item = Some(ctx.inbox(node, "accepted_superseded", &body)?);
+    ctx.event = Some("accepted_superseded");
+    Ok(())
+}
+
 pub(super) fn finish_observation(ctx: &Context<'_>, node: u32, cancelled: bool) -> Result<()> {
     ctx.db.execute(&format!("UPDATE effects SET state='observed_done' WHERE team=?1 AND node=?2 AND state IN {OPEN_EFFECT_STATES}"),params![ctx.team.id,node]).map_err(storage)?;
     ctx.close_inbox(node)?;

@@ -232,7 +232,7 @@ impl Composers {
         *lock(&self.0.deferred) = Some(Arc::new(route));
     }
 
-    fn deferred(&self) -> Option<Arc<DeferredRoute>> {
+    pub(super) fn deferred(&self) -> Option<Arc<DeferredRoute>> {
         lock(&self.0.deferred).clone()
     }
 

@@ -101,7 +101,8 @@ impl Lane {
         match action {
             Action::MarkRead { .. } => Self::Read,
             Action::Interrupt { .. } => Self::Interrupt,
-            Action::Send { .. } => Self::Send,
+            // A late check of a send never runs beside a send of its session.
+            Action::Send { .. } | Action::ConfirmSend => Self::Send,
             Action::StopProcess { .. } => Self::Process,
             Action::SendNow { .. } => Self::Queue,
             Action::RemoveQueued { .. } => Self::Inbox,

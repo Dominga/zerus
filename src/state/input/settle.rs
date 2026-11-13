@@ -255,6 +255,61 @@ pub(super) fn transcript_proof(path: &Path, offset: u64, message: &str) -> Optio
     None
 }
 
+/// How much earlier than the receipt's start a transcript row may be stamped
+/// and still count: the receipt is written before the paste on this computer,
+/// so this only absorbs the stamps' rounding.
+const LATE_SLACK: f64 = 2.0;
+
+/// WhiteWh fork (owner, 2026-11-13): the window's proof read after the window,
+/// for a delivery left uncertain. The first row from `offset` on, stamped at
+/// `since` or later, that records `message` as submitted or queued. The
+/// transcript is read line by line without holding it, and only lines holding
+/// the start of the message's first line are parsed.
+pub(super) fn late_proof(path: &Path, offset: u64, message: &str, since: f64) -> Option<Proof> {
+    use std::io::BufRead;
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(if offset <= length { offset } else { 0 })).ok()?;
+    let needle = late_needle(message);
+    for line in std::io::BufReader::new(file).split(b'\n') {
+        let line = line.ok()?;
+        if !needle.is_empty() && !line.windows(needle.len()).any(|window| window == needle.as_bytes()) {
+            continue;
+        }
+        let Ok(row) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let stamped = row["timestamp"]
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp_millis() as f64 / 1000.0);
+        if stamped.is_none_or(|at| at + LATE_SLACK < since) {
+            continue;
+        }
+        if let Some(proof) = row_proof(&row, message) {
+            return Some(proof);
+        }
+    }
+    None
+}
+
+/// The start of the message's first significant line as Claude's transcript
+/// writes it unescaped: up to 24 characters before a quote, backslash or
+/// control character. Empty when that leaves too little to filter by.
+fn late_needle(message: &str) -> String {
+    let first = significant(message).into_iter().next().unwrap_or_default();
+    let needle: String = first
+        .chars()
+        .take_while(|ch| !matches!(ch, '"' | '\\') && !ch.is_control())
+        .take(24)
+        .collect();
+    if needle.chars().count() < 4 {
+        String::new()
+    } else {
+        needle
+    }
+}
+
 fn row_proof(row: &Value, message: &str) -> Option<Proof> {
     let text = match row["type"].as_str()? {
         "user" if row["isMeta"] != true => match &row["message"]["content"] {
@@ -486,6 +541,44 @@ mod tests {
         assert_eq!(transcript_proof(&queued, 0, MESSAGE), Some(Proof::Queued));
         fs::write(&queued, format!("{}\n", json!({"type":"queue-operation","operation":"remove","content":MESSAGE}))).unwrap();
         assert_eq!(transcript_proof(&queued, 0, MESSAGE), None);
+    }
+
+    #[test]
+    fn a_late_proof_counts_rows_stamped_after_the_receipt() {
+        // WhiteWh fork (owner, 2026-11-13): an uncertain delivery that Claude
+        // recorded after the window closed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let row = |at: &str, kind: &str| match kind {
+            "user" => json!({"type":"user","timestamp":at,"message":{"content":MESSAGE}}),
+            "queued" => json!({"type":"queue-operation","operation":"enqueue","timestamp":at,"content":MESSAGE}),
+            _ => json!({"type":"user","message":{"content":MESSAGE}}),
+        };
+        // 2026-11-12T20:35:58Z
+        let since = 1_794_515_758.0;
+        let earlier = row("2026-11-12T20:30:00.000Z", "user");
+        let unstamped = row("", "none");
+        let other = json!({"type":"user","timestamp":"2026-11-12T20:36:00.000Z","message":{"content":"another message"}});
+        fs::write(&path, format!("{earlier}\n{unstamped}\n{other}\n")).unwrap();
+        assert_eq!(late_proof(&path, 0, MESSAGE, since), None, "an earlier, an unstamped and another row");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", row("2026-11-12T20:35:59.120Z", "queued")).unwrap();
+        assert_eq!(late_proof(&path, 0, MESSAGE, since), Some(Proof::Queued));
+        let offset = fs::metadata(&path).unwrap().len();
+        assert_eq!(late_proof(&path, offset, MESSAGE, since), None, "rows before the offset");
+        writeln!(file, "{}", row("2026-11-12T20:40:00.000Z", "user")).unwrap();
+        assert_eq!(late_proof(&path, offset, MESSAGE, since), Some(Proof::Transcript));
+        // An offset past a rewritten transcript reads it from the start.
+        assert_eq!(late_proof(&path, offset * 10, MESSAGE, since), Some(Proof::Queued));
+        assert_eq!(late_proof(&dir.path().join("missing.jsonl"), 0, MESSAGE, since), None);
+    }
+
+    #[test]
+    fn the_late_needle_is_the_unescaped_start_of_the_first_line() {
+        assert_eq!(late_needle(MESSAGE), "<zerus-message from=");
+        assert_eq!(late_needle("так, а сам svn готов получается?"), "так, а сам svn готов пол");
+        assert_eq!(late_needle("[Image #1] ok"), "", "too short to filter by");
+        assert_eq!(late_needle("\"quoted\""), "");
     }
 
     #[test]

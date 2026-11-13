@@ -154,6 +154,12 @@ pub enum Action {
         #[serde(default)]
         expected_created: Option<i64>,
     },
+    /// WhiteWh fork (owner, 2026-11-13): `hgs send NAME --confirm REQUEST
+    /// --json`, the dispatch's request ID being the uncertain send's own. It
+    /// asks whether Claude's transcript records that send after all; nothing
+    /// is typed or sent. Built in Rust from a draft's held identity.
+    #[serde(skip_deserializing)]
+    ConfirmSend,
     /// `hgs send-now NAME --json` (`requestQueueSendNow`): the agent sends
     /// its native queue now, when it still is the queue `queue_id` names.
     /// Built in Rust from the inspected queue, never from webview JSON.
@@ -582,6 +588,24 @@ pub fn invocation(
             (
                 vec!["send".to_owned(), name, "--json".to_owned()],
                 Some(input),
+                15,
+                45,
+                Some(request_id.to_owned()),
+            )
+        }
+        Action::ConfirmSend => {
+            if !uuid_shaped(request_id) {
+                return Err("Choose the exact uncertain message.".to_owned());
+            }
+            (
+                vec![
+                    "send".to_owned(),
+                    name,
+                    "--confirm".to_owned(),
+                    request_id.to_owned(),
+                    "--json".to_owned(),
+                ],
+                None,
                 15,
                 45,
                 Some(request_id.to_owned()),
@@ -1275,6 +1299,7 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::StopProcess { process_id, .. } => classify_stop(target, process_id, exit),
         Action::SendNow { queue_id } => classify_send_now(target, invocation, queue_id, exit),
         Action::RemoveQueued { .. } => classify_remove_queued(target, invocation, exit),
+        Action::ConfirmSend => classify_confirm_send(target, invocation, exit),
         Action::Answer { question, answers } => {
             classify_answer(target, invocation, question, answers, exit)
         }
@@ -1728,6 +1753,32 @@ fn classify_remove_queued(target: &Target, invocation: &Invocation, exit: Exit) 
                 _ => uncertain("Invalid acknowledgement. Check the session before retrying."),
             }
         }
+    }
+}
+
+/// The answer of [`Action::ConfirmSend`]: done only for a submitted receipt of
+/// exactly that request, session, run and conversation. Anything else leaves
+/// the send uncertain, so every refusal is a plain failure of the check.
+fn classify_confirm_send(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+    const UNCONFIRMED: &str = "Claude's transcript does not record this message yet.";
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = exit
+    else {
+        return failed(UNCONFIRMED);
+    };
+    let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+    let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+    let exact = invocation.request_id.is_some()
+        && field("request_id") == invocation.request_id.as_deref()
+        && field("name") == Some(target.name.as_str())
+        && field("run_id") == Some(target.run_id.as_str())
+        && field("conversation_id") == Some(target.conversation_id.as_str())
+        && field("status") == Some("submitted");
+    if exact {
+        done(receipt, None)
+    } else {
+        failed(UNCONFIRMED)
     }
 }
 
@@ -4131,6 +4182,52 @@ mod tests {
             outcome(exit(1, b"", "Delivery uncertain: check Terminal")),
             uncertain("Delivery uncertain: check Terminal")
         );
+    }
+
+    #[test]
+    fn confirm_send_asks_about_its_own_request_and_counts_only_a_submitted_receipt() {
+        // WhiteWh fork (owner, 2026-11-13): an uncertain send Claude recorded later.
+        let t = target("");
+        const ID: &str = "207c7206-af3c-4409-9940-5583c95c5957";
+        const OTHER: &str = "11111111-2222-3333-4444-555555555555";
+        let inv = invocation(&t, &Action::ConfirmSend, ID).unwrap();
+        assert_eq!(
+            inv.args,
+            [
+                "send",
+                "claude/sample-project/review",
+                "--confirm",
+                ID,
+                "--json"
+            ]
+        );
+        assert!(inv.stdin.is_none(), "nothing is sent");
+        assert_eq!(inv.request_id.as_deref(), Some(ID));
+        assert!(invocation(&t, &Action::ConfirmSend, "req-3").is_err());
+        let outcome = |exit: Exit| classify(&t, &Action::ConfirmSend, &inv, exit);
+        let receipt = |status: &str, request: &str, run: &str| {
+            json!({"status": status, "request_id": request, "name": "claude/sample-project/review",
+                   "run_id": run, "conversation_id": "conv-1"})
+            .to_string()
+        };
+        assert!(matches!(
+            outcome(exit(0, receipt("submitted", ID, "run-1").as_bytes(), "")),
+            Outcome::Done { .. }
+        ));
+        let unconfirmed = failed("Claude's transcript does not record this message yet.");
+        for refused in [
+            exit(0, receipt("in_progress", ID, "run-1").as_bytes(), ""),
+            exit(0, receipt("submitted", OTHER, "run-1").as_bytes(), ""),
+            exit(0, receipt("submitted", ID, "run-2").as_bytes(), ""),
+            exit(
+                1,
+                b"",
+                "hgs: delivery uncertain: Claude's transcript does not record this message",
+            ),
+            Exit::TimedOut,
+        ] {
+            assert_eq!(outcome(refused), unconfirmed);
+        }
     }
 
     #[test]

@@ -10335,6 +10335,24 @@ never confirm the previous input: only an input-acceptance event (a submitted
 or queued prompt, a turn or task start) or that native proof lets the next
 request through.
 
+In the WhiteWh fork (owner, 2026-11-13) an uncertain Claude delivery can be
+confirmed later: `hgs send SESSION --confirm REQUEST_ID --json` reads Claude's
+transcript for the same proof (a user row or queue entry carrying the message,
+stamped at or after the receipt, from the transcript length the receipt kept as
+`transcript_offset`, or from the start for an older receipt). It types and sends
+nothing. When the proof is there the receipt becomes `submitted` with
+`delivery: late`, its `native` proof and `confirmed_at`, and the command prints
+it; otherwise it refuses, as it does for another session, a moved run or
+conversation, and a request that never reached the terminal. While the open
+session on this computer holds an uncertain send's identity in its draft and no
+desktop service takes sends (Windows, and Linux or macOS outside desktop-service
+mode, whose service checks its own held sends), the desktop composer runs this
+check at once and then after 15, 30, 60 and at most
+every 120 seconds while the window is shown. A submitted receipt of exactly that request, session, run
+and conversation ends the uncertainty: the identity goes, the field is cleared
+only while it still holds that message, and the Activity row shows it sent.
+Allow retry stays for every other answer.
+
 The agent confirms an input with an input-acceptance event: UserPromptSubmit at once
 for an idle Claude or Codex, UserPromptQueued for Kimi while it works (DeepSeek
 confirms in its own request). A working Claude or Codex holds the text in its own

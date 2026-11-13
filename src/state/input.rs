@@ -1187,8 +1187,12 @@ pub(super) fn safe_filename(name: &str, index: usize) -> String {
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if args.len() == 4 && args[1] == "--confirm" && args[3] == "--json" {
+        println!("{}", confirm_late(&args[0], &args[2])?);
+        return Ok(0);
+    }
     if args.len() != 2 || args[1] != "--json" {
-        return Err("usage: hgs send <session> --json (JSON from stdin)".into());
+        return Err("usage: hgs send <session> --json (JSON from stdin), or hgs send <session> --confirm <request-id> --json".into());
     }
     let mut input = Vec::new();
     io::stdin()
@@ -1218,6 +1222,84 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     println!("{receipt}");
     Ok(0)
+}
+
+/// The refusal while a late check finds no proof.
+const LATE_UNCERTAIN: &str =
+    "delivery uncertain: Claude's transcript does not record this message; inspect Terminal before retrying";
+/// The largest receipt a late check reads.
+const LATE_RECEIPT_BYTES: u64 = 4 << 20;
+
+/// WhiteWh fork (owner, 2026-11-13): `hgs send <session> --confirm <request>
+/// --json`. A Claude delivery left uncertain, its proof missing when the
+/// settle window closed, is submitted once Claude's transcript records it
+/// after all: the window's own proof (a user row or queue entry carrying the
+/// message, stamped after the receipt), read later. Nothing is typed or sent.
+/// It prints the receipt once it is submitted, and refuses while the
+/// transcript shows nothing, for another session, run or conversation, and
+/// for a request that never reached the terminal.
+fn confirm_late(name: &str, request_id: &str) -> Result<Value> {
+    let request_id = uuid::Uuid::parse_str(request_id)
+        .map_err(|_| "request ID must be a UUID")?
+        .to_string();
+    let path = absolute_root()?
+        .join("input_receipts")
+        .join(format!("{request_id}.json"));
+    // The transcript is read without the input lock; the receipt is read again
+    // under it before it changes.
+    let receipt = late_receipt(&path, name, &request_id)?;
+    if receipt["status"] == "submitted" {
+        return Ok(receipt);
+    }
+    let record = read(name)?;
+    if !settle::applies(string(&record, "agent"))
+        || string(&record, "run_id") != string(&receipt, "run_id")
+        || string(&record, "conversation_id") != string(&receipt, "conversation_id")
+    {
+        return Err(LATE_UNCERTAIN.into());
+    }
+    let transcript = PathBuf::from(string(&record, "transcript"));
+    let message = receipt["submitted_text"].as_str().or(receipt["text"].as_str()).unwrap_or("").to_owned();
+    let since = receipt["submitted_at"].as_f64().unwrap_or(f64::MAX);
+    let offset = receipt["transcript_offset"].as_u64().unwrap_or(0);
+    if !transcript.is_absolute() || message.trim().is_empty() {
+        return Err(LATE_UNCERTAIN.into());
+    }
+    let proof = settle::late_proof(&transcript, offset, &message, since).ok_or(LATE_UNCERTAIN)?;
+    let _guard = lock(None)?;
+    let mut current = late_receipt(&path, name, &request_id)?;
+    if current["status"] == "submitted" {
+        return Ok(current);
+    }
+    if current != receipt {
+        return Err(LATE_UNCERTAIN.into());
+    }
+    current["status"] = json!("submitted");
+    current["delivery"] = json!("late");
+    current["native"] = json!(proof.name());
+    current["confirmed_at"] = json!(now());
+    receipt_index::persist(&path, &current)?;
+    Ok(current)
+}
+
+/// The receipt of `request_id` when it is this session's and either
+/// submitted or a terminal delivery left uncertain.
+fn late_receipt(path: &Path, name: &str, request_id: &str) -> Result<Value> {
+    let size = fs::metadata(path).map_err(|_| "no delivery of this request is known")?.len();
+    if size > LATE_RECEIPT_BYTES {
+        return Err("the delivery receipt is too large to read".into());
+    }
+    let receipt: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("the delivery receipt cannot be read: {e}"))?;
+    if string(&receipt, "request_id") != request_id || string(&receipt, "name") != name {
+        return Err("this request was not sent to this session".into());
+    }
+    match string(&receipt, "status") {
+        "submitted" => Ok(receipt),
+        "in_progress" if receipt["delivery"] == "uncertain" && string(&receipt, "transport") == "terminal" => Ok(receipt),
+        "in_progress" => Err("the request is still being delivered".into()),
+        status => Err(format!("the request was not delivered ({status})")),
+    }
 }
 
 /// The observation's stdin: one exact run and conversation of the session
@@ -1864,6 +1946,10 @@ fn submit_core(
         receipt["delivery"] = json!("uncertain");
         receipt["uncertain_reason"] = json!(error);
         receipt["composer"] = json!(residue);
+        // Where a later proof starts (`confirm_late`).
+        if let Some((_, offset)) = &transcript {
+            receipt["transcript_offset"] = json!(offset);
+        }
         let _ = receipt_index::persist(&receipt_path, receipt);
         crate::analytics::adapters::delivery(&root, &record, receipt, crate::analytics::adapters::Delivery::Uncertain);
         let shown = residue
@@ -2195,6 +2281,50 @@ mod tests {
         ] {
             assert!(!bound.binds(id, name, run, conversation, digest));
         }
+    }
+
+    #[test]
+    fn a_late_proof_submits_an_uncertain_claude_delivery_once() {
+        // WhiteWh fork (owner, 2026-11-13): Claude recorded the message after
+        // the settle window closed; nothing is typed again.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            const ID: &str = "6b2f385b-126e-4abe-ae7f-1c6425b5575b";
+            let transcript = dir.path().join("t.jsonl");
+            fs::write(&transcript, "").unwrap();
+            let mut record = json!({"version":1,"created":100,"name":"claude/x/lead","agent":"claude","run_id":"run",
+                "conversation_id":"conv","transcript":transcript.to_string_lossy()});
+            write(&mut record).unwrap();
+            let receipts = absolute_root().unwrap().join("input_receipts");
+            fs::create_dir_all(&receipts).unwrap();
+            let path = receipts.join(format!("{ID}.json"));
+            let receipt = json!({"request_id":ID,"name":"claude/x/lead","run_id":"run","conversation_id":"conv",
+                "status":"in_progress","delivery":"uncertain","transport":"terminal","submitted_at":1_794_515_751.8,
+                "text":"so is svn ready?","submitted_text":"so is svn ready?",
+                "uncertain_reason":"Claude recorded no submission of this message"});
+            fs::write(&path, receipt.to_string()).unwrap();
+            let on_disk = || serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(confirm_late("claude/x/lead", ID).unwrap_err(), LATE_UNCERTAIN);
+            assert_eq!(on_disk(), receipt, "no proof changes nothing");
+            assert!(confirm_late("claude/x/other", ID).is_err(), "another session's request");
+            assert!(confirm_late("claude/x/lead", "not-a-request").is_err());
+            let row = json!({"type":"user","timestamp":"2026-11-12T20:35:58.505Z","message":{"content":"so is svn ready?"}});
+            fs::write(&transcript, format!("{row}\n")).unwrap();
+            let done = confirm_late("claude/x/lead", ID).unwrap();
+            assert_eq!(
+                (string(&done, "status"), string(&done, "delivery"), string(&done, "native")),
+                ("submitted", "late", "transcript")
+            );
+            assert_eq!(on_disk(), done);
+            assert_eq!(confirm_late("claude/x/lead", ID).unwrap(), done, "the same receipt again");
+            // A moved conversation proves nothing about the old one.
+            let other = "11111111-2222-3333-4444-555555555555";
+            let mut moved = receipt.clone();
+            moved["request_id"] = json!(other);
+            moved["conversation_id"] = json!("older");
+            fs::write(receipts.join(format!("{other}.json")), moved.to_string()).unwrap();
+            assert_eq!(confirm_late("claude/x/lead", other).unwrap_err(), LATE_UNCERTAIN);
+        });
     }
 
     #[test]

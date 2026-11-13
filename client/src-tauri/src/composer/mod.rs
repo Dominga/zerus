@@ -31,6 +31,7 @@ pub mod held;
 mod history_hint;
 pub mod inbox;
 mod interrupted;
+mod late;
 pub mod questions;
 pub mod queue;
 pub mod reference;
@@ -485,6 +486,8 @@ pub(crate) struct Composer {
     pub(crate) handed: Option<handed::Handed>,
     /// A reload's one lookup of the held identity ran.
     pub(crate) probed: bool,
+    /// WhiteWh fork: the late checks of an uncertain send ([`late`]).
+    pub(crate) late: late::Late,
     /// The interrupted prompt offered to the field ([`DraftOffer`]); any edit ends it.
     pub(crate) offer: Option<DraftOffer>,
 }
@@ -524,6 +527,7 @@ impl Composer {
             checkpoint: None,
             handed: None,
             probed: false,
+            late: late::Late::default(),
             offer: None,
         }
     }
@@ -1509,6 +1513,7 @@ impl Composers {
         composer.notice.clear();
         composer.checkpoint = None;
         composer.handed = None;
+        composer.late = late::Late::default();
         self.save(composer);
         // Its late answers resolve nothing now: their tracking goes.
         let key = composer.key.clone();

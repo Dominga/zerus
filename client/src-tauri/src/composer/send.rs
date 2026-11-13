@@ -643,6 +643,7 @@ impl Composers {
         self.push_check();
         self.tick_handed(now);
         self.tick_handed_answers(now);
+        self.tick_late(now);
     }
 
     /// Ticks once a second while a composer is open, until the app quits.

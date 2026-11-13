@@ -553,9 +553,11 @@ already ended and replaced the team's accepted result. The store settles the
 acceptance, marks the node's open effects superseded, ends the node without
 merging, closes its integration and held-step cards, and gives the lead one
 item naming the task and saying the person's own run replaced the team's
-accepted result. The task document is not touched: it stays In review under
-the person's attempt. A task whose current attempt is the node's own keeps the
-ordinary finish and merge path.
+accepted result. The task document is not touched; its stage stays as
+observed. A merge that was already admitted keeps its integration fact, and
+the item says it had already been merged, with the commit when known. A task
+whose current attempt is the node's own keeps the ordinary finish and merge
+path.
 
 ## Pipelines
 

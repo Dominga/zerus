@@ -512,14 +512,17 @@ fn restore_row(ctx: &Context<'_>, node: u32) -> Result<()> {
 /// End an accepted node whose task the person took back in an execution the
 /// store never saw: the accepted result is superseded, nothing merges, the
 /// node leaves the plan and the lead gets one item. The task itself is not
-/// touched: it stays In review under the person's attempt.
+/// touched: its stage stays as observed.
 fn supersede_accepted(
     ctx: &mut Context<'_>,
     node: u32,
     n: &Node,
     o: &TaskObservation,
 ) -> Result<()> {
-    ctx.settle(node)?;
+    // Keep the preserved receipt authority of a Ready acceptance: a Git write
+    // that was already admitted keeps its late integration fact, while the
+    // settled decision can never authorize a second write.
+    ctx.settle_override(node)?;
     ctx.db.execute(&format!("UPDATE effects SET state='superseded' WHERE team=?1 AND node=?2 AND state IN {OPEN_EFFECT_STATES}"),params![ctx.team.id,node]).map_err(storage)?;
     ctx.close_inbox(node)?;
     timers::drop_marks(ctx, node)?;
@@ -538,9 +541,23 @@ fn supersede_accepted(
         .as_ref()
         .map(|t| format!(" {}/{}", t.project, t.uuid))
         .unwrap_or_default();
-    let body = format!(
-        "Task {node}{name}{task}: the person's own run replaced the team's accepted result, so nothing was merged. The task stays In review under the person's attempt."
-    );
+    let merged: Option<String> = ctx
+        .db
+        .query_row(
+            "SELECT commit_id FROM integration_facts WHERE team=?1 AND node=?2 ORDER BY created_ms DESC LIMIT 1",
+            params![ctx.team.id, node],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let body = match merged {
+        Some(commit) if !commit.is_empty() => format!(
+            "Task {node}{name}{task}: the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged."
+        ),
+        _ => format!(
+            "Task {node}{name}{task}: the person's own run replaced the team's accepted result, so nothing further will be merged. The task document was left unchanged."
+        ),
+    };
     ctx.reply.item = Some(ctx.inbox(node, "accepted_superseded", &body)?);
     ctx.event = Some("accepted_superseded");
     Ok(())

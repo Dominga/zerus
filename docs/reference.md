@@ -4104,8 +4104,9 @@ execution the node took in. If the task comes back In review under the
 person's own ended run, with conflicting attempts, or Done with conflicting
 attempts under a branch integration, the accepted result is superseded: the
 node ends without merging, its integration and held-step cards close, the lead
-gets one item naming the task, and the task document is untouched and stays In
-review under the person's attempt.
+gets one item naming the task, and the task document is left unchanged. A Git
+write that was already admitted keeps its integration fact; the item says the
+accepted result had already been merged, with the commit when known.
 
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt

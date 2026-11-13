@@ -1098,17 +1098,29 @@ fn a_late_merge_under_a_conflict_keeps_the_node_for_the_next_observation() {
 }
 
 /// Done under a conflict on an accepted node is the person's own ended run:
-/// the accepted result is superseded, the node ends without merging, and a
-/// late merge receipt has no authority.
+/// the accepted result is superseded and the node ends without merging, while
+/// the receipt authority of the already-admitted write still records its late
+/// fact. It authorizes no second write and does not restore the node.
 #[test]
-fn a_merge_under_a_conflict_of_a_done_task_is_superseded() {
+fn a_merge_under_a_conflict_of_a_done_task_is_superseded_but_keeps_its_fact() {
     let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
     assert!(!in_queue(&h, node));
     let decision = h.accept_decision(node);
-    let error = h
+    h.run(
+        &service(),
+        Operation::RecordIntegration {
+            decision,
+            node,
+            commit: COMMIT.into(),
+        },
+    )
+    .unwrap();
+    assert!(h.store.integration_fact(TEAM, node).unwrap().is_some());
+    assert!(!in_queue(&h, node), "the node is not restored");
+    let second = h
         .run(
             &service(),
             Operation::RecordIntegration {
@@ -1118,8 +1130,7 @@ fn a_merge_under_a_conflict_of_a_done_task_is_superseded() {
             },
         )
         .unwrap_err();
-    assert_eq!(error.code, code::INVALID_STATE);
-    assert!(h.store.integration_fact(TEAM, node).unwrap().is_none());
+    assert_eq!(second.code, code::INVALID_STATE);
 }
 
 fn outcome(h: &Harness, decision: u64) -> Option<String> {

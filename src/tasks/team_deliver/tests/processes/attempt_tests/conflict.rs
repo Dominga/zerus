@@ -248,7 +248,7 @@ fn done_keeps_its_existing_conflict_refusal() {
     let before = bytes(&f);
     let out = call(&f, "team-done");
     assert_eq!(out["reply"]["state"], "refused", "{out}");
-    assert_eq!(out["reply"]["error"], "No accepted generation with the required integration authority.");
+    assert_eq!(out["reply"]["error"], "Task execution changed.");
     assert_eq!(bytes(&f), before);
 }
 

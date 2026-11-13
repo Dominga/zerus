@@ -467,6 +467,8 @@ fn an_accepted_task_taken_back_by_the_person_ends_the_node_once() {
             .collect();
         assert_eq!(items.len(), 1, "{name}");
         assert!(items[0].text.contains("the person's own run replaced the team's accepted result"), "{name}");
+        assert!(items[0].text.contains("The task document was left unchanged."), "{name}");
+        assert!(!items[0].text.contains("stays In review"), "{name}");
         let decided = h
             .store
             .decisions(TEAM, 200, None)
@@ -499,4 +501,42 @@ fn an_accepted_task_taken_back_by_the_person_ends_the_node_once() {
             "{name}: replay wrote another item"
         );
     }
+}
+
+#[test]
+fn a_remembered_person_attempt_under_an_acceptance_is_not_superseded() {
+    use crate::teams::store::Store;
+    let mut h = Harness::new();
+    let _lead = h.bind("lead");
+    h.bind("m1");
+    let node = h.add(&person(), 1);
+    h.submit(node, "m1");
+    // The store sees the person's execution running, then In review.
+    let mut running = h.observation(node, TaskStage::InProgress);
+    running.attempt += 1;
+    running.attempt_id = "person-attempt".into();
+    h.run(
+        &service(),
+        Operation::ObserveTask {
+            node,
+            observation: running,
+        },
+    )
+    .unwrap();
+    h.observe(node, TaskStage::InReview);
+    // The person accepts, the store is reopened, and the same remembered
+    // attempt is observed In review again.
+    h.run(&person(), Operation::Accept { node }).unwrap();
+    h.store = Store::open(h.temp.path()).unwrap();
+    let before = h.accept_decision(node);
+    h.observe(node, TaskStage::InReview);
+    assert!(!h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+    assert!(!h
+        .store
+        .inbox(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .iter()
+        .any(|item| item.kind == "accepted_superseded"));
+    assert_eq!(h.accept_decision(node), before);
 }

@@ -91,8 +91,9 @@ pub(super) fn prepare(witness: &NotOffered) -> Result<()> {
     ) {
         return Err("Pre-input refusal binding changed".into());
     }
-    receipt_index::persist(
-        &witness.receipts,
+    receipt_index::persist_pinned(
+        &receipts,
+        &format!("{}.json", witness.request_id),
         &json!({
             "request_id": witness.request_id, "name": witness.name,
             "run_id": witness.run_id, "conversation_id": witness.conversation_id,
@@ -338,6 +339,25 @@ mod tests {
                 "aliases are not retry evidence"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pending_settings_retirement_keeps_the_original_directory_pinned() {
+        let private = tempfile::tempdir().unwrap();
+        let root = private.path().canonicalize().unwrap();
+        let witness = witness(&root, "a real composer draft");
+        remember(&witness).unwrap();
+        let original = Directory::open(witness.receipts.parent().unwrap()).unwrap();
+        let moved = root.join("replaced-receipts");
+        assert!(fs::rename(&original.path, &moved).is_err());
+        prepare(&witness).unwrap();
+        assert!(fs::rename(&original.path, &moved).is_err(), "retirement released directory custody");
+        let retained: Value = serde_json::from_slice(&fs::read(&witness.receipts).unwrap()).unwrap();
+        assert_eq!(retained["status"], "preparing");
+        assert_eq!(retained["request_id"], witness.request_id);
+        assert!(retained.get("refusal_schema").is_none());
+        original.verify().unwrap();
     }
 
     #[test]

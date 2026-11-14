@@ -47,7 +47,8 @@ impl TaskAttachment {
     }
 }
 
-pub(crate) fn check_attachments(files: &[TaskAttachment]) -> Result<()> {
+/// Validate media with the same metadata and byte limits as native task writers.
+pub fn check_attachments(files: &[TaskAttachment]) -> Result<()> {
     if files.len() > MAX_ATTACHMENTS {
         return Err(Error::new("attach up to 8 files to a task"));
     }

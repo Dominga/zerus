@@ -1,6 +1,7 @@
 package app.zerus.mobile.replica
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -13,6 +14,43 @@ class TaskStoreBindingTest {
     @get:Rule val folders = TemporaryFolder()
 
     private fun store() = TaskStore(folders.newFolder().path, "project-1", "orchard")
+
+    @Test
+    fun mediaBindingsKeepBytesScopeAndTheOriginalContentRevision() {
+        val (computer, phone) = store() to store()
+        val bytes = byteArrayOf(0, -1, 10)
+        val picked = TaskMediaInput("picked-note.txt", "text/plain", bytes)
+        assertEquals("", picked.reference)
+        val task = computer.addWithMedia("Inspect the picked file", TaskStage.TODO,
+            TaskTarget.AnySession, TaskPosition.End, listOf(picked))
+        assertEquals(2L, task.schema)
+        val page = computer.updatesFor(phone.inventory(), 1_048_576UL)
+        assertFalse(page.more)
+        phone.importUpdates(page.updates)
+        val loaded = phone.get(task.uuid)
+        assertEquals(task.attachments, loaded.attachments)
+        val meta = loaded.attachments.single()
+        assertEquals(3UL, meta.size)
+        assertArrayEquals(bytes, phone.readMedia(task.uuid, null, 0u, meta.token).data)
+        val comment = phone.comment(task.uuid, "Arrived while editing").log.last { it.kind == "comment" }
+        assertTrue(comment.entryId.isNotEmpty())
+        assertEquals(0u, comment.attachmentCount)
+        val edited = phone.editContent(task.uuid, "Reviewed content", listOf(meta.token), emptyList(), loaded.contentRevision)
+        assertTrue(edited.log.any { it.text == "Arrived while editing" })
+        try {
+            phone.editContent(task.uuid, "Stale draft", listOf(meta.token), emptyList(), loaded.contentRevision)
+            fail("a stale media draft was accepted")
+        } catch (_: ReplicaException.Refused) { }
+        assertEquals("Reviewed content", phone.get(task.uuid).text)
+        assertArrayEquals(bytes, phone.readMedia(task.uuid, null, 0u, meta.token).data)
+        try {
+            phone.readMedia(task.id, null, 0u, meta.token)
+            fail("a mutable display ID rebound the preview")
+        } catch (_: ReplicaException.Refused) { }
+        val removed = phone.editContent(task.uuid, edited.text, emptyList(), emptyList(), edited.contentRevision)
+        assertTrue(removed.attachments.isEmpty())
+        assertEquals(2L, removed.schema)
+    }
 
     @Test
     fun immutableSessionIdentitySurvivesGeneratedBindingsAndExchange() {

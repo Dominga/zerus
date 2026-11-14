@@ -2,7 +2,7 @@
 import { Show, createEffect, createSignal } from "solid-js";
 import { tr } from "../../i18n";
 import type { TeamMember, TeamOutcome, TeamView } from "../../store/teams";
-import { TextInput } from "../lib/TextField";
+import { TextArea, TextInput } from "../lib/TextField";
 import { AddMemberDialog } from "./AddMemberDialog";
 import { SwapMemberDialog } from "./SwapMemberDialog";
 import { TeamEditDialog } from "./TeamEditDialog";
@@ -53,7 +53,7 @@ function MetadataDialog(props: { kind: string; view: TeamView; busy: boolean; lo
   return <TeamEditDialog title={rename ? tr("Rename team") : tr("Edit goal")} action={tr("Save")} busy={props.busy} error={props.error} close={props.close}
     disabled={props.locked || (!rename && props.view.edit_goal == null) || (rename && !text().trim())} submit={() => props.submit(props.kind, rename ? { name: text() } : { goal: text() })}>
     <label>{rename ? tr("Team name") : tr("Goal")}
-      <Show when={rename} fallback={<textarea class="field" aria-label={tr("Goal")} rows={6} maxlength={16384} value={text()} disabled={props.busy} onInput={(e) => setText(e.currentTarget.value)} />}>
+      <Show when={rename} fallback={<TextArea class="field" aria-label={tr("Goal")} rows={6} maxlength={16384} value={text()} disabled={props.busy} onInput={(e) => setText(e.currentTarget.value)} />}>
         <TextInput class="field" aria-label={tr("Team name")} maxlength={256} value={text()} disabled={props.busy} onInput={(e) => setText(e.currentTarget.value)} />
       </Show>
     </label>

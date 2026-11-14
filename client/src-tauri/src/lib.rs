@@ -129,6 +129,7 @@ mod task_settings;
 mod task_start;
 #[cfg(feature = "live")]
 mod teams;
+mod catalog_editor;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
@@ -1736,6 +1737,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_action_again,
         teams::team_intent_dismiss,
         teams::teams_catalog,
+        catalog_editor::catalog_editor_load,
+        catalog_editor::catalog_editor_validate,
+        catalog_editor::catalog_editor_import,
+        catalog_editor::catalog_editor_import_file,
+        catalog_editor::catalog_editor_export,
+        catalog_editor::catalog_editor_export_template,
+        catalog_editor::catalog_editor_save,
+        catalog_editor::catalog_editor_receipt,
         teams::teams_template_save,
         teams::teams_project,
         teams::teams_preview,

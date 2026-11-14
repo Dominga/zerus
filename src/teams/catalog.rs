@@ -6,6 +6,7 @@
 #![cfg_attr(not(test), allow(dead_code))] // The `hgs team` CLI in package 5 is the caller.
 
 mod digest;
+pub(crate) mod editor;
 mod roster;
 pub(crate) use digest::template_digest;
 pub(crate) use roster::{validate_catalog_roles, validate_roster};
@@ -81,6 +82,11 @@ fn merge_by_id<T: Clone>(base: &[T], over: &[T], id: impl Fn(&T) -> &str) -> Vec
 /// Replaces the person's catalog. Writes nothing unless the merged catalog is
 /// valid.
 pub fn save(config_dir: &Path, catalog: &Catalog) -> Result<(), Problem> {
+    checked(catalog)?;
+    write(config_dir, catalog)
+}
+
+fn checked(catalog: &Catalog) -> Result<(), Problem> {
     first_problem(validate_ids(catalog))?;
     let merged = merge(&builtin(), catalog);
     first_problem(validate_catalog(&merged))?;
@@ -91,7 +97,7 @@ pub fn save(config_dir: &Path, catalog: &Catalog) -> Result<(), Problem> {
     for template in &merged.templates {
         export_bundle(&merged, &template.id)?;
     }
-    write(config_dir, catalog)
+    Ok(())
 }
 
 /// Adds a bundle's template, roles and pipelines to the person's catalog.

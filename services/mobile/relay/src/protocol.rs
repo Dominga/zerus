@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "send_outcome_receipt",
     "session_question_route_person_status",
     "send_receipt",
     "repository_check",
@@ -87,6 +88,8 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "send_outcome",
+    "send_outcome_receipt",
     "session_question_route_person_status",
     "send_receipt",
     "repository_check",
@@ -357,7 +360,7 @@ fn native_token(v: &Value, max: usize) -> Result<()> {
     }
     Ok(())
 }
-fn hex(v: &Value) -> Result<()> {
+pub(crate) fn hex(v: &Value) -> Result<()> {
     let s = text(v, 64, false)?;
     if s.len() != 64
         || !s
@@ -482,7 +485,15 @@ pub fn request(v: &Value) -> Result<()> {
             || SPEECH.contains(&op)
             || TASKS.contains(&op),
     )?;
-    if op == crate::send_receipt::OPERATION {
+    if crate::send_outcome::OPERATIONS.contains(&op) {
+        crate::send_outcome::validate(
+            op,
+            p,
+            id,
+            &v["computer_id"],
+            v["session"].as_str().ok_or(Error::BAD)?,
+        )?;
+    } else if op == crate::send_receipt::OPERATION {
         crate::send_receipt::validate(
             p,
             id,
@@ -933,7 +944,7 @@ pub fn request(v: &Value) -> Result<()> {
         json::size(v, crate::voice_video::MAX_REQUEST_BYTES)?;
     } else if ["speech_submit", "voice_submit"].contains(&op) {
         json::size(v, 6 * MIB)?;
-    } else if op != "send" {
+    } else if !matches!(op, "send" | "send_outcome") {
         json::size(v, MIB)?;
     }
     Ok(())

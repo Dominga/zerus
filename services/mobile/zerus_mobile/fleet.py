@@ -89,6 +89,7 @@ class Fleet:
             for identity, row in routes.items():
                 if identity not in self.contexts:
                     self.contexts[identity] = self.connector.peer_context(row["machine_id"], self.callback(identity, row["machine_id"]))
+                    self.contexts[identity].send_outcome_gateway = self.connector
             await asyncio.gather(*(context.accounts.close() for context in removed))
 
     def callback(self, identity, machine):

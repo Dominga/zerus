@@ -187,16 +187,27 @@ impl<N: Native + 'static> Connector<N> {
                     },
                 ))
             }
-        } else if journal_operation == "send_receipt" && request.contains_key("gateway_route") {
+        } else if matches!(
+            journal_operation.as_str(),
+            "send_receipt" | "send_outcome" | "send_outcome_receipt"
+        ) && request.contains_key("gateway_route")
+        {
             let route = &request["gateway_route"];
             let intent = request
                 .get("payload")
-                .and_then(|p| p.get("intent"))
+                .and_then(|p| {
+                    p.get(if journal_operation == "send_receipt" {
+                        "intent"
+                    } else {
+                        "binding"
+                    })
+                })
                 .unwrap_or(&Value::Null);
             if route["computer_id"] == intent["computer_id"]
                 && route["machine_id"] == intent["machine_id"]
             {
-                self.resolve(route, false).await
+                self.resolve(route, journal_operation == "send_outcome")
+                    .await
             } else {
                 Err(Failure::text(
                     "original send computer does not match its immutable route",
@@ -335,14 +346,26 @@ impl<N: Native + 'static> Connector<N> {
                 ));
             }
             if self.flags.get().windows_gateway
-                && validated.operation != "send_receipt"
+                && !matches!(
+                    validated.operation.as_str(),
+                    "send_receipt" | "send_outcome_receipt"
+                )
                 && !validated.session.is_empty()
                 && !validated
                     .payload
                     .as_ref()
                     .is_some_and(|p| p.get("archive_id").is_some())
             {
-                self.windows_target(&validated).await?;
+                if validated.operation == "send_outcome" {
+                    let ordinary = Validated {
+                        operation: "send".into(),
+                        session: validated.session.clone(),
+                        payload: validated.payload.as_ref().map(|p| p["payload"].clone()),
+                    };
+                    self.windows_target(&ordinary).await?;
+                } else {
+                    self.windows_target(&validated).await?;
+                }
             }
             if self.flags.get().archive || self.flags.get().windows_gateway {
                 if let Some(payload) = validated
@@ -420,7 +443,11 @@ impl<N: Native + 'static> Connector<N> {
         request: &Map<String, Value>,
         request_id: &str,
     ) -> Result<Validated, String> {
-        let receipt_read = request.get("operation").and_then(Value::as_str) == Some("send_receipt");
+        let receipt_read = request
+            .get("operation")
+            .and_then(Value::as_str)
+            .is_some_and(|op| matches!(op, "send_receipt" | "send_outcome_receipt"));
+        let outcome = request.get("operation").and_then(Value::as_str) == Some("send_outcome");
         let context = if receipt_read {
             validate::Context::default()
         } else {
@@ -430,11 +457,19 @@ impl<N: Native + 'static> Connector<N> {
         // v1 Claim::decode removes computer_id after freezing its gateway route;
         // v2 retains the authenticated physical computer. Rebuild only the read
         // validator's route field, never the journal fingerprint or send intent.
-        if receipt_read && !request.contains_key("computer_id") {
+        if (receipt_read || outcome) && !request.contains_key("computer_id") {
             let computer = request
                 .get("gateway_route")
                 .and_then(|r| r.get("computer_id"))
                 .cloned()
+                .or_else(|| {
+                    request
+                        .get("operation")
+                        .and_then(Value::as_str)
+                        .filter(|op| zerus_relay::send_outcome::OPERATIONS.contains(op))
+                        .and_then(|_| request.get("payload")?.get("binding")?.get("computer_id"))
+                        .cloned()
+                })
                 .unwrap_or_else(|| json!(self.settings.binding));
             request.insert("computer_id".into(), computer);
         }
@@ -609,6 +644,11 @@ impl<N: Native + 'static> Connector<N> {
                 "operation is unavailable on a Windows local gateway",
             ));
         }
+        if zerus_relay::send_outcome::OPERATIONS.contains(&operation)
+            && !self.send_outcome_supported()
+        {
+            return Err(Failure::text(crate::send_outcome::UNAVAILABLE));
+        }
         if operation == "send_receipt" && !flags.send_receipt {
             return Err(Failure::text(crate::send_receipt::UNAVAILABLE));
         }
@@ -729,6 +769,7 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            "send_outcome_receipt" => self.send_outcome_receipt(payload.expect("validated")).await,
             "send_receipt" => self.send_receipt(payload.expect("validated")).await,
             operation if zerus_relay::repositories::OPERATIONS.contains(&operation) => {
                 let payload = payload.expect("validated");
@@ -1318,6 +1359,15 @@ impl<N: Native + 'static> Connector<N> {
 /// a session action, a recovery action and a Terminal input, and a failed or
 /// uncertain one carries the native error.
 pub fn receipt_of(operation: &str, result: Value) -> Value {
+    if operation == "send_outcome" {
+        // The mutation boundary has already validated the complete native proof.
+        let state = match result["status"].as_str() {
+            Some("not_offered") => "failed",
+            Some("submitted") => "completed",
+            _ => "uncertain",
+        };
+        return json!({"state":state,"result":result,"error":null});
+    }
     let by_status = crate::capabilities::LIFECYCLE.contains(&operation)
         || matches!(operation, "terminal_input" | "recovery_action");
     if !by_status {

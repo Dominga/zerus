@@ -1,6 +1,7 @@
 """The same real-agent preflight control, with no public model or owner state."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -73,6 +74,33 @@ def refused_draft(case, name, record, screen, calls):
     case.assertEqual(keys(), before_keys, 'a refused send or its lookup typed a key')
     case.assertEqual(calls(), before_calls, 'a refused send reached the private model')
     case.assertIn(draft, screen())
+    # The connector qualification invokes its real Process/claim/journal path
+    # only when this private harness supplies the freshly built test executable.
+    if probe := os.environ.get('HGS_MOBILE_OUTCOME_PROBE'):
+        case.assertEqual(Path(case.env['HOME']).resolve(), case.root.resolve())
+        native_payload = dict(request, request_id=str(uuid.uuid4()), attachments=[])
+        raw = json.dumps(native_payload, sort_keys=True, ensure_ascii=False).encode()
+        binding = dict(schema=2, message_request_id=native_payload['request_id'], computer_id='fixture',
+            machine_id=machine, session_id=raw_record['session_id'], session=name, provider=raw_record['agent'],
+            run_id=request['expected_run_id'], conversation_id=request['expected_conversation_id'],
+            native_encoding='python_default', native_digest=hashlib.sha256(raw).hexdigest())
+        binding_hash = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest()
+        wrapper = dict(schema=2, request_id=native_payload['request_id'], binding=binding, binding_sha256=binding_hash, payload=native_payload)
+        message = dict(request_id=native_payload['request_id'], computer_id='fixture', operation='send_outcome', session=name, payload=wrapper)
+        job = case.root / 'connector-probe.json'; output = case.root / 'connector-proof.json'
+        job.write_text(json.dumps(dict(hgs=str(test_input.HGS),request=message,journal=str(case.root/'connector-journal'),output=str(output))))
+        env = dict(case.env, ZERUS_OUTCOME_PROBE_INPUT=str(job))
+        process = subprocess.run([probe, '--ignored', '--exact', 'private_native_connector_refusal', '--nocapture'],
+            env=env, capture_output=True, text=True, timeout=25)
+        case.assertEqual(process.returncode,0,process.stdout+process.stderr)
+        receipt = json.loads(output.read_bytes())
+        case.assertEqual(receipt['result']['binding'],binding)
+        case.assertEqual(receipt['result']['status'],'not_offered')
+        case.assertEqual(keys(),before_keys,'the connector or its duplicate typed a key')
+        case.assertEqual(calls(),before_calls,'the connector refusal reached the private model')
+        case.assertIn(draft,screen())
+        print('ZERUS_MOBILE_NOT_OFFERED='+json.dumps(dict(agent=raw_record['agent'],native_process=True,
+            journal_once=True,no_keys=True,no_model_call=True)),flush=True)
     print('ZERUS_NATIVE_NOT_OFFERED=' + json.dumps(dict(case=case.id(), agent=raw_record['agent'],
         status=proof['status'], raw_sha256=proof['native_digest'], no_keys=True, no_model_call=True,
         duplicate_unchanged=True, read_only_lookup=True)), flush=True)

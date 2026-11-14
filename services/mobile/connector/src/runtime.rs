@@ -402,6 +402,22 @@ impl<N: Native + 'static> Connector<N> {
     /// from a peer context or a request routed to this computer, also needs
     /// that CLI's [`crate::session_selector::PEER_MARKER`], and a peer's call
     /// the gateway's as well. Anything else keeps the name form.
+    pub(crate) fn send_outcome_supported(&self) -> bool {
+        self.flags.get().send_outcome
+            && self
+                .gateway_flags
+                .as_ref()
+                .is_none_or(|flags| flags.get().send_outcome)
+    }
+
+    pub(crate) fn send_outcome_encoding(&self) -> &'static str {
+        if self.peer || LOCAL_MACHINE.try_with(|_| ()).is_ok() {
+            "compact"
+        } else {
+            "python_default"
+        }
+    }
+
     pub fn selection(
         &self,
         operation: &str,
@@ -624,6 +640,14 @@ impl<N: Native + 'static> Connector<N> {
             .flags
             .get()
             .advertised_for(self.fleet.is_some(), self.gateway_available());
+        let mut capabilities = capabilities;
+        if !self.send_outcome_supported() {
+            if let Some(operations) = capabilities["operations"].as_array_mut() {
+                operations.retain(|op| {
+                    !matches!(op.as_str(), Some("send_outcome" | "send_outcome_receipt"))
+                });
+            }
+        }
         snapshot.insert("mobile_capabilities".into(), capabilities);
         Ok(Value::Object(snapshot))
     }

@@ -829,7 +829,8 @@ impl<N: Native + 'static> Engine<'_, N> {
         }
         let operation = body["operation"].as_str().unwrap_or("");
         if h.operation_class == OperationClass::Control
-            || (operation == "send_receipt" && h.operation_class != OperationClass::Read)
+            || (matches!(operation, "send_receipt" | "send_outcome_receipt")
+                && h.operation_class != OperationClass::Read)
             || (h.operation_class == OperationClass::Read
                 && !zerus_relay::protocol::READS.contains(&operation))
         {
@@ -1051,6 +1052,14 @@ mod tests {
                 ]
             {
                 let q = call.payload.as_ref().unwrap();
+                if q["schema"] == 2 {
+                    return Ok(Output::Json(
+                        json!({"schema":2,"request_id":q["request_id"],"message_request_id":q["message_request_id"],
+                        "name":"codex/fixture/main","machine_id":q["expected_machine_id"],"session_id":q["expected_session_id"],
+                        "run_id":q["expected_run_id"],"conversation_id":q["expected_conversation_id"],"provider":q["provider"],
+                        "agent_id":"","native_digest":q["native_digest"],"status":"not_offered","proof":"native_input_lock","reason":"terminal has a draft"}),
+                    ));
+                }
                 return Ok(Output::Json(
                     json!({"schema":1,"request_id":q["request_id"],"message_request_id":q["message_request_id"],
                     "name":"codex/fixture/main","machine_id":q["expected_machine_id"],"session_id":q["expected_session_id"],
@@ -1324,6 +1333,114 @@ mod tests {
     async fn authenticated_native_dispatch_is_guarded_and_every_read_identity_is_permanent() {
         assert_authenticated_native_dispatch(cfg!(windows)).await;
     }
+    #[tokio::test]
+    async fn encrypted_terminal_negative_is_an_authenticated_original_only_read() {
+        let f = Fixture::new();
+        f.connector.flags.set(crate::capabilities::Flags::from_help(
+            "native-send-outcome-v2\ndelivery-receipt-v1\nmobile-peer-send-outcome-v2\nsession-id-selector-v1\nmobile-peer-session-id-v1"));
+        let vectors: Value =
+            serde_json::from_str(include_str!("../../vectors/send_outcome/outcomes.json")).unwrap();
+        let mut body = vectors["vectors"][0]["read"].clone();
+        body["request_id"] = json!(REQUEST);
+        body["computer_id"] = json!(MACHINE);
+        body["session"] = json!("codex/fixture/main");
+        body["payload"]["request_id"] = json!(REQUEST);
+        let b = &mut body["payload"]["binding"];
+        b["computer_id"] = json!(MACHINE);
+        b["machine_id"] = json!(MACHINE);
+        b["session"] = json!("codex/fixture/main");
+        body["payload"]["binding_sha256"] =
+            json!(zerus_relay::send_outcome::binding_digest(&body["payload"]["binding"]).unwrap());
+        let original = body["payload"]["binding"]["message_request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let old = crate::request::receipt("uncertain", Value::Null, Some("lost original result"));
+        f.connector
+            .journal
+            .claim(
+                &original,
+                "send_outcome",
+                Some("original-hash"),
+                crate::now(),
+            )
+            .unwrap();
+        f.connector
+            .journal
+            .finish(&original, &old, crate::now())
+            .unwrap();
+        let engine = f.engine();
+        let profile = workspace::load_active(&f.private_dir).unwrap();
+        let me = &profile.identity.device;
+        let header = f.request(&profile, REQUEST, &me.device_id, "").header;
+        body["encrypted_transport"] =
+            json!({"gateway_id":me.device_id,"route_id":me.device_id,"machine_id":MACHINE});
+        let envelope = crypto::seal(
+            &f.phone,
+            me,
+            header.clone(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        engine
+            .receive(&profile, serde_json::to_value(envelope).unwrap())
+            .await
+            .unwrap();
+        let stored = f
+            .connector
+            .journal
+            .encrypted_native_receipt(REQUEST)
+            .unwrap()
+            .unwrap();
+        let receipt: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(receipt["result"]["status"], "not_offered", "{receipt}");
+        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert_eq!(
+            f.connector
+                .journal
+                .pending()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| id == &original)
+                .unwrap()
+                .1,
+            crate::request::receipt_text(&old).unwrap()
+        );
+        let sealed = engine
+            .seal_receipt(&profile, &header, receipt.clone())
+            .unwrap();
+        let sealed: EncryptedEnvelope = serde_json::from_str(&sealed).unwrap();
+        assert_eq!(sealed.header.operation_class, OperationClass::Read);
+        let opened = crypto::open(&f.phone, me, &sealed.header, &sealed).unwrap();
+        let proof: Value = serde_json::from_slice(&opened).unwrap();
+        assert_eq!(proof["result"], receipt["result"]);
+        let bad_id = uuid::Uuid::new_v4().to_string();
+        let mut bad_body = body.clone();
+        bad_body["request_id"] = json!(bad_id);
+        bad_body["payload"]["request_id"] = json!(bad_id);
+        let mut wrong_class = header.clone();
+        wrong_class.request_id = bad_id.clone();
+        wrong_class.operation_class = OperationClass::Mutation;
+        let envelope = crypto::seal(
+            &f.phone,
+            me,
+            wrong_class,
+            &serde_json::to_vec(&bad_body).unwrap(),
+        )
+        .unwrap();
+        engine
+            .receive(&profile, serde_json::to_value(envelope).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        assert!(f
+            .connector
+            .journal
+            .encrypted_native_receipt(&bad_id)
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn encrypted_send_receipt_is_an_authenticated_read_and_keeps_the_original_uncertain() {
         for windows in [false, true] {

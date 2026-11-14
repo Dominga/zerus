@@ -33,6 +33,7 @@ use zerus_relay::protocol::opencode_effort_id;
 /// The operations of this module. Every one but `answer`, `interrupt` and
 /// `send` needs a native capability or a fresh native preflight.
 pub const OPERATIONS: &[&str] = &[
+    "send_outcome",
     "answer",
     "archive",
     "clear_context",
@@ -646,9 +647,18 @@ impl<N: Native + 'static> Connector<N> {
         request_id: &str,
         started: &Cell<bool>,
     ) -> Result<Value, Failure> {
-        let operation = validated.operation.as_str();
+        let negotiated = (validated.operation == "send_outcome")
+            .then(|| validated.payload.as_ref().expect("validated"));
+        let operation = if negotiated.is_some() {
+            "send"
+        } else {
+            validated.operation.as_str()
+        };
         let session = validated.session.as_str();
-        let payload = validated.payload.as_ref().ok_or(Failure::Generic)?;
+        let payload = negotiated
+            .map(|p| &p["payload"])
+            .or(validated.payload.as_ref())
+            .ok_or(Failure::Generic)?;
         let flags = self.flags.get();
         // Fresh native state first, as Python checks it before the gates.
         let continuation =
@@ -689,7 +699,7 @@ impl<N: Native + 'static> Connector<N> {
                     .await
             }
             _ => {
-                self.command(operation, session, payload, request_id, started)
+                self.command(operation, session, payload, request_id, started, negotiated)
                     .await
             }
         }
@@ -708,11 +718,12 @@ impl<N: Native + 'static> Connector<N> {
 
     async fn write(&self, call: Call, started: &Cell<bool>) -> Result<Value, Failure> {
         self.begin(started)?;
+        let negotiated = crate::send_outcome::negotiated(&call);
         match self.native(call).await {
             Ok(output) => Ok(output.json()),
             // The CLI refused the selected session ID before any effect, so
             // no write began: a definite failure, never retried.
-            Err(NativeError::SessionChanged) => {
+            Err(NativeError::SessionChanged) if !negotiated => {
                 started.set(false);
                 Err(Failure::text(crate::session_selector::CHANGED))
             }
@@ -1070,6 +1081,7 @@ impl<N: Native + 'static> Connector<N> {
         payload: &Value,
         request_id: &str,
         started: &Cell<bool>,
+        negotiated: Option<&Value>,
     ) -> Result<Value, Failure> {
         let command = match operation {
             "compact_context" => "compact-context",
@@ -1078,8 +1090,35 @@ impl<N: Native + 'static> Connector<N> {
             other => other,
         };
         let call = Call::new([command, session, "--json"]).payload(payload.clone());
-        let call = self.selected(operation, session, payload, call);
+        let call = if let Some(wrapper) = negotiated {
+            let binding = &wrapper["binding"];
+            if binding["native_encoding"] != self.send_outcome_encoding() {
+                return Err(Failure::text(crate::send_outcome::MISMATCH));
+            }
+            let selection = crate::session_selector::Selection {
+                name: session.into(),
+                id: binding["session_id"]
+                    .as_str()
+                    .ok_or(Failure::Generic)?
+                    .into(),
+            };
+            let mut argv = crate::session_selector::selected_argv(&call.argv, &selection)
+                .ok_or(Failure::Generic)?;
+            argv.insert(argv.len() - 1, "--delivery-outcome-v2".into());
+            Call { argv, ..call }.selecting(selection)
+        } else {
+            self.selected(operation, session, payload, call)
+        };
         let result = self.write(call, started).await?;
+        if let Some(wrapper) = negotiated {
+            if result["status"] == "not_offered" {
+                return crate::send_outcome::project(wrapper, &result, true);
+            }
+            // Reuse native's bounded original-only receipt proof for a positive
+            // acknowledgement. Never resend to recover a lost answer.
+            let original = self.call(crate::send_outcome::call(wrapper)?).await?;
+            return crate::send_outcome::project(wrapper, &original, false);
+        }
         let object = result.as_object();
         let identity = |object: &Map<String, Value>| {
             is_str(object.get("request_id"), request_id)

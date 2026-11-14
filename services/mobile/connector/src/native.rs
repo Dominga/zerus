@@ -205,7 +205,8 @@ pub fn parse_output(stdout: &[u8]) -> Result<Value, NativeError> {
 /// Python's rules for a finished call.
 pub fn interpret(call: &Call, success: bool, stdout: Vec<u8>) -> NativeResult {
     // `hgs read` answers an unknown session with JSON and exit status 1.
-    let answered = call.failure_json && !strip(&stdout).is_empty();
+    let negotiated = crate::send_outcome::negotiated(call);
+    let answered = (call.failure_json || negotiated) && !strip(&stdout).is_empty();
     if !success && !answered {
         return Err(NativeError::Failed(FAILED));
     }
@@ -214,10 +215,21 @@ pub fn interpret(call: &Call, success: bool, stdout: Vec<u8>) -> NativeResult {
             .map(Output::Text)
             .map_err(|_| NativeError::Unicode);
     }
+    let bounded_negative = stdout.len() <= zerus_relay::send_outcome::NATIVE_NEGATIVE_BYTES;
     let result = parse_output(&stdout)?;
+    if ((negotiated && result["status"] == "not_offered")
+        || crate::send_outcome::receipt_read(call))
+        && !crate::send_outcome::closed_frame(&stdout)
+    {
+        return Err(NativeError::Failed(INVALID_JSON));
+    }
     // A failing exit carries only a failure answer, never a success receipt.
-    let refusal = result.is_object() && result.get("ok") == Some(&Value::Bool(false));
-    if !success && !refusal {
+    let refusal =
+        call.failure_json && result.is_object() && result.get("ok") == Some(&Value::Bool(false));
+    let closed_negative = negotiated
+        && bounded_negative
+        && zerus_relay::send_outcome::native_negative(&result, false).is_ok();
+    if !success && !refusal && !closed_negative {
         return Err(NativeError::Failed(FAILED));
     }
     Ok(Output::Json(result))

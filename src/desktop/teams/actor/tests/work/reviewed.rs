@@ -189,7 +189,10 @@ fn done_remains_a_merge_candidate_but_conflicts_cancelled_or_changed_attempts_do
 fn a_completed_git_merge_keeps_its_fact_after_supersede() {
     use crate::teams::integrate;
     use std::process::Command;
-    let (mut h, node, _) = accepted();
+    // The repository comes first, so the team is created on its base and
+    // the member's report records its commit through the product's own
+    // writers (zerus-63rru.37 round 4); no store row is written by hand.
+    let mut h = Harness::empty();
     let dir = h.temp.path().join("git");
     std::fs::create_dir(&dir).unwrap();
     let git = |args: &[&str]| -> String {
@@ -214,16 +217,37 @@ fn a_completed_git_merge_keeps_its_fact_after_supersede() {
     let base = git(&["rev-parse", "HEAD"]);
     git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "incoming"]);
     let incoming = git(&["rev-parse", "HEAD"]);
+    let mut op = create();
+    if let Operation::Create {
+        base_commit,
+        bundle,
+        ..
+    } = &mut op
+    {
+        *base_commit = base.clone();
+        bundle.pipelines[0].stages.clear();
+    }
+    h.run(&person(), op).unwrap();
     let branch = h.store.team(TEAM).unwrap().unwrap().integration_branch;
     git(&["branch", &branch, &base]);
-    let db = h.store.db.as_ref().unwrap();
-    db.execute("UPDATE teams SET base_commit=?1 WHERE id=?2", rusqlite::params![base, TEAM])
-        .unwrap();
-    db.execute(
-        "UPDATE reports SET commit_id=?1 WHERE team=?2 AND node=?3",
-        rusqlite::params![incoming, TEAM, node],
+    let lead = h.bind("lead");
+    h.bind("m1");
+    let node = h.add(&person(), 1);
+    let id = h.submit(node, "m1");
+    observe(&mut h, node, TaskStage::InReview, &id, false);
+    let generation = h.store.generation(TEAM, node).unwrap().unwrap();
+    h.run(
+        &service(),
+        Operation::RecordReport {
+            node,
+            generation,
+            member: "m1".into(),
+            text: "Implemented and checked".into(),
+            commit: incoming.clone(),
+        },
     )
     .unwrap();
+    h.run(&lead, Operation::Accept { node }).unwrap();
     let decision = h.accept_decision(node);
     let mut a = actor(&h);
     let mut p = Work {

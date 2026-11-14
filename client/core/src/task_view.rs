@@ -10,6 +10,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod execution;
+
+#[cfg(test)]
+#[path = "task_view/execution_tests.rs"]
+mod execution_tests;
+
 /// Done shows the last seven days; older tasks are asked for.
 pub const RECENT_DONE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -47,6 +53,10 @@ pub struct TaskItem {
     pub stage_at: i64,
     pub cancelled_at: i64,
     pub writable: bool,
+    /// Saved replica evidence only. None means unavailable, never proof of
+    /// legacy/unmanaged work, a free executor slot or an exited process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<execution::Execution>,
     /// Its place in the project's To do, from 1.
     pub queue: usize,
 }
@@ -77,6 +87,7 @@ impl TaskItem {
             stage_at: task["stage_at"].as_f64().unwrap_or(0.0) as i64,
             cancelled_at: task["cancelled_at"].as_f64().unwrap_or(0.0) as i64,
             writable: task["writable"].as_bool().unwrap_or(true),
+            execution: execution::Execution::from_value(&task["execution"]),
             worker: task["worker"].clone(),
             target_known: true,
             session_known: true,

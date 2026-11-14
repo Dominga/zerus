@@ -416,6 +416,25 @@ and introduces no automatic dispatch, Resume or scheduler.
 
 ## Qualification
 
+### Desktop execution reader
+
+The first `.4.9` reader leaf preserves the CLI's existing replica execution
+projection in Core's `TaskItem.execution`. It copies one typed current attempt
+with its exact saved identity, phase and integer timestamps. Submitted remains
+distinct from Running; Running requires recorded begin evidence. Explicit legacy
+projections retain their legacy flag and generation zero. Missing, malformed,
+overlong or future phase/origin data is unavailable, never evidence of legacy
+work, an empty executor slot or exited native work.
+
+The DTO retains conflict and nonempty unknown/unexplained evidence as flags,
+without copying those ID arrays, histories or frozen native input. Session
+labels and resolution metadata remain saved references, not native peer or
+Person proof. It supplies no live runtime freshness or executor queue position;
+the existing project To do order keeps its separate meaning. There is no new
+renderer action, mobile binding, dispatch admission or activation in this leaf.
+
+### Native and activation controls
+
 Record controls cover lazy/no-op storage, exact identities and slot CAS,
 cross-project/child ownership, concurrent claims, immutable request no-replay,
 observed versus unseen Pause/Stop facts, person Stop crossing versus agent or

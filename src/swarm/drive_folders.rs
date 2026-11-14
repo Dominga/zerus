@@ -2081,7 +2081,8 @@ mod route_tests {
             assert_eq!(value["records"], json!([]));
             assert_eq!(value["versions"], json!({}));
             assert_eq!(value["conflicts"], json!({}));
-            assert!(serde_json::to_vec(&value).unwrap().len() + 1 <= limit);
+            // Leave one byte for the CLI's trailing newline.
+            assert!(serde_json::to_vec(&value).unwrap().len() < limit);
         }
         assert_eq!(
             paths.each_ref().map(|path| std::fs::read(path).unwrap()),

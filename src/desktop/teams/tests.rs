@@ -3126,3 +3126,8 @@ pub(super) fn bound151_fixture() -> Harness {
 
 #[path = "edit_tests.rs"]
 mod edits159;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound159_fixture() -> Harness {
+    edits159::started().0
+}

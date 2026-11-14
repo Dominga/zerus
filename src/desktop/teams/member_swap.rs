@@ -113,6 +113,7 @@ pub(crate) fn check(state: &Path, team: &Team, member: &Member) -> Result<()> {
     }
     let row: Row = serde_json::from_str(&raw).map_err(storage)?;
     known(&row, team, member)?;
+    doorbells(&db, team, member)?;
     let Some(db) = read(&state.join("teams/standing-v1/journal.sqlite3"))? else {
         return Ok(());
     };
@@ -138,6 +139,45 @@ pub(crate) fn check(state: &Path, team: &Team, member: &Member) -> Result<()> {
         return Err(refused(
             "The member has an unsettled or unknown delivery receipt; swap is refused.",
         ));
+    }
+    Ok(())
+}
+
+fn doorbells(db: &Connection, team: &Team, member: &Member) -> Result<()> {
+    let session = member
+        .session
+        .as_ref()
+        .ok_or_else(|| refused("The member has no saved binding."))?;
+    for (table, index) in [
+        ("timer_doorbells", "timer_doorbell_unresolved"),
+        ("timer_answer_bells", "timer_answer_unresolved"),
+    ] {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !exists {
+            continue;
+        }
+        let indexed: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                [index],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !indexed {
+            return Err(refused("Let the updated Teams service read this member's doorbell receipts before swapping."));
+        }
+        let unknown:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} INDEXED BY {index} WHERE team=?1 AND member=?2 AND machine=?3 AND session=?4 AND state IN ('reserved','uncertain') LIMIT 1)"),rusqlite::params![team.id,member.id,session.machine,session.session_id],|r|r.get(0)).map_err(storage)?;
+        if unknown {
+            return Err(refused(
+                "The member has an unsettled or unknown doorbell receipt; swap is refused.",
+            ));
+        }
     }
     Ok(())
 }

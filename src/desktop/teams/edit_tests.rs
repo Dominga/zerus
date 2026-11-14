@@ -3,7 +3,7 @@
 use super::*;
 use crate::teams::ops::tests::{person, request, service, TEAM};
 use crate::teams::ops::{Actor, Operation};
-fn started() -> (Harness, Runtime, FakeEffects) {
+pub(super) fn started() -> (Harness, Runtime, FakeEffects) {
     let mut h = Harness::new();
     let mut r = runtime(&h);
     let mut e = FakeEffects {

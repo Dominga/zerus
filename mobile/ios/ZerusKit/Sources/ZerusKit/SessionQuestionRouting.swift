@@ -22,7 +22,7 @@ public struct QuestionRouting: Equatable, Sendable {
 public enum SessionQuestionRouting {
     public static let operation = "session_question_routing"
     public static let unavailable = "Question routing is unavailable. Update and refresh Zerus on this computer."
-    public static let notChild = "Question routing belongs to a live Claude child session."
+    public static let notChild = "Question routing belongs to a supported child session."
     public static let hint = "Applies to this child session on all devices."
     public static let uncertain = "Where this child's questions go was not confirmed. Check its original receipt; it has not been retried."
     public static let stale = "Where this child's questions go changed. Refresh before applying."
@@ -122,11 +122,11 @@ public enum SessionQuestionRouting {
         return String(target.session.split(separator: "/", omittingEmptySubsequences: false).first ?? "")
     }
 
-    /// A live Claude session with a parent link: only those route their questions in this version.
+    /// A qualified session with a parent link: only those route their questions in this version.
     public static func applies(_ target: Target, _ raw: JSONObject?) -> Bool {
         guard let raw, target.agentId.isEmpty, target.archiveId.isEmpty, raw.object("parent") != nil,
               raw.string("state") != "archived" else { return false }
-        return agent(target, raw) == "claude"
+        return ["claude", "kimi", "opencode"].contains(agent(target, raw))
     }
 
     public static func parentName(_ raw: JSONObject?) -> String {

@@ -81,8 +81,8 @@ export function routingOf(s: Session): Routing | undefined {
   return confirmed && (!row || confirmed.revision > row.revision) ? confirmed : row;
 }
 
-/** Only a Claude child routes in this version (Codex has nothing to route). */
-export const routable = (s: Session) => !!s.parent && s.state !== "archived" && s.cmd === "claude";
+/** Qualified providers of blocking native questions; the host validates each card. */
+export const routable = (s: Session) => !!s.parent && s.state !== "archived" && ["claude", "kimi", "opencode"].includes(s.cmd);
 
 /** Whether the person latched it off: the mirror in the child's host record, or this computer's own service. */
 export const latchedOff = (s: Session) => routingOf(s)?.personOff === true || latchOf(s)?.personOff === true;

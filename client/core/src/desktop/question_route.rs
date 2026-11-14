@@ -33,21 +33,29 @@ pub const PER_PARENT_HOUR: i64 = 20;
 pub fn escalates(state: &str) -> bool {
     matches!(state, "refused" | "unknown")
 }
-/// The only question source that routes: Claude's own AskUserQuestion, from
-/// its PreToolUse hook (`questions::from_hook`). Every other source never
-/// routes (owner direction, 2026-11-12), including `claude_native_question`
-/// (Claude Code's own prompt) and every synthetic native prompt. Codex has no
-/// blocking question source (`codex_async` is optional), so a Codex child has
-/// nothing to route.
+/// Claude's own AskUserQuestion from its PreToolUse hook.
 pub const ROUTED_SOURCE: &str = "hook";
-/// Question IDs only the person may ever answer, refused again here even
-/// though such a row is never quiet (`parent_link::human_request`).
-const PERSON_ONLY: [&str; 5] = [
+/// Qualified blocking questions only: Claude's hook, Kimi's foreground
+/// AskUserQuestion and OpenCode's native question-tool form. Each uses its
+/// existing exact-identity answer path and durable original request journal.
+/// Approvals, trust, cache choices and other synthetic prompts never route.
+pub const ROUTED_SOURCES: [&str; 3] = [ROUTED_SOURCE, "kimi_wire", "opencode_native"];
+fn routed_source(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some(ROUTED_SOURCE),
+        "kimi" => Some("kimi_wire"),
+        "opencode" => Some("opencode_native"),
+        _ => None,
+    }
+}
+/// Person-only identities stay refused even in a mislabeled card or record.
+const PERSON_ONLY: [&str; 6] = [
     "claude-trust:",
     "codex-trust:",
     "codex-sandbox:",
     "kimi-trust:",
     "codex-hooks-trust:",
+    "kimi-cache:",
 ];
 const ID_BYTES: usize = 256;
 const NAME_BYTES: usize = 512;
@@ -109,7 +117,7 @@ pub struct Edge {
 }
 
 /// The edge of one catalog row of the service's own computer, or `None`.
-/// The row must be a running Claude child whose host classified it
+/// The row must be a running qualified child whose host classified it
 /// supervised and quiet: a parent link whose parent is `live` there and
 /// `human_request` present and `false`. An older host that does not classify
 /// `human_request` never routes, nor does any row with a human signal, nor a
@@ -135,7 +143,8 @@ pub fn edge(row: &Value) -> Option<Edge> {
         parent_session_id: text(parent, "session_id"),
     };
     (running(row)
-        && agent == "claude"
+        && routed_source(agent).is_some()
+        && edge.name.split('/').next() == Some(agent)
         && row["phase"] == "input"
         && quiet
         && allowed
@@ -300,12 +309,20 @@ fn preview(value: &str) -> String {
     words
 }
 
-/// Whether `card` of a Claude child may route: Claude's own AskUserQuestion
-/// card (source [`ROUTED_SOURCE`]) of the main agent, blocking, unanswered,
-/// answerable through `hgs answer` now, with a full identity. Everything
-/// else never routes.
+/// A main-agent, blocking, unanswered ordinary question that the existing
+/// answer path can handle now. Provider/source pairing is checked again in
+/// `questions`; an approval never inherits ordinary-question route authority.
 pub fn routable(card: &Value) -> bool {
-    card["source"] == ROUTED_SOURCE
+    ROUTED_SOURCES.contains(&card["source"].as_str().unwrap_or(""))
+        && (card["source"] != "kimi_wire"
+            || (card["answer_transport"] == "kimi_tui" && card["blocking"] == true))
+        && (card["source"] != "opencode_native"
+            || (card["kind"] == "opencode_form"
+                && card["status"] == "pending"
+                && card["answer_transport"] == "native_opencode"
+                && card["blocking"] == true))
+        && card["approval"] != true
+        && card["approval_choices"] != true
         && card["agent_id"] == "main"
         && card["optional"] != true
         && card.get("answer_delivery").is_none_or(Value::is_null)
@@ -317,13 +334,17 @@ pub fn routable(card: &Value) -> bool {
 
 /// The routable questions of `inspect` (one bounded metadata read of the
 /// edge's session, `hgs inspect NAME --after i64::MAX`): only when it is still
-/// exactly the edge's session, run and conversation, a running Claude agent.
+/// exactly the edge's session, run and conversation, and its qualified provider.
 pub fn questions(inspect: &Value, edge: &Edge, machine: &str) -> Vec<Question> {
+    let agent = inspect["agent"].as_str().unwrap_or("");
+    let Some(source) = routed_source(agent) else {
+        return Vec::new();
+    };
     let same = text(inspect, "name") == edge.name
         && text(inspect, "session_id") == edge.session_id
         && text(inspect, "run_id") == edge.run_id
         && text(inspect, "conversation_id") == edge.conversation_id
-        && inspect["agent"] == "claude";
+        && edge.name.split('/').next() == Some(agent);
     if !same {
         return Vec::new();
     }
@@ -334,7 +355,8 @@ pub fn questions(inspect: &Value, edge: &Edge, machine: &str) -> Vec<Question> {
         .flatten()
         .take(64)
     {
-        if !routable(card)
+        if card["source"] != source
+            || !routable(card)
             || card["run_id"] != edge.run_id.as_str()
             || card["conversation_id"] != edge.conversation_id.as_str()
         {

@@ -29,7 +29,7 @@ final class SessionQuestionRoutingTests: XCTestCase {
         XCTAssertNil(SessionQuestionRouting.parse(nil))
     }
 
-    func testTheSessionActionsShowItForLiveClaudeChildrenOnly() throws {
+    func testTheSessionActionsShowItForQualifiedChildren() throws {
         for item in try contract().objects("availability") {
             let raw = try XCTUnwrap(item.object("row"))
             let name = item.string("name")

@@ -144,6 +144,11 @@ class Model(http.server.BaseHTTPRequestHandler):
             elif 'QUESTION_NATIVE' in last_user:
                 tool = ('question', {'questions': [{'question': 'Pick a color', 'header': 'Color', 'options': [
                     {'label': 'Green', 'description': 'First'}, {'label': 'Blue', 'description': 'Second'}]}]})
+                if 'QUESTION_NATIVE_MULTIPLE' in last_user:
+                    tool[1]['questions'][0]['multiple'] = True
+                if 'QUESTION_NATIVE_PARTS' in last_user:
+                    tool[1]['questions'].append({'question': 'Pick a database', 'header': 'Database', 'options': [
+                        {'label': 'SQLite', 'description': 'Local'}, {'label': 'Postgres', 'description': 'Server'}]})
             elif 'BASH_NATIVE' in last_user:
                 tool = ('shell', {'command': 'printf native-tool-output', 'description': 'Print isolated fixture output'})
         if tool:
@@ -875,6 +880,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(data.get('attention_id'))
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
+        self.assertIs(card.get('blocking'), True)
         [item] = card['questions']
         self.assertEqual([o['label'] for o in item['options']], ['Green', 'Blue'])
         green = next(o['id'] for o in item['options'] if o['label'] == 'Green')
@@ -895,6 +901,7 @@ class OpenCodeNative(unittest.TestCase):
         data = self.wait(tool['name'], lambda v: v['pending_questions'])
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_permission', True, True))
+        self.assertIs(card.get('blocking'), False)
         [item] = card['questions']
         self.assertEqual([o['id'] for o in item['options']], ['once', 'always', 'reject'])
         self.assertIn('printf native-tool-output', item['prompt'])
@@ -905,6 +912,66 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'shell' and 'native-tool-output' in e['detail']
                             for e in final['events']), final['events'])
         self.assert_private(data, final)
+
+    def test_04_question_routing_identity_and_spent_answers(self):
+        """Qualified native tool questions keep exact identity and durable no replay."""
+        previous = None
+        for mode in ('MULTIPLE', 'PARTS', 'OTHER'):
+            with self.subTest(mode=mode):
+                binding = self.create()
+                name = binding['name']
+                text = 'QUESTION_NATIVE_' + mode + ' routing qualification'
+                self.hgs(['send', name, '--json'], self.payload(binding, text=text))
+                data = self.wait(name, lambda value: value['pending_questions'])
+                [card] = data['pending_questions']
+                self.assertEqual((card['source'], card['kind'], card['answer_transport']),
+                                 ('opencode_native', 'opencode_form', 'native_opencode'))
+                self.assertIs(card.get('blocking'), True)
+                self.assertIs(card['can_answer'], True)
+                self.assertEqual(len([r for r in self.model.requests
+                                      if r['last_user'] == text and 'question' in r['tools']]), 1)
+                items = card['questions']
+                answers = [{'question_id': items[0]['id'], 'selected_option_ids': ['Green'], 'text': ''}]
+                if mode == 'MULTIPLE':
+                    self.assertIs(items[0]['multi_select'], True)
+                    answers[0]['selected_option_ids'] = ['Green', 'Blue']
+                elif mode == 'PARTS':
+                    self.assertEqual(len(items), 2)
+                    answers.append({'question_id': items[1]['id'], 'selected_option_ids': ['SQLite'], 'text': ''})
+                else:
+                    self.assertIs(items[0]['allow_other'], True)
+                    answers[0].update(selected_option_ids=[], text='A private custom color')
+                request = self.payload(binding, question_id=card['question_id'],
+                                       expected_question_hash=card['question_hash'], answers=answers)
+                for key, value in [('expected_run_id', 'replacement-run'),
+                                   ('expected_conversation_id', 'ses_replacement'),
+                                   ('question_id', 'frm_replacement'), ('expected_question_hash', 'changed')]:
+                    self.hgs(['answer', name, '--json'], {**request, key: value}, success=False)
+                # A private crash-style pending reservation must block a replay.
+                pending = {**request, 'request_id': str(uuid.uuid4())}
+                path = self.state / 'opencode/answers' / (pending['request_id'] + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                body = json.dumps({'status': 'pending', 'request_id': pending['request_id']})
+                path.write_text(body)
+                self.hgs(['answer', name, '--json'], pending, success=False)
+                self.assertEqual(path.read_text(), body)
+                if previous:
+                    self.hgs(['answer', name, '--json'], {**request, 'request_id': previous}, success=False)
+                self.assertEqual(self.hgs(['inspect', name])['pending_questions'][0]['question_hash'],
+                                 card['question_hash'])
+                self.assertEqual(self.hgs(['answer', name, '--json'], request)['status'], 'answered')
+                self.hgs(['answer', name, '--json'], request, success=False)
+                self.hgs(['answer', name, '--json'], {**request, 'answers': []}, success=False)
+                previous = request['request_id']
+                final = self.wait(name, lambda value: value['phase'] == 'idle' and value.get('reply_id'))
+                replies = [event for event in final['events']
+                           if event['type'] == 'PostToolUse' and event['tool'] == 'question']
+                self.assertEqual(len(replies), 1)
+                expected = {'MULTIPLE': ['Green', 'Blue'], 'PARTS': ['Green', 'SQLite'],
+                            'OTHER': ['A private custom color']}[mode]
+                for value in expected:
+                    self.assertIn(value, replies[0]['detail'])
+                self.assertEqual(final['pending_questions'], [])
 
     def test_04_current_read_names_what_read_accepts_on_the_shown_observation(self):
         """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts

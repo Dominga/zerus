@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 
 describe("the per-child switch in Session actions", () => {
-  it("appears only for a live Claude child, checked by its host's value", () => {
+  it("appears for a qualified child, checked by its host's value", () => {
     const entry = routingEntry(child())!;
     expect(entry).toMatchObject({ label: "Send questions to lead", checked: true, disabled: false, hint: SEND_ON });
     expect(routingEntry(child({ questionRouting: { sendToParent: false, revision: 2, personOff: false } }))).toMatchObject({ checked: false, hint: SEND_OFF });
@@ -40,6 +40,18 @@ describe("the per-child switch in Session actions", () => {
     expect(routingEntry(child({ state: "archived" }))).toBeUndefined();
     // Codex has nothing to route in this version.
     expect(routingEntry(child({ cmd: "codex" }))).toBeUndefined();
+  });
+
+  it("keeps the person's switch for every qualified provider and excludes DeepSeek", () => {
+    for (const cmd of ["claude", "kimi", "opencode"]) {
+      const row = child({ cmd, name: `${cmd}/project/child` } as Partial<Session>);
+      expect(routingEntry(row), cmd).toMatchObject({ checked: true, disabled: false });
+      expect(routingEntry({ ...row, questionRouting: { sendToParent: false, revision: 1, personOff: false } }), cmd)
+        .toMatchObject({ checked: false, hint: SEND_OFF });
+    }
+    for (const cmd of ["dsh", "deepseek", "codex", "unknown"]) {
+      expect(routingEntry(child({ cmd } as Partial<Session>)), cmd).toBeUndefined();
+    }
   });
 
   it("is off when its host does not say, or its computer is offline", () => {
@@ -104,7 +116,7 @@ describe("the global switch in Settings", () => {
 });
 
 describe("the shared question routing contract", () => {
-  it("shows the switch for live Claude children only, as the phones do", () => {
+  it("shows the switch for qualified children, as the phones do", () => {
     for (const c of contract.availability) {
       const row = c.row as Record<string, unknown> & { name: string; cmd: string; state: string; parent?: { name: string } };
       const s = child({ name: row.name, cmd: row.cmd, state: row.state,

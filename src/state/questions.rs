@@ -8,6 +8,8 @@ use std::fs::{self, File};
 use std::io::{Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
+mod kimi_blocking;
+
 const MAX_WIRE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 128 * 1024;
 
@@ -229,12 +231,18 @@ fn wire_events(record: &Value) -> Result<Vec<Value>> {
             {
                 continue;
             }
-            if !line.windows(12).any(|part| part == b"interaction.") {
+            if !line.windows(12).any(|part| part == b"interaction.")
+                && !line
+                    .windows(25)
+                    .any(|part| part == b"context.append_loop_event")
+            {
                 continue;
             }
             if let Ok(event) = serde_json::from_slice::<Value>(line) {
                 if string(&event, "agentId") == "main"
-                    && string(&event, "type").starts_with("interaction.")
+                    && (string(&event, "type").starts_with("interaction.")
+                        || (event["type"] == "context.append_loop_event"
+                            && event["event"]["type"] == "tool.call"))
                 {
                     events.push(event);
                 }
@@ -246,7 +254,9 @@ fn wire_events(record: &Value) -> Result<Vec<Value>> {
 
 fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
     let mut pending = BTreeMap::new();
+    let mut calls = kimi_blocking::Calls::default();
     for event in events {
+        calls.observe(event);
         let id = string(event, "id");
         if id.is_empty() {
             continue;
@@ -260,7 +270,7 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
                 if !active {
                     continue;
                 }
-                if let Ok(card) = card(
+                if let Ok(mut card) = card(
                     record,
                     id,
                     tool,
@@ -268,7 +278,8 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
                     "kimi_wire",
                     event["time"].as_f64().unwrap_or(0.0) / 1000.0,
                 ) {
-                    pending.insert(id.into(), card);
+                    card["blocking"] = json!(calls.blocking(event, &card["questions"]));
+                    pending.insert(id.into(), (card, event));
                 }
             }
             "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed" => {
@@ -278,6 +289,15 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
         }
     }
     pending
+        .into_iter()
+        .map(|(id, (mut card, request))| {
+            // A later tool-ID reuse must retire an older question's proof.
+            // Rechecking only revokes authority; a future call cannot add it.
+            card["blocking"] =
+                json!(card["blocking"] == true && calls.blocking(request, &card["questions"]));
+            (id, card)
+        })
+        .collect()
 }
 
 /// Current normalized identities without availability checks (adapter guard API).
@@ -1276,6 +1296,7 @@ mod tests {
         let recovered = recover_wire(&record, &[event()]);
         assert_eq!(recovered["question_test"]["question_id"], "question_test");
         assert_eq!(recovered["question_test"]["created_at"], 1.0);
+        assert_eq!(recovered["question_test"]["blocking"], false);
         assert_eq!(
             recovered["question_test"]["questions"][0]["allow_other"],
             true
@@ -1285,6 +1306,32 @@ mod tests {
             &json!({"hook_event_name":"PostToolUse","tool_call_id":"tool_test"}),
         );
         assert_eq!(record["pending_questions"], json!({}));
+    }
+    #[test]
+    fn a_later_native_tool_call_retires_the_pending_questions_blocking_proof() {
+        let original = json!({"type":"context.append_loop_event","agentId":"main",
+            "event":{"type":"tool.call","toolCallId":"tool_test","turnId":"0",
+                "name":"AskUserQuestion","args":{"questions":items()}}});
+        let mut request = event();
+        request["request"]["toolCallId"] = json!("tool_test");
+        request["request"]["turnId"] = json!(0);
+        let recover =
+            |events: &[Value]| recover_wire(&record(), events)["question_test"]["blocking"].clone();
+        assert_eq!(recover(&[original.clone(), request.clone()]), true);
+        for replacement in [
+            json!({"type":"context.append_loop_event","agentId":"main","event":{
+                "type":"tool.call","toolCallId":"tool_test","turnId":"1","name":"AskUserQuestion",
+                "args":{"questions":items(),"background":true}}}),
+            json!({"type":"context.append_loop_event","agentId":"main","event":{
+                "type":"tool.call","toolCallId":"tool_test","turnId":"0","name":"AnotherTool"}}),
+        ] {
+            assert_eq!(
+                recover(&[original.clone(), request.clone(), replacement]),
+                false
+            );
+        }
+        // A future foreground call cannot turn an unproven earlier request into proof.
+        assert_eq!(recover(&[request, original]), false);
     }
     #[test]
     fn a_new_prompt_resolves_the_previous_permission_request() {

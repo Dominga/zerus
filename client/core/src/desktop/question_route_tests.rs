@@ -111,7 +111,10 @@ fn every_row_that_is_not_supervised_and_quiet_never_routes() {
             Box::new(|r| r["human_request"] = json!("false")),
         ),
         ("a Codex child", Box::new(|r| r["cmd"] = json!("codex"))),
-        ("a Kimi child", Box::new(|r| r["cmd"] = json!("kimi"))),
+        (
+            "agent and name disagree",
+            Box::new(|r| r["cmd"] = json!("kimi")),
+        ),
         (
             "an OpenCode child",
             Box::new(|r| r["cmd"] = json!("opencode")),
@@ -176,7 +179,7 @@ fn every_row_that_is_not_supervised_and_quiet_never_routes() {
 }
 
 #[test]
-fn only_claudes_own_blocking_hook_question_routes() {
+fn only_qualified_main_blocking_questions_route() {
     assert!(routable(&card()));
     let cases: Cases<Value> = vec![
         (
@@ -217,8 +220,7 @@ fn only_claudes_own_blocking_hook_question_routes() {
     let mut screen = card();
     screen["answer_transport"] = json!("claude_tui");
     assert!(routable(&screen));
-    // Every other source never routes: Claude Code's own prompt and every
-    // synthetic or other provider's prompt, however answerable.
+    // Unqualified and person-only sources never route, however answerable.
     for source in [
         "claude_native_question",
         "claude_tool_approval",
@@ -232,8 +234,11 @@ fn only_claudes_own_blocking_hook_question_routes() {
         "codex_hooks_trust",
         "codex_sandbox_setup",
         "codex_update",
-        "kimi_wire",
+        "kimi_plan_review",
+        "kimi_tool_approval",
         "dsh_native",
+        "dsh_native_api",
+        "opencode_native",
         "",
         "HOOK",
     ] {
@@ -761,5 +766,99 @@ fn failures_escalate_immediately_without_replay_against_the_shared_contract() {
             crate::view::row(&case["row"]).quiet,
             case["quiet"].as_bool().unwrap()
         );
+    }
+}
+
+#[test]
+fn a_supervised_kimi_question_routes_with_its_exact_native_identity() {
+    let mut row = row();
+    row["name"] = json!("kimi/project/child");
+    row["cmd"] = json!("kimi");
+    let edge = edge(&row).expect("a supervised Kimi child must be eligible");
+    let mut card = card();
+    card["source"] = json!("kimi_wire");
+    card["answer_transport"] = json!("kimi_tui");
+    card["blocking"] = json!(true);
+    card["question_id"] = json!("native-question-1");
+    let mut inspected = inspect(vec![card.clone()]);
+    inspected["name"] = row["name"].clone();
+    inspected["agent"] = json!("kimi");
+    let routed = questions(&inspected, &edge, MACHINE);
+    assert_eq!(routed.len(), 1);
+    assert_eq!(routed[0].identity.question_id, "native-question-1");
+    assert_eq!(routed[0].identity.question_hash, card["question_hash"]);
+    assert_eq!(routed[0].identity.run_id, edge.run_id);
+    assert_eq!(routed[0].identity.conversation_id, edge.conversation_id);
+
+    for (key, value) in [
+        ("source", json!("kimi_tool_approval")),
+        ("source", json!("kimi_plan_review")),
+        ("source", json!("kimi_cache_hint")),
+        ("source", json!("kimi_folder_trust")),
+        ("source", json!("hook")),
+        ("agent_id", json!("child-agent")),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("optional", json!(true)),
+        ("answer_delivery", json!({"status":"in_progress"})),
+        ("can_answer", json!(false)),
+        ("answer_transport", json!("unqualified")),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("question_id", json!("kimi-cache:hash")),
+        ("question_id", json!("kimi-trust:hash")),
+        ("run_id", json!("replacement-run")),
+        ("conversation_id", json!("replacement-conversation")),
+    ] {
+        let mut refused = card.clone();
+        refused[key] = value;
+        inspected["pending_questions"] = json!([refused]);
+        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
+    }
+    inspected["pending_questions"] = json!([card]);
+    inspected["agent"] = json!("claude");
+    assert!(questions(&inspected, &edge, MACHINE).is_empty());
+}
+
+#[test]
+fn an_opencode_question_tool_form_routes_but_permissions_and_unbound_forms_do_not() {
+    let mut row = row();
+    row["name"] = json!("opencode/project/child");
+    row["cmd"] = json!("opencode");
+    let edge = edge(&row).expect("a supervised OpenCode child must be eligible");
+    let mut card = card();
+    card["source"] = json!("opencode_native");
+    card["kind"] = json!("opencode_form");
+    card["status"] = json!("pending");
+    card["blocking"] = json!(true);
+    card["answer_transport"] = json!("native_opencode");
+    card["question_id"] = json!("frm_question");
+    let mut inspected = inspect(vec![card.clone()]);
+    inspected["name"] = row["name"].clone();
+    inspected["agent"] = json!("opencode");
+    let routed = questions(&inspected, &edge, MACHINE);
+    assert_eq!(routed.len(), 1);
+    assert_eq!(routed[0].identity.question_id, "frm_question");
+    for (key, value) in [
+        ("kind", json!("opencode_permission")),
+        ("kind", Value::Null),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("optional", json!(true)),
+        ("status", json!("answered")),
+        ("answer_transport", json!("unknown")),
+        ("agent_id", json!("native-child")),
+        ("source", json!("kimi_wire")),
+        ("source", json!("hook")),
+        ("can_answer", json!(false)),
+        ("run_id", json!("replacement")),
+        ("question_id", json!("kimi-cache:hash")),
+    ] {
+        let mut refused = card.clone();
+        refused[key] = value;
+        inspected["pending_questions"] = json!([refused]);
+        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
     }
 }

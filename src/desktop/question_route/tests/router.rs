@@ -63,7 +63,8 @@ fn inspect(cards: Vec<Value>) -> Value {
         "conversation_id": "conversation-1", "pending_questions": cards})
 }
 fn reference_of(edge: &route::Edge) -> Value {
-    json!({"schema": 1, "uri": REFERENCE, "name": edge.name, "machine_id": MACHINE,
+    let uri = REFERENCE.replace("claude%2Fproject%2Fchild", &edge.name.replace('/', "%2F"));
+    json!({"schema": 1, "uri": uri, "name": edge.name, "machine_id": MACHINE,
         "host": "box", "run_id": edge.run_id, "conversation_id": edge.conversation_id,
         "archive_id": "", "agent_id": ""})
 }
@@ -3202,5 +3203,117 @@ fn a_verified_v2_statement_for_an_absent_child_fences_its_latch_before_restore()
             (false, i64::from(existing)),
             "the refused decision changes neither value nor revision"
         );
+    }
+}
+
+#[test]
+fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replays_after_restart() {
+    for agent in ["kimi", "opencode"] {
+        let mut f = Fixture::new();
+        let mut row = child_row();
+        row["name"] = json!(format!("{agent}/project/child"));
+        row["cmd"] = json!(agent);
+        let mut question = card("native-question-1");
+        question["source"] = json!(if agent == "kimi" {
+            "kimi_wire"
+        } else {
+            "opencode_native"
+        });
+        question["answer_transport"] = json!(if agent == "kimi" {
+            "kimi_tui"
+        } else {
+            "native_opencode"
+        });
+        question["kind"] = json!("opencode_form");
+        question["status"] = json!("pending");
+        question["blocking"] = json!(true);
+        let mut inspected = inspect(vec![question]);
+        inspected["name"] = row["name"].clone();
+        inspected["agent"] = json!(agent);
+        f.reply(vec![inspected]);
+        f.snapshot(vec![row.clone(), parent_row()]);
+        f.until("submitted", |f| f.states() == ["submitted"]);
+        assert_eq!((f.reads(), f.sent()), (2, 1));
+        let sent = f.sent.lock().unwrap();
+        let text = sent[0].1["text"].as_str().unwrap();
+        assert!(
+            text.contains(&format!("{agent}%2Fproject%2Fchild")),
+            "{text}"
+        );
+        assert!(text.contains("native-question-1"), "{text}");
+        drop(sent);
+        f.restart();
+        f.snapshot(vec![row, parent_row()]);
+        f.settle();
+        assert_eq!(f.sent(), 1);
+        assert_eq!(f.states(), ["submitted"]);
+    }
+}
+
+#[test]
+fn kimi_person_only_cards_and_unqualified_transports_never_reserve_or_send() {
+    for (key, value) in [
+        ("source", json!("kimi_tool_approval")),
+        ("source", json!("kimi_plan_review")),
+        ("source", json!("kimi_cache_hint")),
+        ("source", json!("kimi_folder_trust")),
+        ("source", json!("hook")),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("optional", json!(true)),
+        ("answer_transport", json!("unqualified")),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+    ] {
+        let mut f = Fixture::new();
+        let mut row = child_row();
+        row["name"] = json!("kimi/project/child");
+        row["cmd"] = json!("kimi");
+        let mut question = card("native-question-1");
+        question["source"] = json!("kimi_wire");
+        question["answer_transport"] = json!("kimi_tui");
+        question["blocking"] = json!(true);
+        question[key] = value;
+        let mut inspected = inspect(vec![question]);
+        inspected["name"] = row["name"].clone();
+        inspected["agent"] = json!("kimi");
+        f.reply(vec![inspected]);
+        f.snapshot(vec![row, parent_row()]);
+        f.settle();
+        assert!(f.routes().is_empty(), "{key}");
+        assert_eq!(f.sent(), 0, "{key}");
+    }
+}
+
+#[test]
+fn opencode_permissions_and_generic_forms_never_reserve_or_send() {
+    for (key, value) in [
+        ("kind", json!("opencode_permission")),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("status", json!("answered")),
+        ("answer_transport", json!("unknown")),
+    ] {
+        let mut f = Fixture::new();
+        let mut row = child_row();
+        row["name"] = json!("opencode/project/child");
+        row["cmd"] = json!("opencode");
+        let mut question = card("frm_question");
+        question["source"] = json!("opencode_native");
+        question["kind"] = json!("opencode_form");
+        question["status"] = json!("pending");
+        question["answer_transport"] = json!("native_opencode");
+        question["blocking"] = json!(true);
+        question[key] = value;
+        let mut inspected = inspect(vec![question]);
+        inspected["name"] = row["name"].clone();
+        inspected["agent"] = json!("opencode");
+        f.reply(vec![inspected]);
+        f.snapshot(vec![row, parent_row()]);
+        f.settle();
+        assert!(f.routes().is_empty(), "{key}");
+        assert_eq!(f.sent(), 0, "{key}");
     }
 }

@@ -96,7 +96,7 @@ describe("the new sentences in Russian", () => {
     expect(translation, source).toBeTruthy();
     expect(translation, source).not.toBe(source);
     expect(translation, source).toMatch(/^[А-ЯЁ]/u);
-    expect(translation, source).not.toContain("·");
+    expect(translation, source).not.toContain("\u00b7");
     expect(translation?.match(/%1/g)?.length ?? 0).toBe(source.match(/%1/g)?.length ?? 0);
   });
 

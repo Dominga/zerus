@@ -3200,6 +3200,9 @@ impl LaunchOptions {
                     "new session name cannot contain '/', ':', '.', control characters or surrounding whitespace",
                 ));
             }
+            if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+                return Err(Error::new(1, problem));
+            }
         }
         Ok(options)
     }
@@ -3443,6 +3446,11 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if !options.tag.is_empty() && !existing && !binding_exists(config, &session)? {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+            return Err(Error::new(1, problem));
+        }
+    }
     if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
         return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
     }
@@ -3767,6 +3775,15 @@ mod parent_scan_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            let args = ["project", "--new", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&args, true).is_err(), "{tag:?}");
+            let old = ["project", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&old, true).is_ok(), "old names are selectors");
+        }
+    }
     /// zerus-sa9qn.39: a pasted peer dry-run line reads the alias back as one
     /// word and runs nothing, in sh (run) and fish (`fish_words`, modelled).
     #[cfg(unix)]

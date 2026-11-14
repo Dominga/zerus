@@ -3,4 +3,5 @@
     <string name="activity_next_own">Next message from you</string>
     <string name="activity_reading_previous_own">Reading earlier messages…</string>
     <string name="activity_reading_next_own">Reading newer messages…</string>
+    <string name="session_name_unsafe">Names cannot contain shell syntax or invisible formatting characters.</string>
 </resources>

@@ -989,6 +989,11 @@ pub(crate) fn launch(
         dispatch_lock::persist(name, &mut expected, &mut record)?;
         return Ok(());
     }
+    if let Some(tag) = name.split('/').nth(2) {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(tag) {
+            return Err(problem.into());
+        }
+    }
     // A new name has no durable destination reservation yet. Keep allocation,
     // persistence and native creation together; an uncertain reply must retain
     // this exact conversation, never allocate another one for the same name.
@@ -2284,6 +2289,7 @@ pub(super) fn session_action(
         {
             return Err("Rename must preserve the original DeepSeek provider and project".into());
         }
+        rename::validate_new_tag(new)?;
         if new != name && exists(new) {
             return Err("The destination session already exists".into());
         }
@@ -2595,10 +2601,11 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if !new.starts_with("dsh/")
                 || new.split('/').count() != 3
                 || new.contains(['\n', '\r', ':'])
-                || new.chars().any(char::is_whitespace)
+                || new.split('/').take(2).any(|part| part.chars().any(char::is_whitespace))
             {
                 return Err("Invalid DeepSeek session name".into());
             }
+            rename::validate_new_tag(new)?;
             if exists(new) {
                 return Err("This name is already used".into());
             }

@@ -275,9 +275,9 @@ fn done(receipt: Value, cleanup: Option<WorktreeCleanup>) -> Outcome {
     Outcome::Done { receipt, cleanup }
 }
 
-/// `SessionTag::problem` (`tray/src/SessionTag.h`): why a session tag is not
-/// accepted, None when it is. `hgs rename` enforces the same rule.
-pub fn tag_problem(tag: &str) -> Option<&'static str> {
+/// Shape of a recorded tag. Kept compatible for observations and recovery;
+/// shell punctuation in an existing label never prevents looking it up.
+pub(crate) fn recorded_tag_problem(tag: &str) -> Option<&'static str> {
     if tag.is_empty() {
         return Some(crate::source!("Enter a session name."));
     }
@@ -293,6 +293,32 @@ pub fn tag_problem(tag: &str) -> Option<&'static str> {
         ));
     }
     None
+}
+
+/// A NEW tag, never an existing session selector. Native launch, rename and
+/// fork use the same rule; quoting remains required for every name.
+pub fn tag_problem(tag: &str) -> Option<&'static str> {
+    recorded_tag_problem(tag).or_else(|| {
+        tag.chars()
+            .any(unsafe_tag_character)
+            .then_some(crate::source!(
+                "Names cannot contain shell syntax or invisible formatting characters."
+            ))
+    })
+}
+
+fn unsafe_tag_character(c: char) -> bool {
+    // Unicode 17.0 General_Category=Cf, independent of platform Unicode data.
+    // https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt
+    "`$;&|<>(){}[]*?!#~\\'\",".contains(c)
+        || matches!(c, '\u{2018}'..='\u{201e}'
+            | '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}'
+            | '\u{70f}' | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
 /// What Fork shows: whether it is available and its tooltip (the agent's
@@ -316,7 +342,7 @@ pub fn fork_available(
 /// The fork's suggested tag: `fork`, or the session's tag with `-fork`, then
 /// `-2`, `-3`… while a session on the same computer has that name.
 pub fn fork_tag(tag: &str, occupied: impl Fn(&str) -> bool) -> String {
-    let base = if tag.is_empty() {
+    let base = if tag_problem(tag).is_some() {
         "fork".to_owned()
     } else {
         format!("{tag}-fork")
@@ -1908,6 +1934,20 @@ pub fn allowed_with(row: &ViewRow, details: &Value, operation: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        let names: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../mobile/android/app/src/test/resources/session-tag-contract.json"
+        ))
+        .unwrap();
+        for tag in names["rejected"].as_array().unwrap() {
+            let tag = tag.as_str().unwrap();
+            assert!(tag_problem(tag).is_some(), "{tag:?}");
+        }
+        for tag in names["accepted"].as_array().unwrap() {
+            assert_eq!(tag_problem(tag.as_str().unwrap()), None, "{tag}");
+        }
+    }
     use super::*;
 
     fn target(computer: &str) -> Target {

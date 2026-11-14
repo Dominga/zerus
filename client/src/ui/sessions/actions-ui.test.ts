@@ -582,3 +582,13 @@ describe("archiveNameOccupied (Qt SessionsWindow.cpp 3148-3154)", () => {
     }
   });
 });
+
+
+describe("new session tags (zerus-sa9qn.41)", () => {
+  it("rejects shell syntax and invisible formatting without excluding scripts or inner spaces", async () => {
+    const names = (await import("../../../../mobile/android/app/src/test/resources/session-tag-contract.json")).default;
+    for (const tag of names.rejected) expect(tagProblem(tag), JSON.stringify(tag)).toBeDefined();
+    for (const tag of names.accepted) expect(tagProblem(tag), tag).toBeUndefined();
+    expect(renameProblem("safe", row({ name: "claude/proj/old$tag" }), [])).toBeUndefined();
+  });
+});

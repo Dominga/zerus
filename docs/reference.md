@@ -495,6 +495,13 @@ that any tmux session holds. A build older than this one finds no pane for a
 session whose terminal is named otherwise, shows it as not live and drops
 `terminal_name` when it rewrites the record.
 
+New session tags (launch, rename and fork) refuse shell metacharacters, curly
+quotes U+2018–U+201E and invisible Unicode formatting characters (category Cf).
+Letters and digits from any script and internal spaces remain valid. This is
+an additional check on newly chosen tags: existing labels remain valid selectors,
+and an old label can be renamed to a safe tag. Always quote names in shell
+commands; older peers and retained labels may still contain shell syntax.
+
 When several sessions share a label (zerus-ucck P3c), a command picks one by
 the identities it carries. These come from its command line
 (`--expected-run-id`, `--run`, `--run-id`, `--expected-conversation-id`,

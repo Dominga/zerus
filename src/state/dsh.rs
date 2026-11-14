@@ -2061,7 +2061,14 @@ fn inspect_record(name: &str, record: &Value, agent_id: Option<&str>, include_pr
     if agent_id.is_none() && record.get("account_defaults").is_some() {
         result["account_defaults"] = record["account_defaults"].clone();
     }
-    if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
+    if agent_id.is_none() {
+        notifications::enrich(
+            &mut result,
+            notifications::load().as_ref(),
+            journal::journal_name(&record),
+        );
+        question_routing::enrich(&mut result, question_routing::load().as_ref());
+    }
     if let Some(current) = read.and_then(|read| current_read_of(name, &record, read, &inspected)) {
         result["current_read"] = current;
     }

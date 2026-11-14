@@ -881,6 +881,11 @@ class OpenCodeNative(unittest.TestCase):
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
         self.assertIs(card.get('blocking'), True)
+        self.assertIsInstance(data.get('question_routing'),dict)
+        self.assertIs(data['question_routing']['send_to_parent'],True)
+        listed=self.hgs(['ls','--local','--json'])
+        row=next(row for row in listed['sessions'] if row['name']==name)
+        self.assertEqual(row.get('question_routing'),data['question_routing'])
         bounded = self.hgs(['inspect',name,'--after',str(2**63-1),'--skip-processes'])
         self.assertEqual(bounded['pending_questions'],data['pending_questions'])
         [item] = card['questions']

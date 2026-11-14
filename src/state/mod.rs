@@ -651,6 +651,10 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
 /// The last steps of every listed row. `names` holds the session names of the
 /// pane snapshot by session ID.
 fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, String>) {
+    if sessions.iter().any(|row| row.get("question_routing").is_none()) {
+        let routing = question_routing::load();
+        question_routing::enrich_missing(sessions, routing.as_ref());
+    }
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {

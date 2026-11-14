@@ -1106,6 +1106,12 @@ class NativeHarness(unittest.TestCase):
         self.cli('send', b, self.payload(b, text='QUESTION', attachments=[]))
         data = self.wait(lambda: d if (d := self.cli('inspect', b))['pending_questions'] else None)
         question = data['pending_questions'][0]
+        self.assertIsInstance(data.get('question_routing'),dict)
+        self.assertIs(data['question_routing']['send_to_parent'],True)
+        listed=self.hgs('ls','--local','--json')
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        row=next(row for row in json.loads(listed.stdout)['sessions'] if row['name']==b['name'])
+        self.assertEqual(row.get('question_routing'),data['question_routing'])
         self.assertIs(question.get('blocking'), True)
         bounded=self.hgs('inspect',b['name'],'--after',str(2**63-1),'--skip-processes')
         self.assertEqual(bounded.returncode,0,bounded.stderr)

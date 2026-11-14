@@ -34,6 +34,7 @@ struct FakeEffects {
     verify_uncertain: bool,
     launch_verification_unavailable: bool,
     hosted_refusal: Option<bool>,
+    placement_override: Option<Placement>,
 }
 impl Default for FakeEffects {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for FakeEffects {
             verify_uncertain: false,
             launch_verification_unavailable: false,
             hosted_refusal: None,
+            placement_override: None,
         }
     }
 }
@@ -81,6 +83,9 @@ impl Effects for FakeEffects {
         self.placements += 1;
         if self.placement_error {
             return Err(invalid("The project has two local checkouts"));
+        }
+        if let Some(placement) = &self.placement_override {
+            return Ok(placement.clone());
         }
         Ok(Placement {
             source: "/workspace/example".into(),
@@ -3030,4 +3035,48 @@ fn binding_records_the_members_durable_handle() {
         assert_eq!(handle.label_hint, observed.name, "{member}");
         assert_eq!(handle.launch, observed.launch_id, "{member}");
     }
+}
+
+// Inputs go through Create and the launch runtime; no persisted team, member,
+// plan or binding rows are assembled by this fixture.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn named_plans_fixture(
+    names: &[&str],
+    placement: Option<(Placement, String)>,
+) -> (Harness, Vec<Plan>) {
+    let mut h = Harness::empty();
+    let mut effects = FakeEffects {
+        exists: true,
+        placement_override: placement.as_ref().map(|(p, _)| p.clone()),
+        ..Default::default()
+    };
+    let mut runtime = runtime(&h);
+    for (index, name) in names.iter().enumerate() {
+        let id = format!("00000000-0000-4000-8000-{:012x}", 0xbeef + index);
+        let mut create = ops::tests::create();
+        if let ops::Operation::Create {
+            name: label,
+            bundle,
+            integration_branch,
+            base_commit,
+            ..
+        } = &mut create
+        {
+            *label = (*name).into();
+            if let Some((_, base)) = &placement {
+                *base_commit = base.clone();
+            }
+            bundle.pipelines[0].stages.clear();
+            bundle.template.roster[0].count = 1;
+            *integration_branch = format!("teams/fixture-{index}");
+        }
+        h.run_for(&id, &ops::tests::person(), create).unwrap();
+        for step in 0..60 {
+            runtime
+                .tick(&mut h.store, &mut effects, &id, 1234 + step)
+                .unwrap();
+        }
+    }
+    assert_eq!(effects.plans.len(), names.len() * 3);
+    (h, effects.plans)
 }

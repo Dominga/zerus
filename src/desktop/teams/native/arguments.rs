@@ -27,7 +27,12 @@ pub(super) fn launch(plan: &Plan, tree: &Worktree) -> Result<Vec<String>> {
         &Launch {
             agent: plan.agent.clone(),
             target: tree.path.clone(),
-            name: format!("team-{}", plan.launch_id),
+            name: if plan.session_name.is_empty() {
+                // A saved pre-upgrade original keeps its exact launch arguments.
+                format!("team-{}", plan.launch_id)
+            } else {
+                plan.session_name.clone()
+            },
             account: plan.account.clone(),
             launch_id: plan.launch_id.clone(),
             model: plan.model.clone(),

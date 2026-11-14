@@ -121,7 +121,18 @@ impl Runtime {
         now: i64,
     ) -> Result<bool> {
         let selection = (|| -> Result<Plan> {
-            let placement = effects.placement(&team.project, &row.original)?;
+            // IDs now appear in display paths as well as ledger keys.
+            for (field, id) in [("member.id", &member.id), ("member.role", &member.role)] {
+                if let Some(problem) = zerus_team_plan::validate::id_problem(id, field) {
+                    return Err(problem);
+                }
+            }
+            let slug = self.ledger().team_slug(team)?;
+            let placement = super::super::ledger::names::placement(
+                effects.placement(&team.project, &row.original)?,
+                &slug,
+                &member.id,
+            )?;
             row.placement = Some(placement.clone());
             let (choice, model, effort) = role(team, member)?;
             let accounts = self.cached_accounts(effects, &member.agent)?;
@@ -146,6 +157,7 @@ impl Runtime {
                 placement,
                 parent,
                 launch_id: row.original.clone(),
+                session_name: super::super::ledger::names::session(&slug, team, member),
             })
         })();
         match selection {

@@ -135,6 +135,7 @@ impl Fixture {
             },
             parent: None,
             launch_id: b.launch.clone(),
+            session_name: String::new(),
         }
     }
     pub fn record(&self) {

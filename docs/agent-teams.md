@@ -123,6 +123,20 @@ Once the team is created, the desktop service:
 - picks each session's account at launch: by default the signed-in account of
   the role's agent with the most room left in its usage windows.
 
+New sessions use readable tags: for a team named **Teams**, the lead is
+`teams-lead`, and members include their ID and role, such as
+`teams-m1-developer` and `teams-m2-reviewer`. Their worktree folders are
+`zerus-team-teams-lead`, `zerus-team-teams-m1` and `zerus-team-teams-m2`;
+the corresponding branches are `zerus/team/teams/lead`,
+`zerus/team/teams/m1` and `zerus/team/teams/m2`.
+
+The team slug uses lowercase ASCII letters, digits and hyphens, at most 48
+characters. If that slug is empty or already reserved for another team on this
+computer, Zerus adds a short suffix from the team ID. The reservation remains
+stable when the service restarts. Names are labels; launch and session IDs
+still identify members. Existing sessions are not renamed, and saved worktree
+paths, branches and bindings remain in use after an upgrade.
+
 With the preview on, Sessions groups a team under its name, with the lead first
 and the other members ordered by role and member ID. Each row shows its role.
 Membership uses the team roster's computer and launch/run bindings, including

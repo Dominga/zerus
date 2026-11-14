@@ -16,6 +16,8 @@ pub(super) const SCHEMA: u32 = 4;
 pub(super) const BUDGET: &str = "@budget";
 pub(super) const FILE: &str = "member-launch-v1.sqlite3";
 
+pub(super) mod names;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum State {
@@ -242,6 +244,7 @@ impl Ledger {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS launch_checkout_objects (
             team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL,
             data TEXT NOT NULL CHECK(length(CAST(data AS BLOB))<=16384), PRIMARY KEY(team,member,launch));").map_err(storage)?;
+        tx.execute_batch(include_str!("launch-names.sql")).map_err(storage)?;
         tx.commit().map_err(storage)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             .map_err(storage)?;

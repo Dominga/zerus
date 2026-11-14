@@ -126,7 +126,7 @@ public enum SessionQuestionRouting {
     public static func applies(_ target: Target, _ raw: JSONObject?) -> Bool {
         guard let raw, target.agentId.isEmpty, target.archiveId.isEmpty, raw.object("parent") != nil,
               raw.string("state") != "archived" else { return false }
-        return ["claude", "kimi", "dsh", "opencode"].contains(agent(target, raw))
+        return ["claude", "kimi", "dsh"].contains(agent(target, raw))
     }
 
     public static func parentName(_ raw: JSONObject?) -> String {

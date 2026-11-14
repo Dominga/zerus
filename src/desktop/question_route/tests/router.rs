@@ -3208,7 +3208,7 @@ fn a_verified_v2_statement_for_an_absent_child_fences_its_latch_before_restore()
 
 #[test]
 fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replays_after_restart() {
-    for agent in ["kimi", "dsh", "opencode"] {
+    for agent in ["kimi", "dsh"] {
         let mut f = Fixture::new();
         let mut row = child_row();
         row["name"] = json!(format!("{agent}/project/child"));
@@ -3216,20 +3216,14 @@ fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replay
         let mut question = card("native-question-1");
         question["source"] = json!(if agent == "kimi" {
             "kimi_wire"
-        } else if agent == "dsh" {
-            "dsh_native"
         } else {
-            "opencode_native"
+            "dsh_native"
         });
         question["answer_transport"] = json!(if agent == "kimi" {
             "kimi_tui"
-        } else if agent == "dsh" {
-            "native_dsh"
         } else {
-            "native_opencode"
+            "native_dsh"
         });
-        question["kind"] = json!("opencode_form");
-        question["status"] = json!("pending");
         question["blocking"] = json!(true);
         let mut inspected = inspect(vec![question]);
         inspected["name"] = row["name"].clone();
@@ -3290,8 +3284,10 @@ fn kimi_person_only_cards_and_unqualified_transports_never_reserve_or_send() {
 }
 
 #[test]
-fn opencode_permissions_and_generic_forms_never_reserve_or_send() {
+fn opencode_questions_permissions_and_generic_forms_never_reserve_or_send() {
     for (key, value) in [
+        // Even the prior classifier's positive claim grants no authority.
+        ("blocking", json!(true)),
         ("kind", json!("opencode_permission")),
         ("blocking", json!(false)),
         ("blocking", Value::Null),
@@ -3319,5 +3315,6 @@ fn opencode_permissions_and_generic_forms_never_reserve_or_send() {
         f.settle();
         assert!(f.routes().is_empty(), "{key}");
         assert_eq!(f.sent(), 0, "{key}");
+        assert_eq!(f.reads(), 0, "{key}");
     }
 }

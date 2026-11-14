@@ -871,6 +871,31 @@ class OpenCodeNative(unittest.TestCase):
         self.assertNotIn(message_id, [native_id for native_id, _ in users])
         self.assertEqual(self.hgs(['inspect', name])['phase'], 'idle')
 
+    def test_04_form_metadata_never_proves_a_parent_routable_question(self):
+        """The public form API accepts invented question-tool metadata (G1 #2400)."""
+        binding = self.create()
+        conversation = binding['conversation_id']
+        form = dict(title='Approve a private fixture action', metadata=dict(
+            kind='question', tool=dict(id='call_nonexistent', messageID='msg_nonexistent')),
+            fields=[dict(key='decision', type='string', required=True,
+                         description='Allow this action?', options=[dict(value='allow', label='Allow'),
+                                                                   dict(value='deny', label='Deny')])])
+        status, created = self.api('POST', f'/api/session/{conversation}/form', form)
+        self.assertIn(status, (200, 201), created)
+        inspected = self.hgs(['inspect', binding['name'], '--after', str(2**63-1), '--skip-processes'])
+        [card] = inspected['pending_questions']
+        self.assertIs(card['can_answer'], True)
+        self.assertEqual(inspected.get('events', []), [])
+        status, _ = self.api('GET', f'/api/session/{conversation}/message/msg_nonexistent')
+        self.assertEqual(status, 404)
+        self.assertIs(card.get('blocking'), False,
+                      'Unverified form metadata must never mint parent-routing authority')
+        request = self.payload(binding, question_id=card['question_id'],
+                               expected_question_hash=card['question_hash'],
+                               answers=[dict(question_id='decision', selected_option_ids=['deny'], text='')])
+        self.assertEqual(self.hgs(['answer', binding['name'], '--json'], request)['status'], 'answered')
+        self.assertEqual(self.hgs(['inspect', binding['name']])['pending_questions'], [])
+
     def test_04_question_and_permission_answers(self):
         b = self.create()
         name = b['name']
@@ -880,7 +905,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(data.get('attention_id'))
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
-        self.assertIs(card.get('blocking'), True)
+        self.assertIs(card.get('blocking'), False)
         self.assertIsInstance(data.get('question_routing'),dict)
         self.assertIs(data['question_routing']['send_to_parent'],True)
         listed=self.hgs(['ls','--local','--json'])
@@ -921,7 +946,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assert_private(data, final)
 
     def test_04_question_routing_identity_and_spent_answers(self):
-        """Qualified native tool questions keep exact identity and durable no replay."""
+        """Person-only native forms keep existing manual identity and no-replay checks."""
         previous = None
         for mode in ('MULTIPLE', 'PARTS', 'OTHER'):
             with self.subTest(mode=mode):
@@ -933,7 +958,7 @@ class OpenCodeNative(unittest.TestCase):
                 [card] = data['pending_questions']
                 self.assertEqual((card['source'], card['kind'], card['answer_transport']),
                                  ('opencode_native', 'opencode_form', 'native_opencode'))
-                self.assertIs(card.get('blocking'), True)
+                self.assertIs(card.get('blocking'), False)
                 self.assertIs(card['can_answer'], True)
                 self.assertEqual(len([r for r in self.model.requests
                                       if r['last_user'] == text and 'question' in r['tools']]), 1)

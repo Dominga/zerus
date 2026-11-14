@@ -1065,7 +1065,8 @@ answers, selects or approves anything, never builds a UI permit and never
 changes who is alerted: the child stays quiet exactly as above, and every
 person-only request still notifies. The service watches its own computer's
 rows on every catalog event, whatever the notification settings. A row is an
-edge when it is a running Claude or Kimi child waiting for input (`phase: input`)
+edge when it is a running Claude, Kimi or DeepSeek child waiting for input
+(`phase: input`)
 whose parent is `live`, not forwarded, and whose host reports
 `human_request: false`; a new `attention_signature` is a new edge, and a
 question already pending at startup counts once. After about 3 seconds the
@@ -1073,9 +1074,8 @@ service reads the child with one bounded `hgs inspect NAME --after
 9223372036854775807 --skip-processes` and its `hgs reference`, at most one
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
-sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook` and
-Kimi's `kimi_wire`, DeepSeek's `dsh_native` ordinary requests, and OpenCode's
-`opencode_native` question-tool forms,
+sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook`,
+Kimi's `kimi_wire`, and DeepSeek's `dsh_native` ordinary requests,
 paired with that child's provider. They must name the main
 agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
 Kimi also requires its qualified `kimi_tui` answer transport and positive
@@ -1085,11 +1085,10 @@ proof. Its single-choice,
 multiple-choice, multi-part and Other-text answers retain the existing native
 request, terminal identity and original answer receipt guards. Routing delivers
 the question; the parent explicitly calls `hgs answer` under its own permissions.
-OpenCode additionally requires a pending `opencode_form`, the `native_opencode`
-transport and positive `blocking` provenance from its native question tool,
-message and supported required fields. Single-choice, multiple-choice, multi-part
-and Other text retain the exact native form/hash and durable answer journal.
-Generic forms without that provenance and permissions remain person-only.
+OpenCode forms and permissions remain person-only. Public form metadata does not
+prove a native question tool is waiting, and duplicate successful answers do not
+yet recover their original receipt. OpenCode is excluded from parent routing and
+its per-child switch until both contracts are qualified.
 Claude Code's own prompts (`claude_native_question`), every synthetic native
 card, approvals (including Kimi plan and goal approvals), cache choices, trust
 and sign-in never route, even if answerable. Codex async questions are optional,

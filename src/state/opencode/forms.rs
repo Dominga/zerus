@@ -44,31 +44,6 @@ fn supported(form: &Value) -> bool {
     }
     !fields.is_empty() && fields.len() <= MAX_FIELDS && visible > 0
 }
-/// The native question tool waits for this form's reply. Generic forms and
-/// permissions share the API but do not grant parent question-route authority.
-/// Unknown provenance or fields stay available only through the manual path.
-fn blocking_question(form: &Value) -> bool {
-    let tool = &form["metadata"]["tool"];
-    let tool_id = string(tool, "id");
-    form["metadata"]["kind"] == "question"
-        && super::native_id(string(form, "id"), "frm_")
-        && string(form, "id").len() > 4
-        && super::native_id(string(tool, "messageID"), "msg_")
-        && string(tool, "messageID").len() > 4
-        && !tool_id.is_empty()
-        && tool_id.len() <= 200
-        && tool_id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        && supported(form)
-        && form["fields"].as_array().is_some_and(|fields| {
-            fields.iter().all(|field| {
-                !hidden(field)
-                    && field["required"] != false
-                    && ["string", "multiselect"].contains(&kind(field))
-            })
-        })
-}
 fn item(field: &Value) -> Value {
     let header = if string(field, "title").is_empty() {
         string(field, "key")
@@ -208,7 +183,8 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
             let mut card = json!({"question_id":native["id"],"question_hash":hash,"run_id":record["run_id"],
                 "conversation_id":record["conversation_id"],"kind":format!("opencode_{kind}"),"status":"pending",
                 "answerable":answerable,"can_answer":answerable,"approval":kind=="permission",
-                "blocking":kind == "form" && answerable && blocking_question(native),
+                // Public form metadata does not prove a native tool is waiting.
+                "blocking":false,
                 "answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"});
             if kind == "permission" {
                 card["approval_choices"] = json!(true);
@@ -565,14 +541,15 @@ mod route_tests {
     use super::*;
 
     #[test]
-    fn only_supported_native_question_tool_forms_prove_blocking() {
+    fn all_forms_remain_person_only_even_with_claimed_question_tool_metadata() {
         let record = json!({"run_id":"run","conversation_id":"ses_A"});
         let form = json!({"id":"frm_question","sessionID":"ses_A",
             "metadata":{"kind":"question","tool":{"id":"call_1","messageID":"msg_1"}},
             "fields":[{"key":"q0","type":"string","description":"Pick one",
                 "options":[{"value":"A","label":"A"}],"custom":true}]});
         let card = |form: &Value| cards(&record, &json!([form]), &json!([])).remove(0);
-        assert_eq!(card(&form)["blocking"], true);
+        assert_eq!(card(&form)["can_answer"], true);
+        assert_eq!(card(&form)["blocking"], false);
         // Supported manual forms do not inherit question-tool route authority.
         for pointer in [
             "/metadata",

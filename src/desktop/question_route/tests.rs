@@ -9,7 +9,8 @@ mod inventory {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Class {
         /// Claude's own AskUserQuestion of the main agent, from its
-        /// PreToolUse hook, and Kimi's ordinary native question.
+        /// PreToolUse hook, Kimi's foreground question and DeepSeek's
+        /// qualified ordinary forever-waiting request.
         Routes,
         /// Claude Code's, Codex's or Kimi's own prompt, or a synthetic
         /// native card: trust, approvals, sign-in, limits, resumes, choices.
@@ -17,7 +18,7 @@ mod inventory {
         /// Codex async questions: optional, never blocking. Codex therefore
         /// has nothing to route in v1.
         Optional,
-        /// Unqualified DeepSeek paths: zerus-sa9qn.34.
+        /// Unqualified API paths and OpenCode's person-only forms.
         OtherProvider,
         /// Not a question card's source: history, processes, links, goals,
         /// usage, tool metadata.
@@ -49,7 +50,7 @@ mod inventory {
         ("kimi_tool_approval", NativePrompt),
         ("dsh_native", Routes),
         ("dsh_native_api", OtherProvider),
-        ("opencode_native", Routes),
+        ("opencode_native", OtherProvider),
         ("adopt", NotACard),
         ("agent/disposed", NotACard),
         ("auto", NotACard),

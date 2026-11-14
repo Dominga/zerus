@@ -821,46 +821,24 @@ fn a_supervised_kimi_question_routes_with_its_exact_native_identity() {
 }
 
 #[test]
-fn an_opencode_question_tool_form_routes_but_permissions_and_unbound_forms_do_not() {
-    let mut row = row();
-    row["name"] = json!("opencode/project/child");
-    row["cmd"] = json!("opencode");
-    let edge = edge(&row).expect("a supervised OpenCode child must be eligible");
-    let mut card = card();
-    card["source"] = json!("opencode_native");
-    card["kind"] = json!("opencode_form");
-    card["status"] = json!("pending");
-    card["blocking"] = json!(true);
-    card["answer_transport"] = json!("native_opencode");
-    card["question_id"] = json!("frm_question");
-    let mut inspected = inspect(vec![card.clone()]);
-    inspected["name"] = row["name"].clone();
+fn opencode_is_person_only_even_when_a_card_claims_native_question_provenance() {
+    let mut child = row();
+    let mut original_edge = edge(&child).unwrap();
+    child["cmd"] = json!("opencode");
+    child["name"] = json!("opencode/project/child");
+    assert!(edge(&child).is_none());
+    original_edge.name = "opencode/project/child".into();
+    let mut claimed = card();
+    claimed["source"] = json!("opencode_native");
+    claimed["kind"] = json!("opencode_form");
+    claimed["status"] = json!("pending");
+    claimed["answer_transport"] = json!("native_opencode");
+    claimed["blocking"] = json!(true);
+    assert!(!routable(&claimed));
+    let mut inspected = inspect(vec![claimed]);
     inspected["agent"] = json!("opencode");
-    let routed = questions(&inspected, &edge, MACHINE);
-    assert_eq!(routed.len(), 1);
-    assert_eq!(routed[0].identity.question_id, "frm_question");
-    for (key, value) in [
-        ("kind", json!("opencode_permission")),
-        ("kind", Value::Null),
-        ("blocking", json!(false)),
-        ("blocking", Value::Null),
-        ("approval", json!(true)),
-        ("approval_choices", json!(true)),
-        ("optional", json!(true)),
-        ("status", json!("answered")),
-        ("answer_transport", json!("unknown")),
-        ("agent_id", json!("native-child")),
-        ("source", json!("kimi_wire")),
-        ("source", json!("hook")),
-        ("can_answer", json!(false)),
-        ("run_id", json!("replacement")),
-        ("question_id", json!("kimi-cache:hash")),
-    ] {
-        let mut refused = card.clone();
-        refused[key] = value;
-        inspected["pending_questions"] = json!([refused]);
-        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
-    }
+    inspected["name"] = child["name"].clone();
+    assert!(questions(&inspected, &original_edge, MACHINE).is_empty());
 }
 
 #[test]

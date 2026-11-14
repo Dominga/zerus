@@ -347,4 +347,3 @@ mod tests {
         assert!(!Path::new(&p.repo).exists());
     }
 }
-

@@ -80,8 +80,8 @@ pub async fn catalog_editor_receipt(request: String) -> Result<Value, String> {
     )
     .await;
     Ok(match exit {
-        Ok(exit) => catalog_edit::interpret(&request, &exit),
-        Err(_) => catalog_edit::interpret(&request, &Exit::TimedOut),
+        Ok(exit) => catalog_edit::interpret_receipt(&request, &exit),
+        Err(_) => catalog_edit::interpret_receipt(&request, &Exit::TimedOut),
     })
 }
 #[tauri::command]

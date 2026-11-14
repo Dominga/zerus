@@ -77,3 +77,8 @@ it("refreshes the New team catalog only after a confirmed save or receipt", asyn
   const s=setup();let changes=0;s.port.changed=()=>{changes++;};await s.editor.load();s.editor.replace({planning_rules:["mine"]});s.outcome("uncertain");await s.editor.save();expect(changes).toBe(0);
   s.outcome("done");await s.editor.check();expect(changes).toBe(1);
 });
+it("a receipt lookup refusal keeps the original uncertain edit",async()=>{
+  const s=setup();s.outcome("uncertain");await s.editor.load();s.editor.replace({planning_rules:["mine"]});await s.editor.save();const held=s.editor.pending();
+  s.port.receipt=async(id)=>({outcome:"failed",request_id:id,detail:"Preview off"});await s.editor.check();
+  expect(s.editor.pending()).toEqual(held);expect(s.editor.working()).toEqual(held!.catalog);expect(s.counts().saves).toBe(1);
+});

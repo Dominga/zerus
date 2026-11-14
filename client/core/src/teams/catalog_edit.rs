@@ -328,6 +328,17 @@ pub fn interpret(request: &str, exit: &crate::actions::Exit) -> Value {
     uncertain()
 }
 
+/// A failed point lookup says nothing about the original publication. Only a
+/// positive stored receipt can settle it; this journal stores no negatives.
+pub fn interpret_receipt(request: &str, exit: &crate::actions::Exit) -> Value {
+    let outcome = interpret(request, exit);
+    if outcome["outcome"] == "done" {
+        outcome
+    } else {
+        json!({"outcome":"uncertain","request_id":request,"detail":"The save result is not known."})
+    }
+}
+
 #[cfg(test)]
 mod wire_tests {
     use super::*;
@@ -455,5 +466,27 @@ mod schema_contract {
         let mut duplicate = raw;
         duplicate["roles"] = json!([duplicate["roles"][0], duplicate["roles"][0]]);
         assert!(validate(duplicate, base).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+    #[test]
+    fn lookup_refusal_never_proves_the_original_edit_failed() {
+        let request = uuid::Uuid::new_v4().to_string();
+        let refused = crate::actions::Exit::Code {
+            code: 1,
+            stdout: serde_json::to_vec(
+                &json!({"ok":false,"error":{"code":"teams_inactive","message":"Off"}}),
+            )
+            .unwrap(),
+            stderr: String::new(),
+        };
+        assert_eq!(interpret(&request, &refused)["outcome"], "failed");
+        assert_eq!(
+            interpret_receipt(&request, &refused)["outcome"],
+            "uncertain"
+        );
     }
 }

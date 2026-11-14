@@ -103,7 +103,11 @@ export function createCatalogEditor(port: CatalogPort = desktopCatalog) {
   async function check() {
     const intent = pending();
     if (!intent) return;
-    await run(async () => accept(await port.receipt(intent.request_id), intent));
+    await run(async () => {
+      const outcome = await port.receipt(intent.request_id);
+      if (outcome.outcome === "failed") { setNotice(outcome.detail ?? "The save result is not known."); return; }
+      accept(outcome, intent);
+    });
   }
   function discardUncertain() {
     if (busy() || !pending()) return;

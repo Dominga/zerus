@@ -434,6 +434,9 @@ class Connector:
                 return stdout.decode("utf-8", errors="strict")
             try:
                 result = json.loads(stdout, object_pairs_hook=send_outcome.unique_members) if outcome_call or send_outcome.receipt_read(argv,payload) else json.loads(stdout)
+                if ((outcome_call and isinstance(result,dict) and result.get('status')=='not_offered')
+                        or send_outcome.receipt_read(argv,payload)) and not send_outcome.closed_frame(result):
+                    raise ValueError
             except (ValueError, UnicodeError):
                 raise ConnectorError("native command returned invalid JSON") from None
             # A failing exit carries only a failure answer, never a success receipt.

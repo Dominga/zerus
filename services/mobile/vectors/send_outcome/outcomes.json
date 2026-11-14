@@ -825,5 +825,42 @@
         "status": "unknown"
       }
     }
+  ],
+  "native_frames": [
+    {
+      "name": "submitted",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false}",
+      "frame_accepted": true
+    },
+    {
+      "name": "submitted-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false,\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "unknown",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"unknown\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\"}",
+      "frame_accepted": true
+    },
+    {
+      "name": "unknown-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"unknown\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "not-offered",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"not_offered\",\"proof\":\"native_input_lock\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\"}",
+      "frame_accepted": true
+    },
+    {
+      "name": "not-offered-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"not_offered\",\"proof\":\"native_input_lock\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "submitted-missing-required-field",
+      "json": "{\"schema\":2,\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false}",
+      "frame_accepted": false
+    }
   ]
 }

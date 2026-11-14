@@ -328,7 +328,12 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
     crate::mobile_peers::dispatch(config, args)
 }
 #[cfg(not(unix))]
-fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
+fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
+    #[cfg(windows)]
+    if args.first().is_some_and(|op| matches!(op.as_str(), "__mobile-peer-identity" | "__mobile-peer-local")) {
+        return crate::mobile_peers::dispatch(config, args);
+    }
+    let _ = (config, args);
     Err(Error::new(
         2,
         "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",

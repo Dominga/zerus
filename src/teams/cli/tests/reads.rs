@@ -384,6 +384,7 @@ fn waiting_lists_every_open_owner_card_oldest_first_and_only_for_the_person() {
             text: "Decide the release date.".into(),
             node: None,
             decisions: None,
+                parameters: None,
         },
     );
     let (reply, exit) = harness.cli(&person_caller(), "waiting", "");

@@ -98,6 +98,7 @@ fn legacy(f: &mut Fixture, apply: bool) -> crate::teams::ops::Request {
             node: f.key.starts_with("held:").then_some(1),
             text: "The earlier service check failed".into(),
             decisions: Some(vec!["acknowledged".into(), "later".into()]),
+                parameters: None,
         },
     )
     .unwrap();

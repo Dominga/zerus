@@ -55,6 +55,7 @@ pub(super) fn open_card(ctx: &mut Context<'_>) -> Result<()> {
         text,
         node,
         decisions,
+        parameters,
     } = ctx.op
     else {
         unreachable!()
@@ -75,9 +76,43 @@ pub(super) fn open_card(ctx: &mut Context<'_>) -> Result<()> {
         }
         None => Vec::new(),
     };
-    ctx.reply.item = Some(card(ctx, kind, text, *node, None, &listed)?);
+    let parameters = parameters.clone().unwrap_or_default();
+    parameters_checked(&parameters)?;
+    ctx.reply.item = Some(card(ctx, kind, text, *node, None, &listed, &parameters)?);
     Ok(())
 }
+/// The bounded parameters a localized window substitutes (zerus-63rru.34):
+/// at most 8 pairs, each key lower-case ASCII letters and underscores, each
+/// value nonempty, at most 256 characters, and free of control characters,
+/// line or paragraph separators and bidirectional marks. An invalid value is
+/// refused, never stripped. Written only by the service's own card writer.
+pub(super) fn parameters_checked(parameters: &[(String, String)]) -> Result<()> {
+    if parameters.len() > 8 {
+        return Err(invalid("A card takes at most 8 parameters."));
+    }
+    for (key, value) in parameters {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_')
+        {
+            return Err(invalid("A card parameter key must be [a-z_]."));
+        }
+        reason(value)?;
+        if value.chars().count() > 256 {
+            return Err(invalid(
+                "A card parameter value is longer than 256 characters.",
+            ));
+        }
+        if crate::teams::clean::forbidden(value) {
+            return Err(invalid(
+                "A card parameter value holds a control character, a line separator or a bidirectional mark.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The decisions an opener lists: one to four distinct tokens of at most 32
 /// bytes, lower-case ASCII letters and underscores, starting with a letter.
 /// The internal stale mark is never one of them.
@@ -105,8 +140,9 @@ pub(super) fn card(
     node: Option<u32>,
     decision: Option<u64>,
     decisions: &[&str],
+    parameters: &[(String, String)],
 ) -> Result<u64> {
-    card_notes(ctx, kind, body, node, decision, decisions, &[])
+    write_card(ctx, kind, body, node, decision, decisions, (&[], parameters))
 }
 
 /// An open card that quotes a report: the service's notes are their own
@@ -120,6 +156,18 @@ pub(super) fn card_notes(
     decisions: &[&str],
     notes: &[ReportNote],
 ) -> Result<u64> {
+    write_card(ctx, kind, body, node, decision, decisions, (notes, &[]))
+}
+
+fn write_card(
+    ctx: &Context<'_>,
+    kind: &str,
+    body: &str,
+    node: Option<u32>,
+    decision: Option<u64>,
+    decisions: &[&str],
+    (notes, parameters): (&[ReportNote], &[(String, String)]),
+) -> Result<u64> {
     reason(kind)?;
     text(kind, 128)?;
     reason(body)?;
@@ -128,7 +176,12 @@ pub(super) fn card_notes(
     } else {
         Some(encode(&decisions)?)
     };
-    ctx.db.execute("INSERT INTO cards(team,kind,node,actor,text,notes,created_ms,decision_seq,decisions) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![ctx.team.id,kind,node,encode(ctx.actor)?,body,encode(&notes.to_vec())?,ctx.now,decision,listed]).map_err(storage)?;
+    let parameters = if parameters.is_empty() {
+        None
+    } else {
+        Some(encode(&parameters)?)
+    };
+    ctx.db.execute("INSERT INTO cards(team,kind,node,actor,text,notes,created_ms,decision_seq,decisions,parameters) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![ctx.team.id,kind,node,encode(ctx.actor)?,body,encode(&notes.to_vec())?,ctx.now,decision,listed,parameters]).map_err(storage)?;
     Ok(ctx.db.last_insert_rowid() as u64)
 }
 /// An open card's kind, node, decision sequence and stored decisions.

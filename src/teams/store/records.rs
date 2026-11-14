@@ -123,6 +123,13 @@ pub struct Card {
     /// the member's text. Every other card has none.
     #[serde(default)]
     pub notes: Vec<ReportNote>,
+    /// The bounded parameters a localized window substitutes into the card's
+    /// words: at most 8 keys of [a-z_], each value at most 256 characters
+    /// after the sentence's forbidden-character rules, written only by the
+    /// service's own card writer (zerus-63rru.34). A row from before the
+    /// field reads as none.
+    #[serde(default)]
+    pub parameters: Vec<(String, String)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

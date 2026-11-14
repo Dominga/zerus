@@ -349,6 +349,7 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     common_schema(db)?;
     handles_schema(db)?;
     key_clear_schema(db)?;
+    card_parameters(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }
@@ -406,6 +407,61 @@ fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool> {
     ))
     .map_err(storage)?
     .exists([column])
+    .map_err(storage)
+}
+
+/// The additive cards column a localized window's parameters live in
+/// (zerus-63rru.34). An older build's explicit column lists ignore it, so a
+/// newer store opens there unchanged. Like the other extensions, the add runs
+/// under the writer lock after the schema mark and the column's presence are
+/// read again: a store a newer program marked after the first, unlocked fence
+/// is refused with nothing written, and two opens that both saw the column
+/// missing never fail on a duplicate column.
+fn card_parameters(db: &Connection) -> Result<()> {
+    if parameters_present(db)? {
+        return Ok(());
+    }
+    #[cfg(test)]
+    tests::after_missing_column();
+    let own = db.is_autocommit();
+    db.execute_batch(if own {
+        "BEGIN IMMEDIATE;"
+    } else {
+        "SAVEPOINT card_parameters;"
+    })
+    .map_err(begin_error)?;
+    let result = timers::fence(db).and_then(|()| {
+        if parameters_present(db)? {
+            return Ok(());
+        }
+        db.execute_batch("ALTER TABLE cards ADD COLUMN parameters TEXT;")
+            .map_err(|error| {
+                if is_busy(&error) {
+                    Problem::new(
+                        code::STORE_BUSY,
+                        "The Teams store is busy; retry opening the team.",
+                    )
+                } else {
+                    storage(error)
+                }
+            })
+    });
+    let end = match (&result, own) {
+        (Ok(()), true) => "COMMIT;",
+        (Ok(()), false) => "RELEASE card_parameters;",
+        (Err(_), true) => "ROLLBACK;",
+        (Err(_), false) => "ROLLBACK TO card_parameters; RELEASE card_parameters;",
+    };
+    db.execute_batch(end).map_err(storage)?;
+    result
+}
+
+fn parameters_present(db: &Connection) -> Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cards') WHERE name='parameters')",
+        [],
+        |r| r.get(0),
+    )
     .map_err(storage)
 }
 

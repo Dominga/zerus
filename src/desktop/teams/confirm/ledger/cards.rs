@@ -10,6 +10,7 @@ fn card(text: String) -> Request {
             text,
             node: None,
             decisions: None,
+            parameters: Some(vec![("code".into(), "standing_confirmation".into())]),
         },
     }
 }
@@ -42,7 +43,13 @@ fn card_write_is_bounded_and_keeps_the_prior_request_on_refusal() {
     assert!(db
         .save_card("key", Some(&card("x".repeat(ROW_LIMIT))))
         .is_err());
-    assert_eq!(db.card_request("key").unwrap().unwrap(), exact);
+    // The saved request keeps its pre-change shape: the in-memory parameters
+    // are never stored (zerus-63rru.34, F1). The size above is the stored size.
+    let mut persisted = exact.clone();
+    if let Operation::OpenCard { parameters, .. } = &mut persisted.operation {
+        *parameters = None;
+    }
+    assert_eq!(db.card_request("key").unwrap().unwrap(), persisted);
     db.save_card("key", None).unwrap();
     assert!(db.card_request("key").unwrap().is_none());
 }

@@ -126,6 +126,7 @@ fn operation(key: &str, error: &Problem) -> Operation {
     };
     Operation::OpenCard {
         kind: "team_actor_blocked".into(),
+        parameters: Some(vec![("code".into(), error.code.clone())]),
         node: key
             .strip_prefix("held:")
             .and_then(|s| s.rsplit(':').next())

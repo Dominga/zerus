@@ -69,7 +69,8 @@ CREATE INDEX inbox_page ON inbox(team,seq);
 CREATE INDEX inbox_open ON inbox(team,state,seq);
 CREATE TABLE cards (seq INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL REFERENCES teams(id),
  kind TEXT NOT NULL, node INTEGER, actor TEXT NOT NULL, text TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '[]',
- state TEXT NOT NULL DEFAULT 'open', decision TEXT, decided_actor TEXT, created_ms INTEGER NOT NULL, decision_seq INTEGER);
+ state TEXT NOT NULL DEFAULT 'open', decision TEXT, decided_actor TEXT, created_ms INTEGER NOT NULL, decision_seq INTEGER,
+ parameters TEXT);
 CREATE INDEX cards_page ON cards(team,seq);
 CREATE INDEX cards_open ON cards(team,state,seq);
 CREATE TABLE journal (seq INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT NOT NULL REFERENCES teams(id),

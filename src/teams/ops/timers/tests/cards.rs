@@ -40,6 +40,7 @@ fn a_trigger_closed_card_equals_a_card_closed_by_the_service() {
         text: "Example card".into(),
         node: Some(node),
         decisions: None,
+                parameters: None,
     };
     let coded = h.run(&service(), open).unwrap().item.unwrap();
     let close = Operation::CloseCard {
@@ -175,6 +176,7 @@ fn an_unrelated_item_or_card_is_not_touched() {
         text: "Keep this open".into(),
         node: Some(node),
         decisions: None,
+                parameters: None,
     };
     let other = h.run(&lead, open).unwrap().item.unwrap();
     silent_card(&mut h, node, item);
@@ -196,6 +198,7 @@ fn open(h: &mut Harness, decisions: Option<Vec<&str>>) -> Result<u64> {
         text: "Example card".into(),
         node: None,
         decisions: decisions.map(|d| d.into_iter().map(String::from).collect()),
+                parameters: None,
     };
     h.run(&service(), op).map(|r| r.item.unwrap())
 }
@@ -609,6 +612,7 @@ fn an_open_card_saved_before_the_list_replays_to_its_saved_reply() {
             text: "Example card".into(),
             node: None,
             decisions: None,
+                parameters: None,
         },
     );
     let first = crate::teams::ops::apply(&mut h.store, &service(), &plain, 1234).unwrap();
@@ -635,6 +639,7 @@ fn an_open_card_saved_before_the_list_replays_to_its_saved_reply() {
             text: "Example card".into(),
             node: None,
             decisions: Some(vec!["retry".into()]),
+                parameters: None,
         },
     );
     let first = crate::teams::ops::apply(&mut h.store, &service(), &listed, 1234).unwrap();

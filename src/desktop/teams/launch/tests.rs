@@ -193,6 +193,7 @@ fn open_card(h: &mut Harness, n: u32) -> u64 {
             text: format!("card {n}"),
             node: None,
             decisions: Some(vec!["retry".into(), "acknowledged".into()]),
+            parameters: None,
         },
     )
     .unwrap()
@@ -579,4 +580,192 @@ fn an_unopenable_items_file_leaves_the_bind_successful_and_saved() {
     assert_eq!(saved.state, State::Bound, "the bind's success was not saved");
     assert_eq!(saved.failures, 0);
     std::fs::remove_dir_all(&items_path).unwrap();
+}
+
+/// The pre-change shape of a card request: exactly the keys a store written
+/// before zerus-63rru.34 saved. A newer build must keep every row readable by
+/// this strict reader.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreParametersCardRequest {
+    request_id: String,
+    team: String,
+    expected_revision: u64,
+    op: String,
+    kind: String,
+    text: String,
+    #[serde(default)]
+    node: Option<u32>,
+    #[serde(default)]
+    decisions: Option<Vec<String>>,
+}
+
+#[test]
+fn the_saved_launch_request_keeps_the_pre_parameters_shape() {
+    let mut h = Harness::new();
+    let t = h.store.team(TEAM).unwrap().unwrap();
+    let mut r = Runtime::open(h.temp.path(), &t.home, "epoch").unwrap();
+    r.ledger = Some(Ledger::open(h.temp.path()).unwrap());
+    let mut row = Row::new(&t, "lead", "epoch", State::WorktreeIntent);
+    r.ledger.as_mut().unwrap().insert(&row, 1).unwrap();
+    r.block(
+        &mut row,
+        Problem::new("worktree_unavailable", "Private fixture path is unavailable"),
+        2,
+    )
+    .unwrap();
+    r.card(&mut h.store, &mut row, 3).unwrap();
+    let stored = r
+        .ledger
+        .as_ref()
+        .unwrap()
+        .get(TEAM, "lead")
+        .unwrap()
+        .unwrap();
+    let saved = serde_json::to_value(stored.card_request.as_ref().unwrap()).unwrap();
+    assert!(
+        saved.get("parameters").is_none(),
+        "the saved request stores no substitution values: {saved}"
+    );
+    let strict: PreParametersCardRequest = serde_json::from_value(saved).unwrap();
+    let request = stored.card_request.as_ref().unwrap();
+    assert_eq!(strict.request_id, request.request_id);
+    assert_eq!(strict.team, TEAM);
+    assert_eq!(strict.expected_revision, request.expected_revision);
+    assert_eq!(strict.op, "open_card");
+    assert_eq!(strict.kind, "launch_blocked");
+    assert!(strict.text.starts_with("Member lead: worktree_unavailable."));
+    assert_eq!(strict.node, None);
+    assert_eq!(strict.decisions, Some(vec!["acknowledged".to_owned()]));
+    // The card row itself carries the writer's values, derived at write time.
+    let card = h.store.card(TEAM, stored.card_id.unwrap()).unwrap().unwrap();
+    assert_eq!(
+        card.parameters,
+        vec![
+            ("member".into(), "lead".into()),
+            ("code".into(), "worktree_unavailable".into())
+        ]
+    );
+}
+
+#[test]
+fn the_capacity_notice_carries_no_member_parameter() {
+    let mut h = Harness::new();
+    let team = h.store.team(TEAM).unwrap().unwrap();
+    let mut r = Runtime::open(h.temp.path(), &team.home, "epoch").unwrap();
+    r.ledger = Some(Ledger::open(h.temp.path()).unwrap());
+    r.notify_budget(
+        &mut h.store,
+        TEAM,
+        Problem::new(code::OVER_CAP, "Private fixture creation budget is full")
+            .with_refs(["member_launch_ledger"]),
+        1000,
+    )
+    .unwrap();
+    let card = h
+        .store
+        .cards(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|card| card.kind == "launch_capacity")
+        .unwrap();
+    assert!(card.parameters.is_empty(), "{:?}", card.parameters);
+    assert!(card.text.starts_with("Team member creation:"), "{}", card.text);
+    let stored = r
+        .ledger
+        .as_ref()
+        .unwrap()
+        .get(TEAM, crate::desktop::teams::ledger::BUDGET)
+        .unwrap()
+        .unwrap();
+    let saved = serde_json::to_value(stored.card_request.as_ref().unwrap()).unwrap();
+    assert!(saved.get("parameters").is_none(), "{saved}");
+    assert!(!saved.to_string().contains("parameters"), "{saved}");
+}
+
+/// zerus-63rru.34 round 3: a restart reloads a saved open-card request that
+/// stores no parameters (F1), and the first card write after it derives the
+/// member and code from the ledger row. The first attempt cannot land, so the
+/// request is saved and the card is not; the restart then writes it.
+#[test]
+fn a_restart_derives_the_saved_requests_parameters_at_the_first_card_write() {
+    let mut h = Harness::new();
+    let t = h.store.team(TEAM).unwrap().unwrap();
+    let mut r = Runtime::open(h.temp.path(), &t.home, "epoch").unwrap();
+    r.ledger = Some(Ledger::open(h.temp.path()).unwrap());
+    let mut row = Row::new(&t, "lead", "epoch", State::WorktreeIntent);
+    r.ledger.as_mut().unwrap().insert(&row, 1).unwrap();
+    r.block(
+        &mut row,
+        Problem::new(
+            "worktree_unavailable",
+            "Private fixture path is unavailable",
+        ),
+        2,
+    )
+    .unwrap();
+    // The card insert fails once: card() saves the request before it applies
+    // the operation, so the ledger holds the request and no card.
+    h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .execute_batch("CREATE TRIGGER fail_card_write BEFORE INSERT ON cards BEGIN SELECT RAISE(ABORT,'fixture card failure'); END;")
+        .unwrap();
+    let failed = r.card(&mut h.store, &mut row, 3).unwrap_err();
+    assert_eq!(failed.code, "storage_failed");
+    h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_card_write")
+        .unwrap();
+    let saved = r
+        .ledger
+        .as_ref()
+        .unwrap()
+        .get(TEAM, "lead")
+        .unwrap()
+        .unwrap();
+    assert!(!saved.card_done, "the failed write marked the card done");
+    let stored = serde_json::to_value(saved.card_request.as_ref().unwrap()).unwrap();
+    assert!(
+        stored.get("parameters").is_none(),
+        "the saved request stores no parameters: {stored}"
+    );
+    drop(r);
+
+    // The restart reads the row and the saved request, without parameters.
+    let mut r = Runtime::open(h.temp.path(), &t.home, "epoch").unwrap();
+    r.ledger = Some(Ledger::open(h.temp.path()).unwrap());
+    let mut loaded = r.ledger.as_mut().unwrap().get(TEAM, "lead").unwrap().unwrap();
+    let Operation::OpenCard { parameters, .. } = &loaded
+        .card_request
+        .as_ref()
+        .expect("the restart reloaded the request")
+        .operation
+    else {
+        panic!("the saved request opens a card");
+    };
+    assert!(
+        parameters.is_none(),
+        "the reload has no parameters to reuse: {parameters:?}"
+    );
+
+    // The first write after the restart reconstructs them from the ledger row.
+    r.card(&mut h.store, &mut loaded, 4).unwrap();
+    assert!(loaded.card_done);
+    let card = h
+        .store
+        .card(TEAM, loaded.card_id.expect("the restarted write opened a card"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        card.parameters,
+        vec![
+            ("member".to_owned(), "lead".to_owned()),
+            ("code".to_owned(), "worktree_unavailable".to_owned()),
+        ]
+    );
 }

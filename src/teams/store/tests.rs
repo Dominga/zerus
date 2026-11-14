@@ -22,8 +22,8 @@ fn missing_store_is_lazy_and_preview_is_required() {
 
 use crate::teams::ops::{
     self,
-    tests::{create, person, refused, request, route, task, Harness, TEAM},
-    Operation,
+    tests::{create, person, refused, request, route, service, task, Harness, TEAM},
+    Operation, Request,
 };
 
 #[test]
@@ -576,6 +576,7 @@ fn card_lookup_is_scoped_and_reads_the_persons_decision_by_primary_key() {
                 text: "Wait for a person".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .unwrap()
@@ -730,7 +731,6 @@ fn an_oversized_saved_request_is_refused_before_it_is_read() {
     assert_eq!(error.code, code::OVER_CAP);
 }
 
-
 /// zerus-63rru.35 (1): a version-2 store from before the timers extension
 /// creates that extension on its first open. When another writer holds the
 /// store, the opener never begins, so its refusal is store_busy, not a
@@ -785,4 +785,188 @@ fn a_new_store_creation_that_cannot_begin_answers_store_busy() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(version, 0, "the refused creation wrote no schema");
+}
+
+#[test]
+fn an_older_card_row_without_parameters_still_reads() {
+    // The compatibility contract (zerus-63rru.34): a row written before the
+    // parameters field existed deserializes with none.
+    let older = serde_json::json!({
+        "seq": 1,
+        "kind": "note",
+        "node": null,
+        "actor": {"kind": "person", "person": "local"},
+        "text": "Tell the team the release moved to Monday.",
+        "state": "open",
+        "decision": null,
+        "decided_actor": null,
+        "created_ms": 1700000000000i64,
+        "decisions": ["acknowledged"]
+    });
+    let card: crate::teams::store::records::Card = serde_json::from_value(older).unwrap();
+    assert!(card.parameters.is_empty());
+}
+
+/// The concurrency schedule's own count of the additive-column read. Only the
+/// test's armed threads count, so other tests opening old-shape stores in
+/// parallel never join the schedule.
+static WATCH_MISSING_COLUMN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static MISSING_COLUMN_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static MISSING_COLUMN_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub(super) fn after_missing_column() {
+    if WATCH_MISSING_COLUMN.load(std::sync::atomic::Ordering::SeqCst)
+        && MISSING_COLUMN_ARMED.with(std::cell::Cell::get)
+    {
+        MISSING_COLUMN_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The legacy store shape is produced by dropping the additive column from a
+/// product-written store (explicit setup); its team and card rows come from
+/// the product's own writers, never from inserted JSON.
+fn legacy_store_without_parameters() -> (Harness, std::path::PathBuf, u64) {
+    let mut h = Harness::new();
+    let old = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "note".into(),
+                text: "Written before the parameters column existed".into(),
+                node: None,
+                decisions: None,
+                parameters: None,
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    let state = h.temp.path().to_path_buf();
+    h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .execute_batch("ALTER TABLE cards DROP COLUMN parameters")
+        .unwrap();
+    drop(h.store.db.take());
+    (h, state, old)
+}
+
+#[test]
+fn an_older_store_gains_parameters_and_keeps_reading_its_own_cards() {
+    let (h, state, old) = legacy_store_without_parameters();
+    let mut store = Store::open(&state).unwrap();
+    let page = store.waiting(200, None).unwrap();
+    let kept = page.rows.iter().find(|row| row.card.seq == old).unwrap();
+    assert!(kept.card.parameters.is_empty());
+    let request = Request {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: TEAM.into(),
+        expected_revision: store.team(TEAM).unwrap().unwrap().revision,
+        operation: Operation::OpenCard {
+            kind: "launch_blocked".into(),
+            text: "New card on an older store".into(),
+            node: None,
+            decisions: None,
+            parameters: Some(vec![("member".into(), "m1".into())]),
+        },
+    };
+    let card = ops::apply(&mut store, &service(), &request, 2000)
+        .unwrap()
+        .item
+        .unwrap();
+    assert_eq!(store.card(TEAM, card).unwrap().unwrap().parameters[0].1, "m1");
+    assert!(store.db.as_ref().unwrap().is_autocommit());
+    drop(store);
+    drop(h);
+}
+
+#[test]
+fn a_newer_mark_after_the_fence_is_refused_before_the_column_is_added() {
+    let (h, state, _) = legacy_store_without_parameters();
+    let path = state.join("teams/teams-v1.sqlite3");
+    let other_path = path.clone();
+    super::timers::AFTER_FENCE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let other = Connection::open(&other_path).unwrap();
+            other
+                .execute_batch(&format!(
+                    "BEGIN IMMEDIATE; UPDATE timers_extension SET version={}; COMMIT;",
+                    super::timers::EXTENSION + 100
+                ))
+                .unwrap();
+            Ok(())
+        }));
+    });
+    let error = Store::open(&state).unwrap_err();
+    assert_eq!(error.code, code::INVALID_STATE);
+    assert!(error.message.contains("newer"), "{error:?}");
+    let raw = Connection::open(&path).unwrap();
+    let added: bool = raw
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cards') WHERE name='parameters')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !added,
+        "refusing a newer store must leave its schema unchanged"
+    );
+    drop(raw);
+    drop(h);
+}
+
+#[test]
+fn two_opens_that_saw_the_missing_column_never_fail_on_a_duplicate() {
+    let (h, state, _) = legacy_store_without_parameters();
+    let path = state.join("teams/teams-v1.sqlite3");
+    // A writer holds the store so both opens read the missing column, then
+    // both reach the locked add together.
+    let blocker = Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    WATCH_MISSING_COLUMN.store(true, std::sync::atomic::Ordering::SeqCst);
+    MISSING_COLUMN_READS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                MISSING_COLUMN_ARMED.with(|armed| armed.set(true));
+                let opened =
+                    Store::open(&state).map(|store| store.waiting(200, None).unwrap().rows.len());
+                MISSING_COLUMN_ARMED.with(|armed| armed.set(false));
+                opened
+            })
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while MISSING_COLUMN_READS.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both opens must read the missing column before the writer releases"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    blocker.execute_batch("ROLLBACK;").unwrap();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    WATCH_MISSING_COLUMN.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        results.iter().all(std::result::Result::is_ok),
+        "an additive extension must be rechecked under its writer lock: {results:?}"
+    );
+    let raw = Connection::open(path).unwrap();
+    let added: bool = raw
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cards') WHERE name='parameters')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(added);
+    drop(raw);
+    drop(blocker);
+    drop(h);
 }

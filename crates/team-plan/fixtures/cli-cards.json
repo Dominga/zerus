@@ -23,6 +23,7 @@
       "kind": "note",
       "node": null,
       "notes": [],
+      "parameters": [],
       "seq": 1,
       "state": "open",
       "text": "Tell the team the release moved to Monday."

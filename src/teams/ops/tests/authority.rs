@@ -36,6 +36,7 @@ fn lead_ops() -> Vec<Operation> {
             text: "Example".into(),
             node: None,
             decisions: None,
+                parameters: None,
         },
     ]
 }

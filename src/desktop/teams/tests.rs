@@ -2940,6 +2940,7 @@ fn a_restart_at_each_durable_step_of_a_card_replacement_opens_the_current_card_o
                         text: "Member lead: delivery_uncertain. Worktree ownership changed".into(),
                         node: None,
                         decisions: Some(vec!["acknowledged".into()]),
+                parameters: None,
                     },
                 });
             }

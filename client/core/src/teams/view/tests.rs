@@ -948,3 +948,205 @@ fn the_pending_decision_rows_are_the_cores_view() {
         .flat_map(|group| &group.cards)
         .all(|card| !card.pending_replaceable));
 }
+
+/// A card row carries the service's bounded parameters (zerus-63rru.34). The
+/// row here is a synthetic DTO for the projection's own contract; the service
+/// writer bounds the pairs and the CLI sends them as `[[key, value]]`.
+#[test]
+fn a_card_row_carries_the_services_bounded_parameters() {
+    let reply = json!({
+        "rows": [{
+            "seq": 1,
+            "team": TEAM,
+            "kind": "launch_blocked",
+            "node": null,
+            "actor": {"kind": "service", "person": "local"},
+            "text": "Member m1: no_account. Try again later.",
+            "state": "open",
+            "created_ms": 1700000000000i64,
+            "decisions": ["acknowledged"],
+            "parameters": [["member", "m1"], ["code", "no_account"]]
+        }],
+        "next": null
+    });
+    let view = waiting(&reply);
+    assert_eq!(
+        view.items[0].parameters,
+        Some(CardParameters::Pairs(vec![
+            ("member".to_owned(), "m1".to_owned()),
+            ("code".to_owned(), "no_account".to_owned())
+        ]))
+    );
+    assert_eq!(
+        serde_json::to_value(&view).unwrap()["items"][0]["parameters"],
+        json!([["member", "m1"], ["code", "no_account"]])
+    );
+}
+
+/// The five faulted shapes the round-2 review found normalized away before
+/// the window, and its controls, through the real read, view, TeamsUpdate,
+/// coalescer and serialized/deserialized Batch (zerus-63rru.34, F6).
+///
+/// The reply rows are deliberately faulted metadata (hand-written), not rows
+/// the service's bounded writer produced: the writer's valid pairs are pinned
+/// by `a_card_row_carries_the_services_bounded_parameters` and the root launch
+/// tests. The projection must keep the invalid state instead of dropping,
+/// cutting or replacing it, so the window can show the stored sentence.
+#[cfg(unix)]
+#[test]
+fn invalid_card_parameters_survive_the_waiting_read_as_the_invalid_state() {
+    use crate::teams::read::{read, TeamRead};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn row(seq: u64, text: &str, parameters: Value) -> Value {
+        json!({
+            "seq": seq, "team": TEAM, "kind": "launch_blocked", "node": null,
+            "actor": {"kind": "service", "person": "local"},
+            "text": text, "state": "open", "created_ms": 1700000000000i64,
+            "decisions": ["acknowledged"], "parameters": parameters,
+        })
+    }
+    let nine = |last: Value| {
+        let mut pairs: Vec<Value> = (0..8).map(|n| json!([format!("k{n}"), "v"])).collect();
+        pairs.push(last);
+        Value::Array(pairs)
+    };
+    let mut rows = vec![
+        row(
+            100,
+            "Stored sentence for triplet",
+            json!([["member", "Alice", "extra"]]),
+        ),
+        row(
+            101,
+            "Stored sentence for mixed-invalid-pair",
+            json!([["member", "Alice"], ["code", false]]),
+        ),
+        row(
+            102,
+            "Stored sentence for wrong-top-level-type",
+            json!("invalid"),
+        ),
+        row(103, "Stored sentence for null-metadata", Value::Null),
+        row(
+            104,
+            "Stored sentence for nine-pairs-one-filtered",
+            nine(json!(["member", "Alice", "extra"])),
+        ),
+        row(
+            105,
+            "Stored sentence for nine-valid-pairs",
+            nine(json!(["member", "Alice"])),
+        ),
+        row(
+            106,
+            "Stored sentence for bidi-value",
+            json!([["member", "a\u{202e}b"]]),
+        ),
+        row(
+            107,
+            "Stored sentence for valid-pairs",
+            json!([["member", "m1"], ["code", "no_account"]]),
+        ),
+        row(108, "Stored sentence for empty-pairs", json!([])),
+    ];
+    // The absent state: the field is not there at all.
+    rows.push(row(109, "Stored sentence for absent-metadata", Value::Null));
+    rows[9]
+        .as_object_mut()
+        .unwrap()
+        .remove("parameters")
+        .unwrap();
+    let reply = json!({
+        "ok": true,
+        "actor": {"kind": "person", "person": "local"},
+        "rows": rows,
+        "next": null,
+    });
+
+    // A tiny hgs stand-in: the real read runs this child and decodes its reply.
+    let dir = std::env::temp_dir().join(format!("zerus-wp34r3-{}", uuid::Uuid::new_v4()));
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _tmp = TempDir(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let reply_path = dir.join("reply.json");
+    std::fs::write(&reply_path, serde_json::to_vec(&reply).unwrap()).unwrap();
+    let hgs = dir.join("hgs");
+    std::fs::write(
+        &hgs,
+        format!("#!/bin/sh\nexec /bin/cat '{}'\n", reply_path.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let value = read(&hgs, &TeamRead::Waiting { after: None }).expect("the faulted reply reads");
+    let view = waiting(&value);
+    assert_eq!(view.items.len(), 10);
+    let states: Vec<Option<CardParameters>> = view
+        .items
+        .iter()
+        .map(|item| item.parameters.clone())
+        .collect();
+    assert_eq!(states[0], Some(CardParameters::Invalid));
+    assert_eq!(states[1], Some(CardParameters::Invalid));
+    assert_eq!(states[2], Some(CardParameters::Invalid));
+    assert_eq!(states[3], None, "null is absent");
+    assert_eq!(states[4], Some(CardParameters::Invalid));
+    assert_eq!(states[5], Some(CardParameters::Invalid));
+    assert_eq!(states[6], Some(CardParameters::Invalid));
+    assert_eq!(
+        states[7],
+        Some(CardParameters::Pairs(vec![
+            ("member".to_owned(), "m1".to_owned()),
+            ("code".to_owned(), "no_account".to_owned()),
+        ])),
+        "the writer's bounded list stays valid"
+    );
+    assert_eq!(
+        states[8],
+        Some(CardParameters::Pairs(Vec::new())),
+        "a valid empty list is not absent"
+    );
+    assert_eq!(states[9], None, "a missing field is absent");
+
+    // The window's only input is this Batch payload: the three states must
+    // arrive there as they are.
+    let update = crate::TeamsUpdate::Waiting(std::sync::Arc::new(view));
+    let mut coalescer = crate::Coalescer::new();
+    coalescer.push(crate::Change::teams(
+        crate::ComputerId("wp34r3".into()),
+        "waiting".into(),
+        update,
+    ));
+    let wire = serde_json::to_value(&coalescer.take()).unwrap();
+    let decoded: crate::Batch = serde_json::from_value(wire.clone()).expect("the batch decodes");
+    assert_eq!(decoded.teams.len(), 1);
+    let items = wire["teams"][0]["payload"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 10);
+    for item in &items[..3] {
+        assert_eq!(item["parameters"], "invalid", "{item}");
+    }
+    for item in &items[3..4] {
+        assert!(item.get("parameters").is_none(), "null is absent: {item}");
+    }
+    for item in &items[4..7] {
+        assert_eq!(item["parameters"], "invalid", "{item}");
+    }
+    assert_eq!(
+        items[7]["parameters"],
+        json!([["member", "m1"], ["code", "no_account"]])
+    );
+    assert_eq!(items[8]["parameters"], json!([]));
+    assert!(items[9].get("parameters").is_none(), "{items:?}");
+    for (item, row) in items.iter().zip(reply["rows"].as_array().unwrap()) {
+        assert_eq!(
+            item["text"], row["text"],
+            "the original detail stays visible"
+        );
+    }
+}

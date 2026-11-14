@@ -55,6 +55,7 @@ pub(super) fn accept_result(
             Some(node),
             Some(seq),
             &["approve", "reject"],
+            &[],
         )?);
     }
     Ok(())

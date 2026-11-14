@@ -249,6 +249,7 @@ fn a_pipeline_can_ask_the_person_and_only_the_current_card_can_accept() {
                 text: "Forged acceptance".into(),
                 node: Some(parent),
                 decisions: None,
+                parameters: None,
             },
         ),
         code::INVALID_STATE,

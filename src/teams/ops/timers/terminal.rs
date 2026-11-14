@@ -103,7 +103,7 @@ pub(in crate::teams::ops) fn late_session(ctx: &mut Context<'_>) -> Result<()> {
     }
     let body = format!("Member {member} started session {name} after the team stopped or the member was removed. Zerus does not stop it; end that agent if it is not needed.");
     // Nothing reads its decision: acknowledged alone.
-    let card = talk::card(ctx, "late_session", &body, None, None, &[])?;
+    let card = talk::card(ctx, "late_session", &body, None, None, &[], &[])?;
     ctx.db.execute("INSERT INTO late_sessions(team,member,launch,machine,session_id,name,card,created_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![ctx.team.id,member,launch_id,session.machine,session.session_id,name,card,ctx.now]).map_err(storage)?;
     ctx.reply.item = Some(card);
     Ok(())

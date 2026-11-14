@@ -58,22 +58,79 @@ export function waitingNote(note: ServiceNote): string {
   }
 }
 
-/** One sentence that says what a card of this kind is about. */
-export function waitingKindSentence(item: Pick<WaitingItem, "kind">): string {
+/** A card's parameters as the core sends them: absent, invalid, or the
+ * service writer's bounded pairs. */
+type ParsedParameters =
+  | { state: "absent" }
+  | { state: "invalid" }
+  | { state: "valid"; values: Map<string, string> };
+
+/** The card's parameters as the service's writer bounds them: at most eight
+ * pairs, each key lower-case ASCII letters and underscores, each value
+ * nonempty, at most 256 characters and free of control characters, line or
+ * paragraph separators and bidirectional marks. The core already keeps an
+ * invalid row distinct; this check stays as the window's own guard for an
+ * older core and for anything it did not bound. Anything else, or a duplicate
+ * key, means the stored sentence stands and no value is interpolated. */
+function cardParameters(raw: WaitingItem["parameters"]): ParsedParameters {
+  if (raw === undefined || raw === null) return { state: "absent" };
+  if (!Array.isArray(raw) || raw.length > 8) return { state: "invalid" };
+  const values = new Map<string, string>();
+  for (const pair of raw) {
+    if (!Array.isArray(pair) || pair.length !== 2) return { state: "invalid" };
+    const [key, value] = pair;
+    if (typeof key !== "string" || typeof value !== "string") return { state: "invalid" };
+    if (!/^[a-z_]+$/.test(key) || values.has(key)) return { state: "invalid" };
+    if (value.trim().length === 0) return { state: "invalid" };
+    if ([...value].length > 256) return { state: "invalid" };
+    if (/[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value)) return { state: "invalid" };
+    values.set(key, value);
+  }
+  return { state: "valid", values };
+}
+
+/** The kinds whose writer names a member. With no parameters at all, only the
+ * card's stored sentence says what happened; a generic description would drop
+ * the fact that a member is involved. The capacity notice is team-wide and
+ * legitimately carries none (F5). */
+const NAMES_A_MEMBER = new Set(["launch_blocked", "launch_uncertain", "standing_confirmation"]);
+
+/** One sentence that says what a card of this kind is about. The kinds whose
+ * writer sends bounded parameters substitute them (zerus-63rru.34); an
+ * invalid parameter, an absent one on a card that names a member, or a kind
+ * this version does not describe keeps the stored sentence itself, never a
+ * generic description. The capacity notice is team-wide: the budget marker is
+ * not a member (F5). */
+export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters" | "text">): string {
+  const parameters = cardParameters(item.parameters);
+  if (parameters.state === "invalid") return item.text;
+  if (parameters.state === "absent" && NAMES_A_MEMBER.has(item.kind)) return item.text;
+  // The ledger's internal markers (@budget, @branch) are not member names:
+  // a card that still carries one reads as a team-wide sentence.
+  const written = parameters.state === "valid" ? parameters.values.get("member") : undefined;
+  const member = written !== undefined && !written.startsWith("@") ? written : undefined;
   switch (item.kind) {
     case "note": return tr("A note that the lead, the service or you left for the person.");
     case "integration": return tr("The lead accepted a result; merging it into the integration branch waits for your approval.");
     case "pipeline_acceptance": return tr("A task's pipeline finished and asks you to accept its work.");
-    case "launch_blocked": return tr("A team member could not be started; the card says why and whether Zerus tries again.");
-    case "launch_uncertain": return tr("Whether a team member started is not known; Zerus checks before it starts anything again.");
-    case "launch_capacity": return tr("New team members wait until there is room for another session or account.");
-    case "standing_confirmation": return tr("A member's session asks for something Zerus does not confirm on your behalf.");
+    case "launch_blocked": return member
+      ? tr("Member %1 could not be started; the card says why and whether Zerus tries again.", member)
+      : tr("A team member could not be started; the card says why and whether Zerus tries again.");
+    case "launch_uncertain": return member
+      ? tr("Whether member %1 started is not known; Zerus checks before it starts anything again.", member)
+      : tr("Whether a team member started is not known; Zerus checks before it starts anything again.");
+    case "launch_capacity": return member
+      ? tr("Member %1 waits until there is room for another session or account.", member)
+      : tr("New team members wait until there is room for another session or account.");
+    case "standing_confirmation": return member
+      ? tr("Member %1 needs you: the card says what it asks.", member)
+      : tr("A member's session asks for something Zerus does not confirm on your behalf.");
     case "team_actor_blocked": return tr("The team's service could not finish a step and keeps trying.");
     case "report_waiting": return tr("A member's report has waited for the lead's decision longer than the team allows.");
     case "silent_lead": return tr("The lead has not worked for a while although items wait in its inbox.");
     case "late_session": return tr("A member's session started after the team stopped or the member was removed; Zerus does not stop it.");
     case "rejected_merge": return tr("The rejection did not undo the merge; only a revert on the integration branch removes it.");
-    default: return tr("A card of a kind this version does not describe.");
+    default: return item.text;
   }
 }
 

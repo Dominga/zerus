@@ -55,7 +55,13 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         Operation::Ask { .. } => member || person,
         Operation::Accept { .. } => person || (lead && team.settings.delegations.accept_results),
         Operation::Reply { .. } => person || (lead && team.settings.delegations.answer_members),
-        Operation::OpenCard { .. } => person || lead || service,
+        // A card's parameters feed the window's own sentence, so only the
+        // service's card writer supplies them; a person or the lead may open a
+        // card's words, never its substitution values.
+        Operation::OpenCard { parameters, .. } => match parameters {
+            Some(list) if !list.is_empty() => service,
+            _ => person || lead || service,
+        },
         Operation::Pause
         | Operation::Resume
         | Operation::PauseMember { .. }

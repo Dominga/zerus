@@ -18,6 +18,7 @@ pub(super) fn revoke_merges(ctx: &Context<'_>) -> Result<()> {
             Some(node),
             Some(seq),
             &["approve", "reject"],
+            &[],
         )?;
     }
     Ok(())

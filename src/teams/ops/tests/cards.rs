@@ -9,6 +9,7 @@ fn open(h: &mut Harness, actor: &Actor) -> u64 {
             text: "No account available".into(),
             node: None,
             decisions: None,
+                parameters: None,
         },
     )
     .unwrap()
@@ -163,6 +164,7 @@ fn close_card_refuses_unknown_decided_or_foreign_cards() {
                 text: "No account".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .unwrap()
@@ -203,4 +205,150 @@ fn close_card_requires_a_bounded_nonempty_reason() {
         );
         assert_eq!(h.store.card(TEAM, card).unwrap().unwrap().state, "open");
     }
+}
+
+#[test]
+fn card_parameters_are_bounded_and_round_trip_through_the_store() {
+    let mut h = Harness::new();
+    // The service's own writer's shape: at most 8 [a-z_] keys, bounded values.
+    let card = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "launch_blocked".into(),
+                text: "Member alice could not be started: no account.".into(),
+                node: None,
+                decisions: None,
+                parameters: Some(vec![
+                    ("member".into(), "alice".into()),
+                    ("code".into(), "no_account".into()),
+                ]),
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    let row = h.store.card(TEAM, card).unwrap().unwrap();
+    assert_eq!(
+        row.parameters,
+        vec![("member".into(), "alice".into()), ("code".into(), "no_account".into())]
+    );
+    // A row from before the field reads as none.
+    let old = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "note".into(),
+                text: "Hello".into(),
+                node: None,
+                decisions: None,
+                parameters: None,
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    assert!(h.store.card(TEAM, old).unwrap().unwrap().parameters.is_empty());
+}
+
+#[test]
+fn card_parameters_refuse_too_many_keys_a_bad_key_and_an_oversized_value() {
+    let mut h = Harness::new();
+    for (parameters, code) in [
+        (
+            vec![("key".into(), "v".into()); 9],
+            code::INVALID_STATE,
+        ),
+        (
+            vec![("bad-key".into(), "v".into())],
+            code::INVALID_STATE,
+        ),
+        (
+            vec![("key".into(), "x".repeat(257))],
+            code::INVALID_STATE,
+        ),
+    ] {
+        refused(
+            h.run(
+                &service(),
+                Operation::OpenCard {
+                    kind: "note".into(),
+                    text: "Bounded".into(),
+                    node: None,
+                    decisions: None,
+                    parameters: Some(parameters),
+                },
+            )
+            .map(|reply| reply.item),
+            code,
+        );
+    }
+}
+
+#[test]
+fn only_the_service_writes_card_parameters() {
+    let mut h = Harness::new();
+    let lead = h.bind("lead");
+    let with = |parameters| Operation::OpenCard {
+        kind: "launch_blocked".into(),
+        text: "Bounded".into(),
+        node: None,
+        decisions: None,
+        parameters,
+    };
+    for actor in [person(), lead.clone()] {
+        refused(
+            h.run(
+                &actor,
+                with(Some(vec![("member".into(), "m1".into())])),
+            ),
+            code::NOT_ALLOWED,
+        );
+    }
+    // A person and the lead still open a card that carries no substitution
+    // values; the service writes the values.
+    h.run(&person(), with(None)).unwrap();
+    h.run(&lead, with(None)).unwrap();
+    let card = h
+        .run(
+            &service(),
+            with(Some(vec![("member".into(), "m1".into())])),
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    assert_eq!(h.store.card(TEAM, card).unwrap().unwrap().parameters[0].1, "m1");
+}
+
+#[test]
+fn card_parameter_values_refuse_forbidden_characters_and_count_characters() {
+    let mut h = Harness::new();
+    let with = |value: String| Operation::OpenCard {
+        kind: "launch_blocked".into(),
+        text: "Bounded".into(),
+        node: None,
+        decisions: None,
+        parameters: Some(vec![("member".into(), value)]),
+    };
+    // An empty or blank value is no sentence substitution at all.
+    for value in ["", "   ", "\u{0}", "\u{1b}", "a\nb", "a\tb", "a\rb"] {
+        refused(h.run(&service(), with(value.into())), code::INVALID_STATE);
+    }
+    // Line and paragraph separators and bidirectional marks are refused, never
+    // stripped or stored.
+    for value in [
+        "a\u{2028}b", "a\u{2029}b", "a\u{202a}b", "a\u{202e}b", "a\u{2066}b", "a\u{2069}b",
+    ] {
+        refused(h.run(&service(), with(value.into())), code::INVALID_STATE);
+    }
+    // The bound counts characters, not UTF-8 bytes: 256 Cyrillic characters fit
+    // (512 bytes), a 257th does not.
+    let fits = "я".repeat(256);
+    let reply = h.run(&service(), with(fits.clone())).unwrap();
+    let card = h.store.card(TEAM, reply.item.unwrap()).unwrap().unwrap();
+    assert_eq!(card.parameters[0].1, fits);
+    refused(
+        h.run(&service(), with("я".repeat(257))),
+        code::INVALID_STATE,
+    );
 }

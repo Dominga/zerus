@@ -147,6 +147,7 @@ pub(in crate::state) fn still(terminal: &dyn backend::TerminalBackend, claim: &b
 
 /// Pending-Send's Enter fence compares the complete captured composer;
 /// the ordinary lane and bounded receipt previews retain their existing form.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) fn still_complete(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, text: &str) -> bool {
     settled(terminal, claim, true).and_then(|(shown, _)| shown).as_deref() == Some(text)
 }
@@ -164,6 +165,7 @@ pub(in crate::state) fn settle(
 }
 
 /// Same stable-read window, with no truncation in the pending-Send comparator.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) fn settle_complete(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, deadline: Instant) -> std::result::Result<String, Option<String>> {
     wait_settled(terminal, claim, deadline, true)
 }
@@ -424,6 +426,7 @@ mod tests {
         format!("● Fixture complete.\n{}\n❯ {composer}\n{}\n  {footer}\n", rule(), rule())
     }
     const SETTLED: &str = "[Image #1] [Image #2][Pasted text #3 +35 lines]";
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_changed_composer_tail_cannot_hide_behind_the_evidence_bound() {
         let prefix = "x".repeat(RESIDUE_CHARS);

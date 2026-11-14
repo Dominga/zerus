@@ -81,6 +81,7 @@ fn stopped_swap_retains_identity_checkout_and_old_receipts_without_replay() {
         let old_member = h.store.member(TEAM, target).unwrap().unwrap();
         let old_row = row(&h, target);
         let old_plan = old_row.plan.as_ref().unwrap();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let config = crate::config::Config {
             home: String::new(),
             dir: h.temp.path().join("config"),
@@ -93,6 +94,7 @@ fn stopped_swap_retains_identity_checkout_and_old_receipts_without_replay() {
             tab: false,
             tab_colors: String::new(),
         };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(crate::desktop::teams::child::admission(&config, old_plan, true).is_ok());
         let old_actor = Actor::Session {
             person: "local".into(),
@@ -124,6 +126,7 @@ fn stopped_swap_retains_identity_checkout_and_old_receipts_without_replay() {
             (&old_member.worktree, &old_member.ownership_nonce)
         );
         assert!(m.session.is_none());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(
             crate::desktop::teams::child::admission(&config, old_plan, false).is_err(),
             "stale same-agent launch passed generation admission"

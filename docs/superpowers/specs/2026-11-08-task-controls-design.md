@@ -62,6 +62,15 @@ before-effect refusal. No provider, acknowledgement, slot mutation, native
 input, task history, floor or controller is called. Plan and Begin stay explicitly
 unqualified. Person over the CLI bridge still refuses.
 
+The refusal-only native-turn seam now names that missing association precisely:
+`task_control_native_turn_association_unqualified`, with `attempted: false` and
+`read_only: true`. No current adapter or fixture constructs positive turn
+authority. Existing peer/command/Person guards run first; this route adds no
+task/Teams lookup, write or acknowledgement. Future positive Begin still needs
+independent ordinary own-ack/Teams admission and an exact input-generation/tool
+association, including revocation before downstream use. See the
+[writer/adapter census](../../../docs/task-control-native-turn-census.md).
+
 Exactly matching durable requests, including Reserved and Unknown, are lookup
 only, never another worker or import. In-flight duplicates consult bounded
 memory; changed immutable admissions refuse. A crash before durable admission

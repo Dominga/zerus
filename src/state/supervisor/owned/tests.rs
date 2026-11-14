@@ -167,3 +167,30 @@ fn an_unrelated_native_image_cannot_observe_the_owner_even_with_the_json() {
     channel.poll(&source, &binding, &json!({"binding":binding}));
     assert!(child.wait().unwrap().success());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn owned_mac_facade_waits_for_and_caches_its_actual_original_child() {
+    let (_d, source) = fixture();
+    let channel = channel::Channel::new().unwrap();
+    let binding = binding(&source);
+    let root = Command::new("sh")
+        .args(["-c", "exit 23"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut original = Original {
+        root,
+        exit: None,
+        channel,
+        source,
+        binding,
+        startup: true,
+        unresolved: false,
+        _local: PhantomData,
+    };
+    let status = ChildStatus::wait(&mut original).unwrap();
+    assert_eq!(status.code(), Some(23));
+    assert_eq!(ChildStatus::try_wait(&mut original).unwrap(), Some(status));
+    assert_eq!(ChildStatus::wait(&mut original).unwrap(), status);
+}

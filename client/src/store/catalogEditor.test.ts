@@ -73,3 +73,7 @@ it("discarding an uncertain draft requires confirmation and reads current state 
   s.editor.discardUncertain();s.editor.confirm();await Promise.resolve();await Promise.resolve();
   expect(s.editor.pending()).toBeUndefined();expect(s.counts().saves).toBe(1);expect(s.counts().reads).toBe(2);
 });
+it("refreshes the New team catalog only after a confirmed save or receipt", async()=>{
+  const s=setup();let changes=0;s.port.changed=()=>{changes++;};await s.editor.load();s.editor.replace({planning_rules:["mine"]});s.outcome("uncertain");await s.editor.save();expect(changes).toBe(0);
+  s.outcome("done");await s.editor.check();expect(changes).toBe(1);
+});

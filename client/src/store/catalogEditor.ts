@@ -2,7 +2,7 @@
 // an uncertain save is checked by its point receipt, never submitted again.
 import { createRoot, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import { newRequestId } from "./teams";
+import { newRequestId, teams } from "./teams";
 
 export type Item = Record<string, unknown>;
 export type CatalogList = "roles" | "pipelines" | "templates";
@@ -20,6 +20,7 @@ export interface CatalogPort {
   exportTemplate?(id: string): Promise<boolean>;
   save(edit: CatalogSave): Promise<CatalogOutcome>;
   receipt(request: string): Promise<CatalogOutcome>;
+  changed?(): void;
 }
 export const desktopCatalog: CatalogPort = {
   load: () => invoke("catalog_editor_load"),
@@ -30,6 +31,7 @@ export const desktopCatalog: CatalogPort = {
   exportTemplate: (id) => invoke("catalog_editor_export_template", { id }),
   save: (edit) => invoke("catalog_editor_save", { edit }),
   receipt: (request) => invoke("catalog_editor_receipt", { request }),
+  changed: () => { void teams.reloadCatalog(); },
 };
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -85,6 +87,7 @@ export function createCatalogEditor(port: CatalogPort = desktopCatalog) {
     if (outcome.outcome === "done" && outcome.revision) {
       setSnapshot({ ...snapshot()!, person: copy(intent.catalog), revision: outcome.revision });
       setPending(undefined);
+      port.changed?.();
     } else if (outcome.outcome === "failed") setPending(undefined);
   }
   async function save() {

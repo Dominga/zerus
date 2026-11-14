@@ -1284,8 +1284,10 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     {
         return Err(format!("{name}: saved binding changed; refresh before starting fresh"));
     }
-    if archive::equivalent(&current, &archive::records()?) {
-        return Err(format!("{name}: this session is archived; restore it using --archive ID"));
+    if archive::equivalent(&current, &archive::complete_records()?) {
+        return Err(format!(
+            "{name}: this session is archived; restore it using --archive ID"
+        ));
     }
     if pause_active(&current) || current["resume_pending"] == true {
         return Err(format!("{name}: wait for the current pause or restore to finish"));

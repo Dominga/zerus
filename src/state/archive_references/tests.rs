@@ -131,6 +131,49 @@ fn native_receipt_publication_keeps_directory_pins_and_honors_a_live_reader() {
 fn a_changed_relevant_body_is_never_overwritten_by_a_preloaded_record() {
     run("changed");
 }
+
+#[test]
+fn an_unreadable_cached_archive_cannot_authorize_binding_removal() {
+    run("cached-copy-unreadable");
+}
+
+#[test]
+fn all_archive_metadata_entry_points_enforce_the_reference_byte_bound() {
+    for case in [
+        "archive-metadata-normalization",
+        "archive-metadata-boundary",
+        "archive-metadata-selected-oversize",
+        "archive-metadata-records-oversize",
+        "archive-metadata-catalog-oversize",
+    ] {
+        run(case);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_and_legacy_archive_readers_refuse_links_and_fifos() {
+    for case in [
+        "archive-metadata-link",
+        "native-archive-selected-fifo",
+        "native-archive-records-fifo",
+    ] {
+        run(case);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn archive_metadata_replacements_keep_originals_and_reference_uncertainty() {
+    for case in [
+        "native-archive-swap-regular",
+        "native-archive-swap-link",
+        "native-archive-swap-fifo",
+        "native-archive-catalog-replacement-fifo",
+    ] {
+        run(case);
+    }
+}
 #[test]
 fn the_regular_reader_releases_original_files_and_its_private_vfs() {
     run("resources");
@@ -222,6 +265,200 @@ fn isolated_reference_probe() {
     }
     reconcile();
     assert_eq!(related(&target).unwrap(), vec![original.clone()]);
+    if case == "cached-copy-unreadable" {
+        let mut current = original.clone();
+        for key in ["archive_id", "archived_at", "state"] {
+            current.as_object_mut().unwrap().remove(key);
+        }
+        super::super::storage::write(&mut current).unwrap();
+        let binding = super::super::storage::record_path(string(&current, "name"));
+        let binding_before = fs::read(&binding).unwrap();
+        let mut changed_run = original.clone();
+        changed_run["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        let mut changed_conversation = original.clone();
+        changed_conversation["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
+        for bad in [
+            b"{unreadable cached archive".to_vec(),
+            changed_run.to_string().into_bytes(),
+            changed_conversation.to_string().into_bytes(),
+        ] {
+            // In-place changes do not invalidate the directory-generation
+            // fast path: the index cannot stand in for the authoritative body.
+            fs::write(&path, &bad).unwrap();
+            assert!(super::super::archive::save(&current).is_err());
+            assert_eq!(fs::read(&binding).unwrap(), binding_before);
+            assert_eq!(fs::read(&path).unwrap(), bad);
+            assert!(metadata().is_err());
+            let kept =
+                super::super::archive::reconcile_active_locked(&super::super::Snapshot::new())
+                    .unwrap();
+            assert_eq!(
+                kept.len(),
+                1,
+                "an unavailable selected copy must not block other rows"
+            );
+            assert_eq!(kept[0]["name"], current["name"]);
+            assert_eq!(fs::read(&binding).unwrap(), binding_before);
+        }
+        put(&original);
+        reconcile();
+        assert_eq!(super::super::archive::save(&current).unwrap(), id);
+        assert!(
+            !binding.exists(),
+            "a verified archive copy still admits reconciliation"
+        );
+        return;
+    }
+    if case.starts_with("archive-metadata-") {
+        let name = string(&original, "name");
+        if case == "archive-metadata-normalization" {
+            let renamed = "codex/p/renamed";
+            let mut shadow = original.clone();
+            shadow["rename_shadow"] = json!(true);
+            shadow["rename_target"] = json!(renamed);
+            shadow["legacy_shadow"] = json!({"name":name,"run_id":original["run_id"]});
+            fs::write(&path, shadow.to_string()).unwrap();
+            let selected = super::super::archive::read_archive(renamed, id).unwrap();
+            assert_eq!(selected["name"], renamed);
+            for key in ["archive_id", "session_id", "run_id", "conversation_id"] {
+                assert_eq!(selected[key], original[key]);
+            }
+            assert!(super::super::archive::read_archive(name, id).is_err());
+            assert_eq!(super::super::archive::records().unwrap(), vec![selected]);
+            reconcile();
+            assert_eq!(
+                database()
+                    .query_row("SELECT count(*) FROM archive_rows", [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                0,
+                "the preliminary raw label must retain its existing search omission policy"
+            );
+            assert_eq!(metadata().unwrap()[0]["name"], renamed);
+            return;
+        }
+        #[cfg(unix)]
+        if case == "archive-metadata-link" {
+            let retained = root().join("retained-archive");
+            fs::rename(&path, &retained).unwrap();
+            std::os::unix::fs::symlink(&retained, &path).unwrap();
+            assert!(super::super::archive::read_archive(name, id).is_err());
+            assert!(super::super::archive::complete_records().is_err());
+            reconcile();
+            assert!(metadata().is_err());
+            assert_eq!(
+                fs::read(&retained).unwrap(),
+                original.to_string().as_bytes()
+            );
+            return;
+        }
+        let mut bytes = original.to_string().into_bytes();
+        bytes.resize(
+            RECORD + usize::from(case != "archive-metadata-boundary"),
+            b' ',
+        );
+        fs::write(&path, &bytes).unwrap();
+        match case.as_str() {
+            "archive-metadata-boundary" => {
+                assert_eq!(
+                    super::super::archive::read_archive(name, id).unwrap(),
+                    original
+                );
+                assert_eq!(
+                    super::super::archive::records().unwrap(),
+                    vec![original.clone()]
+                );
+                reconcile();
+                assert_eq!(related(&target).unwrap(), vec![original]);
+            }
+            "archive-metadata-selected-oversize" => {
+                assert!(super::super::archive::read_archive(name, id).is_err());
+            }
+            "archive-metadata-records-oversize" => {
+                assert!(
+                    super::super::archive::complete_records().is_err(),
+                    "unreadable evidence is not a complete inventory"
+                );
+                assert!(super::super::archive::records().unwrap().is_empty());
+            }
+            "archive-metadata-catalog-oversize" => {
+                reconcile();
+                assert_eq!(
+                    database()
+                        .query_row("SELECT count(*) FROM archive_rows", [], |row| row
+                            .get::<_, u64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert!(
+                    metadata().is_err(),
+                    "search omission must not authorize cleanup"
+                );
+                assert!(related(&target).is_err());
+            }
+            _ => panic!("unknown archive metadata fixture"),
+        }
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "readers never rewrite invalid evidence"
+        );
+        return;
+    }
+    #[cfg(unix)]
+    if case.starts_with("native-archive-") {
+        use std::os::unix::ffi::OsStrExt;
+        if case == "native-archive-catalog-replacement-fifo" {
+            original["title"] = json!("force a changed body after the warm catalog");
+            fs::write(&path, original.to_string()).unwrap();
+            super::super::archive_catalog::BEFORE_METADATA_READ
+                .with(|slot| slot.set(Some(replace_archive_metadata_input)));
+            fs::write(
+                std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            reconcile();
+            assert!(metadata().is_err());
+            assert!(related(&target).is_err());
+            assert_eq!(
+                fs::read(root().join("retained-archive-input")).unwrap(),
+                original.to_string().as_bytes()
+            );
+            return;
+        }
+        if case.starts_with("native-archive-swap-") {
+            AFTER_METADATA_READ.with(|slot| slot.set(Some(replace_archive_metadata_input)));
+            fs::write(
+                std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            assert!(super::super::archive::read_archive(string(&original, "name"), id).is_err());
+            assert_eq!(
+                fs::read(root().join("retained-archive-input")).unwrap(),
+                original.to_string().as_bytes()
+            );
+            assert!(metadata().is_err());
+            return;
+        }
+        fs::remove_file(&path).unwrap();
+        let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        fs::write(
+            std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+            b"ready",
+        )
+        .unwrap();
+        if case == "native-archive-selected-fifo" {
+            assert!(super::super::archive::read_archive(string(&original, "name"), id).is_err());
+        } else {
+            assert_eq!(case, "native-archive-records-fifo");
+            assert!(super::super::archive::complete_records().is_err());
+        }
+        assert!(metadata().is_err());
+        return;
+    }
     #[cfg(unix)]
     if let Some(which) = case.strip_prefix("native-") {
         use std::os::unix::ffi::OsStrExt;
@@ -305,11 +542,13 @@ fn isolated_reference_probe() {
             store(&database(), &indexed, &expected).unwrap();
             assert!(metadata().is_ok());
             let mut calls = 0;
-            assert!(visit_related(until(), &target, "original-owner", |_| {
-                calls += 1;
-                Ok(())
-            })
-            .is_err());
+            assert!(
+                visit_related(until(), &target, "original-owner", |_| {
+                    calls += 1;
+                    Ok(())
+                })
+                .is_err()
+            );
             assert_eq!(calls, 0);
             assert_eq!(fs::read_to_string(&path).unwrap(), original.to_string());
         }
@@ -511,11 +750,13 @@ fn isolated_reference_probe() {
             let second_path = put(&second);
             reconcile();
             let mut calls = 0;
-            assert!(visit_related(until(), &target, "original-owner", |_| {
-                calls += 1;
-                atomic(&second_path, "{replacement")
-            })
-            .is_err());
+            assert!(
+                visit_related(until(), &target, "original-owner", |_| {
+                    calls += 1;
+                    atomic(&second_path, "{replacement")
+                })
+                .is_err()
+            );
             assert_eq!(calls, 1);
             assert_eq!(fs::read_to_string(second_path).unwrap(), "{replacement");
         }
@@ -543,11 +784,30 @@ fn isolated_reference_probe() {
             fs::rename(root().join("archives"), root().join("old")).unwrap();
             symlink(root().join("missing"), root().join("archives")).unwrap();
             assert!(metadata().is_err());
+            assert!(super::super::archive::complete_records().is_err());
             fs::remove_file(root().join("archives")).unwrap();
             symlink(root().join("old"), root().join("archives")).unwrap();
             assert!(metadata().is_err());
+            assert!(super::super::archive::complete_records().is_err());
         }
         _ => panic!("unknown reference fixture"),
+    }
+}
+
+#[cfg(unix)]
+fn replace_archive_metadata_input(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let retained = root().join("retained-archive-input");
+    fs::rename(path, &retained).unwrap();
+    let case = std::env::var("HGS_TEST_ARCHIVE_REFERENCES").unwrap();
+    if case.ends_with("regular") {
+        fs::copy(retained, path).unwrap();
+    } else if case.ends_with("link") {
+        std::os::unix::fs::symlink(retained, path).unwrap();
+    } else {
+        assert!(case.ends_with("fifo"));
+        let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
     }
 }
 

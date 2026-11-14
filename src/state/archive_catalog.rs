@@ -91,6 +91,11 @@ fn sql<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|e| format!("archive metadata index: {e}"))
 }
 
+#[cfg(all(test, unix))]
+std::thread_local! {
+    pub(super) static BEFORE_METADATA_READ: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
 pub(super) fn catalog() -> Result<Connection> {
     private_dir(&root())?;
     let mut db = sql(Connection::open(root().join("archive-catalog-v1.sqlite3")))?;
@@ -154,10 +159,14 @@ pub(super) fn catalog() -> Result<Connection> {
             if unchanged {
                 continue;
             }
+            #[cfg(all(test, unix))]
+            BEFORE_METADATA_READ.with(|slot| {
+                if let Some(hook) = slot.take() {
+                    hook(&path);
+                }
+            });
             let loaded = (|| -> Result<Value> {
-                let value: Value =
-                    serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
+                let value = archive_references::read_metadata(&path)?;
                 archive::read_archive(string(&value, "name"), id)
             })();
             let record = match loaded {

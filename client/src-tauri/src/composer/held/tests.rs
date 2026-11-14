@@ -415,6 +415,34 @@ fn messages_held_for_an_idle_agent_read_the_draft_at_most_every_four_seconds() {
 }
 
 #[test]
+fn a_shown_draft_the_person_cleared_in_terminal_leaves_the_bar() {
+    // Owner, 2026-11-15: the bar stayed although Terminal was empty.
+    let root = dir("held-draft-cleared");
+    let (c, fake) = send_hub(&root);
+    *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
+        detail: "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt".into(),
+    });
+    let cleared = Arc::new(Mutex::new(false));
+    let gone = Arc::clone(&cleared);
+    let (run, _calls) = runner(move |input| match input["action"].as_str() {
+        Some("draft") if !*lock(&gone) => ok(json!({"request_id": input["request_id"], "status": "draft",
+            "draft": "не починил", "draft_hash": HASH, "draft_supported": true})),
+        Some("draft") => ok(json!({"request_id": input["request_id"], "status": "draft", "draft": null, "draft_hash": HASH})),
+        _ => Exit::StartFailed("unexpected".into()),
+    });
+    c.set_hgs(run);
+    let view = opened(&c, ready());
+    c.edit(view.handle, 1, view.text_epoch, "my message".into(), 10, 10);
+    c.send_message(view.handle, 2, view.text_epoch, "my message".into(), 10, 10);
+    until(&c, |v| v.terminal_draft.is_some());
+    // The person sends the draft in Terminal; no message is held.
+    *lock(&cleared) = true;
+    *lock(&fake.now) += 5.0;
+    c.observe(&state(ready()));
+    until(&c, |v| v.terminal_draft.is_none());
+}
+
+#[test]
 fn a_send_that_does_nothing_while_the_last_one_is_unconfirmed_says_why() {
     let root = dir("held-busy-notice");
     let (c, _) = send_hub(&root);

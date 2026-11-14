@@ -531,8 +531,16 @@ impl Composers {
         for text in notices {
             self.said(&mut hub, text, true);
         }
-        let waiting = !hub.holds.rows(&key, Some(&*details)).is_empty()
-            && details["activity"].as_str() != Some("busy");
+        // A shown draft is read again too: the person may have sent or cleared
+        // it in Terminal, and the bar must not outlive the text.
+        let shown = hub
+            .holds
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.key == key && !draft.draft.is_empty());
+        let waiting = shown
+            || (!hub.holds.rows(&key, Some(&*details)).is_empty()
+                && details["activity"].as_str() != Some("busy"));
         drop(hub);
         if waiting {
             self.draft_check(true);

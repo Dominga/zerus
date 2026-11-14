@@ -17,6 +17,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         case failure(URLError.Code)
         /// Never answers; only cancellation ends the request, which `stopped` counts.
         case hang
+        /// Delivers headers and a body prefix, then waits for cancellation.
+        case partial(status: Int, body: Data)
     }
     typealias Responder = @Sendable (Recorded) -> Reply
 
@@ -55,6 +57,11 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         switch reply {
         case .hang:
             hanging.withLock { $0 = true }
+        case .partial(let status, let data):
+            hanging.withLock { $0 = true }
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
         case .failure(let code):
             client?.urlProtocol(self, didFailWithError: URLError(code))
         case .response(let status, let data, let headers):

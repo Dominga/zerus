@@ -162,14 +162,13 @@ extension ConversationModel {
             payload["expected_question_hash"] = .string(question.hash)
             payload["answers"] = try JSON.parse(frozen)
             attempted = true
-            let initial: JSONObject
-            do { initial = try await app.client.submit(connection, target: target, operation: "answer", payload: payload, id: attempt.requestId) }
-            catch let failure as RelayError {
-                refused = Self.rejectedStatuses.contains(failure.status)
-                throw failure
+            do {
+                try await OutgoingSend.run(client: app.client, connection: connection, target: target, operation: "answer",
+                    payload: payload, id: attempt.requestId, settle: { await self.settle(attempt, $0) })
+            } catch let refusal as OutgoingSend.Rejected {
+                refused = true
+                throw refusal.response
             }
-            let receipt = try await app.client.waitForReceipt(connection, initial: initial)
-            await settle(attempt, receipt)
         } catch {
             let status = !attempted || refused ? "failed" : "uncertain"
             do {
@@ -270,9 +269,9 @@ extension ConversationModel {
             var files: JSON = .array([])
             if !message.attachments.isEmpty {
                 guard let store = app.attachmentStore else { throw ZerusError.invalid("Private attachment storage is unavailable.") }
-                let attachments = message.attachments
-                files = try await Task.detached(priority: .userInitiated) { try store.payload(attachments) }.value
+                files = try await store.preparedPayload(message.attachments)
             }
+            try Task.checkCancellation()
             guard fresh(target), app.connections.contains(where: { $0.id == connection.id }) else {
                 throw ZerusError.invalid("The session changed before transport. Review the saved message.")
             }
@@ -294,13 +293,13 @@ extension ConversationModel {
                 payload = retained
             }
             attempted = true
-            let initial: JSONObject
-            do { initial = try await app.client.submit(connection, target: target, operation: "send", payload: payload, id: id) }
-            catch let failure as RelayError {
-                if Self.rejectedStatuses.contains(failure.status) { rejected = failure }
-                throw failure
+            do {
+                try await OutgoingSend.run(client: app.client, connection: connection, target: target, operation: "send", payload: payload, id: id,
+                    settle: { await self.settleOutgoing(message, $0) })
+            } catch let refusal as OutgoingSend.Rejected {
+                rejected = refusal.response
+                throw refusal.response
             }
-            await settleOutgoing(message, try await app.client.waitForReceipt(connection, initial: initial))
         } catch {
             let failure = rejected?.message ?? (attempted ? "Delivery is unconfirmed. Check its receipt before sending again."
                 : (error as? ZerusError)?.message ?? "The saved message was not sent. Review it before trying again.")
@@ -486,7 +485,7 @@ extension ConversationModel {
         receiptFlights.insert(draft.key)
         defer { receiptFlights.remove(draft.key) }
         do {
-            let receipt = try await app.client.waitForReceipt(connection, initial: try await app.client.receipt(connection, id: draft.requestId))
+            let receipt = try await app.client.boundedReceipt(connection, id: draft.requestId)
             await settle(draft, receipt)
         } catch {
             app.error = "Receipt unavailable. The answer remains saved."

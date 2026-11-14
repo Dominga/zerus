@@ -8,14 +8,16 @@
 //!
 //! Unknown stays unknown: a count that is missing or null is not zero, a
 //! value the reader does not know is not the one it waits for, and a member
-//! whose row has an unknown is not free.
+//! whose established conversation has an unknown is not free. A bound fresh
+//! launch instead needs its exact native first-message readiness proof.
 use super::ports::Fact;
 use serde_json::Value;
 
 /// Every key path [`Facts::of`] reads, and whether every producer writes it
 /// (the guard test checks both against rows the producers made).
-pub(super) const READ: [(&str, bool); 16] = [
+pub(super) const READ: [(&str, bool); 17] = [
     ("name", true),
+    ("agent", true),
     ("run_id", true),
     ("launch_id", true),
     ("conversation_id", true),
@@ -153,6 +155,9 @@ pub(super) struct Facts {
     /// The shared presentation's status is "ready": no error, recovery,
     /// question, schedule or wait the person would see.
     pub ready: bool,
+    /// A native launch that has not acquired a conversation yet. Its
+    /// unknown counters need a separate, exact first-message terminal proof.
+    pub fresh: bool,
     pub activity: Option<String>,
     pub phase: Option<String>,
     /// `process_work.count`: the session's own background jobs.
@@ -191,6 +196,7 @@ impl Facts {
                 && text("process_state") == Some("running")
                 && text("runtime_state") == Some("live"),
             ready: zerus_client_core::view::row(row).status == "ready",
+            fresh: row["conversation_id"].is_null() || row["conversation_id"] == "",
             activity: text("activity").map(str::to_owned),
             phase: text("phase").map(str::to_owned),
             background: count(row.get("process_work").and_then(|w| w.get("count"))),
@@ -200,9 +206,10 @@ impl Facts {
         }
     }
 
-    /// Live, ready, idle, and known to run no job, child or question.
+    /// An established conversation, live and idle, with every count known zero.
     pub fn free(&self) -> bool {
-        self.live
+        !self.fresh
+            && self.live
             && self.ready
             && self.activity.as_deref() == Some("idle")
             && self.phase.as_deref() == Some("idle")
@@ -212,6 +219,17 @@ impl Facts {
             && self.questions == Some(0)
     }
 
+    pub fn first_candidate(&self) -> bool {
+        self.fresh && self.live && self.questions == Some(0)
+            && !self.background.is_some_and(|n| n > 0)
+            && !self.children.is_some_and(|n| n > 0)
+            && !self.children_unsettled
+    }
+
+    pub fn free_with_first(&self, first_ready: bool) -> bool {
+        self.free() || (self.first_candidate() && first_ready)
+    }
+
     /// The count that keeps an otherwise free member from being free
     /// (zerus-63rru.55): live, ready and idle, every known count zero, and
     /// this one unknown. The first such count in [`READ`]'s order. None when
@@ -219,6 +237,12 @@ impl Facts {
     /// member whose count is still unknown is busy, not unreadable. This
     /// only names why [`Facts::free`] said no; it decides nothing.
     pub fn unknown(&self) -> Option<Fact> {
+        if self.fresh && self.live
+            && !self.background.is_some_and(|n| n > 0)
+            && !self.children.is_some_and(|n| n > 0)
+        {
+            return Some(Fact::FirstMessage);
+        }
         let idle = self.live
             && self.ready
             && self.activity.as_deref() == Some("idle")
@@ -270,6 +294,7 @@ impl Facts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Identity<'a> {
     pub name: &'a str,
+    pub agent: &'a str,
     pub run: &'a str,
     pub launch: &'a str,
     pub conversation: &'a str,
@@ -280,6 +305,7 @@ impl<'a> Identity<'a> {
         let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
         Self {
             name: text("name"),
+            agent: text("agent"),
             run: text("run_id"),
             launch: text("launch_id"),
             conversation: text("conversation_id"),

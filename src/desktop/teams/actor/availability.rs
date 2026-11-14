@@ -10,6 +10,7 @@ const SQL:&str="SELECT r.json FROM desktop_catalog_sources s JOIN desktop_catalo
 /// Whether `member` is live and idle in its current run. With `backfill`, a
 /// member bound before handles gets its handle recorded once it is verified;
 /// a read inside an admission passes false and never writes.
+#[cfg(test)]
 pub(super) fn free(
     config: &Config,
     epoch: &str,
@@ -23,6 +24,7 @@ pub(super) fn free(
 /// (zerus-63rru.55): a binding that resolves to no run, or an unknown count
 /// of an otherwise free member. A member with no row, or with one that is
 /// busy, is busy.
+#[cfg(test)]
 pub(super) fn availability(
     config: &Config,
     epoch: &str,
@@ -30,10 +32,23 @@ pub(super) fn availability(
     member: &Member,
     backfill: bool,
 ) -> Result<Availability> {
+    with_first(config, epoch, team, member, backfill, |_| false)
+}
+/// The same bound point read, with a native first-send witness supplied only
+/// for an eligible fresh member. Admission supplies an already-read witness;
+/// it never starts a terminal reader while holding the spawn fence.
+pub(super) fn with_first(
+    config: &Config,
+    epoch: &str,
+    team: &str,
+    member: &Member,
+    backfill: bool,
+    first_ready: impl FnOnce(&Value) -> bool,
+) -> Result<Availability> {
     Ok(match read(config, epoch, team, member, backfill)? {
         Read::Row(row) => {
             let facts = super::fleet::Facts::of(&row);
-            if facts.free() {
+            if facts.free_with_first(facts.first_candidate() && first_ready(&row)) {
                 Availability::Free
             } else {
                 facts

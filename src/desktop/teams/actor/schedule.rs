@@ -219,8 +219,8 @@ impl Runtime {
                 && held.is_some()
             {
                 // An occupied seat remains unavailable for new work. Only
-                // an undecidable binding needs this card: decisive ends are
-                // handled by delivery recovery (.85).
+                // an undecidable binding or first-message readiness needs
+                // this card: decisive ends use delivery recovery (.85).
                 self.member_free(store, ports, team, &m, now)?
             } else if ready_work
                 && m.id != team.lead
@@ -255,7 +255,9 @@ impl Runtime {
             match &answer {
                 Some(Availability::Unreadable(fact)) => {
                     if let Some(effect) = held {
-                        if matches!(fact, Fact::NoHandle | Fact::Unavailable) {
+                        if matches!(fact, Fact::NoHandle | Fact::Unavailable)
+                            || matches!(fact, Fact::FirstMessage) && effect.state == "reserved"
+                        {
                             needs.holders.insert(m.id.clone());
                             needs.needed.insert(
                                 m.id.clone(),

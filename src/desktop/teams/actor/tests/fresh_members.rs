@@ -18,6 +18,11 @@ use zerus_team_plan::model::{Member, TaskRef};
 use zerus_watch_protocol::{topic, Body, CatalogItem, Frame, Hello, Limits, Snapshot};
 
 const CHILD: &str = "desktop::teams::actor::tests::fresh_members::fixture";
+#[test]
+fn first_message_probe_uses_the_production_cli_argument_parser() {
+    child("cli-arguments");
+}
+
 const RUN: &str = "fresh-member-run";
 const SID: &str = "00000000-0000-4000-8000-000000000152";
 
@@ -315,7 +320,16 @@ impl World {
         crate::desktop::teams::child::FIXTURE_SPAWN.with(|s| {
             *s.borrow_mut() = Some(Box::new(move |config, args, input| {
                 let value = if args.first().is_some_and(|a| a == "inspect") {
-                    let mut value = terminal.inspection();
+                    let mut value = match terminal.cli_inspection(args) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            println!("INSPECT_ARGUMENTS_REFUSED={args:?}: {error}");
+                            return crate::desktop::teams::child::Ended::Exited {
+                                code: 2,
+                                output: error.into_bytes(),
+                            };
+                        }
+                    };
                     if let Some((key, value_fault)) = &fault {
                         if *key == "after-reservation" {
                             let store = crate::teams::store::Store::open(&config.state).unwrap();
@@ -374,10 +388,18 @@ impl Drop for World {
 }
 
 #[test]
-#[ignore = "executed by the eight isolated controls"]
+#[ignore = "executed by the nine isolated controls"]
 fn fixture() {
     let case = std::env::var("HGS_FRESH_MEMBER_FIXTURE").unwrap();
     match case.as_str() {
+        "cli-arguments" => {
+            let mut w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                w.transport(None);
+                assert_eq!(w.availability(), Availability::Free);
+            });
+        }
+
         "codex-ready" => {
             let mut w = World::new("codex", "ready", false);
             let terminal = w.terminal;

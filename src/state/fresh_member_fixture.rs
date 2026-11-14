@@ -1,7 +1,11 @@
 //! Native terminal-shaped inputs. Session, inspection and input rows use the
 //! product writers; only the backend's screen and native metadata are stand-ins.
 use super::*;
-use std::sync::Mutex;
+use std::{
+    io::{Read, Seek, SeekFrom, Write},
+    os::fd::AsRawFd,
+    sync::Mutex,
+};
 
 pub(crate) struct Terminal {
     pub record: Value,
@@ -37,8 +41,40 @@ impl Terminal {
     pub fn with<T>(&'static self, body: impl FnOnce() -> T) -> T {
         backend::with_fake(self, body)
     }
-    pub fn inspection(&self) -> Value {
-        journal::inspection(string(&self.record, "name"), 0, None, false).unwrap()
+    /// Capture the production CLI parser and its actual serialized reply.
+    /// Only the one-thread private fixture child may redirect its own stdout.
+    pub fn cli_inspection(&self, args: &[String]) -> Result<Value> {
+        assert!(std::env::var_os("HGS_FRESH_MEMBER_FIXTURE").is_some());
+        let mut output = tempfile::tempfile_in(root()).map_err(|e| e.to_string())?;
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        if saved < 0 {
+            return Err("Could not retain fixture stdout".into());
+        }
+        struct Restore(i32);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::dup2(self.0, libc::STDOUT_FILENO);
+                    libc::close(self.0);
+                }
+            }
+        }
+        let restore = Restore(saved);
+        if unsafe { libc::dup2(output.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+            return Err("Could not capture fixture stdout".into());
+        }
+        let result = super::dispatch(args);
+        std::io::stdout().flush().map_err(|e| e.to_string())?;
+        drop(restore);
+        let code = result?;
+        if code != 0 {
+            return Err(format!("Inspector exited {code}"));
+        }
+        output.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        output.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
 }
 impl backend::TerminalBackend for Terminal {

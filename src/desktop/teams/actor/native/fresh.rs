@@ -34,7 +34,13 @@ impl Native {
         }
         let inspected = self
             .read(
-                &["inspect".into(), named[0].clone(), "--json".into()],
+                &[
+                    "inspect".into(),
+                    named[0].clone(),
+                    "--after".into(),
+                    i64::MAX.to_string(),
+                    "--skip-processes".into(),
+                ],
                 Instant::now() + Duration::from_secs(2),
             )
             .ok()?;

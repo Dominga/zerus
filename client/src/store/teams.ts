@@ -67,6 +67,8 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
+  settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */
   after?: string | null;

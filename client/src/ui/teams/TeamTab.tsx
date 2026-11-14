@@ -2,11 +2,12 @@ import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from
 import { tr } from "../../i18n";
 import { selected, setPage } from "../../store/ui";
 import { machineCards } from "../../store/machines";
-import { newRequestId, teams, type TeamCall, type UnresolvedCall } from "../../store/teams";
+import { newRequestId, teams, type TeamCall, type TeamOutcome, type UnresolvedCall } from "../../store/teams";
 import { rowIdentity } from "./session-binding";
 import { teamCall, type TaskButton } from "./actions";
 import { MemberCard } from "./MemberCard";
 import { TeamBar } from "./team-bar";
+import { TeamSettingsDialog } from "./TeamSettingsDialog";
 import { TaskActions } from "./TeamActions";
 import { TeamConfirmDialog } from "./TeamConfirmDialog";
 import { stageLine } from "./task-line";
@@ -53,7 +54,10 @@ export function TeamWorkspace(props: {
   /** A queue page by its cursor; null is the first page. */
   onPage: (cursor: string | null) => void;
   onAddTask: () => void;
+  onSettingsSave?: (call: TeamCall) => Promise<TeamOutcome>;
+  settingsBlocked?: boolean;
 }) {
+  const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
@@ -66,7 +70,7 @@ export function TeamWorkspace(props: {
   // Only another team resets the selection: a refreshed view of the same team
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
-  createEffect(on(teamId, () => { setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
+  createEffect(on(teamId, () => { setSettingsView(undefined); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
   // Waiting for you's Open task: the node it names, or the card a stage of that
@@ -101,7 +105,10 @@ export function TeamWorkspace(props: {
   const send = (kind: string, fields: Record<string, unknown> = {}) => { props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
-      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)} />
+      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
+        onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked} />
+      <Show when={settingsView()} keyed>{(snapshot) => <TeamSettingsDialog view={snapshot} busy={props.busy || !!props.settingsBlocked}
+        onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} />}</Show>
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>
@@ -269,6 +276,8 @@ export function TeamTab() {
         <span class="dim">{binding().state === "none" ? tr("This session is not a team lead.") : tr("Finding the team of this session…")}</span>
       </div>
     }>{(current) => <TeamWorkspace view={current()} busy={teams.busy()} failure={readFailure()} actionFailure={actionReason(source())}
+      onSettingsSave={(call) => teams.run(call, source())}
+      settingsBlocked={teams.unresolved().some((entry) => entry.call.team === current().bar.id && entry.call.action.kind === "settings")}
       onAction={act} onPage={(cursor) => void teams.page(`team:${current().bar.id}`, cursor)} onAddTask={() => setPage("projects")} />}</Show>
     <Show when={!view() && actionReason(source())}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
     <TeamUnresolvedList entries={teams.unresolved()} busy={teams.busy()} onCheck={(entry) => void teams.check(entry, source())} onDismiss={(entry) => void teams.dismiss(entry, source())} />

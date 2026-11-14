@@ -465,11 +465,20 @@ mod tests {
         });
     }
 
+    // The board stays readable with future fields. Editing settings is stricter:
+    // an unknown field must disable replacement instead of disappearing on Save.
+    fn board_with_settings_admission(value: &Value, queue: &Value) -> Value {
+        let mut view = team(value, queue);
+        assert_eq!(view.settings.is_some(), value["team"]["settings"].get("added_later").is_none());
+        view.settings = None;
+        serde_json::to_value(view).unwrap()
+    }
+
     #[test]
     fn the_status_and_its_members_ignore_unknown_fields_at_every_level() {
         let queue = fixture("queue");
         same_read(TeamRead::Status { team: TEAM.into() }, "status", |value| {
-            serde_json::to_value(team(value, &queue)).unwrap()
+            board_with_settings_admission(value, &queue)
         });
     }
 
@@ -482,7 +491,7 @@ mod tests {
         same_read(
             TeamRead::Status { team: TEAM.into() },
             "status-stopped",
-            |value| serde_json::to_value(team(value, &queue)).unwrap(),
+            |value| board_with_settings_admission(value, &queue),
         );
         let stopped = fixture("status-stopped");
         assert!(stopped["service_items"]["items"]

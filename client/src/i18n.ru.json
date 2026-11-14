@@ -2539,6 +2539,7 @@
   "Refresh the session before sending a message.": "Обновите сессию перед отправкой сообщения.",
   "Refresh the session before sending.": "Обновите сессию перед отправкой.",
   "Refresh the team to check this member's open work.": "Обновите команду, чтобы проверить незавершённую работу участника.",
+  "Refresh the team to read its complete goal.": "Обновите команду, чтобы загрузить цель целиком.",
   "Refresh the team to read its pinned roles.": "Обновите команду, чтобы загрузить закреплённые роли.",
   "Refresh this session": "Обновить эту сессию",
   "Refresh this session's identity before changing shared notifications.": "Обновите данные сессии перед изменением общих уведомлений.",

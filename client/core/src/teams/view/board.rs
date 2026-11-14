@@ -204,6 +204,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
         },
         members: member_cards(status),
         member_roles: super::editing::roles(status),
+        edit_goal: super::editing::goal(status),
         groups,
         truncated,
         next: next_cursor(queue),

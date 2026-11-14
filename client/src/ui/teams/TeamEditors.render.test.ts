@@ -26,7 +26,7 @@ const click = (host: ParentNode, text: string) => {
 };
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 function setup(result: TeamOutcome) {
-  const [view, setView] = createSignal<TeamView>({ ...teamView, revision: 20, member_roles: [{ id: "developer", name: "Developer", agent: "claude", model: "role-model", effort: "high", account: { mode: "freest" } }] });
+  const [view, setView] = createSignal<TeamView>({ ...teamView, revision: 20, edit_goal: "", member_roles: [{ id: "developer", name: "Developer", agent: "claude", model: "role-model", effort: "high", account: { mode: "freest" } }] });
   const action = vi.fn(async () => result);
   const host = document.createElement("div"); document.body.append(host);
   dispose = render(() => createComponent(TeamWorkspace, { get view() { return view(); }, busy: false, failure: null, onAction: action, onPage: () => {}, onAddTask: () => {} }), host);
@@ -66,4 +66,14 @@ it("changing the selected team closes the form without writing to either team", 
   await flush();
   expect(host.querySelector("dialog")).toBeNull();
   expect(action).not.toHaveBeenCalled();
+});
+
+it("edits the complete goal rather than the display preview", async () => {
+  const { host, action, setView, view } = setup({ outcome: "done", request_id: "example", receipt: {} });
+  const full = "x".repeat(9000);
+  setView({ ...view(), edit_goal: full, bar: { ...view().bar, goal: full.slice(0, 8000) } });
+  click(host, "Edit goal");
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(full);
+  click(host, "Save"); await flush();
+  expect(action).toHaveBeenCalledExactlyOnceWith("set_goal", { goal: full }, 20, teamView.bar.id);
 });

@@ -95,3 +95,24 @@ fn status_counts_current_work_outside_the_displayed_queue_page() {
     assert_eq!(exit, 1);
     assert_eq!(reply["error"]["code"], "not_allowed");
 }
+
+#[test]
+fn a_long_goal_is_projected_completely_for_editing_without_widening_the_bar() {
+    let h = Harness::new();
+    h.create();
+    let goal = "x".repeat(9000);
+    let (reply, exit) = h.cli(
+        &Caller::Person,
+        "set-goal",
+        &input(&h, json!({"goal":goal})),
+    );
+    assert_eq!(exit, 0, "{reply}");
+    let (status, exit) = h.cli(&Caller::Person, &format!("status --team {TEAM}"), "");
+    assert_eq!(exit, 0, "{status}");
+    let view = zerus_client_core::teams::view::team(&status, &json!({"rows":[]}));
+    assert_eq!(view.edit_goal.as_deref(), Some(goal.as_str()));
+    assert_eq!(
+        view.bar.goal.chars().count(),
+        zerus_client_core::teams::view::TEXT_CHARS
+    );
+}

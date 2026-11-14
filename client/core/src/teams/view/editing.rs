@@ -45,3 +45,10 @@ fn account(value: &Value) -> Option<AccountChoice> {
     }
     Some(choice)
 }
+
+/// Editing never saves a display-truncated goal back over its unseen suffix.
+pub(super) fn goal(status: &Value) -> Option<String> {
+    status.get("member_roles")?.as_array()?;
+    let goal = status.get("team")?.get("goal")?.as_str()?;
+    (goal.len() <= 16_384).then(|| goal.to_owned())
+}

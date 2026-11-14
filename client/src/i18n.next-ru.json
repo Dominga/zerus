@@ -1043,6 +1043,7 @@
   "Refresh is unavailable without current background access from this Zerus installation. Revoked or changed access needs separate recovery; this build cannot refresh that service.": "Обновление недоступно без действующего фонового доступа от этой установки Zerus. Отозванный или изменённый доступ требует отдельного восстановления; эта сборка не может обновить такую службу.",
   "Refresh starts the updated CLI in the same service mode after the original service has drained. It does not grant or restore background access.": "После завершения работы исходной службы обновление запускает новую версию CLI в том же режиме службы. Обновление не предоставляет и не восстанавливает фоновый доступ.",
   "Refresh the team to check this member's open work.": "Обновите команду, чтобы проверить незавершённую работу участника.",
+  "Refresh the team to read its complete goal.": "Обновите команду, чтобы загрузить цель целиком.",
   "Refresh the team to read its pinned roles.": "Обновите команду, чтобы загрузить закреплённые роли.",
   "Refresh this session's identity before opening its terminal.": "Обновите сведения о сессии, прежде чем открывать её терминал.",
   "Refresh to check limits.": "Обновите, чтобы проверить лимиты.",

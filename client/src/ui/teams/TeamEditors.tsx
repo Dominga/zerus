@@ -49,9 +49,9 @@ export function createTeamEditors(view: () => TeamView, action: EditAction) {
 }
 function MetadataDialog(props: { kind: string; view: TeamView; busy: boolean; locked?: boolean; error: string; close: () => void; submit: EditSubmit }) {
   const rename = props.kind === "rename_team";
-  const [text, setText] = createSignal(rename ? props.view.bar.name : props.view.bar.goal);
+  const [text, setText] = createSignal(rename ? props.view.bar.name : props.view.edit_goal ?? "");
   return <TeamEditDialog title={rename ? tr("Rename team") : tr("Edit goal")} action={tr("Save")} busy={props.busy} error={props.error} close={props.close}
-    disabled={props.locked || (rename && !text().trim())} submit={() => props.submit(props.kind, rename ? { name: text() } : { goal: text() })}>
+    disabled={props.locked || (!rename && props.view.edit_goal == null) || (rename && !text().trim())} submit={() => props.submit(props.kind, rename ? { name: text() } : { goal: text() })}>
     <label>{rename ? tr("Team name") : tr("Goal")}
       <Show when={rename} fallback={<textarea class="field" aria-label={tr("Goal")} rows={6} maxlength={16384} value={text()} disabled={props.busy} onInput={(e) => setText(e.currentTarget.value)} />}>
         <TextInput class="field" aria-label={tr("Team name")} maxlength={256} value={text()} disabled={props.busy} onInput={(e) => setText(e.currentTarget.value)} />
@@ -64,6 +64,6 @@ export function TeamEditButtons(props: { view: TeamView; busy: boolean; open: (k
   return <Show when={activeTeam(props.view.bar.status)}><span class="team-edit-buttons">
     <button type="button" class="btn small" disabled={props.busy} onClick={() => props.open("add_member")}>{tr("Add member")}</button>
     <button type="button" class="btn small" disabled={props.busy} onClick={() => props.open("rename_team")}>{tr("Rename team")}</button>
-    <button type="button" class="btn small" disabled={props.busy} onClick={() => props.open("set_goal")}>{tr("Edit goal")}</button>
+    <button type="button" class="btn small" disabled={props.busy || props.view.edit_goal == null} title={props.view.edit_goal == null ? tr("Refresh the team to read its complete goal.") : undefined} onClick={() => props.open("set_goal")}>{tr("Edit goal")}</button>
   </span></Show>;
 }

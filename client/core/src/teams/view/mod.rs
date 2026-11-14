@@ -550,6 +550,9 @@ pub struct TeamView {
     pub members: Vec<MemberCard>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub member_roles: Vec<MemberRole>,
+    /// Complete bounded goal for editing; the bar keeps its display preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_goal: Option<String>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.
     pub truncated: bool,

@@ -70,6 +70,8 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  /** Complete bounded goal for the editor, distinct from the bar preview. */
+  edit_goal?: string | null;
   member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */

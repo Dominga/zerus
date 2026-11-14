@@ -146,7 +146,9 @@ class NativeClaudeQuestions(unittest.TestCase):
   # tmux's default size for a session no client has attached to yet.
   columns,rows=('80','24') if tall or '_80x24' in self._testMethodName else ('87' if wrapped else '120','45')
   hgs_env=['HGS_SESSION='+self.name,'HGS_RUN_ID='+self.run_id,'HGS_STATE_DIR='+str(self.state),'HGS_CONFIG_DIR='+str(self.root/'config')]+(['HGS_ANSWER_CHANNEL_SECONDS='+str(self.channel_seconds)] if hasattr(self,'channel_seconds') else [])
-  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'CLAUDE_CONFIG_DIR='+str(self.root/'.claude'),'DISABLE_AUTOUPDATER=1','PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*getattr(self,'native_env',()),*hgs_env,CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  # Disable the unrelated asynchronous marketplace clone in this private
+  # HOME before input/approval tests and their bounded pane teardown.
+  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'CLAUDE_CONFIG_DIR='+str(self.root/'.claude'),'DISABLE_AUTOUPDATER=1','PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*getattr(self,'native_env',()),*hgs_env,CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
   # A drawn panel does not prove Claude has created its transcript yet. Both
   # must be ready within the existing startup wait before the fixture binds it.

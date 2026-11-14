@@ -1671,6 +1671,7 @@
   "Waiting for Claude to report its cache lifetime with its next reply.": "Ждём, когда Claude сообщит время жизни кэша в следующем ответе.",
   "Waiting for Codex to report its model.": "Ждём, когда Codex сообщит свою модель.",
   "Waiting for Kimi to report its model.": "Ждём, когда Kimi сообщит свою модель.",
+  "Waiting for a task": "Ожидает задачу",
   "Waiting for confirmation": "Ожидание подтверждения",
   "Waiting for the remote read": "Ожидание данных с удалённого компьютера",
   "Waiting for you": "Ждёт вас",

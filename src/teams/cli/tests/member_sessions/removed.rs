@@ -23,7 +23,7 @@ fn l2_removed_members_keep_the_binding_but_leave_the_teams_session_list() {
         assert_eq!(
             row["member_sessions"],
             json!([
-                {"member":"lead","machine":MACHINE,"session_id":LEAD_SESSION}
+                {"member":"lead","role":"lead","machine":MACHINE,"session_id":LEAD_SESSION}
             ])
         );
         assert_eq!(row["lead_session"], json!(key(LEAD_SESSION)));
@@ -66,7 +66,7 @@ fn a_paused_or_stopped_member_keeps_its_team_session() {
         assert_eq!(
             reply["rows"][0]["member_sessions"],
             json!([
-                {"member":"m1","machine":MACHINE,"session_id":M1_SESSION}
+                {"member":"m1","role":"developer","machine":MACHINE,"session_id":M1_SESSION}
             ])
         );
     }

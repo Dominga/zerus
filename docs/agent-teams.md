@@ -118,9 +118,18 @@ Once the team is created, the desktop service:
 
 - creates the integration branch at the base commit, without checking it out;
 - launches the lead, then each member in its own generated worktree, linked
-  as a child session of the lead where its agent allows that;
+  as a child session of the lead where its agent allows that. A member with a
+  durable session and run can be linked before its first conversation;
 - picks each session's account at launch: by default the signed-in account of
   the role's agent with the most room left in its usage windows.
+
+With the preview on, Sessions groups a team under its name, with the lead first
+and the other members ordered by role and member ID. Each row shows its role.
+Membership uses the team roster's computer and launch/run bindings, including
+when a parent link is pending; session names do not establish membership. A
+live, quiet member without its first conversation shows **Waiting for a task**.
+Ordinary sessions and the Sessions list with the preview off keep their usual
+status and grouping rules.
 
 A member that cannot be started becomes a card in Waiting for you that says
 why and whether Zerus tries again. When Zerus does not know whether a member

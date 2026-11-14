@@ -95,7 +95,7 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   // A subagent row is not a target of its own: the whole family is one session.
   while (i > 0 && rows[i].type === "child") i--;
   const over = rows[i];
-  const group = over.type === "header" || over.type === "container" ? over.project : over.type === "card" ? groupOf(over.session.key)
+  const group = over.type === "header" || over.type === "agent-team" || over.type === "container" ? over.project : over.type === "card" ? groupOf(over.session.key)
     : over.type === "creation" ? projectOf(over.creation, grouping()) : groupOf(over.parent.key);
   const top = offsets[i];
   let bottom = top + heights[i];

@@ -176,6 +176,11 @@ pub(crate) fn save(record: &mut Value) -> Result<()> {
     storage::write(record)
 }
 
+/// Reads the record back through the production label/ID routing.
+pub(crate) fn saved_record(name: &str) -> Result<Value> {
+    storage::read(name)
+}
+
 /// `hgs rename from to`.
 pub(crate) fn rename(from: &str, to: &str) -> Result<()> {
     rename::dispatch(&[from.to_owned(), to.to_owned()], false).map(|_| ())

@@ -172,24 +172,55 @@ pub(crate) fn observe(state: &Path, task: &TaskRef) -> Result<()> {
     Ok(())
 }
 
-/// The revision that the service's ObserveTask would carry for the task now
-/// (zerus-63rru.37 round 4): the same project store, complete load and
-/// observation as `observe`, recording nothing. Native merge admission
-/// compares it with the revision the Teams store applied for the node. The
-/// project lock is waited for no longer than `wait`; a busy, missing or
-/// unreadable task is an error, never a revision. Its one caller, the
-/// desktop Teams actor, runs only on Linux and macOS.
+/// The revision that the service's ObserveTask would carry for the task now,
+/// with the project lock it was read under (zerus-63rru.37 rounds 4 and 5):
+/// the same project store, complete load and observation as `observe`,
+/// recording nothing. While the returned store lives, no task-document
+/// writer of this computer can save the task, so native merge admission
+/// compares the revision with the one the Teams store applied for the node
+/// and keeps the store until its ref update has returned. The project lock
+/// is waited for no longer than `wait`; a busy, missing or unreadable task
+/// is an error, never a revision. Its one caller, the desktop Teams actor,
+/// runs only on Linux and macOS.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
-pub(crate) fn current_revision(
+pub(crate) fn held_revision(
     state: &Path,
     task: &TaskRef,
     team: &str,
     home: &str,
     wait: std::time::Duration,
-) -> Result<String> {
+) -> Result<(ProjectStore, String)> {
+    #[cfg(test)]
+    held::before_lock();
     let tasks = project(state, task, Some(wait))?;
     let document = load(&tasks, &task.uuid)?;
-    Ok(observation(&document, team, home)?.revision)
+    let revision = observation(&document, team, home)?.revision;
+    #[cfg(test)]
+    held::after_read();
+    Ok((tasks, revision))
+}
+
+/// Test points of the held reader, each run once on the thread that armed
+/// it: just before it waits for the project lock, and just after it read
+/// the revision under that lock.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::cell::RefCell;
+    type Hook = RefCell<Option<Box<dyn FnOnce()>>>;
+    thread_local! {
+        pub(crate) static BEFORE_LOCK: Hook = const { RefCell::new(None) };
+        pub(crate) static AFTER_READ: Hook = const { RefCell::new(None) };
+    }
+    pub(super) fn before_lock() {
+        if let Some(hook) = BEFORE_LOCK.with(|s| s.borrow_mut().take()) {
+            hook();
+        }
+    }
+    pub(super) fn after_read() {
+        if let Some(hook) = AFTER_READ.with(|s| s.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 #[cfg(test)]

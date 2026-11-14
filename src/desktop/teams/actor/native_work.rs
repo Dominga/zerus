@@ -151,14 +151,14 @@ impl Native {
             },
         }
     }
-    fn merge_admission(
-        &self,
-        plan: &MergePlan,
-    ) -> Result<crate::teams::store::actor_reads::Admission> {
+    fn merge_admission(&self, plan: &MergePlan) -> Result<MergeAdmission> {
         let store = Store::open(&self.config.state)?;
-        // The accepted task's current state, read before the store's writer
-        // fence because project locks precede team operations; its error is
-        // the last refusal below (zerus-63rru.37 round 4).
+        // The accepted task's project lock first, its current state read
+        // under it, and then the store's writer fence: every path that takes
+        // both takes them in this order (project locks precede team
+        // operations), so this never waits for a project lock while it holds
+        // the fence. Its error is the last refusal below (zerus-63rru.37
+        // rounds 4 and 5).
         let current = self.accepted_task_revision(&store, plan);
         let store = store.admission()?;
         let team = store
@@ -213,8 +213,11 @@ impl Native {
                 // 4): a failed ObserveTask, its supersede included, leaves
                 // the node's revision behind the replica, and the merge
                 // waits for the observation that applies it. A missing or
-                // unreadable task admits nothing.
-                let (task, current) = current?;
+                // unreadable task admits nothing. The project lock the
+                // revision was read under stays held with the fence until the
+                // ref update has returned (round 5): no task write can come
+                // between this comparison and the Git write.
+                let (task, held, current) = current?;
                 if !store
                     .applied_task(&plan.team, plan.node)?
                     .is_some_and(|(applied, revision)| {
@@ -225,7 +228,10 @@ impl Native {
                         "The team store has not applied the accepted task's current state",
                     ));
                 }
-                return Ok(store);
+                return Ok(MergeAdmission {
+                    _store: store,
+                    _task: held,
+                });
             }
             cursor = page.next;
             if cursor.is_none() {
@@ -234,19 +240,24 @@ impl Native {
         }
         Err(problem("The exact Ready acceptance is no longer current"))
     }
-    /// The accepted node's task and its current revision in the replica,
-    /// through the reader that builds ObserveTask, waiting for the project
-    /// lock no longer than the admission's own short bound.
+    /// The accepted node's task, its project lock, and its current revision
+    /// in the replica read under that lock, through the reader that builds
+    /// ObserveTask, waiting for the lock no longer than the admission's own
+    /// short bound.
     fn accepted_task_revision(
         &self,
         store: &Store,
         plan: &MergePlan,
-    ) -> Result<(zerus_team_plan::model::TaskRef, String)> {
+    ) -> Result<(
+        zerus_team_plan::model::TaskRef,
+        zerus_replica::ProjectStore,
+        String,
+    )> {
         let task = store
             .applied_task(&plan.team, plan.node)?
             .and_then(|(task, _)| task)
             .ok_or_else(|| problem("The accepted task is missing"))?;
-        let revision = crate::teams::tasks::current_revision(
+        let (held, revision) = crate::teams::tasks::held_revision(
             &self.config.state,
             &task,
             &plan.team,
@@ -259,8 +270,17 @@ impl Native {
                 cut(&error.message, 512)
             ))
         })?;
-        Ok((task, revision))
+        Ok((task, held, revision))
     }
+}
+/// A merge admission's boundary (zerus-63rru.37 round 5): the store's writer
+/// fence and the accepted task's project lock, under which the task's
+/// current revision was read and found applied. The ref update holds it
+/// until update-ref has returned, within the ref deadline. Fields drop in
+/// order: the fence first, then the project lock, the reverse of taking.
+pub(super) struct MergeAdmission {
+    _store: crate::teams::store::actor_reads::Admission,
+    _task: zerus_replica::ProjectStore,
 }
 /// The merge admission's wait for the accepted task's project lock. The
 /// second admission runs inside the process spawn turn, so it stays short; a

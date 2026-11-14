@@ -210,6 +210,14 @@ impl Drop for Owned {
         crate::teams::integrate::BEFORE_REF_WRITE.with(|s| {
             s.borrow_mut().take();
         });
+        for hook in [
+            &crate::teams::tasks::held::BEFORE_LOCK,
+            &crate::teams::tasks::held::AFTER_READ,
+        ] {
+            hook.with(|s| {
+                s.borrow_mut().take();
+            });
+        }
     }
 }
 #[test]

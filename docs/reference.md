@@ -4108,7 +4108,9 @@ gets one item naming the task, and the task document is left unchanged. A Git
 write that was already admitted keeps its integration fact; the item says the
 accepted result had already been merged, with the commit when known. A merge
 also waits until the home service has applied the task's current state, and a
-task that cannot be read is not merged.
+task that cannot be read is not merged. From that final check until the Git
+ref update returns, the task's own writes wait: a task command that cannot
+wait that long refuses as busy without writing anything and can be retried.
 
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt

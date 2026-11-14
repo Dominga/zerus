@@ -2,15 +2,21 @@
 //! task's current state (zerus-63rru.37 round 4): native merge admission
 //! reads the task's current revision through the reader that builds
 //! ObserveTask and refuses unless the node's applied revision equals it.
+//! The final admission's comparison and the ref write are one boundary
+//! (round 5): the task's project lock, taken before the store's writer
+//! fence, is held with it until update-ref has returned.
 //! Real repositories, real task documents and the product's own writers; no
 //! store row is written by hand.
 use super::*;
+use std::{cell::RefCell, rc::Rc, sync::mpsc, time::Duration};
 use zerus_replica::{
     execution::{NativeRequest, Origin, Receipt, ReportKind},
-    Actor as TaskActor, Settlement, Stage,
+    Actor as TaskActor, ProjectStore, Settlement, Stage,
 };
 
 const NOT_APPLIED: &str = "The team store has not applied the accepted task's current state";
+/// A product task write's own short wait for the project lock.
+const SHORT: Duration = Duration::from_millis(50);
 
 fn executor(machine: &str, who: &str) -> zerus_replica::SessionKey {
     zerus_replica::SessionKey {
@@ -68,6 +74,40 @@ fn tip(o: &Owned, plan: &ports::MergePlan) -> String {
 }
 fn refused_with(result: &ports::MergeResult, reason: &str) -> bool {
     matches!(result, ports::MergeResult::Unavailable { reason: r } if r == reason)
+}
+/// A product write to the task document that waits for the project lock no
+/// longer than `wait`: false, with nothing written, while another holds it.
+fn write_within(state: &Path, task: &TaskRef, wait: Duration, text: &str) -> bool {
+    let Some(tasks) =
+        ProjectStore::open_within(&state.join("replica"), &task.project, wait).unwrap()
+    else {
+        return false;
+    };
+    let mut doc = tasks.load(&task.uuid).unwrap();
+    doc.comment(text, &TaskActor::Person, 9).unwrap();
+    tasks.save(&mut doc).unwrap();
+    true
+}
+/// The task's current revision, as the service's observation reads it.
+fn revision(h: &Harness, task: &TaskRef) -> String {
+    let home = h.store.team(TEAM).unwrap().unwrap().home;
+    crate::teams::tasks::held_revision(h.temp.path(), task, TEAM, &home, SHORT)
+        .unwrap()
+        .1
+}
+/// The revision the store applied for the node.
+fn applied(h: &Harness, node: u32) -> String {
+    h.store.applied_task(TEAM, node).unwrap().unwrap().1
+}
+/// The merged commit joins the admitted base and the admitted report.
+fn assert_admitted_merge(o: &Owned, plan: &ports::MergePlan, result: &ports::MergeResult) {
+    let ports::MergeResult::Merged { commit } = result else {
+        panic!("not merged: {result:?}");
+    };
+    assert_eq!(&tip(o, plan), commit);
+    let parent = |n: &str| git(&o.root, &o.empty, &["rev-parse", &format!("{commit}^{n}")]);
+    assert_eq!(parent("1"), plan.base);
+    assert_eq!(parent("2"), plan.commit);
 }
 
 struct Current {
@@ -332,7 +372,21 @@ fn a_busy_unreadable_or_missing_task_refuses_the_merge() {
         assert!(snapshot.exists(), "{mode}");
         let mut held = None;
         match mode {
-            "busy" => held = Some(zerus_replica::ProjectStore::open(&root, &task.project).unwrap()),
+            // Another thread holds the project lock, released by this test
+            // or after a bound, so a merge that waited without one ends.
+            "busy" => {
+                let (release, released) = mpsc::channel::<()>();
+                let (locked, ready) = mpsc::channel();
+                let (root, project) = (root.clone(), task.project.clone());
+                let holder = std::thread::spawn(move || {
+                    let store = ProjectStore::open(&root, &project).unwrap();
+                    locked.send(()).unwrap();
+                    let _ = released.recv_timeout(Duration::from_secs(5));
+                    drop(store);
+                });
+                ready.recv().unwrap();
+                held = Some((release, holder));
+            }
             "unreadable" => std::fs::write(&snapshot, b"not a task document").unwrap(),
             _ => {
                 std::fs::remove_file(&snapshot).unwrap();
@@ -346,8 +400,165 @@ fn a_busy_unreadable_or_missing_task_refuses_the_merge() {
             "{mode}: {result:?}"
         );
         assert_eq!(tip(&o, &plan), plan.base, "{mode}");
-        drop(held);
+        if let Some((release, holder)) = held {
+            let _ = release.send(());
+            holder.join().unwrap();
+        }
     }
+}
+
+/// The round-4 confirmation's probe: a product task write after the final
+/// admission and before update-ref. The boundary holds the task's project
+/// lock and the store's writer fence until the ref update has returned, so
+/// the write's short wait ends busy and no team writer comes in either; a
+/// writer that waits for the lock gets it only once the ref is written. The
+/// ref moves to the admitted merge. The same write succeeds afterwards, and
+/// the store then observes the new revision.
+#[test]
+fn a_task_write_after_the_final_admission_waits_for_the_ref_write() {
+    let (h, o, plan, task) = merge_fixture_task();
+    let state = h.temp.path().to_owned();
+    let seen = Rc::new(RefCell::new(None));
+    let waiter = Rc::new(RefCell::new(None));
+    let (hook_state, hook_task) = (state.clone(), task.clone());
+    let (hook_seen, hook_waiter) = (seen.clone(), waiter.clone());
+    let reference = o.root.join(".git/refs/heads").join(&plan.branch);
+    crate::teams::integrate::BEFORE_REF_WRITE.with(|s| {
+        *s.borrow_mut() = Some(Box::new(move || {
+            let written = write_within(
+                &hook_state,
+                &hook_task,
+                SHORT,
+                "A note after the final admission",
+            );
+            let fenced = Store::open(&hook_state).unwrap().admission().is_err();
+            *hook_seen.borrow_mut() = Some((written, fenced));
+            // A writer that waits for the project lock reads the ref the
+            // moment it has the lock.
+            let root = hook_state.join("replica");
+            let project = hook_task.project.clone();
+            *hook_waiter.borrow_mut() = Some(std::thread::spawn(move || {
+                let held = ProjectStore::open(&root, &project).unwrap();
+                let tip = std::fs::read_to_string(&reference).unwrap();
+                drop(held);
+                tip.trim().to_owned()
+            }));
+        }))
+    });
+    let result = native(&h).work_merge(&plan);
+    let waited = waiter.borrow_mut().take().map(|t| t.join().unwrap());
+    assert_eq!(
+        *seen.borrow(),
+        Some((false, true)),
+        "a task write or a team writer came inside the boundary"
+    );
+    assert_admitted_merge(&o, &plan, &result);
+    assert_eq!(
+        waited,
+        Some(tip(&o, &plan)),
+        "a waiting task writer got the lock before the ref was written"
+    );
+    let before = applied(&h, plan.node);
+    assert_eq!(before, revision(&h, &task));
+    assert!(write_within(
+        &state,
+        &task,
+        SHORT,
+        "A note after the final admission"
+    ));
+    let written = revision(&h, &task);
+    assert_ne!(written, before);
+    assert_eq!(applied(&h, plan.node), before);
+    observe_task(&state, &task).unwrap();
+    assert_eq!(applied(&h, plan.node), written);
+}
+
+/// The revision is read under the lock the boundary keeps: a product task
+/// write just after the final admission's read also ends busy, and the
+/// merge writes the state it compared.
+#[test]
+fn a_task_write_just_after_the_revision_read_waits_for_the_ref_write() {
+    let (h, o, plan, task) = merge_fixture_task();
+    let state = h.temp.path().to_owned();
+    let seen = Rc::new(RefCell::new(None));
+    let (hook_state, hook_task, hook_seen) = (state.clone(), task.clone(), seen.clone());
+    crate::teams::integrate::BEFORE_ADMISSION.with(|s| {
+        *s.borrow_mut() = Some(Box::new(move || {
+            crate::teams::tasks::held::AFTER_READ.with(|s| {
+                *s.borrow_mut() = Some(Box::new(move || {
+                    *hook_seen.borrow_mut() = Some(write_within(
+                        &hook_state,
+                        &hook_task,
+                        SHORT,
+                        "A note after the revision read",
+                    ));
+                }))
+            })
+        }))
+    });
+    let before = applied(&h, plan.node);
+    let result = native(&h).work_merge(&plan);
+    assert_eq!(
+        *seen.borrow(),
+        Some(false),
+        "a task write came between the revision read and the ref write"
+    );
+    assert_admitted_merge(&o, &plan, &result);
+    assert_eq!(revision(&h, &task), before);
+    assert!(write_within(
+        &state,
+        &task,
+        SHORT,
+        "A note after the revision read"
+    ));
+    assert_ne!(revision(&h, &task), before);
+}
+
+/// Lock order: the service observation takes the task's project lock and
+/// then the store's fence, and the final admission takes them in the same
+/// order. Just before the admission waits for the project lock, a real
+/// observation of a newer task revision runs on another thread and must end
+/// within a bound; the admission then reads the revision it applied and the
+/// merge proceeds. An admission that held the fence first would leave the
+/// observation waiting for it (a bounded deadlock: the admission's own
+/// project wait is short), and this test fails instead of hanging.
+#[test]
+fn the_final_admission_takes_the_project_lock_before_the_store_fence() {
+    let (h, o, plan, task) = merge_fixture_task();
+    let state = h.temp.path().to_owned();
+    let seen = Rc::new(RefCell::new(None));
+    let observer = Rc::new(RefCell::new(None));
+    let (hook_state, hook_task) = (state.clone(), task.clone());
+    let (hook_seen, hook_observer) = (seen.clone(), observer.clone());
+    crate::teams::integrate::BEFORE_ADMISSION.with(|s| {
+        *s.borrow_mut() = Some(Box::new(move || {
+            edit(&hook_state, &hook_task, |doc| {
+                doc.comment("A note during the merge", &TaskActor::Person, 9)
+                    .unwrap()
+            });
+            crate::teams::tasks::held::BEFORE_LOCK.with(|s| {
+                *s.borrow_mut() = Some(Box::new(move || {
+                    let (done, ended) = mpsc::channel();
+                    let thread = std::thread::spawn(move || {
+                        let _ = done.send(observe_task(&hook_state, &hook_task));
+                    });
+                    *hook_seen.borrow_mut() = Some(ended.recv_timeout(Duration::from_secs(5)));
+                    *hook_observer.borrow_mut() = Some(thread);
+                }))
+            })
+        }))
+    });
+    let result = native(&h).work_merge(&plan);
+    if let Some(thread) = observer.borrow_mut().take() {
+        thread.join().unwrap();
+    }
+    assert!(
+        matches!(seen.borrow().as_ref(), Some(Ok(Ok(())))),
+        "the observation waited for the admission: {:?}",
+        seen.borrow()
+    );
+    assert_admitted_merge(&o, &plan, &result);
+    assert_eq!(applied(&h, plan.node), revision(&h, &task));
 }
 
 /// The ordinary lead acceptance and the person's Integration card Approve

@@ -565,7 +565,13 @@ admission reads the task's current revision through the reader that builds the
 service's observation, before and again at the ref update, and refuses unless
 the node's applied revision is the same. A failed observation, its supersede
 included, therefore holds the merge until an observation applies; a missing,
-unreadable or busy task admits nothing.
+unreadable or busy task admits nothing. The admission at the ref update and
+the Git write are one boundary: it takes the task's project lock, reads and
+compares the revision under it, then takes the team store's writer fence, and
+holds both until update-ref has returned, within the ref deadline. Every path
+that takes both locks takes them in that order. A task write in the meantime
+waits for the boundary, or ends busy within its own wait, and is observed
+afterwards.
 
 ## Pipelines
 

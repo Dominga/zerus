@@ -11,6 +11,13 @@ use std::time::Duration;
 
 /// How long a job that no live session holds is not looked for again.
 const UNHELD: Duration = Duration::from_secs(60);
+// Native process/window metadata, not a transcript. Claim admission reads both
+// registries while retaining the global writer: neither may wait or grow unbound.
+const REGISTRY_BYTES: u64 = 64 * 1024;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "continuations/registry_tests.rs"]
+mod registry_tests;
 
 /// The Claude process that runs this hook, when Claude named it for this event's
 /// own conversation rather than an outer Claude passing its variables on.
@@ -60,7 +67,13 @@ fn registry(pid: u32) -> Option<Value> {
 
 fn registry_in(dir: &Path, pid: u32) -> Option<Value> {
     let path = dir.join("sessions").join(format!("{pid}.json"));
-    let entry: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > REGISTRY_BYTES { return None; }
+    let mut bytes = Vec::new();
+    file.take(REGISTRY_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > REGISTRY_BYTES { return None; }
+    let entry: Value = serde_json::from_slice(&bytes).ok()?;
     (entry["pid"] == pid).then_some(entry)
 }
 

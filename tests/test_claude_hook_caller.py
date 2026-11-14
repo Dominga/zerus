@@ -88,6 +88,75 @@ class ClaudeHookCaller(unittest.TestCase):
         temporary = directory / 'answer.tmp'
         temporary.write_text(json.dumps(payload)); temporary.replace(directory / 'answer.json')
 
+    def registry_refusal_before_claim(self, which, kind):
+        if sys.platform != 'linux':
+            self.skipTest('Linux exact-worker flock interleaving; registry units also run on Mac')
+        from test_answer_channel_termination_fence import AnswerChannelTerminationFence
+        worker, directory, _ = self.waiting_question(background=True)
+        registry = self.hold_path if which == 'window' else self.hold_path.parent / f'{os.getpid()}.json'
+        saved = registry.read_bytes()
+        try:
+            with (directory / 'handover.lock').open('a+b') as handover:
+                fcntl.flock(handover, fcntl.LOCK_EX)
+                self.offer(directory)
+                offered = (directory / 'answer.json').read_bytes()
+                self.wait_for(lambda: AnswerChannelTerminationFence.kernel_lock(self, worker, handover, True))
+                registry.unlink()
+                if kind == 'fifo':
+                    os.mkfifo(registry, 0o600)
+                elif kind == 'link':
+                    original = self.root / 'registry-original.json'
+                    original.write_bytes(saved)
+                    registry.symlink_to(original)
+                elif kind == 'oversize':
+                    registry.write_bytes(saved + b' ' * (64 * 1024 + 1))
+                else:
+                    self.fail(f'unknown registry control {kind}')
+            deadline = json.loads((directory / 'waiting.json').read_text())['deadline']
+            while worker.poll() is None and time.time() < deadline + .3:
+                time.sleep(.01)
+            with (self.state / '.lock').open('r+b') as writer:
+                try:
+                    fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    self.fail(f'{which} {kind} retained the global writer past the original channel end')
+            self.assertIsNotNone(worker.poll(), f'{which} {kind} did not refuse within the original lifetime')
+            stdout, _ = worker.communicate(timeout=2)
+            self.assertEqual(stdout, '')
+            self.assertFalse((directory / 'claimed.json').exists())
+            self.assertFalse((directory / 'emitted.json').exists())
+            self.assertEqual((directory / 'answer.json').read_bytes(), offered, 'keep original UUID and body')
+        finally:
+            if worker.poll() is None and kind == 'fifo':
+                # A blocking-read mutant must release only its private reader;
+                # the late result cannot repair the failed lifetime assertion.
+                try:
+                    fd = os.open(registry, os.O_WRONLY | os.O_NONBLOCK)
+                    try: os.write(fd, saved)
+                    finally: os.close(fd)
+                except OSError:
+                    pass
+            registry.unlink(missing_ok=True)
+            registry.write_bytes(saved)
+
+    def test_special_background_registry_cannot_hold_writer_past_original_deadline(self):
+        self.registry_refusal_before_claim('window', 'fifo')
+
+    def test_special_job_registry_cannot_hold_writer_past_original_deadline(self):
+        self.registry_refusal_before_claim('job', 'fifo')
+
+    def test_linked_background_registry_refuses_before_claim(self):
+        self.registry_refusal_before_claim('window', 'link')
+
+    def test_linked_job_registry_refuses_before_claim(self):
+        self.registry_refusal_before_claim('job', 'link')
+
+    def test_oversize_background_registry_refuses_before_claim(self):
+        self.registry_refusal_before_claim('window', 'oversize')
+
+    def test_oversize_job_registry_refuses_before_claim(self):
+        self.registry_refusal_before_claim('job', 'oversize')
+
     def change_pin(self, other):
         record = json.loads(self.record_path.read_text())
         record.update(pid=other[0], process_start=other[1])

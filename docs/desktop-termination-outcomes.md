@@ -262,6 +262,11 @@ Other hook callers and normal writer recovery keep their existing behavior.
 The fresh binding read uses its observed fixed location and bounded metadata,
 without a fleet scan or presentation repair. Special or changed bindings refuse;
 the original channel deadline is checked again after these reads before claim.
+The native background-job registry and owning-window registry each require a
+regular file opened without following its final link or waiting on a FIFO, at
+most 64 KiB. Missing, unreadable, special, malformed or oversized registry
+metadata refuses the hold before claim, leaving the original offer and UUID
+unclaimed. The same bounded reader protects ordinary registry correlation.
 
 This preclaim gate does not serialize final stdout delivery with a future
 marker publisher or prove physical writer/pipe settlement. That integration

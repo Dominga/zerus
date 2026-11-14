@@ -12,6 +12,8 @@ import { machineCards } from "./machines";
 import type { ArchivePage, ArchiveRow, ComputerId, GroupingOut, GroupOut, MachineMeta, ViewRow } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { trNoop, tr } from "../i18n";
+import { archiveReveal } from "./listReveal";
+import { selectedKey, accountFilter } from "./ui";
 
 // The Archive view's pages, after tray/src/ArchiveBrowser.cpp: one bounded
 // page and two cursor anchors per computer, never a growing history. Older
@@ -199,6 +201,7 @@ export interface ListScope {
   includes(archivedAt: number): boolean;
   compact(key: string): boolean;
   accepts?(s: Session): boolean;
+  revealedKey?: string;
 }
 
 export const inScope = (s: Pick<Session, "machine">, scope: Pick<ListScope, "machines">) =>
@@ -210,7 +213,7 @@ export const inScope = (s: Pick<Session, "machine">, scope: Pick<ListScope, "mac
  * account and folder scopes.
  */
 export const archiveListed = (s: ArchivedSession, scope: ListScope) =>
-  scope.includes(s.archivedAt) && inScope(s, scope) && (!scope.projects?.length || scope.projects.includes(s.group))
+  (s.key === scope.revealedKey || scope.includes(s.archivedAt)) && inScope(s, scope) && (!scope.projects?.length || scope.projects.includes(s.group))
     && (scope.accepts?.(s) ?? true);
 
 /**
@@ -487,7 +490,7 @@ function* catalogRows(): Iterable<Session> {
  * count chip and `archiveTip` the chip's tooltip; the selection and the
  * actions also find the loaded archived rows.
  */
-export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() => {
+export const { archive, archiveRows, archiveCount, archiveTip, archiveRevealScope } = createRoot(() => {
   const archive = createArchive({
     read: (computer, from, until, cursor, query, request) => bridge.archivePage(computer, from, until, cursor, query, request),
     cancel: (through) => { void bridge.cancelArchivePages(through); },
@@ -498,14 +501,26 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
     query: search,
     computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter(), machineCards),
   });
+  const archiveRevealScope = () => JSON.stringify([search(), machineFilter(), projectFilter(), accountFilter(), folderFilter(), archive.range()]);
+  const located = createMemo(() => {
+    const value = archiveReveal();
+    return value && value.session.key === selectedKey() && value.scope === archiveRevealScope() ? value : undefined;
+  });
+  const listedRows = createMemo(() => {
+    const rows = archive.rows(), extra = located();
+    if (!extra || rows.some((s) => s.key === extra.session.key)) return rows;
+    const saved = extra.session as Partial<ArchivedSession>;
+    return [...rows, { ...extra.session, group: extra.group, rank: saved.rank ?? Number.MAX_SAFE_INTEGER, archivedAt: saved.archivedAt ?? 0 }];
+  });
   // The list and its count read one scope through archiveListed (zerus-sa9qn.18).
   const listScope = createMemo((): ListScope => ({
     machines: machineFilter(), projects: projectFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
     accepts: (s) => acceptsAccount(s, accountFilterSet()) && acceptsFolder(s, folderFilter()),
+    revealedKey: located()?.session.key,
   }));
-  const archiveRows = createMemo(() => archiveListRows(archive.rows(), listScope(), grouping()));
-  const counted = createMemo(() => archiveCountOf(archive.rows(), listScope()));
-  return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
+  const archiveRows = createMemo(() => archiveListRows(listedRows(), listScope(), grouping()));
+  const counted = createMemo(() => archiveCountOf(listedRows(), listScope()));
+  return { archive, archiveRows, archiveRevealScope, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });
 
 let retained: (key: string) => Session | undefined = () => undefined;

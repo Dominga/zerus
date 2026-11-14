@@ -1918,6 +1918,13 @@ The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.
 
+**Show in session list**, beside the conversation title, opens the Sessions
+panel, expands the row's groups and centers it without changing the open
+conversation. Hiding filters are adjusted with a brief notice. The row pulses
+twice, or uses a static highlight with reduced motion. Archived conversations
+open in Archive; an already-known selection outside its loaded page is shown
+with an explicit notice.
+
 When the open session is terminated or removed, the conversation pane returns
 to **Select a session**. Polling, new sessions and filter changes keep this
 selection empty until you choose a session. Unsent drafts remain in **Saved drafts**.

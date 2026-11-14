@@ -204,3 +204,18 @@ fn the_status_reads_of_items_search_their_key() {
         );
     }
 }
+
+#[test]
+fn list_reads_only_its_teams_blocking_service_items_and_clears_with_the_writer() {
+    let h = Harness::new();
+    let db = ledger(&h);
+    let mut f = failure(TEAM, "", "Project cannot admit work", 10);
+    f.kind = kind::PROJECT_LIMIT;
+    put(&db, &f).unwrap();
+    put(&db, &failure("other-team", "8", "Other failure", 10)).unwrap();
+    let kinds = crate::teams::store::STUCK_KINDS;
+    let blocked = blocked_teams(h.temp.path(), &[TEAM, "other-team"], kinds).unwrap();
+    assert_eq!(blocked, [TEAM.to_owned()].into_iter().collect());
+    clear(&db, TEAM, kind::PROJECT_LIMIT, "").unwrap();
+    assert!(blocked_teams(h.temp.path(), &[TEAM], kinds).unwrap().is_empty());
+}

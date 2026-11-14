@@ -125,15 +125,37 @@ pub(super) fn list_teams(
     let (limit, cursor) = options.page()?;
     let cursor = cursor.map(input::parse_cursor).transpose()?;
     let page = store.teams(limit, cursor.as_ref())?;
+    let mut progress = store.team_progress(&page.rows)?;
+    let ids = page
+        .rows
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect::<Vec<_>>();
+    let blocked = crate::desktop::teams::blocked_service_teams(
+        &config.state,
+        &ids,
+        crate::teams::store::STUCK_KINDS,
+    )
+    .unwrap_or_default();
+    for (id, summary) in &mut progress {
+        summary.stuck |= blocked.contains(id);
+    }
     let rows = page
         .rows
         .into_iter()
-        .map(|row| listed_team(&store, row))
+        .map(|row| {
+            let summary = progress.remove(&row.id).unwrap_or_default();
+            listed_team(&store, row, summary)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     global_rows_with_next(&identity, rows, page.next.as_ref())
 }
 
-fn listed_team(store: &Store, row: TeamRow) -> Result<Value, Problem> {
+fn listed_team(
+    store: &Store,
+    row: TeamRow,
+    progress: crate::teams::store::TeamProgress,
+) -> Result<Value, Problem> {
     // One indexed roster read supplies both fields for each valid live row.
     // An oversized or invalid roster omits memberships and uses one lead PK lookup;
     // inactive rows keep just the existing lead lookup. No bundle is loaded.
@@ -167,6 +189,10 @@ fn listed_team(store: &Store, row: TeamRow) -> Result<Value, Problem> {
     };
     let mut value = serde_json::to_value(&row).map_err(storage)?;
     if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "progress".into(),
+            serde_json::to_value(progress).map_err(storage)?,
+        );
         object.insert(
             "lead_session".into(),
             serde_json::to_value(lead_session).map_err(storage)?,

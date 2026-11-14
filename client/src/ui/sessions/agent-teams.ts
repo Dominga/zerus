@@ -8,6 +8,7 @@ export interface AgentTeamMember {
   member: string;
   role: string;
   lead: boolean;
+  summary?: TeamSummary;
 }
 
 /** Only the followed roster's durable bindings establish membership. */
@@ -28,7 +29,7 @@ export function agentTeamIndex(available: boolean | undefined, summaries: readon
         && v.state !== "removed" && v.session?.machine === m.machine && v.session.session_id === m.session_id) : undefined;
       const key = `${m.machine}\n${m.session_id}`;
       const member = { team: team.id, name: team.name, project: team.project, member: m.member,
-        role: detail?.role ?? m.role ?? "", lead: m.member === team.lead };
+        role: detail?.role ?? m.role ?? "", lead: m.member === team.lead, summary: team };
       // A conflicting binding proves no membership, even across scanned pages.
       bindings.set(key, bindings.has(key) ? null : member);
     }

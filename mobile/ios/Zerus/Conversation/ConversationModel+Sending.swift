@@ -247,11 +247,33 @@ extension ConversationModel {
             deliveryFlights.remove(id)
             syncOutgoing()
         }
-        let frozen = original.attachments.isEmpty ? captureSendIntent(target, id: id, text: original.text,
+        var preparedPayload: JSONObject?
+        var capturedNative: NativeSendIntent?
+        if nativeOutcomeSupported(target), target.agentId.isEmpty, target.archiveId.isEmpty,
+           app.sessions.contains(where: { $0.target == target && ["claude", "codex", "kimi"].contains($0.agent) }) {
+            do {
+                var payload = try target.json()
+                payload["request_id"] = .string(id); payload["text"] = .string(original.text)
+                if original.attachments.isEmpty { payload["attachments"] = .array([]) }
+                else {
+                    guard let store = app.attachmentStore else { throw ZerusError.invalid("Private attachment storage is unavailable.") }
+                    payload["attachments"] = try await store.preparedPayload(original.attachments)
+                }
+                if !expectedCompactionId.isEmpty { payload["expected_compaction_id"] = .string(expectedCompactionId) }
+                let row = OutgoingMessage(requestId: id, target: target, text: original.text, attachments: original.attachments, createdAt: at)
+                capturedNative = captureNativeSendIntent(row, payload: payload)
+                if capturedNative != nil { preparedPayload = payload }
+            } catch {
+                app.error = (error as? ZerusError)?.message ?? "The saved message was not sent. Review it before trying again."
+                preparingTargets.remove(target.key); continuationEnqueuing = ""; cancelCompactContinuation(); return
+            }
+        }
+        let nativeIntent = capturedNative
+        let frozen = nativeIntent == nil && original.attachments.isEmpty ? captureSendIntent(target, id: id, text: original.text,
             compactionId: expectedCompactionId.isEmpty ? nil : expectedCompactionId) : nil
         let written: MessageState
         do {
-            written = try await app.durableMessages({ try $0.enqueue(original, requestId: id, at: at, sendIntent: frozen) },
+            written = try await app.durableMessages({ try $0.enqueue(original, requestId: id, at: at, sendIntent: frozen, nativeSendIntent: nativeIntent) },
                                                     acknowledge: { current, committed in MessageChanges.enqueueAcknowledged(current, original: original, written: committed, requestId: id) })
         } catch {
             app.error = (error as? ZerusError).map(\.message) ?? "Could not save the outgoing message. It was not sent. Your composition is preserved."
@@ -267,7 +289,7 @@ extension ConversationModel {
         var rejected: RelayError?
         do {
             var files: JSON = .array([])
-            if !message.attachments.isEmpty {
+            if preparedPayload == nil && !message.attachments.isEmpty {
                 guard let store = app.attachmentStore else { throw ZerusError.invalid("Private attachment storage is unavailable.") }
                 files = try await store.preparedPayload(message.attachments)
             }
@@ -292,9 +314,16 @@ extension ConversationModel {
                 guard let retained = saved.value()?.object("payload") else { throw ZerusError.invalid("The saved message details are unavailable. Review this message.") }
                 payload = retained
             }
+            if let preparedPayload { payload = preparedPayload }
+            let operation: String
+            if let saved = message.nativeSendIntent {
+                guard saved.matches(message) else { throw ZerusError.invalid("The saved message details are unavailable. Review this message.") }
+                payload = try NativeSendOutcome.request(id, intent: saved, payload: payload)
+                operation = NativeSendOutcome.send
+            } else { operation = "send" }
             attempted = true
             do {
-                try await OutgoingSend.run(client: app.client, connection: connection, target: target, operation: "send", payload: payload, id: id,
+                try await OutgoingSend.run(client: app.client, connection: connection, target: target, operation: operation, payload: payload, id: id,
                     settle: { await self.settleOutgoing(message, $0) })
             } catch let refusal as OutgoingSend.Rejected {
                 rejected = refusal.response
@@ -319,6 +348,21 @@ extension ConversationModel {
         }
     }
 
+    private func nativeOutcomeSupported(_ target: Target) -> Bool {
+        NativeSendOutcome.supported(relay: app.relayOperations[target.connectionId], native: app.machineOperations[MachineKey(connectionId: target.connectionId, computerId: target.computerId)])
+    }
+
+    private func captureNativeSendIntent(_ row: OutgoingMessage, payload: JSONObject) -> NativeSendIntent? {
+        let target = row.target
+        guard fresh(target), let connection = app.connections.first(where: { $0.id == target.connectionId }),
+              let machine = SendReceiptRecovery.machine(app.machines, target: target),
+              let encoding = SendReceiptRecovery.encoding(version: connection.protocolVersion, route: machine.route) else { return nil }
+        let sources = app.sessions.filter { $0.target == target }
+        guard sources.count == 1, let source = sources.first else { return nil }
+        return NativeSendOutcome.freeze(row, payload: payload, provider: source.agent, machineId: machine.machineId,
+            sessionId: source.raw.string("session_id"), encoding: encoding)
+    }
+
     private func captureSendIntent(_ target: Target, id: String, text: String, compactionId: String? = nil) -> SendIntent? {
         guard let connection = app.connections.first(where: { $0.id == target.connectionId }),
               let machine = SendReceiptRecovery.machine(app.machines, target: target),
@@ -331,6 +375,14 @@ extension ConversationModel {
     }
 
     func settleOutgoing(_ message: OutgoingMessage, _ receipt: JSONObject, deadline: Double? = nil) async {
+        if message.nativeSendIntent != nil {
+            do {
+                _ = try await app.durableMessages { current in NativeSendOutcome.settleReceipt(current, captured: message, receipt: receipt,
+                    deadline: deadline ?? .greatestFiniteMagnitude, now: SendReceiptRecovery.now) }
+            } catch { app.error = "Could not save the delivery result. Check its receipt; the outgoing message remains recoverable." }
+            if let target = selected?.target, message.belongs(to: target) { refreshActivity() }
+            return
+        }
         let result = receipt.object("result"), state = receipt.string("state")
         let proof = message.originalSendIntent().flatMap { intent in result.flatMap { SendReceiptRecovery.acknowledgement(intent, $0) } }
         let strict = message.hasOriginalSendIdentity && SendReceiptRecovery.supported(relay: app.relayOperations[message.target.connectionId],
@@ -380,13 +432,16 @@ extension ConversationModel {
         do {
             let supported = SendReceiptRecovery.supported(relay: app.relayOperations[message.target.connectionId],
                 native: app.machineOperations[MachineKey(connectionId: message.target.connectionId, computerId: message.target.computerId)])
-            let intent = supported ? (message.hasOriginalSendIdentity ? message.originalSendIntent() : captureSendIntent(message.target, id: message.requestId, text: message.text)) : nil
-            switch try await app.client.checkDelivery(connection, message: message, intent: intent) {
+            let intent = supported && message.nativeSendIntent == nil ? (message.hasOriginalSendIdentity ? message.originalSendIntent() : captureSendIntent(message.target, id: message.requestId, text: message.text)) : nil
+            switch try await app.client.checkDelivery(connection, message: message, intent: intent, nativeOutcomeSupported: nativeOutcomeSupported(message.target)) {
             case .original(let receipt, let deadline): await settleOutgoing(message, receipt, deadline: deadline)
             case .native(let intent, let proof, let deadline):
                 _ = try await app.durableMessages { current in
                     SendReceiptRecovery.settle(current, captured: message, intent: intent, proof: proof, deadline: deadline, now: SendReceiptRecovery.now)
                 }
+                if let target = selected?.target, message.belongs(to: target) { refreshActivity() }
+            case .outcome(let proof, let deadline):
+                _ = try await app.durableMessages { NativeSendOutcome.settle($0, captured: message, proof: proof, deadline: deadline, now: SendReceiptRecovery.now) }
                 if let target = selected?.target, message.belongs(to: target) { refreshActivity() }
             case .unconfirmed:
                 if !automatic { app.error = "Delivery is still unconfirmed. The original message remains saved." }

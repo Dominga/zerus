@@ -31,6 +31,7 @@ public struct SendReceiptProof: Codable, Hashable, Sendable {
 public enum SendReceiptCheck: Sendable {
     case original(JSONObject, deadline: Double)
     case native(SendIntent, SendReceiptProof, deadline: Double)
+    case outcome(NativeSendProof, deadline: Double)
     case unconfirmed
 }
 

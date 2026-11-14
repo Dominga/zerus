@@ -38,6 +38,7 @@ data class SendReceiptProof(val messageRequestId: String, val intentSha256: Stri
 sealed interface SendReceiptCheck {
     data class Original(val receipt:JSONObject,val deadlineMs:Long):SendReceiptCheck
     data class Native(val intent:SendIntent,val proof:SendReceiptProof,val deadlineMs:Long):SendReceiptCheck
+    data class Outcome(val proof:NativeSendProof,val deadlineMs:Long):SendReceiptCheck
     data object Unconfirmed:SendReceiptCheck
 }
 

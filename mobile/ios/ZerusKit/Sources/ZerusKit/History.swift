@@ -126,14 +126,14 @@ public enum ConversationMerge {
             // Exact receipt-backed read evidence reconciles its own request.
             // A receipt comes first, then OpenCode's exact request-ID mapping.
             // Text/time matching below is only presentation deduplication.
-            let confirmed = ["submitted", "recorded"].contains(message.status)
+            let confirmed = ["submitted", "recorded"].contains(message.status) && (message.nativeSendIntent == nil || NativeSendOutcome.confirmed(message))
             func named(_ source: String) -> Int? {
                 guard AttachmentPolicy.validId(message.requestId) else { return nil }
                 return result.indices.first { index in
                     !used.contains(index) && result[index].role == "You" && result[index].source == source && result[index].requestId == message.requestId
                 }
             }
-            var match = named("hgs_delivery") ?? named("opencode_native")
+            var match = message.nativeSendIntent != nil && !confirmed ? nil : named("hgs_delivery") ?? named("opencode_native")
             if match == nil, let nativeId = SendReceiptRecovery.exactNativeId(message) {
                 let candidates = result.indices.filter { index in
                     let event = result[index]

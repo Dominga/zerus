@@ -14,7 +14,7 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse the person-latch revision delta, then
+# fixtures first reverse the native-send outcome delta, then the person-latch revision delta, then
 # question-routing Activity and person-latch additions,
 # then the outbox-retention and send-receipt additions, then
 # the send-entry and transport-evidence additions, then
@@ -182,6 +182,12 @@ QUESTION_ROUTE_PERSON_REVISION_FILES = ("ZerusViewModel.kt",)
 # question-eligibility, verification-writer and historical reconstruction pin.
 OWN_MESSAGE_NAVIGATION_UPDATES = ROOT / "tests/fixtures/question-availability-own-message-navigation-updates.patch"
 OWN_MESSAGE_NAVIGATION_UPDATES_SHA = "87314c128a991071a27ae0387d61f327792f478d0c15f0a621dde3bffd96e21c"
+# Exact a4mub.1 phone send/receipt delta. It changes only ordinary outgoing
+# custody and proof settlement; question eligibility and all ten verification
+# writers remain pinned. Reverse it before the older outbox/send projections.
+NATIVE_SEND_OUTCOME_UPDATES = ROOT / "tests/fixtures/question-availability-native-send-outcome-updates.patch"
+NATIVE_SEND_OUTCOME_UPDATES_SHA = "aab31e263d2c41b7f992d27a606d5c4f087c086403dea9ba31377b65947427b5"
+NATIVE_SEND_OUTCOME_FILES = ("ZerusViewModel.kt",)
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -190,6 +196,7 @@ BOTH_FILES = ("ZerusViewModel.kt", "MainActivity.kt")
 # Every reviewed update, newest first: reverse_reviewed_updates reverses them in
 # this order, and each fixture's duplicated-hunk check reverses the newer ones.
 REVIEWED_CHAIN = (
+    (NATIVE_SEND_OUTCOME_UPDATES, NATIVE_SEND_OUTCOME_UPDATES_SHA, NATIVE_SEND_OUTCOME_FILES),
     (OWN_MESSAGE_NAVIGATION_UPDATES, OWN_MESSAGE_NAVIGATION_UPDATES_SHA, BOTH_FILES),
     (QUESTION_ROUTE_PERSON_REVISION_UPDATES, QUESTION_ROUTE_PERSON_REVISION_UPDATES_SHA, QUESTION_ROUTE_PERSON_REVISION_FILES),
     (QUESTION_ROUTE_OUTCOME_UPDATES, QUESTION_ROUTE_OUTCOME_UPDATES_SHA, QUESTION_ROUTE_OUTCOME_FILES),
@@ -289,25 +296,37 @@ def reviewed_hunk(name, fixture, fixture_sha, addition):
     return found[0]
 
 
-def reverse_reviewed_updates(name, source):
-    for fixture, fixture_sha, files in REVIEWED_CHAIN:
+def reverse_reviewed_updates(name, source, chain=REVIEWED_CHAIN):
+    for fixture, fixture_sha, files in chain:
         source = reverse_reviewed_patch(name, source, fixture, fixture_sha, files)
     return source
 
 
-def reconstructed(name, source):
-    return strip_availability(reverse_reviewed_updates(name, source))
+def reconstructed(name, source, chain=REVIEWED_CHAIN):
+    return strip_availability(reverse_reviewed_updates(name, source, chain))
 
 
-def original_source(name, source):
+def original_source(name, source, chain=REVIEWED_CHAIN):
     try:
-        digest = hashlib.sha256(reconstructed(name, source).encode()).hexdigest()
+        digest = hashlib.sha256(reconstructed(name, source, chain).encode()).hexdigest()
     except AssertionError:
         return False
     return digest == {"ZerusViewModel.kt": MODEL_SHA, "MainActivity.kt": MAIN_SHA}[name]
 
 
 class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
+    def test_native_send_outcome_projection_refuses_changed_missing_or_duplicate_hunks(self):
+        source = (MAIN / "ZerusViewModel.kt").read_text()
+        for addition in (
+                "                submitOutgoing(api, connection, target, payload, id, evidence, message.nativeSendIntent)\n",
+                "        if(message.nativeSendIntent!=null) {\n",
+                "    private fun nativeOutcomeSupported(target:Target)=NativeSendOutcome.supported(relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])\n"):
+            self.assertEqual(source.count(addition), 1)
+            self.assert_refuses_duplicated_hunk("ZerusViewModel.kt", NATIVE_SEND_OUTCOME_UPDATES, addition)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(addition=addition, replacement=replacement):
+                    self.assertFalse(original_source("ZerusViewModel.kt", source.replace(addition, replacement, 1)))
+
     def assert_refuses_duplicated_hunk(self, name, fixture, addition):
         """A whole reviewed hunk of `fixture` present twice, at the source state
         just before that fixture is reversed, is refused by its own reversal,
@@ -327,6 +346,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                NATIVE_SEND_OUTCOME_UPDATES, NATIVE_SEND_OUTCOME_UPDATES_SHA, NATIVE_SEND_OUTCOME_FILES)
+                current = reverse_reviewed_patch(name, current,
                                                 OWN_MESSAGE_NAVIGATION_UPDATES, OWN_MESSAGE_NAVIGATION_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 QUESTION_ROUTE_PERSON_REVISION_UPDATES, QUESTION_ROUTE_PERSON_REVISION_UPDATES_SHA,
@@ -471,7 +492,9 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for addition in (
                 "    private fun captureSendIntent(target:Target,id:String,text:String,compactionId:String?=null):SendIntent? {\n",
                 "        val frozen=if(original.attachments.isEmpty()) captureSendIntent(target,id,original.text,expectedCompactionId.takeIf { it.isNotBlank() }) else null\n"):
-            source = (MAIN / "ZerusViewModel.kt").read_text()
+            source = reverse_reviewed_patch("ZerusViewModel.kt", (MAIN / "ZerusViewModel.kt").read_text(),
+                                            NATIVE_SEND_OUTCOME_UPDATES, NATIVE_SEND_OUTCOME_UPDATES_SHA, NATIVE_SEND_OUTCOME_FILES)
+            self.assertTrue(original_source("ZerusViewModel.kt", source, REVIEWED_CHAIN[1:]))
             self.assertEqual(source.count(addition), 1)
             for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
                 with self.subTest(addition=addition[:40], replacement=replacement[:40]):
@@ -481,7 +504,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         reverse_reviewed_patch("ZerusViewModel.kt", newer,
                                                SEND_RECEIPT_UPDATES, SEND_RECEIPT_UPDATES_SHA, SEND_RECEIPT_FILES)
-                    self.assertFalse(original_source("ZerusViewModel.kt", changed))
+                    self.assertFalse(original_source("ZerusViewModel.kt", changed, REVIEWED_CHAIN[1:]))
             self.assert_refuses_duplicated_hunk("ZerusViewModel.kt", SEND_RECEIPT_UPDATES, addition)
 
     def test_outbox_release_reason_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
@@ -503,12 +526,14 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         # The send-entry wiring delta stays an exact hunk: changing, removing
         # or duplicating it must break the reconstruction, never be hidden.
         addition = "                submitOutgoing(api, connection, target, payload, id, evidence)\n"
-        source = (MAIN / "ZerusViewModel.kt").read_text()
+        source = reverse_reviewed_patch("ZerusViewModel.kt", (MAIN / "ZerusViewModel.kt").read_text(),
+                                        NATIVE_SEND_OUTCOME_UPDATES, NATIVE_SEND_OUTCOME_UPDATES_SHA, NATIVE_SEND_OUTCOME_FILES)
+        self.assertTrue(original_source("ZerusViewModel.kt", source, REVIEWED_CHAIN[1:]))
         self.assertEqual(source.count(addition), 1)
         self.assert_refuses_duplicated_hunk("ZerusViewModel.kt", OUTGOING_SEND_UPDATES, addition)
         for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
             with self.subTest(replacement=replacement):
-                self.assertFalse(original_source("ZerusViewModel.kt", source.replace(addition, replacement, 1)))
+                self.assertFalse(original_source("ZerusViewModel.kt", source.replace(addition, replacement, 1), REVIEWED_CHAIN[1:]))
 
     def test_send_attempt_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
         # The reviewed evidence delta stays an exact hunk: changing, removing
@@ -517,6 +542,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         # the still newer #2118 and #2087 deltas.
         addition = "        val attempt = SendAttempt(); var rejected: RelayException? = null\n"
         source = reverse_reviewed_patch("ZerusViewModel.kt", (MAIN / "ZerusViewModel.kt").read_text(),
+                                        NATIVE_SEND_OUTCOME_UPDATES, NATIVE_SEND_OUTCOME_UPDATES_SHA, NATIVE_SEND_OUTCOME_FILES)
+        source = reverse_reviewed_patch("ZerusViewModel.kt", source,
                                         OUTBOX_RETENTION_UPDATES, OUTBOX_RETENTION_UPDATES_SHA, OUTBOX_RETENTION_FILES)
         source = reverse_reviewed_patch("ZerusViewModel.kt", source,
                                         SEND_RECEIPT_UPDATES, SEND_RECEIPT_UPDATES_SHA, SEND_RECEIPT_FILES)

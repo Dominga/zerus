@@ -103,6 +103,7 @@ fn folder_answers(payload: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod lead151;
     #[test]
     fn team_kinds_are_distinct_and_ordinary_admission_stays_closed() {
         let dir = tempfile::tempdir().unwrap();

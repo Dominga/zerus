@@ -5047,15 +5047,14 @@ the attempt as not admitted; a new action with a new ID may send it);
 `cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
 reserved or sent); or `uncertain` (the input may have arrived; it is never sent
 again). Repeating a request ID, a restart or `--recover-only` only reads that
-request's receipt and never submits, even when no receipt exists. Only a task
-positively without floor or attempt, whose bootstrap gate is positively open
-(a member not yet known current, or the person's hold), keeps the legacy route,
-checked again there; a task that may hold a floor or attempt is never sent
-that way.
+request's receipt and never submits, even when no receipt exists. Managed native starts require the current causal cutover even when the older
+bootstrap would have selected a legacy route. Missing/unproven migration
+history stays a task-specific refusal; it never authorizes a legacy offer.
 
 For `unroutable`, `unverified` and `deadline`, the refusal includes a catalog
 computer label marked diagnostic beside the exact UUID when available,
-explains the offline-writer dependency, and points to
+explains that absent computers do not block reachable ones and this computer
+must finish its own automatic cutover, and points to
 `hgs task cutover --project P --json`. A catalog label grants no identity or
 route. Desktop Start shows the complete executor reason as its primary notice.
 
@@ -5593,67 +5592,53 @@ The check reports:
   rises, durably before the catalog publishes the change, whenever its peers
   change, including a change an older build made, which the next read
   records);
-- `closed`: the first node that keeps the fence closed, and why:
-  - `unreachable`, `unverified` (another computer answered), or `unroutable`
-    (a catalog machine that no verified route reaches);
-  - `protocol`, `task_schema` below 7, `store`, or `fence_unsupported`;
-  - `unavailable` (the node's own replica cannot be read now: its hello sends
-    an explicit unavailable part, and it stays a writer);
-  - `busy` (the catalog lock was not free within the budget), `deadline`,
-    `discovery_bound` (a node still unseen beyond 16 hops), or
-    `too_many_nodes` (more than 256 candidates, from the catalog, every
-    visited node's writers and the nodes found over peers, counted as they
-    are added). A partial universe is never certified.
+- `closed`: a global local-identity, resource, discovery or task-admission
+  refusal. Per-node `closed` fields such as `unreachable`, `unverified`,
+  `unroutable`, unsupported schema/capability or `unavailable` are retained
+  negative facts; they do not require that computer to acknowledge.
 - `universe_closed`: the first node that keeps the universe closed, alone;
 - `proof`, when the fence is proved: the common `version`, the `rounds` it
   took, every node with the store it answered from, and `admissible: true`
   once the final admission passed (C3c2).
 
 A node whose hello has no replica key, as an older build sends, shares no
-tasks, so it alone is left out. A node whose replica cannot be read sends a
-present part instead, and is never left out.
-The nodes behind it are not left out: with no other route they close the fence
-as `unroutable`. The check holds no lock across the network, creates no floor
-and no attempt, and grants nothing.
+tasks. An unreadable writer and writers behind an unavailable route remain
+listed as exact negative facts, without invented coverage. The check holds
+no lock across the network and grants no native input authority.
 
-The proof (C3c2) runs over that universe. Each round sends every node, over
-its verified route, `swarm replica-task` for the task. That request carries
-this computer's version (a canonical map: decimal peers and positive counts,
-compared as the changes they name, never as encoded bytes) and the updates the
-node lacks. The node then:
-- imports them;
-- runs the store's locked schema repair;
-- saves durably;
-- reads the task again from its files;
-- answers with that read: its version, whether its state is every change it
-  holds, its raw stored schema, whether it holds a valid floor, and the updates
-  this computer lacks.
+Current task writers use fence capability 2 and the reachable-writer causal
+cutover. Computers are optional: unreachable, unverified, unsupported or timed-out
+writers are recorded as exact `not_cut_over` node/store facts, not required
+acknowledgements. Other available current computers proceed. A bounded probe per
+route leaves the rest of the original deadline for healthy peers. Global
+resource/discovery bounds and an unreadable local identity still refuse.
 
-A node answers only from the store its fresh hello over that route showed;
-any other store closes the proof as `changed_identity`. The fence is proved
-when, in ONE round, every node answers exactly this computer's version, with
-nothing more to send. That version must hold a valid floor and a RAW stored
-schema of at least 7 (not the raised one a cut-over task reports), and this
-computer's copy must still hold it when read again afterwards. Answers for
-different versions are never combined. At most three rounds run within the
-budget. The universe is then read again and must be the same incarnation.
+Before availability changes, the common import/save boundary checks every causal
+span against the genuine historical first floor and then the immutable schema-8
+seal. The available cohort freezes exact versions, adopts one dedicated seal,
+and confirms one common version. A peer lost during prepare or confirmation is
+never counted as an adopter and does not veto the remaining cohort. Final
+admission rechecks catalog/project/store identity, own durable pin, pending
+prepare, hold, floor, seal and exact task version before any reservation.
 
-The final admission takes the catalog lock, the project lock and the store's
-admission, in that order and within the budget. Under those locks it reads
-again:
-- this computer's membership view, its store and its replica root;
-- the hold, for a task that records no attempt yet;
-- the task: holding the proven version, its floor and its raw stored schema.
+Returning updated computers automatically adopt the already admitted seal from
+a freshly verified current source. A clean prefix catches up without a person
+ceremony. Extra old-rule writes are refused directly and through relays, with
+original local files kept for review and no automatic replay. Missing, shallow,
+conflicting or damaged migration evidence holds only that task. An older build
+reads schema-8 tasks as newer/read-only; a disconnected old executable cannot be
+remotely prevented from making unknown local effects, which are never treated
+as accepted current task writes. See
+`docs/superpowers/specs/2026-11-14-reachable-task-writer-cutover.md` for the exact
+root, native custody, importer/writer census and qualification boundaries.
 
-Only then would a reservation run; the check runs none. Closed reasons add:
-`no_floor`, `schema`, `damaged`, `not_converged`, `changed_identity`,
-`membership_changed`, `changed_version`, `held`, `malformed`, `busy` and
-`deadline`. It proves the schema barrier only: not exclusive delivery, not
-consent.
+The check grants no dispatch authority or attempt. Current cutover preparation
+can persist protocol custody/seal metadata; it never offers native input.
 
 A proof that passed its final admission can be kept as the task's
 certificate (C3e): `<project store>/fence/<task>.json`, inside the replica
-root, so a replaced root loses it. The record holds:
+root, so a replaced root loses it. The format-2 record holds:
+- the immutable admitted seal and exact negative `not_cut_over` facts;
 - the proven version;
 - this computer's membership view (peers, catalog machines, membership
   generation), store, root and configuration identity (the Location identity

@@ -189,7 +189,9 @@ fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
     let (snapshot, a) = stamp_at(&tasks.join(format!("{uuid}.loro")), now);
     let (updates, b) = stamp_at(&tasks.join(format!("{uuid}.updates")), now);
     let (mark, c) = link_stamp_at(&tasks.join(format!("{uuid}.managed")), now);
-    (format!("{snapshot}|{updates}|{mark}"), a && b && c)
+    let (cutover, d) = link_stamp_at(&tasks.join(format!("{uuid}.cutover")), now);
+    let (prepare, e) = link_stamp_at(&tasks.join(format!("{uuid}.prepare")), now);
+    (format!("{snapshot}|{updates}|{mark}|{cutover}|{prepare}"), a && b && c && d && e)
 }
 
 fn files(dir: &Path, uuid: &str) -> String {
@@ -201,7 +203,7 @@ fn files(dir: &Path, uuid: &str) -> String {
 /// missing without a lookup. A file written after the listing is found by a
 /// later check.
 fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
-    let mut parts: BTreeMap<String, [String; 3]> = BTreeMap::new();
+    let mut parts: BTreeMap<String, [String; 5]> = BTreeMap::new();
     for entry in fs::read_dir(dir.join("tasks"))? {
         let entry = entry?;
         let name = entry.file_name();
@@ -213,10 +215,12 @@ fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
             TaskFile::Snapshot => 0,
             TaskFile::Updates => 1,
             TaskFile::Mark => 2,
+            TaskFile::Cutover => 3,
+            TaskFile::Prepare => 4,
         };
-        parts.entry(uuid.to_owned()).or_insert_with(|| [MISSING.into(), MISSING.into(), MISSING.into()])[slot] = stamp;
+        parts.entry(uuid.to_owned()).or_insert_with(|| std::array::from_fn(|_|MISSING.into()))[slot] = stamp;
     }
-    Ok(parts.into_iter().map(|(uuid, [snapshot, updates, mark])| (uuid, format!("{snapshot}|{updates}|{mark}"))).collect())
+    Ok(parts.into_iter().map(|(uuid, [snapshot, updates, mark, cutover, prepare])| (uuid, format!("{snapshot}|{updates}|{mark}|{cutover}|{prepare}"))).collect())
 }
 
 /// A listed task file's metadata as `stamped` reads it: the mark's own
@@ -225,11 +229,11 @@ fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
 /// elsewhere the listing's own metadata may lag a write, so it is not used.
 fn listed_metadata(entry: &fs::DirEntry, file: TaskFile) -> std::io::Result<fs::Metadata> {
     #[cfg(unix)]
-    if file == TaskFile::Mark || entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+    if matches!(file,TaskFile::Mark|TaskFile::Cutover|TaskFile::Prepare) || entry.file_type().is_ok_and(|t| !t.is_symlink()) {
         return entry.metadata();
     }
     match file {
-        TaskFile::Mark => fs::symlink_metadata(entry.path()),
+        TaskFile::Mark|TaskFile::Cutover|TaskFile::Prepare => fs::symlink_metadata(entry.path()),
         _ => fs::metadata(entry.path()),
     }
 }
@@ -941,7 +945,7 @@ impl<'a> Index<'a> {
                     let (stamps, now) = match known {
                         Some(known) => (
                             known.stamps.get(uuid).cloned(),
-                            known.listed.get(uuid).cloned().unwrap_or_else(|| format!("{MISSING}|{MISSING}|{MISSING}")),
+                            known.listed.get(uuid).cloned().unwrap_or_else(|| [MISSING;5].join("|")),
                         ),
                         None => (self.stored(uuid)?.map(|s| s.0), stamped(&dir, uuid, read_at).0),
                     };

@@ -384,7 +384,7 @@ pub struct TaskStore {
 
 impl TaskStore {
     fn store(&self) -> Result<replica::ProjectStore> {
-        replica::ProjectStore::open_within(&self.root, &self.project, LOCK_WAIT)?
+        replica::ProjectStore::open_phone_within(&self.root, &self.project, LOCK_WAIT)?
             .ok_or_else(|| ReplicaError::Failed("the project's tasks are busy; try again".into()))
     }
 

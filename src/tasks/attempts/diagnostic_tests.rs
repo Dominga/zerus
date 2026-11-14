@@ -12,7 +12,7 @@ fn offline_writer_refusal_names_diagnostic_label_and_exact_node_and_local_detail
         assert!(text.contains(NODE), "{text}");
         assert!(text.contains("example-laptop"), "{text}");
         assert!(text.contains("diagnostic"), "{text}");
-        assert!(text.contains("An offline computer that once wrote this project's tasks blocks new starts until it is reachable again."), "{text}");
+        assert!(text.contains("Absent computers do not block starts on reachable computers. This computer must finish its automatic task cutover before starting."), "{text}");
         assert!(
             text.contains("hgs task cutover --project orchard --json"),
             "{text}"

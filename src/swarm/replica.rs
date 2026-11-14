@@ -107,6 +107,10 @@ pub fn fingerprint(config: &Config) -> Result<String> {
 pub(crate) struct Wire {
     document: Document,
     bytes: String,
+    /// Only the native response producer sets this after reading its
+    /// already admitted immutable pin. Requests never consume it as proof.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    admitted_seal: Option<String>,
 }
 
 pub(crate) fn encode(updates: Vec<Update>) -> Vec<Wire> {
@@ -115,8 +119,60 @@ pub(crate) fn encode(updates: Vec<Update>) -> Vec<Wire> {
         .map(|u| Wire {
             document: u.document,
             bytes: STANDARD.encode(u.bytes),
+            admitted_seal:None,
         })
         .collect()
+}
+
+fn encode_admitted(store:&ProjectStore, updates:Vec<Update>) -> Vec<Wire> {
+    encode(updates).into_iter().map(|mut wire| {
+        if let Document::Task(uuid)=&wire.document {
+            wire.admitted_seal=store.admitted_cutover_identity(uuid).ok().flatten();
+        }
+        wire
+    }).collect()
+}
+
+fn bootstrap_source<'a>(reply:&'a Value, observed:Option<&str>)->Option<&'a str> {
+    reply["store"].as_str().filter(|store| zerus_replica::ids::is_uuid(store) && Some(*store)==observed)
+}
+
+/// The initiator has already bound this response to the exact node/store of
+/// its fresh hello. Only this qualified response lane may bootstrap a pin;
+/// ordinary imports (including requests) keep the field as candidate data.
+fn import_answer(store:&ProjectStore, wire:Vec<Wire>, own_node:&str, source_node:&str, source_store:Option<&str>, capable:bool) -> Result<zerus_replica::Imported> {
+    let mut qualified=0usize;
+    let mut remaining=Vec::new();
+    for update in wire {
+        let scope=match (&update.document,&update.admitted_seal,source_store) {
+            (Document::Task(uuid),Some(seal),Some(source)) if capable =>Some((uuid.clone(),seal.clone(),source.to_owned())),
+            _=>None,
+        };
+        let bytes=STANDARD.decode(&update.bytes)?;
+        if let Some((uuid,seal,source))=scope {
+            if store.admitted_cutover_identity(&uuid).ok().flatten().as_ref()!=Some(&seal) {
+                let adopted=(|| -> Result<()> {
+                    store.settle_cutover(&uuid)?;
+                    let (capture,local)=store.prepare_cutover(&uuid,own_node)?;
+                    let proposal=if let Some(original)=store.original_cutover_proposal(&uuid)? {original} else {
+                        let candidate=if local.is_empty() {zerus_replica::TaskDoc::from_bytes(&bytes)?} else {
+                            let mut candidate=zerus_replica::TaskDoc::from_bytes(&local)?;
+                            candidate.import(&bytes)?;
+                            candidate
+                        };
+                        candidate.snapshot()?
+                    };
+                    store.catch_up_cutover(&proposal,&capture,source_node,&source,&seal)?;
+                    Ok(())
+                })();
+                if adopted.is_ok() {qualified+=1;continue;}
+            }
+        }
+        remaining.push(Update{document:update.document,bytes});
+    }
+    let mut imported=store.import_updates(remaining)?;
+    imported.changed+=qualified;
+    Ok(imported)
 }
 
 pub(crate) fn decode(wire: Vec<Wire>) -> Result<Vec<Update>> {
@@ -221,7 +277,8 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
     // How many of its tasks do not load now, after this page: a task
     // damaged since the inventory the requester read is counted too.
     Ok(json!({"node_id": node, "store": answering_store(config), "imported": imported.changed,
-              "refused": imported.refused, "updates": encode(updates), "more": more,
+              "refused": imported.refused, "updates": encode_admitted(&store,updates), "more": more,
+              "cutover_capability":super::fence::FENCE,
               "damaged": damaged.len()}))
 }
 
@@ -516,14 +573,14 @@ fn exchange_pages(
         eprintln!("hgs swarm: {alias}: the tasks of {project:?} are busy; the next sync continues");
         Ok(Err((Incomplete::Busy, false)))
     };
-    let (node, swarm) = {
+    let (node, swarm, own_node) = {
         let store = LockedStore::load(config).map_err(unreachable)?;
         let peer = store
             .data
             .peers
             .get(alias)
             .ok_or_else(|| (Incomplete::ChangedIdentity, anyhow::anyhow!("{alias} is not a member of this swarm")))?;
-        (peer.node.clone(), store.data.catalog.swarm_id.clone())
+        (peer.node.clone(), store.data.catalog.swarm_id.clone(), store.data.node_id.clone())
     };
     let mut shown = Shown::default();
     for _ in 0..MAX_PAGES {
@@ -562,8 +619,7 @@ fn exchange_pages(
             return Err(changed_identity());
         }
         answered(&response, &mut shown)?;
-        let updates = decode(serde_json::from_value(response["updates"].clone()).map_err(|e| malformed(e.into()))?)
-            .map_err(malformed)?;
+        let updates:Vec<Wire> = serde_json::from_value(response["updates"].clone()).map_err(|e| malformed(e.into()))?;
         let Some(more_theirs) = response["more"].as_bool() else {
             return Err(malformed(anyhow::anyhow!("no page marker")));
         };
@@ -584,7 +640,7 @@ fn exchange_pages(
             let Some(store) = open(&root)? else {
                 return busy();
             };
-            let imported = store.import_updates(updates).map_err(|e| (Incomplete::Busy, e.into()))?;
+            let imported = import_answer(&store,updates,&own_node,&node,bootstrap_source(&response,observed),response["cutover_capability"]==super::fence::FENCE).map_err(|e| (Incomplete::Busy, e))?;
             changed += imported.changed;
             // A refused document is named in the worker's log; the others are kept.
             for document in &imported.refused {
@@ -689,6 +745,64 @@ mod tests {
         replica_members::exchanged(config, "peer", &observed, &[(project.into(), Ok(()))], &known, 20)
             .unwrap();
         assert!(outcome(config, project).complete);
+    }
+
+    #[test]
+    fn a_hello_alone_cannot_fill_in_a_missing_response_store() {
+        assert_eq!(bootstrap_source(&json!({}),Some(STORE)),None);
+        assert_eq!(bootstrap_source(&json!({"store":STORE}),None),None);
+        assert_eq!(bootstrap_source(&json!({"store":NODE}),Some(STORE)),None);
+        assert_eq!(bootstrap_source(&json!({"store":STORE}),Some(STORE)),Some(STORE));
+    }
+
+    #[test]
+    fn only_a_bound_already_admitted_source_bootstraps_a_fresh_receiver() {
+        let source_root = tempfile::tempdir().unwrap();
+        let source = ProjectStore::open(source_root.path(), "example").unwrap();
+        let mut task = TaskDoc::create(NewTask {
+            project: "example", id: "T-abcdef", text: "Original", stage: Stage::Todo,
+            target: Target::Any, author: Actor::Person, rank: "V", now: 1,
+        }).unwrap();
+        source.save(&mut task).unwrap();
+        let source_store = ProjectStore::store_id(source_root.path()).unwrap();
+        let update = || vec![Update {document: Document::Task(task.uuid().into()), bytes: task.snapshot().unwrap()}];
+        for (qualified, known_store) in [(false, true), (true, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let receiver = ProjectStore::open(dir.path(), "example").unwrap();
+            let outcome = import_answer(&receiver, encode_admitted(&source, update()),
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", NODE,
+                known_store.then_some(source_store.as_str()), qualified).unwrap();
+            assert_eq!(outcome.changed, 0);
+            assert_eq!(outcome.refused.len(), 1);
+            assert!(receiver.admitted_cutover_identity(task.uuid()).unwrap().is_none());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = ProjectStore::open(dir.path(), "example").unwrap();
+        let ordinary = receiver.import_updates(update()).unwrap();
+        assert_eq!(ordinary.refused.len(), 1, "a snapshot is only candidate data");
+        let outcome = import_answer(&receiver, encode_admitted(&source, update()),
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", NODE, Some(&source_store), true).unwrap();
+        assert_eq!(outcome.changed, 1);
+        assert!(outcome.refused.is_empty());
+        assert_eq!(receiver.admitted_cutover_identity(task.uuid()).unwrap(), source.admitted_cutover_identity(task.uuid()).unwrap());
+        let mut next = receiver.load(task.uuid()).unwrap();
+        next.comment("After automatic catch-up", &Actor::Person, 3).unwrap();
+        receiver.save(&mut next).unwrap();
+    }
+
+    #[test]
+    fn a_current_relay_cannot_annotate_unadmitted_candidate_bytes_as_source_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ProjectStore::open(dir.path(), "example").unwrap();
+        let mut task = TaskDoc::create(NewTask {
+            project: "example", id: "T-abcdef", text: "Legacy root", stage: Stage::Todo,
+            target: Target::Any, author: Actor::Person, rank: "V", now: 1,
+        }).unwrap();
+        task.floor().unwrap();
+        task.seal_cutover(BTreeMap::new(), BTreeMap::new()).unwrap();
+        source.save_legacy_for_test(&mut task).unwrap();
+        let wire = encode_admitted(&source, vec![Update {document:Document::Task(task.uuid().into()), bytes:task.snapshot().unwrap()}]);
+        assert!(wire[0].admitted_seal.is_none(), "a copied seal cannot mint source custody");
     }
 
     #[test]

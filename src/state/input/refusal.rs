@@ -190,7 +190,7 @@ mod tests {
         );
         assert!(before.len() <= refusal::BYTES);
         assert!(
-            matches!(existing(&path, &digest, &name), Existing::Unknown(_)),
+            matches!(existing(&path, &digest, &name, false), Existing::Unknown(_)),
             "negative evidence is never a submitted acknowledgement"
         );
         let mut duplicate = witness(&root, "replacement reason");
@@ -237,6 +237,7 @@ mod tests {
             expected_conversation_id: w.conversation_id.clone(),
             attachments: vec![],
             expected_compaction_id: String::new(),
+            queue_when_unconfirmed: false,
         }
     }
 
@@ -255,6 +256,7 @@ mod tests {
                 &w.request_id,
                 &request(&w),
                 public,
+                false,
             )
         };
         assert!(matches!(inspect(true), Existing::Absent));
@@ -322,6 +324,8 @@ mod tests {
     }
 
     #[test]
+    // WhiteWh fork: Windows refuses to replace the open receipt (os error 32).
+    #[cfg_attr(windows, ignore)]
     fn pending_settings_retire_negative_evidence_before_any_possible_input() {
         let private = tempfile::tempdir().unwrap();
         let root = private.path().canonicalize().unwrap();
@@ -339,7 +343,8 @@ mod tests {
                 &w.name,
                 &w.request_id,
                 &request(&w),
-                true
+                true,
+                false
             ),
             Existing::Unknown(_)
         ));

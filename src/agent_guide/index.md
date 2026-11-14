@@ -11,31 +11,30 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide send              message another session and read its reply
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
-  hgs guide team-tests        affected tests, never a full suite
+  hgs guide team-tests        affected tests only
   hgs guide team-lead         plan, decide, ship
   hgs guide team-custom       models, stages, branches, scale
   hgs guide team-draft        plan a draft with the owner
-  hgs guide team-input        member shape, --json-file
+  hgs guide team-input        member shape
   hgs guide team-tree         lead a sub-team
   hgs guide team-run          routine commands
   hgs guide team-safe         allow a routine request
-  hgs guide team-propose      propose a change on a card
-  hgs guide team-lore         team memory: find, plans, export
-  hgs guide code              find code and docs: lore atlas, lore find
+  hgs guide team-propose      propose a change
+  hgs guide team-lore         team memory
+  hgs guide code              find code and docs
   hgs guide team-park         park a task, never poll
-  hgs guide team-broker       builds in a shared folder
+  hgs guide team-broker       shared-folder builds
   hgs guide team-cpp          CMake and MSBuild runs
-  hgs guide run               start a build or test as your work
-  hgs guide tests             run only the tests your change touches
-  hgs guide designer          propose roles and templates
-  hgs guide launch            start a session here or on a peer
+  hgs guide run               a build or test as your work
+  hgs guide tests             only the tests you touch
+  hgs guide designer          roles and templates
+  hgs guide launch            start a session
   hgs guide stop              interrupt, pause, kill, archive
   hgs guide tasks             the project task list
 
 Rules
-- Plain ls --json includes at most 50 recent archives. Its archive_page gives
-  the range/query and next_cursor for hgs archives --json --bounded; follow
-  that cursor to enumerate older archives. --no-archives omits the preview.
+- ls --json shows 50 recent archives; page older ones with its
+  archive_page cursor and hgs archives --json --bounded.
 - inspect prints over 100 KB of JSON: always select fields.
 - A message arrives as user input: begin it with who you are and your
   hgs self reference.

@@ -34,6 +34,8 @@ impl backend::TerminalBackend for Frame {
     }
 }
 #[test]
+// WhiteWh fork: the Windows Terminal reader asks its host, not a pane width.
+#[cfg_attr(windows, ignore)]
 fn wrapped_composer_requires_a_successful_native_width_read() {
     let record = json!({"agent":"codex","cwd":"/tmp/hgs-tn-fixture1/work/zerus-team-11111111-1111-4111-8111-111111111111",
         "pane":"%1","name":"codex/fixture/terminal","run_id":"run"});

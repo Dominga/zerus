@@ -99,6 +99,7 @@ fn raw_case() {
     raw["agent_home"] = json!(home().join(".claude"));
     let name = string(&raw, "name");
     let path = label_record_path(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, raw.to_string()).unwrap();
     // Keep the old reader as a negative control: its derived view is not the
     // complete original metadata the new snapshot must retain.

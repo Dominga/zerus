@@ -1,0 +1,29 @@
+{
+  "actor": {
+    "kind": "service",
+    "person": "local",
+    "team": "00000000-0000-4000-8000-00000000beef"
+  },
+  "created_ms": 1700000000000,
+  "decided_actor": null,
+  "decision": null,
+  "decisions": [
+    "approve",
+    "reject"
+  ],
+  "kind": "pipeline_acceptance",
+  "node": 1,
+  "notes": [
+    {
+      "code": "text_shortened"
+    },
+    {
+      "code": "worktree_dirty"
+    }
+  ],
+  "parameters": [],
+  "seq": 1,
+  "state": "open",
+  "team": "00000000-0000-4000-8000-00000000beef",
+  "text": "Trimmed the label and added a case for an empty one."
+}

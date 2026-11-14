@@ -20,30 +20,29 @@ Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: tas
   hgs task send REF [--session SESSION [--host ALIAS]]
   hgs task handoff REF --session SESSION [--host ALIAS]
   hgs task cancel REF [--reason TEXT]
-  hgs task cancel-attempt REF --attempt UUID [--reason TEXT]   person only
+  hgs task cancel-attempt REF --attempt UUID   person only
 
 Add queues; --start/start records work, no resend. Only the person accepts Done.
-Use the prompt's one acknowledgement. After queue activation, begin-attempt
-replaces start for managed work. Controls are inactive; current prompts use start.
+Use the prompt's one acknowledgement; begin-attempt replaces start for managed
+work once controls are active.
 Report with the original command; --progress updates.
-Keep its pinned report-attempt UUID; never substitute get/start's latest ID.
+Keep its pinned attempt UUID, never a newer one.
 Legacy start prints a plain report command.
 History-only means saved, not moved; do not retry. Without a pinned command,
 ask the person to accept or resend. You cannot cancel your dispatched task;
 report or hand it off. Messages do not transfer ownership; submitted handoff does.
-An unknown delivery is recovered without replay. If recovery cannot settle it,
-ask the person to abandon that exact attempt; agents cannot use cancel-attempt.
+An unknown delivery recovers without replay; else ask the person to abandon it.
 
-Plans create none. Use Start dialog or ask the parent for a child.
+Plans create none; ask the parent for a child.
 Bind its live ID to the receipt. Parent reports; children never use its identity.
-Unknown launch: review, not retry. No task Pause yet.
+Unknown launch: review, not retry.
 
 Edit: To do/Backlog. UUID replay keeps edits; changed input refuses.
 Files: --content-json. Read get first.
 
 Discussion: hgs task message REF --request-id UUID --mode queue|send|reopen|note
   --expect-dispatch ID --content-json
-Get supplies dispatch_id/executor. Queue waits for Start; note saves. Reopen
-leaves Review/Done after submission. Same UUID/mode/anchor/content looks up its
+Get supplies dispatch_id. Queue waits for Start; note saves. Reopen
+leaves Review/Done. Same UUID/mode/anchor/content looks up its
 receipt, never repeats input. Coordinator receipts prove no child ownership.
-Submitted is transport, not model-read; unknown stays unknown.
+Submitted is transport, not read; unknown stays unknown.

@@ -950,6 +950,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn the_private_merge_directory_is_closed_to_other_users() {
         use std::os::unix::fs::PermissionsExt;
         let directory = private_merge_dir().unwrap();
@@ -1136,6 +1138,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn branch_observation_uses_git_for_loose_and_packed_refs_and_refuses_invalid_names() {
         let f = Fixture::new();
         assert!(!branch_exists(&f.repo, "integrate/team").unwrap());
@@ -1222,6 +1228,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn clean_merge_advances_only_integration_with_both_parents() {
         let f = Fixture::new();
         let member = f.branch("member", "member.txt", "member\n");
@@ -1280,6 +1290,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn conflict_preserves_refs_reachable_commits_and_checkout() {
         let f = Fixture::new();
         let member = f.branch("member", "shared.txt", "member\n");
@@ -1316,6 +1330,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_moved_ref_is_stale_then_recomputed_without_losing_work() {
         let f = Fixture::new();
         let member = f.branch("member", "member.txt", "member\n");
@@ -1353,6 +1371,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_deleted_ref_is_stale_and_is_not_recreated() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1371,6 +1393,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_ref_lock_failure_is_not_misreported_as_stale() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1385,6 +1411,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_checked_out_branch_is_refused_in_every_worktree() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1405,6 +1435,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_branch_checked_out_after_merge_computation_is_refused() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1418,6 +1452,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn creation_never_replaces_an_existing_ref() {
         let f = Fixture::new();
         let other = f.branch("other", "other.txt", "other\n");
@@ -1431,6 +1469,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn ancestry_checks_report_unrelated_and_invalid_commits() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1444,6 +1486,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn report_pins_commit_and_branch_and_reports_dirty_without_writes() {
         let f = Fixture::new();
         let before = snapshot(&f.main);
@@ -1466,6 +1512,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn reports_work_for_linked_worktrees_and_untracked_only_changes() {
         let f = Fixture::new();
         create_branch(&f.repo, "integrate/team", &f.base).unwrap();
@@ -1485,6 +1535,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn symbolic_integration_refs_cannot_redirect_a_write_to_another_branch() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1508,6 +1562,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn minimum_git_version_is_checked_conservatively() {
         let f = Fixture::new();
         let before = (f.refs(), snapshot(&f.main));
@@ -1535,6 +1593,8 @@ mod tests {
     /// "--local can only be used inside a git repository" (zerus-63rru.111).
     #[cfg(windows)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn the_repository_reaches_git_as_a_plain_path() {
         let f = Fixture::new();
         let verbatim = f.repo.git_dir.canonicalize().unwrap();
@@ -1556,6 +1616,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn conflict_filenames_are_nul_delimited_without_git_quoting() {
         let f = Fixture::new();
         let path = "line\nquote\".txt";
@@ -1588,6 +1650,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn hooks_and_fsmonitor_are_never_run() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1628,6 +1692,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_repository_cannot_execute_merge_drivers_or_content_filters() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1663,6 +1729,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn required_signing_failure_does_not_publish_an_unsigned_commit() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1681,6 +1751,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn required_signing_produces_a_verifiable_signed_merge() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1733,6 +1805,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_worktree_cannot_declare_a_signing_program() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -1766,6 +1840,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn partial_clone_refuses_before_git_can_fetch_missing_objects() {
         let f = Fixture::new();
         for value in ["true", ""] {
@@ -1783,6 +1861,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_submodule_report_cannot_run_a_nested_filter() {
         let f = Fixture::new();
         let nested = f.main.join("nested");
@@ -1824,6 +1904,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn personal_config_hooks_are_disabled_in_global_and_system_scopes() {
         for system in [false, true] {
             let f = Fixture::new();
@@ -1931,27 +2013,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn repository_local_hooks_and_included_hooks_refuse() {
         repository_command_config_is_refused(false, true);
     }
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn worktree_hooks_and_included_hooks_refuse() {
         repository_command_config_is_refused(true, true);
     }
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn worktree_drivers_and_includes_only_block_merging() {
         repository_command_config_is_refused(true, false);
     }
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn local_drivers_and_includes_only_block_merging() {
         repository_command_config_is_refused(false, false);
     }
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn personal_merge_drivers_are_honored_in_global_and_system_scopes() {
         for system in [false, true] {
             let f = Fixture::new();
@@ -2065,18 +2157,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn personal_driver_and_merge_files_use_a_private_directory() {
         private_driver_context(false);
     }
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn timed_out_driver_leaves_no_checkout_files_or_private_directory() {
         private_driver_context(true);
     }
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn uncommitted_checkout_attributes_cannot_select_a_personal_driver() {
         let f = Fixture::new();
         let member = f.branch("member", "shared.txt", "member\n");
@@ -2110,6 +2208,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn many_changed_paths_use_bounded_attribute_argument_batches() {
         let f = Fixture::new();
         let blob = git(&f.main, &["rev-parse", "HEAD:shared.txt"]);
@@ -2169,6 +2271,8 @@ mod tests {
     /// A Git opened through the product path, with no fixture budget, has
     /// the production thirty seconds.
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_git_without_a_fixture_budget_has_the_production_thirty_seconds() {
         let f = Fixture::new();
         let before = Instant::now();
@@ -2182,6 +2286,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn a_failed_spawn_is_a_certain_nonwrite() {
         let f = Fixture::new();
         create_branch(&f.repo, "integrate/team", &f.base).unwrap();
@@ -2200,6 +2308,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_spawn_turn_timeout_has_no_start_receipt() {
         let f = Fixture::new();
         create_branch(&f.repo, "integrate/team", &f.base).unwrap();
@@ -2241,6 +2351,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn report_handles_a_large_synthetic_index() {
         let f = Fixture::new();
         let blob = git(&f.main, &["rev-parse", "HEAD:shared.txt"]);
@@ -2280,6 +2394,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn small_changed_path_sets_share_one_attribute_batch() {
         let f = Fixture::new();
         git(&f.main, &["config", "filter.unused.clean", "cat"]);
@@ -2290,6 +2408,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn unchanged_base_sync_and_duplicate_merges_write_nothing() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -2320,6 +2442,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn recompute_after_another_writer_accepted_the_same_commit_is_a_noop() {
         let f = Fixture::new();
         let member = f.branch("member", "new.txt", "new\n");
@@ -2344,6 +2470,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn detached_rebase_and_bisect_states_keep_the_integration_branch_busy() {
         for state in [
             "rebase-merge/head-name",
@@ -2402,6 +2532,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn an_expired_deadline_is_a_certain_nonwrite() {
         let f = Fixture::new();
         create_branch(&f.repo, "integrate/team", &f.base).unwrap();
@@ -2422,6 +2554,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn a_started_writer_with_a_lost_result_is_uncertain() {
         let f = Fixture::new();
         create_branch(&f.repo, "integrate/team", &f.base).unwrap();
@@ -2440,6 +2574,10 @@ mod tests {
     }
 
     #[test]
+
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+
+    #[cfg_attr(windows, ignore)]
     fn sync_base_uses_the_same_merge_and_conflict_path() {
         let f = Fixture::new();
         let prior = f.branch("prior", "prior.txt", "prior\n");
@@ -2469,6 +2607,8 @@ mod tests {
         assert_eq!(before, (f.refs(), f.reachable(), snapshot(&f.main)));
     }
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn containing_tip_pins_the_branch_commit_and_keeps_failed_reads_unknown() {
         let f = Fixture::new();
         let member = f.branch("member", "member.txt", "member");
@@ -2517,6 +2657,8 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn an_ancestry_command_failure_after_both_commits_resolve_is_not_a_negative() {
         let f = Fixture::new();
         let incoming = f.branch("member", "new.txt", "incoming");
@@ -2544,6 +2686,8 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn an_admitted_ref_update_releases_the_store_within_its_five_second_budget() {
         let f = Fixture::new();
         let incoming = f.branch("member", "new.txt", "incoming");
@@ -2587,6 +2731,8 @@ mod tests {
     /// control sequences and a line break reaches the message as one clean,
     /// bounded line (zerus-63rru.59).
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn gits_own_words_reach_a_failure_as_one_clean_line() {
         let f = Fixture::new();
         let git = Git::repo(&f.repo).unwrap();
@@ -2610,6 +2756,8 @@ mod tests {
     /// A name with a right-to-left override, as Git echoes it: the override
     /// is gone from the failure's sentence (zerus-63rru.59).
     #[test]
+    // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+    #[cfg_attr(windows, ignore)]
     fn gits_words_lose_a_bidirectional_override() {
         let f = Fixture::new();
         let git = Git::repo(&f.repo).unwrap();

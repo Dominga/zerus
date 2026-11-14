@@ -1,0 +1,23 @@
+[
+  "accept",
+  "admit",
+  "archive",
+  "archive_member",
+  "ask",
+  "cancel",
+  "create",
+  "decide",
+  "hold",
+  "pause",
+  "pause_member",
+  "reassign",
+  "release",
+  "reply",
+  "resume",
+  "resume_member",
+  "return",
+  "route",
+  "settings",
+  "stop",
+  "stop_member"
+]

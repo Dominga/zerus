@@ -217,4 +217,6 @@ mod unreadable_stop;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cancel_progress;
 mod closed_keys;
+// WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
+#[cfg(not(windows))]
 mod seats102;

@@ -27,6 +27,8 @@ fn stored() -> (Value, PathBuf) {
     let mut record = raw();
     record["agent_home"] = json!(home().join(".claude"));
     let path = label_record_path(string(&record, "name"));
+    // WhiteWh fork: a fresh state root has no sessions folder yet.
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, record.to_string()).unwrap();
     (record, path)
 }
@@ -98,7 +100,7 @@ pub(super) fn slot() {
     twin["layout"] = json!("id");
     twin["base"] = json!(["twin executable"]);
     let own = id_record_path(id).unwrap();
-    fs::create_dir(own.parent().unwrap()).unwrap();
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
     fs::write(&own, twin.to_string()).unwrap();
     let captured = Snapshot::capture(&own, name).unwrap();
     assert_eq!(

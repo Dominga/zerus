@@ -1,0 +1,28 @@
+{
+  "actor": {
+    "kind": "session",
+    "member": "lead",
+    "person": "local",
+    "team": "00000000-0000-4000-8000-00000000beef"
+  },
+  "next": null,
+  "ok": true,
+  "rows": [
+    {
+      "actor": {
+        "kind": "person",
+        "origin": "cli_interim",
+        "person": "local"
+      },
+      "created_ms": 1700000000000,
+      "decided_actor": null,
+      "decision": null,
+      "kind": "note",
+      "node": null,
+      "seq": 1,
+      "state": "open",
+      "text": "Tell the team the release moved to Monday."
+    }
+  ],
+  "team": "00000000-0000-4000-8000-00000000beef"
+}

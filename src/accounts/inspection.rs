@@ -761,14 +761,15 @@ fn kimi(home: &Path) -> Value {
         }
         return output;
     }
-    // Upstream's test seam names a loopback base; otherwise only Kimi's
-    // managed endpoints (from the native config) receive this token, and
-    // custom gateways stay untouched.
-    let (base, policy) = if std::env::var_os(KIMI_TEST_BASE_ENV).is_some() {
-        let Some(found) = kimi_base(&mut result) else {
-            return result;
-        };
-        found
+    // Upstream's rules first: its loopback test seam, and an ignored custom
+    // KIMI_CODE_BASE_URL. Otherwise the native config's endpoint (WhiteWh
+    // fork), and only Kimi's managed endpoints receive this token: custom
+    // gateways stay untouched.
+    let Some((base, policy)) = kimi_base(&mut result) else {
+        return result;
+    };
+    let (base, policy) = if policy.isolated {
+        (base, policy)
     } else {
         if ![
             "https://api.kimi.com/coding/v1",
@@ -778,11 +779,16 @@ fn kimi(home: &Path) -> Value {
         {
             return result;
         }
-        (environment.base_url.clone(), CurlPolicy { allow_http: false, isolated: false })
+        (environment.base_url.clone(), policy)
     };
     let me = http_json(&format!("{base}/me"), token, &[], policy).ok();
     let usage = http_json(&format!("{base}/usages"), token, &[], policy).ok();
-    kimi_report(me.as_ref(), usage.as_ref())
+    let mut report = kimi_report(me.as_ref(), usage.as_ref());
+    // An ignored endpoint's note (upstream's kimi_base) stays with the report.
+    if let Some(detail) = result.get("detail").filter(|detail| !detail.is_null()) {
+        report["detail"] = detail.clone();
+    }
+    report
 }
 pub(super) fn dsh(home: &Path) -> Value {
     let fallback =
@@ -1284,6 +1290,9 @@ fi
     const KIMI_DEFAULT_ARGV: &str = "--silent\n--fail\n--proto\n=https\n--connect-timeout\n3\n--max-time\n6\n--max-filesize\n1048576\n--config\n-\n";
 
     #[test]
+    // WhiteWh fork: on Windows the stand-in reads an empty request from curl;
+    // upstream runs this seam on Linux and macOS.
+    #[cfg_attr(windows, ignore)]
     fn kimi_inspection_uses_a_loopback_test_base_and_sends_the_token() {
         let _lock = curl_lock();
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1578,6 +1587,9 @@ fi
     }
 
     #[test]
+    // WhiteWh fork: on Windows the stand-in reads an empty request from curl;
+    // upstream runs this seam on Linux and macOS.
+    #[cfg_attr(windows, ignore)]
     fn a_valid_test_base_wins_over_the_kimi_cli_base() {
         let _lock = curl_lock();
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2065,6 +2077,8 @@ fi
 
     #[test]
     fn kimi_global_region_uses_its_active_scoped_credentials() {
+        // Upstream's Kimi tests set KIMI_CODE_BASE_URL under this lock.
+        let _lock = curl_lock();
         let dir = crate::host::staging::private_tempdir();
         let home = dir.path();
         fs::create_dir_all(home.join("credentials")).unwrap();

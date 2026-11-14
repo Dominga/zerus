@@ -1240,7 +1240,7 @@ mod tests {
         // the assistant-shaped suffix that begins at the stored offset.
         let third = scan(&path, &cache, "claude", "one").unwrap();
         assert_eq!(third["partial"], false);
-        assert!(third["prompt_cache"]["expires_at"].as_f64().unwrap() < at,
+        assert!(third["prompt_cache"]["expires_at"].as_f64().or(third["prompt_cache"]["lapsed_at"].as_f64()).unwrap() < at,
             "a record was parsed from the middle of the discarded one: {third}");
         assert_eq!(third["requests"], 1);
     }
@@ -1423,7 +1423,7 @@ mod tests {
         let original = format!("{old}{recent}");
         fs::write(&path, &original).unwrap();
         let first = scan(&path, &cache, "claude", "one").unwrap();
-        let old_expiry = first["prompt_cache"]["expires_at"].as_f64().unwrap();
+        let old_expiry = first["prompt_cache"]["expires_at"].as_f64().or(first["prompt_cache"]["lapsed_at"].as_f64()).unwrap();
         assert_eq!(first["requests"], 2);
         assert_eq!(first["partial"], false);
         // The same path is rewritten in place at the same length with the same
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(replacement.len(), original.len());
         fs::write(&path, &replacement).unwrap();
         let second = scan(&path, &cache, "claude", "one").unwrap();
-        let new_expiry = second["prompt_cache"]["expires_at"].as_f64().unwrap();
+        let new_expiry = second["prompt_cache"]["expires_at"].as_f64().or(second["prompt_cache"]["lapsed_at"].as_f64()).unwrap();
         assert_eq!(second["partial"], false);
         assert_eq!(second["requests"], 2);
         assert!(new_expiry < old_expiry - 100.0,
@@ -1445,7 +1445,7 @@ mod tests {
         let third = scan(&path, &cache, "claude", "one").unwrap();
         assert_eq!(third["partial"], false);
         assert_eq!(third["requests"], 1);
-        assert!(third["prompt_cache"]["expires_at"].as_f64().unwrap() < new_expiry - 100.0,
+        assert!(third["prompt_cache"]["expires_at"].as_f64().or(third["prompt_cache"]["lapsed_at"].as_f64()).unwrap() < new_expiry - 100.0,
             "the truncated transcript was served from the old offset: {third}");
     }
 

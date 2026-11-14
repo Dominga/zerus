@@ -1,0 +1,46 @@
+{
+  "actor": {
+    "kind": "session",
+    "member": "lead",
+    "person": "local",
+    "team": "00000000-0000-4000-8000-00000000beef"
+  },
+  "next": null,
+  "ok": true,
+  "rows": [
+    {
+      "admitted": true,
+      "id": 1,
+      "phase": 0,
+      "pipeline": "reviewed",
+      "rank": "a01",
+      "role": "developer",
+      "round": 1,
+      "source": "sent",
+      "state": "pending",
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000001"
+      },
+      "title": "Task 1"
+    },
+    {
+      "admitted": true,
+      "id": 2,
+      "implementer": "m1",
+      "phase": 0,
+      "pipeline": "reviewed",
+      "rank": "a02",
+      "role": "developer",
+      "round": 1,
+      "source": "sent",
+      "state": "reported",
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000002"
+      },
+      "title": "Task 2"
+    }
+  ],
+  "team": "00000000-0000-4000-8000-00000000beef"
+}

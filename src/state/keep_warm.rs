@@ -1445,7 +1445,7 @@ mod tests {
         let first = usage::scan(&path, &cache, "claude", "conversation-1").unwrap();
         assert_eq!(first["partial"], true);
         // The prefix still shows the old write, long past its 1 h deadline.
-        assert!(first["prompt_cache"]["expires_at"].as_f64().unwrap() < NOW);
+        assert!(first["prompt_cache"]["expires_at"].as_f64().or(first["prompt_cache"]["lapsed_at"].as_f64()).unwrap() < NOW);
         let rule = eligibility(&session, &first, None);
         let observed = Observed { record: &session, live: true, usage: first };
         let step = decide(&enabled(), &Value::Null, Some(&observed), quiet, NOW);

@@ -1,6 +1,8 @@
 //! One admitted pending Settings step followed by one ordinary message. The
-//! parent retains the original Root, SID, frame and deadline throughout.
+//! parent retains SID, frame, deadline and the pinned Root object throughout.
+//! Claude lends only Root to hooks during its read-only settle/proof waits.
 use super::*;
+pub(super) mod claude;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
@@ -11,6 +13,7 @@ pub(super) struct Progress {
     pub(super) paste_possible: AtomicBool,
     pub(super) enter_settled: AtomicBool,
     index_repair: AtomicBool,
+    pub(super) confirmed: AtomicBool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +48,7 @@ pub(super) struct Reservation {
     pub(super) child: Option<Child>,
     pasted: Vec<u8>,
     marker: Option<(Value, Value)>,
+    enter_deadline: Option<Instant>,
 }
 
 fn header(owner: &owner::Owner) -> Result<&input::native_send::Header> {
@@ -205,6 +209,7 @@ pub(super) struct Publication {
     name: String,
     sha: String,
     final_receipt: bool,
+    after_input: bool,
     source: Option<crate::state::guarded_recovery::Original>,
 }
 impl Publication {
@@ -220,6 +225,7 @@ impl Publication {
             with(owner, |held| {
                 if held.phase != Phase::Entered
                     || !held.progress.enter_settled.load(Ordering::Acquire)
+                    || (header(owner)?.agent == "claude" && !held.progress.confirmed.load(Ordering::Acquire))
                 {
                     return Err(
                         "Submitted receipt lacks the original settled Enter exchange".into(),
@@ -239,8 +245,20 @@ impl Publication {
             name,
             sha: staged.content_sha()?,
             final_receipt,
+            after_input: false,
             source,
         })
+    }
+    // Only negative receipt diagnostics or the exact own typing fields may
+    // use this source-only fence after paste; never a key or Settings effect.
+    fn after_input(owner: &Arc<owner::Owner>, staged: &publication::Staged,
+        directory: PathBuf, name: String) -> Result<Self> {
+        let (record, version) = owner.snapshot()?;
+        receipt_current(owner)?;
+        claude::owned_marker(owner, &record)?;
+        claude::check_publication(owner, staged, &directory, &name, &record)?;
+        Ok(Self { record, version, directory, name, sha: staged.content_sha()?,
+            final_receipt: false, after_input: true, source: None })
     }
     pub(super) fn pending_receipt(
         owner: &Arc<owner::Owner>,
@@ -321,10 +339,16 @@ impl Publication {
         if let Some(source) = &self.source {
             source.verify()?;
         }
+        if self.after_input {
+            receipt_current(owner)?;
+            claude::owned_marker(owner, &self.record)?;
+            claude::check_publication(owner, staged, &self.directory, &self.name, &self.record)?;
+        }
         if self.final_receipt {
             with(owner, |held| {
                 if held.phase == Phase::Entered
                     && held.progress.enter_settled.load(Ordering::Acquire)
+                    && (header(owner)?.agent != "claude" || held.progress.confirmed.load(Ordering::Acquire))
                 {
                     Ok(())
                 } else {
@@ -352,7 +376,12 @@ fn receipt_write(owner: &Arc<owner::Owner>, value: Value, final_receipt: bool) -
         Ok((staged, scope.receipts.path.clone(), name, before))
     })?;
     let receipt_path = parent.join(&name);
-    let step = Publication::new(owner, &staged, parent, name.clone(), final_receipt, None)?;
+    let after_input = h.agent == "claude" && with(owner, |held| Ok(matches!(held.phase, Phase::Pasted | Phase::Entered)))?;
+    let step = if after_input && !final_receipt {
+        Publication::after_input(owner, &staged, parent, name.clone())?
+    } else {
+        Publication::new(owner, &staged, parent, name.clone(), final_receipt, None)?
+    };
     let fence = publication::CommitFence::send(owner, &staged, step)?;
     let committed = staged.commit(&fence)?;
     let original = owner.with_scope(|scope| committed.receipt(owner, &scope.receipts, &name))?;
@@ -450,6 +479,11 @@ fn mark_input(owner: &Arc<owner::Owner>, at: f64) -> Result<()> {
     })?;
     let mut record = owner.snapshot()?.0;
     record["input_pending_at"] = json!(at);
+    record["input_pending_request"] = json!(header(owner)?.request_id);
+    if header(owner)?.agent == "claude" {
+        record["input_typing"] = json!({"request_id": header(owner)?.request_id, "until": now() + input::TYPING_SECONDS});
+        if record.get("input_seen_at").is_none() { record["input_seen_at"] = json!(0.0); }
+    }
     record["updated"] = json!(now());
     let (staged, parent, name) = owner.with_scope(|scope| {
         let staged = publication::Staged::prepare(
@@ -480,6 +514,16 @@ fn mark_input(owner: &Arc<owner::Owner>, at: f64) -> Result<()> {
     })
 }
 
+pub(super) fn receipt_current(owner: &owner::Owner) -> Result<()> {
+    with(owner, |held| owner.with_scope(|scope| {
+        if held.receipt.as_ref().ok_or("Send lacks its original receipt")?.record(&scope.receipts)? != held.value
+            || held.value["status"] != "in_progress" {
+            return Err("Original Send receipt changed during polling".into());
+        }
+        Ok(())
+    }))
+}
+
 pub(super) fn parent_ready(owner: &Arc<owner::Owner>, phase: Phase) -> Result<()> {
     owner.actor()?;
     owner.check()?;
@@ -487,6 +531,9 @@ pub(super) fn parent_ready(owner: &Arc<owner::Owner>, phase: Phase) -> Result<()
     with(owner, |held| {
         if held.phase != phase || held.child.is_some() {
             return Err("Send effect belongs to another phase".into());
+        }
+        if phase == Phase::Pasted && held.enter_deadline.is_some_and(|until| Instant::now() >= until) {
+            return Err("Original Claude Send settlement window expired; no Enter was pressed".into());
         }
         owner.with_scope(|scope| {
             if held
@@ -502,7 +549,8 @@ pub(super) fn parent_ready(owner: &Arc<owner::Owner>, phase: Phase) -> Result<()
             Ok(())
         })?;
         if matches!(phase, Phase::Marked | Phase::Pasted)
-            && held.marker.as_ref() != Some(&(record["input_pending_at"].clone(), version))
+            && (record["input_pending_request"] != header(owner)?.request_id
+                || held.marker.as_ref() != Some(&(record["input_pending_at"].clone(), version)))
         {
             return Err("Original Send input marker changed".into());
         }
@@ -526,6 +574,12 @@ pub(super) fn advance(owner: &owner::Owner, from: Phase, to: Phase) -> Result<()
 fn check_replies(record: &Value, value: &Value) -> Result<()> {
     let mut max = value.clone();
     max["status"] = json!("submitted");
+    if string(record, "agent") == "claude" {
+        max["native"] = json!("transcript");
+        max["delivery"] = json!("uncertain");
+        max["uncertain_reason"] = json!("\u{1}".repeat(input::native_send::ERROR_BYTES));
+        max["composer"] = json!("\u{1}".repeat(input::settle::RESIDUE_CHARS));
+    }
     let preview = input::native_send::Reply::Submitted {
         receipt: max,
         index_repair: false, // false has the longer JSON spelling
@@ -584,6 +638,7 @@ pub(super) fn execute(owner: &Arc<owner::Owner>) -> Result<Vec<u8>> {
         child: None,
         pasted: pasted.into_bytes(),
         marker: None,
+        enter_deadline: None,
     });
     // Reserve cleanup capacity before any Settings key/Stage. The lease lives
     // outside Owner, avoiding a source-charge/Owner reference cycle.
@@ -607,10 +662,16 @@ pub(super) fn execute(owner: &Arc<owner::Owner>) -> Result<Vec<u8>> {
         check_replies(&owner.snapshot()?.0, &receipt)?;
         receipt_write(owner, receipt, false)?;
         mark_input(owner, at)?;
+        let mut transcript = if h.agent == "claude" { input::settle::Transcript::of(&owner.snapshot()?.0) } else { None };
+        let pasted_at = now();
         send_helpers::paste(owner, progress.clone())?;
-        std::thread::sleep(Duration::from_millis(180));
-        observe(owner, context::Kind::SendAfterPaste)?;
-        send_helpers::enter(owner, progress.clone())?;
+        if h.agent == "claude" {
+            claude::submit(owner, &progress, transcript.as_mut(), &text, pasted_at)?;
+        } else {
+            std::thread::sleep(Duration::from_millis(180));
+            observe(owner, context::Kind::SendAfterPaste)?;
+            send_helpers::enter(owner, progress.clone())?;
+        }
         let mut receipt = with(owner, |held| Ok(held.value.clone()))?;
         receipt["status"] = json!("submitted");
         receipt_write(owner, receipt.clone(), true)?;
@@ -626,6 +687,11 @@ pub(super) fn execute(owner: &Arc<owner::Owner>) -> Result<Vec<u8>> {
         })
         .map_err(|e| e.to_string())
     })();
+    if let Err(error) = &result {
+        if h.agent == "claude" && progress.paste_possible.load(Ordering::Acquire) {
+            claude::uncertain(owner, error);
+        }
+    }
     let discarded = cleanup.finish();
     let result = match (result, discarded) {
         (Ok(bytes), Ok(())) => Ok(bytes),

@@ -88,7 +88,7 @@ def moved_record(case, name, record, *, existing_machine=False, kind='moved'):
     return current, path, legacy
 
 
-def pending_then_message(case, name, record, path, model, effort, text, attempts):
+def pending_then_message(case, name, record, path, model, effort, text, attempts, attachments=()):
     """Seed one exact scheduled intent, then use only the public production send.
 
     The caller owns this private native record and verifies inference/defaults.
@@ -113,6 +113,8 @@ def pending_then_message(case, name, record, path, model, effort, text, attempts
     scheduled.chmod(0o600)
     request = dict(request_id=str(uuid.uuid4()), expected_run_id=record['run_id'],
                    expected_conversation_id=record.get('conversation_id') or '', text=text)
+    if attachments:
+        request['attachments'] = attachments
     raw = '{\n ' + json.dumps(request, separators=(',', ':'))[1:-1] + '\n}\n'
     command = [str(test_input.HGS), 'send', name, '--session-id', record['session_id'], '--json']
     case.env['ZERUS_PENDING_SEND_RECEIPT'] = str(Path(case.env['HGS_STATE_DIR']) /

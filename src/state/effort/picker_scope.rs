@@ -281,12 +281,15 @@ pub(super) struct Scope<'a> {
 enum Writer<'a> {
     Borrowed(&'a Guard),
     Owned(Guard),
+    // Only the admitted Claude Send can release Root while retaining its SID.
+    Polling,
 }
 impl Writer<'_> {
-    fn get(&self) -> &Guard {
+    fn get(&self) -> Result<&Guard> {
         match self {
-            Self::Borrowed(writer) => writer,
-            Self::Owned(writer) => writer,
+            Self::Borrowed(writer) => Ok(writer),
+            Self::Owned(writer) => Ok(writer),
+            Self::Polling => Err("Original Send Root is released for read-only polling".into()),
         }
     }
 }
@@ -314,7 +317,7 @@ impl<'a> Scope<'a> {
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         let writer_file = Original::open(&state, ".lock".into())?;
         if crate::platform::FileIdentity::of(&writer_file.file).map_err(|e| e.to_string())?
-            != writer.get().identity().map_err(|e| e.to_string())?
+            != writer.get()?.identity().map_err(|e| e.to_string())?
         {
             return Err("The actual picker state writer changed".into());
         }
@@ -364,7 +367,7 @@ impl<'a> Scope<'a> {
         Ok(scope)
     }
 
-    fn current(&self) -> Result<Value> {
+    fn sources(&self) -> Result<()> {
         if let Some(error) = &self.refused {
             return Err(error.clone());
         }
@@ -386,15 +389,21 @@ impl<'a> Scope<'a> {
             }
         }
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
-            || self.writer.get().identity().map_err(|e| e.to_string())?
-                != crate::platform::FileIdentity::of(&self.writer_file.file)
-                    .map_err(|e| e.to_string())?
         {
             return Err("The original picker writer or root changed".into());
         }
         self.writer_file.verify(&self.state)?;
         self.proof.verify(&self.state, &self.inputs)?;
         self.exclusion.verify()?;
+        Ok(())
+    }
+
+    fn current(&self) -> Result<Value> {
+        self.sources()?;
+        if self.writer.get()?.identity().map_err(|e| e.to_string())?
+            != crate::platform::FileIdentity::of(&self.writer_file.file).map_err(|e| e.to_string())? {
+            return Err("The original picker writer changed".into());
+        }
         let record = self.record.record(&self.sessions)?;
         if !self.binding.matches(&record) {
             return Err("The original picker binding changed".into());
@@ -405,6 +414,22 @@ impl<'a> Scope<'a> {
             host.check()?;
         }
         Ok(record)
+    }
+
+    // Bounded fresh read of this same slot while hooks may replace its record.
+    // This grants no mutation, observation turn or new native input authority.
+    fn poll_current(&self) -> Result<(Original, Value)> {
+        if !matches!(self.writer, Writer::Polling) {
+            return Err("Original Send is not polling".into());
+        }
+        self.sources()?;
+        let original = Original::open(&self.sessions, self.record.name.clone())?;
+        let record = original.record(&self.sessions)?;
+        if !self.binding.matches(&record) {
+            return Err("The original polling Send binding changed".into());
+        }
+        self.sources()?;
+        Ok((original, record))
     }
 
     fn retain<T>(&mut self, result: Result<T>) -> Result<T> {

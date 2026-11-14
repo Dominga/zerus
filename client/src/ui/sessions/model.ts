@@ -33,8 +33,9 @@ export function rowHeight(row: Row, strip = false): number {
   // An ended parent's container is a dimmed compact row with its children's line (zerus-sa9qn.17).
   if (row.type === "container") return row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow;
   // A compact parent takes a second line with its child sessions' summary.
-  if (row.compactRow && !strip) return row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow;
-  return ROW_HEIGHT.card;
+  const extra = row.agentTeamSummary && !strip ? 28 : 0;
+  if (row.compactRow && !strip) return (row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow) + extra;
+  return ROW_HEIGHT.card + extra;
 }
 
 export function sessionMatchesSearch(s: Session, q: string): boolean {

@@ -264,6 +264,27 @@ pub struct TeamSummary {
     /// command line's row does, so the serialized summary is unchanged then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_sessions: Option<Vec<MemberSession>>,
+    /// Bounded list projection; absent from an older CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TeamProgress>,
+}
+
+/// The list's capped counts. A `*_more` flag denotes a lower bound.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct TeamProgress {
+    pub tasks: u64,
+    pub accepted: u64,
+    pub questions: u64,
+    pub members: u64,
+    pub phases: u64,
+    pub phases_done: u64,
+    pub stuck: bool,
+    pub tasks_more: bool,
+    pub accepted_more: bool,
+    pub questions_more: bool,
+    pub members_more: bool,
+    pub phases_more: bool,
+    pub phases_done_more: bool,
 }
 
 /// One member's bound session on a live team's list row: how Waiting for you
@@ -603,5 +624,7 @@ pub struct WaitingView {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod progress;
 #[cfg(test)]
 mod session_groups;

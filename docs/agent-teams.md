@@ -149,6 +149,22 @@ when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
 An unknown job count does not establish work; only a positive count prevents
 that waiting label.
+The lead's strip shows accepted/total tasks, its team status (highlighting
+**Stuck** when an explicit blocker remains), unanswered member questions as
+**?N**, and live members including the lead. Accepted tasks include archived
+work; internal review/test stage tasks are excluded. Counts stop at 1000 and
+show **+** when more exist; an approximate count does not draw a percentage.
+The open queue is a single phase, so it has no phase bar. A team with multiple
+phases also shows completed/total phases. Click the strip or its chevron to
+fold the same member rows; the saved choice also survives a restart.
+
+Questions count only the open member-question inbox items, not cards for the
+person. Stuck comes from explicit launch/hand-out/unreadable-member blockers,
+a silent lead, a blocked service card, or a team project-limit service item.
+Ordinary work/integration approvals, questions and uncertain-delivery inbox
+items do not establish Stuck by themselves. These summaries arrive with the
+bounded team list; drawing a strip does not load each team's view.
+
 Ordinary sessions and the Sessions list with the preview off keep their usual
 status and grouping rules.
 

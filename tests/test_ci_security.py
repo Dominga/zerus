@@ -987,7 +987,13 @@ class WorkflowSecurityTests(unittest.TestCase):
             restores, saved = {}, []
             for step in self.checks_steps(name):
                 if "uses: actions/cache/restore@" in step:
-                    self.assertNotRegex(step, r"(?m)^        if:", name)
+                    if name == "client-core":
+                        # A pinned pre-split helper cannot prepare room for the
+                        # full Quick target; its checks run cold instead.
+                        self.assertEqual(re.search(r"(?m)^        if: (.*)$", step)[1],
+                                         "${{ steps.disk-helper.outputs.supported == 'true' }}")
+                    else:
+                        self.assertNotRegex(step, r"(?m)^        if:", name)
                     restores[re.search(r"(?m)^        id: (\S+)$", step)[1]] = self.step_paths(step)
                 elif "uses: actions/cache/save@" in step:
                     saves += 1

@@ -326,7 +326,21 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
+      - name: Check pinned source disk helper support
+        id: disk-helper
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, runpy
+          path = pathlib.Path('scripts/ci/ubuntu-disk.py')
+          helper = runpy.run_path(str(path)) if path.exists() else {}
+          supported = all('client-core' in helper.get(name, ()) for name in ('REPORT_JOBS', 'CLEANUP_JOBS'))
+          if not supported:
+              print('Pinned source disk helper lacks client-core support; omitting disk diagnostics and cache restore, building client-core cold.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('supported=' + str(supported).lower() + '\n')
+          PY
       - name: Reclaim unused hosted Ubuntu tools
+        if: ${{ steps.disk-helper.outputs.supported == 'true' }}
         run: python3 scripts/ci/ubuntu-disk.py prepare
       - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Rust cache identity
@@ -338,6 +352,9 @@ jobs:
       # or another target-cache family within the existing shared cache limit.
       - name: Restore Rust 1.99 cache (read only)
         id: rust-cache
+        # An older pinned helper cannot reclaim space for Quick's full target.
+        # Build just client-core cold instead of restoring it onto that runner.
+        if: ${{ steps.disk-helper.outputs.supported == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -347,12 +364,12 @@ jobs:
           key: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock') }}
           restore-keys: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Disk usage after cache restore
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.disk-helper.outputs.supported == 'true' }}
         run: python3 scripts/ci/ubuntu-disk.py report after-cache-restore
       - name: Desktop client core crate (format, lints, tests)
         run: bash scripts/ci/client-core.sh
       - name: Disk usage after client core tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.disk-helper.outputs.supported == 'true' }}
         run: python3 scripts/ci/ubuntu-disk.py report after-client-core-tests
 
   relay:

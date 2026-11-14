@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -128,3 +129,119 @@ class ParallelClientCore(unittest.TestCase):
                         env=dict(PATH=str(root) + ":/usr/bin:/bin", HOME=str(root), FAIL_ON=command),
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 19, result.stdout + result.stderr)
+
+
+class PinnedClientCoreDiskCompatibility(unittest.TestCase):
+    def run_fixture(self, report_jobs, cleanup_jobs, fail_on="", malformed=False):
+        workflow = local.CI.load_workflow((ROOT / ".github/workflows/checks.yml").read_bytes())
+        job = workflow["jobs"]["client-core"]
+        with tempfile.TemporaryDirectory(prefix="ci-core-pinned-") as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts/ci"
+            scripts.mkdir(parents=True)
+            helper = scripts / "ubuntu-disk.py"
+            if report_jobs is not None:
+                helper.write_text(
+                    "import os,sys\nfrom pathlib import Path\n"
+                    f"REPORT_JOBS={report_jobs!r}\nCLEANUP_JOBS={cleanup_jobs!r}\n"
+                    "if __name__ == '__main__':\n"
+                    "    assert os.environ['GITHUB_JOB'] in REPORT_JOBS, 'unexpected hosted job'\n"
+                    "    if sys.argv[1] == 'prepare': assert os.environ['GITHUB_JOB'] in CLEANUP_JOBS\n"
+                    "    with Path(os.environ['CALLS']).open('a') as out: out.write('disk ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+                )
+            if malformed:
+                helper.write_text("raise RuntimeError('fixture broken helper')\n")
+            (scripts / "client-core.sh").write_bytes((ROOT / "scripts/ci/client-core.sh").read_bytes())
+            binary = root / "bin"
+            binary.mkdir()
+            cargo = binary / "cargo"
+            cargo.write_text(
+                f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+                "with Path(os.environ['CALLS']).open('a') as out: out.write('cargo ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+                "raise SystemExit(19 if os.environ['FAIL_ON'] and os.environ['FAIL_ON'] in ' '.join(sys.argv[1:]) else 0)\n"
+            )
+            cargo.chmod(0o700)
+            calls = root / "calls"
+            output = root / "output"
+            environment = dict(PATH=str(binary) + os.pathsep + os.defpath, HOME=str(root),
+                CALLS=str(calls), FAIL_ON=fail_on, GITHUB_OUTPUT=str(output), GITHUB_JOB="client-core")
+            supported = False
+            logs = ""
+            for step in job["steps"]:
+                body = step.get("run", "")
+                cache = "uses" in step and step["uses"].startswith("actions/cache/restore@")
+                probe = step.get("id") == "disk-helper"
+                if not (cache or probe or "scripts/ci/ubuntu-disk.py" in body or body == COMMAND):
+                    continue
+                condition = step.get("if", "")
+                allowed = {
+                    "": True,
+                    "${{ !cancelled() }}": True,
+                    "${{ steps.disk-helper.outputs.supported == 'true' }}": supported,
+                    "${{ !cancelled() && steps.disk-helper.outputs.supported == 'true' }}": supported,
+                }
+                self.assertIn(condition, allowed)
+                if not allowed[condition]:
+                    continue
+                if cache:
+                    with calls.open("a") as recorded:
+                        recorded.write("cache restore\n")
+                    continue
+                result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", body], cwd=root,
+                    env=environment, capture_output=True, text=True, timeout=10)
+                logs += result.stdout + result.stderr
+                if result.returncode:
+                    return result.returncode, calls.read_text().splitlines() if calls.exists() else [], logs
+                if probe:
+                    supported = "supported=true" in output.read_text().splitlines()
+            return 0, calls.read_text().splitlines() if calls.exists() else [], logs
+
+    def assert_checks_ran(self, calls):
+        commands = [line for line in calls if line.startswith("cargo ")]
+        self.assertEqual(len(commands), 3, calls)
+        for command, expected in zip(commands, (" fmt --check ", " clippy --locked ", " test --locked ")):
+            self.assertIn(expected, command)
+
+    def test_old_pinned_helper_builds_cold_and_runs_all_checks(self):
+        status, calls, logs = self.run_fixture(("quick", "relay"), ("quick", "relay"))
+        self.assertEqual(status, 0, logs)
+        self.assert_checks_ran(calls)
+        self.assertFalse(any(line.startswith(("disk ", "cache ")) for line in calls), calls)
+        self.assertIn("building client-core cold", logs)
+
+    def test_missing_legacy_helper_still_runs_checks_cold(self):
+        status, calls, logs = self.run_fixture(None, None)
+        self.assertEqual(status, 0, logs)
+        self.assert_checks_ran(calls)
+        self.assertFalse(any(line.startswith(("disk ", "cache ")) for line in calls), calls)
+
+    def test_current_helper_keeps_prepare_cache_and_all_diagnostics(self):
+        status, calls, logs = self.run_fixture(("quick", "client-core"), ("quick", "client-core"))
+        self.assertEqual(status, 0, logs)
+        self.assert_checks_ran(calls)
+        self.assertEqual([line for line in calls if not line.startswith("cargo ")], [
+            "disk prepare", "cache restore", "disk report after-cache-restore",
+            "disk report after-client-core-tests",
+        ])
+        self.assertLess(calls.index("disk prepare"), calls.index("cache restore"))
+
+    def test_partial_role_support_cannot_restore_a_cache_without_prepare(self):
+        for reports, cleanup in ((("client-core",), ("quick",)), (("quick",), ("client-core",))):
+            with self.subTest(reports=reports, cleanup=cleanup):
+                status, calls, logs = self.run_fixture(reports, cleanup)
+                self.assertEqual(status, 0, logs)
+                self.assert_checks_ran(calls)
+                self.assertFalse(any(line.startswith(("disk ", "cache ")) for line in calls), calls)
+
+    def test_legacy_path_preserves_each_check_failure(self):
+        for failure in ("fmt --check", "clippy --locked", "test --locked"):
+            with self.subTest(failure=failure):
+                status, calls, logs = self.run_fixture(("quick",), ("quick",), fail_on=failure)
+                self.assertEqual(status, 19, logs)
+                self.assertIn(failure, calls[-1])
+
+    def test_broken_helper_is_an_attributable_failure(self):
+        status, calls, logs = self.run_fixture((), (), malformed=True)
+        self.assertNotEqual(status, 0)
+        self.assertIn("fixture broken helper", logs)
+        self.assertEqual(calls, [])

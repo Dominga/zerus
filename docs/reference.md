@@ -8830,9 +8830,17 @@ It is false when the service shares its console with another process, such as
 the terminal it was started from, when it had no console, and on Linux and
 macOS. It is diagnostic only; readiness never depends on it.
 
-`lifecycle.mode` reports the running command's `passive` or `background`
-selection independently of worker admission. On all three desktop platforms, `registration --json
---background` renders the explicit background variant without installing it;
+`lifecycle.mode` retains the running command's requested `passive` or `background`
+selection independently of worker admission. `lifecycle.requested_mode` is an
+explicit alias of that legacy field. `lifecycle.effective_mode` is `background`
+only while the existing ownership and presence status show an active
+service-owned writer; otherwise it is `passive`, including a blocked start or a
+settled revoke. A draining writer remains effective until it stops. These are
+diagnostics, not writer authority or proof that every background component is
+ready; use `lifecycle.background` for component readiness.
+
+On all three desktop platforms, `registration --json --background` renders the
+explicit background variant without installing it;
 `registration mode-check --json` checks the actual installer caller ancestry and
 foreground terminal or installed frontend on Linux, macOS and Windows, without
 granting service ownership. Windows requires a retained installed frontend

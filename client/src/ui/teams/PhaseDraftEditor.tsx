@@ -69,9 +69,9 @@ export function PhaseDraftEditor(props: {
             <button type="button" class="btn" disabled={pending() || locked() || nodes().length >= 200} data-add-draft-task onClick={add}>{tr("Add draft task")}</button>
           </nav>
           <Show when={current()}>{(n) => <section class="phase-editor-task" data-draft-node={n().id}>
-            <label class="phase-field">{tr("Task title")}<TextInput class="field" value={n().title} maxLength={200} disabled={pending()} data-node-title onInput={(e) => update(n().id, { title: e.currentTarget.value })} /></label>
-            <label class="phase-field">{tr("Description")}<TextArea class="field" rows={4} value={n().text} disabled={pending()} onInput={(e) => update(n().id, { text: e.currentTarget.value })} /></label>
-            <label class="phase-field">{tr("Acceptance criteria, one per line")}<TextArea class="field" rows={3} value={n().criteria.join("\n")} disabled={pending()} data-node-criteria onInput={(e) => update(n().id, { criteria: e.currentTarget.value.split("\n") })} /></label>
+            <label class="phase-field">{tr("Task title")}<TextInput historyKey={n().id} class="field" value={n().title} maxLength={200} disabled={pending()} data-node-title onInput={(e) => update(n().id, { title: e.currentTarget.value })} /></label>
+            <label class="phase-field">{tr("Description")}<TextArea historyKey={n().id} class="field" rows={4} value={n().text} disabled={pending()} onInput={(e) => update(n().id, { text: e.currentTarget.value })} /></label>
+            <label class="phase-field">{tr("Acceptance criteria, one per line")}<TextArea historyKey={n().id} class="field" rows={3} value={n().criteria.join("\n")} disabled={pending()} data-node-criteria onInput={(e) => update(n().id, { criteria: e.currentTarget.value.split("\n") })} /></label>
             <label class="phase-field">{tr("Pipeline")}<select class="field" value={n().pipeline} disabled={pending()} onChange={(e) => {
               const route = props.routes.find((r) => r.pipeline === e.currentTarget.value);
               if (route) update(n().id, { pipeline: route.pipeline, role: route.role, assignee: null });
@@ -89,8 +89,8 @@ export function PhaseDraftEditor(props: {
               </div>}</For>
               <For each={n().deps.filter((d) => !nodes().some((other) => other.id === d.node))}>{(dep) => <div class="phase-dependency"><span>{tr("Task #%1 in another phase", dep.node)}</span><button type="button" class="btn ghost small" disabled={pending()} onClick={() => update(n().id, { deps: n().deps.filter((d) => d.node !== dep.node) })}>{tr("Remove dependency")}</button></div>}</For>
             </fieldset>
-            <label class="phase-field">{tr("Write paths, one per line")}<TextArea class="field" rows={2} value={n().writes.join("\n")} disabled={pending()} onInput={(e) => update(n().id, { writes: e.currentTarget.value ? e.currentTarget.value.split("\n") : [] })} /></label>
-            <label class="phase-field">{tr("Estimate in minutes")}<TextInput class="field" type="number" min={0} max={525600} step={1} value={n().estimate_minutes} disabled={pending()} onInput={(e) => update(n().id, { estimate_minutes: Number(e.currentTarget.value) })} /></label>
+            <label class="phase-field">{tr("Write paths, one per line")}<TextArea historyKey={n().id} class="field" rows={2} value={n().writes.join("\n")} disabled={pending()} onInput={(e) => update(n().id, { writes: e.currentTarget.value ? e.currentTarget.value.split("\n") : [] })} /></label>
+            <label class="phase-field">{tr("Estimate in minutes")}<TextInput historyKey={n().id} class="field" type="number" min={0} max={525600} step={1} value={n().estimate_minutes} disabled={pending()} onInput={(e) => update(n().id, { estimate_minutes: Number(e.currentTarget.value) })} /></label>
             <button type="button" class="btn ghost danger" disabled={pending() || locked()} onClick={() => setRemoving(n().id)}>{tr("Remove draft task…")}</button>
           </section>}</Show>
         </div>

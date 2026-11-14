@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const PAGE: usize = 512 * 1024;
 /// The most updates one request carries; a phone sends the rest in its next.
 pub const MAX_UPDATES: usize = 256;
-/// The largest document a phone puts together from parts: twice the 4 MiB a
-/// task document may reach.
-const MAX_ASSEMBLY: usize = 2 * (crate::MAX_DOCUMENT + crate::MAX_ATTACHMENT_TOTAL.div_ceil(3) * 4);
+/// The largest document a phone puts together from parts; attachment edits
+/// keep task documents within the same bound.
+const MAX_ASSEMBLY: usize = crate::MAX_TASK_DOCUMENT;
 
 /// One document's updates on the wire: `task` is its UUID, or none for the
 /// project document; `bytes` are base64.

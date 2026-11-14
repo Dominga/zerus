@@ -23,6 +23,7 @@ mod native {
     pub struct Listener {
         socket: UnixListener,
         path: PathBuf,
+        identity: (u64, u64),
     }
     pub fn authenticate(stream: &Stream) -> Result<()> {
         #[cfg(target_os = "linux")]
@@ -140,8 +141,10 @@ mod native {
             // and the service's 0077 umask keeps the pre-chmod socket private.
             let socket = UnixListener::bind(&path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            let metadata = fs::symlink_metadata(&path)?;
+            let identity = (metadata.dev(), metadata.ino());
             socket.set_nonblocking(true)?;
-            Ok(Self { socket, path })
+            Ok(Self { socket, path, identity })
         }
         pub fn accept(&self) -> io::Result<Stream> {
             let (stream, _) = self.socket.accept()?;
@@ -154,7 +157,14 @@ mod native {
     }
     impl Drop for Listener {
         fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
+            // A displaced actor may retire after a successor has bound this
+            // name. Remove only this original socket; uncertainty keeps it.
+            if fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+                metadata.file_type().is_socket()
+                    && (metadata.dev(), metadata.ino()) == self.identity
+            }) {
+                let _ = fs::remove_file(&self.path);
+            }
         }
     }
     pub fn connect(location: &Location) -> Result<Option<Stream>> {
@@ -361,6 +371,10 @@ mod native {
     }
 }
 pub use native::*;
+
+#[cfg(all(unix, test))]
+#[path = "transport/unix_tests.rs"]
+mod unix_tests;
 
 #[cfg(all(windows, test))]
 #[path = "transport/windows_tests.rs"]

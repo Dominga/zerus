@@ -5,6 +5,15 @@ use rusqlite::{params, OptionalExtension};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
+// One SQLite read snapshot for both the replacement page and its overflow.
+// The probe visits at most 201 child index entries and fetches no payload;
+// events_subagent_activity keeps unrelated sessions/children out of both reads.
+const RECORDED_EVENTS: &str = "SELECT seq,payload,EXISTS(
+    SELECT 1 FROM events WHERE name=?1 AND conversation IS ?2
+      AND json_extract(payload,'$.agent_id')=?3 ORDER BY seq DESC LIMIT 1 OFFSET 200)
+    FROM events WHERE name=?1 AND conversation IS ?2
+      AND json_extract(payload,'$.agent_id')=?3 ORDER BY seq DESC LIMIT 200";
+
 pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Result<Value> {
     if id.is_empty()
         || id.len() > 160
@@ -44,7 +53,7 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
         output["state"] = json!("archived");
     }
     let db = journal::event_db()?;
-    let mut query = db.prepare("SELECT seq,payload FROM events WHERE name=?1 AND conversation IS ?2 AND json_extract(payload,'$.agent_id')=?3 ORDER BY seq DESC LIMIT 200").map_err(|e|e.to_string())?;
+    let mut query = db.prepare(RECORDED_EVENTS).map_err(|e| e.to_string())?;
     let rows = query
         .query_map(
             params![
@@ -52,12 +61,20 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
                 record["conversation_id"].as_str(),
                 id
             ],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            },
         )
         .map_err(|e| e.to_string())?;
     let mut events = Vec::new();
+    let mut hook_truncated = false;
     for row in rows {
-        let (seq, payload) = row.map_err(|e| e.to_string())?;
+        let (seq, payload, truncated) = row.map_err(|e| e.to_string())?;
+        hook_truncated |= truncated;
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
         event["agent_id"] = json!("");
@@ -96,7 +113,7 @@ pub(super) fn inspection(name: &str, id: &str, archive_id: Option<&str>) -> Resu
         }
         _ => {}
     }
-    if merge_activity_events(&mut events, source_truncated) {
+    if merge_activity_events(&mut events, source_truncated || hook_truncated) {
         output["history_truncated"] = json!(true);
     }
     if events.is_empty() && !string(child, "detail").is_empty() {
@@ -240,6 +257,165 @@ fn native_messages(record: &Value, id: &str) -> Result<Option<(Vec<Value>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+
+    fn hook_db(db: &Connection) {
+        db.execute_batch("CREATE TABLE events(seq INTEGER PRIMARY KEY,name TEXT,conversation TEXT,payload TEXT);
+            CREATE INDEX events_subagent_activity ON events(name,conversation,json_extract(payload,'$.agent_id'),seq);")
+            .unwrap();
+    }
+
+    fn hook(db: &Connection, name: &str, conversation: Option<&str>, child: &str) {
+        db.execute(
+            "INSERT INTO events(name,conversation,payload) VALUES(?1,?2,?3)",
+            params![name, conversation, json!({"agent_id":child}).to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hook_overflow_is_bound_to_the_exact_indexed_child_range() {
+        let db = Connection::open_in_memory().unwrap();
+        hook_db(&db);
+        for _ in 0..200 {
+            hook(&db, "selected", Some("conversation"), "child");
+        }
+        for _ in 0..201 {
+            hook(&db, "other", Some("conversation"), "child");
+            hook(&db, "selected", Some("other"), "child");
+            hook(&db, "selected", None, "child");
+            hook(&db, "selected", Some("conversation"), "other");
+        }
+        let mut query = db.prepare(RECORDED_EVENTS).unwrap();
+        let mut read = |conversation: Option<&str>| {
+            query
+                .query_map(params!["selected", conversation, "child"], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(2)?))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let page = read(Some("conversation"));
+        assert_eq!(page.len(), 200);
+        assert_eq!((page.first().unwrap().0, page.last().unwrap().0), (200, 1));
+        assert!(
+            page.iter().all(|row| !row.1),
+            "other identities never imply overflow"
+        );
+        hook(&db, "selected", Some("conversation"), "child");
+        assert!(read(Some("conversation")).iter().all(|row| row.1));
+        assert!(
+            read(None).iter().all(|row| row.1),
+            "NULL conversation keeps its own range"
+        );
+
+        let plan = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {RECORDED_EVENTS}"))
+            .unwrap()
+            .query_map(params!["selected", "conversation", "child"], |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let searches = plan
+            .iter()
+            .filter(|step| step.starts_with("SEARCH events "))
+            .collect::<Vec<_>>();
+        assert_eq!(searches.len(), 2, "{plan:?}");
+        assert!(
+            searches
+                .iter()
+                .all(|step| step.contains("events_subagent_activity")
+                    && step.contains("name=? AND conversation=? AND <expr>=?")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("SCAN events") || step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+        // SQLite 3.46 does not label a covering expression-index probe in
+        // QUERY PLAN. Its actual EXISTS subroutine must never read the table.
+        let program = db
+            .prepare(&format!("EXPLAIN {RECORDED_EVENTS}"))
+            .unwrap()
+            .query_map(params!["selected", "conversation", "child"], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let start = program.iter().position(|op| op.0 == "BeginSubrtn").unwrap();
+        let end = start
+            + program[start..]
+                .iter()
+                .position(|op| op.0 == "Return")
+                .unwrap();
+        let probe = &program[start..end];
+        let table: i64 = db
+            .query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name='events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let table_cursors = probe
+            .iter()
+            .filter(|op| op.0 == "OpenRead" && op.2 == table)
+            .map(|op| op.1)
+            .collect::<Vec<_>>();
+        assert!(
+            !probe
+                .iter()
+                .any(|op| op.0 == "Column" && table_cursors.contains(&op.1)),
+            "{program:?}"
+        );
+    }
+
+    #[test]
+    fn hook_page_and_overflow_share_a_snapshot_while_new_events_arrive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        hook_db(&db);
+        for _ in 0..200 {
+            hook(&db, "selected", Some("conversation"), "child");
+        }
+        let writer = Connection::open(path).unwrap();
+        let mut query = db.prepare(RECORDED_EVENTS).unwrap();
+        let mut rows = query
+            .query(params!["selected", "conversation", "child"])
+            .unwrap();
+        let first = rows.next().unwrap().unwrap();
+        assert_eq!(first.get::<_, i64>(0).unwrap(), 200);
+        assert!(!first.get::<_, bool>(2).unwrap());
+        hook(&writer, "selected", Some("conversation"), "child");
+        let mut expected = 199;
+        while let Some(row) = rows.next().unwrap() {
+            assert_eq!(row.get::<_, i64>(0).unwrap(), expected);
+            assert!(
+                !row.get::<_, bool>(2).unwrap(),
+                "new events cannot tear the page's overflow flag"
+            );
+            expected -= 1;
+        }
+        assert_eq!(expected, 0);
+        drop(rows);
+        let mut rows = query
+            .query(params!["selected", "conversation", "child"])
+            .unwrap();
+        let first = rows.next().unwrap().unwrap();
+        assert_eq!(first.get::<_, i64>(0).unwrap(), 201);
+        assert!(first.get::<_, bool>(2).unwrap());
+    }
 
     fn event(at: i64, kind: &str) -> Value {
         json!({"at":at,"type":kind,"detail":format!("{kind} {at}")})

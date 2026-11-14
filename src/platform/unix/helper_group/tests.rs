@@ -242,3 +242,5 @@ fn private_policy_probe() {
 }
 
 mod spawn_turn;
+
+mod shared_gate;

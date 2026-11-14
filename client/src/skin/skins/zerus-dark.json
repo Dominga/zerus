@@ -79,7 +79,8 @@
       "row-hover": "#242c34",
       "row-selected": "#303b47",
       "row-selected-border": "#8295a9",
-      "attention-ink": "#392900"
+      "attention-ink": "#392900",
+      "members-surface": "#151a20"
     },
     "agent": {
       "claude": "#e8b29b",

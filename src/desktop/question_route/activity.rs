@@ -9,7 +9,7 @@
 //!
 //! It reads the route ledger by its schema-38 indexes and each route's own
 //! saved original. It never sends, settles, retries or grants anything, and
-//! refused, reserved or unknown routes are not shown in this version.
+//! reserved routes remain pending. Settled failures are shown only to the child.
 use rusqlite::{params, Connection, Transaction};
 use serde_json::{json, Value};
 
@@ -35,11 +35,47 @@ pub(super) fn remove_fixture(db: &Connection) {
     .unwrap();
 }
 
+/// Outcome metadata is retained even when no send original could be admitted.
+pub(super) fn migrate_outcomes(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE desktop_question_routes ADD COLUMN record TEXT
+        CHECK(record IS NULL OR (length(CAST(record AS BLOB))<=16384 AND json_valid(record)));
+        UPDATE desktop_question_routes SET record=(SELECT checkpoint FROM desktop_deferred_sends d
+        WHERE d.request_id=desktop_question_routes.request_id AND json_valid(d.checkpoint)
+        AND json_extract(d.checkpoint,'$.kind')='route_question');
+        CREATE TRIGGER desktop_question_route_record BEFORE UPDATE OF record ON desktop_question_routes BEGIN
+        SELECT RAISE(ABORT,'immutable question route metadata'); END;
+        CREATE INDEX desktop_question_routes_child_outcomes ON desktop_question_routes(child_session_id,created,request_id)
+        WHERE state IN('submitted','refused','unknown');
+        CREATE TABLE desktop_question_route_outcome_revision(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        INSERT INTO desktop_question_route_outcome_revision VALUES(1,0);
+        CREATE TRIGGER desktop_question_route_failure_insert AFTER INSERT ON desktop_question_routes
+        WHEN NEW.state IN('refused','unknown') BEGIN
+        UPDATE desktop_question_route_outcome_revision SET revision=revision+1 WHERE id=1; END;
+        CREATE TRIGGER desktop_question_route_failure_settle AFTER UPDATE OF state ON desktop_question_routes
+        WHEN NEW.state IN('refused','unknown') BEGIN
+        UPDATE desktop_question_route_outcome_revision SET revision=revision+1 WHERE id=1; END;",
+    )?;
+    Ok(())
+}
+#[cfg(test)]
+pub(super) fn remove_outcomes_fixture(db: &Connection) {
+    db.execute_batch(
+        "DROP TRIGGER desktop_question_route_record;
+        DROP TRIGGER desktop_question_route_failure_insert;
+        DROP TRIGGER desktop_question_route_failure_settle;
+        DROP TABLE desktop_question_route_outcome_revision;
+        DROP INDEX desktop_question_routes_child_outcomes;
+        ALTER TABLE desktop_question_routes DROP COLUMN record;",
+    )
+    .unwrap();
+}
+
 /// The two exact reads, each at most [`LIMIT`] rows of its own index.
-pub(super) const CHILD_SQL: &str = "SELECT request_id,child_session_id,parent_session_id,created
-    FROM desktop_question_routes INDEXED BY desktop_question_routes_child_submitted
-    WHERE child_session_id=?1 AND state='submitted' ORDER BY created DESC,request_id DESC LIMIT ?2";
-pub(super) const PARENT_SQL: &str = "SELECT request_id,child_session_id,parent_session_id,created
+pub(super) const CHILD_SQL: &str = "SELECT request_id,child_session_id,parent_session_id,created,state,record
+    FROM desktop_question_routes INDEXED BY desktop_question_routes_child_outcomes
+    WHERE child_session_id=?1 AND state IN('submitted','refused','unknown') ORDER BY created DESC,request_id DESC LIMIT ?2";
+pub(super) const PARENT_SQL: &str = "SELECT request_id,child_session_id,parent_session_id,created,state,record
     FROM desktop_question_routes INDEXED BY desktop_question_routes_parent_submitted
     WHERE parent_session_id=?1 AND state='submitted' ORDER BY created DESC,request_id DESC LIMIT ?2";
 
@@ -48,6 +84,8 @@ struct Route {
     child: String,
     parent: String,
     created: i64,
+    state: String,
+    record: Option<String>,
 }
 
 fn newest(db: &Connection, sql: &str, session: &str) -> rusqlite::Result<Vec<Route>> {
@@ -58,6 +96,8 @@ fn newest(db: &Connection, sql: &str, session: &str) -> rusqlite::Result<Vec<Rou
                 child: r.get(1)?,
                 parent: r.get(2)?,
                 created: r.get(3)?,
+                state: r.get(4)?,
+                record: r.get(5)?,
             })
         })?
         .collect()
@@ -66,21 +106,32 @@ fn newest(db: &Connection, sql: &str, session: &str) -> rusqlite::Result<Vec<Rou
 /// The newest [`LIMIT`] submitted routes of `session`, newest first. A
 /// route whose original is missing or does not name exactly this ledger
 /// row is left out.
-fn routes(db: &Connection, session: &str) -> anyhow::Result<Vec<Value>> {
+pub(crate) fn routes(db: &Connection, session: &str) -> anyhow::Result<Vec<Value>> {
     let mut rows = newest(db, CHILD_SQL, session)?;
     rows.extend(newest(db, PARENT_SQL, session)?);
     rows.sort_by(|a, b| (b.created, &b.request_id).cmp(&(a.created, &a.request_id)));
     rows.truncate(LIMIT);
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let Ok(Some(record)) = crate::desktop::deferred_send::route_record(db, &row.request_id)
-        else {
-            continue;
-        };
-        if !record.valid()
+        let record: Option<zerus_client_core::desktop::question_route::Record> = row
+            .record
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        let Some(record) = record else { continue };
+        if !record.displayable()
             || record.request_id() != row.request_id
             || record.identity.session_id != row.child
             || record.parent.session_id != row.parent
+            || (row.state == "submitted" && !record.valid())
+        {
+            continue;
+        }
+        if row.state == "submitted"
+            && crate::desktop::deferred_send::route_record(db, &row.request_id)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(&record)
         {
             continue;
         }
@@ -94,6 +145,13 @@ fn routes(db: &Connection, session: &str) -> anyhow::Result<Vec<Value>> {
             "parent": {"name": record.parent.session, "session_id": row.parent},
             "question": record.question,
         });
+        if row.state != "submitted" {
+            line["outcome"] = json!(if row.state == "refused" {
+                "not_sent"
+            } else {
+                "uncertain"
+            });
+        }
         if !child {
             line["text"] = Value::String(record.text());
         }

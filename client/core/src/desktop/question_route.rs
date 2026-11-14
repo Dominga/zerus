@@ -28,6 +28,11 @@ pub const TEXT_BYTES: usize = 2048;
 pub const PREVIEW_CHARS: usize = 300;
 /// At most this many questions are routed to one parent per hour.
 pub const PER_PARENT_HOUR: i64 = 20;
+/// F3/F4: a settled failure belongs to the person immediately. Reserved is
+/// still in flight. No outcome, including unknown, permits another send.
+pub fn escalates(state: &str) -> bool {
+    matches!(state, "refused" | "unknown")
+}
 /// The only question source that routes: Claude's own AskUserQuestion, from
 /// its PreToolUse hook (`questions::from_hook`). Every other source never
 /// routes (owner direction, 2026-11-12), including `claude_native_question`
@@ -37,9 +42,10 @@ pub const PER_PARENT_HOUR: i64 = 20;
 pub const ROUTED_SOURCE: &str = "hook";
 /// Question IDs only the person may ever answer, refused again here even
 /// though such a row is never quiet (`parent_link::human_request`).
-const PERSON_ONLY: [&str; 4] = [
+const PERSON_ONLY: [&str; 5] = [
     "claude-trust:",
     "codex-trust:",
+    "codex-sandbox:",
     "kimi-trust:",
     "codex-hooks-trust:",
 ];
@@ -430,14 +436,21 @@ impl Record {
         }
     }
     pub fn valid(&self) -> bool {
+        self.displayable()
+            && self.identity.valid()
+            && printable_name(&self.child.name)
+            && !self.child.reference.contains('\'')
+            && self.text().len() <= TEXT_BYTES
+    }
+    /// Read-only metadata may describe a route refused for unprintable
+    /// command values or an oversized send. It never grants send authority.
+    pub fn displayable(&self) -> bool {
         self.kind == RECORD_KIND
             && self.schema == 1
-            && self.identity.valid()
+            && self.identity.complete()
             && session_name(&self.child.name)
-            && printable_name(&self.child.name)
             && self.child.reference.starts_with("zerus://session?")
             && bounded(&self.child.reference, REFERENCE_BYTES)
-            && !self.child.reference.contains('\'')
             && KINDS.contains(&self.question.kind.as_str())
             && self.question.questions >= 1
             && self.question.preview == preview(&self.question.preview)
@@ -453,7 +466,6 @@ impl Record {
             && bounded(&self.parent.run_id, 128)
             && (self.parent.conversation_id.is_empty()
                 || bounded(&self.parent.conversation_id, 128))
-            && self.text().len() <= TEXT_BYTES
     }
     pub fn request_id(&self) -> String {
         self.identity.request_id()

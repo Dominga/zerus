@@ -186,7 +186,8 @@ fn agent(name: &str, run: &str, pid: u32, conversation: &str) {
     let mut record = json!({"version":1,"name":name,"agent":"claude","run_id":run,
         "conversation_id":conversation,"pid":pid,
         "process_start":super::storage::process_start(pid),"activity":"idle","phase":"idle",
-        "active_tools":{},"subagents":{},"created":now()});
+        "active_tools":{},"subagents":{},"created":now(),
+        "claude_registry_home":PathBuf::from(std::env::var_os("PROBE_ROOT").unwrap()).join("claude")});
     super::storage::write(&mut record).unwrap();
 }
 

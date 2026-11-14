@@ -130,7 +130,7 @@ struct MessageBubble: View {
             if event.role == "You (answer)" {
                 Text("You (answer)").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
             }
-            if own {
+            if own || event.source == QuestionRouteActivity.source {
                 Text(verbatim: event.text).textSelection(.enabled)
             } else {
                 MarkdownContent(source: event.text)

@@ -172,10 +172,28 @@ pub(crate) const UNDER_HOST: &str = "This command runs under a DeepSeek agent ho
 /// names a host.
 pub(crate) fn hosted_ancestor() -> Result<Option<Host>, Refusal> {
     let state = crate::state::storage::root();
-    decide(
+    hosted_ancestor_with(
+        &state,
+        std::process::id(),
         recorded_hosts,
-        || walk(std::process::id(), inspect),
-        |chain| host_by_process(chain, &state, super::argv::read),
+        inspect,
+        super::argv::read,
+    )
+}
+
+/// Production wiring, with native observations replaceable for race tests.
+fn hosted_ancestor_with(
+    state: &Path,
+    pid: u32,
+    records: impl FnOnce() -> Result<Vec<Recorded>, Refusal>,
+    inspect: impl Fn(u32) -> Result<Inspection, ()>,
+    read: impl FnMut(u32) -> Option<Vec<Vec<u8>>>,
+) -> Result<Option<Host>, Refusal> {
+    let inspect = &inspect;
+    decide(
+        records,
+        || walk(pid, inspect),
+        |chain| host_by_process(chain, state, read),
         |chain| unchanged(chain, inspect),
     )
 }
@@ -264,17 +282,7 @@ pub(super) fn recorded_hosts_at(
     state: &Path,
     boot: Option<&str>,
 ) -> Result<Vec<Recorded>, Refusal> {
-    let state_root = match std::fs::canonicalize(state) {
-        Ok(root) => root,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(unreadable(state)),
-    };
-    let root = Directory::open(&state_root).map_err(|_| unreadable(&state_root))?;
-    let Some(dsh) = optional_child(&root, "dsh").map_err(unreadable_at(&state_root, "dsh"))? else {
-        return Ok(Vec::new());
-    };
-    let Some(hosts) = optional_child(&dsh, "hosts").map_err(unreadable_at(&dsh.path, "hosts"))?
-    else {
+    let Some(hosts) = hosts_at(state)? else {
         return Ok(Vec::new());
     };
     let mut folders = Vec::new();
@@ -313,6 +321,41 @@ pub(super) fn recorded_hosts_at(
     }
     hosts.verify().map_err(|_| unreadable(&hosts.path))?;
     Ok(named)
+}
+
+/// The hosted-token proof selects exactly one home; unrelated host records
+/// cannot enter that proof. Decode its files with the global reader's rules.
+pub(crate) fn for_home(agent_home: &str) -> Result<Vec<Named>, Refusal> {
+    let Some(hosts) = hosts_at(&crate::state::storage::root())? else {
+        return Ok(Vec::new());
+    };
+    let key = crate::state::dsh::host_key(agent_home);
+    let Some(folder) = optional_child(&hosts, &key).map_err(unreadable_at(&hosts.path, &key))?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(host(&folder, super::boot().ok().as_deref())
+        .map_err(|path| unreadable(&path))?
+        .into_iter()
+        .map(|(named, _)| named)
+        .collect())
+}
+
+fn hosts_at(state: &Path) -> Result<Option<Directory>, Refusal> {
+    let state_root = match std::fs::canonicalize(state) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unreadable(state)),
+    };
+    let root = Directory::open(&state_root).map_err(|_| unreadable(&state_root))?;
+    let Some(dsh) = optional_child(&root, "dsh").map_err(unreadable_at(&state_root, "dsh"))? else {
+        return Ok(None);
+    };
+    let Some(hosts) = optional_child(&dsh, "hosts").map_err(unreadable_at(&dsh.path, "hosts"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(hosts))
 }
 
 fn unreadable_at<'a, E>(parent: &'a Path, name: &'a str) -> impl FnOnce(E) -> Refusal + 'a {

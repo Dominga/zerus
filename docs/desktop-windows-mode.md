@@ -239,16 +239,15 @@ these diagnostics are never admission or cleanup evidence. Exit polling
 validates the current owned definition once and uses that same checked task
 for GUID disappearance, under the original Stop deadline.
 
-Refresh allocates the ordinary two-second Stop allowance plus its unused
-two-second Update allowance to ONE four-second Stop deadline, captured once
-at Stop entry. It performs no Update or Rollback phase and cannot spend those
-allowances again. Preflight 2 + Hold 3 + Stop 4 + Start 2 + Readiness 8 + Release 2
-is 21 seconds, plus the existing three-second exchange/cleanup allowance, inside
+Refresh has its own four-second Stop allocation, captured once at Stop
+entry. It is independent of the ordinary mode-switch Stop allowance and
+performs no Update or Rollback phase; no allowance can be spent again.
+Preflight 2 + Hold 3 + Stop 4 + Start 2 + Readiness 8 + Release 2 is 21 seconds, plus the existing three-second exchange/cleanup allowance, inside
 the unchanged 30-second original-helper/runner bound. A declared overall
 deadline begins at helper entry; every phase is clipped to it. Checks, debug
 pause, physical-exit/GUID polls and Stopped publication all spend the same Stop
 deadline. Expiry never renews it or authorizes another start. Ordinary mode,
-first-choice and post-review choice budgets are unchanged.
+first-choice and post-review choice deadlines remain independent of Refresh.
 
 This first controller supports a current, identity-current Service Grant only.
 Revoked, blocked, changed-origin and unsupported actors are explicitly refused;
@@ -390,20 +389,29 @@ GUID, changed definition, unready original instance or unverifiable exclusion
 reports its exact unknown phase/reason; another instance is never adopted.
 
 The phase budgets are independent: preflight 2 s, rollback 6 s, hold acquisition
-3 s, Stop 2 s, update 2 s, start 2 s, readiness 8 s and release 2 s. Readiness
+3 s, Stop 4 s, update 2 s, start 2 s, readiness 8 s and release 2 s. Readiness
 gets its full budget after earlier phases; it does not spend the drain's
 remaining time. The original child exchange remains bounded by the shared
 runner's existing 30 s maximum. Its timeout still leaves uncertainty pending
 for observation, never permission to replay a manager call.
 
+The ordinary Stop allowance was raised from two to four seconds after a
+hosted loaded switch spent 2,022 ms confirming its original: 29 native
+rechecks took 1,456 ms, metadata synchronization 7 ms, the instance Stop call
+5 ms and physical-exit verification 553 ms. The earlier deadline expired
+during running-task verification after Stop. Every check and its order stays
+in place; the outer child exchange remains capped at 30 seconds.
+
 A refusal within Stop also includes `stop_timing` diagnostics
-(`desktop-mode-stop-timing-v1`): the unchanged budget, elapsed milliseconds,
+(`desktop-mode-stop-timing-v1`): the configured Stop budget, elapsed milliseconds,
 and fixed counters/times for native rechecks, metadata synchronization, the
 instance Stop call and physical-exit confirmation. Nested rechecks are charged
 to their own step, without double counting. Elapsed values cap at 60,000 ms;
 unattributed time is explicit. These fields never select a deadline or change
-the refusal wording, pending phase, authority or replay rules. The mode path
-has no separate failure audit; the refusal detail carries this bounded snapshot.
+the refusal wording, pending phase, authority or replay rules. A successful
+changed-mode reply also includes the same bounded `stop_timing` shape, captured
+immediately after Stop settles. It is additive diagnostic data; an unchanged
+mode need not include it. The mode path has no separate failure audit.
 
 If a fresh frontend Rearm won before hold acquisition, explicitly cancel only
 the obsolete saved rollback metadata:

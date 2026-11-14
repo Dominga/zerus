@@ -510,9 +510,10 @@ pub(super) fn request(frame: Frame) -> Result<Vec<u8>> {
 /// existing spawn turn (including macOS's non-atomic pipe CLOEXEC setup). There
 /// is no native effect or request frame in this cold start.
 fn cold_start(frame: &Frame, slot: &Arc<InheritedLock>) -> Result<(UnixStream, Child)> {
-    let _turn = crate::platform::spawn_turn();
+    let turn = crate::platform::spawn_turn();
     frame.deadline.remaining()?;
-    let (parent, child_end) = UnixStream::pair().map_err(|e| e.to_string())?;
+    let (parent, child_end) = zerus_client_core::unix_spawn::socket_pair_in_turn(&turn)
+        .map_err(|e| e.to_string())?;
     parent.set_nonblocking(true).map_err(|e| e.to_string())?;
     child_end.set_nonblocking(true).map_err(|e| e.to_string())?;
     let descriptor = child_end.as_raw_fd();

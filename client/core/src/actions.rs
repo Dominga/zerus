@@ -1445,7 +1445,7 @@ fn field<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 
 /// A native startup request that may come before a conversation exists:
-/// folder trust, Claude's permission mode, Codex's hooks review and update.
+/// folder trust, Claude's permission mode, Codex's hooks review, update and sandbox setup.
 fn startup_request(question: &Value) -> bool {
     let (source, transport, id, hash) = (
         field(question, "source"),
@@ -1462,6 +1462,9 @@ fn startup_request(question: &Value) -> bool {
             && id == format!("{provider}-trust:{hash}")
     });
     trust
+        || (source == "codex_sandbox_setup"
+            && transport == "codex_tui"
+            && id == format!("codex-sandbox:{hash}"))
         || (source == "claude_permission_mode"
             && transport == "claude_tui"
             && id == format!("claude-permissions:{hash}"))
@@ -2801,6 +2804,7 @@ mod tests {
             "Claude is waiting for a permission mode choice. Choose an option in Activity or Terminal before sending a message.",
             "Claude is waiting for folder trust approval. Choose an option in Activity or Terminal before sending a message.",
             "Codex is waiting for folder trust approval. Choose an option in Activity or Terminal before sending a message.",
+            "Codex is waiting for your sandbox setup choice. Choose an option in Activity or Terminal before sending a message.",
             "Codex is waiting for hook trust review. Choose an option in Activity or Terminal before sending a message.",
             "Codex is waiting for an update choice. Choose an option in Activity or Terminal before sending a message.",
             "Codex is waiting for your rate-limit model choice. Choose an option in Activity or open Terminal before sending a message.",

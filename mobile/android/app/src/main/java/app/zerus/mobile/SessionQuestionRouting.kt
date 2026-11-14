@@ -69,6 +69,17 @@ object SessionQuestionRouting {
 
     /** The person's latch through this phone's signed statement (zerus-sa9qn.50). */
     const val personOperation = "session_question_route_person"
+    const val personRevisionOperation = "session_question_route_person_status"
+    fun revisioned(relay: Set<String>, machine: Set<String>) = personRevisionOperation in relay && personRevisionOperation in machine
+    /** Exact read-only service reply: a stale/mismatched response never becomes a signed revision. */
+    fun latchRevision(value: JSONObject, id: String, session: String, run: String, conversation: String): Long {
+        val revision = integer(value.opt("revision"))
+        require(value.length()==9 && value.opt("request_id")==id && value.opt("op")=="question_route_child_status" &&
+            value.opt("accepted")==true && value.opt("durable")==false && value.opt("session_id")==session &&
+            value.opt("run_id")==run && value.opt("conversation_id")==conversation && value.opt("person_off") is Boolean &&
+            revision != null && revision <= 9_007_199_254_740_991L) { "The computer did not confirm this child's question routing. Refresh and try again." }
+        return revision
+    }
     /** Only an encrypted workspace connection can sign, and only where both the relay and the computer offer it. */
     fun person(connection: Connection?, relay: Set<String>, machine: Set<String>) =
         connection?.protocolVersion == 2 && personOperation in relay && personOperation in machine

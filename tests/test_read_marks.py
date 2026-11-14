@@ -410,8 +410,10 @@ class ReadMarks(unittest.TestCase):
 
     def hook(self, kind, session_id=None, **fields):
         event = dict(session_id=session_id or self.conversation_id, hook_event_name=kind, **fields)
-        result = subprocess.run([str(HGS), '__state', 'hook'], input=json.dumps(event), text=True, capture_output=True,
-                                env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id), timeout=10)
+        import hook_caller_fixtures
+        env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        result = hook_caller_fixtures.run(self,event,env) if self.record['agent']=='claude' else subprocess.run(
+            [str(HGS),'__state','hook'],input=json.dumps(event),text=True,capture_output=True,env=env,timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def acknowledged(self):

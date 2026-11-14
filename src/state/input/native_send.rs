@@ -646,8 +646,9 @@ mod tests {
         // its lock-free proof window and typing marker (#2119, #2124,
         // zerus-iitw8.4-.8), Clear input's pending request id (#2110,
         // zerus-wkj9l.5) and the original receipt's persist (#2077,
-        // zerus-a4mub.4). Routing, receipt bytes and native input order stay
-        // pinned below.
+        // zerus-a4mub.4). PR #2195 (zerus-cdhjm.3) adds Kimi's pre-send
+        // compaction reservation, wait, identity recheck and receipt diagnostics.
+        // Pin the complete resulting core, including ordinary delivery guards.
         let source = include_str!("../input.rs");
         let body = source
             .split_once("fn submit_core(")
@@ -656,10 +657,92 @@ mod tests {
             .split_once("/// Codex on Windows reads console key events")
             .unwrap()
             .0;
-        let original = format!("fn submit_core({body}");
+        // Teams adds only its typed pre-input refusal witness here. Undo
+        // those four exact, uniquely present edits before checking main's
+        // 9875d263b core (including pre-send compaction); changing or dropping
+        // any gate also fails this guard. before_input owns the common
+        // post-publication refusal persistence for both kinds of gate.
+        let mut original = format!("fn submit_core({body}");
+        // The public send's durable negative adds only a retention parameter
+        // and routes the same two live witnesses through its publisher. Exact
+        // negative retries re-enter the guards and retire before settings input. Keep
+        // the previous complete core hash and all delivery guards unchanged.
+        // The final Enter fence adds only this fresh-record check after the
+        // unlocked settle. The actual-CLI interleaving test pins its behavior.
+        for (retained, previous) in [
+            ("                let current = read(name)?;\n                if !typing_ours(&current, &request_id, string(&record, \"run_id\")) {", "                if !typing_ours(&read(name)?, &request_id, string(&record, \"run_id\")) {"),
+            ("                // Root was released during settle: only this fresh record can\n                // fence the remaining Enter. Keep the writer through the key.\n                terminating::check_mutation(&current)?;\n", ""),
+            ("match refusal::admit(&receipt_path, &digest, name, &request_id, &request, retain_refusal)", "match existing(&receipt_path, &digest, name)"),
+            ("// From here no possible-input receipt existed for this ID.", "// From here no receipt existed for this ID."),
+            ("    if retain_refusal && typed { refusal::prepare(&witness(String::new(), false, None)).map_err(unknown)?; }\n", ""),
+            ("    origin: Origin,\n    retain_refusal: bool,\n", "    origin: Origin,\n"),
+            ("remember_before_input(typed, witness(reason, false, None), retain_refusal)", "before_input(typed, witness(reason, false, None))"),
+            ("remember_before_input(typed, witness(gate.reason(), waiting, dialog), retain_refusal)", "before_input(typed, witness(gate.reason(), waiting, dialog))"),
+        ] {
+            assert_eq!(original.matches(retained).count(), 1, "refusal retention projection changed");
+            original = original.replacen(retained, previous, 1);
+        }
+        for (teams, main) in [
+            (r###"    let witness = |reason: String, waiting: bool, dialog: Option<&'static str>| NotOffered {
+        request_id: request_id.clone(),
+        name: name.to_owned(),
+        run_id: request.expected_run_id.clone(),
+        conversation_id: request.expected_conversation_id.clone(),
+        digest: digest.clone(),
+        receipts: receipt_path.clone(),
+        reason,
+        waiting,
+        dialog,
+    };
+    let refused = |typed: bool, reason: String| before_input(typed, witness(reason, false, None));
+    // The terminal gate's own refusal keeps its cause.
+    let gated = |typed: bool, gate: Gate| {
+        let waiting = matches!(gate, Gate::Waiting { .. });
+        let dialog = gate.dialog().map(|d| d.name());
+        before_input(typed, witness(gate.reason(), waiting, dialog))
+    };
+    let record = checked_record_gate(name, &request).map_err(|gate| gated(typed, gate))?;
+"###, r###"    let refused = |typed: bool, reason: String| {
+        let reason = if typed { kimi_expiry::refused(&receipt_path, reason) } else { reason };
+        before_input(
+            typed,
+            NotOffered {
+                request_id: request_id.clone(),
+                name: name.to_owned(),
+                run_id: request.expected_run_id.clone(),
+                conversation_id: request.expected_conversation_id.clone(),
+                digest: digest.clone(),
+                receipts: receipt_path.clone(),
+                reason,
+            },
+        )
+    };
+    let record = checked_record(name, &request).map_err(|e| refused(typed, e))?;
+"###),
+            (r###"    checked_send_gate(&record).map_err(|gate| gated(typed, gate))?;
+"###, r###"    checked_send_terminal(&record).map_err(|e| refused(typed, e))?;
+"###),
+            (r###"    if let Err(gate) = checked_record_gate(name, &request).and_then(|r| checked_send_gate(&r)) {
+        cleanup();
+        return Err(gated(typed, gate));
+    }
+"###, r###"    if let Err(error) = checked_record(name, &request).and_then(|r| checked_send_terminal(&r)) {
+        cleanup();
+        return Err(refused(typed, error));
+    }
+"###),
+            (r###"        record = checked_record_gate(name,&request).map_err(|gate| gated(typed,gate))?;
+        checked_send_gate(&record).map_err(|gate| gated(typed,gate))?;
+"###, r###"        record = checked_record(name,&request).map_err(|e| refused(typed,e))?;
+        checked_send_terminal(&record).map_err(|e| refused(typed,e))?;
+"###),
+        ] {
+            assert_eq!(original.matches(teams).count(), 1, "Teams gate projection changed");
+            original = original.replacen(teams, main, 1);
+        }
         assert_eq!(
             format!("{:x}", Sha256::digest(original.as_bytes())),
-            "843183ff4e2dd7ec9ef392271a192b963feaaae25408c7acb9ecfb52a6818f41"
+            "fff1e65bfc4cda56753b9f9e5b425db0c7deac5046ae0748e95d4e678ccd39c9"
         );
     }
     fn fixture() -> (Value, Value, Guard<'static>) {

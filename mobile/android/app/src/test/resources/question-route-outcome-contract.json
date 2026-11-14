@@ -1,0 +1,326 @@
+{
+  "description": "Owner-approved F3/F4 (zerus-sa9qn.52): no retry. Reserved stays pending; a settled refusal/not-started or unknown becomes a human request immediately, while the exact pending question remains answerable. Activity outcomes are child-only, read-only and bounded. The parent display name is the final session-name segment. Shared by the service, desktop, Android and iOS.",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "decisions": [
+    {
+      "state": "reserved",
+      "human_request": false,
+      "retry": false,
+      "row": {
+        "name": "codex/p/ask",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false
+      },
+      "quiet": true
+    },
+    {
+      "state": "submitted",
+      "human_request": false,
+      "retry": false,
+      "row": {
+        "name": "codex/p/ask",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false
+      },
+      "quiet": true
+    },
+    {
+      "state": "refused",
+      "human_request": true,
+      "retry": false,
+      "row": {
+        "name": "codex/p/ask",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": true
+      },
+      "quiet": false
+    },
+    {
+      "state": "unknown",
+      "human_request": true,
+      "retry": false,
+      "row": {
+        "name": "codex/p/ask",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": true
+      },
+      "quiet": false
+    }
+  ],
+  "activity": [
+    {
+      "name": "not_sent",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "not_sent"
+      },
+      "accepted": true,
+      "label": "Question not sent to lead"
+    },
+    {
+      "name": "uncertain",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "uncertain"
+      },
+      "accepted": true,
+      "label": "Question delivery to lead uncertain"
+    },
+    {
+      "name": "reserved",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "reserved"
+      },
+      "accepted": false,
+      "label": ""
+    },
+    {
+      "name": "unknown spelling",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "unknown"
+      },
+      "accepted": false,
+      "label": ""
+    },
+    {
+      "name": "parent failure",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "parent",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "uncertain",
+        "text": "never received"
+      },
+      "accepted": false,
+      "label": ""
+    },
+    {
+      "name": "extra field",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "not_sent",
+        "retry": true
+      },
+      "accepted": false,
+      "label": ""
+    },
+    {
+      "name": "no timestamp",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 0,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "not_sent"
+      },
+      "accepted": false,
+      "label": ""
+    },
+    {
+      "name": "wrong session",
+      "line": {
+        "request_id": "00000000-0000-8000-8000-000000000003",
+        "at": 1794599000000,
+        "role": "child",
+        "child": {
+          "name": "claude/project/child",
+          "reference": "zerus://session?machine=22222222-2222-4222-8222-222222222222&name=claude%2Fproject%2Fchild",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "parent": {
+          "name": "codex/project/lead",
+          "session_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "question": {
+          "kind": "single-choice",
+          "questions": 1,
+          "options": 2,
+          "preview": "Which database?"
+        },
+        "outcome": "not_sent"
+      },
+      "accepted": false,
+      "label": ""
+    }
+  ]
+}

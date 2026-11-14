@@ -193,6 +193,9 @@ export interface ActivityOut { computer: ComputerId; key: string; kind: Activity
 /** The existing watch tasks topic; a list replaces the open project's board. */
 export interface TasksOut { computer: ComputerId; key: string; kind: string; payload: unknown }
 
+/** One Teams view of the followed computer: `list`, `team:<id>`, `failed` or `ended`. */
+export interface TeamsOut { computer: ComputerId; key: string; kind: string; payload: unknown }
+
 // The Sessions list's grouping by the shared project organization
 // (client/core `swarm/grouping.rs`). The Rust side keeps the organization;
 // the webview gets each row's project and rank, and the ordered headers.
@@ -615,7 +618,7 @@ export interface Profile {
   permission: string; permission_mode?: string; permission_label: Text; permission_hint: Text;
   permission_source?: "provider" | "zerus";
   permission_catalog?: unknown; permission_current?: unknown;
-  model_supported: boolean; model_text: Text;
+  model_supported: boolean; model_text: Text; compact_on_expiry_supported?: boolean; compact_on_expiry?: boolean;
   /** The mode is the Zerus default (bypass for Claude, Codex and Kimi), not a choice (T-6hcfnu). */
   permission_default?: boolean;
   /** This computer's model and effort defaults, empty for provider settings (zerus-f0uz8). */

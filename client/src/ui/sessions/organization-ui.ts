@@ -50,6 +50,7 @@ export interface HeaderActions {
   /** New session on this project (showGroupMenu 2572-2573). */
   newSession: () => void;
   filter: () => void;
+  markRead: () => MenuEntry;
   collapse: (collapsed: boolean) => void;
   rename: () => void;
   settings: () => void;
@@ -58,7 +59,7 @@ export interface HeaderActions {
   remove: () => void;
 }
 
-/** The project header's menu, in Qt's order (2568-2616); none for a project no longer listed. */
+/** The project header's menu, with the project read action beside its filter; none for an unlisted project. */
 export function headerEntries(g: GroupingOut, project: string, act: HeaderActions): MenuEntry[] {
   const m = headerMenuState(g, project);
   if (!m) return [];
@@ -67,6 +68,7 @@ export function headerEntries(g: GroupingOut, project: string, act: HeaderAction
     { label: tr("New session…"), icon: "plus", action: act.newSession },
     { separator: true },
     { label: tr("Filter this project"), icon: "funnel", action: act.filter },
+    act.markRead(),
     { separator: true },
     // This device's layout: never waits for sync.
     { label: m.collapse, icon: "list-tree", action: () => act.collapse(!m.collapsed) },

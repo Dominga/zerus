@@ -6,6 +6,7 @@ import { suggestions } from "./suggestions";
 import { anyHidden, documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
 import type { Answer, ClearControl, ColdPrompt, ComposerView, InboxRemoveReply, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
+import { sendErrorText } from "../ui/sessions/send-error";
 import { trNoop, tr } from "../i18n";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
@@ -36,6 +37,13 @@ export const MAX_TEXT_BYTES = 64 * 1024;
 /** Qt refuses a pasted image above this many pixels (MessageComposer.cpp:394; core `MAX_IMAGE_PIXELS`). */
 export const MAX_PIXELS = 32_000_000;
 export const TOO_LONG = trNoop("Message exceeds 64 KiB.");
+/**
+ * The draft store's refused-save error, `drafts::NOT_RECORDED` in client
+ * core: the one core status text shown translated, since it tells the user
+ * what to do. Other core status text keeps its source form.
+ */
+export const DRAFTS_NOT_RECORDED = trNoop("Drafts are not being saved: their earlier versions could not be recorded. Check access to the Zerus data folder, then use Retry in Saved drafts.");
+const coreText = (text: string) => (text === DRAFTS_NOT_RECORDED ? tr(DRAFTS_NOT_RECORDED) : sendErrorText(text));
 const TOO_LARGE = trNoop("Image is too large. Use an image below 32 megapixels.");
 const UNREADABLE = trNoop("Could not read the pasted image.");
 /** How long the disabled Send's hint shows (Qt's QToolTip, MessageComposer.cpp:817). */

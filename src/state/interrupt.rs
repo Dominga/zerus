@@ -25,7 +25,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let uncertain =
         |e: String| format!("Interrupt delivery uncertain: {e}. Check Terminal before retrying");
     expect(&args[0], &request.expected_run_id, &request.expected_conversation_id)?;
-    let guard=lock(None)?;
+    // A native DeepSeek RPC belongs only to its stable conversation. Wait for
+    // that guard before taking any machine-wide metadata/receipt lock.
+    let dsh_session=if dsh::exists(&args[0]) {Some(dsh::dispatch_lock::acquire(&args[0])?.0)} else {None};
+    let guard=if dsh_session.is_some() {None} else {Some(lock(None)?)};
     let name=&args[0];let open_native=opencode::exists(name);let native=dsh::exists(name) || open_native;
     let record=if open_native {opencode::own_state(name)?} else if native {dsh::inspect(name,None)?} else {read(name)?};
     if request.expected_run_id.is_empty() || record["run_id"]!=request.expected_run_id
@@ -34,6 +37,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("The session or turn changed; nothing was stopped".into());
     }
     let path=absolute_root()?.join("interrupt_receipts").join(format!("{uuid}.json"));
+    let pending_guard=if dsh_session.is_some() {Some(lock(None)?)} else {None};
     if path.exists() {return Err("This interrupt was already attempted. Check Terminal before trying again".into());}
     if native {
         if record["interrupt_supported"]!=true {return Err("This DeepSeek turn cannot be interrupted from Activity. Open the native UI".into());}
@@ -43,6 +47,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     recovery::cancel_for_input(&record)?;
     atomic(&path,&json!({"status":"in_progress"}).to_string())?;
+    drop(pending_guard);
     let mut seen=None;
     if open_native {opencode::interrupt(&record)?;}
     else if native { dsh::interrupt(&record)?; }
@@ -60,6 +65,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let mut receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":"submitted"});
     // The interrupt was delivered or may have been (zerus-1wchz).
+    let _receipt_guard=if dsh_session.is_some() {Some(lock(None)?)} else {None};
     atomic(&path, &receipt.to_string()).map_err(uncertain)?;
     if let Some(seen)=seen {
         // Hooks must not wait while Claude redraws.

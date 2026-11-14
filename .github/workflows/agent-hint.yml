@@ -9,6 +9,8 @@ on:
       - '.github/workflows/agent-hint.yml'
       - 'scripts/ci/prepare-agent-hint.py'
       - 'scripts/ci/agent-compatibility.py'
+      - 'scripts/ci/native_discovery.py'
+      - 'tests/test_native_discovery.py'
       - 'tests/test_agent_hint_native.py'
       - 'tests/test_agent_hint_controls.py'
       - 'examples/session_start_observer.rs'

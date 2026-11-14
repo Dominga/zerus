@@ -201,7 +201,8 @@ extension ConversationModel {
                 else if operation == SessionQuestionRouting.personOperation {
                     guard case .bool(let send)? = arguments["send_to_parent"] else { throw ZerusError.invalid("Invalid question routing setting.") }
                     payload = try await app.client.signRoutePerson(connection, computer: target.computerId, sessionId: arguments.string("session_id"),
-                        run: target.run, conversation: target.conversation, personOff: !send, requestId: action.requestId)
+                        run: target.run, conversation: target.conversation, personOff: !send, requestId: action.requestId,
+                        useRevision: SessionQuestionRouting.revisioned(relay: app.relayOperations[target.connectionId] ?? [], machine: app.machineOperations[target.machineKey] ?? []), session: target.session)
                 }
                 else {
                     payload["request_id"] = .string(action.requestId)

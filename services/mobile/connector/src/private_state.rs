@@ -2,11 +2,15 @@
 //! Public reports must select fields explicitly; this module never logs bytes.
 use crate::fsguard;
 use ring::rand::{SecureRandom, SystemRandom};
+#[cfg(unix)]
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
+
+#[cfg(all(test, unix))]
+mod lock_tests;
 
 pub const MAX_STATE_BYTES: usize = 2 * 1024 * 1024;
 pub type Result<T> = std::result::Result<T, io::Error>;
@@ -46,7 +50,7 @@ pub struct Store {
     directory: File,
     #[cfg(windows)]
     _directory: zerus_windows_private::DirectoryGuard,
-    _lock: File,
+    _lock: zerus_file_lock::OwnedLock,
 }
 
 impl std::fmt::Debug for Store {
@@ -102,7 +106,7 @@ impl Store {
             directory,
             #[cfg(windows)]
             _directory: directory,
-            _lock: lock,
+            _lock: zerus_file_lock::OwnedLock::acquired(lock),
         }))
     }
 

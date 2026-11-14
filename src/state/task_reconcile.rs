@@ -357,7 +357,13 @@ pub(super) fn environment(pid: u32) -> Result<Vec<u8>> {
         "executor environment unavailable"
     );
     bytes.truncate(size);
-    let argc = i32::from_ne_bytes(bytes[..4].try_into()?);
+    procargs_environment(&bytes)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn procargs_environment(bytes: &[u8]) -> Result<Vec<u8>> {
+    let count = bytes.get(..4).context("executor environment unavailable")?;
+    let argc = i32::from_ne_bytes(count.try_into()?);
     ensure!((1..=4096).contains(&argc), "executor argv unavailable");
     let mut rest = &bytes[4..];
     rest = &rest[rest
@@ -375,8 +381,18 @@ pub(super) fn environment(pid: u32) -> Result<Vec<u8>> {
             .context("executor argv unavailable")?
             + 1..];
     }
+    // As in the caller proof, a NUL-only tail is withheld, not a readable
+    // empty environment (which still contains the kernel's own strings).
+    ensure!(
+        rest.iter().any(|byte| *byte != 0),
+        "executor environment unavailable"
+    );
     Ok(rest.to_vec())
 }
+
+#[cfg(test)]
+mod procargs_tests;
+
 /// An optional fixed entry under `parent`: None only when it is verifiably
 /// absent. Permission, links and every other error stay errors, so they can
 /// never select a different saved binding.

@@ -1,10 +1,11 @@
+import outcomeContract from "../../../mobile/android/app/src/test/resources/question-route-outcome-contract.json";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // The read-only Activity lines of submitted question routes (zerus-sa9qn.33);
 // the native read is a fixture.
 const calls = vi.hoisted(() => ({ invoke: vi.fn(), enabled: vi.fn(() => true) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: calls.invoke }));
 vi.mock("./desktopService", () => ({ desktopService: { enabled: calls.enabled } }));
-import { ROUTE_FOLLOW_MS, ROUTE_LIMIT, ROUTE_REFRESH_MS, parseRouteActivity, refreshRouteActivity, routeActivityOf, routeSessionOf } from "./questionRouteActivity";
+import { ROUTE_FOLLOW_MS, ROUTE_LIMIT, ROUTE_REFRESH_MS, inspectionRouteActivity, parseRouteActivity, refreshRouteActivity, routeActivityOf, routeSessionOf } from "./questionRouteActivity";
 
 const CHILD = "00000000-0000-4000-8000-000000000001";
 const PARENT = "00000000-0000-4000-8000-000000000002";
@@ -154,4 +155,25 @@ describe("which session's lines the Activity shows", () => {
     expect(routeSessionOf(undefined, live)).toBeUndefined();
     expect(routeSessionOf({ computer: "", key: "\nrun:r1" }, live)).toBeUndefined();
   });
+});
+
+it("the settled outcomes follow the shared mobile contract at real millisecond timestamps", () => {
+  for (const c of outcomeContract.activity) {
+    const routes = parseRouteActivity({ routes: [c.line] }, outcomeContract.session_id);
+    expect(routes.length, c.name).toBe(c.accepted ? 1 : 0);
+    if (c.accepted) expect(routes[0]).toMatchObject({ outcome: c.line.outcome, at: 1794599000 });
+  }
+});
+
+it("uses bounded exact-session inspection outcomes on remote desktops and deduplicates a local poll", () => {
+  const line = outcomeContract.activity[0].line;
+  const summary = { session_id: CHILD, question_route_activity: [line] };
+  const inspected = inspectionRouteActivity(summary, CHILD);
+  expect(inspected).toHaveLength(1);
+  expect(inspectionRouteActivity(summary, OTHER)).toEqual([]);
+  expect(inspectionRouteActivity(summary, undefined)).toEqual([]);
+  expect(inspectionRouteActivity(undefined, CHILD)).toEqual([]);
+  expect(inspectionRouteActivity(summary, CHILD, inspected)).toHaveLength(1);
+  expect(inspectionRouteActivity({ ...summary, question_route_activity: [] }, CHILD, inspected)).toEqual(inspected);
+  expect(inspectionRouteActivity({ ...summary, question_route_activity: Array(ROUTE_LIMIT + 1).fill(line) }, CHILD)).toEqual([]);
 });

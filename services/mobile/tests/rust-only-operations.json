@@ -60,6 +60,11 @@
       "operation": "session_question_route_person",
       "marker": "question_route_person",
       "class": "mutation"
+    },
+    {
+      "operation": "session_question_route_person_status",
+      "marker": "question_route_person_revision",
+      "class": "read"
     }
   ],
   "markers": {
@@ -69,6 +74,7 @@
     "task_actions": "hgs task mobile-send|mobile-cancel|mobile-done --json",
     "send_receipt": "delivery-receipt-v1",
     "question_routing": "session-question-routing-v1",
-    "question_route_person": "question-route-person-v1"
+    "question_route_person": "question-route-person-v1",
+    "question_route_person_revision": "question-route-person-v2"
   }
 }

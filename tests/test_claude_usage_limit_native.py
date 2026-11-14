@@ -69,7 +69,10 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         # An explicit config directory also isolates macOS Keychain service
         # identity. The native master config lives beside credentials there.
         (config / '.claude.json').write_bytes((self.root / '.claude.json').read_bytes())
-        (config / 'settings.json').write_text(json.dumps({'autoContinueAtUsageLimit': False}))
+        import hook_caller_fixtures
+        settings = {'autoContinueAtUsageLimit': False}
+        self.native_hook_socket = hook_caller_fixtures.install_native(settings, self.root)
+        (config / 'settings.json').write_text(json.dumps(settings))
         self.reset = int(time.time()) + 5 * 86400
         fixture = self
         self.requests = []
@@ -189,6 +192,7 @@ class NativeClaudeUsageLimit(unittest.TestCase):
             expected_id=self.conversation_id, launch_dir=str(work), pane=self.pane,
             pid=pid, process_start=start, activity='busy', phase='working',
             active_tools={}, subagents={}, transcript=str(history), last_event_at=time.time())
+        self.wait_for(lambda:self.native_hook_socket.exists())
         self.write_record()
         self.hook(dict(hook_event_name='StopFailure', error="You've hit your weekly limit · resets Oct 20, 1pm (UTC)"))
         self.card = self.wait_for(lambda: next((q for q in self.inspect()['pending_questions']

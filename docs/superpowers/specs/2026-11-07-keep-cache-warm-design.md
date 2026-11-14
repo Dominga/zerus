@@ -198,13 +198,29 @@ under the input lock.
 1. The setting is enabled, not expired, and its revision is unchanged since the
    decision. At `until` the worker turns it off and records `expired`.
 2. The agent is supported, its TTL is known, the ping is due, and the estimated
-   cache expiry is still at least 30 seconds away.
+   cache expiry is still at least 30 seconds away. A partial native usage read,
+   the source of Claude's TTL, is not evidence of expiry: while its scan is
+   still catching up, the cache lifetime is unknown, the round holds `waiting`
+   with a plain reason and only a complete read may turn the state cold or
+   allow a ping. A scan takes the transcript's identity and modification stamp
+   under the usage-cache lock, and a cold decision is confirmed by a fresh
+   complete read taken in the same round: a size or stamp read before the lock,
+   or a fresh read that shows a later expiry, never turns the state cold. An
+   oversized JSONL record is discarded across scans within the same per-scan
+   byte budget, persisting the reached offset and a skipping flag; a record is
+   oversized only when a full read bound from its own start finds no newline,
+   and one that only straddles the remaining budget of a scan is read from its
+   start by the next scan. An unterminated tail at EOF stays partial and
+   unread.
 3. The exact verified process is live with the expected run and conversation;
    the session is not paused, pausing, launching, archived or terminated.
-4. The agent is settled (`telemetry::settled`), has no live background jobs
-   (desktop **Background**), no scheduled jobs, no recovery job, no unconfirmed
-   input (`input_pending_at`), no native queued messages and no pending
-   launch prompt.
+4. The agent is settled (`telemetry::settled`), has no scheduled jobs, no
+   recovery job, no unconfirmed input (`input_pending_at`), no native queued
+   messages and no pending launch prompt. Owned live shell or native jobs
+   (desktop **Background**) do not hold a ping for Claude or Codex: an idle
+   agent with them accepts a new message, so the ping uses the same guarded
+   path. Kimi keeps the hold because its scheduled and background jobs can
+   start their own turns.
 5. No question, approval, trust, resume, usage-limit, permission, cache-expiry
    or terminal chooser is pending (`checked_input`), and no pending model or
    effort setting would be typed first (as for question answers).
@@ -218,7 +234,8 @@ Delivery reuses the guarded path with a new submission origin, like the
 existing `recovery_id`: a fresh request ID, the receipt marked
 `"origin":"keep_warm"`, no cancellation of recovery, and the ping recorded on
 the session record as `keep_warm_pending`. A refusal proven before input keeps
-the state `waiting`. Any unknown outcome sets `uncertain`; keep-warm then waits
+the state `waiting`, including a refusal for the unknown lifetime of a partial
+usage read. Any unknown outcome sets `uncertain`; keep-warm then waits
 for the next real turn and never replays.
 
 ## Silent ping turns
@@ -229,8 +246,14 @@ A ping is not the person's message.
   `TurnStarted`) whose text equals the constant while `keep_warm_pending` names
   a submitted ping gets `origin: "keep_warm"`, and the record holds
   `keep_warm_turn`. Main-agent events until that turn's Stop get
-  `turn_origin: "keep_warm"`. Any other prompt during the turn (a message the
-  person queued) clears the mark: the turn is then the person's.
+  `turn_origin: "keep_warm"`, but only while the turn holds nothing but the
+  ping. The first prompt of any other origin (the person's text, a task
+  notification, a subagent report, a peer message, any other system envelope)
+  ends the masking at once, before that prompt is applied: the record restores
+  the person's saved prompt, last message, last event time and turn start, and
+  every event from that prompt on is ordinary and visible. This includes a Stop
+  that closes a turn the ping started when a prompt joined it: that Stop ends
+  real work. The ping's own prompt event keeps `origin: "keep_warm"`.
 - **Reply, unread and notifications.** `latest_reply` skips Stops with
   `turn_origin: "keep_warm"`, so `reply_id` stays on the last real reply: no
   unread badge, no "Agent has a new reply" notification, no read-mark movement.

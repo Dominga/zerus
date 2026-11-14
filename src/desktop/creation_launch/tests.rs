@@ -71,10 +71,10 @@ fn exact_previous_store_upgrade_adds_only_the_independent_launch_leaf() {
     // Its own two tables, then the termination outcome, task message, task
     // message input, deferred send, deferred answer and compact-to-send
     // leaves.
-    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50 and .36).
+    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50, .36 and .52).
     assert_eq!(
         tables(&store.db),
-        before + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 1
+        before + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 1 + 1
     );
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
 }
@@ -1311,6 +1311,43 @@ mod reservation_budget {
             )
             .unwrap();
         originals
+    }
+    #[test]
+    fn custody_pages_search_the_pinned_partial_index_and_refuse_its_absence() {
+        let (_temp, _location, store, _epoch) = fixture();
+        for after in ["", "00000000-0000-4000-8000-000000000001"] {
+            let mut query = store
+                .db
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", ledger::CUSTODY_PENDING))
+                .unwrap();
+            let plan: Vec<String> = query
+                .query_map([after], |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains(
+                    "INDEX desktop_creation_launches_custody (drained=? AND launch_id>?)"
+                )),
+                "{after:?}: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|step| step.starts_with("SCAN desktop_creation_launches")
+                        || step.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+            assert!(ledger::custody_pending(&store.db, after).unwrap().is_none());
+        }
+        store
+            .db
+            .execute_batch("DROP INDEX desktop_creation_launches_custody")
+            .unwrap();
+        assert!(
+            ledger::custody_pending(&store.db, "").is_err(),
+            "a missing custody index must refuse instead of scanning retained history"
+        );
     }
     #[test]
     fn exact_legacy_conversion_keeps_every_original_and_duplicate() {

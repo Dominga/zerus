@@ -222,8 +222,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_session_resume_leaf() 
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50 and .36).
-    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2 + 1);
+    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50, .36 and .52).
+    assert_eq!(tables(&store.db), before + 2 + 1 + 2 + 2 + 1 + 1);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["session_resume"]["undrained"],
@@ -1056,7 +1056,10 @@ mod actor {
             .unwrap()
         }
         fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-            let until = Instant::now() + Duration::from_secs(8);
+            // A generous ceiling, not a budget: the loop exits the moment
+            // the condition holds, and the ceiling only caps a true failure.
+            // Eight seconds ran out under a loaded suite (zerus-63rru.21).
+            let until = Instant::now() + Duration::from_secs(60);
             while !done(self) {
                 assert!(
                     Instant::now() < until,
@@ -1273,6 +1276,11 @@ mod actor {
                 let observer: Observe = Arc::new(move |_, _| {
                     let n = count.fetch_add(1, Ordering::SeqCst);
                     let ready = case == "before_send" && n == 0;
+                    if ready {
+                        // A valid observation may complete after the short
+                        // timeout used only by the never-ready controls.
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
                     Some(
                         if ready {
                             OBSERVED_READY
@@ -1285,8 +1293,14 @@ mod actor {
                 observer
             });
             f.runtime.fixture_observer(observer, Duration::from_secs(5));
+            // Expiry cases keep their short budget. The before-send veto
+            // must reach its second observation within the production wait.
             f.runtime.fixture_wait(
-                Duration::from_millis(80),
+                if case == "before_send" {
+                    runtime::WAIT
+                } else {
+                    Duration::from_millis(80)
+                },
                 Duration::from_millis(5),
                 runtime::CHAIN,
             );
@@ -1294,6 +1308,8 @@ mod actor {
             f.admit(&original);
             f.until(case, |f| f.row(&original).receipt.drained);
             let row = f.row(&original);
+            eprintln!("RESUME_READY case={case}; send_reserved={}; observations={}; counts={:?}; receipt={}",
+                row.send.is_some(), observed.load(Ordering::SeqCst), ran.counts(), serde_json::to_string(&row.receipt).unwrap());
             assert_eq!(row.receipt.resume.step, Step::Recorded, "{case}");
             if case == "before_send" {
                 assert!(row.send.is_some(), "{case}: reserved before its turn");

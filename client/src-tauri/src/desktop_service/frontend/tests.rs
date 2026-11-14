@@ -1191,11 +1191,12 @@ fn a_question_route_latch_settles_only_on_its_exact_receipt_or_closed_refusal() 
         "person_off":true,"revision":3,"applied":true,"accepted":true,"durable":true,"code":""});
     let (_, complete) = checked(&request, receipt.clone(), false).unwrap();
     assert!(complete);
-    // Already so: the same revision.
+    // Already so: still a new decision, with the next revision.
     let mut same = receipt.clone();
     same["applied"] = json!(false);
+    assert!(checked(&request, same.clone(), false).is_some());
     same["revision"] = json!(2);
-    assert!(checked(&request, same, false).is_some());
+    assert!(checked(&request, same, false).is_none());
     for (field, wrong) in [
         ("request_id", json!(uuid::Uuid::new_v4().to_string())),
         ("op", json!("question_routes")),

@@ -79,6 +79,53 @@ class OpenCodeHintNative(native.OpenCodeNative):
                 'idle_helper_returns_hint': True, 'history_has_no_hint': True,
             }, indent=2) + '\n')
 
+    def test_transient_sender_writer_reobserves_context_without_replaying_the_send(self):
+        workspace = os.path.realpath(self.workspace)
+        self.hgs(['account', 'start', 'native-opencode'])
+        conversation = 'ses_' + native.native_suffix()
+        status, answer = self.api('POST', '/api/session', {
+            'id': conversation, 'title': 'transient sender', 'location': {'directory': workspace}})
+        self.assertEqual(status, 200, answer)
+        status, answer = self.api('POST', f'/api/session/{conversation}/prompt', {
+            'id': 'msg_' + native.native_suffix(), 'text': 'Before transient writer', 'delivery': 'queue'})
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(self.api('POST', f'/api/experimental/session/{conversation}/wait', {})[0], 204)
+        binding = self.save_binding('transient-sender', service='opencode2', conversation_id=conversation)
+        self.hgs(['opencode', str(self.workspace), '-n', 'transient-sender', '-d', '--account', 'native-opencode'])
+        binding = json.loads(self.binding_path(binding['name']).read_text())
+        marker = json.loads((self.state / 'opencode/context-hint/service.json').read_text())
+        args = ['--opencode-agent-hint', marker['nonce'], str(marker['pid']), workspace, conversation]
+        self.assertEqual(self.hgs(args)['context'], native.Model.HINT)
+        text = 'One send after transient writer contention'
+        payload = self.payload(binding, text=text)
+        probe = None
+        try:
+            with held_sender(self.root, self.state, self.workspace, self.env, native.HGS, binding, payload) as sender:
+                probe = subprocess.Popen([str(native.HGS), *args], env=self.env, cwd=self.workspace,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                # The original sender's framed fsync witness pins this lock
+                # hold. The helper must stay inside the same callback window.
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    probe.wait(timeout=.075)
+            stdout, stderr = probe.communicate(timeout=1)
+            self.assertEqual(probe.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout), {'context': native.Model.HINT})
+            self.assertEqual(sender.returncode, 0, sender.stderr_text)
+            self.assertEqual(sender.receipt['status'], 'submitted')
+            self.assertEqual(sender.receipt['request_id'], payload['request_id'])
+            self.assertEqual(self.api('POST', f'/api/experimental/session/{conversation}/wait', {})[0], 204)
+            requests = [r for r in self.model.requests if r['last_user'] == text and r['tools']]
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(json.dumps(requests[0]['messages']).count(native.Model.HINT), 1)
+            status, history = self.api('GET', f'/api/session/{conversation}/message?limit=100')
+            self.assertEqual(status, 200, history)
+            self.assertNotIn(native.Model.HINT, json.dumps(history))
+        finally:
+            if probe is not None:
+                if probe.poll() is None:
+                    probe.kill()  # Only this private helper process.
+                probe.communicate(timeout=5)
+
     @classmethod
     def cleanup(cls):
         if hasattr(cls, 'env'):
@@ -433,4 +480,5 @@ def load_tests(loader, _tests, _pattern):
     return loader.loadTestsFromNames([
         'OpenCodeHintNative.test_existing_turn_context_hint',
         'OpenCodeHintNative.test_sender_writer_omits_context_without_error_or_replay',
+        'OpenCodeHintNative.test_transient_sender_writer_reobserves_context_without_replaying_the_send',
     ], sys.modules[__name__])

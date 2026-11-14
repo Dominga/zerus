@@ -19,6 +19,51 @@ from tests import test_tasks
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 TMUX = shutil.which("tmux")
+# A real peer is not a descendant of the local SSH client's agent. Give the
+# stand-in the same boundary, rather than only clearing the child's markers.
+SSH_TRANSPORT = r'''#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys, tempfile, time
+root = pathlib.Path(os.environ['ROUTING_ROOT'])
+env = {k: v for k, v in os.environ.items() if not k.startswith(('HGS_', 'TMUX'))}
+env['HGS_SSH'] = str(root / 'ssh')
+env['HGS_TAB'] = '0'
+with tempfile.TemporaryDirectory(prefix='peer-', dir=root) as temporary:
+    call = pathlib.Path(temporary)
+    (call / 'request').write_text(json.dumps(dict(args=sys.argv[1:], text=sys.stdin.read())))
+    # The worker waits for this short-lived launcher to exit before executing.
+    subprocess.run(['sh', '-c', '"$@" "$$" </dev/null >/dev/null 2>&1 &',
+                    'peer-fixture', sys.executable, str(root / 'peer.py'), str(call)],
+                   env=env, check=True, timeout=5)
+    until = time.monotonic() + 55
+    while not (call / 'result').exists():
+        if time.monotonic() > until:
+            raise TimeoutError('private peer command did not settle')
+        time.sleep(.005)
+    result = json.loads((call / 'result').read_text())
+    sys.stdout.write(result['stdout']); sys.stderr.write(result['stderr'])
+    sys.exit(result['code'])
+'''
+PEER = r'''
+import json, os, pathlib, subprocess, sys, time
+call = pathlib.Path(sys.argv[1]); launcher = int(sys.argv[2])
+try:
+    until = time.monotonic() + 3
+    while os.getppid() == launcher and time.monotonic() < until:
+        time.sleep(.002)
+    if os.getppid() == launcher:
+        raise TimeoutError('private peer launcher did not exit')
+    for marker in ('HGS_SESSION', 'HGS_RUN_ID', 'HGS_SESSION_ID', 'HGS_AGENT'):
+        assert marker not in os.environ, marker
+    request = json.loads((call / 'request').read_text())
+    result = subprocess.run([sys.executable, str(pathlib.Path(os.environ['ROUTING_ROOT']) / 'ssh-command'),
+                             *request['args']], input=request['text'],
+                            text=True, capture_output=True, timeout=45)
+    reply = dict(code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+except Exception as error:
+    reply = dict(code=255, stdout='', stderr=str(error))
+(call / 'result.tmp').write_text(json.dumps(reply))
+os.replace(call / 'result.tmp', call / 'result')
+'''
 SSH = '''#!/usr/bin/env python3
 import json, os, pathlib, shlex, subprocess, sys
 root = pathlib.Path(os.environ['ROUTING_ROOT'])
@@ -58,7 +103,9 @@ class TaskRouting(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="hgs-routing-")
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        ssh = self.root / "ssh"; ssh.write_text(SSH); ssh.chmod(0o755)
+        ssh = self.root / "ssh"; ssh.write_text(SSH_TRANSPORT); ssh.chmod(0o755)
+        (self.root / "ssh-command").write_text(SSH)
+        (self.root / "peer.py").write_text(PEER)
         self.base = dict(os.environ, ROUTING_ROOT=str(self.root), ROUTING_HGS=str(HGS), HGS_SSH=str(ssh), HGS_TAB="0")
         for name in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION", "HGS_EXECUTABLE", "HGS_SELF", "HGS_PEERS"):
             self.base.pop(name, None)
@@ -67,7 +114,7 @@ class TaskRouting(unittest.TestCase):
             (self.root / node / "state").mkdir()
             socket = self.root / node / "socket"
             # hgs puts $HOME/.local/bin first on PATH: each node's tmux stays private.
-            shim = home / "tmux"; shim.write_text(f'#!/bin/sh\nexec {TMUX} -S "{socket}" -f /dev/null "$@"\n'); shim.chmod(0o755)
+            shim = home / "tmux"; shim.write_text(f'#!/bin/sh\n[ -d "{socket.parent}" ] || {{ echo "private tmux socket directory is gone" >&2; exit 97; }}\nexec {TMUX} -S "{socket}" -f /dev/null "$@"\n'); shim.chmod(0o755)
             self.addCleanup(lambda socket=socket: subprocess.run([TMUX, "-S", str(socket), "kill-server"], capture_output=True))
             config = self.root / node / "config"; config.mkdir()
             (config / "config").write_text(f'HGS_SELF="{node}"\nHGS_PEERS="{peer}"\n')

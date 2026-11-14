@@ -1010,6 +1010,10 @@ fn effort_reason(record: &Value, known: bool, running: bool) -> &'static str {
     }
 }
 
+/// Read-only effective alias, including a native model choice made in Terminal.
+/// The cache-expiry reader still requires a matching main-agent upstream route.
+pub(super) fn native_model(record: &Value) -> String { settings(record,true).model }
+
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     let value = settings(record, live_pane);
     let mut choices = options(record, &value.model);

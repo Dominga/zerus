@@ -2107,6 +2107,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerus-file-lock"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+]
+
+[[package]]
 name = "zerus-replica"
 version = "0.1.0"
 dependencies = [
@@ -2118,6 +2125,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+ "zerus-file-lock",
 ]
 
 [[package]]

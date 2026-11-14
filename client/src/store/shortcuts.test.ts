@@ -48,8 +48,8 @@ describe("chords as Qt writes them", () => {
 });
 
 describe("commands and defaults (Shortcuts.cpp)", () => {
-  it("keeps Qt's 28 commands in Qt's order", () => {
-    expect(COMMANDS).toHaveLength(28);
+  it("keeps the existing command order and adds own-message navigation", () => {
+    expect(COMMANDS).toHaveLength(30);
     expect(COMMANDS[0].id).toBe("go.overview");
     expect(COMMANDS.filter((c) => c.scope === "composer").map((c) => c.id)).toEqual(["message.send", "message.push"]);
   });
@@ -358,4 +358,16 @@ describe("composer commands in the one map", () => {
     expect(route(ctrl("S", { target: composer() }), state, "linux")).toEqual({ consume: false });
     off.forEach((f) => f());
   });
+});
+
+it.each(["linux", "windows", "macos"] as const)("routes own-message navigation from the composer without conflicting on %s", on => {
+  const off = [onCommand("activity.previousOwn", () => {}), onCommand("activity.nextOwn", () => {})];
+  try {
+    const state = sequenceState(), target = focus({ marked: "composer", tag: "TEXTAREA" });
+    for (const [arrow, id] of [["ArrowUp", "activity.previousOwn"], ["ArrowDown", "activity.nextOwn"]]) {
+      expect(conflicts(id, keys(id, on)[0], on)).toEqual([]);
+      expect(route(key({ key: arrow, code: arrow, ctrlKey: on !== "macos", metaKey: on === "macos", altKey: true, shiftKey: true, target }), state, on)).toEqual({ run: id, consume: true });
+      expect(route(key({ key: arrow, code: arrow, target }), state, on)).toEqual({ consume: false });
+    }
+  } finally { off.forEach(stop => stop()); }
 });

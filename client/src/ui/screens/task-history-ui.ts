@@ -4,6 +4,7 @@ import { tr } from "../../i18n";
 
 /** TaskDialogs::taskHistoryAction and TaskInspector's discussion receipts. */
 export function historyAction(e: TaskEntry): string {
+  if (e.kind === "attempt_cancelled") return tr("abandoned attempt %1; delivery remains unknown", e.requestId);
   const words: Record<string, string> = { created: "created the task", edited: "edited the prompt", cancelled: "cancelled it",
     resumed: "requested changes and submitted feedback", started: "started the task" };
   return words[e.kind] ?? (e.kind === "title" ? `renamed the task: ${e.text}` : e.kind === "stage" ? `moved it to ${STAGE_LABEL[e.text as Stage] ?? e.text}`

@@ -10,7 +10,7 @@ import { APPROVALS_KEY, APPROVALS_WARNING, APPROVALS_HINT, createApprovalOptIn }
 import { Icon } from "../../lib/icons";
 import { Actions, Group, SectionHead, Status, Table, Switch, ToggleRow } from "./ui";
 import { APPROVAL_CATEGORIES, CATEGORIES_HINT, SERVICE_CATEGORIES_UNKNOWN, categoryLabels, type ApprovalCategory } from "./approval-categories";
-import { PLACEHOLDER, createJournal, type JournalState, type Page } from "./approvals-journal";
+import { PLACEHOLDER, createJournal, type JournalState, type Page, trustSentence } from "./approvals-journal";
 import { tr, trNoop } from "../../../i18n";
 import { canToggleServiceApproval } from "./approval-readiness";
 
@@ -108,6 +108,7 @@ export function ApprovalsSection() {
               { key: "session", label: "Session", render: (e) => <span title={e.session}>{e.session}</span> },
               { key: "question", label: "Question", class: "ell-cell", render: (e) => <span title={e.prompt}>{e.prompt}</span> },
               { key: "category", label: trNoop("Category"), render: (e) => { const names = categoryLabels(e.categories).map((label) => tr(label)).join(", "); return <span title={names}>{names}</span>; } },
+              { key: "scope", label: trNoop("Scope"), render: (e) => { const sentence = trustSentence(e); return <span title={sentence ?? ""}>{sentence ?? ""}</span>; } },
               { key: "result", label: "Result", render: (e) => <span title={e.result}>{e.result}</span> },
             ]} />
           <aside class="an-detail appr-detail">

@@ -24,7 +24,15 @@ pub struct Hello {
 /// Read one complete line without allocating beyond the bound. Truncated and
 /// oversize requests close their connection; their payload is never diagnosed.
 pub fn line(reader: &mut impl BufRead, limit: usize) -> Result<Option<Vec<u8>>> {
-    line_checked(reader, limit, |_| Ok(()))
+    line_checked(reader, limit, |_, _| Ok(()))
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ReadPhase {
+    BeforeRead,
+    // macOS can reject socket-option updates after the peer closes, even
+    // when a complete frame was received. This phase only checks the budget.
+    Complete,
 }
 
 /// The local task-control lane carries its unchanged budget across every
@@ -32,11 +40,11 @@ pub fn line(reader: &mut impl BufRead, limit: usize) -> Result<Option<Vec<u8>>> 
 pub(super) fn line_checked<R: BufRead>(
     reader: &mut R,
     limit: usize,
-    mut check: impl FnMut(&R) -> Result<()>,
+    mut check: impl FnMut(&R, ReadPhase) -> Result<()>,
 ) -> Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     loop {
-        check(reader)?;
+        check(reader, ReadPhase::BeforeRead)?;
         let part = reader.fill_buf()?;
         if part.is_empty() {
             ensure!(bytes.is_empty(), "incomplete desktop frame");
@@ -51,7 +59,7 @@ pub(super) fn line_checked<R: BufRead>(
         bytes.extend_from_slice(&part[..count]);
         reader.consume(count);
         if end.is_some() {
-            check(reader)?;
+            check(reader, ReadPhase::Complete)?;
             return Ok(Some(bytes));
         }
     }
@@ -121,6 +129,57 @@ mod tests {
         assert!(line(&mut &b"abcd\n"[..], 4).is_err());
         assert_eq!(line(&mut &b"abc\nrest"[..], 4).unwrap().unwrap(), b"abc\n");
         assert!(line(&mut &b""[..], 4).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_complete_good_frame_survives_peer_close_and_keeps_its_deadline() {
+        use std::{
+            io::{BufReader, Write},
+            os::unix::net::UnixStream,
+            time::{Duration, Instant},
+        };
+        let (input, output) = UnixStream::pair().unwrap();
+        let mut peer = Some(output);
+        let mut reader = BufReader::new(input);
+        let good = b"{\"abi\":\"desktop-v1\",\"t\":\"status\",\"value\":{\"running\":true}}\n";
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut completed = false;
+        let frame = line_checked(&mut reader, FRAME_BYTES, |reader, phase| {
+            let remaining = until.saturating_duration_since(Instant::now());
+            ensure!(!remaining.is_zero(), "frame deadline expired");
+            match phase {
+                ReadPhase::BeforeRead => {
+                    reader.get_ref().set_read_timeout(Some(remaining))?;
+                    // Close only after the initial timeout is installed, but
+                    // before the read. Repeating that setup after the frame
+                    // deterministically fails with EINVAL on macOS.
+                    if let Some(mut peer) = peer.take() {
+                        peer.write_all(good)?;
+                        drop(peer);
+                    }
+                }
+                ReadPhase::Complete => completed = true,
+            }
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(frame, good);
+        assert!(completed, "the complete frame still checks its deadline");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        assert!(line_checked(&mut &good[..], FRAME_BYTES, |_, _| {
+            anyhow::bail!("frame deadline expired")
+        })
+        .is_err());
     }
 
     struct Timed {

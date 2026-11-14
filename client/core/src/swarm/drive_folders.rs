@@ -1237,6 +1237,18 @@ impl DriveController {
                 return Err("drive folder identity is already used".into());
             }
         }
+        if observation.records.iter().any(|(id, current)| {
+            request.desired.id.as_ref() != Some(id)
+                && current.project == request.desired.project
+                && current.machine == request.desired.machine
+                && crate::paths::same(
+                    &current.path,
+                    &request.desired.path,
+                    crate::paths::Style::Windows,
+                )
+        }) {
+            return Err(super::folder_edit::DUPLICATE.into());
+        }
         let draft = self.begin_draft(request.clone())?;
         match DriveCheckpoint::load(&self.draft_path) {
             Ok(None) if self.checkpoint.is_none() => {}
@@ -1595,6 +1607,83 @@ mod tests {
             .acknowledge_status(serde_json::to_value(changed).unwrap())
             .is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_known_windows_duplicate_refuses_before_pending_and_keeps_scope_and_self_edits() {
+        let dir = scratch();
+        let first = request();
+        let mut observed = observation();
+        observed
+            .records
+            .insert(FOLDER.into(), first.desired.clone());
+        observed
+            .versions
+            .insert(format!("drive_folders_v1:{FOLDER}"), vec![REQUEST.into()]);
+        let mut duplicate = request();
+        duplicate.request_id = uuid::Uuid::new_v4().to_string();
+        duplicate.desired.id = Some(uuid::Uuid::new_v4().to_string());
+        duplicate.desired.path = "c:/work".into();
+        let duplicate = duplicate.sealed().unwrap();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        let other_version = uuid::Uuid::new_v4().to_string();
+        let mut other_folder = first.desired.clone();
+        other_folder.id = Some(other_id.clone());
+        other_folder.path = "D:/Other".into();
+        let mut retargeted = duplicate.clone();
+        retargeted.original = Some(other_folder.clone());
+        retargeted.source = Some(retargeted.destination.clone());
+        retargeted.desired.id = Some(other_id.clone());
+        retargeted.versions = BTreeMap::from([(
+            format!("drive_folders_v1:{other_id}"),
+            vec![other_version.clone()],
+        )]);
+        let retargeted = retargeted.sealed().unwrap();
+        let mut with_other = observed.clone();
+        with_other.records.insert(other_id.clone(), other_folder);
+        with_other
+            .versions
+            .insert(format!("drive_folders_v1:{other_id}"), vec![other_version]);
+        for (name, request, current) in [
+            ("add", duplicate.clone(), observed.clone()),
+            ("edit", retargeted, with_other),
+        ] {
+            let path = dir.join(format!("duplicate-{name}.json"));
+            let mut controller = DriveController::new(path.clone(), true);
+            controller.observe(current).unwrap();
+            assert_eq!(
+                controller.begin(request).err().as_deref(),
+                Some(super::super::folder_edit::DUPLICATE),
+                "{name}"
+            );
+            assert!(!controller.pending());
+            assert!(!path.exists(), "a known refusal publishes no Pending");
+            let mut distinct = duplicate.clone();
+            distinct.desired.path = "E:/Distinct".into();
+            assert!(controller.begin(distinct.sealed().unwrap()).is_ok());
+        }
+
+        for (name, mut other) in [("project", observed.clone()), ("machine", observed.clone())] {
+            let record = other.records.get_mut(FOLDER).unwrap();
+            if name == "project" {
+                record.project = "other-project".into();
+            } else {
+                record.machine = uuid::Uuid::new_v4().to_string();
+            }
+            let mut controller = DriveController::new(dir.join(name), true);
+            controller.observe(other).unwrap();
+            assert!(controller.begin(duplicate.clone()).is_ok(), "{name}");
+        }
+        let mut edit = first.clone();
+        edit.request_id = uuid::Uuid::new_v4().to_string();
+        edit.original = Some(first.desired);
+        edit.source = Some(edit.destination.clone());
+        edit.desired.path = "c:/work".into();
+        edit.versions = observed.versions.clone();
+        let mut controller = DriveController::new(dir.join("self-edit"), true);
+        controller.observe(observed).unwrap();
+        assert!(controller.begin(edit.sealed().unwrap()).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -78,6 +78,18 @@ if (root / ('preference-' + alias)).exists():
     output = json.loads(result.stdout)
     if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'order']
     print(json.dumps(output)); sys.exit(0)
+if (root / ('twinsonly-' + alias)).exists():
+    # P2c-1 understands twins, but cannot read or edit the primary ID graph.
+    request = sys.stdin.read()
+    if args[1:] == ['exchange'] and {'id_memberships', 'known_id_memberships'} & set(json.loads(request)):
+        print('unknown primary membership field', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id_memberships_v1']
+    for field in ('id_memberships', 'known_id_memberships'): output.pop(field, None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('nosessionid-' + alias)).exists():
     # A member from before session membership by ID (v0.47.0): it lists its
     # kinds without "session_id", shows no twins and, as its exchange denies
@@ -1183,6 +1195,82 @@ class Swarm(unittest.TestCase):
         (self.root / 'nosessionid-c').unlink()
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(gate(), {'ready': True, 'missing': []})
+
+    def test_membership_readiness_requires_primary_capability_not_just_twins(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        c = self.call('c', 'get')['node_id']
+        (self.root / 'twinsonly-c').touch()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'], 'legacy twins exchange must keep working')
+        snapshot = self.call('b', 'get')
+        self.assertEqual(snapshot['membership_by_id'], {'ready': False, 'missing': [c]},
+                         'a twin-only peer cannot keep primary ID grouping current')
+        listed = json.loads((self.root / 'b/swarm/session-id-peers.json').read_text())
+        self.assertEqual(listed['c'], c, 'the older twins capability is still recorded separately')
+        (self.root / 'twinsonly-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.call('b', 'get')['membership_by_id'], {'ready': True, 'missing': []})
+
+    def test_unavailable_primary_keeps_legacy_native_projects_and_refuses_id_fallback(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        original = self.call('a', 'get')
+        state = self.root / 'a/state'; state.mkdir(exist_ok=True)
+        ids = state / 'ids'; ids.mkdir(exist_ok=True)
+        session = str(uuid.uuid4())
+        def query(name, by_id=False):
+            payload = dict(request_id=str(uuid.uuid4()), name=name, expected_run_id='private-run',
+                           expected_conversation_id='private-conversation', expected_machine_id=original['node_id'])
+            if by_id: payload['session_id'] = session
+            return payload
+        legacy, modern = 'claude/example/legacy', 'claude/example/modern'
+        for name in [legacy, modern]:
+            record = dict(version=1, agent='claude', name=name, run_id='private-run',
+                          conversation_id='private-conversation', state='paused')
+            if name == modern:
+                record['session_id'] = session
+                (ids / (session + '.json')).write_text(json.dumps(dict(version=1, name=name, kind='record')))
+            (state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(record))
+        modern_query = query(modern, True)
+        modern_before = self.call('a', 'session-project', '--json', data=modern_query)
+        self.assertEqual(modern_before['status'], 'ok', modern_before)
+        primary = self.root / 'a/swarm/session-id-memberships.json'
+        damaged = b'{damaged primary evidence'
+        primary.write_bytes(damaged)
+        legacy_query = query(legacy)
+        current = self.call('a', 'session-project', '--json', data=legacy_query)
+        self.assertEqual(current['status'], 'ok', current)
+        change = dict(legacy_query, request_id=str(uuid.uuid4()), swarm_id=original['swarm_id'],
+                      project_id='b', membership_token=current['membership_token'], catalog_epoch=current['catalog_epoch'])
+        assigned = self.call('a', 'assign-session', '--json', data=change)
+        self.assertEqual(assigned['status'], 'assigned', assigned)
+        self.assertEqual(self.call('a', 'session-project', '--json', data=query(legacy))['current_project_id'], 'b')
+        self.assertTrue(self.call('b', 'sync')['a']['ok'], 'legacy grouping still replicates')
+        projects = {row['id']: row for row in self.call('b', 'get')['organization']['projects']}
+        self.assertIn('a\n' + legacy, projects['b']['sessions'])
+        for payload in [query(modern), query(modern, True)]:
+            rejected = self.call('a', 'session-project', '--json', data=payload)
+            self.assertEqual(rejected['status'], 'failed', rejected)
+            self.assertIn('ID project membership is unavailable', rejected['error'])
+        modern_change = dict(modern_query, request_id=str(uuid.uuid4()), swarm_id=original['swarm_id'], project_id='b',
+                             membership_token=modern_before['membership_token'], catalog_epoch=modern_before['catalog_epoch'])
+        rejected = self.call('a', 'assign-session', '--json', data=modern_change)
+        self.assertEqual(rejected['status'], 'failed', rejected)
+        self.assertIn('ID project membership is unavailable', rejected['error'])
+        legacy_path = state / (hashlib.sha256(legacy.encode()).hexdigest() + '.json')
+        record = json.loads(legacy_path.read_text())
+        for value in [None, '']:
+            record['session_id'] = value
+            before = json.dumps(record)
+            legacy_path.write_text(before)
+            self.assertEqual(self.call('a', 'session-project', '--json', data=query(legacy))['status'], 'ok')
+            self.assertEqual(legacy_path.read_text(), before, 'legacy reads never create a session ID')
+        for value in [True, {}, 'not-an-id', 'EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE', str(uuid.UUID(int=0))]:
+            record['session_id'] = value
+            legacy_path.write_text(json.dumps(record))
+            invalid = self.call('a', 'session-project', '--json', data=query(legacy))
+            self.assertEqual(invalid['status'], 'failed', 'an invalid native ID is not legacy absence')
+        self.assertEqual(primary.read_bytes(), damaged, 'legacy work cannot repair or replace primary evidence')
 
     def test_twins_travel_only_between_members_that_list_the_kind(self):
         # zerus-ucck P2c-1 (#1413 review): session ID memberships live beside

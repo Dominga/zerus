@@ -1,4 +1,4 @@
-  Folder access
+Folder access
   /work/example
 
   Trust this folder? Codex can read, edit, and run files here, subject to your permission

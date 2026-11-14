@@ -374,6 +374,7 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
         }
     }
     record["shell_jobs"] = json!(jobs);
+    compact(record);
 }
 pub(super) fn event_job(record: &Value, event: &Value) -> Option<String> {
     let call = call_id(event);

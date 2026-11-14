@@ -5,7 +5,18 @@ import { trNoop, tr } from "../../../i18n";// The approval journal's reads as Au
 // or select after a failed read, and an entry's detail where only the
 // latest selection's answer counts.
 
-export interface Entry { id: number; at: number; host: string; session: string; prompt: string; result: string; categories?: string[] }
+export interface Entry { id: number; at: number; host: string; session: string; prompt: string; result: string; categories?: string[]; scope?: string | null; standing?: string | null }
+
+/** The trust sentence a row's scope yields (zerus-63rru.66 round 4): only a
+ * folder-trust record shows one, and only a confirmed grant claims the
+ * trust; anything else says trust was requested. */
+export function trustSentence(entry: Entry): string | null {
+  const scope = entry.scope?.trim();
+  if (!scope || entry.standing !== "team_folder_trust") return null;
+  return entry.result === "Approved once"
+    ? tr("Trusted for %1 and its subfolders on this account", scope)
+    : tr("Trust was requested for %1 and its subfolders; it was not confirmed", scope);
+}
 /** Read identity only; native code rechecks it against the selected service. */
 export interface JournalScope { configuration: string; epoch: string; generation: number; journal: string; through: number; host: string; session: string }
 export interface Page { entries: Entry[]; next: number; previous: number; scope?: JournalScope }

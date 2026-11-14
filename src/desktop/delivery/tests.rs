@@ -55,6 +55,7 @@ impl Fixture {
             &self.feed,
             &crate::desktop::catalog_read::Reader::default(),
         )
+        .expect("the fixture's service scope remains current")
     }
     fn projection(&self) -> Value {
         let mut value = self.passive_projection();

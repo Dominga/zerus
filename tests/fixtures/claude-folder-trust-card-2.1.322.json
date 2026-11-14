@@ -1,0 +1,33 @@
+{
+  "agent_id": "main",
+  "answer_transport": "claude_tui",
+  "answer_unavailable_reason": "",
+  "can_answer": true,
+  "conversation_id": null,
+  "created_at": 0,
+  "question_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+  "question_id": "claude-trust:5555555555555555555555555555555555555555555555555555555555555555",
+  "questions": [
+    {
+      "allow_other": false,
+      "body": "/work/example-team/fixtures/claude-0001/w/zerus-team-00000000-0000-4000-8000-0000000000c1\n\nQuick safety check: Is this a project you created or one you trust? (Like your\nown code, a well-known open source project, or work from your team). If not,\ntake a moment to review what's in this folder first.\n\nClaude Code'll be able to read, edit, and execute files here.",
+      "header": "Folder trust",
+      "id": "trust",
+      "multi_select": false,
+      "options": [
+        {
+          "id": "trust_0",
+          "label": "No, exit"
+        },
+        {
+          "id": "trust_1",
+          "label": "Yes, I trust this folder"
+        }
+      ],
+      "question": "Trust this folder?"
+    }
+  ],
+  "run_id": "00000000-0000-4000-8000-0000000000d1",
+  "source": "claude_folder_trust",
+  "tool_call_id": "claude_folder_trust"
+}

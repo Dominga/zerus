@@ -79,7 +79,8 @@ impl Budget {
             Self::Preflight => 2,
             Self::Rollback => 6,
             Self::Hold => 3,
-            Self::Stop | Self::Update | Self::Start | Self::Release => 2,
+            Self::Stop => 4,
+            Self::Update | Self::Start | Self::Release => 2,
             Self::Readiness => 8,
         })
     }
@@ -87,7 +88,9 @@ impl Budget {
         now + self.duration()
     }
     pub fn exchange_timeout() -> Duration {
-        Self::ALL.into_iter().map(Self::duration).sum::<Duration>() + Duration::from_secs(3)
+        // Phase allowances never extend the original shared child-runner cap.
+        (Self::ALL.into_iter().map(Self::duration).sum::<Duration>() + Duration::from_secs(3))
+            .min(Duration::from_secs(30))
     }
 }
 
@@ -338,6 +341,20 @@ mod tests {
         }
     }
     #[test]
+    fn measured_stop_verification_fits_the_deadline_without_renewing_the_outer_bound() {
+        // Hosted zerus-yuwgz: 29 native rechecks took 1456 ms, metadata
+        // publication 7 ms, COM Stop 5 ms and physical verification 553 ms.
+        // The 2022 ms observed total outlived the former two-second phase.
+        let start = Instant::now();
+        let verified = start + Duration::from_millis(2022);
+        let stop = Budget::Stop.deadline(start);
+        assert!(verified < stop, "the measured original verification expired");
+        assert_eq!(stop, start + Duration::from_secs(4));
+        assert!(start + Budget::exchange_timeout() > stop);
+        assert_eq!(Budget::exchange_timeout(), Duration::from_secs(30));
+    }
+
+    #[test]
     fn readiness_has_a_fresh_budget_after_rollback_and_the_exchange_remains_bounded() {
         let start = Instant::now();
         let after_rollback = Budget::Rollback.deadline(start);
@@ -353,7 +370,7 @@ mod tests {
                 .into_iter()
                 .map(Budget::duration)
                 .sum::<Duration>(),
-            Duration::from_secs(27)
+            Duration::from_secs(29)
         );
     }
     #[test]

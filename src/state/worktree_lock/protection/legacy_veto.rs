@@ -1,6 +1,11 @@
-//! Explicit legacy advisory-veto proof. This never establishes native-private
-//! root authority and never creates, rewrites, chmods or relocks a Git veto.
+//! Explicit legacy advisory-veto proof. Preparation retains the original Git
+//! veto unchanged; shared retirement rewrites only its reason through the
+//! retained descriptor. Neither establishes native-private root authority,
+//! creates a Git veto, changes its mode or relocks a manual unlock.
 use super::*;
+
+#[cfg(unix)]
+mod handoff;
 
 pub(super) const VERSION: u64 = 2;
 pub(super) const KIND: &str = "legacy-advisory-veto";
@@ -129,7 +134,25 @@ impl Protection {
         Ok(held)
     }
 
+    fn handoff_name(&self) -> String {
+        format!("{}.handoff", self.receipt)
+    }
+
     pub(super) fn verify_legacy(&self) -> Result<()> {
+        self.receipts.verify()?;
+        if self
+            .receipts
+            .read_private_optional(&self.handoff_name())?
+            .is_some()
+        {
+            return Err("The shared handoff is incomplete; keep its Git veto for review".into());
+        }
+        self.verify_legacy_version(&self.before["lock_version"], "ready")
+    }
+
+    // Only the owned handoff may check its changed original descriptor while
+    // the durable proof remains review-only. Ordinary readers require Ready.
+    fn verify_legacy_version(&self, lock_version: &Value, status: &str) -> Result<()> {
         self.state.verify()?;
         self.receipts.verify()?;
         self.common.verify()?;
@@ -140,7 +163,7 @@ impl Protection {
             || read_receipt(&self.receipts, &self.receipt)?.as_ref() != Some(&self.before)
             || self.before["version"] != VERSION
             || self.before["kind"] != KIND
-            || self.before["status"] != "ready"
+            || self.before["status"] != status
             || self.before["owner"] != self.owner
             || self.before["state_object"] != json!(self.state.object()?)
             || self.before["receipt_object"] != json!(self.receipts.object()?)
@@ -163,8 +186,8 @@ impl Protection {
         let actual = version(&current)?;
         if self.before["lock_object"] != object(&self.lock)?
             || self.before["lock_object"] != object(&current)?
-            || self.before["lock_version"] != version(&self.lock)?
-            || self.before["lock_version"] != actual
+            || *lock_version != version(&self.lock)?
+            || *lock_version != actual
             || self.before["lock_mode"] != actual[2]
             || text(&mut current)? != format!("zerus:{}\n", self.reason)
         {
@@ -173,5 +196,10 @@ impl Protection {
             );
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(super) fn transfer_legacy(self, holder: &worktree_cleanup::Reference) -> Result<()> {
+        handoff::transfer(self, holder)
     }
 }

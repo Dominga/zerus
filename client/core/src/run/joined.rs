@@ -32,7 +32,7 @@ pub fn run_owned_joined_observed(
     parent_env: &[(&str, &str)],
     cancel: &AtomicBool,
     guard: JoinedSpawn<
-        impl FnOnce(&mut Command) -> std::io::Result<GuardedChild>,
+        impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<GuardedChild>,
         impl FnOnce(&mut Child, Instant) -> bool,
     >,
     resources: Arc<dyn Send + Sync>,
@@ -60,7 +60,7 @@ fn exchange(
     parent_env: &[(&str, &str)],
     cancel: &AtomicBool,
     guard: JoinedSpawn<
-        impl FnOnce(&mut Command) -> std::io::Result<GuardedChild>,
+        impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<GuardedChild>,
         impl FnOnce(&mut Child, Instant) -> bool,
     >,
     resources: Arc<dyn Send + Sync>,
@@ -97,9 +97,10 @@ fn exchange(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let input_spawn = InputSpawn::new(!input.is_empty()).map_err(|_| OwnedError::StartFailed)?;
     let (mut owner, withheld) =
-        match (guard.spawn)(&mut command).map_err(|_| OwnedError::StartFailed)? {
-            GuardedChild::Ready(child) => (admission.attach(child), false),
+        match (guard.spawn)(&mut command, input_spawn).map_err(|_| OwnedError::StartFailed)? {
+            GuardedChild::Ready(child) => (admission.attach_input(child, !input.is_empty()), false),
             GuardedChild::Withheld(child) => (admission.attach_withheld(child), true),
         };
     if !withheld {

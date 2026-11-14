@@ -179,3 +179,39 @@ fn the_person_statement_is_a_rust_only_mutation_gated_by_its_own_marker() {
         "question-route-person-v1"
     );
 }
+
+#[test]
+fn revisioned_person_statements_and_the_additive_read_have_exact_shapes() {
+    let mut signed = person_payload();
+    signed["statement"]["expected_revision"] = json!(7);
+    assert_eq!(wire(&person_request(signed.clone())), 202);
+    for bad in [
+        json!(null),
+        json!(-1),
+        json!(1.0),
+        json!("7"),
+        json!(9_007_199_254_740_992u64),
+    ] {
+        signed["statement"]["expected_revision"] = bad;
+        assert_eq!(wire(&person_request(signed.clone())), 400);
+    }
+    let op = "session_question_route_person_status";
+    assert!(protocol::READS.contains(&op));
+    let mut read = person_request(
+        json!({"session_id":"00000000-0000-4000-8000-0000000000c1","expected_run_id":"run-1","expected_conversation_id":"conversation-1"}),
+    );
+    read["operation"] = json!(op);
+    assert_eq!(wire(&read), 202);
+    read["payload"]["extra"] = json!(1);
+    assert_eq!(wire(&read), 400);
+    let table: Value = serde_json::from_str(RUST_ONLY).unwrap();
+    assert!(table["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["operation"] == op && r["class"] == "read"));
+    assert_eq!(
+        table["markers"]["question_route_person_revision"],
+        "question-route-person-v2"
+    );
+}

@@ -1,8 +1,10 @@
+import { batch } from "solid-js";
 import { GONE, notify, stillListed } from "../../store/actions";
 import { markAllRead, markNeedsAttention, markRead, markReadUnavailable, unreadReplies } from "../../store/marks";
-import { computerFresh } from "../../store/catalog";
+import { catalog, computerFresh } from "../../store/catalog";
+import { groupOf } from "../../store/organization";
 import { needsAttention, selected, selectedKey, setReadSelectionKey, type MenuEntry } from "../../store/ui";
-import type { AttentionFacts } from "../../store/attention";
+import { visibleUnreadReply, type AttentionFacts } from "../../store/attention";
 import { snapshotOf, type ActionRow } from "./actions-ui";
 import type { Session } from "./types";
 import { trNoop, tr } from "../../i18n";
@@ -48,6 +50,23 @@ export function markEntry(s: Session): Extract<MenuEntry, { label: string }> | u
   return markReadChip(s, computerFresh(s.computer)).active
     ? { label: tr("Mark as read"), icon: "check-check", action: () => { runMarkRead(row); } }
     : { label: tr("Mark needs attention"), icon: "bell", hint: tr(REVIEW_HINT), action: () => { runMarkNeedsAttention(row); } };
+}
+
+/** Snapshot this project's unread replies, including members hidden by list filters. */
+export function markProjectEntry(project: string, members: readonly Session[]): Extract<MenuEntry, { label: string }> {
+  const unread = (s: Session) => visibleUnreadReply(s, computerFresh(s.computer));
+  const rows = members.filter(unread).map(snapshotOf);
+  return {
+    label: tr("Mark sessions as read"), icon: "check-check", disabled: rows.length === 0,
+    action: () => batch(() => {
+      for (const row of rows) {
+        const current = catalog.rows[row.key];
+        // A moved/read row is no longer a target. The per-session action
+        // rechecks the original run, conversation and reply before writing.
+        if (current && groupOf(row.key) === project && unread(current)) runMarkRead(row);
+      }
+    }),
+  };
 }
 
 /** The footer button's tooltip (Qt: the label, a newline, the hint). */

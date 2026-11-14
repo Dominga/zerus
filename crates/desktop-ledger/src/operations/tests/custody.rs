@@ -230,7 +230,11 @@ fn helper_birth_is_once_only_and_registration_refuses_after_revoke_or_restart() 
     crate::revoke(&tx, "fixture").unwrap();
     tx.commit().unwrap();
     assert!(store::register(&mut db, &prepared.ticket, &helper).is_err());
-    recover_batch(&mut db, &id(300)).unwrap();
+    let next = id(300);
+    assert!(recover_batch(&mut db, &next).is_err());
+    assert_eq!(store::pending(&db).unwrap().unwrap().0.state, "reserved");
+    crate::begin_service(&mut db, &next).unwrap();
+    recover_batch(&mut db, &next).unwrap();
     assert_eq!(store::pending(&db).unwrap().unwrap().0.state, "unknown");
     assert_eq!(totals(&db).unwrap().undrained, 1);
 }
@@ -251,7 +255,11 @@ fn missing_custody_and_unregistered_helper_never_mean_resources_ended() {
         .unwrap()
         .helper
         .is_none());
-    recover_batch(&mut db, &id(300)).unwrap();
+    let next = id(300);
+    assert!(recover_batch(&mut db, &next).is_err());
+    assert_eq!(store::pending(&db).unwrap().unwrap().0.state, "reserved");
+    crate::begin_service(&mut db, &next).unwrap();
+    recover_batch(&mut db, &next).unwrap();
     assert_eq!(totals(&db).unwrap().undrained, 1);
     finish(
         &mut db,

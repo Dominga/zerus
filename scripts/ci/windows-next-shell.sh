@@ -14,6 +14,8 @@ on_exit() {
 }
 trap on_exit EXIT
 native_status=0
+# The real checking thread must stop before slow exit work on Windows too.
+cargo test --locked --manifest-path client/src-tauri/Cargo.toml --test watchdog_exit -j 4 || native_status=1
 python scripts/ci/windows-desktop-registration-tests.py || native_status=1
 cargo test --locked --manifest-path crates/presence-sampler/Cargo.toml || native_status=1
 # The service/relay binary and native tests come from this exact checkout.

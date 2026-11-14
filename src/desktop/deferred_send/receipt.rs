@@ -16,7 +16,7 @@
 //! replaced, changing or mismatched receipt, folder or root.
 use crate::desktop::original_store::{self, Failure};
 pub(super) use crate::desktop::original_store::{Evidence, Roots};
-use zerus_client_core::desktop::deferred_send::{Outcome, Plan, RECEIPT_BYTES, RECEIPT_MISMATCH};
+use zerus_client_core::desktop::deferred_send::{Outcome, Plan, Refusal, RECEIPT_BYTES, RECEIPT_MISMATCH};
 
 /// No receipt of the request exists in the original, unchanged store.
 pub(super) const MISSING: &str = "deferred_send_receipt_missing";
@@ -38,6 +38,8 @@ pub(super) const FOLDER: &str = "input_receipts";
 pub(super) enum Observed {
     /// The exact original's receipt is `submitted`.
     Submitted(Outcome),
+    /// Exact retained negative evidence; it remains Unknown and cannot replay.
+    Refused(Refusal),
     /// Anything else, for the named reason. Never resent.
     Unknown(&'static str),
 }
@@ -55,7 +57,10 @@ pub(super) fn read(roots: &Roots, plan: &Plan, between: &dyn Fn()) -> (Observed,
         // record, or no outcome.
         Ok(bytes) => match Outcome::from_receipt(plan, &bytes) {
             Ok(outcome) => Observed::Submitted(outcome),
-            Err(code) => Observed::Unknown(code),
+            Err(code) => match Refusal::from_receipt(plan, &bytes) {
+                Ok(refusal) => Observed::Refused(refusal),
+                Err(_) => Observed::Unknown(code),
+            },
         },
         Err(Failure::Missing) => Observed::Unknown(MISSING),
         Err(Failure::Unavailable) => Observed::Unknown(UNAVAILABLE),

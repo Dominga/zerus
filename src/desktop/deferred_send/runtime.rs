@@ -690,7 +690,7 @@ impl Runtime {
                         Ended::NotStarted => ledger::not_started(&tx, &row)?,
                         // The exit proves nothing; the CLI's receipt, read
                         // at the drain, decides.
-                        Ended::Exited { .. } => ledger::ended(&tx, &row, ledger::AWAITING_DRAIN)?,
+                        Ended::Exited { code, stderr } => ledger::exited(&tx, &row, code, &stderr)?,
                         Ended::Unknown(code) => ledger::ended(&tx, &row, code)?,
                     }
                     tx.commit()?;

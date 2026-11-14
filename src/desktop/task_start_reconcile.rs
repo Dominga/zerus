@@ -690,7 +690,7 @@ impl Runtime {
                     &invocation,
                     &env,
                     &selected.cancel,
-                    move |command| {
+                    move |command, input_spawn| {
                         if current.cancel.load(Ordering::Acquire)
                             || current
                                 .executor
@@ -700,7 +700,7 @@ impl Runtime {
                             return Err(std::io::Error::other("task Start current guard refused"));
                         }
                         lock.inherit(command)?;
-                        let mut child = platform::spawn_in_turn(command)?;
+                        let mut child = input_spawn.spawn_with(command, platform::spawn_in_turn)?;
                         let bound = (|| -> Option<bool> {
                             let birth = platform::process_identity(child.id())?;
                             let (reply, receive) = mpsc::sync_channel(1);

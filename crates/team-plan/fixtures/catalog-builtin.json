@@ -1,0 +1,149 @@
+{
+  "roles": [
+    {
+      "id": "developer",
+      "name": "Developer",
+      "agent": "claude",
+      "prompt": "Implement the task in your own worktree. Start from the base commit named in the task, keep to its write set, run the checks that can fail for your change, commit, and report what you changed and how you checked it."
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "agent": "claude",
+      "prompt": "Review the reported commit against the task's criteria. You never change what you review. Give a verdict: pass, or return with the exact findings."
+    },
+    {
+      "id": "tester",
+      "name": "Tester",
+      "agent": "claude",
+      "prompt": "Check the reported commit by running it: the task's criteria and the scenarios a person would try. You never implement. Give a verdict: pass, or return with what failed and how to see it."
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "code",
+      "name": "Code: review, test, lead",
+      "implementer": "developer",
+      "stages": [
+        {
+          "kind": "review",
+          "role": "reviewer"
+        },
+        {
+          "kind": "test",
+          "role": "tester"
+        }
+      ]
+    },
+    {
+      "id": "reviewed",
+      "name": "Reviewed: review, lead",
+      "implementer": "developer",
+      "stages": [
+        {
+          "kind": "review",
+          "role": "reviewer"
+        }
+      ]
+    },
+    {
+      "id": "docs",
+      "name": "Docs: review, then accepted",
+      "implementer": "developer",
+      "stages": [
+        {
+          "kind": "review",
+          "role": "reviewer"
+        }
+      ],
+      "accept": "pipeline"
+    },
+    {
+      "id": "check",
+      "name": "Check: lead",
+      "implementer": "developer"
+    }
+  ],
+  "templates": [
+    {
+      "id": "feature-delivery",
+      "name": "Feature delivery",
+      "description": "Planned work on one goal: two developers, a reviewer and a tester.",
+      "lead": {
+        "agent": "claude"
+      },
+      "roster": [
+        {
+          "role": "developer",
+          "count": 2
+        },
+        {
+          "role": "reviewer",
+          "count": 1
+        },
+        {
+          "role": "tester",
+          "count": 1
+        }
+      ],
+      "default_pipeline": "code",
+      "settings": {
+        "routing": "lead"
+      }
+    },
+    {
+      "id": "bugfix",
+      "name": "Bugfix",
+      "description": "A queue of independent fixes: a developer and a reviewer.",
+      "lead": {
+        "agent": "claude"
+      },
+      "roster": [
+        {
+          "role": "developer",
+          "count": 1
+        },
+        {
+          "role": "reviewer",
+          "count": 1
+        }
+      ],
+      "default_pipeline": "reviewed",
+      "settings": {}
+    },
+    {
+      "id": "small",
+      "name": "Small",
+      "description": "A small task or a tight budget: one implementer and an independent checker.",
+      "lead": {
+        "agent": "claude"
+      },
+      "roster": [
+        {
+          "role": "developer",
+          "count": 1
+        },
+        {
+          "role": "reviewer",
+          "count": 1
+        }
+      ],
+      "default_pipeline": "reviewed",
+      "settings": {
+        "routing": "lead",
+        "caps": {
+          "max_members": 2
+        }
+      }
+    }
+  ],
+  "planning_rules": [
+    "Aim at 20 to 25 tasks in a phase and offer a split above 25.",
+    "Use a hard dependency only where it is needed, and none across phases: use a barrier phase.",
+    "Plan shared foundations first.",
+    "A reviewer never writes what it reviews.",
+    "A tester never implements.",
+    "Make each task text self-contained, with criteria a reviewer can check.",
+    "The lead never builds, tests or merges a member's work by hand."
+  ]
+}

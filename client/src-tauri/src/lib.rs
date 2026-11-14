@@ -17,6 +17,10 @@ mod active_app;
 mod analytics;
 #[cfg(feature = "live")]
 mod approvals;
+// The path-shared child_environment module must use the linked core gate,
+// never a second copy of unix_spawn.rs and its process-local mutex.
+#[cfg(unix)]
+use zerus_client_core::unix_spawn;
 #[path = "../../core/src/child_environment.rs"]
 #[allow(dead_code)]
 mod child_environment;
@@ -236,7 +240,7 @@ mod termination_cleanup;
 mod updates;
 #[cfg(feature = "media")]
 mod voice;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod watchdog;
 #[cfg(feature = "live")]
 mod window_geometry;
@@ -1550,7 +1554,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }
             }
             lifecycle::sync_policy(app.handle());
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if app.state::<identity::Identity>().watchdog(identity::flag("ZERUS_CLIENT_WATCHDOG")) {
                 app.manage(start_watchdog()?);
             }
@@ -1702,7 +1706,7 @@ fn forward_activations(
 
 /// The main-thread watchdog (Task 8): Qt's thresholds, a heartbeat on the main
 /// thread and, on macOS, the hold around sleep. The returned value keeps it running.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
     let limits = watchdog::Limits::QT;
     let dog = watchdog::Watchdog::start(limits, watchdog::now_ms, |silent| {
@@ -1720,6 +1724,9 @@ fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
     }
     #[cfg(target_os = "linux")]
     platform::linux::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()));
+    // A thread timer on the main thread, which modal loops dispatch too (zerus-5wmh.13.14.3).
+    #[cfg(windows)]
+    platform::windows::heartbeat(limits.beat_every(), move || pulse.beat(watchdog::now_ms()))?;
     eprintln!(
         "zerus-client: main-thread watchdog on ({} s)",
         limits.hang_ms / 1000
@@ -1884,6 +1891,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        renderer::renderer_diagnostics,
         window_theme::window_theme,
         content_search::content_search,
         content_search::cancel_content_search,
@@ -2038,6 +2046,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,
+        task_details::task_cancel_attempt,
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
@@ -2346,6 +2355,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        renderer::renderer_diagnostics,
         window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
@@ -2756,3 +2766,61 @@ mod tests {
 #[cfg_attr(not(feature = "live"), allow(dead_code))]
 #[path = "../../../tests/support/executable.rs"]
 mod test_executable;
+
+#[cfg(all(test, unix))]
+mod unix_spawn_policy_tests {
+    use std::{sync::mpsc, time::Duration};
+
+    fn shared_gate_excludes(action: impl FnOnce() -> bool + Send + 'static) {
+        let turn = zerus_client_core::unix_spawn::turn();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            done_tx.send(action()).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(200));
+        drop(turn);
+        let escaped = early.is_ok();
+        let result =
+            early.unwrap_or_else(|_| done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+        assert!(result);
+        assert!(!escaped, "the Tauri spawn must use the linked core mutex");
+    }
+
+    #[test]
+    fn path_shared_environment_uses_the_linked_core_gate() {
+        shared_gate_excludes(|| {
+            let mut command = std::process::Command::new("/usr/bin/true");
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut child = crate::child_environment::spawn(&mut command).unwrap();
+            child.wait().unwrap().success()
+        });
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn tokio_spawn_uses_the_same_core_gate_without_changing_its_child() {
+        shared_gate_excludes(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut command = tokio::process::Command::new("/usr/bin/true");
+                command
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let child = crate::platform::spawn_async(&mut command).unwrap();
+                let output = child.wait_with_output().await.unwrap();
+                output.status.success() && output.stdout.is_empty() && output.stderr.is_empty()
+            })
+        });
+    }
+}

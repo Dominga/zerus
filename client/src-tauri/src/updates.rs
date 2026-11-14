@@ -1287,19 +1287,20 @@ const RESTART_SCRIPT: &str = "SECONDS=0; while kill -0 \"$1\" 2>/dev/null; do if
 #[cfg(target_os = "macos")]
 fn restart_helper(bundle: &Path, pid: u32) -> std::io::Result<()> {
     use std::process::Stdio;
-    crate::child_environment::command("/bin/sh")
-        .args([
-            "-c",
-            RESTART_SCRIPT,
-            "zerus-restart",
-            &pid.to_string(),
-            &bundle.to_string_lossy(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
+    crate::child_environment::spawn(
+        crate::child_environment::command("/bin/sh")
+            .args([
+                "-c",
+                RESTART_SCRIPT,
+                "zerus-restart",
+                &pid.to_string(),
+                &bundle.to_string_lossy(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map(|_| ())
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

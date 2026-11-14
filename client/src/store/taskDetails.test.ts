@@ -7,6 +7,14 @@ const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); 
 const deferred = () => { let resolve!: (v: unknown) => void; const promise = new Promise<unknown>((r) => { resolve = r; }); return { promise, resolve }; };
 
 describe("bounded task inspector", () => {
+  it("retains only a bounded exact unknown-attempt list", () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    expect(taskDetail(raw("p", "one", { unknown_attempts: [id] }), "p", "one").unknownAttempts).toEqual([id]);
+    expect(taskDetail(raw(), "p", "one").unknownAttempts).toEqual([]);
+    for (const unknown_attempts of ["wrong", ["latest"], Array(257).fill(id)]) {
+      expect(() => taskDetail(raw("p", "one", { unknown_attempts }), "p", "one")).toThrow("Invalid unknown task attempts");
+    }
+  });
   it("serializes selection changes and discards the previous task's response", async () => {
     const first = deferred(), last = deferred(); const read = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(last.promise);
     const s = createTaskDetails(read); s.select("p", "one"); s.select("p", "two"); s.select("other", "three");

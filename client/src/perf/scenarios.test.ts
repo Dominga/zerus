@@ -73,6 +73,7 @@ describe("scroll scenario skips", () => {
 
 describe("Activity content growth diagnostics", () => {
   it("records counts around every run without adding per-frame geometry reads", async () => {
+    vi.stubGlobal("WheelEvent", class extends Event {});
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       queueMicrotask(() => callback(performance.now()));
       return 1;
@@ -81,6 +82,8 @@ describe("Activity content growth diagnostics", () => {
     const activity = {
       scrollHeight: 1500, clientHeight: 500, scrollTop: 0,
       addEventListener: () => {}, removeEventListener: () => {}, querySelectorAll: queries,
+      dispatchEvent: () => true,
+      scrollTo(this: { scrollTop: number }, options: ScrollToOptions) { this.scrollTop = options.top ?? 0; },
     } as unknown as HTMLElement;
     const events = vi.fn().mockReturnValueOnce(100).mockReturnValueOnce(200).mockReturnValueOnce(300).mockReturnValueOnce(400);
     const targets: DiagnosticsTargets = { scrollList: () => null, scrollActivity: () => activity, activityEvents: events, openSession: async () => {} };

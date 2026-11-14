@@ -552,6 +552,7 @@ public enum NativeEvents {
                 rows.append(next)
             }
         }
+        rows += QuestionRouteActivity.events(raw)
         if !raw.string("history_epoch").isEmpty { return rows }
         return rows.enumerated().sorted { $0.element.at != $1.element.at ? $0.element.at < $1.element.at : $0.offset < $1.offset }.map(\.element)
     }

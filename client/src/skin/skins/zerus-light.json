@@ -72,7 +72,8 @@
       "row-selected": "#dde7ef",
       "row-selected-border": "#7a91a6",
       "status-attention": "#e9b23c",
-      "attention-ink": "#392900"
+      "attention-ink": "#392900",
+      "members-surface": "#f2f5f7"
     },
     "agent": {
       "claude": "#956044",

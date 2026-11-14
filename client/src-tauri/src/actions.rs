@@ -23,6 +23,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tauri::State;
+pub(crate) mod busy;
+pub(crate) use busy::is_busy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod program_termination;
 mod read_barrier;
@@ -51,8 +53,8 @@ type LockKey = (String, String, Lane, String);
 
 #[derive(Default)]
 struct Claimed {
-    names: HashSet<LockKey>,
-    runs: HashSet<LockKey>,
+    names: HashMap<LockKey, Arc<busy::Holder>>,
+    runs: HashMap<LockKey, Arc<busy::Holder>>,
 }
 
 /// Hears that this device's marks changed: the menu bar's desk reads them
@@ -143,30 +145,41 @@ pub struct Claim {
     name_key: LockKey,
     run_key: Option<LockKey>,
     active: AtomicBool,
+    holder: Arc<busy::Holder>,
 }
 
 impl InFlight {
     /// None while an action already runs for that session.
+    #[cfg(test)]
     pub fn claim(&self, key: Key) -> Option<Claim> {
+        self.claim_for(key, busy::GENERIC).ok()
+    }
+    fn claim_for(&self, key: Key, label: &'static str) -> Result<Claim, String> {
         let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
         let name_key = (key.0.clone(), key.1.clone(), key.2, key.3.clone());
         let run_key =
             (!key.4.is_empty()).then(|| (key.0.clone(), key.4.clone(), key.2, key.3.clone()));
-        if keys.names.contains(&name_key)
-            || run_key.as_ref().is_some_and(|run| keys.runs.contains(run))
+        if let Some(holder) = keys
+            .names
+            .get(&name_key)
+            .or_else(|| run_key.as_ref().and_then(|run| keys.runs.get(run)))
         {
-            return None;
+            // Snapshot the actual conflicting holder under the same lock as
+            // admission; a later lookup could name a replacement or no holder.
+            return Err(holder.refusal());
         }
-        keys.names.insert(name_key.clone());
+        let holder = Arc::new(busy::Holder::new(label));
+        keys.names.insert(name_key.clone(), holder.clone());
         if let Some(run) = &run_key {
-            keys.runs.insert(run.clone());
+            keys.runs.insert(run.clone(), holder.clone());
         }
-        Some(Claim {
+        Ok(Claim {
             keys: Arc::clone(&self.keys),
             key,
             name_key,
             run_key,
             active: AtomicBool::new(false),
+            holder,
         })
     }
 }
@@ -241,6 +254,10 @@ pub(crate) struct Running {
     _claim: Arc<Claim>,
 }
 impl Running {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn describe(&self, label: &'static str) {
+        self._claim.holder.label(label);
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn claim(&self) -> Arc<Claim> {
         self._claim.clone()
@@ -403,16 +420,33 @@ impl Actions {
     /// it. A message-blocking write, and a context reset for its own
     /// session, also marks its kind (`write_kind`) under the claimed
     /// computer and name.
+    #[cfg(test)]
     pub(crate) fn begin(&self, key: Key, action: &Action) -> Option<Running> {
-        let claim = Arc::new(self.flight.claim(key)?);
-        self.activate(claim, action)
+        self.begin_named(key, action, busy::action(action)).ok()
+    }
+    pub(crate) fn begin_named(
+        &self,
+        key: Key,
+        action: &Action,
+        label: &'static str,
+    ) -> Result<Running, String> {
+        let claim = Arc::new(self.flight.claim_for(key, label)?);
+        self.activate_named(claim, action, label)
     }
 
     /// Reserve only the existing write lane. Pending Undo is not an active
     /// write, so it never publishes a composer block or prevents a send.
+    #[cfg(test)]
     pub(crate) fn reserve_end(&self, target: &Target) -> Option<Arc<Claim>> {
+        self.reserve_end_for(target, &Action::Archive).ok()
+    }
+    pub(crate) fn reserve_end_for(
+        &self,
+        target: &Target,
+        action: &Action,
+    ) -> Result<Arc<Claim>, String> {
         self.flight
-            .claim(Lane::key(target, &Action::Archive))
+            .claim_for(Lane::key(target, &Action::Archive), busy::action(action))
             .map(Arc::new)
     }
 
@@ -422,21 +456,32 @@ impl Actions {
             && claim.active.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn activate(&self, claim: Arc<Claim>, action: &Action) -> Option<Running> {
+        self.activate_named(claim, action, busy::action(action))
+            .ok()
+    }
+    fn activate_named(
+        &self,
+        claim: Arc<Claim>,
+        action: &Action,
+        label: &'static str,
+    ) -> Result<Running, String> {
         if !Arc::ptr_eq(&claim.keys, &self.flight.keys) || claim.key.2 != Lane::of(action) {
-            return None;
+            return Err(zerus_client_core::end_action::STATE_CHANGED.into());
         }
         if claim
             .active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return None;
+            return Err(claim.holder.refusal());
         }
+        claim.holder.label(label);
         let (computer, name) = (&claim.key.0, &claim.key.1);
         let marked = blocks_messages(action) || WriteKind::of(action) == WriteKind::Clear;
         let write = marked.then(|| self.mark_write(computer, name, &claim.key.4, action));
-        Some(Running {
+        Ok(Running {
             _write: write,
             _claim: claim,
         })
@@ -654,13 +699,19 @@ impl Actions {
 
     /// The session's lane, None while an action runs in it.
     pub(crate) fn claim_lane(&self, computer: &str, name: &str, lane: Lane) -> Option<Claim> {
-        self.flight.claim((
-            computer.to_owned(),
-            name.to_owned(),
-            lane,
-            String::new(),
-            String::new(),
-        ))
+        self.claim_lane_checked(computer, name, lane).ok()
+    }
+    fn claim_lane_checked(&self, computer: &str, name: &str, lane: Lane) -> Result<Claim, String> {
+        self.flight.claim_for(
+            (
+                computer.to_owned(),
+                name.to_owned(),
+                lane,
+                String::new(),
+                String::new(),
+            ),
+            busy::lane(lane),
+        )
     }
 
     /// A mark as `run_action` saves it, without `queue_read_marks`' cleanup.
@@ -1272,7 +1323,7 @@ pub(crate) async fn dispatch_captured_end_with(
         + Send
         + 'static,
 ) -> Result<(Outcome, bool), String> {
-    let claim = state.reserve_end(&captured.target).ok_or(BUSY)?;
+    let claim = state.reserve_end_for(&captured.target, &captured.action)?;
     let (target, action) = (captured.target.clone(), captured.action.clone());
     dispatch_end_reserved_with(
         state,
@@ -1387,7 +1438,7 @@ pub(crate) async fn restore_captured(
 /// The one dispatcher of session actions, for `run_action` and for commands
 /// that build an action in Rust (a message from the held draft). A message
 /// already in flight to the same agent fails with Qt's text; any other lane
-/// answers `Err("busy")`.
+/// answers an attributed, definite busy refusal.
 pub async fn dispatch(state: &Actions, target: Target, action: Action) -> Result<Outcome, String> {
     dispatch_as(state, target, action, uuid::Uuid::new_v4().to_string()).await
 }
@@ -1800,17 +1851,19 @@ async fn dispatch_reserved_original(
             {
                 return Ok(failed(zerus_client_core::end_action::STATE_CHANGED));
             }
-            state.activate(Arc::clone(claim), &action)
+            state.activate_named(Arc::clone(claim), &action, busy::action(&action))
         }
-        None => state.begin(key, &action),
+        None => state.begin_named(key, &action, busy::action(&action)),
     };
-    let Some(running) = running else {
-        return match Lane::of(&action) {
-            Lane::Send => Ok(failed(ALREADY_SENDING)),
-            Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
-            _ if zerus_client_core::end_action::needs_capture(&action) => Err(END_BUSY.into()),
-            _ => Err(BUSY.into()),
-        };
+    let running = match running {
+        Ok(running) => running,
+        Err(refusal) => {
+            return match Lane::of(&action) {
+                Lane::Send => Ok(failed(ALREADY_SENDING)),
+                Lane::Answer => Ok(failed(ALREADY_ANSWERING)),
+                _ => Err(refusal),
+            };
+        }
     };
     // The service case moves this SAME native claim into a revocable hold.
     // The bounded worker owns it even if the async future drops; later pipe
@@ -2013,9 +2066,7 @@ pub async fn set_notifications(
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.into());
     }
-    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::Notifications) else {
-        return Err("busy".into());
-    };
+    let _claim = state.claim_lane_checked(&target.computer, &target.name, Lane::Notifications)?;
     let hgs = default_hgs();
     let call_target = target.clone();
     let projection = app.notification_projection(target);
@@ -2040,9 +2091,7 @@ pub async fn set_keep_warm(
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.into());
     }
-    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::KeepWarm) else {
-        return Err("busy".into());
-    };
+    let _claim = state.claim_lane_checked(&target.computer, &target.name, Lane::KeepWarm)?;
     let hgs = default_hgs();
     tauri::async_runtime::spawn_blocking(move || {
         zerus_client_core::keep_warm::change(&hgs, &target, choice, expected_revision)
@@ -2065,10 +2114,7 @@ pub async fn set_question_routing(
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.into());
     }
-    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::QuestionRouting)
-    else {
-        return Err("busy".into());
-    };
+    let _claim = state.claim_lane_checked(&target.computer, &target.name, Lane::QuestionRouting)?;
     let hgs = default_hgs();
     tauri::async_runtime::spawn_blocking(move || {
         zerus_client_core::question_routing::change(
@@ -2094,9 +2140,7 @@ pub async fn set_parent(
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.into());
     }
-    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::Write) else {
-        return Err("busy".into());
-    };
+    let _claim = state.claim_lane_checked(&target.computer, &target.name, Lane::Write)?;
     let hgs = default_hgs();
     tauri::async_runtime::spawn_blocking(move || {
         zerus_client_core::parent_change::change(&hgs, &target, &change)
@@ -2489,14 +2533,9 @@ impl Drop for ActivitySlot<'_> {
 /// The text the frontend ignores: a read of that row is already running.
 pub const ACTIVITY_BUSY: &str = "busy";
 
-/// `dispatch`'s `Err` when the session's lane is taken: refused before any
-/// call ran, so a definite refusal, never an uncertain outcome.
+/// Legacy capacity refusal for internal callers. Session lane conflicts
+/// carry busy::Holder metadata and remain definite refusals before delivery.
 pub const BUSY: &str = "busy";
-/// The same refusal for an end action, where the person needs to know what
-/// holds the lane and what to do (zerus-ex66o).
-pub const END_BUSY: &str = zerus_client_core::source!(
-    "Another action on this session is still running. Wait for it to finish, or restart the app if it never does."
-);
 
 /// The recorded Activity of one archived session after cursor `after`
 /// (`hgs [@alias] inspect NAME --after N --skip-processes --archive ID`).
@@ -2675,7 +2714,7 @@ mod tests {
             || true,
             |_, _| panic!("busy cannot run"),
         ));
-        assert_eq!(out, Err(BUSY.into()));
+        assert!(out.as_ref().is_err_and(|error| is_busy(error)));
         drop(held);
         let out = tauri::async_runtime::block_on(dispatch_terminal_image_with(
             &actions,

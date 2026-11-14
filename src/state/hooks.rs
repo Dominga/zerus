@@ -1918,12 +1918,12 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let _guard = lock(None)?;
     let panes = live()?;
     let own = read_own_run(&name, &token)?;
-    let record = if continuations::foreign(own.as_ref(), sid) {
+    let admitted = if continuations::foreign(own.as_ref(), sid) {
         continuations::owner(&event, sid, &panes)?
     } else {
-        own
+        own.map(|record| hook_caller::admit(&record).map(|caller| (record, caller))).transpose()?
     };
-    let Some(mut record) = record else {
+    let Some((mut record, _caller)) = admitted else {
         return Ok(0);
     };
     if !matches(&record, panes_of(&panes, &record)) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Termination admission only: private fake agents and a private tmux socket.
+"""Termination mutation fences: private fake agents and a private tmux socket.
 
 The fixture writes marker data directly. Production has no marker producer or
 graceful controller yet; these are not real-provider termination controls.
@@ -12,6 +12,8 @@ import sys
 import time
 import unittest
 import uuid
+
+import test_backend_contract
 
 if os.name == 'posix':
     import fcntl
@@ -136,8 +138,7 @@ class TerminationFence(test_pause.Harness if test_pause else unittest.TestCase):
                 original = self.marker(name, {'request_id': str(uuid.uuid4())})
                 env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=original['run_id'])
                 event = dict(session_id=original['conversation_id'], hook_event_name='SessionEnd', reason=reason)
-                result = subprocess.run([str(test_pause.HGS), '__state', 'hook'], env=env,
-                                        input=json.dumps(event), text=True, capture_output=True, timeout=10)
+                result = self.hook(event, env, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 current = self.binding(name)
                 self.assertEqual(current['session_end']['reason'], reason)
@@ -146,9 +147,7 @@ class TerminationFence(test_pause.Harness if test_pause else unittest.TestCase):
                     self.assertEqual(current.get(key), original.get(key), key)
                 before = self.path(name).read_bytes()
                 for kind in ('SessionStart', 'PreToolUse', 'UserPromptSubmit'):
-                    result = subprocess.run([str(test_pause.HGS), '__state', 'hook'], env=env,
-                                            input=json.dumps(dict(event, hook_event_name=kind)),
-                                            text=True, capture_output=True, timeout=10)
+                    result = self.hook(dict(event, hook_event_name=kind), env, check=False)
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertEqual(self.path(name).read_bytes(), before)
 
@@ -169,6 +168,103 @@ class TerminationFence(test_pause.Harness if test_pause else unittest.TestCase):
         self.assertIsNone(current['terminating'])
         self.assertEqual(current['conversation_id'], original['conversation_id'])
         self.assertEqual(list((self.root / 'state/archives').glob('*.json')), [])
+
+
+@unittest.skipUnless(test_pause and test_backend_contract.TMUX
+                     and sys.platform in ('linux', 'darwin'),
+                     'Private Linux/macOS tmux required')
+class PasteSettleFence(test_backend_contract.Contract):
+    """A marker arriving in the real Send's unlocked paste-settle window."""
+
+    path = TerminationFence.path
+    marker = TerminationFence.marker
+
+    def setUp(self):
+        super().setUp()
+        self.fenced = []
+        self.addCleanup(self.remove_markers)
+        # The fake records the paste but leaves the composer empty until the
+        # explicit render below. No timing sleep decides when Root may continue.
+        self.configure(ECHO='0')
+
+    def remove_markers(self):
+        for name in self.fenced:
+            self.marker(name, remove=True)
+
+    def settled_send(self, marker=None, install=True):
+        name, row, agent = self.launch()
+        payload = self.message(row, 'original message')
+        wire = json.dumps(payload)
+        pasted = b'\x1b[200~original message\x1b[201~'
+        sender = subprocess.Popen([str(test_backend_contract.HGS), 'send', name, '--json'],
+                                  env=self.env, cwd=self.root, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def settle_sender():
+            if sender.poll() is None:
+                sender.terminate()  # Only this test's original CLI child.
+                try:
+                    sender.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    sender.kill()
+                    sender.communicate(timeout=5)
+
+        self.addCleanup(settle_sender)
+        sender.stdin.write(wire)
+        sender.stdin.close()
+        sender.stdin = None
+        self.wait_for(lambda: self.received(agent['pid']) == pasted,
+                      'the exact paste before its composer is rendered')
+        self.assertIsNone(sender.poll(), 'Send must still wait for the composer')
+        original = self.marker(name, marker) if install else None
+        # This control is recorded only after the real terminal write. The
+        # fake's internal composer already contains the exact received paste.
+        self.control(agent['pid'], 'write \\e[2J\\e[H' + test_backend_contract.PROMPT + payload['text'])
+        stdout, stderr = sender.communicate(timeout=self.backend.COMMAND)
+        actual = self.received(agent['pid'])
+        if not install:
+            self.assertEqual(sender.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout)['status'], 'submitted')
+            self.assertEqual(actual, pasted + b'\r')
+            return
+
+        self.assertEqual(actual, pasted, 'a late termination fence must prevent Enter')
+        self.assertNotEqual(sender.returncode, 0, stdout)
+        self.assertIn('delivery uncertain', stderr)
+        self.assertIn('Session termination is unfinished', stderr)
+        current = json.loads(self.path(name).read_text())
+        self.assertIn('terminating', current)
+        self.assertEqual(current['terminating'], marker)
+        for key in ('name', 'session_id', 'run_id', 'conversation_id', 'pid',
+                    'process_start', 'supervisor', 'pane', 'launch_dir'):
+            self.assertEqual(current.get(key), original.get(key), key)
+        receipt = self.root / 'state/input_receipts' / (payload['request_id'] + '.json')
+        before = receipt.read_bytes()
+        saved = json.loads(before)
+        self.assertEqual(saved['status'], 'in_progress')
+        self.assertEqual(saved['delivery'], 'uncertain')
+        self.assertNotIn('refusal_schema', saved, 'a paste is not a zero-input refusal')
+        # The old UUID is lookup-only even though no Enter was delivered.
+        lookup = self.hgs('send', name, '--json', input=wire, rc=None)
+        self.assertNotEqual(lookup.returncode, 0)
+        self.assertIn('delivery uncertain', lookup.stderr)
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual(self.received(agent['pid']), pasted)
+
+    def test_unmarked_send_crosses_the_same_settle_barrier_once(self):
+        self.settled_send(install=False)
+
+    def test_null_marker_after_paste_prevents_enter(self):
+        self.settled_send(None)
+
+    def test_false_marker_after_paste_prevents_enter(self):
+        self.settled_send(False)
+
+    def test_damaged_marker_after_paste_prevents_enter(self):
+        self.settled_send('damaged')
+
+    def test_reserved_marker_after_paste_prevents_enter(self):
+        self.settled_send({'request_id': str(uuid.uuid4())})
 
 
 if __name__ == '__main__':

@@ -1,0 +1,235 @@
+{
+  "team": {
+    "id": "00000000-0000-4000-8000-00000000beef",
+    "project": "example-project",
+    "name": "Fixes",
+    "home": "00000000-0000-4000-8000-0000000000aa",
+    "owner": "local",
+    "status": "running",
+    "lead": "lead",
+    "settings": {},
+    "bundle": {
+      "template": {
+        "id": "bugfix",
+        "name": "Bugfix",
+        "description": "A queue of independent fixes: a developer and a reviewer.",
+        "lead": {
+          "agent": "claude"
+        },
+        "roster": [
+          {
+            "role": "developer",
+            "count": 2
+          },
+          {
+            "role": "reviewer",
+            "count": 1
+          }
+        ],
+        "default_pipeline": "reviewed",
+        "settings": {}
+      },
+      "roles": [
+        {
+          "id": "developer",
+          "name": "Developer",
+          "agent": "claude",
+          "prompt": "Implement the task in your own worktree. Start from the base commit named in the task, keep to its write set, run the checks that can fail for your change, commit, and report what you changed and how you checked it."
+        },
+        {
+          "id": "reviewer",
+          "name": "Reviewer",
+          "agent": "claude",
+          "prompt": "Review the reported commit against the task's criteria. You never change what you review. Give a verdict: pass, or return with the exact findings."
+        }
+      ],
+      "pipelines": [
+        {
+          "id": "reviewed",
+          "name": "Reviewed: review, lead",
+          "implementer": "developer",
+          "stages": [
+            {
+              "kind": "review",
+              "role": "reviewer"
+            }
+          ]
+        }
+      ]
+    },
+    "integration_branch": "zerus/team/fixes",
+    "base_commit": "0123456789abcdef0123456789abcdef01234567",
+    "revision": 42
+  },
+  "members": [
+    {
+      "id": "lead",
+      "role": "lead",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+      },
+      "worktree": "/workspace/example-team-lead",
+      "ownership_nonce": "nonce-lead"
+    },
+    {
+      "id": "m1",
+      "role": "developer",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+      },
+      "worktree": "/workspace/example-team-m1",
+      "ownership_nonce": "nonce-m1"
+    },
+    {
+      "id": "m2",
+      "role": "developer",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000032"
+      },
+      "worktree": "/workspace/example-team-m2",
+      "ownership_nonce": "nonce-m2"
+    },
+    {
+      "id": "m3",
+      "role": "reviewer",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000033"
+      },
+      "worktree": "/workspace/example-team-m3",
+      "ownership_nonce": "nonce-m3"
+    }
+  ],
+  "phases": [
+    {
+      "n": 0,
+      "kind": "queue",
+      "mode": "free",
+      "state": "approved"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000001"
+      },
+      "title": "Fix the empty-state crash",
+      "source": "sent",
+      "role": "developer",
+      "pipeline": "reviewed",
+      "round": 1,
+      "implementer": "m1",
+      "admitted": true,
+      "state": "accepted",
+      "decided_by": "lead",
+      "integrated": true,
+      "rank": "a0"
+    },
+    {
+      "id": 2,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000002"
+      },
+      "title": "Trim the label in the list",
+      "source": "sent",
+      "role": "developer",
+      "pipeline": "reviewed",
+      "round": 1,
+      "implementer": "m1",
+      "admitted": true,
+      "state": "reported",
+      "rank": "a1"
+    },
+    {
+      "id": 3,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000003"
+      },
+      "title": "Keep the selection after a refresh",
+      "source": "sent",
+      "role": "developer",
+      "pipeline": "reviewed",
+      "writes": [
+        "client/src/ui/sessions"
+      ],
+      "round": 1,
+      "implementer": "m2",
+      "admitted": true,
+      "state": "in_progress",
+      "rank": "a2"
+    },
+    {
+      "id": 4,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000004"
+      },
+      "title": "Show the reset time in the tooltip",
+      "source": "sent",
+      "role": "developer",
+      "pipeline": "reviewed",
+      "round": 1,
+      "admitted": true,
+      "state": "pending",
+      "rank": "a3"
+    },
+    {
+      "id": 5,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000005"
+      },
+      "title": "Review: Trim the label in the list",
+      "source": "sent",
+      "role": "reviewer",
+      "pipeline": "reviewed",
+      "kind": "stage",
+      "stage_of": 2,
+      "round": 1,
+      "implementer": "m1",
+      "admitted": true,
+      "state": "pending",
+      "rank": "a1"
+    },
+    {
+      "id": 6,
+      "phase": 0,
+      "task": {
+        "project": "example-project",
+        "uuid": "00000000-0000-4000-8000-000000000006"
+      },
+      "title": "Rename the setting",
+      "source": "sent",
+      "role": "developer",
+      "pipeline": "reviewed",
+      "round": 1,
+      "admitted": false,
+      "state": "waiting",
+      "rank": "a4"
+    }
+  ]
+}

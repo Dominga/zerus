@@ -11,9 +11,9 @@ fn prepared(f: &Fixture) -> Journal {
             &CheckId::fixture_initial(&f.intent.reconcile_id),
         ) {
             Ok(journal) => return journal,
-            // Another parallel fixture's fork may briefly retain the same
-            // CLOEXEC description until exec. Busy is a no-write refusal;
-            // wait for the actual flock, never retry an offer/publication.
+            // Preserve bounded setup retries for Busy, a no-write refusal.
+            // Never retry an offer/publication; owner release has direct
+            // fork regressions without retries.
             Err(Error::Busy) if std::time::Instant::now() < until => {
                 std::thread::sleep(std::time::Duration::from_millis(1))
             }
@@ -22,10 +22,10 @@ fn prepared(f: &Fixture) -> Journal {
     }
 }
 #[track_caller]
-fn metadata_lock(slot: &Slot) -> File {
+fn metadata_lock(slot: &Slot) -> MetadataLock {
     metadata_lock_after_busy(slot, || {})
 }
-fn metadata_lock_after_busy(slot: &Slot, mut busy: impl FnMut()) -> File {
+fn metadata_lock_after_busy(slot: &Slot, mut busy: impl FnMut()) -> MetadataLock {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
     loop {
         match slot.lock(false) {

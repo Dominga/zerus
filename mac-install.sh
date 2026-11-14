@@ -58,6 +58,7 @@ sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_st
   services/mobile/connector/Cargo.toml services/mobile/connector/Cargo.lock services/mobile/connector/.cargo
   services/mobile/connector/src services/mobile/relay/Cargo.toml services/mobile/relay/src
   services/mobile/crypto/Cargo.toml services/mobile/crypto/src
+  services/mobile/windows-private/Cargo.toml services/mobile/windows-private/src
   crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src
   crates/lore-bin/Cargo.toml crates/lore-bin/Cargo.lock crates/lore-bin/src
   crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src
@@ -67,6 +68,8 @@ sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_st
   crates/desktop-ledger/Cargo.toml crates/desktop-ledger/src
   crates/desktop-migration/Cargo.toml crates/desktop-migration/src
   crates/desktop-read-policy/Cargo.toml crates/desktop-read-policy/src
+  crates/file-lock/Cargo.toml crates/file-lock/src
+  crates/team-plan/Cargo.toml crates/team-plan/src
   crates/freedesktop-notify/Cargo.toml crates/freedesktop-notify/src
   crates/presence-sampler/Cargo.toml crates/presence-sampler/src)
 tar czf - -C "$here" "${sources[@]}" \
@@ -149,8 +152,10 @@ tar czf - -C "$here" \
   packaging/desktop client crates/watch-protocol/Cargo.toml crates/watch-protocol/src \
   crates/desktop-read-policy/Cargo.toml crates/desktop-read-policy/src \
   crates/desktop-migration/Cargo.toml crates/desktop-migration/src \
+  crates/file-lock/Cargo.toml crates/file-lock/src \
+  crates/team-plan/Cargo.toml crates/team-plan/src \
   crates/freedesktop-notify/Cargo.toml crates/freedesktop-notify/src DEV_VERSION VERSION \
-  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src crates/desktop-read-policy/src crates/desktop-migration/src crates/freedesktop-notify/src && tar xzf -'
+  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src crates/desktop-read-policy/src crates/desktop-migration/src crates/file-lock/src crates/team-plan/src crates/freedesktop-notify/src && tar xzf -'
 # PATH неинтерактивного ssh на маке — без Homebrew; npm packaging/desktop/install.sh ищет сам
 # (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
 # an optional exact identity selector travels as one literal environment value.

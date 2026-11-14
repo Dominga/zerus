@@ -2012,6 +2012,83 @@ mod route_tests {
         .unwrap();
         assert!(allow_join(&store, false).is_err());
     }
+
+    #[test]
+    fn oversized_complete_frontier_is_bounded_for_native_get_and_watch_without_losing_history() {
+        let (_dir, config, store, machine) = fixture();
+        let main = MainContext::from_store(&store.data);
+        let folder_id = catalog::new_id();
+        let mut operations: Vec<DriveOperation> = Vec::new();
+        for clock in 1..=1024 {
+            operations.push(DriveOperation {
+                id: catalog::new_id(),
+                actor: main.node_id.clone(),
+                clock,
+                folder_id: folder_id.clone(),
+                parents: operations
+                    .last()
+                    .map(|op| op.id.clone())
+                    .into_iter()
+                    .collect(),
+                value: Some(DriveRecord {
+                    project: "alpha".into(),
+                    machine: machine.clone(),
+                    path: "C:/Root".into(),
+                    name: String::new(),
+                }),
+            });
+        }
+        let parents: Vec<_> = operations.iter().map(|op| op.id.clone()).collect();
+        for index in 0..200 {
+            operations.push(DriveOperation {
+                id: catalog::new_id(),
+                actor: main.node_id.clone(),
+                clock: 1025 + index,
+                folder_id: folder_id.clone(),
+                parents: parents.clone(),
+                value: Some(DriveRecord {
+                    project: "alpha".into(),
+                    machine: machine.clone(),
+                    path: format!("C:/{}", "a".repeat(8189)),
+                    name: index.to_string(),
+                }),
+            });
+        }
+        let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+        graph.merge(&main.swarm_id, operations).unwrap();
+        let drive = DriveStore::create(&main, store.path.parent().unwrap(), graph).unwrap();
+        let raw = observation(&drive, &main, None);
+        assert_eq!(
+            raw["complete"], true,
+            "the count/field caps alone allow this frontier"
+        );
+        let native_limit = zerus_client_core::reads::Read::Swarm.limit();
+        assert_eq!(native_limit as u64, MAX_EXCHANGE_BYTES);
+        assert!(serde_json::to_vec(&raw).unwrap().len() + 1 > native_limit);
+        let paths = [
+            store.path.clone(),
+            store.path.with_file_name(FILE),
+            store.path.with_file_name(INIT_FILE),
+        ];
+        let before = paths.each_ref().map(|path| std::fs::read(path).unwrap());
+        let get = get_locked(&store, None).unwrap();
+        drop(store);
+        let watch = watch_snapshot(&config).unwrap();
+        for (value, limit) in [(get, native_limit), (watch, 1024 * 1024)] {
+            assert_eq!(value["status"], "incomplete");
+            assert_eq!(value["complete"], false);
+            assert_eq!(value["store_nonce"], drive.graph.store_nonce);
+            assert_eq!(value["records"], json!([]));
+            assert_eq!(value["versions"], json!({}));
+            assert_eq!(value["conflicts"], json!({}));
+            // Leave one byte for the CLI's trailing newline.
+            assert!(serde_json::to_vec(&value).unwrap().len() < limit);
+        }
+        assert_eq!(
+            paths.each_ref().map(|path| std::fs::read(path).unwrap()),
+            before
+        );
+    }
 }
 
 #[cfg(test)]

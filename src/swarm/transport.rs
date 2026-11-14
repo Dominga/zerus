@@ -443,12 +443,11 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
         let node = identity["node_id"].as_str().unwrap().to_owned();
         local.outdated.insert(alias.into(), node);
     }
-    // Whether this member reads session memberships by ID (zerus-ucck
-    // P2c-1); only such a member exchanges them.
-    let primary = local.data.id_memberships.is_some()
-        && peer_kinds
-            .as_ref()
-            .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
+    // Negotiate the primary graph separately from the older twins format.
+    let primary_supported = peer_kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
+    let primary = local.data.id_memberships.is_some() && primary_supported;
     let twins = peer_kinds
         .as_ref()
         .is_some_and(|kinds| kinds.contains(catalog::SESSION_ID_KIND));
@@ -458,6 +457,10 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     } else {
         local.session_ids.remove(alias);
     }
+    super::session_membership_peers::observed(
+        local.path.parent().expect("catalog directory"), &local.data.peers,
+        alias, identity["node_id"].as_str().unwrap(), primary_supported,
+    )?;
     local.save()?;
     if identity["digest"] != local.data.catalog.digest()
         || (twins && identity["twins"] != local.data.twins.digest())

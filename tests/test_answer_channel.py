@@ -5,6 +5,16 @@ import glob,hashlib,json,os,subprocess,tempfile,time,unittest
 from pathlib import Path
 from test_input import HGS
 
+def caller_pid():
+    return os.getpid() if os.name == "posix" else 1
+
+
+def caller_start():
+    if os.name != "posix": return "not this process"
+    return subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
+        env=dict(os.environ, LC_ALL="C", TZ="UTC"), text=True).strip()
+
+
 QUESTIONS=[dict(question='Which release should we prepare?',header='Release',options=[
     dict(label='Stable',description='Use stable build'),dict(label='Preview',description='Use preview build')])]
 
@@ -41,12 +51,13 @@ class AnswerChannelConversation(unittest.TestCase):
 
     def bound(self,event):
         with tempfile.TemporaryDirectory(prefix='hgs-answer-channel-') as state:
-            # The saved run's process has gone, so a bound channel closes at once.
+            # Unix workers prove their owned parent and close at the short deadline.
+            # Windows retains its existing gone-process fixture.
             record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,
-                        pid=1,process_start='not this process',pending_questions=dict(toolu_1=self.card()))
+                        pid=caller_pid(),process_start=caller_start(),pending_questions=dict(toolu_1=self.card()))
             path=os.path.join(state,hashlib.sha256(self.NAME.encode()).hexdigest()+'.json')
             with open(path,'w') as file:json.dump(record,file)
-            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN)
+            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN,HGS_ANSWER_CHANNEL_SECONDS="0.1")
             for name in ('TMUX','TMUX_PANE'):values.pop(name,None)
             result=subprocess.run([str(HGS),'__state','answer-channel'],input=json.dumps(event),text=True,
                                   capture_output=True,env=values,timeout=30)
@@ -71,13 +82,13 @@ class AnswerChannelApproval(AnswerChannelConversation):
     def bound(self,event,uses=None):
         digest=hashlib.sha256(json.dumps(self.INPUT,separators=(',',':'),sort_keys=True).encode()).hexdigest()
         with tempfile.TemporaryDirectory(prefix='hgs-answer-channel-') as state:
-            record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=1,
-                        process_start='not this process',phase='approval',pending_approval_at=time.time(),
+            record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=caller_pid(),
+                        process_start=caller_start(),phase='approval',pending_approval_at=time.time(),
                         pending_approval=dict(hook_event_name='PermissionRequest',tool_name='Bash',tool_input=self.INPUT),
                         claude_tool_uses=uses if uses is not None else dict(toolu_1=dict(tool_name='Bash',input=digest,at=time.time()-1)))
             path=os.path.join(state,hashlib.sha256(self.NAME.encode()).hexdigest()+'.json')
             with open(path,'w') as file:json.dump(record,file)
-            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN)
+            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN,HGS_ANSWER_CHANNEL_SECONDS="0.1")
             for name in ('TMUX','TMUX_PANE'):values.pop(name,None)
             result=subprocess.run([str(HGS),'__state','answer-channel'],input=json.dumps(event),text=True,
                                   capture_output=True,env=values,timeout=30)
@@ -93,7 +104,7 @@ class AnswerChannelApproval(AnswerChannelConversation):
     def test_only_the_saved_conversation_binds(self):
         [(question,reason)]=self.bound(self.event())
         self.assertTrue(question.startswith('claude-approval:'))
-        self.assertEqual(reason,'agent exited')
+        self.assertEqual(reason,'deadline' if os.name=='posix' else 'agent exited')
         for session in ('d2b0c6a1-1111-4222-8333-944455556666',''):
             self.assertEqual(self.bound(self.event(session_id=session)),[],session)
 
@@ -125,12 +136,12 @@ class AnswerChannelApprovalBinding(unittest.TestCase):
         event=dict(hook_event_name='PermissionRequest',tool_name='Bash',session_id=self.CONVERSATION,tool_input=self.INPUT)
         with tempfile.TemporaryDirectory(prefix='hgs-answer-channel-') as state:
             path=Path(state)/(hashlib.sha256(self.NAME.encode()).hexdigest()+'.json')
-            record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=1,
-                        process_start='not this process',phase='tool',claude_tool_uses=first_uses)
+            record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=caller_pid(),
+                        process_start=caller_start(),phase='tool',claude_tool_uses=first_uses)
             def write(value):
                 temporary=path.with_suffix('.new');temporary.write_text(json.dumps(value));temporary.replace(path)
             write(record)
-            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN)
+            values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN,HGS_ANSWER_CHANNEL_SECONDS="0.1")
             for name in ('TMUX','TMUX_PANE'):values.pop(name,None)
             worker=subprocess.Popen([str(HGS),'__state','answer-channel'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE,text=True,env=values)
@@ -150,7 +161,7 @@ class AnswerChannelApprovalBinding(unittest.TestCase):
             return started,[c['question_id'] for c in channels],(at+1 if later is not None else None)
 
     def identity(self,tool,at):
-        key=[self.RUN,self.CONVERSATION,None,1,'not this process',tool,'Bash',self.INPUT,at]
+        key=[self.RUN,self.CONVERSATION,None,caller_pid(),caller_start(),tool,'Bash',self.INPUT,at]
         return 'claude-approval:'+hashlib.sha256(json.dumps(key,separators=(',',':'),sort_keys=True).encode()).hexdigest()
 
     def use(self):

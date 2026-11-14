@@ -417,7 +417,7 @@ mod tests {
                 (NAVIGATION_ENV, &encoded),
             ],
             &std::sync::atomic::AtomicBool::new(false),
-            |command| command.spawn(),
+            |command, input_spawn| input_spawn.spawn(command),
             std::sync::Arc::new(()),
         )
         .unwrap();

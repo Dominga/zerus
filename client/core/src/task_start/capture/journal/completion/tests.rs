@@ -4,6 +4,35 @@ use serde_json::{json, Value};
 use std::fs;
 const READ: &str = "0000000a-1111-4111-8111-111111111111";
 const NEXT: &str = "0000000b-1111-4111-8111-111111111111";
+
+#[test]
+fn fork_metadata_error_path_releases_the_local_settlement_lock() {
+    let f = Fixture::new();
+    let mut saved = offered(&f);
+    let (q, r) = submitted(&f, &saved);
+    let original = fs::read(&f.file).unwrap();
+    let journal = fs::read(f.file.with_extension("reconcile")).unwrap();
+    let mut calls = 0;
+    let mut held = None;
+    let result = saved.settle_submitted(&q, &r, || {
+        calls += 1;
+        if calls == 2 {
+            held = Some(super::super::lock_tests::HeldFork::new());
+            false
+        } else {
+            true
+        }
+    });
+    assert!(result.is_err());
+    assert!(held.is_some(), "control must fork with the local lock held");
+    assert!(saved.slot.lock(false).is_ok());
+    assert_eq!(fs::read(&f.file).unwrap(), original);
+    assert_eq!(
+        fs::read(f.file.with_extension("reconcile")).unwrap(),
+        journal
+    );
+}
+
 fn offered(f: &Fixture) -> Saved {
     let mut journal = Journal::prepare(
         f.capture().unwrap(),
@@ -14,9 +43,8 @@ fn offered(f: &Fixture) -> Saved {
     drop(journal);
     saved(f)
 }
-// Every settlement follows `offered`'s lock, which a parallel fork may still
-// hold through an inherited description (zerus-p1l5z): wait for Busy, the
-// no-write refusal, and keep every other result exactly.
+// Retain the bounded Busy-only fixture helper (zerus-p1l5z); the fork error
+// regression above checks immediate release directly, without a retry.
 fn settle(
     saved: &mut Saved,
     query: &wire::Query,

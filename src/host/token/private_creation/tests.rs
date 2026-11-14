@@ -277,12 +277,12 @@ fn administrators_default_is_reproduced_and_corrected_in_one_isolated_child() {
         &invocation,
         &refs,
         &AtomicBool::new(false),
-        move |command| {
+        move |command, input_spawn| {
             command
                 .env_clear()
                 .envs(child_env)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
+                .creation_flags(CREATE_NO_WINDOW);
+            input_spawn.spawn(command)
         },
         root,
         |error, stderr| failure = Some(format!("{error:?}: {}", stderr.unwrap_or("no stderr"))),

@@ -2246,7 +2246,7 @@ pub(crate) fn outcome_of(
 ) -> Outcome {
     match called {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) if error == crate::actions::BUSY => Outcome::Failed {
+        Ok(Err(error)) if crate::actions::is_busy(&error) => Outcome::Failed {
             detail: refused.into(),
         },
         Ok(Err(error)) => Outcome::Uncertain { detail: error },

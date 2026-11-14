@@ -39,6 +39,7 @@ fn statement() -> RoutePersonStatement {
         request_id: "00000000-0000-4000-8000-0000000000d1".into(),
         issued_at: 1_999_999_900,
         expires_at: 2_000_000_100,
+        expected_revision: None,
     }
 }
 fn membership(gateway: &Identity, phone: &Identity) -> MembershipState {
@@ -167,4 +168,40 @@ fn only_a_current_phone_of_the_workspace_within_its_lifetime_verifies() {
     ] {
         assert!(bad.canonical_bytes().is_err(), "{bad:?}");
     }
+}
+
+/// The computer-issued latch revision is authenticated, not supplied by the forwarding agent.
+#[test]
+fn a_v2_statement_signs_the_exact_latch_revision() {
+    let gateway = identity(GATEWAY, Role::Computer, b'A');
+    let phone = identity(PHONE, Role::Phone, b'B');
+    let state = membership(&gateway, &phone);
+    let mut value = serde_json::to_value(statement()).unwrap();
+    value["expected_revision"] = json!(7);
+    for invalid in [json!(null), json!(-1), json!(7.0), json!("7")] {
+        let mut malformed = value.clone();
+        malformed["expected_revision"] = invalid;
+        assert!(serde_json::from_value::<RoutePersonStatement>(malformed).is_err());
+    }
+    let revisioned: RoutePersonStatement = serde_json::from_value(value.clone()).unwrap();
+    let signature = revisioned.sign(&phone).unwrap();
+    let vector: Value =
+        serde_json::from_str(include_str!("vectors/question-route-person-v2.json")).unwrap();
+    assert_eq!(
+        hex::encode(revisioned.canonical_bytes().unwrap()),
+        vector["canonical_hex"].as_str().unwrap()
+    );
+    assert_eq!(signature, vector["signature"]);
+    revisioned
+        .verify(&state, &signature, 2_000_000_000)
+        .unwrap();
+    value["expected_revision"] = json!(8);
+    let changed: RoutePersonStatement = serde_json::from_value(value).unwrap();
+    assert!(changed.verify(&state, &signature, 2_000_000_000).is_err());
+    assert!(
+        statement()
+            .verify(&state, &signature, 2_000_000_000)
+            .is_err(),
+        "v2 cannot be relabelled as v1"
+    );
 }

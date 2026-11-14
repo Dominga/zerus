@@ -34,6 +34,10 @@ on:
       run_ios:
         type: boolean
         default: false
+      windows_flake_rounds:
+        description: Opt-in loaded native Windows sample rounds; no retry after refusal or unknown
+        type: number
+        default: 0
       filter_pr_platforms:
         type: boolean
         default: false
@@ -111,7 +115,7 @@ jobs:
     name: Quick checks (source and Rust 1.99)
     needs: source
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -190,6 +194,15 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           "$lint_dir/actionlint" -color -ignore 'unexpected key "cache-mode" for "(workflow|job)" section'
 
+      - name: Linux tmux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+      - name: Pinned tmux with verified input-mode support
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
       - run: rustup toolchain install 1.99.1 --profile minimal
       # Rust caches: the compiler identity and a monthly epoch precede the lock
       # hash. A Cargo.lock change restores the previous target; a new month or
@@ -223,17 +236,18 @@ jobs:
           cargo +1.99.1 test --locked --bin hgs desktop::delivery::tests::actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures -- --exact --nocapture |
             python3 client/scripts/generate-delivery-status-fixture.py --check
       - name: Replica crates (format, lints, tests, golden vectors, the mobile binding surface)
-        run: |
-          rustup component add --toolchain 1.99.1 rustfmt clippy
-          cargo +1.99.1 fmt --check --manifest-path crates/replica/Cargo.toml
-          cargo +1.99.1 clippy --locked --manifest-path crates/replica/Cargo.toml --target-dir target --all-targets -- -D warnings
-          cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target
-          cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml
-          cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target --all-targets -- -D warnings
-          cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target
+        run: bash scripts/ci/replica.sh
       - name: Disk usage after replica tests
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/ubuntu-disk.py report after-replica-tests
+      - name: Ordinary file lock crate (format, lints, owner and fork tests)
+        env:
+          CARGO_BUILD_JOBS: "4"
+          RUST_TEST_THREADS: "4"
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path crates/file-lock/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/file-lock/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/file-lock/Cargo.toml --target-dir target
       - name: Watch protocol crate (format, lints, tests)
         run: |
           cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml
@@ -247,16 +261,13 @@ jobs:
           cargo +1.99.1 fmt --check --manifest-path crates/lore-bin/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target
-      - name: Desktop client core crate (format, lints, tests)
+      - name: Team plan crate (format, lints, tests)
         run: |
-          cargo +1.99.1 fmt --check --manifest-path client/core/Cargo.toml
-          cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target --all-targets -- -D warnings
-          cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --target-dir target
+          cargo +1.99.1 fmt --check --manifest-path crates/team-plan/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/team-plan/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/team-plan/Cargo.toml --target-dir target
       # hgs and client/core take these by path, which builds them but never runs their tests.
       # Every Quick Cargo check shares target: compatible dependencies are built once.
-      - name: Disk usage after client core tests
-        if: ${{ !cancelled() }}
-        run: python3 scripts/ci/ubuntu-disk.py report after-client-core-tests
       - name: Desktop crates (format, lints, tests)
         run: |
           cargo +1.99.1 fmt --check --manifest-path crates/content-search/Cargo.toml
@@ -306,6 +317,67 @@ jobs:
       - name: Disk usage after cache save
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/ubuntu-disk.py report after-cache-save
+
+  client-core:
+    name: Desktop client core checks (format, lints, tests)
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: Check pinned source disk helper support
+        id: disk-helper
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, runpy
+          path = pathlib.Path('scripts/ci/ubuntu-disk.py')
+          helper = runpy.run_path(str(path)) if path.exists() else {}
+          supported = all('client-core' in helper.get(name, ()) for name in ('REPORT_JOBS', 'CLEANUP_JOBS'))
+          if not supported:
+              print('Pinned source disk helper lacks client-core support; omitting disk diagnostics and cache restore, building client-core cold.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('supported=' + str(supported).lower() + '\n')
+          PY
+      - name: Reclaim unused hosted Ubuntu tools
+        if: ${{ steps.disk-helper.outputs.supported == 'true' }}
+        run: python3 scripts/ci/ubuntu-disk.py prepare
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      # Reuse Quick's compatible compiler/month cache without a second writer
+      # or another target-cache family within the existing shared cache limit.
+      - name: Restore Rust 1.99 cache (read only)
+        id: rust-cache
+        # An older pinned helper cannot reclaim space for Quick's full target.
+        # Build just client-core cold instead of restoring it onto that runner.
+        if: ${{ steps.disk-helper.outputs.supported == 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock') }}
+          restore-keys: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Disk usage after cache restore
+        if: ${{ !cancelled() && steps.disk-helper.outputs.supported == 'true' }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-cache-restore
+      - name: Desktop client core crate (format, lints, tests)
+        run: bash scripts/ci/client-core.sh
+      - name: Disk usage after client core tests
+        if: ${{ !cancelled() && steps.disk-helper.outputs.supported == 'true' }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-client-core-tests
 
   relay:
     name: Rust relay (v1, PostgreSQL and connector contracts)
@@ -924,7 +996,20 @@ jobs:
           node-version: '24'
       - name: Windows shell tests and disposable app
         if: ${{ !cancelled() }}
+        id: windows-shell
         run: bash scripts/ci/windows-next-shell.sh
+      - name: Loaded native Windows task-mode samples
+        if: ${{ !cancelled() && steps.windows-shell.outcome == 'success' && github.event_name == 'workflow_dispatch' && inputs.windows_flake_rounds != 0 }}
+        timeout-minutes: 20
+        env:
+          ZERUS_WINDOWS_FLAKE_ROUNDS: ${{ inputs.windows_flake_rounds }}
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/artifacts/zerus-next-windows-shell/hgs.exe")
+          HGS_WINDOWS_FRONTEND_FIXTURE=$(cygpath -w "$PWD/artifacts/zerus-next-windows-shell/windows-frontend-tests.exe")
+          export HGS_TEST_BIN HGS_WINDOWS_FRONTEND_FIXTURE
+          cp tests/windows_flake_samples.py artifacts/zerus-next-windows-shell/native-tests/
+          cd tests
+          python -m unittest -v windows_flake_samples.ModeSamples </dev/null
       - name: Retain disposable Windows shell
         if: ${{ !cancelled() && hashFiles('artifacts/zerus-next-windows-shell/zerus-client.exe') != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1021,11 +1106,7 @@ jobs:
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Keyless latest Codex, Claude Code and OpenCode compatibility
-        run: |
-          python3 scripts/ci/native-effort-seed.py build --source-sha '${{ needs.source.outputs.commit }}' \
-            --hgs "$GITHUB_WORKSPACE/target/debug/hgs" --image "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed" \
-            --receipt "$GITHUB_WORKSPACE/target/debug/hgs-effort-seed.json"
-          python3 scripts/ci/agent-compatibility.py
+        run: bash scripts/ci/native-compatibility.sh '${{ needs.source.outputs.commit }}'
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1609,6 +1690,18 @@ jobs:
           python ../scripts/ci/outside-job.py --custody-only --timeout 300 \
             --log ../artifacts/test-results/windows-native-transport.log -- \
             python -m unittest -v test_windows_bootstrap test_remote_windows.WindowsNativeTransport </dev/null
+      - name: Loaded native Windows transport samples
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_flake_rounds != 0 }}
+        timeout-minutes: 25
+        env:
+          ZERUS_WINDOWS_FLAKE_ROUNDS: ${{ inputs.windows_flake_rounds }}
+        run: |
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          export HGS_TEST_FAKE_AGENT
+          cd tests
+          python ../scripts/ci/outside-job.py --custody-only --timeout 1400 \
+            --log ../artifacts/test-results/windows-transport-samples.log -- \
+            python -m unittest -v windows_flake_samples.TransportSamples </dev/null
       # Microsoft's ConPTY pair (spec D6) from the NuGet package pinned in
       # packaging/windows/conpty.json: the package's SHA-256 is checked before it
       # is opened, then each of the two files'. Nothing from it runs here; the
@@ -1816,7 +1909,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
+    needs: [source, quick, client-core, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1834,6 +1927,7 @@ jobs:
           selected = {
               'source': True,
               'quick': True,
+              'client-core': True,
               'client-frontend': True,
               'relay': True,
               'connector': True,

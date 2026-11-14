@@ -256,6 +256,19 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
+A team's standing confirmations are a separate bounded exception with their
+own audit categories: the startup folder trust prompt of a member whose
+worktree Zerus created for that team, and the resume of a member whose agent
+exited by itself, at most three times an hour. Trust covers the team repository's
+main checkout and its subfolders on the member's account; its audit row names
+that scope. These confirmations never widen automatic tool approvals. Session
+and task command effects use this computer's own `hgs` as one original child,
+admitted at its spawn; a merge is admitted at its ref update. Closed-task key
+maintenance uses bounded replica writes without adding history. An unknown
+delivery is never replayed. Quitting
+a member's agent by hand stops neither the member nor the team. Zerus never
+stops a team's agents by itself.
+
 Dev publication is build-gated: successful distributables, package/source identity,
 signatures and installation checks admit Dev without waiting for the full regression
 matrix. Main regression tests run separately and keep failures visible; file and fix

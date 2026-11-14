@@ -38,6 +38,20 @@ public enum SessionQuestionRouting {
 
     /// The person's latch through this phone's signed statement (zerus-sa9qn.50).
     public static let personOperation = "session_question_route_person"
+    public static let personRevisionOperation = "session_question_route_person_status"
+    public static func revisioned(relay: Set<String>, machine: Set<String>) -> Bool {
+        relay.contains(personRevisionOperation) && machine.contains(personRevisionOperation)
+    }
+    /// Exact read-only service reply; never sign a revision from an unbound response.
+    public static func latchRevision(_ value: JSONObject, id: String, session: String, run: String, conversation: String) throws -> Int64 {
+        guard value.count == 9, value["request_id"] == .string(id), value["op"] == .string("question_route_child_status"),
+              value["accepted"] == .bool(true), value["durable"] == .bool(false), value["session_id"] == .string(session),
+              value["run_id"] == .string(run), value["conversation_id"] == .string(conversation), case .bool? = value["person_off"],
+              case .int(let revision)? = value["revision"], (0...9_007_199_254_740_991).contains(revision) else {
+            throw ZerusError.mismatch("The computer did not confirm this child's question routing. Refresh and try again.")
+        }
+        return revision
+    }
     /// Only an encrypted workspace connection can sign, and only where both the relay and the computer offer it.
     public static func person(_ connection: Connection?, relay: Set<String>, machine: Set<String>) -> Bool {
         connection?.protocolVersion == 2 && relay.contains(personOperation) && machine.contains(personOperation)

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "storage_failed",
+    "detail": "Teams storage is unavailable: fixture CLI write failure",
+    "message": "The result is not known; repeat the same request with the same request ID."
+  },
+  "ok": false
+}

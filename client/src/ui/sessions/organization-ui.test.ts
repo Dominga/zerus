@@ -75,16 +75,17 @@ const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? 
 const entry = (entries: MenuEntry[], label: string) => entries.find((e): e is Item => "label" in e && e.label === label)!;
 const actions = () => ({
   newSession: vi.fn<() => void>(), filter: vi.fn<() => void>(), collapse: vi.fn<(collapsed: boolean) => void>(), rename: vi.fn<() => void>(), settings: vi.fn<() => void>(),
+  markRead: vi.fn(() => ({ label: "Mark sessions as read", disabled: true, action: vi.fn<() => void>() })),
   move: vi.fn<(before: string | undefined) => void>(), sort: vi.fn<() => void>(), remove: vi.fn<() => void>(),
 }) satisfies HeaderActions;
 const WAITING = "Project sync is starting.";
 
 describe("the project header menu", () => {
-  it("lists Qt's entries in Qt's order, New session first (2572-2573)", () => {
+  it("lists the project entries, with Mark sessions as read after Filter this project", () => {
     const act = actions();
     const entries = headerEntries(g(), "alpha", act);
     expect(labels(entries)).toEqual([
-      "New session…", "-", "Filter this project", "-", "Collapse project", "Rename project…", "Project settings…", "-",
+      "New session…", "-", "Filter this project", "Mark sessions as read", "-", "Collapse project", "Rename project…", "Project settings…", "-",
       "Move project up", "Move project down", "Sort sessions by name", "-", "Delete project…",
     ]);
     expect(entry(entries, "New session…").disabled).toBeFalsy();

@@ -126,7 +126,8 @@ fn start_detached(start: &Start) -> Result<(), String> {
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut child =
+        crate::child_environment::spawn(&mut command).map_err(|error| error.to_string())?;
     let _ = std::thread::Builder::new()
         .name("terminal-reaper".to_owned())
         .stack_size(64 * 1024)

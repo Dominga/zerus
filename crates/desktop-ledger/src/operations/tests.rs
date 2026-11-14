@@ -610,6 +610,31 @@ fn wrong_ticket_receipt_and_early_drain_cannot_change_an_attempt() {
     assert_eq!(totals(&db).unwrap().undrained, 1);
 }
 #[test]
+fn a_stale_service_cannot_recover_the_current_services_reserved_operation() {
+    let mut db = db();
+    let original = put(&mut db, 0);
+    let before = reserve(&mut db, &request(&original, 0)).unwrap().attempt;
+    assert!(
+        recover_batch(&mut db, &id(999)).is_err(),
+        "a stale service must refuse recovery before changing a current attempt"
+    );
+    let after = db
+        .query_row(
+            &format!("SELECT {ATTEMPT} FROM desktop_operation_attempts WHERE attempt_id=?1"),
+            [&before.ticket.attempt_id],
+            attempt,
+        )
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(totals(&db).unwrap().undrained, 1);
+    assert_eq!(recover_batch(&mut db, SERVICE).unwrap(), 0);
+    assert_eq!(totals(&db).unwrap().undrained, 1);
+    let duplicate = reserve(&mut db, &request(&original, 0)).unwrap();
+    assert!(!duplicate.fresh);
+    assert_eq!(duplicate.attempt, before);
+}
+
+#[test]
 fn restart_recovers_unknown_without_pretending_orphaned_resources_are_gone() {
     let mut db = db();
     let original = put(&mut db, 0);

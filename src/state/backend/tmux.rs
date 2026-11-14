@@ -630,15 +630,14 @@ impl TerminalBackend for Tmux {
         Ok(())
     }
     fn stage(&self, buffer: &str, text: &[u8], errors: StageErrors) -> Result<bool> {
-        let mut loader = Command::new("tmux")
+        let mut loader = zerus_client_core::child_environment::spawn(Command::new("tmux")
             .args(["load-buffer", "-b", buffer, "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(match errors {
                 StageErrors::Read => Stdio::piped(),
                 StageErrors::Discard => Stdio::null(),
-            })
-            .spawn()
+            }))
             .map_err(|e| e.to_string())?;
         let written = match loader.stdin.take() {
             Some(mut stdin) => stdin.write_all(text),

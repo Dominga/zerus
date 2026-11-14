@@ -12,6 +12,9 @@ use std::{
 };
 
 use std::sync::mpsc::Sender;
+#[path = "cleanup_initial_call_controls/input_owner.rs"]
+mod stdin;
+use stdin::InputOwner;
 // The production gates name `run::Retirement`.
 mod run {
     pub use super::Retirement;
@@ -151,21 +154,27 @@ fn settle(completion: &Completion) -> Retirement {
 }
 
 struct Child {
-    stdin: Option<std::io::PipeWriter>,
+    stdin: Option<std::process::ChildStdin>,
 }
 struct Invocation {
     stdin: Option<Vec<u8>>,
 }
 struct Pipes {
     readers: Option<Arc<OriginalCall>>,
-    input: Option<Box<dyn FnOnce(std::io::PipeWriter) -> bool + Send>>,
+    input: Option<Box<dyn FnOnce(std::process::ChildStdin) -> bool + Send>>,
     after_written: Option<Box<dyn FnOnce() + Send>>,
     completion: Option<Arc<Completion>>,
 }
-fn actual_writer_fragment(mut child: Child, inv: Invocation, pipes: Pipes) {
+fn actual_writer_fragment(mut child: Child, inv: Invocation, pipes: Pipes) -> bool {
     let retain_all = true;
-    let completion = pipes.completion;
+    let has_input =
+        pipes.input.is_some() || inv.stdin.as_ref().is_some_and(|bytes| !bytes.is_empty());
+    let completion = pipes.completion.clone();
     let stdin = child.stdin.take();
+    let input_owner = stdin
+        .as_ref()
+        .map(|writer| InputOwner::acquire(writer, has_input))
+        .transpose();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
     let input_guard = if retain_all {
@@ -177,20 +186,37 @@ fn actual_writer_fragment(mut child: Child, inv: Invocation, pipes: Pipes) {
         .as_ref()
         .map(|_| Arc::new(Mutex::new(IoState::Running)));
     let writer_state_for_thread = writer_state.clone();
+    #[cfg(test)]
     let after_written = pipes.after_written;
     let writer = thread::spawn(move || {
-        let ok = match (stdin, pipes.input, input) {
-            (Some(pipe), Some(write), _) => write(pipe),
-            (Some(mut pipe), None, Some(bytes)) => {
-                pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
+        let ok = if input_owner.is_ok() {
+            match (stdin, pipes.input, input) {
+                (Some(pipe), Some(write), _) => write(pipe),
+                (Some(mut pipe), None, Some(bytes)) => {
+                    pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
+                }
+                _ => !has_input,
             }
-            _ => true,
+        } else {
+            drop(stdin);
+            false
         };
+        // Always finish the actual input, including a partial/failed write.
+        // A shutdown error is a failure, never evidence of successful delivery.
+        let ok = match input_owner {
+            Ok(Some(owner)) => owner.finish().is_ok() && ok,
+            Ok(None) => ok,
+            Err(_) => false,
+        };
+        // The input is closed: release the group before signalling, as the
+        // readers do, so a completed exchange holds no hidden admission.
         drop(input_guard);
         if let Some(state) = &writer_state_for_thread {
+            // Physical closure is distinct from the input success sent below.
             *state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Closed;
         }
         let _ = write_tx.send(ok);
+        #[cfg(test)]
         if let Some(hook) = after_written {
             hook();
         }
@@ -198,7 +224,25 @@ fn actual_writer_fragment(mut child: Child, inv: Invocation, pipes: Pipes) {
     if let Some(completion) = &completion {
         completion.register(writer, writer_state.expect("completion state"));
     }
-    write_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    write_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+}
+
+// The production Unix input is socket-backed; Windows keeps its kernel pipe.
+#[cfg(unix)]
+fn input_pipe() -> (std::os::unix::net::UnixStream, std::process::ChildStdin) {
+    let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
+    (
+        read,
+        std::process::ChildStdin::from(std::os::fd::OwnedFd::from(write)),
+    )
+}
+#[cfg(windows)]
+fn input_pipe() -> (std::io::PipeReader, std::process::ChildStdin) {
+    let (read, write) = std::io::pipe().unwrap();
+    (
+        read,
+        std::process::ChildStdin::from(std::os::windows::io::OwnedHandle::from(write)),
+    )
 }
 
 fn check_original(through_service: bool) {
@@ -219,11 +263,11 @@ fn check_original(through_service: bool) {
             })
         },
     };
-    let (mut input_read, input_write) = std::io::pipe().unwrap();
+    let (mut input_read, input_write) = input_pipe();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
-    actual_writer_fragment(
+    assert!(actual_writer_fragment(
         Child {
             stdin: Some(input_write),
         },
@@ -240,7 +284,7 @@ fn check_original(through_service: bool) {
             })),
             completion: Some(completion.clone()),
         },
-    );
+    ));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let mut bytes = Vec::new();
     input_read.read_to_end(&mut bytes).unwrap();
@@ -263,6 +307,70 @@ fn native_original_call_requires_actual_writer_completion() {
 #[test]
 fn service_original_call_requires_actual_writer_completion() {
     check_original(true);
+}
+
+#[test]
+fn missing_input_is_not_successful_delivery() {
+    assert!(!actual_writer_fragment(
+        Child { stdin: None },
+        Invocation {
+            stdin: Some(b"original".to_vec()),
+        },
+        Pipes {
+            readers: None,
+            input: None,
+            after_written: None,
+            completion: None,
+        },
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_socket_shutdown_is_not_successful_delivery() {
+    // A real pipe can write/close, but cannot acknowledge socket shutdown.
+    let (mut read, write) = std::io::pipe().unwrap();
+    let write = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(write));
+    assert!(!actual_writer_fragment(
+        Child { stdin: Some(write) },
+        Invocation {
+            stdin: Some(b"original".to_vec()),
+        },
+        Pipes {
+            readers: None,
+            input: None,
+            after_written: None,
+            completion: None,
+        },
+    ));
+    let mut bytes = Vec::new();
+    read.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"original");
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_failed_input_finishes_before_a_retained_descriptor_closes() {
+    use std::os::fd::AsFd;
+    let (mut read, write) = input_pipe();
+    read.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let _retained = write.as_fd().try_clone_to_owned().unwrap();
+    assert!(!actual_writer_fragment(
+        Child { stdin: Some(write) },
+        Invocation { stdin: None },
+        Pipes {
+            readers: None,
+            input: Some(Box::new(|mut pipe| {
+                pipe.write_all(b"partial").unwrap();
+                false
+            })),
+            after_written: None,
+            completion: None,
+        },
+    ));
+    let mut bytes = Vec::new();
+    read.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"partial", "EOF does not prove complete input");
 }
 
 type Shared = Arc<Mutex<Vec<u8>>>;
@@ -395,6 +503,19 @@ fn the_controls_run_the_exact_production_original_call_gates_and_completion() {
             .windows(fragment.len())
             .any(|window| window == fragment),
         "the writer fragment differs from production run_inner"
+    );
+    let owner = include_str!("cleanup_initial_call_controls/input_owner.rs");
+    let original_owner = include_str!("../../core/src/run/stdin.rs");
+    let start = "pub(super) struct InputOwner {";
+    let original_owner = &original_owner[original_owner.find(start).expect("production owner")..];
+    let original_owner = original_owner
+        .split_once("#[cfg(all(test, unix))]")
+        .expect("owner test boundary")
+        .0;
+    assert_eq!(
+        normalized(&owner[owner.find(start).expect("copied owner")..]).collect::<Vec<_>>(),
+        normalized(original_owner).collect::<Vec<_>>(),
+        "InputOwner differs from production"
     );
 }
 

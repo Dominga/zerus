@@ -61,7 +61,8 @@ class Termination:
         if os.path.exists('/proc/'+str(record['pid'])+'/exe'):
             self.assertEqual(Path('/proc/'+str(record['pid'])+'/exe').resolve(),native)
         else:
-            image=subprocess.check_output(['ps','-ww','-p',str(record['pid']),'-o','comm='],text=True).strip()
+            from test_kimi_native import executable
+            image=executable(record['pid'])  # Kernel image; ps comm can be a mutable basename.
             # macOS workers stage another same-byte copy of the public image.
             # Compare the kernel-reported image to that sealed selection.
             with open(image,'rb') as running, native.open('rb') as selected:

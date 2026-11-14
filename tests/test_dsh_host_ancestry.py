@@ -229,6 +229,7 @@ class UnderARecordedHost(unittest.TestCase):
         # sent or forwarded: send, send-now, a zerus:// reference and @host.
         uri = json.loads(self.call('self', '--json', env=self.claim).stdout)['uri']
         forms = (('send', self.lead['name'], '--json'),
+                 ('__state', 'send', self.lead['name'], '--json'),
                  ('send-now', self.lead['name'], '--json'),
                  ('send', uri, '--json'),
                  ('--dry-run', '@peerx', 'send', 'claude/p/s', '--json'))

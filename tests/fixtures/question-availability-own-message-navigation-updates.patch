@@ -1,0 +1,269 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+index 0e9207169..8b8599b22 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+@@ -74,6 +74,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.platform.LocalWindowInfo
+ import androidx.compose.ui.res.painterResource
++import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.TextRange
+ import androidx.compose.ui.text.input.PasswordVisualTransformation
+@@ -853,6 +854,15 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+     val unread = UnreadPresentation.conversationBadge(model.unreadCount(target), model.loadedUnreadCount(target))
+     var unavailableSaved by remember(target.key) { mutableStateOf(false) }
+     var latestPending by remember(target.key) { mutableStateOf(false) }
++    var ownCursor by remember(target.key) { mutableStateOf<String?>(null) }
++    var ownHighlight by remember(target.key) { mutableStateOf<String?>(null) }
++    var ownDirection by remember(target.key) { mutableStateOf<OwnMessageNavigation.Direction?>(null) }
++    var ownJob by remember(target.key) { mutableStateOf<Job?>(null) }
++    var ownGeneration by remember(target.key) { mutableIntStateOf(0) }
++    var ownEpoch by remember(target.key) { mutableStateOf(model.historyEpoch) }
++    var queuedOwn by remember(target.key) { mutableStateOf<OwnMessageNavigation.Direction?>(null) }
++    var navigationIdle by remember(target.key) { mutableStateOf(true) }
++    val ownAvailability = remember(target.key) { OwnMessageNavigation.Availability() }
+     var searchNotice by remember(target.key) { mutableStateOf("") }
+     val historyReason = if(model.demo) "" else model.historyReason(target)
+     val boundedNotice = if(model.historyEpoch.isNotBlank()) {
+@@ -901,6 +911,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+     }
+     val scope = rememberCoroutineScope()
+     val currentHistoryTarget by rememberUpdatedState(target.key)
++    val latestKeys by rememberUpdatedState(keys)
++    val latestEvents by rememberUpdatedState(events)
+     val window = LocalWindowInfo.current
+     val lifecycle = LocalLifecycleOwner.current.lifecycle
+     var foreground by remember(lifecycle) { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+@@ -909,11 +921,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         lifecycle.addObserver(observer)
+         onDispose { lifecycle.removeObserver(observer) }
+     }
+-    suspend fun jump(index: Int, offset: Int = 0) {
++    suspend fun jump(index: Int, offset: Int = 0, key: String? = null, epoch: String? = null) {
+         scrollMutex.withLock {
+             if (target.key != currentHistoryTarget || model.selected?.target != target) return@withLock
++            if (epoch != null && epoch != model.historyEpoch) return@withLock
++            val position = if (key == null) index.coerceAtLeast(0) else latestKeys.indexOf(key).takeIf { it >= 0 } ?: return@withLock
+             programmatic = true
+-            try { listState.scrollToItem(index.coerceAtLeast(0), offset.coerceAtLeast(0)) }
++            try { listState.scrollToItem(position, offset.coerceAtLeast(0)) }
+             finally { programmatic = false }
+         }
+     }
+@@ -930,10 +944,81 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         }
+         onJumpConsumed()
+     }
+-    val latestKeys by rememberUpdatedState(keys)
+     val renderedHistory by rememberUpdatedState(Triple(model.conversationEvents,model.hasOlder,model.hasNewer))
++    fun cancelOwnNavigation(keepQueued: Boolean = false) {
++        ownGeneration++; ownJob?.cancel(); ownDirection = null; ownCursor = null; ownHighlight = null
++        if (!keepQueued) queuedOwn = null
++    }
++    DisposableEffect(target.key) { onDispose { ownJob?.cancel() } }
++    LaunchedEffect(target.key,model.historyEpoch) {
++        if (ownEpoch.isNotBlank() && ownEpoch != model.historyEpoch) cancelOwnNavigation()
++        ownEpoch = model.historyEpoch
++    }
++    LaunchedEffect(target.key,ownHighlight) {
++        if (ownHighlight != null) { delay(1600); ownHighlight = null }
++    }
++    fun ownSelection(): OwnMessageNavigation.Selection {
++        val viewport = listState.layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { displayedEventId(it.key.toString()) }
++            ?: latestKeys.asSequence().drop(listState.firstVisibleItemIndex).mapNotNull(::displayedEventId).firstOrNull()
++        return OwnMessageNavigation.Selection(ownCursor,viewport,follow.following)
++    }
++    fun ownPage() = model.ownMessagePage(target,latestEvents)
++    fun requestOwn(direction: OwnMessageNavigation.Direction) {
++        val page = ownPage() ?: return
++        if (listState.isScrollInProgress || !navigationIdle) {
++            if (ownDirection == null && !latestPending && !obscured) queuedOwn = direction
++            return
++        }
++        val selection = ownSelection()
++        if (!OwnMessageNavigation.enabled(page,selection,direction,historyReason.isBlank() && !model.demo,
++                ownDirection != null || latestPending || model.olderLoading || listState.isScrollInProgress || !follow.opened || obscured)) return
++        val mine = ++ownGeneration
++        ownDirection = direction
++        follow = follow.copy(opened = true,following = false,anchor = null)
++        ownJob = scope.launch {
++            try {
++                val found = OwnMessageNavigation.find(target,selection,direction,::ownPage,read@{ requested ->
++                    if (currentHistoryTarget != target.key || model.selected?.target != target || model.historyReason(target).isNotBlank()) return@read false
++                    val read = (if (requested == OwnMessageNavigation.Direction.Previous) model.loadOlder(target) else model.loadNewer(target)) ?: return@read false
++                    read.join()
++                    // The page job prepares rows off-main. Wait for their existing
++                    // publication and composition before using named list keys.
++                    snapshotFlow { model.selected?.target != target || currentHistoryTarget != target.key || !model.olderLoading &&
++                        renderedHistory == Triple(model.conversationEvents,model.hasOlder,model.hasNewer) }.first { it }
++                    model.selected?.target == target && currentHistoryTarget == target.key && model.olderError.isBlank()
++                }) ?: return@launch
++                if (mine != ownGeneration || currentHistoryTarget != target.key || model.selected?.target != target) return@launch
++                val current = ownPage() ?: return@launch
++                val key = currentRowKeys.key(found.id)
++                val index = latestKeys.indexOf(key)
++                if (index < 0) return@launch
++                ownCursor = found.id; ownHighlight = found.id
++                follow = follow.copy(opened = true,following = false,anchor = ConversationAnchor(key,0,false))
++                jump(index,key = key,epoch = current.epoch)
++            } finally { if (mine == ownGeneration) ownDirection = null }
++        }
++    }
++    // A native fling owns availability until its end has reached a frame.
++    LaunchedEffect(target.key,listState.isScrollInProgress,model.olderLoading) {
++        if (listState.isScrollInProgress) { navigationIdle = false; return@LaunchedEffect }
++        withFrameNanos { }
++        if (!listState.isScrollInProgress) {
++            navigationIdle = true
++            if (!model.olderLoading) {
++                val direction = queuedOwn; queuedOwn = null
++                direction?.let(::requestOwn)
++            }
++        }
++    }
++    val ownGesture = remember(target.key) { object : NestedScrollConnection {
++        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
++            if (source == NestedScrollSource.UserInput) queuedOwn = null
++            return Offset.Zero
++        }
++    } }
+     fun requestLatest() {
+         if(model.selected?.target != target || latestPending) return
++        cancelOwnNavigation()
+         val needsHistory = model.hasNewer || model.olderLoading
+         // Await this accepted navigation, rather than hoping a content effect sees
+         // a loading transition. A cached/identical read can finish in one frame.
+@@ -972,6 +1057,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         // With no cards below the message, align its bottom to the composer.
+         val ownKey = if (own == null) null else if (questions.isEmpty() && !queueVisible) "history:tail" else rowKeys.key(own.id)
+         val explicitSend = ownSendId.isNotBlank() && ownSendId != follow.ownSendId && ownKey != null
++        if (explicitSend) cancelOwnNavigation()
+         val firstOpen = !follow.opened
+         // Ledger hydration must not cause a second jump after the reader deliberately scrolls.
+         if (firstOpen && !explicitSend && !readReady) return@LaunchedEffect
+@@ -997,6 +1083,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         }.distinctUntilChanged().collect { (moving, atEnd, automatic) ->
+             if (!automatic && moving) userMovement = true
+             if (!automatic && userMovement) {
++                cancelOwnNavigation(keepQueued = true)
+                 follow = ConversationViewport.userScrolled(follow, atEnd).copy(opened = true)
+                 if (!moving) userMovement = false
+             }
+@@ -1020,8 +1107,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         val tail = layout.visibleItemsInfo.lastOrNull()
+         tail?.key == "history:tail" && tail.offset + tail.size <= layout.viewportEndOffset + 2
+     } }
+-    LaunchedEffect(settledAtTail,listState.isScrollInProgress,programmatic,follow.opened,follow.following,follow.anchor,model.hasNewer) {
+-        if(!listState.isScrollInProgress && !programmatic) follow = ConversationViewport.settled(follow,settledAtTail,model.hasNewer)
++    LaunchedEffect(settledAtTail,listState.isScrollInProgress,programmatic,follow.opened,follow.following,follow.anchor,model.hasNewer,ownCursor,ownDirection) {
++        if(!listState.isScrollInProgress && !programmatic && ownCursor == null && ownDirection == null)
++            follow = ConversationViewport.settled(follow,settledAtTail,model.hasNewer)
+     }
+     val videoCapture = model.speech.recording && model.speech.videoRecorder != null
+     var videoOverlayVisible by remember { mutableStateOf(false) }
+@@ -1110,8 +1198,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+             .onGloballyPositioned { viewportBounds = it.boundsInWindow() }) {
+             Box(Modifier.fillMaxSize().semantics { if (videoCapture || videoOverlayVisible) hideFromAccessibility() }) {
+             ConversationTailRefresh(model, target.key, Modifier.fillMaxSize()) {
+-            // The tail item already adds one item gap above the composer.
+-            LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp),
++            // Keep the newest bubble above the floating navigation controls.
++            LazyColumn(Modifier.fillMaxSize().nestedScroll(ownGesture), state = listState, contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 72.dp),
+                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                 item(key = "history:earlier") { if (loadStatus?.initial != true) Column(Modifier.fillMaxWidth(),horizontalAlignment = Alignment.CenterHorizontally) {
+                     if(model.olderError.isNotBlank()) {
+@@ -1156,7 +1244,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                     item(key = rowKeys.key(event.id)) {
+                     val provider = if (target.agentId.isNotBlank()) raw?.string("provider").orEmpty().ifBlank { session.agent } else session.agent
+                     ConversationMessage(target, event, provider, outgoing.find { it.requestId == event.outgoingId },
+-                        model, onReviewOutgoing)
++                        model, onReviewOutgoing,highlighted = ownHighlight?.let { it in HistoryInspection.identities(event) } == true)
+                     }
+                 }
+                 if (events.isEmpty() && !conversationLoading) item(key = "history:empty") {
+@@ -1181,10 +1269,31 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                 Text(loadStatus.text, Modifier.semantics { if (!obscured) liveRegion = LiveRegionMode.Polite }, color = Muted, style = MaterialTheme.typography.bodyMedium)
+             }
+-            if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
+-                !(questions.isNotEmpty() && cardVisible))
++            if ((events.isNotEmpty() || questions.isNotEmpty()) && !(questions.isNotEmpty() && cardVisible))
++                Row(Modifier.align(Alignment.BottomEnd).padding(16.dp),horizontalArrangement = Arrangement.spacedBy(8.dp),verticalAlignment = Alignment.CenterVertically) {
++                val page = ownPage()
++                val selection = ownSelection()
++                val busy = ownDirection != null || latestPending || model.olderLoading || listState.isScrollInProgress || !follow.opened || obscured
++                val directions = ownAvailability.project(page,selection,historyReason.isBlank() && !model.demo,busy,
++                    listState.isScrollInProgress || !navigationIdle)
++                SideEffect { ownAvailability.commit(directions) }
++                for (direction in OwnMessageNavigation.Direction.entries) {
++                    val previous = direction == OwnMessageNavigation.Direction.Previous
++                    val label = stringResource(if (previous) R.string.activity_previous_own else R.string.activity_next_own)
++                    val loading = stringResource(if (previous) R.string.activity_reading_previous_own else R.string.activity_reading_next_own)
++                    FilledTonalIconButton(onClick = { requestOwn(direction) },enabled = if (previous) directions.previous else directions.next,
++                        modifier = Modifier.size(48.dp).semantics {
++                            contentDescription = label
++                            if (ownDirection == direction) { stateDescription = loading; liveRegion = LiveRegionMode.Polite }
++                        },shape = RoundedCornerShape(16.dp),colors = IconButtonDefaults.filledTonalIconButtonColors(
++                            containerColor = Color(0xFF2D4142),contentColor = Mint,disabledContainerColor = Color(0xFF2D4142),disabledContentColor = Muted)) {
++                        if (ownDirection == direction) CircularProgressIndicator(Modifier.size(18.dp),color = Mint,strokeWidth = 2.dp)
++                        else Icon(if (previous) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,null)
++                    }
++                }
++                if (!follow.following || model.hasNewer || latestPending)
+                 FilledTonalButton(onClick = ::requestLatest,enabled = !latestPending,
+-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).heightIn(min = 48.dp).semantics {
++                    modifier = Modifier.heightIn(min = 48.dp).semantics {
+                         contentDescription = "Jump to latest messages"
+                         stateDescription = UnreadPresentation.latest(latestPending).description
+                     }, shape = RoundedCornerShape(16.dp),
+@@ -1195,6 +1304,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                     Text(UnreadPresentation.latest(latestPending).text,
+                         Modifier.padding(start = 4.dp),style = MaterialTheme.typography.labelMedium)
+                 }
++                }
+             }
+             RoundVideoRecordingOverlay(model.speech, Modifier.matchParentSize()) { videoOverlayVisible = it }
+         }
+@@ -1218,7 +1328,7 @@ private data class ReadViewport(val ids:Set<String>,val first:Pair<String,Int>?,
+     val current:String,val flags:ConversationViewport.CurrentFlags)
+ 
+ @Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
+-    model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
++    model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit, highlighted: Boolean = false) {
+     if (event.role == ActivityNotices.ROLE) return ActivityNotice(target, event, model)
+     val own = QuestionReplyPresentation.isOwnRole(event.role)
+     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
+@@ -1232,6 +1342,7 @@ private data class ReadViewport(val ids:Set<String>,val first:Pair<String,Int>?,
+     val inherited = event.inheritedFrom.isNotBlank()
+     Row(Modifier.fillMaxWidth().alpha(if (inherited) .72f else 1f), horizontalArrangement = if (own) Arrangement.End else Arrangement.Start) {
+         Surface(color = if (roundVideo) Color.Transparent else messageColor,
++            border = if (highlighted) BorderStroke(2.dp,Mint) else null,
+             shape = if (roundVideo) RectangleShape else RoundedCornerShape(17.dp),
+             modifier = Modifier.fillMaxWidth(if (own) .92f else 1f).semantics {
+                 contentDescription = (if (inherited) "Inherited, " else "") + if (own) "You" else agent.ifBlank { "Agent" }
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index 06d4735b2..8a72e7d75 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -578,11 +578,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         }
+         return olderJob
+     }
+-    fun loadOlder(target:Target) {
++    fun loadOlder(target:Target):Job? {
+         val window=historyWindows[target.key]
+-        if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before)
++        return if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before) else null
++    }
++    fun loadNewer(target:Target):Job? = historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) }
++    /** Navigation reads the displayed rows and the existing window's opaque page cursors. */
++    fun ownMessagePage(target:Target,displayed:List<Event>):OwnMessageNavigation.Page? {
++        if(selected?.target!=target) return null
++        val window=historyWindows[target.key]
++        return OwnMessageNavigation.Page(target,displayed,historyEpoch,window?.before,window?.after,hasOlder,hasNewer)
+     }
+-    fun loadNewer(target:Target) { historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) } }
+     /** The recent native inspection is independent of historical indexing and exact unread totals. */
+     fun jumpToLatest(target:Target):Job? {
+         if(selected?.target!=target) return null

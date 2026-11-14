@@ -47,12 +47,13 @@ enum Availability {
 struct ProbeChild(Child);
 impl ProbeChild {
     fn start(mut command: Command) -> std::io::Result<Self> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(Self)
+        crate::child_environment::spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map(Self)
     }
 }
 impl Drop for ProbeChild {

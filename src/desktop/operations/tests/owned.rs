@@ -284,14 +284,14 @@ impl Host {
             &inv,
             &[],
             &cancel,
-            move |command| {
+            move |command, input_spawn| {
                 calls.fetch_add(1, Ordering::AcqRel);
                 environment(command, &root.join("child-env"));
                 command
                     .env("OWNED_PORT_ROOT", &root)
                     .env("OWNED_PORT_MODE", child_mode);
                 inherited.inherit(command)?; // LAST hook, before this one owned fork.
-                let child = command.spawn()?;
+                let child = input_spawn.spawn(command)?;
                 // From here no failure can mean StartFailed/no child. Preserve its
                 // actual owner, allow the runner to wait/drain, and pin unknowns.
                 let bound = platform::process_identity(child.id()).is_some_and(|birth| {

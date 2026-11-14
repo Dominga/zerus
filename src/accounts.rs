@@ -2,6 +2,7 @@
 mod inspection;
 mod claude_usage;
 mod model_defaults;
+mod kimi_compaction;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
@@ -52,6 +53,8 @@ struct Catalog {
     defaults: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "model_defaults::Stored::is_empty")]
     model_defaults: model_defaults::Stored,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    kimi_compact_on_expiry: BTreeMap<String, bool>,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -90,6 +93,11 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1,"Invalid account permission mode."));
         }
         permission_catalog::check_stored_mode(mode)?;
+    }
+    for id in catalog.kimi_compact_on_expiry.keys() {
+        if id != "native-kimi" && catalog.profiles.get(id).is_none_or(|p| p.provider != "kimi") {
+            return Err(Error::new(1, "Invalid Kimi cache-expiry account policy."));
+        }
     }
     for (provider, id) in &catalog.defaults {
         if !["codex", "claude", "kimi"].contains(&provider.as_str())
@@ -551,6 +559,10 @@ fn list(config: &Config) -> Result<Value> {
         permission_status::describe(config, row, explicit.unwrap_or(default_permission_mode(&provider)), &mut catalogs);
         row["permission_modes"] = json!(permission_modes(&provider));
         model_defaults::describe(row, &catalog);
+        if provider == "kimi" {
+            row["compact_on_expiry_supported"] = json!(true);
+            row["compact_on_expiry"] = json!(catalog.kimi_compact_on_expiry.get(row["id"].as_str().unwrap_or("")).copied().unwrap_or(true));
+        }
     }
     permission_scope::describe(config, &mut rows);
     marks::describe(config, &mut rows);
@@ -591,6 +603,10 @@ pub const AUTH_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
+/// Serialises tests that change process environment variables.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The permission mode of an account without an explicit choice (owner,
 /// 2026-11-07, T-6hcfnu): bypass for Claude, Codex and Kimi. OpenCode and
 /// DeepSeek keep their native configuration: OpenCode refuses a Zerus mode,
@@ -871,6 +887,10 @@ pub fn select(config: &Config, id: &str, provider: &str) -> Result<Vec<String>> 
         format!("{key}={selected_home}"),
         format!("HGS_ACCOUNT_ID={id}"),
     ];
+    // The inspection's test seam is never passed to a native agent started in
+    // this session, whichever account kind it uses.
+    env::remove_var(inspection::KIMI_TEST_BASE_ENV);
+    environment.push(format!("{}=", inspection::KIMI_TEST_BASE_ENV));
     if !native {
         if provider == "claude" {
             let config_home = home.join("anthropic");
@@ -1000,6 +1020,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         // Task 115: the owner's explicit opt-in for a Kimi account's read-only
         // hgs rules. A team launch never writes them.
         "kimi-read-only"=>{println!("{}",kimi_read_only(config,id,args,dry)?);},
+        "compact-on-expiry"=>{println!("{}",kimi_compaction::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
         "bind-existing"=>{
@@ -1648,6 +1669,8 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
         return Vec::new();
     };
     let mut environment = vec![format!("{key}={home}"), format!("HGS_ACCOUNT_ID={account}")];
+    // As in `select`: the inspection's test seam stays out of agent sessions.
+    environment.push(format!("{}=", inspection::KIMI_TEST_BASE_ENV));
     if !account.starts_with("native-") {
         if provider == "claude" {
             environment.push(format!(
@@ -1671,9 +1694,65 @@ pub fn launch_selection(config: &Config, provider: &str) -> Result<Option<(Strin
     model_defaults::launch_selection(config, provider)
 }
 
+/// Read the exact account's Zerus policy. Missing policy defaults on; unreadable
+/// catalogs and a changed home are errors, never permission to compact.
+pub(crate) fn kimi_compact_on_expiry(config: &Config, id: &str, home: &Path) -> Result<bool> {
+    kimi_compaction::enabled(config, id, home)
+}
+
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    #[test]
+    fn selecting_an_account_clears_the_inspection_test_seam() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("config");
+        fs::create_dir_all(dir.join("accounts/work")).unwrap();
+        fs::write(
+            dir.join("accounts.json"),
+            r#"{"profiles":{"work":{"provider":"kimi","label":"Work"}}}"#,
+        )
+        .unwrap();
+        let config = Config {
+            home: root.path().to_string_lossy().into_owned(),
+            dir,
+            state: root.path().join("state"),
+            selves: Vec::new(),
+            peers: Vec::new(),
+            base_peers: Vec::new(),
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let keys: Vec<&str> = std::iter::once("KIMI_CODE_HOME")
+            .chain(std::iter::once("HGS_ACCOUNT_ID"))
+            .chain(std::iter::once(inspection::KIMI_TEST_BASE_ENV))
+            .chain(AUTH_ENV.iter().copied())
+            .collect();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.into_iter().map(|key| (key, env::var_os(key))).collect();
+        env::set_var(inspection::KIMI_TEST_BASE_ENV, "http://127.0.0.1:9");
+        let environment = select(&config, "work", "kimi").unwrap();
+        assert!(
+            environment.contains(&format!("{}=", inspection::KIMI_TEST_BASE_ENV)),
+            "{environment:?}"
+        );
+        assert!(
+            env::var_os(inspection::KIMI_TEST_BASE_ENV).is_none(),
+            "select left the seam in the launching process"
+        );
+        for (key, value) in saved {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]

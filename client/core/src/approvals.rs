@@ -191,6 +191,14 @@ pub struct Entry {
     /// The approval categories the request needed, by ID; empty for an
     /// entry saved before categories or by an older CLI.
     pub categories: Vec<String>,
+    /// The granted scope the row recorded, next to the card's folder; none
+    /// for a row written before it (zerus-63rru.66 round 2).
+    pub scope: Option<String>,
+    /// The standing-confirmation kind the row recorded (the folder-trust
+    /// grant), carried through the page separately from the ordinary tool
+    /// categories so the row's sentence can distinguish the grant
+    /// (zerus-63rru.66 round 5).
+    pub standing: Option<String>,
 }
 
 /// One page and its cursors (0: none that way).
@@ -236,10 +244,22 @@ pub fn page(reply: &Map<String, Value>) -> Result<Page, String> {
                 prompt: text(&entry["prompt"]),
                 result: status_text(entry["status"].as_str().unwrap_or_default()).into(),
                 categories: known_categories(&entry["categories"]),
+                scope: entry["scope"].as_str().map(str::to_owned),
+                standing: standing_kind(&entry["categories"]),
             })
             .collect(),
         next: reply.get("next").map_or(0, integer),
         previous: reply.get("previous").map_or(0, integer),
+    })
+}
+
+/// The standing-confirmation kind the row recorded, when it has one:
+/// the service's folder-trust grant and any other standing kind it writes
+/// (zerus-63rru.66 round 5). Kept out of the ordinary category names.
+pub(crate) fn standing_kind(value: &Value) -> Option<String> {
+    value.as_array()?.iter().find_map(|id| match id.as_str()? {
+        "team_folder_trust" => Some("team_folder_trust".to_owned()),
+        _ => None,
     })
 }
 
@@ -259,6 +279,30 @@ fn known_categories(value: &Value) -> Vec<String> {
 /// A detail reply as Qt shows it: the outcome, the approval categories when
 /// recorded, each question with its body and the answers chosen for it, then
 /// the outcome's detail.
+/// The trust sentence a record's scope yields, only for a FolderTrust
+/// record and by its outcome (zerus-63rru.66 round 4): a confirmed grant
+/// claims the trust; an unconfirmed, unknown or refused record only says
+/// trust was requested; a non-trust record shows nothing even when an
+/// older row carries a scope.
+pub fn trust_sentence(
+    scope: Option<&str>,
+    categories: &Value,
+    status: Option<&str>,
+) -> Option<String> {
+    let scope = scope.filter(|s| !s.is_empty())?;
+    let trust = categories
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == "team_folder_trust"));
+    if !trust {
+        return None;
+    }
+    Some(if status == Some("approved") {
+        format!("Trusted for {scope} and its subfolders on this account")
+    } else {
+        format!("Trust was requested for {scope} and its subfolders; it was not confirmed")
+    })
+}
+
 pub fn detail(reply: &Map<String, Value>) -> String {
     let mut parts = vec![status_text(
         reply
@@ -268,6 +312,13 @@ pub fn detail(reply: &Map<String, Value>) -> String {
     )
     .to_owned()];
     let categories = known_categories(reply.get("categories").unwrap_or(&Value::Null));
+    if let Some(sentence) = trust_sentence(
+        reply.get("scope").and_then(Value::as_str),
+        reply.get("categories").unwrap_or(&Value::Null),
+        reply.get("status").and_then(Value::as_str),
+    ) {
+        parts.push(sentence);
+    }
     if !categories.is_empty() {
         let set = categories
             .iter()

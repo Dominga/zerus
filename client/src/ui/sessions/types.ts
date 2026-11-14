@@ -261,6 +261,7 @@ export interface ToolEvent {
 
 /** A submitted question route as one Activity line (zerus-sa9qn.33). */
 export interface RouteLine {
+  outcome?: "not_sent" | "uncertain";
   requestId: string;
   role: "child" | "parent";
   /** The child's session name and its `zerus://session?...` reference. */

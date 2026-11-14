@@ -45,6 +45,23 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
     )?;
     Ok(())
 }
+
+/// Once any verified v2 statement reaches a latch, legacy clock ordering
+/// can never be used on it again, including by another phone.
+pub(super) fn migrate_order(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE desktop_question_route_children ADD COLUMN revision_guarded INTEGER NOT NULL DEFAULT 0 CHECK(revision_guarded IN(0,1));
+        CREATE TRIGGER desktop_question_route_child_fenced BEFORE UPDATE OF revision_guarded ON desktop_question_route_children
+        WHEN OLD.revision_guarded=1 AND NEW.revision_guarded<>1 BEGIN
+        SELECT RAISE(ABORT,'a question route revision fence is kept'); END;",
+    )?;
+    Ok(())
+}
+#[cfg(test)]
+pub(super) fn remove_order_fixture(db: &Connection) {
+    db.execute_batch("DROP TRIGGER desktop_question_route_child_fenced; ALTER TABLE desktop_question_route_children DROP COLUMN revision_guarded;").unwrap();
+}
+
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &Connection) {
     db.execute_batch(
@@ -54,41 +71,51 @@ pub(super) fn remove_fixture(db: &Connection) {
 }
 
 /// The child's latch, its revision and the time of the person's last
-/// decision (seconds); an absent row is `(false, 0, 0)`. A corrupt row is an
-/// error, never "not latched".
-fn decision(db: &Connection, session_id: &str) -> Result<(bool, i64, i64)> {
-    let row: Option<(i64, i64, i64)> = db
+/// decision (seconds), and whether v2 fenced it. An absent row is
+/// `(false, 0, 0, false)`. A corrupt row is an error, never "not latched".
+fn decision(db: &Connection, session_id: &str) -> Result<(bool, i64, i64, bool)> {
+    let row: Option<(i64, i64, i64, i64)> = db
         .query_row(
-            "SELECT person_off,revision,decided_at FROM desktop_question_route_children
+            "SELECT person_off,revision,decided_at,revision_guarded FROM desktop_question_route_children
              WHERE session_id=?1",
             [session_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
     match row {
-        None => Ok((false, 0, 0)),
-        Some((off, revision, decided)) => {
+        None => Ok((false, 0, 0, false)),
+        Some((off, revision, decided, fenced)) => {
             ensure!(
-                matches!(off, 0 | 1) && revision >= 0 && decided >= 0,
+                matches!(off, 0 | 1) && revision >= 0 && decided >= 0 && matches!(fenced, 0 | 1),
                 "question route latch changed"
             );
-            Ok((off == 1, revision, decided))
+            Ok((off == 1, revision, decided, fenced == 1))
         }
     }
 }
 /// The child's latch and its revision.
 pub(super) fn state(db: &Connection, session_id: &str) -> Result<(bool, i64)> {
-    let (off, revision, _) = decision(db, session_id)?;
+    let (off, revision, _, _) = decision(db, session_id)?;
     Ok((off, revision))
 }
 
-/// What orders the person's decisions (zerus-sa9qn.53): the desktop's
-/// compare-and-swap at the latch revision, or a phone statement's own issue
-/// time (seconds), which must be after the latch's last decision. A phone's
-/// statement delivered late is never applied over a newer decision.
+/// Desktop and v2 phone decisions compare the computer's latch revision.
+/// Legacy phones retain time ordering only until this latch sees v2.
 pub(super) enum Guard {
     Revision(i64),
+    PhoneRevision(i64),
     IssuedAt(i64),
+}
+
+/// A v2 phone statement signs the computer-issued latch revision.
+/// Legacy statements are accepted only on latches that never saw v2.
+impl Guard {
+    fn phone_revision(&self) -> Option<i64> {
+        match self {
+            Self::PhoneRevision(revision) => Some(*revision),
+            _ => None,
+        }
+    }
 }
 
 /// Whether the person latched this child off, read in the caller's
@@ -124,13 +151,34 @@ fn receipt(db: &Connection, id: &str) -> Result<Option<Value>> {
         .map(|(session, off, revision, applied)| reply(id, &session, off == 1, revision, applied == 1)))
 }
 
+fn fence(tx: &Transaction<'_>, session_id: &str) -> Result<bool> {
+    if tx.execute(
+        "UPDATE desktop_question_route_children SET revision_guarded=1 WHERE session_id=?1",
+        [session_id],
+    )? == 1
+    {
+        return Ok(true);
+    }
+    let kept: i64 = tx.query_row(
+        "SELECT count(*) FROM desktop_question_route_children",
+        [],
+        |r| r.get(0),
+    )?;
+    if kept >= CHILDREN {
+        return Ok(false);
+    }
+    tx.execute("INSERT INTO desktop_question_route_children(session_id,person_off,revision,decided_at,revision_guarded) VALUES(?1,0,0,0,1)", [session_id])?;
+    Ok(true)
+}
+
 /// Sets the child's latch to `person_off` for request `id`, once, as
 /// `guard` orders it. The same request again returns its receipt; another
 /// value or child under a used request is refused. A stale revision is the
-/// closed `conflict` refusal with the current value, and a phone statement
-/// not issued after the last decision the closed `stale_decision`; neither
-/// writes anything. Every accepted decision records its time, even one that
-/// changes nothing, so an older one delivered later is refused.
+/// closed `conflict` refusal with the current value. A stale v2 revision,
+/// or a legacy issue time not after the last decision, is `stale_decision`; neither
+/// changes the latch. A verified v2 request durably fences the latch even
+/// on a conflict. Every accepted new decision advances its revision, even
+/// when the value was already so. Replay returns the original receipt.
 pub(super) fn set(
     db: &mut Connection,
     id: &str,
@@ -151,7 +199,10 @@ pub(super) fn set(
         );
         return Ok(old);
     }
-    let (now, revision, decided) = decision(&tx, session_id)?;
+    let (now, revision, decided, fenced) = decision(&tx, session_id)?;
+    if guard.phone_revision().is_some() && !fence(&tx, session_id)? {
+        return Ok(refusal(id, "capacity"));
+    }
     let decided = match guard {
         Guard::Revision(expected) => {
             if expected != revision {
@@ -162,7 +213,18 @@ pub(super) fn set(
             }
             decided.max(at.max(0) / 1000)
         }
+        Guard::PhoneRevision(expected) => {
+            if expected != revision {
+                tx.commit()?;
+                return Ok(refusal(id, "stale_decision"));
+            }
+            // Audit/legacy metadata only; never consulted for v2 ordering.
+            decided.max(at.max(0) / 1000)
+        }
         Guard::IssuedAt(issued) => {
+            if fenced {
+                return Ok(refusal(id, "upgrade_required"));
+            }
             if issued <= decided {
                 return Ok(refusal(id, "stale_decision"));
             }
@@ -170,14 +232,10 @@ pub(super) fn set(
         }
     };
     let applied = now != person_off;
-    let next = if applied {
-        revision
-            .checked_add(1)
-            .filter(|r| *r < i64::MAX)
-            .ok_or_else(|| anyhow::anyhow!("question route latch revisions exhausted"))?
-    } else {
-        revision
-    };
+    let next = revision
+        .checked_add(1)
+        .filter(|r| *r < i64::MAX)
+        .ok_or_else(|| anyhow::anyhow!("question route latch revisions exhausted"))?;
     let present = tx
         .query_row(
             "SELECT 1 FROM desktop_question_route_children WHERE session_id=?1",
@@ -326,8 +384,15 @@ pub(in crate::desktop) fn status_request(db: &Connection, value: &Value) -> Valu
     let session = value["session_id"].as_str().unwrap_or("");
     let refused =
         |code: &str| json!({"request_id": id, "accepted": false, "durable": false, "code": code});
+    let scoped = value.get("run_id").is_some() || value.get("conversation_id").is_some();
     let shape = value.as_object().is_some_and(|object| {
-        object.len() == 3
+        (object.len() == 3 && !scoped
+            || object.len() == 5
+                && scoped
+                && value["run_id"].as_str().is_some_and(|s| !s.is_empty())
+                && value["conversation_id"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()))
             && value["op"] == STATUS_OP
             && super::policy::canonical(id)
             && super::policy::canonical(session)
@@ -335,9 +400,26 @@ pub(in crate::desktop) fn status_request(db: &Connection, value: &Value) -> Valu
     if !shape {
         return refused("invalid_question_route_child_request");
     }
+    if scoped {
+        match super::session_row(db, session) {
+            Ok(Some(row))
+                if row["run_id"] == value["run_id"]
+                    && row["conversation_id"] == value["conversation_id"] => {}
+            Ok(Some(_)) => return refused("stale_identity"),
+            Ok(None) => return refused("not_found"),
+            Err(_) => return refused("question_route_store_refused"),
+        }
+    }
     match state(db, session) {
-        Ok((person_off, revision)) => json!({"request_id": id, "accepted": true, "durable": false,
-            "op": STATUS_OP, "session_id": session, "person_off": person_off, "revision": revision}),
+        Ok((person_off, revision)) => {
+            let mut reply = json!({"request_id": id, "accepted": true, "durable": false,
+                "op": STATUS_OP, "session_id": session, "person_off": person_off, "revision": revision});
+            if scoped {
+                reply["run_id"] = value["run_id"].clone();
+                reply["conversation_id"] = value["conversation_id"].clone();
+            }
+            reply
+        }
         Err(_) => refused("question_route_store_refused"),
     }
 }
@@ -359,6 +441,8 @@ struct Statement {
     request_id: String,
     issued_at: u64,
     expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_revision: Option<u64>,
 }
 
 /// `{"op":"question_route_person","statement":{...},"signature":"..."}`:
@@ -380,7 +464,9 @@ pub(in crate::desktop) fn person_request(
         .to_owned();
     let shape = value.as_object().is_some_and(|o| {
         o.len() == 3 && value["op"] == PERSON_OP && value["signature"].is_string()
-    });
+    }) && value["statement"]
+        .get("expected_revision")
+        .is_none_or(|r| r.as_u64().is_some_and(|r| r < i64::MAX as u64));
     let Some(statement) = shape
         .then(|| serde_json::from_value::<Statement>(value["statement"].clone()).ok())
         .flatten()
@@ -413,11 +499,39 @@ pub(in crate::desktop) fn person_request(
         Ok(Some(row))
             if row["run_id"] == statement.run_id
                 && row["conversation_id"] == statement.conversation_id => {}
-        Ok(Some(_)) => return refusal(&id, "stale_identity"),
-        Ok(None) => return refusal(&id, "not_found"),
+        Ok(row) => {
+            // Even a verified statement for an absent child or its previous
+            // run must prevent a later downgrade to clock ordering. A new
+            // fence keeps the default value and is subject to CHILDREN.
+            if statement.expected_revision.is_some() {
+                let pinned = (|| -> Result<bool> {
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let kept = fence(&tx, &statement.session_id)?;
+                    tx.commit()?;
+                    Ok(kept)
+                })();
+                match pinned {
+                    Ok(true) => {}
+                    Ok(false) => return refusal(&id, "capacity"),
+                    Err(_) => return refusal(&id, "question_route_store_refused"),
+                }
+            }
+            return refusal(
+                &id,
+                if row.is_some() {
+                    "stale_identity"
+                } else {
+                    "not_found"
+                },
+            );
+        }
         Err(_) => return refusal(&id, "question_route_store_refused"),
     }
-    let Ok(issued) = i64::try_from(statement.issued_at) else {
+    let guard = if let Some(revision) = statement.expected_revision {
+        Guard::PhoneRevision(revision as i64)
+    } else if let Ok(issued) = i64::try_from(statement.issued_at) {
+        Guard::IssuedAt(issued)
+    } else {
         return refusal(&id, "invalid_request");
     };
     let reply = match set(
@@ -425,7 +539,7 @@ pub(in crate::desktop) fn person_request(
         &id,
         &statement.session_id,
         statement.person_off,
-        Guard::IssuedAt(issued),
+        guard,
         chrono::Utc::now().timestamp_millis(),
     ) {
         Ok(reply) => reply,

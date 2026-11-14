@@ -575,6 +575,46 @@ fn a_changed_chain_refuses() {
     );
 }
 
+#[test]
+fn hosted_ancestor_rechecks_its_negative_answer_after_the_argv_read() {
+    for change in 0..4 {
+        let after_walk = std::cell::Cell::new(false);
+        let result = hosted_ancestor_with(
+            Path::new("/fixture/state"),
+            10,
+            || {
+                Ok(vec![Recorded {
+                    named: named(99, Some("other-birth")),
+                    record: PathBuf::from("/fixture/state/dsh/hosts/other/host.identity.json"),
+                }])
+            },
+            |pid| match pid {
+                10 if after_walk.get() && change == 1 => Ok(own(20, Some("replacement"))),
+                10 if after_walk.get() && change == 2 => Ok(own(30, Some("b10"))),
+                20 if after_walk.get() && change == 3 => Err(()),
+                10 => Ok(own(20, Some("b10"))),
+                20 => Ok(own(1, Some("b20"))),
+                1 => Ok(Inspection::Foreign),
+                _ => panic!("unexpected process {pid}"),
+            },
+            |_| {
+                after_walk.set(true);
+                None
+            },
+        );
+        assert!(after_walk.get(), "the production argv check must run");
+        assert_eq!(
+            result,
+            if change == 0 {
+                Ok(None)
+            } else {
+                Err(Refusal::UnreadableAncestry)
+            },
+            "change {change}"
+        );
+    }
+}
+
 /// A recorded host matches an ancestor by process ID and birth; another birth
 /// is not that host; a record without a birth whose ID is an ancestor's
 /// refuses and names its file.

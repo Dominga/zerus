@@ -1,0 +1,215 @@
+{
+  "about": "Real input-witness answers of the bridge on the official harness (zerus-hfw2s), message and request IDs and the host generation normalised. Written by tests/test_dsh_native.py NativeInputWitness with ZERUS_REGENERATE_DSH_WITNESS_FACTS=1 on the pinned host; read by src/state/dsh/witness.rs.",
+  "host": {
+    "package": "@deepseek-ai/dsh",
+    "version": "0.2.1-rc.2"
+  },
+  "scenarios": {
+    "dropped_after_claim": {
+      "digest": "18e99a318d1f6d65348c82820665440f66a2d80e0992125477f4f244909aeb5e",
+      "expected": "dropped_after_claim",
+      "facts": {
+        "complete": true,
+        "disposals": [],
+        "durable": true,
+        "events": [
+          {
+            "inserted": [
+              {
+                "id": "<message>",
+                "rpcId": "<request>"
+              }
+            ],
+            "outcome": null,
+            "removedCount": 0,
+            "seq": 6,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "inserted": [],
+            "outcome": null,
+            "removedCount": 1,
+            "seq": 8,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "reason": "error",
+            "seq": 9,
+            "turn": 1,
+            "type": "turn/end"
+          }
+        ],
+        "from": 6,
+        "generation": "<generation>",
+        "idle": true,
+        "live": true,
+        "messageId": "<message>",
+        "pending": false,
+        "spliceSeq": 6,
+        "state": "tracked",
+        "through": 10
+      },
+      "request_id": "<request>"
+    },
+    "host_disposed": {
+      "digest": "cf8f906a1c73e91e87f88177a8642c74287be5569b6c994cd2f3db500bbb3be5",
+      "expected": "host_disposed",
+      "facts": {
+        "complete": true,
+        "disposals": [
+          [
+            17,
+            21
+          ]
+        ],
+        "durable": false,
+        "events": [
+          {
+            "inserted": [
+              {
+                "id": "<message>",
+                "rpcId": "<request>"
+              }
+            ],
+            "outcome": null,
+            "removedCount": 0,
+            "seq": 16,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "inserted": [],
+            "outcome": "canceled",
+            "removedCount": 1,
+            "seq": 17,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "reason": "aborted",
+            "seq": 20,
+            "turn": 1,
+            "type": "turn/end"
+          }
+        ],
+        "from": 16,
+        "frozen": true,
+        "generation": "<generation>",
+        "idle": true,
+        "live": false,
+        "messageId": "<message>",
+        "pending": false,
+        "spliceSeq": 16,
+        "state": "tracked",
+        "through": 21
+      },
+      "request_id": "<request>"
+    },
+    "pending": {
+      "digest": "c628be5ec41f072a700628fe896df0d7d30b6b98dc3d8c444fad12e6772660a7",
+      "expected": "pending",
+      "facts": {
+        "complete": true,
+        "disposals": [],
+        "durable": true,
+        "events": [
+          {
+            "inserted": [
+              {
+                "id": "<message>",
+                "rpcId": "<request>"
+              }
+            ],
+            "outcome": null,
+            "removedCount": 0,
+            "seq": 16,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          }
+        ],
+        "from": 16,
+        "generation": "<generation>",
+        "idle": false,
+        "live": true,
+        "messageId": "<message>",
+        "pending": true,
+        "spliceSeq": 16,
+        "state": "tracked",
+        "through": 17
+      },
+      "request_id": "<request>"
+    },
+    "received": {
+      "digest": "10a64938d3486d746ed4bd25f79aff534c750164431190d8c5192f8d2abb175e",
+      "expected": "received",
+      "facts": {
+        "complete": true,
+        "disposals": [],
+        "durable": true,
+        "events": [
+          {
+            "inserted": [
+              {
+                "id": "<message>",
+                "rpcId": "<request>"
+              }
+            ],
+            "outcome": null,
+            "removedCount": 0,
+            "seq": 6,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "inserted": [],
+            "outcome": null,
+            "removedCount": 1,
+            "seq": 8,
+            "start": 0,
+            "target": "next-step",
+            "type": "agent/inbox/spliced"
+          },
+          {
+            "digest": "10a64938d3486d746ed4bd25f79aff534c750164431190d8c5192f8d2abb175e",
+            "id": "<message>",
+            "rpcId": "<request>",
+            "seq": 11,
+            "type": "user/message"
+          },
+          {
+            "digest": "887bc5bd399e3c43468a9a288ec3fd52d16ff49246686e27c9dbc4208a4fdd1f",
+            "id": "<message-1>",
+            "rpcId": null,
+            "seq": 12,
+            "type": "user/message"
+          },
+          {
+            "digest": "fd2fe277430f4913fdfd1ddfba032ed50da3600fb3675701ddffbaaf5e890e40",
+            "id": "<message-2>",
+            "rpcId": null,
+            "seq": 13,
+            "type": "user/message"
+          }
+        ],
+        "from": 6,
+        "generation": "<generation>",
+        "idle": false,
+        "live": true,
+        "messageId": "<message>",
+        "pending": false,
+        "spliceSeq": 6,
+        "state": "tracked",
+        "through": 16
+      },
+      "request_id": "<request>"
+    }
+  }
+}

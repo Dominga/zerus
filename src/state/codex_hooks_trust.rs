@@ -78,6 +78,13 @@ fn eligible(record: &Value) -> bool {
         && (record["input_pending_at"].as_f64().unwrap_or(0.) == 0. || resumed)
 }
 
+/// The card this producer writes for `record` at `screen`, its startup panel:
+/// the route the readers of these cards test with (zerus-63rru.73).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(super) fn produced(record: &Value, screen: &str) -> Option<Value> {
+    card(record, &parse(screen)?)
+}
+
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
     if !eligible(record) { return None; }
     let hash = format!("{:x}", Sha256::digest(json!([

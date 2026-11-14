@@ -29,6 +29,23 @@ final class QuestionRoutePersonTests: XCTestCase {
             signature: WorkspaceProtocol.decode(v.string("signature"), size: 64), message: changed.frame()))
     }
 
+    func testV2SignsTheComputerIssuedRevisionAndCannotBeStrippedToV1() throws {
+        let v = try vector(), legacy = try XCTUnwrap(v.object("statement"))
+        let statement = try RoutePersonStatement.parse(legacy.putting("expected_revision", .int(7)))
+        let keys = try WorkspaceCrypto.Keys(signingSeed: WorkspaceProtocol.decode(v.string("phone_signing_seed"), size: 32),
+                                            encryptionPrivate: Data(repeating: 7, count: 32))
+        let signature = try WorkspaceCrypto.sign(keys, message: statement.frame())
+        let shared = try XCTUnwrap(try SharedFixture.json("question-route-person-v2.json").object)
+        XCTAssertEqual(shared.string("canonical_hex"), hex(try statement.frame()))
+        try WorkspaceCrypto.verify(publicKey: keys.signingPublic,
+            signature: WorkspaceProtocol.decode(shared.string("signature"), size: 64), message: statement.frame())
+        try WorkspaceCrypto.verify(publicKey: keys.signingPublic, signature: signature, message: statement.frame())
+        let changed = try RoutePersonStatement.parse(legacy.putting("expected_revision", .int(8)))
+        XCTAssertThrowsError(try WorkspaceCrypto.verify(publicKey: keys.signingPublic, signature: signature, message: changed.frame()))
+        XCTAssertThrowsError(try WorkspaceCrypto.verify(publicKey: keys.signingPublic, signature: signature, message: RoutePersonStatement.parse(legacy).frame()))
+        XCTAssertEqual(statement.json["expected_revision"], .int(7))
+    }
+
     func testOnlyAValidStatementWithinItsLifetimeIsMade() throws {
         let good = try XCTUnwrap(try vector().object("statement"))
         for (key, value) in [("expires_at", JSON.int(good.int64("issued_at"))), ("expires_at", .int(good.int64("issued_at") + 301)),
@@ -97,4 +114,26 @@ final class QuestionRoutePersonTests: XCTestCase {
                                                            raw.putting("session_id", .string("00000000-0000-4000-8000-0000000000c2"))),
                        SessionQuestionRouting.refusals["stale_identity"])
     }
+    func testRevisionStatusIsCapabilityGatedAndBoundToTheExactChildRead() throws {
+        let capability: Set<String> = [SessionQuestionRouting.personRevisionOperation]
+        XCTAssertEqual(WorkspaceProtocol.operationClass(SessionQuestionRouting.personRevisionOperation), "read")
+        XCTAssertTrue(SessionQuestionRouting.revisioned(relay: capability, machine: capability))
+        XCTAssertFalse(SessionQuestionRouting.revisioned(relay: [], machine: capability))
+        XCTAssertFalse(SessionQuestionRouting.revisioned(relay: capability, machine: []))
+        let status: JSONObject = ["request_id": .string("read-id"), "op": .string("question_route_child_status"), "accepted": .bool(true), "durable": .bool(false),
+            "session_id": .string(sessionId), "run_id": .string(target().run), "conversation_id": .string(target().conversation), "person_off": .bool(true), "revision": .int(7)]
+        XCTAssertEqual(try SessionQuestionRouting.latchRevision(status, id: "read-id", session: sessionId, run: target().run, conversation: target().conversation), 7)
+        for (key, value) in [("request_id", JSON.string("other")), ("run_id", .string("other")), ("conversation_id", .string("other")), ("session_id", .string("other")),
+            ("accepted", .bool(false)), ("durable", .bool(true)), ("person_off", .string("true")), ("revision", .int(-1)), ("revision", .double(7)), ("extra", .int(1))] {
+            XCTAssertThrowsError(try SessionQuestionRouting.latchRevision(status.putting(key, value), id: "read-id", session: sessionId, run: target().run, conversation: target().conversation), key)
+        }
+    }
+
+    func testAnOrdinaryFailedReceiptShowsTheUpdateMessageEvenForALegacyAction() {
+        let message = "Update the Zerus app on this phone to change this child's question routing."
+        let action = SessionAction(requestId: id, target: target(), operation: SessionQuestionRouting.personOperation, arguments: args())
+        let result = SessionActionPolicies.result(action, ["request_id": .string(id), "state": .string("failed"), "error": .string(message)])
+        XCTAssertEqual(result.status, "failed"); XCTAssertEqual(result.error, message)
+    }
+
 }

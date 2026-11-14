@@ -193,8 +193,15 @@ impl Controller {
                 timeout: WAIT,
                 request_id: None,
             };
-            let bytes =
-                run_owned(path, &inv, &[], &cancelled, |command| command.spawn(), held).ok()?;
+            let bytes = run_owned(
+                path,
+                &inv,
+                &[],
+                &cancelled,
+                |command, input_spawn| input_spawn.spawn(command),
+                held,
+            )
+            .ok()?;
             let text = std::str::from_utf8(&bytes).ok()?;
             if bytes.len() > 64 << 10
                 || !image.current(selected.executable().ok()?)
@@ -602,8 +609,8 @@ fn call(
         &inv,
         &[],
         &session.stop,
-        move |command| {
-            let child = command.spawn()?;
+        move |command, input_spawn| {
+            let child = input_spawn.spawn(command)?;
             started.store(true, Ordering::Release);
             if let Some(registration) = registration {
                 let _ = registration.bind_original(&child);

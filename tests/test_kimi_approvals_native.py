@@ -229,12 +229,17 @@ def trust_chooser_2_2(screen, folder):
         return False
     margin = len(rows[rule]) - len(rows[rule].lstrip())
     width = len(rows[rule].strip())
-    expected = ['─' * width, ' Trust this folder?', ' ↑↓ navigate · Enter select · Esc exit', '', ' ' + str(folder), '',
+    if width < 20:
+        return False
+    folder = str(folder)
+    wrapped = [folder[index:index + width - 1] for index in range(0, len(folder), width - 1)] or ['']
+    expected = ['─' * width, ' Trust this folder?', ' ↑↓ navigate · Enter select · Esc exit', '',
+                *(' ' + row for row in wrapped), '',
                 ' No project integrations or instructions to activate.', '',
                 ' Trust is remembered for this folder, including future project config changes.',
                 ' Tool approvals follow your permission settings.', '', '  ❯ Trust and continue', '    Exit', '─' * width]
     shown = rows[rule:rule + len(expected)]
-    return width >= 20 and len(shown) == len(expected) and all(
+    return len(shown) == len(expected) and all(
         (row == '' and line == '') or row == ' ' * margin + line for row, line in zip(shown, expected)) and \
         not any(row.strip() for row in rows[rule + len(expected):])
 
@@ -1117,6 +1122,13 @@ class FixtureControls(unittest.TestCase):
                         self.CHOOSER.replace('Trust this folder?', 'Trust this folder? (2)')):
             self.assertFalse(trust_chooser_2_2(changed, folder), changed)
         self.assertFalse(trust_chooser_2_2(self.CHOOSER, '/tmp/hgs-pause-x/project'))
+        long_folder = folder + '/' + 'x' * 80
+        wrapped = self.CHOOSER.replace('  ' + folder, '  ' + long_folder[:77] + '\n  ' + long_folder[77:])
+        self.assertTrue(trust_chooser_2_2(wrapped, long_folder))
+        self.assertFalse(trust_chooser_2_2(wrapped, folder))
+        self.assertFalse(trust_chooser_2_2(wrapped.replace('  ' + long_folder[77:], '  wrong'), long_folder))
+        changed = wrapped.replace('❯ Trust and continue', '  Trust and continue').replace('     Exit', '   ❯ Exit')
+        self.assertFalse(trust_chooser_2_2(changed, long_folder))
 
     def test_an_early_failure_cleans_up_with_private_values_only(self):
         module = sys.modules[__name__]

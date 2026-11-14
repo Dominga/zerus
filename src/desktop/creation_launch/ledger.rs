@@ -497,8 +497,12 @@ pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+pub(super) const CUSTODY_PENDING: &str = "SELECT CASE typeof(launch_id) WHEN 'text' THEN CAST(substr(CAST(launch_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_launches INDEXED BY desktop_creation_launches_custody WHERE drained=0 AND custody IS NOT NULL AND launch_id>?1 ORDER BY launch_id LIMIT 1";
+
 pub(super) fn custody_pending(db: &Connection, after: &str) -> Result<Option<Row>> {
-    let id:Option<String>=db.query_row("SELECT CASE typeof(launch_id) WHEN 'text' THEN CAST(substr(CAST(launch_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_launches WHERE drained=0 AND custody IS NOT NULL AND launch_id>?1 ORDER BY launch_id LIMIT 1",[after],|r|r.get(0)).optional()?;
+    let id: Option<String> = db
+        .query_row(CUSTODY_PENDING, [after], |r| r.get(0))
+        .optional()?;
     id.map(|id| load(db, &id)?.context("creation disappeared"))
         .transpose()
 }

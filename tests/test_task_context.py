@@ -17,11 +17,9 @@ class TaskContext(test_fork.Base):
         env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=record["run_id"], HGS_AGENT=agent)
         if not raw:
             return self.hook(event, env).stdout
-        legacy = test_fork.test_pause.LEGACY_STATE
-        command = ([sys.executable, legacy, "hook"] if legacy else
-                   [str(test_fork.test_pause.HGS), "__state", "hook"])
-        return subprocess.run(command, env=env, input=json.dumps(event).encode("utf-8"),
-                              capture_output=True, check=True, timeout=15).stdout
+        # The producer invokes the complete production hook entry; retain its
+        # exact UTF-8 stdout document, with no parsing or synthesized context.
+        return self.hook(event, env).stdout.encode('utf-8')
 
     def test_claude_and_codex_sessions_read_the_task_commands_at_start(self):
         for agent in ("claude", "codex"):

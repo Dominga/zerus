@@ -85,6 +85,17 @@ class SessionActions(test_pause.Harness):
         self.assertEqual(self.binding("codex/p/new")["run_id"], before["run_id"])
         self.action(name, {**request, "new_name": "codex/p/other"}, rc=1)
 
+    def test_native_startup_pause_helper_retains_the_original_saved_identity(self):
+        import test_codex_input_native as native
+        self.name = self.start("codex")
+        original = self.binding(self.name)
+        reply = native.NativeCodexStartup.pause_settled_original(self)
+        self.assertEqual(json.loads(reply)["status"], "completed")
+        paused = self.binding(self.name)
+        self.assertTrue(paused["paused"])
+        for field in ("run_id", "conversation_id", "pid", "process_start"):
+            self.assertEqual(paused[field], original[field], field)
+
     def test_pause_resume_terminate_restore_keep_exact_original_and_result_identities(self):
         name = self.start("claude")
         original = self.binding(name)

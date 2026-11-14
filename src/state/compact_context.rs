@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request { request_id: String, expected_run_id: String, expected_conversation_id: String }
+pub(super) struct Request { pub request_id: String, pub expected_run_id: String, pub expected_conversation_id: String }
 
 pub(super) fn pending(record: &Value) -> bool {
     ["submitted", "compacting", "uncertain"].contains(&string(&record["compact_context_request"], "status"))
@@ -55,10 +55,26 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let mut bytes = Vec::new(); io::stdin().take(8193).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len() > 8192 { return Err("Compact request is too large".into()); }
     let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e|e.to_string())?;
+    let receipt = submit(&args[0], request, None)?;
+    println!("{receipt}"); Ok(0)
+}
+
+/// Shared native command path, including every manual compact guard.
+pub(super) fn submit(name: &str, request: Request, prepared: Option<&Value>) -> Result<Value> {
     let uuid = uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
-    let name = &args[0];
     let guard = lock(None)?;
     let mut record = input::checked_ready(name, &request.expected_run_id, &request.expected_conversation_id)?;
+    if prepared.is_some_and(|original| !kimi_expiry::same_identity(original,&record)
+        || !kimi_expiry::owned(&record) || record["kimi_pre_send"] != original["kimi_pre_send"]) {
+        return Err("Session process or pre-send custodian changed before compaction; no keys were typed".into());
+    }
+    if let Some(original) = prepared {
+        let current = kimi_expiry::decision(&record);
+        if current.as_ref().is_none_or(|current| ["model","cache_duration","min_tokens_to_hint","last_active_at","tokens"]
+            .iter().any(|key| current[*key] != original["last_send_compaction"][*key])) {
+            return Err("Cache-expiry inputs changed before compaction; no compact keys were typed".into());
+        }
+    }
     if !clear_context::available(&record, true) || record["pending_settings"].is_object() {
         return Err("Wait for the agent to become idle before compacting context".into());
     }
@@ -110,7 +126,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     drop(guard); // Native hooks must be free to report start/completion.
     atomic(&path, &receipt.to_string()).map_err(uncertain)?;
-    println!("{receipt}"); Ok(0)
+    Ok(receipt)
 }
 
 #[cfg(test)] mod tests {

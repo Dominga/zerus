@@ -63,6 +63,8 @@ fn receipt(
         phase,
         drained,
         code: code.into(),
+        cli_exit: None,
+        refusal: None,
         outcome: (phase == wire::Phase::Recorded).then(|| wire::Outcome {
             request_id: verified.plan.request_id.clone(),
             status: wire::SUBMITTED.into(),
@@ -160,4 +162,68 @@ fn without_a_live_service_a_send_stays_direct_and_a_check_knows_nothing() {
         SendAnswer::Direct
     );
     assert_eq!(check(None, &verified().plan), Checked::Unavailable);
+}
+
+#[test]
+fn a_refusal_is_visible_only_on_the_exact_drained_unknown_and_never_means_unsent() {
+    let v = verified();
+    let mut r = receipt(
+        &v,
+        wire::Phase::Unknown,
+        true,
+        "deferred_send_receipt_missing",
+    );
+    r.cli_exit = Some(wire::CliExit::new(
+        1,
+        "hgs: agent busy: real draft\nnot retained",
+    ));
+    assert_eq!(
+        settled(&r, &v.plan),
+        Some(SendAnswer::Unconfirmed(format!(
+            "{UNCONFIRMED}\nhgs send (1): hgs: agent busy: real draft"
+        )))
+    );
+    r.drained = false;
+    assert_eq!(settled(&r, &v.plan), None);
+    r.drained = true;
+    let mut other = v.plan.clone();
+    other.run_id = "another-run".into();
+    assert_eq!(settled(&r, &other), None);
+    r.phase = wire::Phase::Recorded;
+    r.outcome = Some(wire::Outcome {
+        request_id: v.plan.request_id.clone(),
+        status: wire::SUBMITTED.into(),
+        input_sha256: v.plan.input_sha256.clone(),
+    });
+    assert_eq!(
+        settled(&r, &v.plan),
+        Some(SendAnswer::Recorded(r.outcome.unwrap()))
+    );
+}
+
+#[test]
+fn a_retained_preinput_refusal_shows_its_reason_without_submission_or_replay_authority() {
+    let v = verified();
+    let mut r = receipt(&v, wire::Phase::Unknown, true, wire::refusal::CODE);
+    let reason = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
+    r.refusal = wire::Refusal::new(
+        &v.plan.request_id,
+        &v.plan.session,
+        &v.plan.run_id,
+        &v.plan.conversation_id,
+        &v.plan.input_sha256,
+        reason,
+    );
+    let detail = wire::refusal::MESSAGE.replace("%1", reason);
+    assert_eq!(settled(&r, &v.plan), Some(SendAnswer::Unconfirmed(detail)));
+    assert_eq!(r.result(&v.plan), None);
+    assert!(!r.not_started(&v.plan));
+    r.drained = false;
+    assert_eq!(settled(&r, &v.plan), None);
+    r.drained = true;
+    let mut other = v.plan.clone();
+    other.run_id = "other-run".into();
+    assert_eq!(settled(&r, &other), None);
+    r.refusal.as_mut().unwrap().conversation_id = "other-conversation".into();
+    assert_eq!(settled(&r, &v.plan), None);
 }

@@ -11,6 +11,8 @@
 //! tests can use a fake tree.
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", test))]
+mod observation;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
@@ -449,6 +451,71 @@ pub fn diagnostics() -> serde_json::Value {
     serde_json::Value::Null
 }
 
+#[cfg(target_os = "linux")]
+static OBSERVED: OnceLock<observation::Snapshot> = OnceLock::new();
+
+/// Read on Wry's GTK thread, once for the main webview in this process. Page
+/// reloads and opening Diagnostics reuse the same observation and log entry.
+#[cfg(target_os = "linux")]
+async fn observe(window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+    if window.label() != crate::MAIN_WINDOW {
+        return Err("renderer observations belong to the main webview".into());
+    }
+    if let Some(snapshot) = OBSERVED.get() {
+        return serde_json::to_value(snapshot).map_err(|e| e.to_string());
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    window
+        .with_webview(move |native| {
+            use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+            let snapshot = observation::record_once(
+                &OBSERVED,
+                || {
+                    let policy = native.inner().settings().and_then(|settings| {
+                        match settings.hardware_acceleration_policy() {
+                            HardwareAccelerationPolicy::Always => Some("always"),
+                            HardwareAccelerationPolicy::Never => Some("never"),
+                            HardwareAccelerationPolicy::OnDemand => Some("on-demand"),
+                            _ => None,
+                        }
+                    });
+                    observation::Snapshot::capture(diagnostics(), policy, |name| {
+                        std::env::var(name).ok()
+                    })
+                },
+                |snapshot| {
+                    // The installed launcher captures stderr in its tray log. This is
+                    // the same requested/observed snapshot the Diagnostics command reads.
+                    if let Ok(json) = serde_json::to_string(snapshot) {
+                        eprintln!("zerus-client: renderer observed {json}");
+                    }
+                },
+            );
+            let _ = send.send(serde_json::to_value(snapshot).map_err(|e| e.to_string()));
+        })
+        .map_err(|e| e.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), receive)
+        .await
+        .map_err(|_| "native renderer observation timed out".to_owned())?
+        .map_err(|_| "native renderer observation unavailable".to_owned())?
+}
+
+/// Read-only startup evidence, separate from the renderer selection request.
+#[tauri::command]
+pub async fn renderer_diagnostics(
+    window: tauri::WebviewWindow,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    {
+        observe(window).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Ok(serde_json::Value::Null)
+    }
+}
+
 /// Deletes the marker held in `slot` once; later calls find it empty and do nothing.
 #[cfg(target_os = "linux")]
 fn clear_marker(slot: &Mutex<Option<PathBuf>>) -> bool {
@@ -459,10 +526,15 @@ fn clear_marker(slot: &Mutex<Option<PathBuf>>) -> bool {
 /// The first frame after load reached the page: the DMA-BUF start worked.
 #[tauri::command]
 #[cfg(target_os = "linux")]
-pub fn renderer_frame() -> bool {
-    CHOSEN
+pub async fn renderer_frame(window: tauri::WebviewWindow) -> bool {
+    if window.label() != crate::MAIN_WINDOW {
+        return false;
+    }
+    let cleared = CHOSEN
         .get()
-        .is_some_and(|chosen| clear_marker(&chosen.marker_path))
+        .is_some_and(|chosen| clear_marker(&chosen.marker_path));
+    let _ = observe(window).await;
+    cleared
 }
 
 #[tauri::command]

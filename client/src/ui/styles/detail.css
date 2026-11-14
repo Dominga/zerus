@@ -101,6 +101,7 @@
   .act-virtual-flow { position: relative; width: 100%; }
   .act-virtual-spacer { overflow-anchor: none; }
   .act-virtual-row { position: relative; width: 100%; }
+  .act-own-highlight > .act-msg { outline: 2px solid var(--z-color-accent); outline-offset: -2px; }
   .act-col [id^="item-"] { scroll-margin-top: 10px; }
   /* An unbroken run (a JSON line, a long URL) wraps inside its card. Not anywhere:
      that also shrinks min-content, squeezing header labels and table columns.

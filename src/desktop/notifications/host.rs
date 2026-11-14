@@ -276,10 +276,13 @@ impl Original {
         );
         let close_until = limit.rlim_cur as libc::c_int;
         let (child, (control, stdout, stderr)) =
-            platform::spawn_prepared_in_turn_before(until, || {
-                let (control, child_control) = UnixStream::pair()?;
-                let (stdout, child_stdout) = UnixStream::pair()?;
-                let (stderr, child_stderr) = UnixStream::pair()?;
+            platform::spawn_prepared_in_turn_before(until, |turn| {
+                let (control, child_control) =
+                    zerus_client_core::unix_spawn::socket_pair_in_turn(turn)?;
+                let (stdout, child_stdout) =
+                    zerus_client_core::unix_spawn::socket_pair_in_turn(turn)?;
+                let (stderr, child_stderr) =
+                    zerus_client_core::unix_spawn::socket_pair_in_turn(turn)?;
                 for stream in [&control, &stdout, &stderr] {
                     stream.set_nonblocking(true)?;
                 }

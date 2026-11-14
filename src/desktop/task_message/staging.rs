@@ -676,6 +676,8 @@ pub(super) enum Effect {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReviewPoint {
+    /// Before the worker fixes its review deadline (a delayed worker start).
+    BeforeDeadline,
     /// After the bytes were read through the held descriptor.
     Hashed,
     /// After the read's checks, before the final name and folder
@@ -695,6 +697,8 @@ pub(super) static REVIEW_TIMES: std::sync::Mutex<Vec<(String, std::time::Duratio
 /// The deadline of one review of `request`, fixed when its worker starts and
 /// never renewed: `time` unless a test shortens it.
 pub(super) fn review_deadline(request: &str, time: std::time::Duration) -> Instant {
+    #[cfg(test)]
+    review_hook(request, ReviewPoint::BeforeDeadline);
     #[cfg(test)]
     if let Some((_, time)) = REVIEW_TIMES
         .lock()

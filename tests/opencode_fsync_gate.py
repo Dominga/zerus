@@ -6,13 +6,13 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+import tempfile
 import time
 
 
 @contextmanager
 def held_sender(root, state, workspace, env, executable, binding, payload):
-    folder = root / 'fsync-control'
-    folder.mkdir()
+    folder = Path(tempfile.mkdtemp(prefix='fsync-control-', dir=root))
     library = folder / ('gate.dylib' if sys.platform == 'darwin' else 'gate.so')
     compiler = ['cc', '-std=c11', '-O2']
     compiler += ['-dynamiclib'] if sys.platform == 'darwin' else ['-shared', '-fPIC']

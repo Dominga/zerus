@@ -1,0 +1,168 @@
+name: Agent Teams real agents
+
+# The separately selected Agent Teams contract (docs/ci-and-aur.md, "Agent Teams real
+# agents"): one team of one agent kind in a private root with a private desktop
+# service, against the latest official Claude Code, Codex and Kimi Code releases and
+# a keyless loopback model. A green run covers member launch and identity, delivery
+# into a free member and its own shell, the lead's doorbell, the cancel notice, team
+# stop and Terminate, and the resume of an exited member; for Codex also the audited
+# repository-scope folder trust by the standing confirmation, and for Claude Code the
+# refused restore of a member that never worked. Written and waiting: Claude Code
+# folder trust by the standing confirmation, for the owner's decision zerus-63rru.66 and
+# for zerus-63rru.73; an ordinary question after no startup card, for zerus-63rru.73;
+# and a member shell in a private PID namespace, for zerus-63rru.76. Kimi Code's steps
+# 2 to 4 are selected but not yet proven: their first proof is the first hosted run.
+# This workflow is not part of the Dev gate or Nightly: a red run is visible and holds
+# nothing back.
+on:
+  pull_request:
+    branches: [main]
+    # Keep the pull_request and push lists identical (tests/test_ci_security.py
+    # compares them). They name every component whose drift the contract can catch
+    # and every script, test and fixture it executes or reads.
+    paths:
+      - '.github/workflows/teams-native.yml'
+      - '.cargo/**'
+      - 'src/**'
+      - 'crates/**'
+      - 'client/core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'scripts/ci/agent-compatibility.py'
+      - 'scripts/ci/native_discovery.py'
+      - 'tests/test_native_discovery.py'
+      - 'scripts/ci/agent-compatibility.json'
+      - 'scripts/ci/kimi-native.py'
+      - 'scripts/ci/kimi-native-manifests/**'
+      - 'scripts/ci/install-tmux.sh'
+      - 'tests/test_teams_native.py'
+      - 'tests/teams_native_fixture.py'
+      - 'tests/model_api_fixture.py'
+  push:
+    branches: [main]
+    # Keep the pull_request and push lists identical (tests/test_ci_security.py
+    # compares them). They name every component whose drift the contract can catch
+    # and every script, test and fixture it executes or reads.
+    paths:
+      - '.github/workflows/teams-native.yml'
+      - '.cargo/**'
+      - 'src/**'
+      - 'crates/**'
+      - 'client/core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'scripts/ci/agent-compatibility.py'
+      - 'scripts/ci/native_discovery.py'
+      - 'tests/test_native_discovery.py'
+      - 'scripts/ci/agent-compatibility.json'
+      - 'scripts/ci/kimi-native.py'
+      - 'scripts/ci/kimi-native-manifests/**'
+      - 'scripts/ci/install-tmux.sh'
+      - 'tests/test_teams_native.py'
+      - 'tests/teams_native_fixture.py'
+      - 'tests/model_api_fixture.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+cache-mode: none
+
+# Pull requests: one run per PR, and a new head cancels the older run; closing the
+# PR cancels the rest (pr-closed.yml). Main pushes and manual runs stay independent.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('teams-native-pr-{0}', github.event.pull_request.number) || format('teams-native-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  teams:
+    name: Teams contract, Claude Code and Codex (ubuntu-24.04)
+    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Linux tmux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+      - name: Pinned tmux
+        shell: bash
+        run: |
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
+      # The same pinned Node as the Linux CLI job that runs agent-compatibility.py.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Build the exact CLI with pinned Rust and at most two jobs
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          RUSTUP_TOOLCHAIN=1.99.1 cargo build --locked --bin hgs
+      - name: One latest Claude Code and Codex release each, Teams contract
+        shell: bash
+        run: |
+          python3 scripts/ci/agent-compatibility.py --contract teams --hgs "$GITHUB_WORKSPACE/target/debug/hgs" \
+            --results "$GITHUB_WORKSPACE/artifacts/test-results/teams-native" </dev/null
+      - name: Retain the Teams evidence and raw logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: teams-native-results-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/test-results/teams-native
+          retention-days: 7
+
+  teams-kimi:
+    name: Teams contract, Kimi Code (ubuntu-24.04)
+    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.8'
+      - name: Keep Cargo and Rustup in this ephemeral runner's private temporary directory
+        shell: bash
+        run: |
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/kimi-target"
+            echo "CARGO_HOME=$RUNNER_TEMP/kimi-cargo"
+            echo "RUSTUP_HOME=$RUNNER_TEMP/kimi-rustup"
+          } >> "$GITHUB_ENV"
+      - name: Refuse an unreviewed runner architecture before building
+        run: python -c "import runpy; runpy.run_path('scripts/ci/kimi-native.py')['target']()"
+      - name: Linux tmux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+      - name: Build the existing pinned tmux release privately
+        shell: bash
+        run: bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/kimi-tmux"
+      - name: Build the exact CLI with pinned Rust and at most two jobs
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          RUSTUP_TOOLCHAIN=1.99.1 cargo build --locked --bin hgs
+      - name: One official latest Kimi release, Teams contract in its own child
+        shell: bash
+        run: |
+          python -s -B scripts/ci/kimi-native.py --teams --source-sha "$SOURCE_SHA" \
+            --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-tmux/bin/tmux" \
+            --output "$GITHUB_WORKSPACE/artifacts/test-results/kimi-teams" </dev/null
+      - name: Retain exact native results and raw logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kimi-teams-results-${{ env.SOURCE_SHA }}
+          path: artifacts/test-results/kimi-teams/evidence
+          retention-days: 7

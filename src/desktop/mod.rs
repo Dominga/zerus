@@ -60,7 +60,7 @@ pub(crate) mod program_stop;
 pub(crate) mod program_cleanup;
 mod protocol;
 /// The owner-approved question route leaf (zerus-sa9qn.8, slice a).
-mod question_route;
+pub(crate) mod question_route;
 mod registration;
 mod revoke;
 #[cfg(any(windows, test))]
@@ -82,6 +82,7 @@ pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
 pub(crate) mod task_controls;
+pub(crate) mod teams;
 mod termination_outcome;
 mod transport;
 mod ui_authority;
@@ -592,7 +593,8 @@ fn projection(
     migration: &Value,
     feed: &feed::Broker,
     reads: &catalog_read::Reader,
-) -> Value {
+) -> Result<Value> {
+    store.check_service_scope(location, epoch)?;
     let mut value = json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "lifecycle":lifecycle::status(&location.configuration,epoch,store.generation),
@@ -611,7 +613,7 @@ fn projection(
     value["desktop_ownership"] = ownership::status(store, &location.configuration)
         .and_then(|v| Ok(serde_json::to_value(v)?))
         .unwrap_or(Value::Null);
-    value
+    Ok(value)
 }
 
 enum Event {
@@ -823,9 +825,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 drop(handoff);
                 if background::replacement_permitted(
                     background_mode,
-                    background
-                        .as_ref()
-                        .is_some_and(background::Runtime::drained),
+                    background.as_ref(),
                     &location,
                     &store,
                 )? {
@@ -980,7 +980,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &migration,
                         &feed,
                         &reads,
-                    );
+                    )?;
                     value["frontend_read_delivery"] = frontend.status();
                     value["notification_controls"] = notification_controls.projection(&store);
                     value["lifecycle"]["mode"] = if background_mode {
@@ -1701,7 +1701,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     &migration,
                     &feed,
                     &reads,
-                );
+                )?;
                 value["frontend_read_delivery"] = frontend.status();
                 value["notification_controls"] = notification_controls.projection(&store);
                 value["lifecycle"]["mode"] = if background_mode {

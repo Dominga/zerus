@@ -1,0 +1,49 @@
+{
+  "template": {
+    "id": "bugfix",
+    "name": "Bugfix",
+    "description": "A queue of independent fixes: a developer and a reviewer.",
+    "lead": {
+      "agent": "claude"
+    },
+    "roster": [
+      {
+        "role": "developer",
+        "count": 1
+      },
+      {
+        "role": "reviewer",
+        "count": 1
+      }
+    ],
+    "default_pipeline": "reviewed",
+    "settings": {}
+  },
+  "roles": [
+    {
+      "id": "developer",
+      "name": "Developer",
+      "agent": "claude",
+      "prompt": "Implement the task in your own worktree. Start from the base commit named in the task, keep to its write set, run the checks that can fail for your change, commit, and report what you changed and how you checked it."
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "agent": "claude",
+      "prompt": "Review the reported commit against the task's criteria. You never change what you review. Give a verdict: pass, or return with the exact findings."
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "reviewed",
+      "name": "Reviewed: review, lead",
+      "implementer": "developer",
+      "stages": [
+        {
+          "kind": "review",
+          "role": "reviewer"
+        }
+      ]
+    }
+  ]
+}

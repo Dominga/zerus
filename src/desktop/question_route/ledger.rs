@@ -228,7 +228,7 @@ fn insert(tx: &Connection, record: &Record, at: i64, state: &str, code: &str) ->
     ensure!(count(tx)? < ROWS, "question route ledger is full");
     tx.execute(
         "INSERT INTO desktop_question_routes(key,request_id,child_session_id,parent_session_id,
-         question_id,created,state,code,run_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+         question_id,created,state,code,run_id,record) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             record.identity.key(),
             record.request_id(),
@@ -238,10 +238,20 @@ fn insert(tx: &Connection, record: &Record, at: i64, state: &str, code: &str) ->
             at,
             state,
             code,
-            record.identity.run_id
+            record.identity.run_id,
+            serde_json::to_string(record)?
         ],
     )?;
     Ok(())
+}
+
+/// The same three switches gate a final pre-admission refusal as well as a
+/// reservation. Off writes no outcome and cannot escalate a quiet question.
+fn allowed(tx: &Transaction<'_>, record: &Record, state: &Path) -> Result<bool> {
+    Ok(super::policy::enabled(tx)?
+        && !super::latch::latched(tx, &record.identity.session_id)?
+        && crate::state::question_routing::send_to_parent_at(state, &record.identity.session_id)
+            == Some(true))
 }
 
 /// The reservation, in the actor's admission transaction. The person's
@@ -258,11 +268,7 @@ pub(super) fn reserve(
     at: i64,
     state: &Path,
 ) -> Result<Reservation> {
-    if !super::policy::enabled(tx)?
-        || super::latch::latched(tx, &record.identity.session_id)?
-        || crate::state::question_routing::send_to_parent_at(state, &record.identity.session_id)
-            != Some(true)
-    {
+    if !allowed(tx, record, state)? {
         return Ok(Reservation::Off);
     }
     if !room(tx, at)? {
@@ -284,8 +290,17 @@ pub(super) fn reserve(
 
 /// A final refusal before any admission: the route's fixed text or send is
 /// not valid, so it never routes.
-pub(super) fn refuse(db: &mut Connection, record: &Record, at: i64, code: &str) -> Result<()> {
+pub(super) fn refuse(
+    db: &mut Connection,
+    record: &Record,
+    at: i64,
+    code: &str,
+    state: &Path,
+) -> Result<bool> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !allowed(&tx, record, state)? {
+        return Ok(false);
+    }
     let mut recorded = true;
     if !known(&tx, &record.identity.key())? {
         recorded = room(&tx, at)?;
@@ -296,7 +311,7 @@ pub(super) fn refuse(db: &mut Connection, record: &Record, at: i64, code: &str) 
     // A full ledger keeps only its retention pass.
     tx.commit()?;
     ensure!(recorded, "question route ledger is full");
-    Ok(())
+    Ok(true)
 }
 
 /// What the actor's receipt says about a reserved route; `None` while it is

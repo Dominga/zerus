@@ -263,8 +263,42 @@ fn receipt(
         phase,
         drained,
         code: code.into(),
+        cli_exit: None,
+        refusal: None,
         outcome,
     }
+}
+
+#[test]
+fn cli_exit_is_bounded_diagnostic_and_old_receipts_keep_their_encoding() {
+    let verified = intent().verify().unwrap();
+    let mut r = receipt(
+        &verified,
+        Phase::Unknown,
+        true,
+        "deferred_send_receipt_missing",
+        None,
+    );
+    let old = serde_json::to_vec(&r).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&serde_json::from_slice::<Receipt>(&old).unwrap()).unwrap(),
+        old
+    );
+    assert!(!String::from_utf8(old).unwrap().contains("cli_exit"));
+    let exit = CliExit::new(1, &format!("{}\nprivate second line", "λ".repeat(1024)));
+    assert_eq!(exit.stderr.len(), STDERR_BYTES);
+    assert!(!exit.stderr.contains("second line"));
+    r.cli_exit = Some(exit);
+    assert!(r.valid());
+    assert_eq!(r.result(&verified.plan), None);
+    assert!(!r.not_started(&verified.plan));
+    r.cli_exit.as_mut().unwrap().stderr.push('x');
+    assert!(!r.valid());
+    r.cli_exit = Some(CliExit {
+        code: 1,
+        stderr: "bad\nline".into(),
+    });
+    assert!(!r.valid());
 }
 
 #[test]

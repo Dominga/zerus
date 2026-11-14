@@ -5,8 +5,9 @@
 //! the live tracked agent that launched or adopted it, proven by native process
 //! ancestry exactly as `hgs self` proves its caller. The child's computer is
 //! the link's only writer. The link is presentation and attention routing
-//! only: it never authorizes a send, answer, approval, stop or removal, and it
-//! never moves a session's project. Only a new child's initial placement
+//! only: by itself it never authorizes an action or moves a session's project.
+//! The explicit Kimi Compact-only exception separately proves the caller of
+//! the exact recorded launch parent. Only a new child's initial placement
 //! follows a parent this computer proved (zerus-d5twt).
 use super::*;
 use std::{fs, io::Read};
@@ -95,6 +96,23 @@ fn proven_link() -> Option<String> {
     link_of(&record, &machine, config.host(), "launch").map(|link| link.to_string())
 }
 
+/// Proof for the Kimi cache chooser's explicit Compact-only exception. A
+/// recorded launch link alone grants nothing: reuse the launcher's native caller
+/// proof and this computer's existing identity, with all durable parent IDs.
+/// Names may change; siblings and ancestors never substitute for this parent.
+pub(super) fn caller_is_parent(child: &Value) -> bool {
+    let Some(parent) = listed(child).filter(|p| string(p, "source") == "launch") else {
+        return false;
+    };
+    let Some(caller) = proven_link().and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    else {
+        return false;
+    };
+    ["machine", "session_id", "run_id", "conversation_id"]
+        .iter()
+        .all(|key| !string(&parent, key).is_empty() && parent[*key] == caller[*key])
+}
+
 /// A link another computer's hgs forwarded with this launch (zerus-sa9qn.7).
 static FORWARDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -110,7 +128,21 @@ pub(crate) fn launcher_value() -> Result<String> {
         return link_of(&parent, &machine, config.host(), "claimed")
             .map(|link| link.to_string()).ok_or("The parent identity is incomplete".into());
     }
-    Ok(proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default())
+    if let Some(link) = proven_link().or_else(|| FORWARDED.get().cloned()) {
+        return Ok(link);
+    }
+    // A resident DeepSeek host's tool call is never the person, so it never
+    // launches a session that no one launched (zerus-ppd26 Part B).
+    if let Some(reason) = session_graph::hosted_proof_refusal() {
+        return Err(hosted_launch_refusal(&reason));
+    }
+    Ok(String::new())
+}
+
+/// The refusal of a launch that a DeepSeek tool call without its hosted proof
+/// would start with no parent.
+pub(crate) fn hosted_launch_refusal(reason: &str) -> String {
+    format!("This DeepSeek tool call (HGS_AGENT=dsh) cannot prove its session, so it does not launch a session without a parent: {reason} Name the parent with --parent.")
 }
 
 /// The launcher of a new native-API session. Resolve the link directly:
@@ -232,8 +264,8 @@ pub(crate) fn decorate(sessions: &mut [Value]) {
     }
 }
 
-/// Native questions only the person may answer: folder and hook trust.
-const PERSON_ONLY_QUESTIONS: [&str; 5] = ["claude-trust:", "claude-bypass:", "codex-trust:", "kimi-trust:", "codex-hooks-trust:"];
+/// Native questions only the person may answer: folder/hook trust and sandbox setup.
+const PERSON_ONLY_QUESTIONS: [&str; 6] = ["codex-sandbox:", "claude-trust:", "claude-bypass:", "codex-trust:", "kimi-trust:", "codex-hooks-trust:"];
 
 /// Whether a live row holds a request only the person can answer (spec 2.2):
 /// a tool or permission approval, folder or hook trust, or signing in. A
@@ -492,10 +524,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         String::new()
     };
+    let provider = provider_binding::Provider::named(name);
+    let _session = if matches!(provider, Some(provider_binding::Provider::DeepSeek)) {
+        Some(dsh::dispatch_lock::acquire(name)?.0)
+    } else { None };
+    // Observe liveness after any wait for the child, before machine-wide
+    // writers. The claim must not age while queued behind the child's RPC.
+    let claimed = if request.action == "adopt" {
+        request.parent.as_ref().map(claimed_parent).transpose()?
+    } else { None };
     let _writer = lock(None)?;
     // Parent writers share the state lock for cycle checks, then the native
     // provider's own lock so a metadata change cannot overwrite its updates.
-    let provider = provider_binding::Provider::named(name);
     let _dsh = if matches!(provider, Some(provider_binding::Provider::DeepSeek)) {
         Some(lock(Some(&root().join("dsh/bindings.lock")))?)
     } else { None };
@@ -531,7 +571,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             // set is the session a person chose.
             let (chosen, source) = match (caller, request.parent.as_ref()) {
                 (Some(caller), _) => (caller, "adopt"),
-                (None, Some(choice)) if request.action == "adopt" => (claimed_parent(choice)?, "claimed"),
+                (None, Some(_)) if request.action == "adopt" => {
+                    let parent = claimed.as_ref().ok_or("The claimed parent is unavailable")?;
+                    let current = read_session(string(parent, "session_id"), string(parent, "name"))?
+                        .ok_or("The claimed parent disappeared")?;
+                    if current != *parent { return Err("The claimed parent changed; refresh and retry".into()); }
+                    (current, "claimed")
+                },
                 (None, Some(choice)) => {
                     if !session_id::canonical(&choice.session_id) {
                         return Err("Choose the parent by its session ID".into());
@@ -1388,7 +1434,7 @@ mod tests {
         assert!(!human_request(&row("input"), None));
         assert!(!human_request(&row("idle"), Some(&[])));
         let asked = |id: &str| vec![json!({"question_id": id})];
-        for id in ["claude-trust:abc", "codex-trust:abc", "kimi-trust:abc", "codex-hooks-trust:abc"] {
+        for id in ["codex-sandbox:abc", "claude-trust:abc", "codex-trust:abc", "kimi-trust:abc", "codex-hooks-trust:abc"] {
             assert!(human_request(&row("input"), Some(&asked(id))), "{id}");
         }
         assert!(!human_request(&row("input"), Some(&asked("toolu_ask_user"))));

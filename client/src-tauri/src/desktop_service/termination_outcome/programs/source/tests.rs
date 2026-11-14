@@ -9,7 +9,6 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
 };
 use zerus_client_core::{
     worktree_programs::{stop, DirectoryId},
@@ -287,7 +286,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 manifest.configuration.clone(),
                 context.environment.clone(),
                 context.clone(),
-                Arc::new(Command::spawn),
+                Arc::new(|command, input_spawn| input_spawn.spawn(command)),
             )
             .unwrap();
             let not_after = owner.deadline();
@@ -340,9 +339,9 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 1024,
                 &AtomicBool::new(false),
                 (resources, Some(mutation.completion.clone())),
-                move |command| {
+                move |command, input_spawn| {
                     inherited.inherit(command)?;
-                    command.spawn()
+                    input_spawn.spawn(command)
                 },
             )
             .unwrap();
@@ -409,7 +408,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 1024,
                 &AtomicBool::new(false),
                 (source.clone(), Some(initial_completion.clone())),
-                move |command| command.spawn(),
+                move |command, input_spawn| input_spawn.spawn(command),
             )
             .unwrap();
             assert!(matches!(initial, Exit::Code { code: 0, .. }));
@@ -438,9 +437,9 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                     1024,
                     &AtomicBool::new(false),
                     (resources, Some(unarmed.completion.clone())),
-                    move |command| {
+                    move |command, input_spawn| {
                         inherited.inherit(command)?;
-                        command.spawn()
+                        input_spawn.spawn(command)
                     },
                 )
                 .unwrap();
@@ -516,8 +515,8 @@ fn gated_refusal(
         manifest.configuration.clone(),
         context.environment.clone(),
         context.clone(),
-        Arc::new(|command| {
-            let child = command.spawn();
+        Arc::new(|command, input_spawn| {
+            let child = input_spawn.spawn(command);
             if let Err(error) = &child {
                 eprintln!("fixture holder spawn failed: {error}");
             }
@@ -568,9 +567,9 @@ fn gated_refusal(
         1024,
         &AtomicBool::new(false),
         (resources, Some(mutation.completion.clone())),
-        move |command| {
+        move |command, input_spawn| {
             inherited.inherit(command)?;
-            command.spawn()
+            input_spawn.spawn(command)
         },
     )
     .unwrap();
@@ -588,7 +587,7 @@ fn gated_refusal(
         1024,
         &AtomicBool::new(false),
         (source.clone(), Some(completion.clone())),
-        move |command| command.spawn(),
+        move |command, input_spawn| input_spawn.spawn(command),
     )
     .unwrap();
     assert!(matches!(original, Exit::Code { code: 0, .. }));

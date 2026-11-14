@@ -738,6 +738,12 @@ pub fn drained(db: &mut Connection, ticket: &Ticket, proof: VerifiedDrain) -> Re
 pub fn recover_batch(db: &mut Connection, service_epoch: &str) -> Result<usize> {
     uuid(service_epoch)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let same: bool = tx.query_row(
+        "SELECT service_epoch=?1 FROM desktop_writer WHERE id=1",
+        [service_epoch],
+        |row| row.get(0),
+    )?;
+    ensure!(same, "operation recovery service epoch changed");
     let mut statement=tx.prepare(&format!("SELECT {ATTEMPT} FROM desktop_operation_attempts WHERE state='reserved' AND service_epoch<>?1 ORDER BY seq LIMIT 256"))?;
     let rows = statement
         .query_map([service_epoch], attempt)?

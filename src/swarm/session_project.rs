@@ -148,6 +148,11 @@ impl Request {
     }
     fn check_binding(&self, record: &Value) -> Result<()> {
         ensure!(
+            record.get("session_id").is_none_or(|value| value.is_null()
+                || value.as_str().is_some_and(|id| id.is_empty() || uuid(id))),
+            "Native session ID is invalid; refresh before assigning"
+        );
+        ensure!(
             record["name"] == self.name
                 && record["run_id"] == self.expected_run_id
                 && record["conversation_id"].as_str().unwrap_or_default()
@@ -219,13 +224,14 @@ fn snapshot_bound(store: &Store, request: &Request, session_id: Option<&str>) ->
         machine: store.catalog.machine(&store.node_id),
         session: request.name.clone(),
     };
-    let primary = store.id_memberships.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("ID project membership is unavailable; refresh before assigning")
-    })?;
-    let resolved = session_id
-        .map(|id| primary.resolve(&store.catalog, &store.node_id, id))
-        .transpose()?
-        .flatten();
+    let resolved = if let Some(id) = session_id {
+        let primary = store.id_memberships.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("ID project membership is unavailable; refresh before assigning")
+        })?;
+        primary.resolve(&store.catalog, &store.node_id, id)?
+    } else {
+        None
+    };
     let (current, heads, conflict) = if let Some(record) = resolved {
         (
             record.value.as_str().unwrap_or("ungrouped").to_owned(),
@@ -658,6 +664,37 @@ mod tests {
         assert_eq!(snapshot_bound(&store,&request,Some(&a)).unwrap().current,"ungrouped");
         store.id_memberships=None;
         assert!(snapshot_bound(&store,&request,Some(&a)).is_err());
+    }
+    #[test]
+    fn malformed_native_ids_are_not_legacy_absence() {
+        let (_, query) = fixture();
+        let mut record = json!({"name":query.name,"run_id":query.expected_run_id,
+            "conversation_id":query.expected_conversation_id});
+        assert!(query.check_binding(&record).is_ok());
+        for value in [Value::Null, json!(""), json!(new_id())] {
+            record["session_id"] = value;
+            assert!(query.check_binding(&record).is_ok());
+        }
+        for value in [json!(true), json!({}), json!(1), json!("not-an-id"),
+            json!(uuid::Uuid::nil().to_string()), json!("EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE")] {
+            record["session_id"] = value;
+            assert!(query.check_binding(&record).is_err(), "malformed native ID was treated as legacy absence");
+        }
+    }
+    #[test]
+    fn unavailable_primary_preserves_legacy_grouping_but_never_an_id_fallback() {
+        let (mut store, query) = fixture();
+        store.catalog.set(&store.node_id, Key::Session {
+            machine: store.node_id.clone(), session: query.name.clone(),
+        }, json!("one")).unwrap();
+        store.id_memberships = None;
+        let current = snapshot(&store, &query).expect("legacy grouping must not require primary ID evidence");
+        assert_eq!(current.current, "one");
+        let change = mutation(&store, &query);
+        assign(&mut store, &change, &current).unwrap();
+        assert_eq!(snapshot(&store, &query).unwrap().current, "two");
+        assert!(store.id_memberships.is_none(), "legacy assignment cannot rebuild the primary");
+        assert!(snapshot_bound(&store, &query, Some(&new_id())).is_err(), "an ID-bound native record must never fall back to its label");
     }
     #[test]
     fn logical_assignment_changes_only_the_exact_session_register() {

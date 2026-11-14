@@ -20,13 +20,15 @@ pub(in crate::desktop) fn line(
     limit: usize,
     until: Instant,
 ) -> Result<Option<Vec<u8>>> {
-    protocol::line_checked(reader, limit, |reader| {
+    protocol::line_checked(reader, limit, |reader, phase| {
         let remaining = until.saturating_duration_since(Instant::now());
         ensure!(
             !remaining.is_zero(),
             "task-control request deadline expired"
         );
-        reader.get_ref().set_read_timeout(Some(remaining))?;
+        if matches!(phase, protocol::ReadPhase::BeforeRead) {
+            reader.get_ref().set_read_timeout(Some(remaining))?;
+        }
         Ok(())
     })
 }

@@ -539,6 +539,8 @@ mod tests {
         }
         let hgs = "/home/example/.local/bin/hgs";
         for (index, name) in HOSTILE.iter().copied().enumerate() {
+            #[cfg(not(unix))]
+            let _ = index;
             let line = open_command(hgs, "mac\\'", name, None, Shell::Posix);
             let mut words = vec![hgs.to_owned()];
             words.extend(open_arguments("mac\\'", name, None));

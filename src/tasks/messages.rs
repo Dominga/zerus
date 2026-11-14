@@ -23,7 +23,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
     } else {
         (machines(config)?, None)
     };
-    let who = actor(&machines.here, args, true)?;
+    let mut who = super::teams::actor(config, &machines, args, true, false)?;
     let r = super::reference_by(
         config,
         args,
@@ -36,6 +36,11 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         store(config, &r.project.0)?
     };
     let mut task = store.find(&r.task).map_err(fail)?;
+    if let Some(actor) = super::teams::actor_for_marked_task(config, &machines, args, true, &task)? { who = actor; }
+    {
+        let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
+        super::teams::guard(config, &machines, &task, "message", args, &mut meeting)?;
+    }
     let mut before = task.view().map_err(fail)?;
     let existing = before
         .log
@@ -153,6 +158,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 &frozen,
                 (&before.target, before.stage_at),
                 &who,
+                args,
                 deadline,
             )?;
             if let Some(out) = reopened {
@@ -160,8 +166,11 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             }
             // Legacy: read again; the message path below rechecks it all,
             // and refuses a task that is managed by now.
+            super::attempts::pause_at(id, "legacy_reload");
             store = super::store(config, &r.project.0)?;
             task = store.load(&uuid).map_err(fail)?;
+            let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
+            super::teams::guard(config, &machines, &task, "message", args, &mut meeting)?;
             before = task.view().map_err(fail)?;
         }
     }
@@ -222,7 +231,14 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(fail)?;
-        match crate::state::prepare_task_reply(to, dispatch, id, &delivery.prompt, &attachments) {
+        match crate::state::prepare_task_reply(
+            to,
+            dispatch,
+            id,
+            &delivery.prompt,
+            &attachments,
+            crate::state::Continuation::SameRun,
+        ) {
             Ok(request) => {
                 delivery.run_id = request["expected_run_id"].as_str().unwrap_or_default().into();
                 delivery.conversation_id = request["expected_conversation_id"].as_str().unwrap_or_default().into();
@@ -312,10 +328,23 @@ pub(super) fn prompt(
     text: &str,
     worker: Option<&zerus_replica::TaskWorker>,
 ) -> String {
+    prompt_from(project_name, task_id, id, mode, text, worker, None)
+}
+
+/// A service return supplies its attribution from the stored decision.
+pub(super) fn prompt_from(
+    project_name: &str,
+    task_id: &str,
+    id: &str,
+    mode: &str,
+    text: &str,
+    worker: Option<&zerus_replica::TaskWorker>,
+    reopen: Option<&str>,
+) -> String {
     let worker = worker.map(|w| format!("\nCoordinator: relay this feedback to the registered child {} only if its exact current identity still matches; otherwise explain why it cannot be delivered.", w.id)).unwrap_or_default();
     // The header is a label; the commands name the task as one safe word (zerus-sa9qn.38).
     let reference = zerus_replica::command_reference(project_name, task_id);
     format!("[Zerus task {project_name}/{task_id} message {id}]\n{}\n\n{text}{worker}\n\n{}",
-        if mode == "reopen" { "The person requests changes. Continue this task." } else { "The person added task feedback." },
+        if mode == "reopen" { reopen.unwrap_or("The person requests changes. Continue this task.") } else { "The person added task feedback." },
         format_args!("Read the task context with `hgs task get {reference}` and report the result with `hgs task report {reference}`."))
 }

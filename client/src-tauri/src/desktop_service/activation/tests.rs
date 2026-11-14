@@ -40,10 +40,10 @@ fn private_case_as(case: &'static str, agent: bool) -> bool {
             &call,
             &[(MARKER, case)],
             &AtomicBool::new(false),
-            |command| {
+            |command, input_spawn| {
                 command.env("HGS_SESSION", "codex/fixture/gui-parent");
                 command.env("HGS_RUN_ID", "fixture-agent-run");
-                command.spawn()
+                input_spawn.spawn(command)
             },
             Arc::new(()),
         )

@@ -103,12 +103,13 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     } else {
         "xdg-open"
     };
-    let mut child = crate::child_environment::command(program)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let mut child = crate::child_environment::spawn(
+        crate::child_environment::command(program)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )?;
     // Reaped off the caller: the opener may stay until the browser starts.
     std::thread::spawn(move || {
         let _ = child.wait();

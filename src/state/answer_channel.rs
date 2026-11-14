@@ -205,11 +205,18 @@ fn withheld(
 /// Take an offered answer to `kind` only when `ready`. An approval waits for
 /// the screen to show its request; until then the offer stays unclaimed, and
 /// `hgs answer` retracts it with nothing sent.
-fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool) -> Result<Option<Value>> {
+fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool, admit: impl FnOnce() -> Result<()>) -> Result<Option<Value>> {
     // An offer that appears after this look waits for the next poll.
     if kind == Kind::Approval && (!dir.join(ANSWER).exists() || !ready()) {
         return Ok(None);
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if !dir.join(ANSWER).exists() { return Ok(None); }
+        admit()?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = admit;
     claim(dir)
 }
 
@@ -772,7 +779,7 @@ extern "C" fn terminate(_: libc::c_int) {
 /// the bound one, and when the request moves on (`Batch`), for its group's
 /// answer, which it hands Claude like an offer.
 pub(super) fn run() -> Result<i32> {
-    let _ = wait();
+    if let Err(error) = wait() { hook_caller::report_channel(&error); }
     Ok(0)
 }
 
@@ -953,7 +960,7 @@ fn serve(
         }
         if let Some((dir, card, _)) = &channel {
             let ready = || current.as_ref().is_some_and(waits);
-            if let Some(offer) = take_offer(kind, dir, ready)? {
+            if let Some(offer) = take_offer(kind, dir, ready, || Ok(()))? {
                 // The question must still be the bound one when its answer goes out.
                 // Claude tells the hook nothing of a Terminal approval: only the
                 // screen still showing the request proves it waits.
@@ -1894,7 +1901,7 @@ mod tests {
         let (temp, waiting) = channel(|dir| {
             for _ in 0..40 {
                 let ready = || claude_approval::channel::waits(&json!({}), Err("Session identity changed; open Terminal".into()), |_| unreachable!());
-                assert!(take_offer(Kind::Approval, dir, ready).unwrap().is_none());
+                assert!(take_offer(Kind::Approval, dir, ready, || Ok(())).unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1910,7 +1917,7 @@ mod tests {
     fn an_approval_offer_stays_unclaimed_until_its_screen_shows_it() {
         let (temp, waiting) = channel(|dir| {
             for _ in 0..40 {
-                assert!(take_offer(Kind::Approval, dir, || false).unwrap().is_none());
+                assert!(take_offer(Kind::Approval, dir, || false, || Ok(())).unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1926,10 +1933,10 @@ mod tests {
         for (kind, ready) in [(Kind::Approval, true), (Kind::Question, false)] {
             let temp = tempfile::tempdir().unwrap();
             offer(temp.path(), &json!({"request_id":"two"})).unwrap();
-            assert_eq!(take_offer(kind, temp.path(), || ready).unwrap().unwrap()["request_id"], "two", "{kind:?}");
+            assert_eq!(take_offer(kind, temp.path(), || ready, || Ok(())).unwrap().unwrap()["request_id"], "two", "{kind:?}");
         }
         let empty = tempfile::tempdir().unwrap();
-        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture")).unwrap().is_none());
+        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture"), || Ok(())).unwrap().is_none());
     }
 
     #[test]

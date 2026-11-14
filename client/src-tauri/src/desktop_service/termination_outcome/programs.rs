@@ -116,7 +116,7 @@ impl Controller {
             NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
             (call, Some(completion.clone())),
-            move |command| current.spawn(command),
+            move |command, input_spawn| current.spawn_input(command, input_spawn),
         )
         .ok()
         .filter(|_| !self.context.rejected.load(Ordering::Acquire))

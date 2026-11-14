@@ -5,6 +5,9 @@ use crate::desktop_service::{
 };
 
 fn private_case(case: &'static str) -> bool {
+    private_case_observed(case, None)
+}
+fn private_case_observed(case: &'static str, observe: Option<fn(&str)>) -> bool {
     const MARKER: &str = "ZERUS_CREATION_CLONE_CASE";
     if std::env::var(MARKER).as_deref() == Ok(case) {
         return true;
@@ -32,7 +35,12 @@ fn private_case(case: &'static str) -> bool {
             code,
             stdout,
             stderr,
-        } => assert_eq!(code, 0, "{}\n{stderr}", String::from_utf8_lossy(&stdout)),
+        } => {
+            assert_eq!(code, 0, "{}\n{stderr}", String::from_utf8_lossy(&stdout));
+            if let Some(observe) = observe {
+                observe(&stderr);
+            }
+        }
         other => panic!("{other:?}"),
     }
     false
@@ -58,11 +66,26 @@ fn operation() -> (String, Value) {
         "clone_id":uuid::Uuid::new_v4().to_string(),"expected_machine":"22222222-2222-4222-8222-222222222222"}),
     )
 }
+const CALL_EVIDENCE_BYTES: usize = 256 << 10;
 fn calls(f: &Fixture) -> Vec<Value> {
-    std::fs::read_to_string(f.0.join("clone-calls"))
-        .unwrap_or_default()
+    use std::io::Read as _;
+    let file = match std::fs::File::open(f.0.join("clone-calls")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("clone-call evidence unavailable: {error}"),
+    };
+    let mut bytes = Vec::new();
+    file.take((CALL_EVIDENCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(
+        bytes.len() <= CALL_EVIDENCE_BYTES,
+        "clone-call evidence exceeds bound"
+    );
+    String::from_utf8(bytes)
+        .expect("clone-call evidence is not UTF-8")
         .lines()
-        .filter_map(|s| serde_json::from_str(s).ok())
+        .map(|s| serde_json::from_str(s).expect("invalid clone-call evidence"))
         .collect()
 }
 async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
@@ -98,6 +121,123 @@ async fn answer(service: Arc<Service>, id: String, value: Value, fresh: bool) ->
     reply(service, id, value, fresh, false)
         .await
         .expect("a service answer, not the direct path")
+}
+
+fn assert_lost_clone(f: &Fixture, answer: &creation::Answer) {
+    let bound = f.0.join("clone-bound").exists();
+    let calls = calls(f);
+    let originals = calls
+        .iter()
+        .filter(|c| c["value"]["request"]["op"] == "creation_clone")
+        .count();
+    let reads = calls
+        .iter()
+        .filter(|c| c["value"]["op"] == "creation_clone_result")
+        .count();
+    let kind = if answer.ok && answer.data["effects_started"] == false {
+        "unsent"
+    } else if !answer.ok && answer.error == zerus_client_core::repository::UNCONFIRMED_OPERATION {
+        "unknown"
+    } else {
+        "other"
+    };
+    assert!(
+        bound && originals == 1 && reads == 0,
+        "original clone send not established: bound={bound} clone_requests={originals} clone_result_reads={reads} answer={kind}"
+    );
+    assert!(!answer.ok);
+    assert_eq!(
+        answer.error,
+        zerus_client_core::repository::UNCONFIRMED_OPERATION
+    );
+    assert!(
+        answer.data.is_null(),
+        "a lost clone reply carries no result body"
+    );
+}
+
+fn lost_clone_failure(f: &Fixture, answer: &creation::Answer) -> String {
+    match std::panic::catch_unwind(|| assert_lost_clone(f, answer)) {
+        Ok(()) => "no assertion failed".into(),
+        Err(failure) => failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic")
+            .into(),
+    }
+}
+
+#[test]
+fn a_never_sent_clone_fails_the_send_precondition_before_unknown() {
+    if !private_case_observed(
+        "desktop_service::creation_clone::tests::a_never_sent_clone_fails_the_send_precondition_before_unknown",
+        Some(|stderr| assert!(stderr.contains("code=helper_exchange stage=help refusal="), "missing bounded exchange-stage evidence: {stderr}")),
+    ) { return }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        std::fs::write(
+            f.0.join("fixture.json"),
+            json!({"clone_help_fail":true}).to_string(),
+        )
+        .unwrap();
+        let (id, value) = operation();
+        let result = reply(service.clone(), id, value, true, true).await.unwrap();
+        assert!(result.ok, "the preflight refusal is definitely unsent");
+        assert_eq!(result.data["effects_started"], false);
+        let missing = lost_clone_failure(&f, &result);
+        // A marker alone, without an original request, is not the send proof.
+        std::fs::write(f.0.join("clone-bound"), []).unwrap();
+        let marker_only = lost_clone_failure(&f, &result);
+        service.join().await.unwrap();
+        for (diagnostic, bound) in [(missing, false), (marker_only, true)] {
+            assert!(
+                diagnostic.contains("original clone send not established"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains(&format!(
+                    "bound={bound} clone_requests=0 clone_result_reads=0 answer=unsent"
+                )),
+                "{diagnostic}"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_request_without_the_native_bound_marker_cannot_qualify_as_a_lost_reply() {
+    if !private_case("desktop_service::creation_clone::tests::a_request_without_the_native_bound_marker_cannot_qualify_as_a_lost_reply") { return }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"clone_lost":true}));
+        let (service, _cache) = connected(&f).await;
+        let (id, value) = operation();
+        let answer = reply(service.clone(), id, value, true, true).await.unwrap();
+        assert_lost_clone(&f, &answer);
+        std::fs::remove_file(f.0.join("clone-bound")).unwrap();
+        let diagnostic = lost_clone_failure(&f, &answer);
+        service.join().await.unwrap();
+        assert!(diagnostic.contains("original clone send not established: bound=false clone_requests=1 clone_result_reads=0 answer=unknown"), "{diagnostic}");
+    });
+}
+
+#[test]
+fn clone_call_evidence_is_bounded_without_printing_the_request_body() {
+    let f = fixture(json!({}));
+    let body = "private-fixture-body".repeat(CALL_EVIDENCE_BYTES / 10);
+    std::fs::write(f.0.join("clone-calls"), json!({"body":body}).to_string()).unwrap();
+    let failure = std::panic::catch_unwind(|| calls(&f)).expect_err("oversized evidence refuses");
+    let diagnostic = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        diagnostic.contains("clone-call evidence exceeds bound"),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("private-fixture-body"));
 }
 #[test]
 fn a_launch_help_failure_is_unsent_and_never_falls_back_or_dispatches() {
@@ -167,12 +307,8 @@ fn original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read() {
             .collect();
         value["catalog"] = json!({"common_dir":"/srv/repo/.git","worktrees":rows});
         assert!(serde_json::to_vec(&value).unwrap().len() > wire::SOURCE_BYTES);
-        assert!(
-            !answer(service.clone(), id.clone(), value.clone(), true)
-                .await
-                .ok
-        );
-        assert!(f.0.join("clone-bound").exists());
+        let original = answer(service.clone(), id.clone(), value.clone(), true).await;
+        assert_lost_clone(&f, &original);
         let result = answer(service.clone(), id.clone(), value.clone(), false).await;
         assert_eq!(result.data["status"], "cloned");
         assert_eq!(
@@ -213,8 +349,8 @@ fn a_sent_create_whose_reply_is_lost_stays_unconfirmed_for_clone_and_worktree() 
         let f = fixture(json!({"clone_lost":true}));
         let (service, _cache) = connected(&f).await;
         let (id, value) = operation();
-        unconfirmed(reply(service.clone(), id, value, true, true).await.unwrap());
-        assert!(f.0.join("clone-bound").exists(), "the clone was sent");
+        let original = reply(service.clone(), id, value, true, true).await.unwrap();
+        assert_lost_clone(&f, &original);
         service.join().await.unwrap();
 
         let f = fixture(json!({"worktree_abi":true}));
@@ -240,13 +376,13 @@ fn a_sent_create_whose_reply_is_lost_stays_unconfirmed_for_clone_and_worktree() 
         .await
         .unwrap()
         .expect("a service answer, not the direct path");
-        unconfirmed(answer);
         let written = std::fs::read_to_string(f.0.join("worktree-calls")).unwrap_or_default();
         assert_eq!(
             written.lines().count(),
             1,
             "the worktree intent was sent once"
         );
+        unconfirmed(answer);
         service.join().await.unwrap();
     });
 }

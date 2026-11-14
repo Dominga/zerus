@@ -746,6 +746,7 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
             .any(|card| card["kind"] == "opencode_permission")
     });
     parent_link::mark_human_request(&mut value, None, approval);
+    telemetry::pending_input_summary(&mut value, !pending.is_empty());
     value
 }
 /// A row without a reading of the session: no events, so clients keep the

@@ -11,7 +11,7 @@ import os from 'node:os';
 import { checkCommand } from './command-guard.mjs';
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -66,6 +66,85 @@ export function readIdentity(dir, sessionId) {
     const read = readSync(fd, buffer, 0, buffer.length, 0);
     return read > IDENTITY_BYTES ? undefined : parseIdentity(buffer.subarray(0, read).toString('utf8'), sessionId);
   } catch { return undefined; } finally { if (fd !== undefined) closeSync(fd); }
+}
+
+// zerus-ppd26 Part B. Process ancestry cannot tell hosted agents apart, so
+// each tool call's processes also carry a fresh random token of 256 bits. The
+// host keeps token -> the calling top-level conversation while the call runs
+// and, for its background or promoted jobs, until each job settles; hgs asks
+// the host for it over the private socket to prove which conversation's call
+// started a command. The table is bounded; an evicted token is unknown.
+export const CALL_TOKEN = 'HGS_DSH_CALL_TOKEN';
+const CALL_TOKENS = 4096;
+// A conversation's calls and jobs make room only from its own oldest tokens:
+// another conversation's live token is never evicted (zerus-ppd26.5, .13).
+const CONVERSATION_TOKENS = 512;
+// What the host's socket serves in place of a live token (zerus-ppd26.5).
+export const HIDDEN_TOKEN = '[hidden call token]';
+export function callTokens(limit = CALL_TOKENS, share = CONVERSATION_TOKENS) {
+  const live = new Map(), jobs = new Map(), held = new Map();
+  const drop = token => {
+    const entry = live.get(token);
+    if (!entry) return;
+    live.delete(token);
+    for (const id of entry.jobs) jobs.delete(id);
+    const mine = held.get(entry.conversation);
+    mine?.delete(token);
+    if (mine?.size === 0) held.delete(entry.conversation);
+  };
+  const release = token => { const entry = live.get(token); if (entry && !entry.open && entry.jobs.size === 0) drop(token); };
+  return {
+    // A full table holding only other conversations' live tokens issues none:
+    // that call stays unproven rather than taking another conversation's.
+    open(conversation) {
+      const mine = held.get(conversation) ?? new Set();
+      while (mine.size > 0 && (mine.size >= share || live.size >= limit)) drop(mine.values().next().value);
+      if (live.size >= limit) return undefined;
+      const token = randomBytes(32).toString('hex');
+      live.set(token, { conversation, open: true, jobs: new Set() });
+      held.set(conversation, mine.add(token));
+      return token;
+    },
+    close(token) { const entry = live.get(token); if (entry) { entry.open = false; release(token); } },
+    job(token, id) { const entry = live.get(token); if (entry) { entry.jobs.add(id); jobs.set(id, token); } },
+    settled(id) {
+      const token = jobs.get(id);
+      jobs.delete(id);
+      if (token === undefined) return;
+      live.get(token)?.jobs.delete(id);
+      release(token);
+    },
+    conversation(token) {
+      return typeof token === 'string' && /^[0-9a-f]{64}$/.test(token) ? live.get(token)?.conversation : undefined;
+    },
+    // A live token printed whole never leaves the host in what its socket
+    // serves. Every 64-character window of each hex run is tested, so a token
+    // after another hex digit or a JSON-escaped control character is
+    // hidden too, and every copy of it (zerus-ppd26.13).
+    redact(text) {
+      if (live.size === 0) return text;
+      // A cheap prefix test before the 64-character lookup; a live token's
+      // first 8 hex characters are not a hex run of their own (zerus-ppd26.14).
+      const prefixes = new Set();
+      for (const token of live.keys()) prefixes.add(token.slice(0, 8));
+      // {64}[0-9a-f]* never asks the regex engine for an unbounded run: a
+      // 4-8 MiB hex run threw RangeError with {64,} (zerus-ppd26.14).
+      return text.replace(/[0-9a-f]{64}[0-9a-f]*/g, run => {
+        let out = '', at = 0, from = 0;
+        while (at + 64 <= run.length) {
+          if (prefixes.has(run.slice(at, at + 8)) && live.has(run.slice(at, at + 64))) {
+            out += run.slice(from, at) + HIDDEN_TOKEN;
+            at += 64;
+            from = at;
+          } else {
+            at += 1;
+          }
+        }
+        return out + run.slice(from);
+      });
+    },
+    get size() { return live.size; },
+  };
 }
 
 // Adds the current call's entries to each process the service starts while
@@ -283,10 +362,20 @@ export function apply(ctx, config) {
   const owned = new Map(), opening = new Map(), questions = new Map();
   registerAgentHint(ctx, config?.agentHint, owned);
   const generation = randomUUID();
+  // An end is the host's own lifecycle event, never a failed list/inspect
+  // or a turn that finished while its Agent remains alive. Keep bounded
+  // evidence only; a pruned or pre-bridge session has an unknown end.
+  const endedAgents = new Map();
+  ctx.on('agent/disposed', ({ agent }) => {
+    const sessionId = agent.session.id;
+    endedAgents.delete(sessionId);
+    endedAgents.set(sessionId, { at: Date.now(), source: 'agent/disposed' });
+    while (endedAgents.size > 4096) endedAgents.delete(endedAgents.keys().next().value);
+  });
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
   // Windows composes the official pwsh tools instead of bash; both run shell jobs.
   const shellTools = new Set(['bash', 'pwsh']);
-  const callContext = new AsyncLocalStorage();
+  const callContext = new AsyncLocalStorage(), tokens = callTokens();
   const identities = typeof config.shellIdentities === 'string' && config.shellIdentities ? config.shellIdentities : null;
   let spawns = null, spawnService = null;
   // A reloaded subprocess service is wrapped again before the next call.
@@ -302,6 +391,10 @@ export function apply(ctx, config) {
   ctx.on('dispose', () => spawns?.restore());
   const jobRegistry = ctx.get('jobs');
   if (jobRegistry) ctx.on('dispose',jobRegistry.events.subscribe({owners:'scope'},event => {
+    // A job a tool call registers keeps that call's token until it settles.
+    const token = callContext.getStore()?.[CALL_TOKEN];
+    if (event.type === 'registered' && token) tokens.job(token, event.job.id);
+    if (event.type === 'settled' || event.type === 'removed') tokens.settled(event.job.id);
     const call = shellContext.getStore();
     if (event.type === 'registered' && shellTools.has(event.job.kind) && call?.owner === event.job.owner) {
       call.jobId=event.job.id;jobCalls.set(event.job.id,call);
@@ -310,10 +403,13 @@ export function apply(ctx, config) {
   }));
   // Every tool call, whatever the tool or agent: its processes carry
   // HGS_AGENT=dsh and the calling top-level session's markers or none.
-  ctx.on('tools/execute', (exec, next) => {
+  ctx.on('tools/execute', async (exec, next) => {
     callEnvironmentInstalled();
-    const env = callEnvironment(readIdentity(identities, identitySession(exec.agent)));
-    return callContext.run(env, () => observeShell(exec, next));
+    const session = identitySession(exec.agent);
+    const token = session === undefined ? undefined : tokens.open(session);
+    const env = Object.freeze({ ...callEnvironment(readIdentity(identities, session)), [CALL_TOKEN]: token });
+    try { return await callContext.run(env, () => observeShell(exec, next)); }
+    finally { if (token) tokens.close(token); }
   });
   function observeShell(exec, next) {
     if (!shellTools.has(exec.name)) return next();
@@ -740,6 +836,131 @@ export function apply(ctx, config) {
     if (p.action === 'update' && (!p.expected || typeof p.expected !== 'object')) throw new Error('Expected task record is required');
     return { available: true, generation, result: await manageSchedule(schedule, p) };
   }
+  // zerus-hfw2s: input witness (docs/reference.md). A send with a requestId
+  // is bound to the FIRST message the harness inserted for it on that session
+  // ({session, messageId, spliceSeq}); a later insert with the same rpcId but
+  // another message id never rebinds it. input-witness flushes that session
+  // and returns bounded facts from its in-memory log forward from spliceSeq;
+  // HGS classifies them. The bridge records its own disposals so a canceled
+  // removal they cause can be told from any other.
+  const WITNESS_LIMIT = 256, WITNESS_SCAN = 4096, WITNESS_WAIT = 25000;
+  const witnesses = new Map(), expecting = new Map(), disposals = new WeakMap();
+  const witnessDigest = content => {
+    const hash = createHash('sha256');
+    for (const block of Array.isArray(content) ? content : [])
+      hash.update(`${block?.type ?? ''}\0${block?.type === 'text' ? block.text ?? '' : ''}\0`);
+    return hash.digest('hex');
+  };
+  const rememberWitness = (requestId, record) => {
+    witnesses.delete(requestId); witnesses.set(requestId, record);
+    while (witnesses.size > WITNESS_LIMIT) witnesses.delete(witnesses.keys().next().value);
+  };
+  const rpcIdOf = message => (message?.source?.kind === 'user' && typeof message.source.rpcId === 'string' ? message.source.rpcId : null);
+  ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+    const rpcId = rpcIdOf(message), session = agent?.session;
+    if (!rpcId || !session || expecting.get(rpcId) !== session.id || witnesses.get(rpcId)?.messageId) return;
+    rememberWitness(rpcId, { sessionId: session.id, session, messageId: message.id, spliceSeq: session.seq - 1 });
+  });
+  // A duplicate request inserts nothing: bind the message an earlier send of
+  // the same request inserted, if the bounded tail of the log still holds it.
+  function bindEarlierInsert(requestId, sessionId) {
+    const session = ctx.agents.get(sessionId)?.session;
+    if (!session || witnesses.get(requestId)?.messageId) return;
+    const from = Math.max(0, session.seq - WITNESS_SCAN);
+    const events = session.snapshotEvents(from, session.seq);
+    for (const event of events) {
+      const message = event.type === 'agent/inbox/spliced' ? event.data.inserted.find(m => rpcIdOf(m) === requestId) : undefined;
+      if (message) return rememberWitness(requestId, { sessionId, session, messageId: message.id, spliceSeq: event.seq });
+    }
+  }
+  async function witnessedSend(p, send) {
+    const requestId = typeof p.requestId === 'string' && p.requestId ? p.requestId : null;
+    if (!requestId) return send();
+    expecting.set(requestId, p.sessionId);
+    try {
+      const sent = await send();
+      bindEarlierInsert(requestId, p.sessionId);
+      return sent;
+    } catch (error) {
+      // Refused only when the harness inserted nothing for this request.
+      if (!witnesses.get(requestId)?.messageId) rememberWitness(requestId, { sessionId: p.sessionId, refused: String(error?.message ?? error) });
+      throw error;
+    } finally { expecting.delete(requestId); }
+  }
+  async function disposeOwned(sessionId, handle) {
+    const session = handle?.agent?.session ?? ctx.agents.get(sessionId)?.session;
+    const from = session?.seq;
+    try { await handle.dispose(); } finally {
+      if (session && from !== undefined) {
+        const windows = disposals.get(session) ?? [];
+        windows.push([from, session.seq]);
+        while (windows.length > 16) windows.shift();
+        disposals.set(session, windows);
+        await freezeWitnesses(session);
+      }
+    }
+  }
+  // A disposed session's log no longer changes: keep each of its records with
+  // its final facts and drop the session, so records never retain the logs of
+  // disposed sessions. A record whose facts exceed one page keeps the session.
+  async function freezeWitnesses(session) {
+    const records = [...witnesses.values()].filter(record => record.session === session);
+    if (!records.length) return;
+    let durable = false;
+    try { durable = Boolean(await ctx.get('sessions')?.flush(session)); } catch {}
+    for (const record of records) {
+      const facts = witnessFacts(record, session.seq);
+      if (!facts.complete) continue;
+      record.frozen = { ...facts, durable, frozen: true };
+      delete record.session;
+    }
+  }
+  // One page of facts from `from` (at least spliceSeq), at most WITNESS_SCAN
+  // events; `complete` says it reached the log's end at `through`. HGS pages
+  // forward from the returned `through`.
+  function witnessFacts(record, through, from = record.spliceSeq) {
+    const { session, messageId, spliceSeq } = record;
+    const start = Math.min(Math.max(Number.isSafeInteger(from) ? from : spliceSeq, spliceSeq), through);
+    const end = Math.min(through, start + WITNESS_SCAN);
+    const events = [];
+    for (const event of session.snapshotEvents(start, end)) {
+      const d = event.data;
+      if (event.type === 'agent/inbox/spliced') events.push({ seq: event.seq, type: event.type, target: d.target, start: d.start,
+        removedCount: d.removedCount ?? 0, outcome: d.outcome ?? null, inserted: d.inserted.map(m => ({ id: m.id, rpcId: rpcIdOf(m) })) });
+      else if (event.type === 'user/message') events.push({ seq: event.seq, type: event.type, id: d.id, rpcId: rpcIdOf(d), digest: witnessDigest(d.content) });
+      else if (event.type === 'turn/end') events.push({ seq: event.seq, type: event.type, turn: d.turn, reason: d.reason?.kind ?? null });
+    }
+    const live = ctx.agents.get(record.sessionId);
+    const pending = Boolean(live && [...live.inbox.nextStep, ...live.inbox.nextTurn].some(m => m.id === messageId));
+    return { messageId, spliceSeq, from: start, through: end, complete: end === through, live: Boolean(live), pending,
+      idle: !live || live.status === 'idle', events,
+      disposals: (disposals.get(session) ?? []).filter(([first, last]) => last > spliceSeq && first < end) };
+  }
+  // {sessionId, requestId, generation, waitMs, fromSeq?}: see witnessFacts.
+  async function inputWitness(p) {
+    if (p.generation !== generation) return { generation, state: 'host_gone' };
+    const record = witnesses.get(p.requestId);
+    if (!record || record.sessionId !== p.sessionId) return { generation, state: 'unseen' };
+    if (record.refused !== undefined) return { generation, state: 'refused', reason: record.refused };
+    if (record.frozen) {
+      const from = Math.max(Number.isSafeInteger(p.fromSeq) ? p.fromSeq : record.frozen.from, record.frozen.from);
+      return { generation, state: 'tracked', ...record.frozen, from, events: record.frozen.events.filter(event => event.seq >= from) };
+    }
+    // Wait, bounded, until the message is delivered or can no longer be.
+    const deadline = Date.now() + Math.min(Math.max(Number(p.waitMs) || 0, 0), WITNESS_WAIT);
+    for (;;) {
+      const facts = witnessFacts(record, record.session.seq);
+      const delivered = facts.events.some(e => e.type === 'user/message' && e.id === record.messageId);
+      if (delivered || (!facts.pending && facts.idle) || Date.now() >= deadline) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    // Only what was appended before the flush is reported, and only a
+    // successful flush makes it durable.
+    const through = record.session.seq;
+    let durable = false;
+    try { durable = Boolean(await ctx.get('sessions')?.flush(record.session)); } catch {}
+    return { generation, state: 'tracked', durable, ...witnessFacts(record, through, p.fromSeq) };
+  }
   // zerus-yj7ef: every list row carries `listJobs`, a bounded summary of the
   // session's running bash jobs, its own and its listed subagents', read from
   // the same job registry as inspect. Contract (docs/reference.md):
@@ -772,7 +993,8 @@ export function apply(ctx, config) {
       // Task 234: loadedSessions lets a listing reuse a stopped session's row
       // (building one replays its stored history) until this host loads it.
       case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true, sessionRows: true, fileAttachments: true,
-        listJobs: true, shellIdentity: callEnvironmentInstalled(),
+        inputWitness: true, listJobs: true, teamLifecycle: true,
+        shellIdentity: callEnvironmentInstalled(), callTokens: callEnvironmentInstalled(),
         loadedSessions: typeof ctx.sessions?.keys === 'function' ? [...ctx.sessions.keys()].slice(0, 5000) : undefined,
         nativeOperations: ['fork', 'history-search', 'schedules', 'permission-preset', 'permissions'], schedule: Boolean(scheduleService()) };
       case 'list': {
@@ -804,6 +1026,14 @@ export function apply(ctx, config) {
         return { generation, items: rows.map(row => ({ ...listRow(row, status, scheduled), listJobs: jobSummaries.get(row.sessionId) })) };
       }
       case 'inspect': return inspect(p);
+      case 'input-witness': return inputWitness(p);
+      case 'session-lifecycle': {
+        if (typeof p.sessionId !== 'string' || !p.sessionId || p.sessionId.length > 2048) throw new Error('Invalid session identity');
+        const live = ctx.agents.get(p.sessionId);
+        const end = endedAgents.get(p.sessionId);
+        return { generation, sessionId: p.sessionId, state: live ? 'live' : end ? 'ended' : 'unknown',
+          ...(live || !end ? {} : { end }) };
+      }
       case 'fork': return fork(p);
       case 'search-history': return searchHistory(p);
       case 'schedules': return schedules(p);
@@ -975,7 +1205,7 @@ export function apply(ctx, config) {
             changed = true; await api.rename({sessionId:p.sessionId,title:p.title});
           } else if (live) {
             changed = true; ctx.goals.disarm(live);
-            await handle.dispose();
+            await disposeOwned(p.sessionId, handle);
             if (owned.get(p.sessionId) === handle) owned.delete(p.sessionId);
           }
           return answer('completed');
@@ -990,7 +1220,7 @@ export function apply(ctx, config) {
         const handle = owned.get(p.sessionId);
         if (!handle) throw new Error('This agent is owned by the native UI; stop it there');
         ctx.goals.disarm(live);
-        await handle.dispose(); owned.delete(p.sessionId);
+        await disposeOwned(p.sessionId, handle); owned.delete(p.sessionId);
         return { stopped: true };
       }
       case 'rename': return api.rename(p);
@@ -999,7 +1229,7 @@ export function apply(ctx, config) {
         if (!parent) throw new Error('Resume the parent session before messaging this agent');
         return ctx.subagents.prompt(p, new AbortController().signal);
       }
-      case 'send': {
+      case 'send': return witnessedSend(p, async () => {
         topLevel(ctx.agents.get(p.sessionId));
         const compact = compactionPublic(p.sessionId);
         if (p.expectedCompactionId && (compact?.request_id !== p.expectedCompactionId || compact.status !== 'completed'))
@@ -1029,7 +1259,7 @@ export function apply(ctx, config) {
           content.push({ type: 'file', receiptId });
         }
         return api.prompt({ ...p, content }, new AbortController().signal);
-      }
+      });
       case 'settings': {
         // A launch applying account defaults binds the exact host generation
         // that created the session. A paused session resumes under the
@@ -1067,6 +1297,11 @@ export function apply(ctx, config) {
         }
         q.settle({ answers: p.answers }); return { accepted: true };
       }
+      // Which conversation's live tool call holds this token; nothing else.
+      case 'call-token': {
+        const conversation = tokens.conversation(p.token);
+        return conversation === undefined ? { known: false } : { known: true, conversation };
+      }
       default: throw new Error('Unsupported HGS native request');
     }
   }
@@ -1089,9 +1324,9 @@ export function apply(ctx, config) {
       (async () => {
         try {
           const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          socket.end(JSON.stringify({ ok: true, value: await execute(request) }) + '\n');
+          socket.end(tokens.redact(JSON.stringify({ ok: true, value: await execute(request) })) + '\n');
         } catch (error) {
-          socket.end(JSON.stringify({ ok: false, error: String(error?.message ?? error), code: error?.code }) + '\n');
+          socket.end(tokens.redact(JSON.stringify({ ok: false, error: String(error?.message ?? error), code: error?.code })) + '\n');
         }
       })();
     });

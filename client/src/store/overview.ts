@@ -105,17 +105,16 @@ export function liveSessions(rows: readonly Session[], computers: Record<Compute
 }
 
 /**
- * The Overview's Main only cards (owner 2026-11-07): a child session drops out
- * only while its chain of live parents ends at a card shown here, which stands
- * for its team. A child whose own request needs the person (not quiet) always
- * stays, and so do a child whose parent is not live here and a parent loop.
- * `parentOf` is the parent a card really nests under (`nestKeyOf`, task 467):
- * a session another one merely launched stays a Main card.
+ * The Overview's Main only cards (owner 2026-11-14): hide a child whose parent
+ * exists in the non-archived catalog, even when that parent is idle, limited
+ * or not shown here. Keep the child's own non-quiet request, Review later,
+ * missing/archived parents and parent loops. With sub-sessions bypasses this.
+ * `parentOf` is the session list's parent lookup (`parentKeyOf`).
  */
-export function mainSessions(live: readonly Session[], parentOf: (s: Session) => string | undefined): Session[] {
-  const byKey = new Map(live.map((s) => [s.key, s]));
-  const liveParent = (s: Session) => { const key = parentOf(s); return key === undefined ? undefined : byKey.get(key); };
-  // Whether a row's chain of live parents ends at a row without one; a loop never
+export function mainSessions(live: readonly Session[], catalog: readonly Session[], parentOf: (s: Session) => string | undefined): Session[] {
+  const byKey = new Map(catalog.filter((s) => s.state !== "archived" && s.state !== "forgotten" && !s.archiveId).map((s) => [s.key, s]));
+  const parent = (s: Session) => { const key = parentOf(s); return key === undefined ? undefined : byKey.get(key); };
+  // Whether a row's chain of catalog parents ends at a row without one; a loop never
   // does. Each walk records its whole path, so the pass stays linear.
   const ends = new Map<string, boolean>();
   const rooted = (s: Session) => {
@@ -126,7 +125,7 @@ export function mainSessions(live: readonly Session[], parentOf: (s: Session) =>
       if (known !== undefined) { result = known; break; }
       if (onPath.has(at.key)) break;
       onPath.add(at.key); path.push(at.key);
-      at = liveParent(at);
+      at = parent(at);
       if (!at) result = true;
     }
     for (const key of path) ends.set(key, result);
@@ -134,7 +133,7 @@ export function mainSessions(live: readonly Session[], parentOf: (s: Session) =>
   };
   // The person's own Review later mark counts even on a quiet child (attention.ts quietCounts).
   const ownMark = (s: Session) => !s.muted && !!s.reviewLater;
-  return live.filter((s) => !liveParent(s) || (attentionNeeded(s) && !quietAttention(s)) || ownMark(s) || !rooted(s));
+  return live.filter((s) => !parent(s) || (attentionNeeded(s) && !quietAttention(s)) || ownMark(s) || !rooted(s));
 }
 
 /**

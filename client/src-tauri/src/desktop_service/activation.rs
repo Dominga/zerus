@@ -189,7 +189,7 @@ fn supported(relay: &relay::Connection, stop: &AtomicBool, charge: Charge) -> bo
         &invocation(&["--help"], vec![], RPC_WAIT),
         &[],
         stop,
-        |command| command.spawn(),
+        |command, input_spawn| input_spawn.spawn(command),
         Arc::new(charge),
     ) else {
         return false;
@@ -238,8 +238,8 @@ fn read(
         ),
         &[],
         stop,
-        move |command| {
-            let child = command.spawn()?;
+        move |command, input_spawn| {
+            let child = input_spawn.spawn(command)?;
             // Binding refusal still returns the ORIGINAL child to its owner.
             let _ = registration.bind_original(&child);
             Ok(child)

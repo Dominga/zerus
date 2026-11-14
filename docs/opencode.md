@@ -44,9 +44,16 @@ For previously unmarked conversations that already have turns, OpenCode 2.2.7
 or newer can receive Zerus's optional coordination hint through a context plugin.
 Zerus supplies it only in the environment of a service it starts, preserving the
 person's config files and plugins. Each primary request checks its own decided
-session binding; native subagents, stale or busy bindings and opted-out sessions
-receive no new context. Restarting a managed service and resuming verifies the
-plugin again. An already-running service without it is left running and reports
+session binding; native subagents, stale bindings and opted-out sessions receive
+no new context. Temporary writer contention is re-observed inside one 500 ms
+helper budget, within the plugin's unchanged 750 ms callback timeout. Each
+attempt drops partial locks before waiting and reads the binding and all
+identity evidence only after acquiring both locks. Missing or unreadable locks
+and exhausted contention omit the hint; they never replay a prompt. Restarting
+a managed service and resuming verifies the plugin again. Cold activation gets one two-second readiness window, including
+its HTTP reads; a slow response may use the remaining window without being cut
+into shorter polls. A late, failed or mismatched plugin stays unavailable.
+An already-running service without it is left running and reports
 the hint as unavailable; Zerus does not restart it or install into global plugin
 folders. Fresh/still-empty conversations retain their existing instruction-entry
 channel, and an entry-backed conversation never receives a second plugin hint.

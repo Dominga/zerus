@@ -84,6 +84,8 @@ fn receipt(verified: &wire::Verified, phase: wire::Phase, drained: bool, code: &
         phase,
         drained,
         code: code.into(),
+        cli_exit: None,
+        refusal: None,
         outcome: (phase == wire::Phase::Recorded).then(|| wire::Outcome {
             request_id: verified.plan.request_id.clone(),
             status: wire::SUBMITTED.into(),
@@ -215,16 +217,14 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_send_is_pending() {
                 .unwrap()
         };
         assert_eq!(checked, Checked::InProgress);
-        answers(
-            &f.0,
-            None,
-            &[receipt(
-                &v,
-                wire::Phase::Unknown,
-                true,
-                "deferred_send_receipt_missing",
-            )],
+        let mut refused = receipt(
+            &v,
+            wire::Phase::Unknown,
+            true,
+            "deferred_send_receipt_missing",
         );
+        refused["cli_exit"] = json!({"code":1,"stderr":"hgs: private send refusal"});
+        answers(&f.0, None, &[refused]);
         let checked = {
             let (service, plan) = (service.clone(), v.plan.clone());
             tauri::async_runtime::spawn_blocking(move || check(Some(service), &plan))
@@ -233,7 +233,9 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_send_is_pending() {
         };
         assert_eq!(
             checked,
-            Checked::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into()))
+            Checked::Settled(SendAnswer::Unconfirmed(format!(
+                "{UNCONFIRMED}\nhgs send (1): hgs: private send refusal"
+            )))
         );
         assert_eq!(
             count(&f.0, "deferred_send"),

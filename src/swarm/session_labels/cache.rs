@@ -474,6 +474,9 @@ mod tests {
             )
             .unwrap();
         store.session_ids.insert("local".into(), node.into());
+        super::super::super::session_membership_peers::observed(
+            &config.dir.join("swarm"), &store.data.peers, "local", node, true,
+        ).unwrap();
         store.save().unwrap();
         drop(store);
         node.into()

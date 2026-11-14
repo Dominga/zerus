@@ -8,6 +8,7 @@ recorded. No global installation, old lock fallback or native version probe.
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -101,19 +102,19 @@ def json_new(path, value, end=None):
     sync_directory(path.parent, end)
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError('Official npm discovery must not redirect')
+discovery_spec = importlib.util.spec_from_file_location(
+    'zerus_native_discovery', Path(__file__).with_name('native_discovery.py'))
+discovery = importlib.util.module_from_spec(discovery_spec)
+discovery_spec.loader.exec_module(discovery)
+
+NoRedirect = discovery.NoRedirect
 
 
 def discover(end):
     before(end)
-    request = urllib.request.Request(LATEST, headers={'Accept': 'application/json', 'User-Agent': 'Zerus-DeepSeek-CI'})
-    with urllib.request.build_opener(NoRedirect).open(request, timeout=min(30, end - time.monotonic())) as response:
-        before(end)
-        raw = read_bytes(response, MAX_METADATA, end)
+    raw, _ = discovery.fetch_metadata(LATEST, MAX_METADATA, policy='no-redirect',
+                                      deadline=end, stage='official DeepSeek latest')
     before(end)
-    require(len(raw) <= MAX_METADATA, 'Latest npm metadata exceeds its byte bound')
     return raw
 
 

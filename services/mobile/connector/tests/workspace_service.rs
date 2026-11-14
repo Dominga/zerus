@@ -54,6 +54,12 @@ elif a[1]=='start':
    durable(intent,{'pending':False,'outcome':'reaped-after-error','pid':p.pid})
   raise
 elif a[1]=='show':
+ if q.get('pause_started_show') and q.get('starts',0)>0:
+  (r/'ack-show-ready').write_text('ready')
+  end=time.monotonic()+8
+  while not (r/'ack-show-release').exists():
+   if time.monotonic()>end:raise RuntimeError('synthetic acknowledgement barrier timed out')
+   time.sleep(.01)
  if q.get('show_delay'):time.sleep(q['show_delay'])
  q['shows']=q.get('shows',0)+1;s.write_text(json.dumps(q))
  if q.get('refuse_on_show')==q['shows']:q.setdefault('properties',{})['ConsistsOf']='synthetic-native.scope';s.write_text(json.dumps(q))
@@ -158,6 +164,8 @@ impl Fixture {
             std::env::var_os("ZERUS_WORKSPACE_SERVICE_FIXTURE")
                 .expect("Pass the exact normal Cargo example artifact"),
         );
+        assert!(std::fs::metadata(&source).unwrap().len() <= 64 * 1024 * 1024,
+            "Build the private Cargo example with -C strip=debuginfo; oversized-image refusal is not causal RED");
         let old = r.join("old/zerus-mobile-connector");
         let new = r.join("new/zerus-mobile-connector");
         std::fs::copy(&source, &old).unwrap();
@@ -207,6 +215,7 @@ impl Fixture {
             binary: self.new.clone(),
             dropin: self.dropin.clone(),
             cgroup: self.path("cgroup"),
+            acknowledgement_waiting: None,
         }
     }
     async fn drain(&self) -> Option<Value> {
@@ -1797,4 +1806,158 @@ async fn retired_switch_recovers_published_destination_from_exact_archived_histo
             .count(),
         1
     );
+}
+
+async fn contended_start(
+    f: &Fixture,
+    revision: &str,
+    change: &str,
+) -> (
+    zerus_mobile_connector::error::Result<Option<Value>>,
+    Vec<u8>,
+) {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let waiting = Arc::new(AtomicBool::new(false));
+    let mut paths = f.paths();
+    paths.acknowledgement_waiting = Some(waiting.clone());
+    f.mutate(|v| v["pause_started_show"] = json!(true));
+    let (cfg, _) = workspace_cli::read_config(&f.config).unwrap();
+    let state = PathBuf::from(cfg["state_dir"].as_str().unwrap());
+    let completed = std::cell::Cell::new(false);
+    let retained = std::cell::RefCell::new(Vec::new());
+    let start = async {
+        let result = service::test_scope(
+            paths,
+            service::test_start(&f.config, &f.private, NODE, revision),
+        )
+        .await;
+        completed.set(true);
+        result
+    };
+    let contend = async {
+        until(|| f.path("ack-show-ready").exists() || completed.get()).await;
+        assert!(
+            f.path("ack-show-ready").exists(),
+            "Start returned before the acknowledgement barrier"
+        );
+        until(|| {
+            zerus_mobile_connector::workspace_lifecycle::status(&state)
+                .is_ok_and(|status| status["running"] == true)
+        })
+        .await;
+        let held = Store::lock(&f.private, false).unwrap();
+        std::fs::write(f.path("ack-show-release"), b"release").unwrap();
+        until(|| waiting.load(Ordering::SeqCst) || completed.get()).await;
+        assert!(
+            !completed.get(),
+            "acknowledgement returned while the Store was held"
+        );
+        assert!(
+            value(&f.private.join("legacy-service-handover.json"))["details"]["managed"].is_null()
+        );
+        match change {
+            "none" => {}
+            "record" => {
+                let mut record = value(&f.private.join("legacy-service-handover.json"));
+                record["reason"] = json!("synthetic concurrent change");
+                let expected = Store::revision(
+                    held.read("legacy-service-handover.json")
+                        .unwrap()
+                        .as_deref(),
+                );
+                held.replace(
+                    "legacy-service-handover.json",
+                    &expected,
+                    &serde_json::to_vec(&record).unwrap(),
+                )
+                .unwrap();
+            }
+            "config" => {
+                let (mut cfg, expected) = workspace_cli::read_config(&f.config).unwrap();
+                cfg["fixture_changed"] = json!(true);
+                workspace_cli::replace_config(&f.config, &expected, &cfg).unwrap();
+            }
+            "generation" => {
+                let path = state.join("workspace-control.json");
+                let mut control = value(&path);
+                control["generation"] = json!("0".repeat(32));
+                save(&path, &control);
+            }
+            "invocation" => f.mutate(|v| v["invocation"] = json!("synthetic-changed")),
+            _ => panic!("unknown private fixture case"),
+        }
+        *retained.borrow_mut() = held.read("legacy-service-handover.json").unwrap().unwrap();
+        drop(held);
+    };
+    let (result, ()) = futures_util::future::join(start, contend).await;
+    assert_eq!(value(&f.path("manager.json"))["starts"], 1);
+    (result, retained.into_inner())
+}
+async fn activated_fixture() -> (Fixture, String) {
+    let mut f = Fixture::new().await;
+    f.drain().await;
+    f.finish().await;
+    assert!(f.drain().await.is_none());
+    let revision = f.activate();
+    (f, revision)
+}
+#[tokio::test(flavor = "current_thread")]
+async fn successful_start_acknowledgement_waits_for_temporary_store_contention() {
+    let (f, revision) = activated_fixture().await;
+    let (result, _) = contended_start(&f, &revision, "none").await;
+    assert!(result.is_ok(), "acknowledgement refused after verified launch and temporary private Store contention: {result:?}");
+    let status = result.unwrap().unwrap();
+    assert_eq!(
+        value(&f.private.join("legacy-service-handover.json"))["details"]["managed"]["generation"],
+        status["generation"]
+    );
+    assert_eq!(
+        f.start(NODE, &revision).await["generation"],
+        status["generation"]
+    );
+    assert_eq!(value(&f.path("manager.json"))["starts"], 1);
+    f.stop_new().await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn acknowledgement_wait_keeps_record_and_config_cas() {
+    for change in ["record", "config"] {
+        let (f, revision) = activated_fixture().await;
+        let (result, retained) = contended_start(&f, &revision, change).await;
+        assert!(result.is_err(), "{change}");
+        assert_eq!(
+            std::fs::read(f.private.join("legacy-service-handover.json")).unwrap(),
+            retained
+        );
+        f.stop_new().await;
+        assert!(service::test_scope(
+            f.paths(),
+            service::test_start(&f.config, &f.private, NODE, &revision)
+        )
+        .await
+        .is_err());
+        assert_eq!(value(&f.path("manager.json"))["starts"], 1);
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn acknowledgement_wait_rechecks_native_generation_and_service_identity() {
+    for change in ["generation", "invocation"] {
+        let (f, revision) = activated_fixture().await;
+        let (result, retained) = contended_start(&f, &revision, change).await;
+        assert!(result.is_err(), "{change}");
+        assert_eq!(
+            std::fs::read(f.private.join("legacy-service-handover.json")).unwrap(),
+            retained
+        );
+        f.stop_new().await;
+        assert!(service::test_scope(
+            f.paths(),
+            service::test_start(&f.config, &f.private, NODE, &revision)
+        )
+        .await
+        .is_err());
+        assert_eq!(value(&f.path("manager.json"))["starts"], 1);
+    }
 }

@@ -280,14 +280,19 @@ fn reopen(app: &AppHandle) {
 /// outlives the tray agent whose `aboutToQuit` flushes (`main.cpp:340`,
 /// `:378`), so the socket is removed last, as `QLocalServer::close` does.
 fn exit(app: &AppHandle) {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    crate::watchdog::run_exit(
+        app.try_state::<crate::watchdog::Watchdog>().as_deref(),
+        || exit_after_watchdog(app),
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    exit_after_watchdog(app);
+}
+
+fn exit_after_watchdog(app: &AppHandle) {
     #[cfg(feature = "live")]
     if let Some(native) = app.try_state::<crate::native_ui::runtime::NativeUi>() {
         native.shutdown();
-    }
-    // Quitting is not a hang (`Watchdog::stop`).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
-        dog.stop();
     }
     #[cfg(all(target_os = "linux", feature = "live"))]
     {

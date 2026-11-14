@@ -1,6 +1,8 @@
 //! Bounded control I/O only. No production caller, controller or authority.
 use super::transport::Stream;
 #[cfg(unix)]
+use crate::platform::receive_timeout_result;
+#[cfg(unix)]
 use anyhow::ensure;
 use anyhow::Result;
 #[cfg(unix)]
@@ -96,22 +98,6 @@ impl Until<'_> {
     }
 }
 
-#[cfg(unix)]
-fn receive_timeout_result(result: io::Result<()>, apple: bool) -> io::Result<()> {
-    // The supplied timeout is already valid, nonzero and <=15s. XNU's
-    // sosetoptlock rejects options with EINVAL after both socket directions
-    // shut down. Reading can then drain queued bytes/EOF without blocking.
-    // Keep the read itself and both absolute deadline checks authoritative.
-    if apple
-        && result
-            .as_ref()
-            .is_err_and(|e| e.raw_os_error() == Some(libc::EINVAL))
-    {
-        Ok(())
-    } else {
-        result
-    }
-}
 #[cfg(unix)]
 impl Read for Until<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {

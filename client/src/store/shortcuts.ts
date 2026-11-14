@@ -43,6 +43,8 @@ export const COMMANDS: readonly Command[] = [
   { id: "focus.next", group: trNoop("Session view"), title: trNoop("Next area"), scope: "window" },
   { id: "focus.previous", group: trNoop("Session view"), title: trNoop("Previous area"), scope: "window" },
   { id: "message.send", group: trNoop("Messages"), title: trNoop("Send message"), scope: "composer" },
+  { id: "activity.previousOwn", group: trNoop("Messages"), title: trNoop("Previous message from you"), scope: "window" },
+  { id: "activity.nextOwn", group: trNoop("Messages"), title: trNoop("Next message from you"), scope: "window" },
   { id: "queue.sendNow", group: trNoop("Messages"), title: trNoop("Send queued messages now"), scope: "window" },
   { id: "message.push", group: trNoop("Messages"), title: trNoop("Send and push now"), scope: "composer" },
   { id: "zoom.in", group: trNoop("Content scale"), title: trNoop("Increase content scale"), scope: "window" },
@@ -61,6 +63,7 @@ const COMMON: Record<string, string[]> = {
   "view.refresh": ["Ctrl+R", "F5"], "panel.toggle": ["Ctrl+I"],
   "focus.next": ["F6"], "focus.previous": ["Shift+F6"],
   "message.send": ["Ctrl+Return"], "queue.sendNow": ["Ctrl+Shift+Return"],
+  "activity.previousOwn": ["Ctrl+Alt+Shift+Up"], "activity.nextOwn": ["Ctrl+Alt+Shift+Down"],
   "zoom.in": ["Ctrl+=", "Ctrl++"], "zoom.out": ["Ctrl+-"], "zoom.reset": ["Ctrl+0"],
 };
 

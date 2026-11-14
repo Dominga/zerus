@@ -2,7 +2,7 @@
 //!
 //! The child is this computer's own `hgs` with the plan's exact arguments, in
 //! its own process group. Its stdin is exactly the original's frozen bytes;
-//! its output is drained and discarded within a bound, because only the CLI's
+//! its output is drained, retaining a bounded stderr diagnostic. Only the CLI's
 //! own receipt settles the send. It inherits the effect's close-only custody
 //! lock and, before anything else, marks it close-on-exec ([`adopt_custody`]).
 //! Only that child is ever signalled, and only at the deadline.
@@ -23,8 +23,6 @@ use zerus_client_core::run::custody::InheritedLock;
 
 /// Names the inherited custody descriptor of a deferred send child.
 pub(super) const CUSTODY_FD: &str = "HGS_DEFERRED_SEND_CUSTODY_FD";
-/// The reply kept to bound the drain; its content settles nothing.
-const STDOUT_BYTES: usize = 64 << 10;
 /// This kind's reasons for an Unknown result.
 const CODES: Codes = Codes {
     unobserved: "deferred_send_unobserved",
@@ -49,7 +47,7 @@ pub(crate) fn adopt_custody() -> Result<(), String> {
 pub(in crate::desktop) enum Ended {
     /// It read all of its stdin and exited with `code`, and both output pipes
     /// ended, within the deadline.
-    Exited { code: i32 },
+    Exited { code: i32, stderr: String },
     /// It never started: refused before any child existed. Nothing ran.
     NotStarted,
     /// Its end is unknown, for the named reason.
@@ -74,10 +72,7 @@ pub(super) fn run(
             stdin: Stdin::Bytes(input),
             unwritten: "deferred_send_input_unwritten",
         },
-        output: Output::Stdout {
-            bytes: STDOUT_BYTES,
-            too_large: "deferred_send_reply_too_large",
-        },
+        output: Output::StderrPrefix(zerus_client_core::desktop::deferred_send::STDERR_BYTES),
         codes: CODES,
         retain: Some(Retain {
             guard: resources,
@@ -85,7 +80,10 @@ pub(super) fn run(
         }),
     };
     match original_child::run(program, args, spec, custody, deadline, final_check) {
-        original_child::Ended::Exited { code, .. } => Ended::Exited { code },
+        original_child::Ended::Exited { code, output } => Ended::Exited {
+            code,
+            stderr: String::from_utf8_lossy(&output).into_owned(),
+        },
         original_child::Ended::NotStarted => Ended::NotStarted,
         original_child::Ended::Unknown(code) => Ended::Unknown(code),
     }

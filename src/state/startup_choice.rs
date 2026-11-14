@@ -4,9 +4,9 @@
 //! still shows the wait: the visible panel verbatim, answered in Terminal.
 //! Zerus never sends keys to it.
 //!
-//! One reviewed chooser stays here on purpose: the sandbox setup that Codex
-//! 0.162 on Windows shows after folder trust. Zerus names it but never answers
-//! it (`codex_sandbox`).
+//! Sandbox setup keeps this read-only fallback when its dedicated parser
+//! cannot verify the complete native frame. This generic path names the
+//! legacy prompt (`codex_sandbox`) and never answers it.
 use super::*;
 use sha2::{Digest, Sha256};
 

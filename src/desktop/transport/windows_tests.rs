@@ -119,12 +119,12 @@ fn outgoing_server_and_incoming_client_identities_use_the_correct_pipe_end() {
         &invocation,
         &refs,
         &AtomicBool::new(false),
-        move |command| {
-            let child = command
+        move |command, input_spawn| {
+            command
                 .env_clear()
                 .envs(child_env)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()?;
+                .creation_flags(CREATE_NO_WINDOW);
+            let child = input_spawn.spawn(command)?;
             let _ = spawned.send(child.id());
             Ok(child)
         },

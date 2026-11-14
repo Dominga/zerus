@@ -2,6 +2,8 @@
 """Message transport tests. Private tmux socket + scripted raw-terminal agent only."""
 import base64
 import hashlib
+import hook_caller_fixtures
+import codex_refusal_artifacts
 import json
 import os
 from pathlib import Path
@@ -41,6 +43,9 @@ original = termios.tcgetattr(fd)
 tty.setraw(fd)
 os.write(1, b'\x1b[?2004h\x1b[2J\x1b[H' + '\u203a '.encode())
 def screen(*args):
+    if (root / 'unreadable-environment').exists() and sys.platform.startswith('linux'):
+        import ctypes
+        assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
     os.write(1, (root / 'screen').read_bytes())
 signal.signal(signal.SIGUSR1, screen)
 children = []
@@ -134,6 +139,9 @@ class InputTransport(unittest.TestCase):
                         PATH=str(self.bin) + ":" + os.environ["PATH"])
         for variable in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION", "HGS_EXECUTABLE"):
             self.env.pop(variable, None)
+        self.env.pop('NO_COLOR', None)
+        if self._testMethodName.startswith('test_no_color_'):
+            self.env['NO_COLOR'] = '1'
         (self.bin / "hgs").symlink_to(HGS)
         self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
         (self.root / "agent.py").write_text(FAKE_AGENT)
@@ -158,6 +166,11 @@ class InputTransport(unittest.TestCase):
         self.write_record()
 
     def tearDown(self):
+        hook_error = None
+        if path := getattr(self, "native_hook_socket", None):
+            import hook_caller_fixtures
+            try: hook_caller_fixtures.stop(path)
+            except (OSError, TimeoutError) as error: hook_error = error
         pids = {pid for pid in self.tmux('list-panes', '-a', '-F', '#{pane_pid}', check=False).splitlines()
                 if pid.isdigit()}
         self.tmux("kill-server", check=False)
@@ -174,7 +187,9 @@ class InputTransport(unittest.TestCase):
                 break
             time.sleep(.02)
         self.assertFalse(pids, 'owned fixture panes survived tmux shutdown')
+        codex_refusal_artifacts.preserve(self.root, self.id(), REPO / "artifacts/test-results/python")
         self.temp.cleanup()
+        if hook_error: raise hook_error
 
     def script(self, name, value):
         path = self.bin / name
@@ -185,6 +200,7 @@ class InputTransport(unittest.TestCase):
         self.record_path.write_text(json.dumps(self.record))
 
     def tmux(self, *args, check=True):
+        assert self.socket.parent.is_dir(), "the private tmux socket directory is gone"
         result = subprocess.run([str(self.bin / "tmux"), *args], env=self.env,
                                 capture_output=True, text=True, timeout=5)
         if check: self.assertEqual(result.returncode, 0, result.stderr)
@@ -833,6 +849,22 @@ while True: signal.pause()
         self.assertIn("input mode", self.send(success=False))
         self.assertEqual(self.received(), b"")
 
+    def test_public_preinput_refusal_is_durable_and_an_exact_retry_rechecks_the_composer(self):
+        self.screen("\x1b[2J\x1b[H› existing draft", "16:0")
+        request = self.payload(text="type only after the draft is gone")
+        self.assertIn("draft", self.send(request, success=False))
+        self.assert_refusal(request)
+        path = self.state / "input_receipts" / (request["request_id"] + ".json")
+        self.assertIn("draft", self.send(request, success=False))
+        self.assert_refusal(request)
+        self.assertEqual(self.received(), b"")
+        self.screen("\x1b[2J\x1b[H› \x1b[?2004h", "2:0")
+        self.assertEqual(self.send(request)["status"], "submitted")
+        receipt = json.loads(path.read_bytes())
+        self.assertEqual(receipt["status"], "submitted")
+        self.assertNotIn("refusal_schema", receipt)
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+
     # zerus-ucck P3b: input goes to the session's own terminal, named apart
     # from its label as a resume beside an untracked terminal names it; the
     # input claim checks that terminal's name, never the label's.
@@ -844,6 +876,21 @@ while True: signal.pause()
         self.screen("\x1b[2J\x1b[H› \x1b[?2004h", "2:0")
         self.send()
         self.wait_for(lambda: self.received().endswith(b"\r"))
+
+    def test_a_refusal_retry_retires_its_negative_before_pending_settings(self):
+        self.screen("\x1b[2J\x1b[H› existing draft", "16:0")
+        request = self.payload()
+        self.send(request, success=False)
+        self.assert_refusal(request)
+        self.screen("\x1b[2J\x1b[H› \x1b[?2004h", "2:0")
+        self.record["pending_settings"] = dict(run_id="other-run", conversation_id=self.conversation_id)
+        self.write_record()
+        self.assertIn("pending settings belong to a different session", self.send(request, success=False))
+        receipt = self.receipt_file(request)
+        self.assertEqual(receipt["status"], "preparing")
+        self.assertNotIn("refusal_schema", receipt)
+        self.assertIn("delivery uncertain", self.send(request, success=False))
+        self.assertEqual(self.received(), b"")
 
     def test_empty_claude_prompt_is_supported(self):
         self.record["agent"] = "claude"
@@ -866,6 +913,30 @@ while True: signal.pause()
 
     def receipt_file(self, payload):
         return json.loads((self.state / "input_receipts" / (payload["request_id"] + ".json")).read_text())
+
+    def assert_refusal(self, payload, reason=None):
+        path = self.state / "input_receipts" / (payload["request_id"] + ".json")
+        self.assertTrue(path.is_file(), "the same public send must retain its pre-input refusal")
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), 8192)
+        value = json.loads(raw)
+        self.assertEqual(value["refusal_schema"], 1)
+        self.assertEqual(value["status"], "refused_before_input")
+        self.assertEqual(value["request_id"], payload["request_id"])
+        self.assertEqual(value["name"], self.name)
+        self.assertEqual(value["run_id"], payload["expected_run_id"])
+        self.assertEqual(value["conversation_id"], payload["expected_conversation_id"])
+        self.assertEqual(value["digest"], hashlib.sha256(json.dumps(payload).encode()).hexdigest())
+        self.assertEqual(value["transport"], "terminal")
+        self.assertTrue(value["reason"])
+        self.assertLessEqual(len(value["reason"].encode()), 1024)
+        self.assertNotIn("\n", value["reason"])
+        self.assertNotIn("text", value)
+        self.assertNotIn("attachments", value)
+        if reason is not None:
+            self.assertEqual(value["reason"], reason)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
     def claude_rows(self):
         path = Path(self.record["transcript"])
@@ -961,10 +1032,12 @@ while True: signal.pause()
             fcntl.flock(file, fcntl.LOCK_UN)
             return True
 
-    def claude_hook(self, kind):
-        event = dict(hook_event_name=kind, session_id=self.conversation_id)
-        result = subprocess.run([str(HGS), "__state", "hook"], env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id),
-                                input=json.dumps(event), capture_output=True, text=True, timeout=10)
+    def claude_hook(self, kind, **fields):
+        event = dict(hook_event_name=kind, session_id=self.conversation_id, **fields)
+        # The controller is a sibling of the pinned agent. Have that actual
+        # agent spawn the hook; copied routing markers alone grant no authority.
+        result = hook_caller_fixtures.run(self, event,
+            dict(self.env, HGS_TEST_BIN=str(HGS), HGS_SESSION=self.name, HGS_RUN_ID=self.run_id))
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def terminal_request(self, **values):
@@ -1476,7 +1549,7 @@ os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
                 request = self.payload(text='private attempted send')
                 self.assertIn('agent busy:', self.send(request, success=False))
                 self.assertEqual(self.received(), b'')
-                self.assertFalse((self.state / 'input_receipts' / (request['request_id'] + '.json')).exists())
+                self.assert_refusal(request)
                 path = self.state / 'input_diagnostics' / (agent + '.json')
                 raw = path.read_bytes()
                 self.assertLessEqual(len(raw), 16 * 1024)
@@ -1508,6 +1581,28 @@ os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
         sample = json.loads((self.state / 'input_diagnostics/codex.json').read_text())
         self.assertFalse(sample['cursor_stable'])
         self.assertEqual(sample['cursor_row'], '')
+
+    def test_no_color_refusal_names_the_verified_agents_environment_and_keeps_drafts(self):
+        self.record.update(agent='claude', activity='busy', phase='tool', active_tools={'one': {}})
+        self.write_record()
+        reason = 'This agent was started with NO_COLOR, so Zerus cannot tell a queued message from a draft. Restart the session to fix sending.'
+        for text in ['Press up to edit queued messages', 'keep my real draft', 'Press up to edit queued messages\r\n  real continuation']:
+            self.screen('\x1b[2J\x1b[H' + '─' * 40 + '\r\n❯\u00a0' + text + '\r\n' + '─' * 40 + '\x1b[2;3H', '2:1')
+            request = self.payload()
+            self.assertIn(reason, self.send(request, success=False))
+            self.assertEqual(self.received(), b'')
+            self.assert_refusal(request, reason)
+
+    @unittest.skipUnless(os.sys.platform.startswith('linux'), 'Linux native environment permissions')
+    def test_no_color_unreadable_environment_keeps_the_generic_refusal(self):
+        self.record.update(agent='claude', activity='busy', phase='tool')
+        self.write_record()
+        (self.root / 'unreadable-environment').touch()
+        self.screen('\x1b[2J\x1b[H' + '─' * 40 + '\r\n❯\u00a0Press up to edit queued messages\r\n' + '─' * 40 + '\x1b[2;3H', '2:1')
+        refused = self.send(success=False)
+        self.assertIn('agent busy:', refused)
+        self.assertNotIn('This agent was started with NO_COLOR', refused)
+        self.assertEqual(self.received(), b'')
 
     def test_working_agent_accepts_next_message_without_interrupting(self):
         self.record.update(activity="busy", phase="tool", active_tools={"one": {}},
@@ -1618,12 +1713,7 @@ os.execv('/bin/sh',['sh','-c',sys.argv[-1]])
             self.write_record()
             self.claude_composer()
             self.screen('\x1b[2J\x1b[H❯ ', '2:0')
-            event = dict(hook_event_name='StopFailure', session_id=self.conversation_id,
-                         error=message, error_type='model_capacity')
-            hook = subprocess.run([str(HGS), '__state', 'hook'],
-                                  env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id),
-                                  input=json.dumps(event), capture_output=True, text=True, timeout=10)
-            self.assertEqual(hook.returncode, 0, hook.stderr)
+            self.claude_hook('StopFailure', error=message, error_type='model_capacity')
             self.record = json.loads(self.record_path.read_text())
 
     def interrupted_turn(self):

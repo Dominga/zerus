@@ -189,17 +189,15 @@ impl Delays {
                 // A partial reservation drops all its claims before returning.
                 entry.insert(match &original {
                     Some(claim) => claim.clone(),
-                    None => match actions.reserve_end(&c.target) {
-                        Some(claim) => claim,
+                    None => match actions.reserve_end_for(&c.target, &c.action) {
+                        Ok(claim) => claim,
                         // An undo window whose deadline passed long ago and
                         // whose frontend never took it would otherwise keep
                         // this lane for the app's lifetime (zerus-ex66o).
-                        None if self.release_abandoned(&mut model, &c.target, Instant::now()) => {
-                            actions
-                                .reserve_end(&c.target)
-                                .ok_or(crate::actions::END_BUSY)?
+                        Err(_) if self.release_abandoned(&mut model, &c.target, Instant::now()) => {
+                            actions.reserve_end_for(&c.target, &c.action)?
                         }
-                        None => return Err(crate::actions::END_BUSY.into()),
+                        Err(refusal) => return Err(refusal),
                     },
                 });
             }
@@ -232,27 +230,34 @@ impl Delays {
         Ok(())
     }
 
-    /// Releases the exact reservation of an undo window whose deadline passed
-    /// beyond [`STALE_GRACE`] and whose frontend never took it; the group's
-    /// claim would otherwise block every later end for its sessions.
+    /// Release only the contended session's reservation after an abandoned
+    /// deadline. Keep other members at their original reference indices and
+    /// deadline; a late take of a replaced member reports STATE_CHANGED.
     fn release_abandoned(&self, model: &mut Model, target: &Target, now: Instant) -> bool {
-        let abandoned = model
-            .groups
-            .iter()
-            .find(|(_, group)| {
-                now.saturating_duration_since(group.created)
-                    > zerus_client_core::end_action::UNDO_WINDOW + STALE_GRACE
-                    && group.members.iter().any(|member| {
-                        member.captured.target.computer == target.computer
-                            && member.captured.target.name == target.name
-                    })
-            })
-            .map(|(id, _)| id.clone());
-        let Some(id) = abandoned else {
+        let key = (target.computer.clone(), target.name.clone());
+        let Some((id, group)) = model.groups.iter_mut().find(|(_, group)| {
+            now.saturating_duration_since(group.created)
+                > zerus_client_core::end_action::UNDO_WINDOW + STALE_GRACE
+                && group.claims.contains_key(&key)
+        }) else {
             return false;
         };
-        if let Some(mut group) = model.remove(&id) {
-            group.window.cancel();
+        for member in &mut group.members {
+            if !member.used
+                && member.captured.target.computer == target.computer
+                && member.captured.target.name == target.name
+            {
+                member.used = true;
+                group.remaining -= 1;
+            }
+        }
+        // Same-name archives share this claim. Retire every untaken member
+        // of that session together; a previously taken call still owns its
+        // own Arc and cannot be made idle by removing this group reference.
+        group.claims.remove(&key);
+        if group.remaining == 0 {
+            let id = id.clone();
+            model.remove(&id);
         }
         self.0.changed.notify_all();
         true

@@ -2024,7 +2024,21 @@ fn agent_environment(pid: u32) -> Result<bool> {
         "frontend environment unavailable"
     );
     bytes.truncate(size);
-    let argc = i32::from_ne_bytes(bytes[..4].try_into()?);
+    procargs_agent_environment(&bytes)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn procargs_agent_environment(bytes: &[u8]) -> Result<bool> {
+    // This ancestry check rejects positive agent evidence. Unavailable data
+    // supplies none; the caller still needs its independent native authority
+    // proof. In particular, restricted shells and signed frontends are valid.
+    Ok(procargs_environment(bytes)?.is_some_and(marked))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn procargs_environment(bytes: &[u8]) -> Result<Option<&[u8]>> {
+    let count = bytes.get(..4).context("frontend environment unavailable")?;
+    let argc = i32::from_ne_bytes(count.try_into()?);
     ensure!((1..=4096).contains(&argc), "frontend argv unavailable");
     let mut rest = &bytes[4..];
     rest = &rest[rest
@@ -2038,8 +2052,16 @@ fn agent_environment(pid: u32) -> Result<bool> {
     for _ in 0..argc {
         rest = &rest[rest.iter().position(|b| *b == 0).context("invalid argv")? + 1..];
     }
-    Ok(marked(rest))
+    // A readable empty environment still leaves the kernel's own strings.
+    // Missing or NUL-only data is unavailable, not a readable empty value.
+    if rest.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    Ok(Some(rest))
 }
+
+#[cfg(test)]
+mod procargs_tests;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn same_user(_: u32) -> Result<bool> {

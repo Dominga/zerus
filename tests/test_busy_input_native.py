@@ -4,6 +4,7 @@ import datetime
 import http.server
 import json
 import struct
+import subprocess
 import zlib
 import os
 import re
@@ -193,9 +194,18 @@ class NativeBusyCodex(codex.NativeCodexInput):
 @unittest.skipUnless(claude.native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for the private busy Claude contract')
 class NativeBusyClaude(claude.NativeClaudeInput):
     native_permission_mode = 'bypassPermissions'
+    assert_refusal = claude.fixtures.InputTransport.assert_refusal
+    input_events = claude.native.NativeClaudeQuestions.events
     test_trailing_backslash_starts_one_turn_with_the_exact_message = None
     test_multiline_message_ending_in_backslashes_is_preserved = None
     test_leading_absolute_path_is_literal_message_text = None
+
+    def setUp(self):
+        if self._testMethodName.startswith('test_no_color_'):
+            self.native_env = (*self.native_env, 'NO_COLOR=1')
+        super().setUp()
+        if self._testMethodName.startswith(('test_busy_long_hgs_reports', 'test_no_color_')):
+            claude.native.NativeClaudeQuestions.enable_gutter_capture(self, False)
 
     def queued_messages(self):
         # Claude steers queued inputs into the original Bash tool result, not
@@ -255,6 +265,87 @@ class NativeBusyClaude(claude.NativeClaudeInput):
 
     def test_busy_tool_queue_80x24(self):
         self.test_busy_tool_queue_preserves_drafts_and_accepts_exactly_once()
+
+    def test_busy_long_hgs_reports_preserve_a_real_draft_then_accept_the_persons_send(self):
+        release = self.root / 'tool-release'
+        self.busy_ready = True
+        reports = [f'<zerus-message from="codex/fixture/child-{n}">\n' +
+                   '\n'.join(f'Report {n}, line {line}: ' + 'long private fixture report ' * 5 for line in range(12)) +
+                   '\n</zerus-message>' for n in range(3)]
+        try:
+            terminal_send(self, PROMPT)
+            self.wait_for((self.root / 'tool-started').exists)
+            self.record.update(activity='busy', phase='tool', active_tools={'toolu_busy': {'tool_name': 'Bash'}})
+            self.write_record()
+            for report in reports:
+                payload = self.payload(text=report)
+                receipt = self.send(payload)
+                self.assertEqual(receipt['status'], 'submitted')
+                self.assertEqual(self.send(payload), receipt)
+            self.wait_for(lambda: 'Press up to edit queued messages' in self.screen())
+            draft = 'keep the persons real draft'
+            self.tmux('send-keys', '-t', self.pane, '-l', draft)
+            self.wait_for(lambda: draft in self.screen())
+            refused = self.payload(text='must not be typed')
+            offered = self.input_events()
+            self.assertIn('agent busy:', self.send(refused, success=False))
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(refused)
+            self.assertIn(draft, self.screen())
+            self.tmux('send-keys', '-t', self.pane, 'C-u')
+            self.wait_for(lambda: draft not in self.screen())
+            payload = self.payload(text=LAST)
+            receipt = self.send(payload)
+            self.assertEqual(receipt['status'], 'submitted')
+            self.assertEqual(self.send(payload), receipt)
+            release.touch()
+            self.wait_for(lambda: LAST in self.queued_messages())
+            self.assertEqual(self.queued_messages(), [*reports, LAST])
+            self.assertEqual(self.accepted('must not be typed'), 0)
+        finally:
+            release.touch()
+
+    def test_busy_long_hgs_reports_80x24(self):
+        self.test_busy_long_hgs_reports_preserve_a_real_draft_then_accept_the_persons_send()
+
+    def test_no_color_short_terminal_queue_explains_the_refusal_and_never_types_into_a_draft(self):
+        release = self.root / 'tool-release'
+        self.busy_ready = True
+        reason = 'This agent was started with NO_COLOR, so Zerus cannot tell a queued message from a draft. Restart the session to fix sending.'
+        try:
+            terminal_send(self, PROMPT)
+            self.wait_for((self.root / 'tool-started').exists)
+            self.record.update(activity='busy', phase='tool', active_tools={'toolu_busy': {'tool_name': 'Bash'}})
+            self.write_record()
+            terminal_send(self, 'Short terminal queue')
+            hint = 'Press up to edit queued messages'
+            self.wait_for(lambda: hint in self.screen())
+            payload = self.payload(text='must not be typed')
+            offered = self.input_events()
+            self.assertIn(reason, self.send(payload, success=False))
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(payload)
+            # The same hint as a real draft with its caret at Home must refuse too.
+            self.tmux('send-keys', '-t', self.pane, '-l', hint)
+            self.wait_for(lambda: self.tmux('display-message', '-p', '-t', self.pane, '#{cursor_x}').strip() == str(2 + len(hint)))
+            self.tmux('send-keys', '-t', self.pane, 'C-a')
+            self.wait_for(lambda: self.tmux('display-message', '-p', '-t', self.pane, '#{cursor_x}').strip() == '2')
+            payload = self.payload(text='also must not be typed')
+            offered = self.input_events()
+            self.assertIn(reason, self.send(payload, success=False))
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(payload)
+            self.assertIn(hint, self.screen())
+            release.touch()
+            self.wait_for(lambda: 'Short terminal queue' in self.queued_messages())
+            self.assertEqual(self.queued_messages(), ['Short terminal queue'])
+            self.assertEqual(self.accepted('must not be typed'), 0)
+            self.assertEqual(self.accepted('also must not be typed'), 0)
+        finally:
+            release.touch()
+
+    def test_no_color_short_terminal_queue_80x24(self):
+        self.test_no_color_short_terminal_queue_explains_the_refusal_and_never_types_into_a_draft()
 
     def enqueued(self, content):
         return [r for r in self.rows() if r.get('type') == 'queue-operation'
@@ -375,7 +466,171 @@ class NativeHookedImagesClaude(NativeBusyClaude):
         hook = shlex.quote(str(claude.fixtures.HGS)) + ' __state hook'
         settings.setdefault('hooks', {})['UserPromptSubmit'] = [
             {'hooks': [{'type': 'command', 'command': hook, 'timeout': 60}]}]
+        if '_after_turn' in self._testMethodName:
+            settings['hooks']['Stop'] = [{'hooks': [{'type': 'command', 'command': hook, 'timeout': 60}]}]
         return settings
+
+    def pending_images(self, *, after_turn=False, attached=False):
+        import native_effort_id as identity
+        if after_turn:
+            terminal_send(self, 'Complete the private preceding turn.')
+            self.wait_for(lambda: self.accepted('Complete the private preceding turn.'))
+            self.wait_for(lambda: self.composer() in ('❯', '❯\xa0'))
+            self.wait_for(lambda: json.loads(self.record_path.read_bytes()).get('activity') == 'idle')
+            current = json.loads(self.record_path.read_bytes())
+            self.assertEqual((current['run_id'], current['pid']), (self.run_id, self.record['pid']))
+            self.record = current
+        defaults = self.root / '.claude/settings.json'
+        before_defaults = defaults.read_bytes()
+        text, attachments = image_message(self.root)
+        text = text.replace('Screenshots:', '\n'.join('Extra fixture detail %d: preserve this entire line in order.' % n for n in range(10)) + '\nScreenshots:')
+        self.assertGreaterEqual(len(text), 3072)
+        self.assertLessEqual(len(text), 4096)
+        record, path, _ = identity.moved_record(self, self.name, self.record, existing_machine=True)
+        self.record, self.record_path = record, path
+        attempts = identity.key_log(self)
+        calls = len(self.native_requests)
+        receipt = identity.pending_then_message(self, self.name, record, path,
+            'claude-fable-5-2', 'xhigh', text, attempts, attachments[:1] if attached else ())
+        self.assertEqual((receipt['status'], receipt['native']), ('submitted', 'transcript'))
+        rows = self.carrying(self.rows())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sum(b.get('type') == 'image' for b in rows[0]['message']['content']), 2)
+        self.assertEqual(len(self.native_requests) - calls, 1, self.native_requests[calls:])
+        current = json.loads(path.read_bytes())
+        self.assertEqual(current['input_pending_request'], receipt['request_id'])
+        self.assertGreater(current['input_seen_at'], current['input_pending_at'])
+        self.assertNotIn('input_typing', current)
+        self.assertEqual(defaults.read_bytes(), before_defaults)
+
+    def test_pending_settings_then_message_settles_two_image_paths_when_idle(self):
+        self.pending_images()
+
+    def test_pending_settings_then_message_settles_two_image_paths_after_turn(self):
+        self.pending_images(after_turn=True)
+
+    def test_pending_settings_then_message_settles_two_image_paths_with_attachments(self):
+        self.pending_images(attached=True)
+
+    def test_pending_settings_then_message_swallowed_enter_keeps_input_and_manual_clear(self):
+        import fcntl
+        import hashlib
+        import hook_caller_fixtures
+        import native_effort_id as identity
+        import test_clear_input_native as clearing
+        import uuid
+        record, path, _ = identity.moved_record(self, self.name, self.record, existing_machine=True)
+        self.record, self.record_path = record, path
+        attempts = identity.key_log(self)
+        pending = str(uuid.uuid4())
+        record['pending_settings'] = dict(request_id=pending, model='claude-fable-5-2', effort='xhigh',
+            run_id=self.run_id, conversation_id=self.conversation_id,
+            receipt_name=self.name, receipt_run_id=self.run_id)
+        path.write_text(json.dumps(record))
+        scheduled = self.state / 'settings_receipts' / (pending + '.json')
+        scheduled.parent.mkdir(mode=0o700, exist_ok=True)
+        scheduled.write_text(json.dumps(dict(request_id=pending, status='scheduled', name=self.name,
+            run_id=self.run_id, conversation_id=self.conversation_id,
+            model='claude-fable-5-2', effort='xhigh', scope='session')))
+        scheduled.chmod(0o600)
+        text, _ = image_message(self.root)
+        payload = self.payload(text=text)
+        raw = json.dumps(payload)
+        receipt_path = self.state / 'input_receipts' / (payload['request_id'] + '.json')
+        self.env['ZERUS_PENDING_SEND_RECEIPT'] = str(receipt_path)
+        swallowed = self.root / 'swallowed-message-enter'
+        observer = self.root / 'native-effort-tmux.py'
+        source = observer.read_text()
+        needle = 'raise SystemExit(subprocess.call('
+        assert source.count(needle) == 1
+        fault = ("if args[:1]==['send-keys'] and args[-1:]==['Enter'] and "
+                 "json.loads(pathlib.Path(" + repr(str(path)) + ").read_bytes()).get('input_pending_request') == "
+                 + repr(payload['request_id']) + ":\n pathlib.Path(" + repr(str(swallowed)) + ").touch()\n raise SystemExit(0)\n")
+        observer.write_text(source.replace(needle, fault + needle))
+        command = [str(claude.fixtures.HGS), 'send', self.name, '--session-id', record['session_id'], '--json']
+        calls = len(self.native_requests)
+        child = subprocess.Popen(command, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        child.stdin.write(raw); child.stdin.close(); child.stdin = None
+        try:
+            self.wait_for(swallowed.exists)
+            # Root is free during proof, but the original SID and typing marker
+            # still exclude another input to the same session.
+            with (self.state / '.lock').open('rb') as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(writer, fcntl.LOCK_UN)
+            competing = dict(payload, request_id=str(uuid.uuid4()), text='Do not enter this second message')
+            refused = subprocess.run(command, env=self.env, input=json.dumps(competing),
+                                     text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('another message is being entered', refused.stderr)
+            _, shown = clearing.ClearInput.terminal_request(self, 'composer')
+            self.assertFalse(shown['composer']['clearable'])
+            _, denied = clearing.ClearInput.terminal_request(self, 'input',
+                terminal_binding_id=shown['terminal_binding_id'], expires_at=time.time() + 5,
+                text='do not type', enter=False)
+            self.assertEqual(denied['status'], 'failed')
+            self.assertIn('message is being entered', denied['error'])
+            # A second scripted agent, its own process and genuine hook child,
+            # shares only this private state Root. No borrowed ancestry markers.
+            other = claude.fixtures.InputTransport(methodName='runTest')
+            other.setUp()
+            self.addCleanup(other.doCleanups)
+            self.addCleanup(other.tearDown)
+            other.state = self.state
+            other.env['HGS_STATE_DIR'] = str(self.state)
+            other.record_path = self.state / other.record_path.name
+            other.claude_ready()
+            other.record_path.chmod(0o600)
+            event = dict(hook_event_name='PreToolUse', session_id=other.conversation_id,
+                         tool_name='Bash', tool_use_id='other-private-tool')
+            hook = hook_caller_fixtures.run(other, event, dict(other.env,
+                HGS_TEST_BIN=str(claude.fixtures.HGS), HGS_SESSION=other.name, HGS_RUN_ID=other.run_id))
+            self.assertEqual(hook.returncode, 0, hook.stderr)
+            self.assertIn('other-private-tool', json.loads(other.record_path.read_bytes())['active_tools'])
+            self.assertIsNone(child.poll(), 'the unrelated hook ran while proof was still waiting')
+            out, err = child.communicate(timeout=30)
+        finally:
+            if child.poll() is None:
+                child.terminate(); child.communicate(timeout=30)
+        self.assertNotEqual(child.returncode, 0, out)
+        self.assertIn('delivery uncertain', err)
+        receipt = json.loads(receipt_path.read_bytes())
+        self.assertEqual((receipt['status'], receipt['delivery']), ('in_progress', 'uncertain'))
+        self.assertEqual(receipt['digest'], hashlib.sha256(raw.encode()).hexdigest())
+        self.assertEqual(receipt['text'], text)
+        self.assertTrue(receipt['composer'])
+        current = json.loads(path.read_bytes())
+        self.assertEqual(current['input_pending_request'], payload['request_id'])
+        self.assertNotIn('input_typing', current)
+        self.assertEqual(len(self.native_requests), calls)
+        self.assertEqual(self.carrying(self.rows()), [])
+        before = attempts()
+        replay = subprocess.run(command, env=self.env, input=raw, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertEqual(attempts(), before, 'an uncertain UUID cannot replay input')
+        _, shown = clearing.ClearInput.terminal_request(self, 'composer')
+        self.assertTrue(shown['composer']['clearable'], shown)
+        _, cleared = clearing.ClearInput.terminal_request(self, 'clear-input',
+            terminal_binding_id=shown['terminal_binding_id'], expires_at=time.time() + 5,
+            text=shown['composer']['text'])
+        self.assertEqual(cleared['status'], 'cleared')
+        # The person explicitly sends the retained payload from Terminal after
+        # clearing. This is not a retry or another delivery by the original UUID.
+        observer.write_text(source)
+        self.tmux('set-buffer', '-b', 'person-kept-message', receipt['submitted_text'])
+        self.tmux('paste-buffer', '-p', '-r', '-d', '-b', 'person-kept-message', '-t', self.pane)
+        # Native attachment IDs advance across Clear; they do not restart at 1.
+        prior = max(map(int, re.findall(r'\[(?:Image|Pasted text) #(\d+)', receipt['composer'])))
+        expected = f'[Image #{prior + 1}] [Image #{prior + 2}][Pasted text #{prior + 3} '
+        self.wait_for(lambda: expected in self.screen() and 'Pasting…' not in self.screen())
+        time.sleep(.3)
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.wait_for(lambda: len(self.carrying(self.rows())) == 1)
+        rows = self.carrying(self.rows())
+        self.assertEqual(sum(b.get('type') == 'image' for b in rows[0]['message']['content']), 2)
+        self.assertEqual(len(self.native_requests), calls + 1)
+        self.assertEqual(json.loads(receipt_path.read_bytes()), receipt)
 
     def test_pasted_images_settle_before_the_one_enter_when_idle(self):
         started = time.monotonic()

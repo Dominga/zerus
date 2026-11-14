@@ -41,7 +41,11 @@ if (firebaseEnabled) {
 // unit tests load; cargo-ndk builds the library of each packaged ABI.
 val rustToolchain = "1.99.1"
 val replicaCrate = rootProject.file("../../crates/replica-ffi")
-val replicaSources = listOf(replicaCrate, rootProject.file("../../crates/replica")).flatMap {
+val replicaSources = listOf(
+    replicaCrate,
+    rootProject.file("../../crates/replica"),
+    rootProject.file("../../crates/file-lock"),
+).flatMap {
     listOf(it.resolve("src"), it.resolve("Cargo.toml"), it.resolve("Cargo.lock"))
 } + replicaCrate.resolve("uniffi.toml")
 val rustBuild = layout.buildDirectory.dir("rust")

@@ -324,7 +324,7 @@ fn probe_until(
     let mut child = match if let Some(source) = source {
         source.spawn(&mut command)
     } else {
-        command.spawn()
+        crate::child_environment::spawn(&mut command)
     } {
         Ok(child) => child,
         Err(error) => {
@@ -1741,7 +1741,7 @@ impl Supervisor {
         let spawned = if let Some(source) = &self.source {
             source.spawn(&mut command)
         } else {
-            command.spawn()
+            crate::child_environment::spawn(&mut command)
         };
         let mut child = match spawned {
             Ok(child) => child,

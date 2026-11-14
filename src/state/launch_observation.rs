@@ -34,11 +34,82 @@ pub(crate) fn observe(state: &Path, launch: &str, deadline: Instant) -> Observat
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TeamRecord {
+    pub launch_id: String,
+    pub name: String,
+    pub agent: String,
+    pub account: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub cwd: String,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TeamObservation {
+    Record(TeamRecord),
+    Absent { legacy: bool },
+    Ended { code: i32 },
+    Mismatch { field: String },
+    Unavailable,
+}
+/// Bounded identity facts for Teams, including a record at a trust prompt.
+/// This is not the strict creation result and never settles a CLI outcome.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn observe_team_launch(
+    state: &Path,
+    launch: &str,
+    deadline: Instant,
+) -> TeamObservation {
+    team::observe(state, launch, deadline)
+}
+/// What a team member's durable handle, its session's own `session_id`,
+/// resolves to now (zerus-63rru.53). Unlike the launch's evidence, which is
+/// gone once the first run ends or after a week, the handle lasts as long
+/// as the session's record.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TeamSession {
+    /// The live or saved record that carries the handle and the bound launch.
+    Record(TeamRecord),
+    /// No live or saved session carries the handle: it was archived or
+    /// forgotten, or an older hgs rewrote its record without the ID.
+    Gone,
+    /// The session that carries the handle names another launch's ID, or
+    /// none without having started fresh.
+    LaunchChanged,
+    /// The session started fresh (`hgs resume --fresh`): its record keeps
+    /// the session ID but no launch ID. A fresh conversation is another
+    /// executor of tasks, so the binding ends here.
+    StartedFresh,
+    /// A fault, a bound or the deadline; another read may answer.
+    Unavailable,
+}
+/// The session whose durable ID is `session`, bound to launch `launch`:
+/// its own record in the ID layout, else the ID index's label, else the
+/// label `hint` (the name at binding) with at most three rename hops. Every
+/// record read must carry the ID; the answer is a record only when it also
+/// carries `launch`. Bounded and pinned like [`observe_team_launch`].
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn observe_team_session(
+    state: &Path,
+    session: &str,
+    launch: &str,
+    agent: &str,
+    hint: &str,
+    deadline: Instant,
+) -> TeamSession {
+    team::session(state, session, launch, agent, hint, deadline)
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod team;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
     use super::*;
     use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
-    use serde_json::Value;
-    use sha2::{Digest, Sha256};
+    pub(super) use serde_json::Value;
+    pub(super) use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
     use std::fs::{self, File, Metadata};
     use std::io::{self, Read};
@@ -46,30 +117,31 @@ mod unix {
         fd::{AsRawFd, FromRawFd},
         unix::fs::MetadataExt,
     };
-    use std::path::{Component, PathBuf};
+    use std::path::Component;
+    pub(super) use std::path::PathBuf;
 
-    fn canonical(value: &str) -> bool {
+    pub(super) fn canonical(value: &str) -> bool {
         uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
     }
 
-    const RAW: usize = 1 << 20;
+    pub(super) const RAW: usize = 1 << 20;
     // Conservative reservations, not measured syscall counts. Exact1.99.1 can
     // perform statx + availability probe + legacy stat, and audited libc statx
     // can add fstatat on ENOSYS. Further target paths withhold qualification.
     const META_COST: usize = 5;
-    const SMALL: usize = 8 << 10;
+    pub(super) const SMALL: usize = 8 << 10;
     #[derive(Clone, Copy, Debug)]
-    struct Fault;
-    type Checked<T> = std::result::Result<T, Fault>;
+    pub(super) struct Fault;
+    pub(super) type Checked<T> = std::result::Result<T, Fault>;
 
     #[derive(Default)]
-    struct Counts {
-        walks: usize,
-        opens: usize,
-        metadata: usize,
+    pub(super) struct Counts {
+        pub(super) walks: usize,
+        pub(super) opens: usize,
+        pub(super) metadata: usize,
         /// The observation refuses once this passes; checked before each open
         /// and metadata reservation.
-        deadline: Option<Instant>,
+        pub(super) deadline: Option<Instant>,
     }
     impl Counts {
         fn walk(&mut self, path: &Path) -> Checked<()> {
@@ -101,7 +173,7 @@ mod unix {
         }
     }
     #[derive(PartialEq, Eq)]
-    struct Stamp {
+    pub(super) struct Stamp {
         device: u64,
         inode: u64,
         mode: u32,
@@ -127,7 +199,7 @@ mod unix {
             }
         }
     }
-    fn path_stamp(path: &Path, counts: &mut Counts) -> Checked<Option<Stamp>> {
+    pub(super) fn path_stamp(path: &Path, counts: &mut Counts) -> Checked<Option<Stamp>> {
         valid_path(path)?;
         counts.meta(META_COST)?;
         match fs::symlink_metadata(path) {
@@ -236,12 +308,12 @@ mod unix {
             Ok(file)
         }
     }
-    struct Root {
+    pub(super) struct Root {
         directory: ReadDirectory,
         stamp: Stamp,
     }
     impl Root {
-        fn pin(path: &Path, counts: &mut Counts) -> Checked<Self> {
+        pub(super) fn pin(path: &Path, counts: &mut Counts) -> Checked<Self> {
             valid_path(path)?;
             let stamp = path_stamp(path, counts)?.ok_or(Fault)?;
             let directory = ReadDirectory::open(path, counts)?;
@@ -254,7 +326,7 @@ mod unix {
             }
             Ok(Self { directory, stamp })
         }
-        fn finish(&self, counts: &mut Counts) -> Checked<()> {
+        pub(super) fn finish(&self, counts: &mut Counts) -> Checked<()> {
             if !self.directory.private(counts)? {
                 return Err(Fault);
             }
@@ -272,11 +344,11 @@ mod unix {
             self.directory.read_private(leaf, counts)
         }
     }
-    struct ByteBudget {
+    pub(super) struct ByteBudget {
         remaining: usize,
     }
     impl ByteBudget {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self { remaining: RAW }
         }
         fn consume(&mut self, bytes: usize) -> Checked<()> {
@@ -327,13 +399,13 @@ mod unix {
         }
         Ok((bytes, hash.finalize().into()))
     }
-    struct Image {
+    pub(super) struct Image {
         file: File,
         stamp: Stamp,
         bytes: Vec<u8>,
         hash: [u8; 32],
     }
-    fn capture(
+    pub(super) fn capture(
         root: &Root,
         leaf: &str,
         cap: usize,
@@ -363,7 +435,7 @@ mod unix {
             hash,
         }))
     }
-    fn recheck(
+    pub(super) fn recheck(
         root: &Root,
         leaf: &str,
         image: Option<&Image>,
@@ -449,7 +521,7 @@ mod unix {
         Unique.deserialize(&mut decoder).map_err(|_| Fault)?;
         decoder.end().map_err(|_| Fault)
     }
-    fn json(image: &Image) -> Checked<Value> {
+    pub(super) fn json(image: &Image) -> Checked<Value> {
         unique(&image.bytes)?;
         let value: Value = serde_json::from_slice(&image.bytes).map_err(|_| Fault)?;
         if !value.is_object()
@@ -461,12 +533,12 @@ mod unix {
         }
         Ok(value)
     }
-    fn text<'a>(value: &'a Value, key: &str) -> Checked<&'a str> {
+    pub(super) fn text<'a>(value: &'a Value, key: &str) -> Checked<&'a str> {
         value.get(key).and_then(Value::as_str).ok_or(Fault)
     }
     /// The wire's own session-name rule, so evidence the observer produces is
     /// always valid on the wire.
-    fn name(value: &str) -> bool {
+    pub(super) fn name(value: &str) -> bool {
         zerus_client_core::desktop::creation_launch::session_name(value)
     }
     fn finite(value: &Value, key: &str) -> Checked<f64> {
@@ -476,7 +548,7 @@ mod unix {
             .filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or(Fault)
     }
-    fn valid_path(path: &Path) -> Checked<()> {
+    pub(super) fn valid_path(path: &Path) -> Checked<()> {
         if !path.is_absolute()
             || path.as_os_str().len() > 4096
             || path
@@ -665,7 +737,7 @@ mod unix {
             state: PathBuf,
         }
         impl Fixture {
-            fn new() -> Self {
+            pub(super) fn new() -> Self {
                 let root = tempfile::tempdir().unwrap();
                 let state = root.path().canonicalize().unwrap().join("state");
                 for path in [&state, &state.join("launches"), &state.join("name_routes")] {
@@ -727,6 +799,15 @@ mod unix {
             fn status(&self) -> String {
                 self.read().0["status"].as_str().unwrap().into()
             }
+        }
+        #[test]
+        fn an_optional_allocated_session_in_start_evidence_changes_no_strict_result() {
+            let f = Fixture::new();
+            f.start();
+            f.put_binding(&f.binding());
+            let before = f.read().0;
+            write(&f.start_path(),&serde_json::to_vec(&json!({"launch_id":id(2),"name":"codex/fixture/original","started_at":1.0,"session_id":id(8)})).unwrap());
+            assert_eq!(f.read().0, before);
         }
         #[test]
         fn an_original_binding_is_closed_body_free_evidence() {

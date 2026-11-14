@@ -99,6 +99,7 @@ pub const SOURCES: &[&str] = &[
     "codex_update",
     "codex_rate_limit",
     "codex_folder_trust",
+    "codex_sandbox_setup",
     "kimi_folder_trust",
     "kimi_cache_hint",
     "kimi_plan_review",

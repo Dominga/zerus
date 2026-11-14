@@ -415,6 +415,17 @@ amber badge and edge.
 No UI text separates values with dots (`scripts/check-ui-separators.py`): the
 team strip says `3 of 5`, the footer uses spacing, and tooltips use line breaks.
 
+### 3.8 Overview Main only
+
+Owner clarification, 2026-11-14 (zerus-hbuvb): Main only hides a child when
+its resolved parent exists in the catalog in any non-archived, non-forgotten
+state. The parent can be idle, usage-limited or absent from Overview's active
+cards. The child's own non-quiet attention, the person's Review later mark
+and parent loops keep their existing exceptions. A missing or archived parent
+does not hide its child. With sub-sessions, attention precedence and counters
+keep their existing behavior. Parent resolution still uses the catalog's
+machine/session identities, never names, with a linear memoized walk per batch.
+
 ---
 
 ## Delivery

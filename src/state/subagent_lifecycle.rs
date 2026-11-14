@@ -212,7 +212,7 @@ pub(super) fn owner_unknown(record: &Value, owner: &str) -> bool {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Retire {
+pub(super) struct Retire {
     request_id: String,
     expected_run_id: String,
     expected_conversation_id: String,
@@ -248,7 +248,7 @@ pub(crate) fn retire(name: &str, bytes: &[u8]) -> Result<Value> {
     Ok(result)
 }
 
-fn retire_record(record: &mut Value, request: Retire) -> Result<(Value, bool)> {
+pub(super) fn retire_record(record: &mut Value, request: Retire) -> Result<(Value, bool)> {
     let original = serde_json::to_value(&request).map_err(|e| e.to_string())?;
     let result = json!({"abi":ABI,"request_id":request.request_id,"accepted":true,
         "agent_id":request.agent_id,"state":"ended","native_completion":false});
@@ -312,6 +312,10 @@ fn retire_record(record: &mut Value, request: Retire) -> Result<(Value, bool)> {
     child["current_tool"] = json!("");
     child["updated"] = json!(now());
     child["completion_source"] = json!("explicit_retirement");
+    // The end is settled: the process projection must not outlive it, or no
+    // later reconcile (which visits only working children) can clear it.
+    child.as_object_mut().unwrap().remove("process_unknown");
+    child.as_object_mut().unwrap().remove("process_display_state");
     if !record["subagent_retirements"].is_object() {
         record["subagent_retirements"] = json!({});
     }

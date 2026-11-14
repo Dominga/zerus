@@ -27,13 +27,13 @@ import { snapshotOf } from "./actions-ui";
 let dispose: (() => void) | undefined;
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 beforeEach(() => { vi.clearAllMocks(); calls.offer.mockRejectedValue("Unexpected worktree check"); calls.end.mockResolvedValue({ outcome: "done" }); });
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.useRealTimers(); });
 
 function mount(gitWorktree: boolean | undefined, confirmed: boolean) {
   const row = snapshotOf(toSession("", "run:original", {
     name: "codex/example/fresh", agent: "codex", state: "running", tracked: true,
     run_id: "original-run", conversation_id: confirmed ? "conversation" : null,
-    resumable: confirmed, activity: confirmed ? "idle" : "unknown", machine: "fixture", git_worktree: gitWorktree,
+    resumable: confirmed, phase: confirmed ? "interrupted" : "unknown", machine: "fixture", git_worktree: gitWorktree,
   }));
   const host = document.createElement("div"); document.body.append(host);
   const [open, setOpen] = createSignal<ActionRow | undefined>(row);
@@ -67,4 +67,45 @@ it.each([undefined, true])("no cleanup request before its required native conver
   expect(calls.offer).not.toHaveBeenCalled();
   expect(document.querySelector(".cleanup-offer-notice")).toBeNull();
   expect(document.querySelector('input[type="checkbox"]')).toBeNull();
+});
+
+it("first Stop waits for a pending cleanup offer and its cancellation before claiming End", async () => {
+  let offer!: (value: { id: string; checked: boolean; programs: [] }) => void;
+  let released!: () => void;
+  calls.offer.mockReturnValue(new Promise((resolve) => { offer = resolve; }));
+  calls.cancel.mockReturnValue(new Promise<void>((resolve) => { released = resolve; }));
+  const row = mount(true, true); await flush();
+  const stop = [...document.querySelectorAll("button")].find((button) => button.classList.contains("solid-danger"))!;
+  stop.click(); await flush();
+  expect(calls.end).not.toHaveBeenCalled();
+  offer({ id: "pending-original-review", checked: false, programs: [] }); await flush();
+  expect(calls.cancel).toHaveBeenCalledExactlyOnceWith("pending-original-review");
+  expect(calls.end).not.toHaveBeenCalled();
+  released(); await flush();
+  expect(calls.end).toHaveBeenCalledExactlyOnceWith(row, "terminate", undefined);
+});
+
+it("failed cancellation of a late cleanup offer never dispatches ordinary End", async () => {
+  let offer!: (value: { id: string; checked: boolean; programs: [] }) => void;
+  calls.offer.mockReturnValue(new Promise((resolve) => { offer = resolve; }));
+  calls.cancel.mockRejectedValue("The original review could not finish.");
+  mount(true, true); await flush();
+  [...document.querySelectorAll("button")].find((button) => button.classList.contains("solid-danger"))!.click();
+  await flush();
+  offer({ id: "unconfirmed-review", checked: false, programs: [] }); await flush();
+  expect(calls.cancel).toHaveBeenCalledExactlyOnceWith("unconfirmed-review");
+  expect(calls.end).not.toHaveBeenCalled();
+  expect(calls.notify).toHaveBeenCalledWith("error", "The original review could not finish.", true);
+});
+
+it("a stalled optional review reaches guarded End admission after a bounded wait", async () => {
+  vi.useFakeTimers();
+  calls.offer.mockReturnValue(new Promise(() => {}));
+  const row = mount(true, true); await flush();
+  [...document.querySelectorAll("button")].find((button) => button.classList.contains("solid-danger"))!.click();
+  await flush();
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(calls.end).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); await flush();
+  expect(calls.end).toHaveBeenCalledExactlyOnceWith(row, "terminate", undefined);
 });

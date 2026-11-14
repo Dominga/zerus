@@ -1872,23 +1872,36 @@ it. The Working clocks stop too, as Qt stops its timers when a window hides.
 
 Session search shows immediate name, metadata and identity matches and reads
 public message contents after 350 ms with two or more characters. Live and
-archive excerpts share the virtual list, with state, machine, project and
-archive-date scopes. Click, arrow navigation and Enter open the exact matched
-run/conversation/archive, with a clearable highlighted preview. A stale result
+archive excerpts share the virtual list, with state, machine, project, account,
+folder and archive-date scopes. Click, arrow navigation and Enter open the exact
+matched run/conversation/archive, with a clearable highlighted preview. A stale result
 never falls back to the latest session of the same name.
 
-The parity path uses Qt's existing `hgs search --query … --limit 100` contract;
-older peers are help-gated before that verb is sent. Four cancellable CLI reads
-run at most, including children of a retired query until they exit. Replies are
+Next probes help for `content-search-query-v1` before selecting
+`hgs search --indexed --query … --limit 100`. Older peers keep Qt's existing
+`hgs search --query … --limit 100` contract and are help-gated before that verb
+is sent. The private, disposable index catches up only on demand, with bounded
+discovery, ingestion and freshly verified public-content pages. Codex, Claude
+and Kimi have indexed adapters; DeepSeek remains delegated to legacy native
+search until a bounded cold-history read is available (tracked separately in
+`zerus-5wmh.66.2.2.1.5`). Cold, incomplete and live coverage retains the fresh
+legacy fallback, with exact-message deduplication preferring the fresh copy.
+
+Four cancellable CLI reads run at most, including children of a retired query
+until they exit. Replies are
 limited to 8 MiB and 100 hits per computer, with 32 computers, 200 retained
 content hits and 500 visible metadata/content rows overall, plus one selected
 archive/excerpt. Exceeding coverage shows “Limited history searched”; offline,
 unsupported or failed computers stay explicit. There are no transcript caches
-per session. The cursor-backed content index is tracked by
-`zerus-5wmh.66.2.2.1`; the current CLI's own scan limits remain visible meanwhile.
+per session. The indexed CLI exposes query-bound continuation cursors; Next
+retains one checked result window per computer and marks an unconsumed cursor
+as limited coverage. See `crates/content-search/README.md` for the indexing,
+publication, retention and fallback budgets.
 The `content-search-smoke=1` replay query requires an explicit fake hgs and
 `ZERUS_CLIENT_PERF`; run it only under isolated data, Xvfb and a private D-Bus
-session, as the other native replay smokes.
+session, as the other native replay smokes. Its fake must keep the
+`slow-needle` indexed read pending until cancellation; the smoke requires a
+`superseded` result before it reports success.
 
 ## Settings and motion
 

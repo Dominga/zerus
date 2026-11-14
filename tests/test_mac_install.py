@@ -169,7 +169,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
                 manifest = tomllib.loads(current.read_text())
                 owners = [manifest, *manifest.get('target', {}).values()]
                 for owner in owners:
-                    for group in ('dependencies', 'build-dependencies'):
+                    for group in ('dependencies', 'build-dependencies', 'dev-dependencies'):
                         for spec in owner.get(group, {}).values():
                             if not isinstance(spec, dict) or 'path' not in spec:
                                 continue
@@ -180,6 +180,11 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
             return found
         cli = closure(REPO / 'Cargo.toml')
         client = closure(REPO / 'client/core/Cargo.toml') | closure(REPO / 'client/src-tauri/Cargo.toml')
+        mobile = set()
+        for name in ('connector', 'relay', 'crypto'):
+            crate = Path('services/mobile') / name
+            mobile.add(crate)
+            mobile.update(closure(REPO / crate / 'Cargo.toml'))
         self.assertIn(Path('crates/desktop-read-policy'), cli & client)
         self.assertIn(Path('client/core'), cli)
         result = self.run_install('fixture-mac', HGS_MAC_GUI='client')
@@ -187,7 +192,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         sent = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()]
         cli_tar = next(line for line in sent if 'hgs_state.py' in line)
         tray_tar = next(line for line in sent if 'packaging/desktop' in line)
-        for crates, tar in ((cli, cli_tar), (client, tray_tar)):
+        for crates, tar in ((cli | mobile, cli_tar), (client, tray_tar)):
             for crate in sorted(crates):
                 with self.subTest(crate=str(crate), tray=tar is tray_tar):
                     for suffix in ('Cargo.toml', 'src'):

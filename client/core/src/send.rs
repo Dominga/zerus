@@ -12,6 +12,11 @@ use crate::text::Text;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A diagnostic only: an unstyled native composer still refuses all input.
+pub const NO_COLOR: &str = crate::source!(
+    "This agent was started with NO_COLOR, so Zerus cannot tell a queued message from a draft. Restart the session to fix sending."
+);
+
 /// The agents the composer sends to; any other is typed into in Terminal.
 pub const MESSAGE_AGENTS: [&str; 5] = ["codex", "claude", "kimi", "dsh", "opencode"];
 

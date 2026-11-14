@@ -185,6 +185,10 @@ fn only_claudes_own_blocking_hook_question_routes() {
         ),
         ("optional", Box::new(|c| c["optional"] = json!(true))),
         (
+            "Kimi cache chooser",
+            Box::new(|c| c["source"] = json!("kimi_cache_hint")),
+        ),
+        (
             "already answered",
             Box::new(|c| c["answer_delivery"] = json!({"status": "submitted"})),
         ),
@@ -226,6 +230,7 @@ fn only_claudes_own_blocking_hook_question_routes() {
         "claude_folder_trust",
         "codex_async",
         "codex_hooks_trust",
+        "codex_sandbox_setup",
         "codex_update",
         "kimi_wire",
         "dsh_native",
@@ -279,6 +284,7 @@ fn a_read_lists_only_the_edges_own_exact_routable_questions() {
         ("run_id", json!("run-2")),
         ("conversation_id", json!("c-2")),
         ("question_id", json!("claude-trust:folder")),
+        ("question_id", json!("codex-sandbox:setup")),
         ("question_id", json!("")),
         ("question_hash", json!("")),
         ("question_hash", Value::Null),
@@ -738,4 +744,22 @@ fn a_route_with_any_other_text_target_or_identity_is_refused() {
     let mut intent = route_intent(&record);
     intent.checkpoint = serde_json::to_string(&changed).unwrap();
     assert!(intent.verify_route().is_err());
+}
+
+#[test]
+fn failures_escalate_immediately_without_replay_against_the_shared_contract() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mobile/android/app/src/test/resources/question-route-outcome-contract.json"
+    ))
+    .unwrap();
+    for case in fixture["decisions"].as_array().unwrap() {
+        assert_eq!(
+            super::escalates(case["state"].as_str().unwrap()),
+            case["human_request"].as_bool().unwrap()
+        );
+        assert_eq!(
+            crate::view::row(&case["row"]).quiet,
+            case["quiet"].as_bool().unwrap()
+        );
+    }
 }

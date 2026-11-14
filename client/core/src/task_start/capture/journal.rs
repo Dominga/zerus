@@ -62,6 +62,14 @@ struct Slot {
     name: OsString,
     lock_name: OsString,
 }
+/// Process-owned metadata exclusion, never an inherited native custody lease.
+struct MetadataLock(zerus_file_lock::OwnedLock);
+impl std::ops::Deref for MetadataLock {
+    type Target = File;
+    fn deref(&self) -> &File {
+        self.0.file()
+    }
+}
 impl Slot {
     fn open(store: &Path, project: &str, task: &str) -> io::Result<Self> {
         crate::task_details::document_call(project, task).map_err(|_| refused())?;
@@ -147,7 +155,7 @@ impl Slot {
         file_version(&file, BYTES)?;
         Ok(file)
     }
-    fn lock(&self, create: bool) -> Result<File, Error> {
+    fn lock(&self, create: bool) -> Result<MetadataLock, Error> {
         self.current().map_err(|_| Error::Unavailable)?;
         let file = if create {
             self.create(&self.lock_name, true)
@@ -180,7 +188,7 @@ impl Slot {
                 Error::Unavailable
             });
         }
-        Ok(file)
+        Ok(MetadataLock(zerus_file_lock::OwnedLock::acquired(file)))
     }
 }
 struct Disk {
@@ -316,7 +324,7 @@ impl Saved {
 pub struct Journal {
     saved: Saved,
     source: Captured,
-    lock: File,
+    lock: MetadataLock,
     poisoned: bool,
 }
 impl Journal {
@@ -579,5 +587,7 @@ fn encode(record: &Record) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod tests;

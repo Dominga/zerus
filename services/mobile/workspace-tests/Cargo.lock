@@ -3154,6 +3154,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerus-file-lock"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+]
+
+[[package]]
 name = "zerus-mobile-connector"
 version = "0.1.0"
 dependencies = [
@@ -3174,6 +3181,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+ "zerus-file-lock",
  "zerus-mobile-crypto",
  "zerus-relay",
  "zerus-watch-protocol",

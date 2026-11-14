@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage, type HgsSettingName, type HgsSettingOutcome } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { Text } from "./text";
+import { formatActionBusy } from "./action-busy";
+import { tr } from "./i18n";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
@@ -30,6 +32,10 @@ export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS
 export const logLatest = () => inTauri() ? invoke<string | null>("log_latest") : Promise.resolve(null);
 export const logWrite = (level: string, text: string) => inTauri() ? invoke<void>("log_write", { level, text }) : Promise.resolve();
 export const openLog = () => inTauri() ? invoke<void>("log_open") : Promise.resolve();
+
+function actionInvoke<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  return invoke<T>(command, args).catch((error: unknown) => { throw formatActionBusy(error, tr) ?? error; });
+}
 
 /** Content-free invariant evidence through the existing capped stderr logger. */
 export async function reportDetailInvariant(line: string): Promise<void> {
@@ -71,6 +77,7 @@ export const taskStartRelease = (view: import("./store/taskStart").StartView) =>
 export const taskStartCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
 export const taskStartDiscardCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_discard_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot, checkId: view.unsent_check_id });
 export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
+export const cancelTaskAttempt = (project: string, task: string, attempt: string, reason: string) => desktop<void>("task_cancel_attempt", { project, task, attempt, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });
 export const taskFormEdit = (kind: import("./store/taskForms").FormKind, input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_edit", { kind, input });
@@ -344,7 +351,7 @@ export async function metrics(windowMs?: number): Promise<Record<string, unknown
 /** One guarded session action; an Err (a rejected promise) is an unknown outcome. */
 export async function runAction(target: Target, action: Action, delay?: import("./store/endActionBusy").EndReference): Promise<Outcome> {
   if (!inTauri()) return { outcome: "failed", detail: "Actions need the desktop app." };
-  return invoke<Outcome>("run_action", { target, action, delay });
+  return actionInvoke<Outcome>("run_action", { target, action, delay });
 }
 
 /**
@@ -353,7 +360,7 @@ export async function runAction(target: Target, action: Action, delay?: import("
  */
 export async function setNotifications(target: Target, muted: boolean, expectedRevision: number | null): Promise<Record<string, unknown>> {
   if (!inTauri()) throw new Error("Actions need the desktop app.");
-  return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
+  return actionInvoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
 }
 
 /**
@@ -363,7 +370,7 @@ export async function setNotifications(target: Target, muted: boolean, expectedR
  */
 export async function setQuestionRouting(target: Target, sendToParent: boolean, expectedRevision: number): Promise<Record<string, unknown>> {
   if (!inTauri()) throw new Error("Actions need the desktop app.");
-  return invoke<Record<string, unknown>>("set_question_routing", { target, sendToParent, expectedRevision });
+  return actionInvoke<Record<string, unknown>>("set_question_routing", { target, sendToParent, expectedRevision });
 }
 
 /** What the person chose for Keep cache warm (core `keep_warm::Choice`). */
@@ -375,14 +382,14 @@ export type KeepWarmChoice = { kind: "off" } | { kind: "hours"; hours: number } 
  */
 export async function setKeepWarm(target: Target, choice: KeepWarmChoice, expectedRevision: number): Promise<Record<string, unknown>> {
   if (!inTauri()) throw new Error("Actions need the desktop app.");
-  return invoke<Record<string, unknown>>("set_keep_warm", { target, choice, expectedRevision });
+  return actionInvoke<Record<string, unknown>>("set_keep_warm", { target, choice, expectedRevision });
 }
 
 /** A session's parent link change (zerus-sa9qn.9), checked by its host; resolves with the host's reply. */
 export type ParentChange = { kind: "clear" } | { kind: "set"; session_id: string; name: string; conversation_id: string; run_id: string; replace: boolean };
 export async function setParent(target: Target, change: ParentChange): Promise<Record<string, unknown>> {
   if (!inTauri()) throw new Error("Actions need the desktop app.");
-  return invoke<Record<string, unknown>>("set_parent", { target, change });
+  return actionInvoke<Record<string, unknown>>("set_parent", { target, change });
 }
 
 /** The inspect fields of a session; null when they are unavailable. */
@@ -672,13 +679,13 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
-export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope" | "mark";
+export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope" | "mark" | "cache_expiry";
 export interface AccountModelCatalog {
   models: import("./types").CatalogModel[];
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string;color?:string;emoji?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null;
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; compact_on_expiry?:boolean; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null;
   /** Every computer the edit saves on, the selected one first; whether their values differ now; per-computer permissions (zerus-f0uz8). */
   machines?: string[]; differs?: boolean; per_computer?: boolean }
 /** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
@@ -1235,7 +1242,7 @@ export function processesStop(key: string, ids: string[]) {
 
 const DESKTOP_ACTIONS = "Actions need the desktop app.";
 const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> =>
-  inTauri() ? invoke<T>(command, args) : Promise.reject(DESKTOP_ACTIONS);
+  inTauri() ? actionInvoke<T>(command, args) : Promise.reject(DESKTOP_ACTIONS);
 
 /** Opens the selected session's composer (undefined: none is open); null outside the app. */
 export const composerOpen = (session: SessionRef | undefined) =>

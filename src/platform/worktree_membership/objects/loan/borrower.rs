@@ -6,7 +6,7 @@ use std::{
     io,
     mem::{offset_of, size_of},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::AsRawFd,
         unix::net::UnixStream,
     },
     time::{Duration, Instant},
@@ -30,24 +30,7 @@ fn check(until: Instant) -> io::Result<()> {
     }
 }
 fn socket() -> io::Result<UnixStream> {
-    #[cfg(target_os = "macos")]
-    let _turn = crate::platform::spawn_turn();
-    #[cfg(target_os = "linux")]
-    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
-    #[cfg(target_os = "macos")]
-    let kind = libc::SOCK_STREAM;
-    let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    #[cfg(target_os = "macos")]
-    if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-        || unsafe { libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(UnixStream::from(fd))
+    zerus_client_core::unix_spawn::nonblocking_stream()
 }
 fn connect(path: &str, until: Instant) -> io::Result<UnixStream> {
     check(until)?;

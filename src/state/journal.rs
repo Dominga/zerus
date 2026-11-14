@@ -302,6 +302,8 @@ fn event_db_at(root: &Path) -> Result<Connection> {
         .map_err(|e| e.to_string())?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);
         CREATE INDEX IF NOT EXISTS events_session ON events(name, conversation, seq);
+        CREATE INDEX IF NOT EXISTS events_subagent_activity ON events(name, conversation,
+            json_extract(payload, '$.agent_id'), seq);
         CREATE INDEX IF NOT EXISTS events_kimi_completions ON events(name, conversation,
             json_extract(payload, '$.run_id'), json_extract(payload, '$.kimi_turn_id'))
         WHERE json_extract(payload, '$.type') = 'Stop' AND json_extract(payload, '$.agent_id') = '';
@@ -430,6 +432,12 @@ pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
         } else {
             "working"
         });
+    }
+    // Archives keep the last hooks for history and restore, not current work.
+    // Normalize reads so old archives also stop reporting their last live turn.
+    if !live_pane && record["state"] == "archived" {
+        activity = json!("ended");
+        phase = json!("ended");
     }
     // Legacy SessionEnd was overloaded as process death. It is not evidence of
     // either process death or idleness; old manifests remain restorable.
@@ -887,7 +895,7 @@ pub(super) fn notification_summary(record: &Value, live_pane: bool) -> Result<Va
 /// panel wins. Dispatch refuses each of them (`input::checked_input`).
 pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &'static str)> {
     type Current = fn(&Value) -> Option<Value>;
-    let choosers: [(Current, &str, &str); 14] = [
+    let choosers: [(Current, &str, &str); 15] = [
         // First: any panel a later, known chooser recognizes wins.
         (claude_approval::idle_choice, "input", "Claude is waiting for your choice in Terminal"),
         (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
@@ -896,6 +904,7 @@ pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &
         (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
         (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
         (claude_bypass::current, "approval", "Claude is waiting for your Bypass Permissions choice"),
+        (codex_sandbox::current, "approval", "Codex is waiting for your sandbox setup choice"),
         (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
         (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
         (codex_update::current, "input", "Codex is waiting for an update choice"),
@@ -916,6 +925,7 @@ pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &
 /// fork and an effort change wait until it is answered, and a settings change
 /// is scheduled for Ready instead of applied now.
 fn wait_for_chooser(output: &mut Value) {
+    telemetry::pending_input_summary(output, true);
     if let Some(reason) = clear_context::answer_first(string(output, "phase")) {
         fork::wait_for_chooser(output, reason);
         effort::wait_for_chooser(output, reason);
@@ -1378,6 +1388,10 @@ pub(super) fn inspection_with(
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");
+        // The same locked predicate as Restore admission. Standing resume
+        // reads this through its bounded own-CLI observation, never by an
+        // unbounded backend call on the desktop worker (zerus-63rru.129).
+        output["restore_name_busy"] = json!(lifecycle::restore_name_busy(name)?);
     }
     drop(_guard);
     phases.mark("summary");
@@ -1421,6 +1435,8 @@ pub(super) fn inspection_with(
         }
     }
     phases.mark("questions");
+    let pending = output["pending_questions"].as_array().is_some_and(|questions| !questions.is_empty());
+    telemetry::pending_input_summary(&mut output, pending);
     output["input_queue"] = if archive_id.is_none() { input_queue::inspection(&record, panes.is_some()).unwrap_or(Value::Null) } else { Value::Null };
     output["session_usage"] = if clear_context::awaiting_start(&record) {
         json!({"status":"unavailable","source":record["agent"],"scope":"conversation"})
@@ -1448,6 +1464,8 @@ pub(super) fn inspection_with(
     output["compact_context_supported"] = json!(context_reason.is_none());
     output["compact_context_reason"] = json!(context_reason.clone().unwrap_or_default());
     output["compact_context_request"] = record["compact_context_request"].clone();
+    let pre_send = &record["last_send_compaction"];
+    output["pre_send_compaction"] = if pre_send["run_id"] == record["run_id"] && pre_send["conversation_id"] == record["conversation_id"] { pre_send.clone() } else { Value::Null };
     // The summary above verified a pending resume once; its message and
     // actions reuse that result instead of checking the terminal again.
     // So did the summary of an interrupted Claude turn's prompt.
@@ -1567,6 +1585,7 @@ pub(super) fn inspection_with(
         // The person's per-child question route switch, as the listing
         // shows it (zerus-sa9qn.33): the phones check an action against it.
         super::question_routing::enrich(&mut output, super::question_routing::load().as_ref());
+        if let Some(outcomes) = super::question_route_outcomes::Reader::load() { outcomes.inspect(&mut output); }
         let usage = output["session_usage"].clone();
         keep_warm::describe(&mut output, &record, &usage);
     }
@@ -1690,6 +1709,11 @@ pub(super) fn journal_name(record: &Value) -> &str {
     }
 }
 
+/// A Kimi profile child revived by a racing start: settled as ended by the
+/// next profile-group event once it has had no event of its own for this
+/// long, the first tier the unreadable-member path waits (zerus-63rru.93).
+pub(super) const REVIVED_KIMI_SETTLE_SECONDS: f64 = 60.0;
+
 pub(super) fn update_activity(record: &mut Value, event: &Value) {
     if stale_kimi_turn(record, event) { return; }
     repair_kimi_main(record);
@@ -1746,6 +1770,45 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 info["description"] = json!(clipped(&tool["detail"], 160));
             }
         }
+        // A Start for a child the record already holds as ended or interrupted
+        // is that child's own Stop or Interrupt that arrived first: the two hook
+        // processes race. Counting it working again would leave a child no later
+        // Stop ever ends, so the record keeps the end it already has. Nothing
+        // else about the child changes, and a late announcement is still kept.
+        // This is the one exception to "a later event resumes the child": a
+        // later Start of the same ID is not counted until its next event.
+        // "Interrupted" is the hook writer's own shape, never process
+        // uncertainty, which a fresh Start must clear: only the lifecycle
+        // projection sets process_unknown.
+        let interrupted = string(info, "state") == "working"
+            && string(info, "display_state") == "unknown"
+            && info["process_unknown"] != true;
+        let ended = ["finished", "ended"].contains(&string(info, "state")) || interrupted;
+        // A child's end is final for its ID (zerus-63rru.88). Claude and
+        // Codex name every subagent invocation with a fresh ID, so no event
+        // of theirs revives an ended child: a late Start is dropped here.
+        // A Kimi profile child really resumes under its profile name, so
+        // only its own start event revives it.
+        if kind == "SubagentStart" && ended && string(record, "agent") != "kimi" {
+            record["subagents"] = json!(children);
+            return;
+        }
+        // The non-start events of an ended child are recorded as history
+        // only: nothing but its producer's own start event (the guard above
+        // admits only Kimi's) sets it working again. An interrupted child
+        // (working with the hook writer's unknown display) is not an end:
+        // its own tool events resume it as before.
+        let final_end = ["finished", "ended"].contains(&string(info, "state"));
+        let revives = !final_end || kind == "SubagentStart";
+        // zerus-63rru.93: the Start that revives a finished or ended Kimi
+        // profile child records the revival; the next profile-group event
+        // settles it if nothing of its own has followed (the measure found
+        // nothing orderable in Kimi's frames, so the race cannot be told
+        // from a genuine resume by the bytes alone).
+        let revived = kind == "SubagentStart" && final_end && string(record, "agent") == "kimi";
+        if revived {
+            info["revived_at"] = json!(timestamp);
+        }
         if ["Stop", "SubagentStop"].contains(&kind) {
             let result = detail(event);
             if string(info, "state") != "finished"
@@ -1756,10 +1819,12 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         }
         // A Claude child's StopFailure ends its turn with a provider error, such
         // as a usage limit; Claude sends no SubagentStop after it. The child is
-        // settled as an error, which never keeps its parent working. A newer
-        // event of the same child resumes it as usual.
+        // settled as an error, which never keeps its parent working. Any newer
+        // event of the same child but its Start resumes it as usual.
         let failed = kind == "StopFailure" && string(record, "agent") == "claude";
-        info["state"] = json!(if failed || ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
+        info["state"] = json!(if !revives {
+            string(info, "state")
+        } else if failed || ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {
             "finished"
         } else {
             "working"
@@ -1772,7 +1837,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             info["display_state"] = json!("error");
         } else if ["StopFailure", "Interrupt"].contains(&kind) {
             info["display_state"] = json!("unknown");
-        } else {
+        } else if revives {
             info.as_object_mut().unwrap().remove("display_state");
         }
         // Any newer child event ends its pending request (hooks.rs sets a new one).
@@ -1828,12 +1893,14 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 record[count] = json!(record[count].as_u64().unwrap_or(0) + 1);
             }
         }
+        let _ = settle_quiet_revivals(record, &mut children, timestamp);
         record["subagents"] = json!(children);
         return;
     }
     record["subagents"] = json!(children);
     if ["UserPromptSubmit", "UserPromptQueued"].contains(&kind) {
         record["recovery_user_at"] = json!(timestamp);
+        kimi_completion::observe_submission(record, event, timestamp);
         record["recovery_user_text"] = json!(event["prompt"].as_str().map(str::to_owned).unwrap_or_else(||
             event["prompt"].as_array().into_iter().flatten().filter(|v|v["type"]=="text")
                 .map(|v|string(v,"text")).collect::<Vec<_>>().join("\n")));
@@ -2126,6 +2193,54 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         }
     }
     record["active_tools"] = json!(tools);
+    // zerus-63rru.93 round 2: the persisted settle also rides the session's
+    // next event of any kind (the main's Stop or turn end included), so a
+    // last invocation whose Start lost the race cannot keep the member busy
+    // for ever. Round 3: the map is rewritten only when a child settled.
+    let mut children = record["subagents"].as_object().cloned().unwrap_or_default();
+    if settle_quiet_revivals(record, &mut children, timestamp) {
+        record["subagents"] = json!(children);
+    }
+}
+
+/// zerus-63rru.93: a revived Kimi profile child that has had no event of its
+/// own for the settle period is ended, with no new timer; its group's counts
+/// follow so the listing the fleet reads shows no active child for it.
+/// Whether anything was settled.
+fn settle_quiet_revivals(record: &mut Value, children: &mut serde_json::Map<String, Value>, timestamp: f64) -> bool {
+    let quiet: Vec<String> = children
+        .iter()
+        .filter(|(_, child)| {
+            child["revived_at"].as_f64().is_some()
+                && child["updated"].as_f64().is_some_and(|at| {
+                    timestamp - at >= REVIVED_KIMI_SETTLE_SECONDS
+                })
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let settled_any = !quiet.is_empty();
+    for id in quiet {
+        let Some(child) = children.get_mut(&id) else {
+            continue;
+        };
+        child["state"] = json!("ended");
+        child["detail"] = json!("Revived by a racing start and quiet since; the next event settled the child.");
+        child.as_object_mut().unwrap().remove("revived_at");
+        if let Some(groups) = record["subagent_groups"].as_object_mut() {
+            if let Some(group) = groups.get_mut(&id) {
+                // The read-time rule zeroes the profile's whole active count
+                // (the quiet revived profile has no live invocation left to
+                // be told apart), so the persisted settle agrees with it.
+                let active = group["active_count"].as_u64().unwrap_or(1);
+                group["active_count"] = json!(0);
+                group["completed_count"] = json!(group["completed_count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_add(active));
+            }
+        }
+    }
+    settled_any
 }
 
 // Native turn IDs are monotonic, but the observation-only TurnStarted hook can
@@ -2233,6 +2348,72 @@ pub(super) fn settle_children(record: &mut Value) {
     {
         record["activity"] = json!("idle");
         record["phase"] = json!("idle");
+    }
+}
+
+// Archives retain historical hooks without claiming current activity.
+#[cfg(test)]
+mod archived_activity_regressions {
+    use super::*;
+
+    #[test]
+    fn archived_activity_is_ended_without_changing_its_saved_history() {
+        for agent in ["kimi", "claude", "codex"] {
+            for phase in ["working", "tool", "approval", "input", "error", "idle"] {
+                let record = json!({"agent":agent,"state":"archived","activity":"busy","phase":phase,
+                    "pid":0,"process_start":"exited-fixture","conversation_state":"active",
+                    "run_id":"old-run","conversation_id":"saved-conversation",
+                    "archive_id":"11111111-1111-4111-8111-111111111111"});
+                let original = record.clone();
+                let activity = normalized_activity(&record, false);
+                assert_eq!(activity["activity"], "ended", "{agent}: {phase}");
+                assert_eq!(activity["phase"], "ended", "{agent}: {phase}");
+                assert_eq!(activity["runtime_state"], "stopped");
+                assert_eq!(activity["process_state"], "exited");
+                assert_eq!(activity["conversation_state"], "active");
+                assert_eq!(record, original, "the archive remains the restore source");
+
+                // The desktop already prioritizes Archive for the old wire
+                // shape as well as the normalized row.
+                let old_view = zerus_client_core::view::row(&record);
+                assert_eq!(old_view.status, "ended");
+                assert_eq!(old_view.caption, "Archived");
+                let mut projected = record.clone();
+                projected
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(activity.as_object().unwrap().clone());
+                let view = zerus_client_core::view::row(&projected);
+                assert_eq!(view.status, "ended");
+                assert_eq!(view.caption, "Archived");
+            }
+        }
+    }
+
+    #[test]
+    fn live_and_saved_activity_keeps_background_and_attention_semantics() {
+        let pid = std::process::id();
+        let start = storage::process_start(pid);
+        assert!(!start.is_empty());
+        for state in ["running", "paused", "stopped", "archived"] {
+            for phase in ["working", "tool", "approval", "input", "error"] {
+                let record = json!({"state":state,"activity":"busy","phase":phase,
+                    "pid":pid,"process_start":start});
+                let live = normalized_activity(&record, true);
+                assert_eq!(live["activity"], "busy", "{state}: {phase}");
+                assert_eq!(live["phase"], phase, "{state}: {phase}");
+                if state != "archived" {
+                    let saved = normalized_activity(&record, false);
+                    assert_eq!(saved["activity"], "busy", "{state}: {phase}");
+                    assert_eq!(saved["phase"], phase, "{state}: {phase}");
+                }
+            }
+            let record = json!({"state":state,"activity":"idle","phase":"idle",
+                "pid":pid,"process_start":start,"subagent_groups":{"worker":{"active_count":1}}});
+            let live = normalized_activity(&record, true);
+            assert_eq!(live["activity"], "busy", "live background work: {state}");
+            assert_eq!(live["phase"], "working", "live background work: {state}");
+        }
     }
 }
 
@@ -2466,11 +2647,32 @@ mod attention_regressions {
     }
 
     #[test]
+    fn terminal_input_choosers_replace_the_earlier_activity_summary() {
+        for agent in ["claude", "codex", "kimi"] {
+            for earlier in ["Working", "Ready", "Bash"] {
+                let mut shown = json!({"agent":agent,"phase":"input","activity":"busy",
+                    "activity_summary":earlier,"pending_questions":[{"question_id":"choice"}]});
+                wait_for_chooser(&mut shown);
+                assert_eq!(shown["activity_summary"], "Needs attention", "{agent}: {earlier}");
+                assert_eq!(shown["phase"], "input");
+                assert_eq!(shown["pending_questions"][0]["question_id"], "choice");
+            }
+        }
+    }
+
+    #[test]
     fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {
         // A Ready saved record; the summary shows a chooser only the terminal
         // reports. Dispatch refuses it, so inspect and the listing agree.
-        let mut record = telemetry::stale_hook_child();
-        record["base"] = json!(["kimi"]);
+        let record = json!({
+            "agent": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "base": ["codex"],
+            "activity": "idle",
+            "phase": "idle",
+            "main_done": true
+        });
         let shown = |phase: &str| {
             let mut output = fork::summary(&record, true);
             for part in [session_action::summary(&record, true, &None),

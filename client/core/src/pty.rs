@@ -119,8 +119,9 @@ impl Pty {
         let mut envp_ptrs: Vec<*const libc::c_char> =
             envp.iter().map(|entry| entry.as_ptr()).collect();
         envp_ptrs.push(std::ptr::null());
-        let (wake_read, wake) =
-            UnixStream::pair().map_err(|error| format!("Cannot open terminal: {error}"))?;
+        let turn = crate::unix_spawn::turn();
+        let (wake_read, wake) = crate::unix_spawn::socket_pair_in_turn(&turn)
+            .map_err(|error| format!("Cannot open terminal: {error}"))?;
         wake_read
             .set_nonblocking(true)
             .and_then(|()| wake.set_nonblocking(true))
@@ -192,6 +193,7 @@ impl Pty {
             );
             (master, pid)
         };
+        drop(turn);
         let shared = Arc::new(Shared {
             master: Mutex::new(Some(master)),
             pid: Mutex::new(Some(pid)),

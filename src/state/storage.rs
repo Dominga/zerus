@@ -4,6 +4,11 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+// Read-only selected-slot source fences for saved Resume, Start fresh and terminal Fork.
+pub(super) mod selected_source;
+#[cfg(test)]
+mod selected_source_tests;
+
 // Dormant physical exclusion for a future legacy-to-ID storage move.
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -404,8 +409,8 @@ pub(super) fn read_id(id: &str) -> Result<Value> {
     verify_at(&path, &name, &bytes)
 }
 
-/// The largest record read from the ID layout (#1437 review). Real records
-/// stay well under a megabyte; a larger file is not one of ours.
+/// Shared byte bound for live ID records and their archived copies. Retained
+/// job metadata can make a valid record larger than a megabyte.
 pub(super) const ID_RECORD_BYTES: u64 = 16 << 20;
 
 /// Bounded authoritative metadata only. No native telemetry, transcript cache,
@@ -437,7 +442,6 @@ pub(super) fn read_metadata(name: &str) -> Result<Value> {
     read_metadata_at(&path, name)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {
     let bytes = record_bytes(path, Some(ID_RECORD_BYTES)).map_err(|e| not_found(name, e))?;
     let record = verify_metadata_at(path, name, &bytes)?;
@@ -448,7 +452,6 @@ fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {
 /// Structural proof for bytes retained by recovery's original read. Selection
 /// is checked by public metadata readers; it never leaks into a different
 /// historical transaction through ambient caller state.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn verify_metadata_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
     let record: Value =
         serde_json::from_slice(bytes).map_err(|e| format!("{name}: invalid saved binding: {e}"))?;
@@ -641,17 +644,31 @@ pub(super) fn remove_record(record: &Value) -> Result<()> {
     let path = own_path(record)?;
     if in_id_layout(record) {
         if path.exists() {
-            archive::remove_synced(&path)?;
+            remove_record_file(&path, record)?;
         }
         session_index::retire(record);
         return labels::remove(string(record, "name"), string(record, "session_id"));
     }
     rename::remove_legacy(record)?;
     if path.exists() {
-        archive::remove_synced(&path)?;
+        remove_record_file(&path, record)?;
     }
     session_index::retire(record);
     Ok(())
+}
+
+fn remove_record_file(path: &Path, record: &Value) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        super::process_index_writer::remove_at(&root(), path, record, || {
+            archive::remove_synced(path)
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = record;
+        archive::remove_synced(path)
+    }
 }
 
 /// The file `record` lives in: its own `sessions/<id>.json` in the ID layout,
@@ -761,10 +778,15 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
     Ok(())
 }
 
-/// Every saved live/archive record write also migrates legacy command text.
+/// Saved live/archive writes compact command previews and settled job history.
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     ensure_session_id(record);
     processes::compact(record);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    super::process_index_writer::write_at(&root(), path, record, |record| {
+        atomic(path, &format!("{record}\n"))
+    })?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     atomic(path, &format!("{record}\n"))?;
     super::archive_references::note(path, record);
     Ok(())

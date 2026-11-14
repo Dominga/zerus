@@ -143,15 +143,17 @@ impl NativeContext {
     pub(super) fn current(&self) -> bool {
         self.same_context() && self.image.current(&self.helper)
     }
-    pub(super) fn spawn(
+    pub(super) fn spawn_input(
         &self,
         command: &mut Command,
+        input_spawn: run::InputSpawn,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
-        self.spawn_with_custody(command, None)
+        self.spawn_with_custody(command, input_spawn, None)
     }
     pub(super) fn spawn_with_custody(
         &self,
         command: &mut Command,
+        input_spawn: run::InputSpawn,
         custody: Option<&Arc<run::custody::InheritedLock>>,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
         if !self.current() {
@@ -161,7 +163,7 @@ impl NativeContext {
         if let Some(custody) = custody {
             custody.inherit(command)?;
         }
-        let mut child = command.spawn()?;
+        let mut child = input_spawn.spawn(command)?;
         let identity = self.image.observe_custody_child(&mut child).ok();
         if identity.is_none() || !self.same_context() {
             self.rejected.store(true, Ordering::Release);
@@ -197,7 +199,11 @@ impl NativeContext {
             cap,
             &self.cancel,
             held,
-            move |command| context.spawn(command).map(|(child, _)| child),
+            move |command, input_spawn| {
+                context
+                    .spawn_input(command, input_spawn)
+                    .map(|(child, _)| child)
+            },
         );
         let until = Instant::now() + Duration::from_secs(2);
         while self.busy.load(Ordering::Acquire) && Instant::now() < until {

@@ -128,6 +128,7 @@ import Dispatch
     var callbacks: [String] = []
     var pendingQuestionSend: Bool? = nil
     var receiptFlights: Set<String> = []
+    static func monotonicMillis() -> Int64 { Int64(ProcessInfo.processInfo.systemUptime * 1_000) }
     init(feedbackPrefix: Bool) { self.feedbackPrefix = feedbackPrefix }
     func draft(_ target: Target, _ question: Question) -> Draft {
         let key = target.key + ":" + QuestionPolicies.key(question)

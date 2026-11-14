@@ -96,8 +96,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_worktree_leaf() {
         // Its own two tables, then the later launch, termination outcome, task
         // message, task message input, deferred send, deferred answer and
         // compact-to-send leaves, and the question route leaves'
-        // (zerus-sa9qn.8, .32, .50 and .36).
-        before + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 1
+        // (zerus-sa9qn.8, .32, .50, .36 and .52).
+        before + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 1 + 1
     );
     // The clone leaf's original table is byte-compatible and separate.
     assert_eq!(
@@ -1307,6 +1307,58 @@ mod actor {
         assert!(reply.matches(&query));
         assert_eq!(reply.receipt.unwrap(), retained);
     }
+    #[test]
+    fn a_retained_failed_attempt_is_readable_only_under_the_restarted_services_exact_scope() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let invoked = calls.clone();
+        let mut f = Fixture::new(move |plan, control| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            (control.before)(Step::Reserve)?;
+            Ok(json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"failed",
+                "effects_started":false,"detail":"synthetic refusal before checkout"}))
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("failed original drain", |f| {
+            f.row(&original).receipt.drained
+        });
+        let retained = f.row(&original).receipt;
+        assert_eq!(retained.phase, Phase::Failed);
+        f.runtime.request_stop();
+        f.until("original runtime drain", |f| f.runtime.drained());
+        let next_epoch = uuid::Uuid::new_v4().to_string();
+        let next = Store::open_owned(&f.location, &next_epoch, &f.owner).unwrap();
+        assert!(f.store.check_service_scope(&f.location, &f.epoch).is_err());
+        assert!(next.check_service_scope(&f.location, &next_epoch).is_ok());
+        let mut query = wire::Query::for_plan(
+            original.intent.scope.clone(),
+            original.binding.creation_id.clone(),
+            &original.plan,
+        )
+        .unwrap();
+        assert_eq!(
+            super::query(
+                &next,
+                &json!({"op":"creation_worktree_result","query":query})
+            )["code"],
+            "creation_result_unavailable"
+        );
+        query.scope.service_epoch = next_epoch;
+        let result: wire::Lookup = serde_json::from_value(super::query(
+            &next,
+            &json!({"op":"creation_worktree_result","query":query}),
+        ))
+        .unwrap();
+        assert!(result.matches(&query) && result.read_only);
+        assert_eq!(result.receipt, Some(retained));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a fresh read scope never replays the failed original"
+        );
+    }
+
     #[test]
     fn fixed_admitted_plan_finishes_without_gui_and_waits_for_a_real_descendant_lock() {
         use std::process::{Command, Stdio};

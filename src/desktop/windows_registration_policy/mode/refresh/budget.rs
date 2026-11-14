@@ -1,5 +1,5 @@
-//! Refresh spends the unused Update allowance once, inside the unchanged
-//! outer bound. Deadlines are local timing limits, never native authority.
+//! Refresh has an independent Stop allocation inside the unchanged outer
+//! bound. Deadlines are local timing limits, never native authority.
 use super::*;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ pub(in crate::desktop) const PHASES: [Budget; 6] = [
 ];
 pub(in crate::desktop) fn duration(phase: Budget) -> Result<Duration> {
     Ok(match phase {
-        Budget::Stop => Budget::Stop.duration() + Budget::Update.duration(),
+        Budget::Stop => Duration::from_secs(4),
         Budget::Preflight | Budget::Hold | Budget::Start | Budget::Readiness | Budget::Release => {
             phase.duration()
         }
@@ -72,7 +72,7 @@ mod tests {
     use super::*;
     #[test]
     fn the_one_allocation_keeps_ordinary_and_outer_budgets_and_forbids_spending_update_again() {
-        assert_eq!(Budget::Stop.duration(), Duration::from_secs(2));
+        assert_eq!(Budget::Stop.duration(), Duration::from_secs(4));
         assert_eq!(duration(Budget::Stop).unwrap(), Duration::from_secs(4));
         let total = PHASES
             .into_iter()

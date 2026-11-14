@@ -340,11 +340,10 @@ pub(super) fn run() -> Result<i32> {
 /// output and errors go straight to Claude Code.
 fn compose(command: &str, input: &[u8]) -> Result<i32> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new("/bin/sh")
+    let mut child = zerus_client_core::child_environment::spawn(Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
-        .stdin(Stdio::piped())
-        .spawn()
+        .stdin(Stdio::piped()))
         .map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
         // A command that does not read its input closes the pipe early.

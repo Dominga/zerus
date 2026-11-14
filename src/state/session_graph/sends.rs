@@ -9,6 +9,114 @@ use std::process::{Command, Stdio};
 const MAX_INPUT: u64 = 29 * 1024 * 1024;
 const MAX_RECEIPT: usize = 1024 * 1024;
 
+#[path = "caller_binding.rs"]
+mod caller_binding;
+#[path = "caller_hosts.rs"]
+mod caller_hosts;
+#[path = "caller_hosted.rs"]
+mod caller_hosted;
+pub(crate) use caller_hosted::{hosted_caller, HOSTED_LIMIT};
+#[cfg(all(test, unix))]
+pub(crate) use caller_hosts::Named;
+pub(crate) use caller_hosts::Registered;
+
+/// OpenCode's refusal-only registration. DeepSeek ancestry uses the shared
+/// state::dsh helper, independently of this service file.
+pub(crate) fn caller_opencode_host() -> Option<Registered> {
+    caller_hosts::opencode()
+}
+
+/// This boot's identity as the host's own writer reads it, for the tests'
+/// host records.
+#[cfg(all(test, unix))]
+pub(crate) fn written_boot() -> Option<String> {
+    caller_hosts::written_boot()
+}
+
+/// What one host folder names under `boot`, for the tests of the record rules.
+#[cfg(all(test, unix))]
+pub(crate) fn caller_host_folder(
+    folder: &Path,
+    boot: Option<&str>,
+) -> std::result::Result<Vec<Named>, &'static str> {
+    caller_hosts::named_in(folder, boot)
+}
+
+/// The processes this boot's record names as the DeepSeek host of
+/// `agent_home`, each with its recorded birth: the very read the hosted
+/// caller proof makes (zerus-63rru.28). A process named without a birth is
+/// left out, as the proof leaves it out; no record names no host.
+#[cfg(unix)]
+pub(crate) fn caller_host_for_home(
+    agent_home: &str,
+) -> std::result::Result<Vec<(u32, String)>, &'static str> {
+    Ok(caller_hosts::deepseek_home(agent_home)?
+        .into_iter()
+        .filter_map(|host| host.birth.map(|birth| (host.pid, birth)))
+        .collect())
+}
+
+/// Whether a marked claim names a DeepSeek session, whose commands only the
+/// hosted caller proof can bind to it: by the name's agent alone, before any
+/// binding is read.
+pub(crate) fn hosted_claim(name: &str) -> bool {
+    matches!(
+        crate::state::provider_binding::Provider::named(name),
+        Some(crate::state::provider_binding::Provider::DeepSeek)
+    )
+}
+
+/// The backend of a session a resident host serves, when a marked claim
+/// names one by its exact route; `None` for every other claim.
+pub(crate) fn caller_hosted_backend(
+    name: &str,
+    run: &str,
+    session: Option<&str>,
+) -> Option<String> {
+    caller_hosts::hosted_backend(name, run, session)
+}
+
+#[cfg(test)]
+pub(crate) fn caller_host_reads() -> usize {
+    {
+        #[cfg(unix)]
+        { crate::state::dsh::recorded_host_reads() }
+        #[cfg(not(unix))]
+        { 0 }
+    }
+}
+
+/// Explicit, bounded caller admission. Existing send attribution keeps its
+/// compatibility behavior; Teams and task intake use this strict reader.
+pub(crate) fn caller_record_for(
+    name: &str,
+    run: &str,
+    session: Option<&str>,
+) -> std::result::Result<Option<Value>, &'static str> {
+    caller_binding::record(name, run, session, None)
+}
+
+pub(crate) fn caller_agent_for(
+    name: &str,
+    run: &str,
+    session: Option<&str>,
+    pid: u32,
+    birth: &str,
+) -> std::result::Result<Option<Value>, &'static str> {
+    caller_binding::record(name, run, session, Some((pid, birth)))
+}
+
+pub(crate) fn caller_machine(
+    config: &crate::config::Config,
+) -> std::result::Result<String, &'static str> {
+    caller_binding::machine(config)
+}
+
+#[cfg(test)]
+pub(crate) fn caller_binding_reads() -> usize {
+    caller_binding::reads()
+}
+
 fn machine() -> Option<String> {
     let config = crate::config::Config::load().ok()?;
     crate::swarm::local_node_id(&config).ok()
@@ -43,6 +151,16 @@ fn owned_record() -> Option<Value> {
 fn token_record() -> Option<Value> {
     let name = nonempty_env("HGS_SESSION")?;
     let run = nonempty_env("HGS_RUN_ID")?;
+    // A hosted DeepSeek tool call has no agent process of its own; its host's
+    // per-call token proves the conversation (zerus-ppd26 Part B).
+    if matches!(
+        crate::state::provider_binding::Provider::named(&name),
+        Some(crate::state::provider_binding::Provider::DeepSeek)
+    ) {
+        return hosted_caller(&name, &run, nonempty_env("HGS_SESSION_ID").as_deref())
+            .ok()
+            .flatten();
+    }
     let record = read_run(&name, &run).ok()??;
     if !process_alive(&record) || record["state"] == "archived" {
         return None;
@@ -157,6 +275,27 @@ pub(crate) const HOSTED_AGENT: &str = "dsh";
 /// agent that clears its own environment.
 pub(crate) fn hosted_agent_call() -> bool {
     std::env::var_os("HGS_AGENT").is_some_and(|agent| agent == HOSTED_AGENT)
+}
+
+/// Why a resident DeepSeek host's tool call (`HGS_AGENT=dsh`) cannot act as
+/// its session, or `None` when this is no such call or its hosted proof holds
+/// (zerus-ppd26 Part B). Such a call is never the person: a path that would
+/// otherwise go on with no origin (a send without a sender, a launch without
+/// a parent) refuses it with this sentence instead. A call that scrubs every
+/// marker is outside this rule, as for every agent.
+pub(crate) fn hosted_proof_refusal() -> Option<String> {
+    if !hosted_agent_call() {
+        return None;
+    }
+    let (Some(name), Some(run)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID")) else {
+        return Some("It carries no session markers.".into());
+    };
+    match hosted_caller(&name, &run, nonempty_env("HGS_SESSION_ID").as_deref()) {
+        Ok(Some(record)) if target_receipt(&record).is_some() => None,
+        Ok(Some(_)) => Some("Its session cannot be named on this computer.".into()),
+        Ok(None) => Some("Its session is archived.".into()),
+        Err(reason) => Some(reason.to_owned()),
+    }
 }
 
 /// The calling agent's own binding under its current name, proven like a
@@ -289,8 +428,8 @@ fn confirm(id: &str, mut event: Value, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Use the ordinary CLI in a child with attribution context cleared, preserving
-/// every delivery guard and exact exit status. Only metadata capture is bounded;
+/// Deliver in a child without attributing the same send twice, preserving
+/// every native delivery guard and exact exit status. Only metadata capture is bounded;
 /// stdout is streamed byte-for-byte, and errors retain the normal stderr route.
 pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate::cli::Result<i32> {
     let executable = crate::self_exec::current()?;
@@ -328,12 +467,26 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     if !route.is_empty() {
         command.arg(format!("@{route}"));
     }
+    // This endpoint came from send_origin's native caller proof, never from
+    // stdin. A hosted caller's child remains under its host: clearing that
+    // proof would make main's found-host gate correctly refuse the child.
+    // Keep the call context and use the existing native state entry so this
+    // already-enveloped send cannot enter attribution recursively. Remote
+    // routing still rechecks the live hosted proof before its SSH hop.
+    let hosted = origin["endpoint"]["provider"] == "dsh";
+    if hosted {
+        command.arg("__state");
+    } else {
+        command
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .env_remove("HGS_AGENT")
+            .env_remove("HGS_DSH_CALL_TOKEN");
+    }
     command
         .arg("send")
         .args(args)
-        .env_remove("HGS_SESSION")
-        .env_remove("HGS_SESSION_ID")
-        .env_remove("HGS_RUN_ID")
         .stdin(file)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

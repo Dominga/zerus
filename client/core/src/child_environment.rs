@@ -1,6 +1,7 @@
 //! Keep a local GUI's private WebKit libraries out of terminals and other applications.
 use std::ffi::{OsStr, OsString};
-use std::process::Command;
+use std::io;
+use std::process::{Child, Command};
 
 pub const WEBKIT_MARKER: &str = "HGS_LINUX_WEBKIT_ORIGINAL_ENV";
 
@@ -10,6 +11,20 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     restore(&mut command);
     command
+}
+
+/// Spawn only. Unix callers share the core endpoint/spawn turn; other hosts
+/// retain std's existing flags and behavior. This does not restore or edit env.
+#[doc(hidden)]
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        crate::unix_spawn::spawn(command)
+    }
+    #[cfg(not(unix))]
+    {
+        command.spawn()
+    }
 }
 
 /// Apply after any explicit environment overrides as well as at construction.

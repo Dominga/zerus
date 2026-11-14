@@ -3,6 +3,7 @@
 Persisted binding changes model a confirmed same-conversation resume. These tests
 exercise indexing and wire identity, not lifecycle execution or model traffic.
 """
+import base64
 import hashlib
 from contextlib import closing
 import json
@@ -855,6 +856,117 @@ class PublicHistoryContract(unittest.TestCase):
         # The resumed frontier imports exactly the new original once.
         self.assertEqual(classified, 3)
 
+
+    def receipt_frontier(self):
+        index = next((self.state / "public_history").glob("*.sqlite3"))
+        with closing(sqlite3.connect(index)) as db:
+            cursor = db.execute("SELECT value FROM meta WHERE key='receipt_cursor'").fetchone()[0]
+        body = cursor.split(".")[0]
+        return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+
+    def receipt_locator(self, request):
+        with closing(sqlite3.connect(self.state / "delivery-receipts-v1.sqlite3")) as db:
+            return db.execute("SELECT seq,binding,stamp,change FROM receipt_rows "
+                              "WHERE source='terminal' AND request=?", (request,)).fetchone()
+
+    def assert_receipt_gap(self, page, epoch):
+        self.assertEqual(page["source_status"].get("gap"), "receipt_source_gap")
+        self.assertFalse(page["head"]["complete"])
+        self.assertIsNone(page["head"]["incoming_seq"])
+        self.assertIsNone(page["head"]["total_incoming"])
+        self.assertEqual(page["history_epoch"], epoch)
+
+    def test_deleted_imported_receipt_after_settled_frontier_is_a_gap_across_restart(self):
+        deleted, kept, unknown = [str(uuid.uuid4()) for _ in range(3)]
+        removed = self.receipt(deleted)
+        present = self.receipt(kept, at=1_700_000_051.0)
+        uncertain = self.receipt(unknown, at=1_700_000_052.0)
+        value = json.loads(uncertain.read_text())
+        value.update(status="in_progress", delivery="uncertain")
+        uncertain.write_text(json.dumps(value), encoding="utf-8")
+        present_bytes, uncertain_bytes = present.read_bytes(), uncertain.read_bytes()
+        self.receipt_worker()
+        before = self.complete()
+        epoch = before["history_epoch"]
+        cached = next(row for row in before["events"] if row.get("message_id") == deleted)
+        self.assertNotIn(unknown, [row.get("message_id") for row in before["events"]])
+        frontier = self.receipt_frontier()
+        self.assertEqual(frontier["after"], frontier["upper"], "settled import frontier")
+        locator = self.receipt_locator(deleted)
+        removed.unlink()
+
+        # Both the real discovery worker and every history read run in new
+        # CLI processes: the persisted locator/frontier must carry the gap.
+        self.receipt_worker()
+        after = self.history()
+        self.assert_receipt_gap(after, epoch)
+        self.assertEqual(next(row for row in after["events"] if row.get("message_id") == deleted), cached)
+        missing = self.receipt_locator(deleted)
+        self.assertEqual(missing[:2], locator[:2], "keep sequence and immutable binding")
+        self.assertEqual(missing[2], "gap:missing")
+        self.assertGreater(missing[3], locator[3], "publish the missing original beyond the settled frontier")
+        resumed = self.receipt_frontier()
+        self.assertGreater(resumed["after"], frontier["after"])
+        rows, classified = self.indexed_receipts()
+        self.assertEqual(rows, {deleted: 1, kept: 1})
+        self.assertEqual(classified, 3)
+
+        # A further worker restart is idempotent; an unknown send never
+        # becomes a submitted history row and no original is reconstructed.
+        self.receipt_worker()
+        repeated = self.history()
+        self.assert_receipt_gap(repeated, epoch)
+        self.assertEqual(self.receipt_locator(deleted), missing)
+        self.assertEqual(self.indexed_receipts(), (rows, classified))
+        self.assertFalse(removed.exists())
+        self.assertEqual(present.read_bytes(), present_bytes)
+        self.assertEqual(uncertain.read_bytes(), uncertain_bytes)
+        self.assertEqual({p.name for p in present.parent.glob("*.json")}, {present.name, uncertain.name})
+
+    def test_deleted_imported_receipt_is_disclosed_before_a_frozen_chain_reaches_its_change(self):
+        requests = [str(uuid.uuid4()) for _ in range(70)]
+        for request in requests:
+            self.receipt(request)
+        self.receipt_worker()
+        first = self.history()
+        epoch = first["history_epoch"]
+        frontier = self.receipt_frontier()
+        self.assertLess(frontier["after"], frontier["upper"], "an unfinished bounded import chain")
+        with closing(sqlite3.connect(next((self.state / "public_history").glob("*.sqlite3")))) as db:
+            name = db.execute("SELECT name FROM receipt_seen ORDER BY name LIMIT 1").fetchone()[0]
+        deleted = name.removesuffix(".json")
+        removed = self.state / "input_receipts" / name
+        cached = next(row for row in first["events"] if row.get("message_id") == deleted)
+        removed.unlink()
+        added = str(uuid.uuid4())
+        kept = self.receipt(added, at=1_700_000_060.0)
+        kept_bytes = kept.read_bytes()
+        self.receipt_worker()
+        missing = self.receipt_locator(deleted)
+        self.assertGreater(missing[3], frontier["upper"])
+
+        # The old frozen upper excludes both the new arrival and the missing
+        # original's change. Coverage must disclose the gap on this page,
+        # while the unchanged cursor finishes the original bounded chain.
+        middle = self.history()
+        self.assert_receipt_gap(middle, epoch)
+        drained = self.receipt_frontier()
+        self.assertEqual(drained["upper"], frontier["upper"])
+        self.assertEqual(drained["after"], frontier["upper"])
+        rows, classified = self.indexed_receipts()
+        self.assertEqual(set(rows), set(requests))
+        self.assertNotIn(added, rows)
+        self.assertEqual(classified, 70)
+        self.assertEqual(next(row for row in middle["events"] if row.get("message_id") == deleted), cached)
+
+        after = self.history()
+        self.assert_receipt_gap(after, epoch)
+        rows, classified = self.indexed_receipts()
+        self.assertEqual(set(rows), set(requests + [added]))
+        self.assertTrue(all(count == 1 for count in rows.values()))
+        self.assertEqual(classified, 71)
+        self.assertFalse(removed.exists())
+        self.assertEqual(kept.read_bytes(), kept_bytes)
 
     def test_a_rebound_receipt_original_is_a_gap_not_an_import(self):
         request = str(uuid.uuid4())

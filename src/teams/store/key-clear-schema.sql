@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS key_clear_finished(team TEXT PRIMARY KEY);

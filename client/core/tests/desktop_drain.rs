@@ -144,7 +144,7 @@ fn owned_input_pipe_keeps_gate_charged_after_bounded_runner_return() {
         &inv,
         &[],
         &AtomicBool::new(false),
-        |command| command.spawn(),
+        |command, input_spawn| input_spawn.spawn(command),
         charge,
     );
     assert_eq!(result, Err(OwnedError::TimedOut));

@@ -28,6 +28,7 @@ conservative change selection, including both sides of renames.
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
+| Desktop client core | Always | The unchanged `client-core.sh` format, strict Clippy and test sequence on Ubuntu, in parallel with Quick and bound to the same resolved commit; required by Suite results |
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
@@ -41,6 +42,12 @@ conservative change selection, including both sides of renames.
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, Tauri build with video and frontend notices, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
+
+Manual checks may pin a source older than the client-core job split. If that
+source's disk helper does not support the job, client-core omits only its disk
+preparation/diagnostics and cache restore, building cold to avoid extracting
+Quick's full target cache onto an unprepared runner. Format, strict Clippy,
+tests and the required suite result still run against the exact pinned source.
 
 PR #430's first native-client run at `b3716dd8` (run `40898847326`) measured an
 11-minute-19-second green Linux check run, a 65-minute macOS check-run span that
@@ -61,8 +68,12 @@ command has its own named workflow step and calls
 shared registry cache, so the two jobs cannot race to save one key. Linux keeps
 45 minutes and Windows 60.
 
-Quick checks and the full suites start together once the commit is resolved, so
-a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
+Quick, the client-core job and the full suites start together once the commit is
+resolved. Client-core restores the compiler/month Rust cache read-only and adds
+no cache writer or cache family. Suite results requires client-core success for
+every platform selection, so its failure, cancellation or skip reaches the
+calling CI, regression, Nightly and stable-candidate gates. A Quick failure does
+not hold back the other suites. New PR/manual runs cancel
 obsolete runs for the same branch/PR and workflow. Every `pull_request` workflow has
 such a per-PR group: a new head cancels that PR's older run, and the other workflows'
 manual runs keep their earlier concurrency. Closing or merging a PR cancels its
@@ -277,6 +288,37 @@ An explicit test `ref` changes the checked-out commit, not GitHub's workflow run
 metadata. Use the exact tested SHA recorded in the job summary when reviewing
 such a manual run. Automatic PR and push runs produce CI gate without a dispatch.
 Review and merging remain deliberate; successful CI does not auto-merge PRs.
+
+The existing CI workflow accepts `windows_flake_rounds` from 0 to 40 for opt-in
+native Windows qualification. Zero keeps ordinary runs unchanged. A selected
+run samples four independent sustained transports per round and serial mode
+round trips, each under two local hash workers. Successful changed-mode replies
+carry bounded Stop step timings; a no-op or missing timing cannot qualify a
+Stop sample. A fresh round explicitly Rearms after the prior passive rollback. Mode sampling stops at the first
+refused or unknown choice, retaining the original fixture custody; it never
+retries that choice. Per-invocation readiness, lease, Stop and cleanup bounds
+stay unchanged. Additional dispatch-only steps have their own aggregate CI
+allowance for the extra rounds; ordinary suite commands and limits are
+unchanged. Mode sampling requires that exact Windows shell/native step to
+succeed, while earlier independent failures stay visible. Use the PR's
+reviewed workflow and exact source pin;
+do not start a second full matrix while that SHA is already under verification.
+
+The sustained transport fixture gives startup and an exact framed-input marker
+one eight-second deadline, then gives the 20-chunk render its own 25 seconds.
+The marker must appear in the fake's complete input record before rendering
+starts; no renewal is queued between those events. This binds the 19-second
+render to the decoder's actual clock, which starts after `Add-Type`. The product
+lease remains 15 seconds. Native no-renewal controls must observe the original
+helper exit with code 127 before rendering completes, while stdin stays open.
+The 4 KiB paste marker fills the existing redirected-input buffer before EOF;
+the fixture's 8 KiB incoming pipe fits its data and framing before the decoder
+reads, so marker publication cannot block the startup deadline checks. See the
+[redirected stdin construction](https://github.com/microsoft/referencesource/blob/main/System/services/monitoring/system/diagnosticts/Process.cs)
+and [buffered writes](https://github.com/microsoft/referencesource/blob/main/mscorlib/system/io/filestream.cs#L1638)
+in the .NET Framework reference source.
+Readiness/marker and render diagnostics identify their separate stage and bound;
+cleanup keeps its existing 18-second wait, five-second fallback and reader joins.
 
 Arch is the Linux GUI build environment because the application uses Qt 6 and KDE
 Frameworks 6. Ubuntu remains useful for portable CLI and minimum-Rust checks.
@@ -834,6 +876,34 @@ selected agent, then resolves its exact platform package and SHA-512 integrity.
 All selected packages must resolve before any native execution. The report saves
 their exact versions, URLs and digests before the first test; a missing release,
 platform package or valid digest fails without falling back to historical pins.
+
+Kimi's standalone image selection reads three official current-release pointers
+once: the standalone `code.kimi.com/kimi-code/latest`, npm's
+`@moonshot-ai/kimi-code` latest metadata and the published stable release at
+`MoonshotAI/kimi-code` on GitHub. The highest stable numeric version must be named
+by at least two sources. An unavailable or invalid source, three-way disagreement,
+or an uncorroborated higher version fails before execution; an older agreeing pair
+never supplies a fallback. This handles a lagging standalone pointer without
+qualifying an older native agent. The exact selected version's official manifest
+and image HEAD bind the platform filename, manifest digest, image size and SHA-256;
+the download must match them. Selection provenance retains all three observations
+and agreeing sources. Every case in the run keeps that one selected image.
+
+Discovery retries only the same official metadata URL and method, through the
+shared `scripts/ci/native_discovery.py` reader used by Kimi, Claude Code, Codex,
+OpenCode and DeepSeek. Each request has at most three attempts, each in a private
+child with a 30-second wall timeout, with 2- and 4-second backoff: a 96-second
+request budget, further clamped by any original caller deadline. Kimi resolves
+five metadata requests (the three current pointers, that exact manifest and the
+image HEAD), so its metadata phase has at most 480 seconds; image download keeps
+its separate bound.
+Each attempt logs URL, stage, attempt and outcome as `ZERUS_DISCOVERY` JSON.
+Transient network errors and HTTP 408/429/5xx may retry; invalid metadata,
+redirects rejected by the existing caller policy, permanent HTTP errors and
+certificate verification failures fail closed. Exhaustion raises a distinct
+`discovery unavailable` error and fails the job before native execution. A retry never selects a historical release, relaxes
+integrity checks or turns unavailable discovery into a skipped-suite success.
+
 Every terminal case uses that same selected image. Historical package records in
 `scripts/ci/agent-compatibility.json` remain evidence for separately selected old
 fixtures; ordinary CI and the daily upstream report do not execute those versions.
@@ -1047,9 +1117,13 @@ single goal-creation checks.
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through
 guarded input and preserving the conversation across pause/resume without
-replaying that message. The former send-after-start-only coverage missed the
-unsupported positional launch prompt. Help snapshots from native 2.1.1, 2.2.0
-and 2.3.3 cover argument construction without running historical releases in CI.
+replaying that message. Fork coverage independently checks the native utility's
+live-instance refusal, the disabled live offer and CLI refusal, then real paused
+and archived forks with distinct CIDs. The paused fork also verifies inherited
+model context. The former send-after-start-only coverage missed the unsupported
+positional launch prompt.
+Help snapshots from native 2.1.1, 2.2.0 and 2.3.3 cover argument construction
+without running historical releases in CI.
 Declining trust also verifies cancellation without delivery and bounds the
 retained inspection preview independently of the full initial message size.
 
@@ -1360,6 +1434,217 @@ Windows target, which is clean today; Linux-only modules are not linted.
 Logs are under ignored
 `artifacts/test-results/`; packaging outputs are under ignored `artifacts/` and
 `dist/`.
+
+### Agent Teams real agents
+
+`tests/test_teams_native.py` checks the Agent Teams milestone 1 against the real
+agents. It is selected separately: `scripts/ci/agent-compatibility.py --contract teams`
+runs it for Claude Code and Codex, and `scripts/ci/kimi-native.py --teams` runs its
+Kimi class. Both run in the **Agent Teams real agents** workflow (`teams-native.yml`)
+on pull requests and main pushes that change a component the contract can catch
+drifting (`src/**`, `crates/**`, `client/core/**`, the Cargo files) or a script, test
+or fixture it runs, and on demand, on the public repository only. The workflow is not
+part of the Dev gate or of Nightly: a red run is visible and holds nothing back.
+
+- **Selection.** Each agent gets the same one latest official release as ordinary
+  CI, with the same checked fetch. There is no Effort seed and no
+  terminal-geometry matrix, and no other job's timing changes.
+- **Static tests.** Run the suite's static parts from the repository root with the
+  tests folder on the path, as `scripts/ci/python-tests.py` does:
+  `PYTHONPATH=tests python3 -m unittest test_ci_security test_kimi_native_ci
+  test_agent_compatibility test_teams_native`. The native classes skip without a pinned
+  agent.
+- **Setup.** Each class creates one private root (`hgs-tn-*` in `TMPDIR`)
+  with:
+  - `HOME`, every XDG folder and a 0700 `XDG_RUNTIME_DIR`;
+  - `HGS_STATE_DIR` and `HGS_CONFIG_DIR`;
+  - the agents' account homes;
+  - an existing 0700 `TMUX_TMPDIR`;
+  - a D-Bus address naming a missing socket;
+  - `PATH` limited to the root's wrappers and the system folders.
+
+  It then starts a private `hgs desktop serve --background` with the Teams preview
+  turned on by the person, and creates one team: a lead and one member of the agent
+  under test. The service launches both.
+- **Model.** A keyless loopback fixture (`tests/model_api_fixture.py`) answers text,
+  or a scripted shell step for a delivered task prompt or a typed `ZT-RUN <step>`.
+  No account and no model quota are used, and only fixture keys exist in the root.
+
+It runs these steps in order:
+
+1. **Launch and identity.** The launch binds by launch ID, and the session record
+   carries the store's ownership nonce and worktree. The native process is the
+   pinned image under the production supervisor. The role's model and effort reach
+   its argv. The service writes the member's parent link once the lead has a
+   conversation. Codex starts its conversation at the first message, so for Codex the
+   person's first message to each session comes before this check.
+2. **Delivery and the member's shell.** `team-deliver` puts the prompt into the
+   member exactly once. The prompt pins `report-attempt` exactly once and
+   `begin-attempt` at most once (only while the product's task controls are on; off
+   today), and the case records which form it met. The member's own tool shell runs
+   every pinned command: it acknowledges with `begin-attempt` when one is pinned,
+   passes the caller proof (`hgs team current` names the member), is refused the
+   lead's inbox, and reports with `report-attempt`.
+3. **The lead's doorbell.** The lead gets one message naming the inbox, with none
+   of the item's text, and its own shell reads the inbox as the lead.
+4. **The cancel notice.** The lead cancels a delivered task from its shell, and the
+   member gets the existing notice once.
+5. **Stop and Terminate.** Unless a task is still unfinished, the step adds one, so
+   the stop has an unfinished node. The person's team stop ends no agent, while the service cancels the stopped
+   team's nodes. Terminate ends the member's process and
+   archives its run.
+
+The person answers each startup card the way the product offers it:
+
+- Claude's and Kimi's folder trust, and Codex's Folder access, through `hgs answer`;
+- Codex's hooks review through `hgs answer`. It shows once per account: after "Trust
+  all and continue", a second session on the same account does not show it.
+
+Further classes repeat the same bring-up with one of the team's delegations on:
+
+- **Codex folder trust by the standing confirmation** (`NativeTeamsTrustCodex`,
+  `confirm_trust`, selected). Every member worktree is a linked worktree, so Codex's
+  Folder access panel carries its Git-root note and asks "Trust this Git
+  repository?". The standing confirmation answers that startup card, as owner
+  decision D9 permits, with one audited grant per member naming the exact main
+  checkout scope, category and original run. The person supplies no folder answer;
+  the native account records only the main checkout as trusted. The ordinary Codex
+  startup case, where the person answers, retains which panel the pane showed (a folder of up to 76
+  columns fills one row): a hosted runner, whose root in `/tmp` is short, must show
+  the one-row panel and a local run the wrapped one.
+- **Resume of an exited member** (`NativeTeamsResumeClaude` and
+  `NativeTeamsResumeCodex`, `resume_exited`, selected; the person answers folder
+  trust). The member works once
+  (the person's message and its answer), so its conversation is persisted. The existing
+  turn wait requires both Stop and the product Terminal reader's empty composer before
+  sending quit keys; Stop can precede native input readiness. When its
+  agent then exits by itself (`/exit`; Codex `/quit`), the service resumes it in a new run of the same
+  launch and conversation, it gets its brief once, and the audit records `team_resume`. A member
+  the person terminates is refused with a card and no audit row, and no run of its
+  launch is live.
+- **A Claude Code member that exits before any message**
+  (`NativeTeamsResumeUnworkedClaude`, `resume_exited`, selected). It has no persisted
+  conversation, so the service's restore is refused before launch. Nothing of its
+  launch starts, and the person's card carries the exact refusal reason from the
+  archive's own inspection. The separate explicit Restore must fail too; its receipt
+  is recorded beside the inspection, and no member run starts afterward.
+
+Written and waiting: `WAITING` in the module lists these, and the contract does not
+select them until their fixes land.
+
+| Case | Waits for |
+|---|---|
+| Claude Code folder trust by the standing confirmation (`NativeTeamsTrustClaude`, two members pinned to one account): the service answers each member's startup folder trust with one audit grant. What Claude Code 2.1.322 records is pinned as observed: the account holds exactly the main checkout as trusted and no worktree key, and the later worktree on the same account still shows its card. The owner's decision (zerus-63rru.66) keeps the automatic answer for Claude and Codex and states the real scope in the setting, the docs and the audit row, which names the repository's main checkout next to the card's folder. Then each member asks an ordinary question: it stays pending for the person, with no card and no grant, and its member is not free while it is open | `zerus-63rru.66` and `zerus-63rru.73` (an ordinary question is taken as a trust candidate today) |
+| An ordinary question after no startup card (`NativeTeamsQuestionAfterTrustClaude`): the person has trusted the main checkout on both Claude accounts first; the question plans nothing, no card and no grant | `zerus-63rru.73` (today it opens one notice card) |
+| A member whose agent runs its shell in a private PID namespace (`waiting_6_a_member_shell_in_a_private_pid_namespace`, written down, not built): its report and team commands are refused with the refusal that names the separate process namespace and its remedy, no report is recorded, and the lead is told | `zerus-63rru.76` (the caller proof cannot see the agent's recorded process; the named refusal comes with the other stream's next sync to main) |
+
+#### Isolation
+
+Each class checks its own isolation and fails rather than skipping:
+
+- **tmux.** A `tmux` wrapper first on `PATH` logs every call and refuses any call
+  that names no server inside the root. It resolves symbolic links before judging:
+  an existing socket path must resolve inside the root, and a path that does not
+  exist yet is judged by its nearest existing ancestor. A link from the private
+  folder to another server therefore never reaches tmux.
+- **Account name.** The suite's children never see the runner's account name:
+  `USER` and `LOGNAME` are the fixture value `teams-fixture`, and the preflight fails
+  if the real name is the value of any variable.
+- **Shims.** `ssh`, `scp`, `systemd-run` and `hgs` are refusing shims: nothing
+  reaches another computer, the user manager or an installed hgs. The build under
+  test runs only by its absolute path.
+- **Preflight.** Before anything starts, a preflight checks every path, the absent
+  session and display variables and the wrappers' resolution.
+- **Account homes.** Every account home that the launch inspects is configured,
+  including the always-listed native ones (`HOME/.claude`, `HOME/.codex`,
+  `HOME/.kimi-code`): auto-update off, plugins off and the provider's base URL on
+  loopback where the agent allows it.
+- **Teardown.** It terminates the team's sessions as the person, stops the service
+  (exit 0 on SIGTERM) and ends the private tmux server. It then requires that no
+  process refers to the root by its working folder, executable or environment.
+  Otherwise the root is kept and the class fails.
+- **A killed run.** A run killed after a session started (the row's bound, a
+  cancelled job) runs no teardown. What remains is the evidence written as it goes:
+  the calls, waits, census, model requests, account inspection, preflight, and the
+  tmux and shim logs, which the wrappers write straight into the uploaded evidence
+  folder. There is no archive of the private root. The hosted Kimi runner records the
+  root in its custody file as soon as it exists, but its retention refuses the
+  sockets a killed session leaves behind, which is that campaign's reviewed rule. The
+  Claude Code and Codex job uploads only the evidence folder. A runner killed directly
+  (SIGKILL) also leaves the private desktop service and its tmux server running, since
+  the suite has no handler for it: locally the transient user unit's cgroup ends them
+  when the unit stops, and on a hosted runner the runner's end does.
+- **Network census.** Once a second, a census lists the TCP and UDP peers of the
+  class's own processes: the descendants of the test process and of the private
+  tmux server. Any peer that is neither loopback nor an address of an allow-listed
+  host fails the class. The census is sampled: a connection opened and closed
+  between two samples is not seen.
+
+| Agent | Allowed host | Contacted with these switches set |
+|---|---|---|
+| Claude Code | `downloads.claude.ai` | `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in its environment and settings, `autoUpdates: false`; once per session start |
+| Codex | `raw.githubusercontent.com`, `ab.chatgpt.com` | `check_for_update_on_startup=false`, `[features] plugins=false`, `chatgpt_base_url` on loopback |
+| Kimi Code | none | `KIMI_CODE_NO_AUTO_UPDATE=1`, `KIMI_DISABLE_TELEMETRY=1`, `tui.toml` `auto_install=false`, platform URL on loopback, private `fd` stand-in for file references |
+
+#### Kimi account inspection
+
+Kimi signs an account in only through `api.kimi.com`. The Kimi class therefore puts
+an expiring fixture token in the account home and a logged `node` stand-in on `PATH`
+for the one call `hgs account inspect` makes to refresh it. The stand-in prints a
+value its producer, `src/accounts/kimi-read.mjs`, writes: a signed-in profile with no
+usage windows, built from the producer's starting object by changing named keys
+only. `TeamsFixtureProducers` compares it with that file, so a key the producer does
+not write fails. Kimi's account choice is
+not evidence here (a loopback inspection seam is a follow-up for the accounts owner); everything after it
+is the real Kimi image. `kimi-native.py --teams` runs only on a disposable
+GitHub-hosted runner. It runs the class in a child of its own under a 2400-second
+bound and sets the `ZERUS_TEAMS_KIMI_HOSTED` marker, without which the class skips.
+A skip is reported as no evidence.
+Kimi Code's steps 2 to 4 (delivery and the member's shell, the doorbell, the cancel
+notice) are selected but not yet proven: no hosted run has carried them yet, and their
+first proof is the first hosted run. Until then they count as no evidence.
+
+#### Bounds
+
+Every wait names what it waits for and has its own bound, about three times the
+duration measured on a loaded development host; the upstream canary has no Teams
+step yet. Measured on 2026-11-12 with Claude Code 2.1.322 and Codex 0.167.2, over
+seven passing runs:
+
+| Wait | Measured | Bound |
+|---|---|---|
+| Lead and member bound by launch ID | 129–141 s | 420 s |
+| Ready after the person's startup answers | 3.5–11 s | 360 s |
+| A Codex conversation started by its first message | 0.8–3 s | 180 s |
+| Parent link written by the service | 26–53 s | 200 s |
+| The service's cancel and key clear after a stop | 2 s | 180 s |
+| One whole run | 215–230 s | 2400 s (the row) |
+ Each wait logs its measured duration as a `ZERUS_TEAMS_WAIT=` line and in
+`waits.jsonl`, so a bound can be tightened from evidence. The row's bound is 2400
+seconds. Locally, run the contract outside any agent session, for example in a
+`systemd-run --user` unit with `env -i` and `USER=teams-fixture LOGNAME=teams-fixture`:
+the Teams caller proof refuses a person command below a live agent.
+
+#### Not covered in milestone 1
+
+- **DeepSeek and OpenCode members:** a resident host serves those sessions, so the
+  caller proof cannot bind their commands to them. Team creation refuses them until
+  the per-call token lands.
+- **macOS:** not run in this milestone. The Mac is not used for packages, Codex has
+  no darwin package in the runner, and the marked path with the hardened release
+  `hgs` is unobserved on a Mac.
+- **Windows:** the caller proof refuses every caller there, so the preview cannot be
+  turned on.
+- **Uncertain outcomes** (unknown delivery, answer or launch): a real agent cannot
+  produce them honestly. They are not agent behaviour and stay with the package
+  fakes.
+- **Timers past their first firing:** they are agent-independent and stay with the
+  package fakes.
+- **The waiting cases:** Claude Code folder trust by the standing confirmation, for
+  the owner's decision `zerus-63rru.66` and for `zerus-63rru.73`, and an ordinary
+  question after no startup card, for `zerus-63rru.73`. The cases exist and are not
+  selected. A member shell in a private PID namespace (`zerus-63rru.76`) is written
+  down as a waiting case and not yet built.
 
 ## Automatic nightly publication
 

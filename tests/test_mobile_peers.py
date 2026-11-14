@@ -411,7 +411,8 @@ class MobilePeers(unittest.TestCase):
         def record(name, run, pid, conversation):
             value = dict(version=1, name=name, agent='claude', run_id=run, conversation_id=conversation,
                          session_id=str(uuid.uuid4()), pid=pid, process_start=started(pid), activity='idle',
-                         phase='idle', active_tools={}, subagents={})
+                         phase='idle', active_tools={}, subagents={},
+                         claude_registry_home=str(self.root / 'claude'))
             (state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(value))
 
         record('claude/example/agent', 'run-agent', os.getpid(), str(uuid.uuid4()))

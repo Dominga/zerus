@@ -120,7 +120,7 @@ const AUTHORED: [&str; 7] = [
     "claude_native_question",
 ];
 /// Sources only Terminal can answer while the host cannot.
-const TERMINAL_ONLY: [&str; 8] = [
+const TERMINAL_ONLY: [&str; 10] = [
     "claude_tool_approval",
     "kimi_tool_approval",
     "claude_terminal_choice",
@@ -129,6 +129,8 @@ const TERMINAL_ONLY: [&str; 8] = [
     "claude_usage_limit",
     "startup_terminal_choice",
     "codex_rate_limit",
+    "kimi_cache_hint",
+    "codex_sandbox_setup",
 ];
 /// Native cards whose body refreshes in place (`refreshNativeBody`).
 const REFRESHED: [&str; 3] = [
@@ -1606,7 +1608,9 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
     } else {
         None
     };
-    let heading = if let Some((_, count)) = &starting {
+    let heading = if question.source == "codex_sandbox_setup" {
+        crate::text!("Codex sandbox setup")
+    } else if let Some((_, count)) = &starting {
         if *count == 1 { crate::text!("Start 1 subagent") } else { crate::text!("Start %1 subagents", *count) }
     } else if question.approval || question.trust_request || question.plan_review {
         crate::text!("Agent needs your approval")
@@ -1651,7 +1655,13 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
         ));
     }
     if notice.is_none() && !supported {
-        notice = stored(&question.unavailable_reason);
+        notice = if question.source == "codex_sandbox_setup"
+            && question.unavailable_reason == "Open Terminal to answer this question."
+        {
+            Some(crate::text!("Answer this request in Terminal."))
+        } else {
+            stored(&question.unavailable_reason)
+        };
     }
     if notice.is_none() && !supported {
         notice = Some(crate::text!("Answer this request in Terminal."));
@@ -1682,6 +1692,9 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
         notice = Some(crate::text!(
             "Review the request, then choose one of the agent's options."
         ));
+    }
+    if notice.is_none() && question.source == "codex_sandbox_setup" {
+        notice = Some(crate::text!("Choose how Codex sets up its Windows sandbox. Administrator setup may open a Windows permission prompt. Continue setup in Terminal."));
     }
     if notice.is_none() && question.plan_review && !complete {
         notice = Some(crate::text!(

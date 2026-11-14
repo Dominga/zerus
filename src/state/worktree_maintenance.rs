@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions, ReadDir};
 use std::time::{Duration, Instant};
 
+const DATABASE_BUSY_TIME: Duration = Duration::from_millis(200);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Policy {
@@ -80,7 +82,7 @@ fn database() -> Result<Connection> {
         return Err("Worktree maintenance database must be private".into());
     }
     let db = Connection::open(path).map_err(|e| e.to_string())?;
-    db.busy_timeout(Duration::from_millis(200))
+    db.busy_timeout(DATABASE_BUSY_TIME)
         .map_err(|e| e.to_string())?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS checkouts (
         path TEXT PRIMARY KEY, common_dir TEXT NOT NULL, owner TEXT NOT NULL,

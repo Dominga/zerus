@@ -1,7 +1,9 @@
 """Keep cache warm: setting, worker round and silent ping turns, with private fake agents only."""
+import datetime
 import fcntl
 import os
 import json
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -12,6 +14,14 @@ import test_input as fixtures
 import test_pause
 
 TEXT = "[Zerus keep-warm] Reply with exactly OK and do nothing else."
+NOTICE = ("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+          "<summary>Background command \"watch\" completed</summary>\n</task-notification>")
+PEER = ("<zerus-message from=\"peer/session\" host=\"peerhost\" "
+        "reference=\"zerus://session?machine=11111111-1111-4111-8111-111111111111"
+        "&amp;host=peerhost&amp;name=peer%2Fsession"
+        "&amp;conversation=22222222-2222-4222-8222-222222222222"
+        "&amp;run=33333333-3333-4333-8333-333333333333\">\n"
+        "hello from a peer\n</zerus-message>")
 
 
 class KeepWarm(unittest.TestCase):
@@ -89,10 +99,11 @@ class KeepWarm(unittest.TestCase):
         self.assertFalse((self.state / "keep-warm.json").exists())
 
     def hook(self, kind, **values):
-        result = subprocess.run([str(fixtures.HGS), "__state", "hook"],
-                                env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id),
-                                input=json.dumps(dict(hook_event_name=kind, session_id=self.conversation_id, **values)),
-                                text=True, capture_output=True, timeout=10)
+        import hook_caller_fixtures
+        env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id)
+        event=dict(hook_event_name=kind,session_id=self.conversation_id,**values)
+        result=hook_caller_fixtures.run(self,event,env) if self.record['agent']=='claude' else subprocess.run(
+            [str(fixtures.HGS),'__state','hook'],env=env,input=json.dumps(event),text=True,capture_output=True,timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def pending_ping(self):
@@ -137,6 +148,98 @@ class KeepWarm(unittest.TestCase):
         final = self.inspect()
         self.assertNotEqual(final["reply_id"], before["reply_id"])
         self.assertEqual(final["last_message"], "Done again.")
+
+    def begin_ping(self, agent="claude"):
+        """The person's finished turn, then one ping typed by the guarded path."""
+        self.record.update(agent=agent)
+        self.write_record()
+        self.hook("UserPromptSubmit", prompt="Fix the tests")
+        self.hook("Stop", last_assistant_message="Done.")
+        before = self.inspect()
+        self.pending_ping()
+        self.hook("UserPromptSubmit", prompt=TEXT)
+        return before
+
+    def marked(self, after):
+        return [(event["type"], event.get("origin"), event.get("turn_origin"))
+                for event in after["events"]
+                if event.get("origin") == "keep_warm" or event.get("turn_origin") == "keep_warm"]
+
+    def test_a_background_completion_after_a_ping_keeps_the_person_prompt_and_reply(self):
+        before = self.begin_ping()
+        self.hook("Stop", last_assistant_message="OK")
+        self.hook("UserPromptSubmit", prompt=NOTICE)
+        self.hook("Stop", last_assistant_message="The watcher finished; all jobs are green.")
+        after = self.inspect()
+        self.assertNotEqual(after["reply_id"], before["reply_id"])
+        self.assertEqual((after["prompt"], after["last_message"]),
+                         ("Fix the tests", "The watcher finished; all jobs are green."))
+        self.assertFalse(self.listed()["keep_warm"]["turn_active"])
+        # Only the ping's own prompt and Stop are marked; the completion is visible.
+        self.assertEqual(self.marked(after),
+                         [("UserPromptSubmit", "keep_warm", "keep_warm"), ("Stop", None, "keep_warm")])
+        by_detail = {event.get("detail"): event for event in after["events"]}
+        completion = by_detail['Background command "watch" completed']
+        self.assertEqual((completion["origin"], completion.get("turn_origin")), ("task_notification", None))
+        self.assertIsNone(by_detail["The watcher finished; all jobs are green."].get("turn_origin"))
+
+    def test_a_background_completion_queued_during_a_ping_keeps_the_person_prompt_and_reply(self):
+        before = self.begin_ping()
+        self.hook("UserPromptSubmit", prompt=NOTICE)  # queued while the ping runs
+        self.hook("Stop", last_assistant_message="OK")  # the joined Stop ends real work
+        self.hook("Stop", last_assistant_message="The watcher finished; all jobs are green.")
+        after = self.inspect()
+        self.assertNotEqual(after["reply_id"], before["reply_id"])
+        self.assertEqual((after["prompt"], after["last_message"]),
+                         ("Fix the tests", "The watcher finished; all jobs are green."))
+        # The joined turn holds more than the ping, so only the ping prompt is marked.
+        self.assertEqual(self.marked(after), [("UserPromptSubmit", "keep_warm", "keep_warm")])
+        by_detail = {event.get("detail"): event for event in after["events"]}
+        self.assertIsNone(by_detail["OK"].get("turn_origin"), "a joined Stop stays visible")
+        self.assertIsNone(by_detail["The watcher finished; all jobs are green."].get("turn_origin"))
+
+    def test_a_persons_message_during_a_ping_keeps_the_persons_prompt(self):
+        before = self.begin_ping()
+        self.hook("UserPromptSubmit", prompt="Also check CI")
+        self.hook("Stop", last_assistant_message="CI is green.")
+        after = self.inspect()
+        self.assertNotEqual(after["reply_id"], before["reply_id"])
+        self.assertEqual((after["prompt"], after["last_message"]), ("Also check CI", "CI is green."))
+        self.assertEqual(self.marked(after), [("UserPromptSubmit", "keep_warm", "keep_warm")])
+        self.assertFalse(self.listed()["keep_warm"]["turn_active"])
+
+    def test_a_peer_message_during_a_ping_keeps_the_person_prompt(self):
+        before = self.begin_ping()
+        self.hook("UserPromptSubmit", prompt=PEER)
+        self.hook("Stop", last_assistant_message="Handled the peer message.")
+        after = self.inspect()
+        self.assertNotEqual(after["reply_id"], before["reply_id"])
+        self.assertEqual((after["prompt"], after["last_message"]),
+                         ("Fix the tests", "Handled the peer message."))
+        self.assertEqual(self.marked(after), [("UserPromptSubmit", "keep_warm", "keep_warm")])
+        peer = next(event for event in after["events"] if event.get("origin") == "peer_message")
+        self.assertEqual(peer["detail"], "Message from peer/session")
+        self.assertIsNone(peer.get("turn_origin"))
+
+    def test_a_prompt_that_only_starts_with_the_ping_text_stays_visible(self):
+        self.begin_ping()
+        text = TEXT + " Then review this task."
+        self.hook("UserPromptSubmit", prompt=text)
+        after = self.inspect()
+        self.assertEqual(after["prompt"], text)
+        self.assertFalse(self.listed()["keep_warm"]["turn_active"])
+        self.hook("Stop", last_assistant_message="Real reply")
+        self.assertEqual(self.inspect()["last_message"], "Real reply")
+
+    def test_an_unmasking_prompt_restores_the_last_message_at_once(self):
+        self.begin_ping()
+        self.hook("Stop", last_assistant_message="OK")
+        self.hook("UserPromptSubmit", prompt=NOTICE)
+        after = self.inspect()
+        self.assertEqual((after["prompt"], after["last_message"]), ("Fix the tests", "Done."))
+        self.assertFalse(self.listed()["keep_warm"]["turn_active"])
+        self.hook("Stop", last_assistant_message="Watcher finished.")
+        self.assertEqual(self.inspect()["last_message"], "Watcher finished.")
 
     def test_a_failed_ping_starts_no_recovery(self):
         self.record["agent"] = "claude"
@@ -412,6 +515,105 @@ class KeepWarm(unittest.TestCase):
         self.tick()
         time.sleep(0.3)
         self.assertEqual(self.received(), b"")
+
+    def transcript(self):
+        self.record.update(agent="claude", model="claude-opus-5-5",
+                           transcript=str(self.root / (self.conversation_id + ".jsonl")))
+        self.write_record()
+        return Path(self.record["transcript"])
+
+    def assistant(self, at, identity):
+        return json.dumps(dict(type="assistant", sessionId=self.conversation_id,
+            timestamp=datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat(),
+            message=dict(id=identity, model="claude-opus-5-5", usage=dict(input_tokens=10,
+                cache_read_input_tokens=100, cache_creation_input_tokens=20, output_tokens=3,
+                cache_creation=dict(ephemeral_1h_input_tokens=20))))) + "\n"
+
+    def wait_for_usage_lock(self, pid):
+        for _ in range(500):
+            try:
+                if "lock" in Path(f"/proc/{pid}/wchan").read_text():
+                    return
+            except OSError:
+                pass
+            time.sleep(0.01)
+        self.fail("the round never waited for the usage cache lock")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "waits on the lock with /proc wchan")
+    def test_an_append_while_a_round_waits_for_the_usage_lock_does_not_turn_cold(self):
+        path = self.transcript()
+        path.write_text(self.assistant(time.time() - 7000, "old"))
+        self.change(always=True)
+        cache_path = next((self.state / "usage-cache").glob("cache-v2-*.json"))
+        with cache_path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen([str(fixtures.HGS), "recovery", "tick"], env=self.env,
+                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                self.wait_for_usage_lock(child.pid)
+                with path.open("a") as out:
+                    out.write(self.assistant(time.time() - 30, "recent"))
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                _, stderr = child.communicate(timeout=15)
+                self.assertEqual(child.returncode, 0, stderr)
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    child.communicate(timeout=10)
+        after = self.inspect()
+        self.assertEqual(after["keep_warm"]["state"], "waiting")
+        self.assertFalse(after["session_usage"]["partial"])
+        self.assertGreater(after["session_usage"]["prompt_cache"]["expires_at"], time.time())
+
+    def test_an_oversized_record_no_longer_stalls_the_scan(self):
+        path = self.transcript()
+        with path.open("w") as out:
+            out.write(self.assistant(time.time() - 7000, "old"))
+            out.write('{"type":"user","message":{"content":"')
+            for _ in range(33 * 16):
+                out.write("x" * (64 * 1024))
+            out.write('"}}\n')
+            out.write(self.assistant(time.time() - 3000, "recent"))
+        usage = self.inspect()["session_usage"]
+        for _ in range(4):
+            if not usage["partial"]:
+                break
+            usage = self.inspect()["session_usage"]
+        self.assertFalse(usage["partial"])
+        self.assertGreater(usage["prompt_cache"]["expires_at"], time.time())
+
+    def test_a_record_straddling_the_scan_budget_does_not_turn_a_tick_cold(self):
+        path = self.transcript()
+        old = self.assistant(time.time() - 7000, "old")
+        path.write_text(old)
+        self.change(always=True)
+        # An ordinary row fills the scan to 50 bytes before its budget; the
+        # recent assistant row is longer than that, so it straddles the end.
+        opening = ('{"type":"user","sessionId":"%s","message":{"content":"'
+                   % self.conversation_id)
+        closing = '"}}\n'
+        target = 32 * 1024 * 1024 - 50 - len(old)
+        filler = target - len(opening) - len(closing)
+        self.assertGreater(filler, 64 * 1024)
+        with path.open("a") as out:
+            out.write(opening)
+            out.write("x" * filler)
+            out.write(closing)
+            out.write(self.assistant(time.time() - 30, "recent"))
+        self.tick()
+        after = self.inspect()
+        self.assertNotEqual(after["keep_warm"]["state"], "cold")
+        self.assertFalse(after["session_usage"]["partial"])
+        self.assertGreater(after["session_usage"]["prompt_cache"]["expires_at"], time.time())
+
+    def test_a_really_expired_cache_still_turns_cold(self):
+        path = self.transcript()
+        path.write_text(self.assistant(time.time() - 7000, "old"))
+        self.change(always=True)
+        self.tick()
+        after = self.inspect()
+        self.assertEqual(after["keep_warm"]["state"], "cold")
+        self.assertLess(after["session_usage"]["prompt_cache"]["expires_at"], time.time())
 
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(

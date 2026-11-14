@@ -114,6 +114,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "session_notifications",
     "session_question_routing",
     "session_question_route_person",
+    "session_question_route_person_status",
     "process_output",
     "project_assignment",
     "project_assign",
@@ -187,6 +188,7 @@ pub enum Gate {
     QuestionRouting,
     /// A phone's signed latch statement (zerus-sa9qn.50).
     QuestionRoutePerson,
+    QuestionRoutePersonRevision,
 }
 
 impl Gate {
@@ -201,6 +203,7 @@ impl Gate {
             Gate::SendReceipt => flags.send_receipt,
             Gate::QuestionRouting => flags.question_routing,
             Gate::QuestionRoutePerson => flags.question_route_person,
+            Gate::QuestionRoutePersonRevision => flags.question_route_person_revision,
         }
     }
 
@@ -216,6 +219,7 @@ impl Gate {
             Gate::SendReceipt => "send_receipt",
             Gate::QuestionRouting => "question_routing",
             Gate::QuestionRoutePerson => "question_route_person",
+            Gate::QuestionRoutePersonRevision => "question_route_person_revision",
         }
     }
 
@@ -230,6 +234,9 @@ impl Gate {
             Gate::SendReceipt => crate::send_receipt::HELP_MARKER,
             Gate::QuestionRouting => crate::session_question_routing::HELP_MARKER,
             Gate::QuestionRoutePerson => crate::session_question_route_person::HELP_MARKER,
+            Gate::QuestionRoutePersonRevision => {
+                crate::session_question_route_person::REVISION_HELP_MARKER
+            }
         }
     }
 }
@@ -315,6 +322,11 @@ pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
         gate: Gate::QuestionRoutePerson,
         class: Class::Mutation,
     },
+    ConnectorOnly {
+        operation: "session_question_route_person_status",
+        gate: Gate::QuestionRoutePersonRevision,
+        class: Class::Read,
+    },
 ];
 
 /// Whether only this connector executes the operation.
@@ -388,6 +400,7 @@ pub struct Flags {
     pub question_routing: bool,
     /// The exact `question-route-person-v1` line (zerus-sa9qn.50).
     pub question_route_person: bool,
+    pub question_route_person_revision: bool,
     pub preference: bool,
     pub attachment_read: bool,
     pub file_read: bool,
@@ -455,6 +468,9 @@ impl Flags {
             question_route_person: help
                 .lines()
                 .any(|line| line.trim() == crate::session_question_route_person::HELP_MARKER),
+            question_route_person_revision: help.lines().any(|line| {
+                line.trim() == crate::session_question_route_person::REVISION_HELP_MARKER
+            }),
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),

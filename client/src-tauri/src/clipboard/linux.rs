@@ -134,8 +134,7 @@ fn wl_copy(program: &OsStr, home: &Path, text: &str, timeout: Duration) -> Resul
             Ok(())
         });
     }
-    let mut child = command
-        .spawn()
+    let mut child = crate::child_environment::spawn(&mut command)
         .map_err(|_| "cannot start wl-copy (not in PATH?)".to_owned())?;
     let deadline = Instant::now() + timeout;
     loop {

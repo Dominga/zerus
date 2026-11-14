@@ -69,7 +69,7 @@ impl Fixture {
             "a".repeat(64),
             FrozenEnvironment::capture().unwrap(),
             source,
-            Arc::new(Command::spawn),
+            Arc::new(|command, input| input.spawn(command)),
         )
         .unwrap();
         (owner, released)

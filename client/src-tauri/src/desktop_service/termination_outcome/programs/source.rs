@@ -112,20 +112,22 @@ impl Origin {
             line.trim() == zerus_client_core::worktree_programs::presentation::HELP_MARKER
         }))
     }
-    fn spawn(
+    fn spawn_input(
         &self,
         command: &mut std::process::Command,
+        input_spawn: run::InputSpawn,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
-        self.spawn_with_custody(command, None)
+        self.spawn_with_custody(command, input_spawn, None)
     }
     fn spawn_with_custody(
         &self,
         command: &mut std::process::Command,
+        input_spawn: run::InputSpawn,
         custody: Option<&Arc<run::custody::InheritedLock>>,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
         match self {
-            Self::Service(c) => c.spawn_program_child(command, custody),
-            Self::Native(c) => c.spawn_with_custody(command, custody),
+            Self::Service(c) => c.spawn_program_child(command, input_spawn, custody),
+            Self::Native(c) => c.spawn_with_custody(command, input_spawn, custody),
         }
     }
 }
@@ -192,8 +194,8 @@ impl Source {
             context.configuration().into(),
             context.environment().clone(),
             context.clone(),
-            Arc::new(move |command| {
-                let (child, identity) = selected.spawn(command)?;
+            Arc::new(move |command, input_spawn| {
+                let (child, identity) = selected.spawn_input(command, input_spawn)?;
                 // Owner builds only the fixed help/holder commands. Help must
                 // also pass observation, but its exited identity is not reused.
                 if command.get_args().any(|arg| arg == "program-holder") {
@@ -248,6 +250,7 @@ impl Context {
     fn spawn_program_child(
         &self,
         command: &mut std::process::Command,
+        input_spawn: run::InputSpawn,
         custody: Option<&Arc<run::custody::InheritedLock>>,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
         if !self.current() {
@@ -257,7 +260,7 @@ impl Context {
         if let Some(custody) = custody {
             custody.inherit(command)?;
         }
-        let mut child = command.spawn()?;
+        let mut child = input_spawn.spawn(command)?;
         let identity = self.image.observe_custody_child(&mut child).ok();
         if identity.is_none() || !self.same_context() {
             self.reject_child(&mut child);
@@ -357,7 +360,11 @@ impl Source {
             NATIVE_RECEIPT_LIMIT,
             &context.cancel,
             (resources, Some(completion)),
-            move |command| selected.spawn(command).map(|(child, _)| child),
+            move |command, input_spawn| {
+                selected
+                    .spawn_input(command, input_spawn)
+                    .map(|(child, _)| child)
+            },
         )
         .unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))
     }
@@ -560,10 +567,11 @@ impl Source {
             zerus_client_core::worktree_programs::MAX_BYTES,
             &stop,
             (resource, Some(mutation.completion.clone())),
-            move |command| {
-                let (mut child, native) = selected
-                    .context
-                    .spawn_with_custody(command, Some(&inherited))?;
+            move |command, input_spawn| {
+                let (mut child, native) =
+                    selected
+                        .context
+                        .spawn_with_custody(command, input_spawn, Some(&inherited))?;
                 let mut refused = native.is_none() || !registration.bind_original(&child);
                 if !refused {
                     armed.store(true, Ordering::Release); // missing ACK cannot reopen a phase

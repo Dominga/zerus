@@ -76,6 +76,10 @@ fn encoded<T: serde::Serialize>(value: &T, limit: usize) -> Result<String> {
     Ok(text)
 }
 
+// Project bytes, not TEXT characters: SQLite TEXT substr hides literal NULs
+// and their suffixes. Cap plus one lets the existing byte/semantic bounds
+// refuse oversized proof before decoding or charging it. Preserve SQL NULL
+// only for genuine absence; a non-TEXT value must remain unreadable evidence.
 pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
     type Saved = (
         String,
@@ -92,9 +96,9 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
     );
     let saved: Option<Saved> = db
         .query_row(
-            "SELECT substr(source,1,65537),substr(checkpoint,1,16385),substr(plan,1,16385),
-             substr(receipt,1,24577),substr(fingerprint,1,65),substr(writer_epoch,1,37),phase,
-             drained,substr(ticket,1,4097),substr(custody,1,8193),substr(session,1,513)
+            "SELECT CASE typeof(source) WHEN 'text' THEN CAST(substr(CAST(source AS BLOB),1,65537) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(checkpoint) WHEN 'text' THEN CAST(substr(CAST(checkpoint AS BLOB),1,16385) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(plan) WHEN 'text' THEN CAST(substr(CAST(plan AS BLOB),1,16385) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,
+             CASE typeof(receipt) WHEN 'text' THEN CAST(substr(CAST(receipt AS BLOB),1,24577) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(fingerprint) WHEN 'text' THEN CAST(substr(CAST(fingerprint AS BLOB),1,65) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(writer_epoch) WHEN 'text' THEN CAST(substr(CAST(writer_epoch AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(phase) WHEN 'text' THEN CAST(substr(CAST(phase AS BLOB),1,10) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,
+             drained,CASE typeof(ticket) WHEN 'text' THEN CAST(substr(CAST(ticket AS BLOB),1,4097) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(custody) WHEN 'text' THEN CAST(substr(CAST(custody AS BLOB),1,8193) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(session) WHEN 'text' THEN CAST(substr(CAST(session AS BLOB),1,513) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END
              FROM desktop_deferred_sends WHERE request_id=?1",
             [id],
             |r| {
@@ -365,11 +369,11 @@ fn reconcile(tx: &Transaction<'_>) -> Result<()> {
     loop {
         const PAGE: usize = 64;
         let ids: Vec<String> = if let Some(after) = &after {
-            tx.prepare_cached("SELECT substr(request_id,1,37) FROM desktop_deferred_sends WHERE request_id>?1 ORDER BY request_id LIMIT 64")?
+            tx.prepare_cached("SELECT CASE typeof(request_id) WHEN 'text' THEN CAST(substr(CAST(request_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_deferred_sends WHERE request_id>?1 ORDER BY request_id LIMIT 64")?
                 .query_map([after], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
         } else {
             // Include a malformed NULL/empty first ID: never skip it as a cursor.
-            tx.prepare_cached("SELECT substr(request_id,1,37) FROM desktop_deferred_sends ORDER BY request_id LIMIT 64")?
+            tx.prepare_cached("SELECT CASE typeof(request_id) WHEN 'text' THEN CAST(substr(CAST(request_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_deferred_sends ORDER BY request_id LIMIT 64")?
                 .query_map([], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
         };
         for id in &ids {
@@ -446,6 +450,8 @@ pub(super) fn admit(
         drained: false,
         code: String::new(),
         outcome: None,
+        cli_exit: None,
+        refusal: None,
     };
     ensure!(receipt.valid(), "invalid original deferred send");
     let encoded_receipt = encoded(&receipt, wire::REPLY_BYTES)?;
@@ -483,7 +489,7 @@ pub(super) fn admit(
 pub(super) fn pending(db: &Connection) -> Result<Option<Row>> {
     let id: Option<String> = db
         .query_row(
-            "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending WHERE drained=0
+            "SELECT CASE typeof(request_id) WHEN 'text' THEN CAST(substr(CAST(request_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending WHERE drained=0
              ORDER BY phase,created,request_id LIMIT 1",
             [],
             |r| r.get(0),
@@ -512,7 +518,7 @@ pub(super) fn summary(db: &Connection) -> Result<serde_json::Value> {
     );
     // Indexed metadata only, with one overflow sentinel. Historical IDs are
     // retained without becoming an unbounded foreground scan or queue.
-    let mut query = db.prepare_cached("SELECT substr(phase,1,10),drained FROM desktop_deferred_sends ORDER BY request_id LIMIT 4097")?;
+    let mut query = db.prepare_cached("SELECT CASE typeof(phase) WHEN 'text' THEN CAST(substr(CAST(phase AS BLOB),1,10) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,drained FROM desktop_deferred_sends ORDER BY request_id LIMIT 4097")?;
     let mut rows = query.query([])?;
     let mut count = 0_u64;
     let mut unsettled = 0_u64;
@@ -541,7 +547,7 @@ pub(super) fn summary(db: &Connection) -> Result<serde_json::Value> {
 }
 pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
     let mut query = db.prepare_cached(
-        "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending
+        "SELECT CASE typeof(request_id) WHEN 'text' THEN CAST(substr(CAST(request_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending
          WHERE drained=0 ORDER BY phase,created,request_id LIMIT 33",
     )?;
     let ids = query
@@ -556,7 +562,7 @@ pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
 pub(super) fn custody_pending(db: &Connection, after: &str) -> Result<Option<Row>> {
     let id: Option<String> = db
         .query_row(
-            "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_custody WHERE drained=0 AND custody IS NOT NULL
+            "SELECT CASE typeof(request_id) WHEN 'text' THEN CAST(substr(CAST(request_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_custody WHERE drained=0 AND custody IS NOT NULL
              AND request_id>?1 ORDER BY request_id LIMIT 1",
             [after],
             |r| r.get(0),
@@ -689,6 +695,18 @@ pub(super) fn ended(tx: &Transaction<'_>, row: &Row, code: &str) -> Result<()> {
     record(tx, row, code)
 }
 
+/// Keep the original child's exit for diagnosis only; the CLI receipt at drain
+/// remains the sole evidence of submission.
+pub(super) fn exited(tx: &Transaction<'_>, row: &Row, code: i32, stderr: &str) -> Result<()> {
+    ensure!(!row.receipt.drained, "deferred send is already drained");
+    let mut next = row.receipt.clone();
+    next.phase = Phase::Unknown;
+    next.revision += 1;
+    next.code = AWAITING_DRAIN.into();
+    next.cli_exit = (code != 0).then(|| wire::CliExit::new(code, stderr));
+    state(tx, row, &next)
+}
+
 /// Records the closed pre-child result: the original child never started.
 /// The receipt stays Unknown until the custody drain settles it.
 pub(super) fn not_started(tx: &Transaction<'_>, row: &Row) -> Result<()> {
@@ -733,7 +751,15 @@ pub(super) fn drained(
         Observed::Submitted(outcome) if outcome.matches(&row.verified.plan) => {
             next.phase = Phase::Recorded;
             next.code.clear();
+            next.cli_exit = None;
+            next.refusal = None;
             next.outcome = Some(outcome.clone());
+        }
+        Observed::Refused(refusal) if refusal.matches(&row.verified.plan) => {
+            next.phase = Phase::Unknown;
+            next.code = wire::refusal::CODE.into();
+            next.outcome = None;
+            next.refusal = Some(refusal.clone());
         }
         // The closed pre-child result, confirmed by the absence of any
         // record of the request: nothing ran and nothing else submitted it.
@@ -741,7 +767,7 @@ pub(super) fn drained(
             next.phase = Phase::Failed;
             next.code = wire::NOT_STARTED.into();
         }
-        Observed::Submitted(_) => {
+        Observed::Submitted(_) | Observed::Refused(_) => {
             next.phase = Phase::Unknown;
             next.code = wire::RECEIPT_MISMATCH.into();
         }

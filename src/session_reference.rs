@@ -255,6 +255,9 @@ pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
         _ => return Err(Error::new(1, "usage: hgs self [--json]")),
     };
     let (record, source) = match state::session_graph::caller_record() {
+        // zerus-ppd26: a hosted DeepSeek call is proven by its host's per-call
+        // token under the host's ancestry, never by an agent process of its own.
+        Some(record) if record["caller_proof"]["kind"] == "hosted_call" => (record, "hosted_call"),
         Some(record) => (record, "process"),
         // A native claim stays a claim. Without one, a command under a
         // recorded DeepSeek host says so (zerus-ppd26.15).
@@ -266,7 +269,11 @@ pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
     };
     let (reference, provider) = from_record(config, &record)?;
     let parent = json!({"session_id":record["session_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
-    print(&reference, as_json, json!({"provider":provider,"identity_source":source,"session_id":record["session_id"],"parent_identity":parent}))
+    let mut fields = json!({"provider":provider,"identity_source":source,"session_id":record["session_id"],"parent_identity":parent});
+    if source == "hosted_call" {
+        fields["proof_limit"] = json!(state::session_graph::HOSTED_LIMIT);
+    }
+    print(&reference, as_json, fields)
 }
 
 /// The reference and provider of the live agent whose process runs this CLI,

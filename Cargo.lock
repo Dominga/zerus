@@ -1067,9 +1067,11 @@ dependencies = [
  "zerus-desktop-catalog",
  "zerus-desktop-ledger",
  "zerus-desktop-migration",
+ "zerus-file-lock",
  "zerus-freedesktop-notify",
  "zerus-presence-sampler",
  "zerus-replica",
+ "zerus-team-plan",
  "zerus-watch-protocol",
 ]
 
@@ -3385,6 +3387,8 @@ dependencies = [
  "windows-sys 0.61.2",
  "zerus-desktop-migration",
  "zerus-desktop-read-policy",
+ "zerus-file-lock",
+ "zerus-team-plan",
  "zerus-watch-protocol",
 ]
 
@@ -3444,6 +3448,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerus-file-lock"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+]
+
+[[package]]
 name = "zerus-freedesktop-notify"
 version = "0.1.0"
 dependencies = [
@@ -3474,6 +3485,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+ "zerus-file-lock",
+]
+
+[[package]]
+name = "zerus-team-plan"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

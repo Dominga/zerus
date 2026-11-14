@@ -1,6 +1,15 @@
 //! Runs one [`Invocation`] and reports how it ended as an [`Exit`].
 #[cfg(any(windows, test))]
 mod hidden;
+#[cfg(all(test, unix))]
+mod input_tests;
+mod stdin;
+// Internal cross-crate bridge for the root desktop original_child runner only.
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod original_input;
+use stdin::InputOwner;
+pub use stdin::InputSpawn;
 #[cfg(unix)]
 pub mod rendezvous;
 pub(crate) mod startup;
@@ -99,8 +108,9 @@ pub fn run_hidden_limited(
         parent_env,
         stdout_cap,
         Pipes {
-            spawn: Some(Box::new(|command| {
-                command.creation_flags(CREATE_NO_WINDOW).spawn()
+            spawn: Some(Box::new(|command, input| {
+                command.creation_flags(CREATE_NO_WINDOW);
+                input.spawn(command)
             })),
             hidden_stop: Some(stop.clone()),
             clear_environment: true,
@@ -271,7 +281,7 @@ pub fn run_accounted_frozen(
     stdout_cap: usize,
     cancel: &AtomicBool,
     resources: Arc<dyn Send + Sync>,
-    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    spawn: impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<Child> + Send + 'static,
 ) -> Result<Exit, Stopped> {
     run_accounted_frozen_with_completion(
         hgs,
@@ -291,7 +301,7 @@ pub fn run_accounted_frozen_with_completion(
     stdout_cap: usize,
     cancel: &AtomicBool,
     custody: (Arc<dyn Send + Sync>, Option<Arc<Completion>>),
-    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    spawn: impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<Child> + Send + 'static,
 ) -> Result<Exit, Stopped> {
     let (resources, completion) = custody;
     let environment = environment.clone();
@@ -305,9 +315,9 @@ pub fn run_accounted_frozen_with_completion(
         Pipes {
             clear_environment: true,
             completion,
-            spawn: Some(Box::new(move |command| {
+            spawn: Some(Box::new(move |command, input| {
                 environment.apply(command);
-                spawn(command)
+                spawn(command, input)
             })),
             ..Pipes::default()
         },
@@ -376,7 +386,7 @@ pub fn run_without(
 type StreamInput = Box<dyn FnOnce(ChildStdin) -> bool + Send>;
 type StreamOutput = Box<dyn FnOnce(ChildStdout) -> bool + Send>;
 type Spawn = fn(&mut Command) -> std::io::Result<Child>;
-type GuardedSpawn = Box<dyn FnOnce(&mut Command) -> std::io::Result<Child> + Send>;
+type GuardedSpawn = Box<dyn FnOnce(&mut Command, InputSpawn) -> std::io::Result<Child> + Send>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retirement {
@@ -573,7 +583,7 @@ pub fn run_owned(
     inv: &Invocation,
     parent_env: &[(&str, &str)],
     cancel: &AtomicBool,
-    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    spawn: impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<Child> + Send + 'static,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Vec<u8>, OwnedError> {
     run_owned_observed(hgs, inv, parent_env, cancel, spawn, resources, |_, _| {})
@@ -588,7 +598,7 @@ pub fn run_owned_observed(
     inv: &Invocation,
     parent_env: &[(&str, &str)],
     cancel: &AtomicBool,
-    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    spawn: impl FnOnce(&mut Command, InputSpawn) -> std::io::Result<Child> + Send + 'static,
     resources: Arc<dyn Send + Sync>,
     observe: impl FnOnce(&OwnedError, Option<&str>),
 ) -> Result<Vec<u8>, OwnedError> {
@@ -725,7 +735,9 @@ pub fn run_decoded<T: Send + 'static, E: Send + 'static>(
             let ok = result.is_ok();
             tx.send(result).is_ok() && ok
         })),
-        spawn: Some(Box::new(spawn)),
+        spawn: Some(Box::new(move |command, input| {
+            input.spawn_with(command, spawn)
+        })),
         readers: Some(readers),
         child_exited: Some(child.exited.clone()),
         stop: Some(stop),
@@ -874,10 +886,17 @@ fn run_inner(
         crate::stream::helper::prepare(&mut command);
     }
     let group = pipes.group;
-    let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(spawn_helper))(&mut command) {
-        Ok(child) => child,
+    let has_input =
+        pipes.input.is_some() || inv.stdin.as_ref().is_some_and(|bytes| !bytes.is_empty());
+    let input_spawn = match InputSpawn::new(has_input) {
+        Ok(input) => input,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
     };
+    let mut child =
+        match pipes.spawn.unwrap_or_else(|| Box::new(spawn_helper))(&mut command, input_spawn) {
+            Ok(child) => child,
+            Err(error) => return Ok(Exit::StartFailed(error.to_string())),
+        };
     if pipes.require_complete
         && (child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none())
     {
@@ -896,6 +915,10 @@ fn run_inner(
 
     let completion = pipes.completion.clone();
     let stdin = child.stdin.take();
+    let input_owner = stdin
+        .as_ref()
+        .map(|writer| InputOwner::acquire(writer, has_input))
+        .transpose();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
     let input_guard = if retain_all {
@@ -910,17 +933,30 @@ fn run_inner(
     #[cfg(test)]
     let after_written = pipes.after_written;
     let writer = thread::spawn(move || {
-        let ok = match (stdin, pipes.input, input) {
-            (Some(pipe), Some(write), _) => write(pipe),
-            (Some(mut pipe), None, Some(bytes)) => {
-                pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
+        let ok = if input_owner.is_ok() {
+            match (stdin, pipes.input, input) {
+                (Some(pipe), Some(write), _) => write(pipe),
+                (Some(mut pipe), None, Some(bytes)) => {
+                    pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
+                }
+                _ => !has_input,
             }
-            _ => true,
+        } else {
+            drop(stdin);
+            false
         };
-        // The pipe is closed: release the group before signalling, as the
+        // Always finish the actual input, including a partial/failed write.
+        // A shutdown error is a failure, never evidence of successful delivery.
+        let ok = match input_owner {
+            Ok(Some(owner)) => owner.finish().is_ok() && ok,
+            Ok(None) => ok,
+            Err(_) => false,
+        };
+        // The input is closed: release the group before signalling, as the
         // readers do, so a completed exchange holds no hidden admission.
         drop(input_guard);
         if let Some(state) = &writer_state_for_thread {
+            // Physical closure is distinct from the input success sent below.
             *state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Closed;
         }
         let _ = write_tx.send(ok);
@@ -1003,7 +1039,9 @@ fn run_inner(
         if !written {
             match write_rx.try_recv() {
                 Ok(true) => written = true,
-                Err(TryRecvError::Disconnected) if !pipes.require_complete => written = true,
+                Err(TryRecvError::Disconnected) if !pipes.require_complete && !has_input => {
+                    written = true
+                }
                 Ok(false) | Err(TryRecvError::Disconnected) => {
                     written = true;
                     write_failed_until = Some((Instant::now() + WRITE_GRACE).min(deadline));
@@ -1134,6 +1172,20 @@ fn run_inner(
     } else {
         drain(&done_rx);
     }
+    // Preserve the ordinary runner's raw exit when its charged writer is
+    // still pending. A known write/shutdown failure cannot become success;
+    // the owned runner above additionally requires complete input and joins.
+    if status.success() && has_input && !pipes.require_complete {
+        let failed = write_failed_until.is_some()
+            || (!written
+                && matches!(
+                    write_rx.try_recv(),
+                    Ok(false) | Err(TryRecvError::Disconnected)
+                ));
+        if failed {
+            return Ok(Exit::WriteFailed);
+        }
+    }
     let stdout = take(&out);
     // A child can exit before the loop sees its output pass the cap.
     if stdout.len() > stdout_cap || over.load(Ordering::Relaxed) {
@@ -1152,14 +1204,14 @@ fn run_inner(
 
 /// Helpers have private pipes, never an interactive console. Keep custom
 /// spawn/observation hooks in charge of their own original child.
-fn spawn_helper(command: &mut Command) -> std::io::Result<Child> {
+fn spawn_helper(command: &mut Command, input: InputSpawn) -> std::io::Result<Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    command.spawn()
+    input.spawn(command)
 }
 
 /// Waits for both pipe readers to finish. One budget for both pipes: a
@@ -1334,7 +1386,9 @@ mod completion_tests {
                 require_complete: true,
                 child_exited: Some(child_exited),
                 completion: Some(completion.clone()),
-                spawn: Some(Box::new(|command| command.stdin(Stdio::null()).spawn())),
+                spawn: Some(Box::new(|command, _input| {
+                    command.stdin(Stdio::null()).spawn()
+                })),
                 ..Pipes::default()
             },
         );
@@ -1416,7 +1470,7 @@ mod frozen_tests {
             4096,
             &AtomicBool::new(false),
             Arc::new(()),
-            |command| command.spawn(),
+            |command, input| input.spawn(command),
         )
         .unwrap()
     }

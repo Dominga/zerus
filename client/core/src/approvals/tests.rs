@@ -104,6 +104,125 @@ fn a_page_holds_at_most_50_entries_and_names_each_outcome() {
     );
 }
 
+/// zerus-63rru.66 round 5: the standing folder-trust kind survives the
+/// journal page projection, so the row sentences distinguish the five
+/// trust outcomes; a resume row shows none.
+#[test]
+fn the_page_carries_the_standing_trust_kind_for_each_outcome() {
+    let cases = [
+        ("approved", "Approved once", true),
+        ("failed", "Failed", false),
+        ("unknown", "Unconfirmed", false),
+        ("cancelled", "Cancelled", false),
+        ("unconfirmed", "Unconfirmed", false),
+    ];
+    let rows: Vec<Value> = cases
+        .iter()
+        .map(|(status, _, _)| {
+            json!({"id": 1, "at": 1, "host": "h", "session": "s", "prompt": "Trust this folder?",
+                "status": status, "categories": ["team_folder_trust"], "scope": "/fixture/main"})
+        })
+        .chain([
+            json!({"id": 2, "at": 2, "host": "h", "session": "s", "prompt": "Resume?",
+            "status": "approved", "categories": ["team_resume"], "scope": "/fixture/main"}),
+        ])
+        .collect();
+    let reply = json!({"entries": rows, "next": null, "previous": null});
+    let page = page(reply.as_object().unwrap()).unwrap();
+    assert_eq!(page.entries.len(), 6);
+    for (entry, (_, result, confirmed)) in page.entries.iter().zip(cases.iter()) {
+        assert_eq!(entry.result, *result, "{entry:?}");
+        assert_eq!(
+            entry.standing.as_deref(),
+            Some("team_folder_trust"),
+            "{entry:?}"
+        );
+        assert_eq!(
+            trust_sentence(
+                entry.scope.as_deref(),
+                &json!(["team_folder_trust"]),
+                Some(if *confirmed { "approved" } else { "unknown" })
+            ),
+            Some(if *confirmed {
+                "Trusted for /fixture/main and its subfolders on this account".to_owned()
+            } else {
+                "Trust was requested for /fixture/main and its subfolders; it was not confirmed"
+                    .to_owned()
+            }),
+            "{entry:?}"
+        );
+    }
+    let resume = page.entries.last().unwrap();
+    assert_eq!(
+        resume.standing, None,
+        "a resume row carries no standing kind"
+    );
+    assert_eq!(
+        trust_sentence(
+            resume.scope.as_deref(),
+            &json!(["team_resume"]),
+            Some("approved")
+        ),
+        None
+    );
+}
+
+/// zerus-63rru.66 round 6: the real service list reply through the real
+/// page, committed as the fixture the Approvals render test consumes; the
+/// guard fails when the core's page output drifts from the committed file
+/// (regenerate with HGS_R6_WRITE_FIXTURE set).
+#[test]
+fn the_real_service_reply_projects_into_the_committed_page_fixture() {
+    let reply = json!({"entries": [
+        {"id": 1, "at": 1, "host": "a.example", "session": "agent/project/fixture", "provider": "codex",
+            "prompt": "Trust this folder?", "status": "approved", "categories": ["team_folder_trust"], "scope": "/fixture/main"},
+        {"id": 2, "at": 2, "host": "a.example", "session": "agent/project/fixture", "provider": "codex",
+            "prompt": "Trust this folder?", "status": "failed", "categories": ["team_folder_trust"], "scope": "/fixture/main"},
+        {"id": 3, "at": 3, "host": "a.example", "session": "agent/project/fixture", "provider": "codex",
+            "prompt": "Trust this folder?", "status": "unknown", "categories": ["team_folder_trust"], "scope": "/fixture/main"},
+        {"id": 4, "at": 4, "host": "a.example", "session": "agent/project/fixture", "provider": "codex",
+            "prompt": "Trust this folder?", "status": "cancelled", "categories": ["team_folder_trust"], "scope": "/fixture/main"},
+        {"id": 5, "at": 5, "host": "a.example", "session": "agent/project/fixture", "provider": "codex",
+            "prompt": "Trust this folder?", "status": "unconfirmed", "categories": ["team_folder_trust"], "scope": "/fixture/main"},
+        {"id": 6, "at": 6, "host": "a.example", "session": "agent/project/fixture", "provider": "claude",
+            "prompt": "Resume the member?", "status": "approved", "categories": ["team_resume"], "scope": "/fixture/main"},
+        {"id": 7, "at": 7, "host": "a.example", "session": "agent/project/fixture", "provider": "claude",
+            "prompt": "Resume the member?", "status": "approved", "categories": [], "scope": "/fixture/main"},
+        {"id": 8, "at": 8, "host": "a.example", "session": "agent/project/fixture", "provider": "claude",
+            "prompt": "May I run this command?", "status": "approved", "categories": ["shell"], "scope": null},
+    ], "next": null, "previous": null});
+    let page = page(reply.as_object().unwrap()).unwrap();
+    let mut projected = serde_json::to_value(&page).unwrap();
+    // Each row's exact detail sentence, from the same core formatter the
+    // detail reader feeds, on the detail reply's full shape with the raw
+    // categories (zerus-63rru.66 round 7).
+    for (i, entry) in reply["entries"].as_array().unwrap().iter().enumerate() {
+        let mut detail_reply = entry.clone();
+        detail_reply["categories"] = entry["categories"].clone();
+        detail_reply["question"] = json!({"questions": [{"id": "trust", "question": "Trust this folder?", "body": "/fixture/main"}]});
+        detail_reply["answers"] = json!([]);
+        let text = detail(detail_reply.as_object().unwrap());
+        projected["entries"][i]["detail"] = json!(text);
+    }
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../src/ui/screens/settings/approvals-page.r6.fixture.json"
+    );
+    if std::env::var_os("HGS_R6_WRITE_FIXTURE").is_some() {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&projected).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+    let committed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        projected, committed,
+        "the core page output drifted; regenerate with HGS_R6_WRITE_FIXTURE"
+    );
+}
+
 #[test]
 fn a_detail_shows_the_question_and_the_answer_chosen() {
     let reply = json!({"id": 9, "status": "approved", "detail": "Granted once.",
@@ -116,6 +235,58 @@ fn a_detail_shows_the_question_and_the_answer_chosen() {
     );
     let bare = json!({"status": "failed", "detail": ""});
     assert_eq!(detail(bare.as_object().unwrap()), "Failed");
+    // zerus-63rru.66 round 4: the sentence distinguishes the record's kind
+    // and outcome — a confirmed folder-trust grant claims the trust, an
+    // unconfirmed, unknown or refused one only says trust was requested,
+    // and a non-trust record shows nothing even with an old row's scope.
+    for status in [Some("failed"), Some("unknown"), Some("cancelled"), None] {
+        assert_eq!(
+            trust_sentence(Some("/fixture/main"), &json!(["team_folder_trust"]), status),
+            Some(
+                "Trust was requested for /fixture/main and its subfolders; it was not confirmed"
+                    .to_owned()
+            ),
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        trust_sentence(
+            Some("/fixture/main"),
+            &json!(["team_folder_trust"]),
+            Some("approved")
+        ),
+        Some("Trusted for /fixture/main and its subfolders on this account".to_owned())
+    );
+    assert_eq!(
+        trust_sentence(
+            Some("/fixture/main"),
+            &json!(["team_resume"]),
+            Some("approved")
+        ),
+        None,
+        "a resume record shows no trust sentence"
+    );
+    assert_eq!(
+        trust_sentence(Some("/fixture/main"), &Value::Null, Some("approved")),
+        None,
+        "a record without the trust category shows no trust sentence"
+    );
+    // The granted scope's sentence (zerus-63rru.66 round 3): present when the
+    // reply carries it, absent for a row without one.
+    let scoped = json!({"status": "approved", "detail": "", "scope": "/fixture/main",
+        "categories": ["team_folder_trust"]});
+    assert_eq!(
+        detail(scoped.as_object().unwrap()),
+        "Approved once\n\nTrusted for /fixture/main and its subfolders on this account"
+    );
+    assert_eq!(
+        detail(
+            json!({"status": "approved", "detail": ""})
+                .as_object()
+                .unwrap()
+        ),
+        "Approved once"
+    );
     let categorized = json!({"status": "approved", "detail": "", "categories": ["shell", "paid"]});
     assert_eq!(
         detail(categorized.as_object().unwrap()),

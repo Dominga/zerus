@@ -172,6 +172,8 @@ pub struct Profile {
     /// Zerus override, separate from the provider's effective permission mode.
     pub permission_mode: String,
     pub model_supported: bool,
+    pub compact_on_expiry_supported: bool,
+    pub compact_on_expiry: bool,
     pub model_text: Text,
     /// This computer's model and effort defaults for the account, empty when
     /// it follows the provider (zerus-f0uz8).
@@ -777,6 +779,8 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
         .into(),
         permission_default: zerus_default(raw),
         model_supported: flag(raw, "model_defaults_supported"),
+        compact_on_expiry_supported: flag(raw, "compact_on_expiry_supported"),
+        compact_on_expiry: raw["compact_on_expiry"].as_bool().unwrap_or(true),
         model_text: model_text(raw),
         model: text(raw.get("model_defaults").unwrap_or(&Value::Null), "model"),
         effort: text(raw.get("model_defaults").unwrap_or(&Value::Null), "effort"),

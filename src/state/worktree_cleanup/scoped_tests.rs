@@ -11,6 +11,7 @@ macro_rules! cases {
 cases! {
     registered_review_unlocks_with_a_retained_fork => "scoped_cleanup_registered",
     incomplete_listing_unlocks_and_keeps_the_pending_row => "scoped_cleanup_partial",
+    incomplete_listing_through_a_linked_state_root_keeps_the_pending_row => "scoped_cleanup_partial_alias",
     failed_listing_unlocks_and_keeps_the_pending_row => "scoped_cleanup_list_error",
     changed_registration_unlocks_without_forgetting_the_row => "scoped_cleanup_changed",
     program_stop_guard_unlocks_with_a_retained_fork => "scoped_cleanup_stop_ok",
@@ -19,6 +20,18 @@ cases! {
 }
 
 pub(in crate::state) fn run(case: &str, checkout: &Path, common: &Path) {
+    // Reproduce a noncanonical macOS temporary-root spelling on every Unix host.
+    // Only this ignored fixture's isolated child changes its own state root.
+    let case = if case == "scoped_cleanup_partial_alias" {
+        let original = root();
+        let parent = original.parent().unwrap();
+        let alias = parent.join("zz-state-alias");
+        std::os::unix::fs::symlink(parent, &alias).unwrap();
+        std::env::set_var("HGS_STATE_DIR", alias.join(original.file_name().unwrap()));
+        "scoped_cleanup_partial"
+    } else {
+        case
+    };
     let lock = super::super::worktrees::cache_file("repo", &common.to_string_lossy())
         .with_extension("lock");
     if case.contains("_stop_") {
@@ -93,6 +106,7 @@ pub(in crate::state) fn run(case: &str, checkout: &Path, common: &Path) {
         assert!(commit.status.success());
         // Real Git emits more rows than the parser's unchanged 512-row bound;
         // the original worktree sorts after these private prunable entries.
+        let parent = crate::platform::canonical(root().parent().unwrap()).unwrap();
         for index in 0..513 {
             let metadata = common.join("worktrees").join(format!("a{index:04}"));
             fs::create_dir(&metadata).unwrap();
@@ -100,7 +114,7 @@ pub(in crate::state) fn run(case: &str, checkout: &Path, common: &Path) {
             fs::write(metadata.join("commondir"), "../..\n").unwrap();
             fs::write(
                 metadata.join("gitdir"),
-                format!("{}/a{index:04}/.git\n", root().parent().unwrap().display()),
+                format!("{}/a{index:04}/.git\n", parent.display()),
             )
             .unwrap();
         }

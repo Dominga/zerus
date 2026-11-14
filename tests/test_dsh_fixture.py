@@ -66,11 +66,12 @@ class LatestFixture(unittest.TestCase):
             with self.subTest(spec=spec), self.assertRaisesRegex(ValueError, 'registry version'):
                 F.selection(json.dumps({**self.metadata, 'dependencies': {'example': spec}}).encode())
 
-    def test_official_metadata_fetch_is_single_bounded_and_redirects_refuse(self):
+    def test_official_metadata_fetch_is_bounded_and_redirects_refuse(self):
         response = io.BytesIO(self.raw)
+        response.url = F.LATEST
         with patch.object(F.urllib.request, 'build_opener') as opener:
             opener.return_value.open.return_value = response
-            self.assertEqual(F.discover(time.monotonic() + 30), self.raw)
+            self.assertEqual(F.discovery.read_metadata(F.LATEST, F.MAX_METADATA, policy='no-redirect')[0], self.raw)
             request = opener.return_value.open.call_args.args[0]
             self.assertEqual(request.full_url, F.LATEST)
             self.assertGreater(opener.return_value.open.call_args.kwargs['timeout'], 29)
@@ -79,7 +80,7 @@ class LatestFixture(unittest.TestCase):
         with patch.object(F.urllib.request, 'build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'x' * (F.MAX_METADATA + 1))
             with self.assertRaisesRegex(ValueError, 'metadata exceeds'):
-                F.discover(time.monotonic() + 30)
+                F.discovery.read_metadata(F.LATEST, F.MAX_METADATA, policy='no-redirect')[0]
         with self.assertRaisesRegex(ValueError, 'must not redirect'):
             F.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.invalid/x')
 
@@ -302,14 +303,14 @@ class LatestFixture(unittest.TestCase):
                 value = super().read(size)
                 clock[0] = 6.0
                 return value
-        response = Late(self.raw)
+        def late_discovery(*args, **kwargs):
+            self.assertEqual(kwargs['deadline'], 5.0)
+            clock[0] = 6.0
+            return self.raw, {}
         with patch.object(F.time, 'monotonic', side_effect=lambda: clock[0]), \
-                patch.object(F.urllib.request, 'build_opener') as opener:
-            opener.return_value.open.return_value = response
+                patch.object(F.discovery, 'fetch_metadata', side_effect=late_discovery):
             with self.assertRaisesRegex(ValueError, 'deadline expired'):
                 F.discover(5.0)
-            self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'], 5.0)
-        self.assertTrue(response.closed)
         clock[0] = 0.0
         source = Late(b'fixture')
         with patch.object(F.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(Path, 'open', return_value=source):

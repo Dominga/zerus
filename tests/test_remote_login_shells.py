@@ -264,6 +264,97 @@ class RemoteLoginShells(unittest.TestCase):
                         self.assertEqual(argv[:2], ['--expect-machine', '33333333-3333-4333-8333-333333333333'], argv)
                     self.assertEqual(argv[-len(call[1:]):], call[1:], argv)
 
+    def test_an_unproven_hosted_call_forwards_nothing_as_nobody(self):
+        # zerus-ppd26 Part B: a resident DeepSeek host's tool call (HGS_AGENT=dsh)
+        # without its hosted proof is never the person, and a peer cannot see
+        # who calls. Every command a session reference or --expect-machine
+        # forwards with a machine, every send and every launch without --parent
+        # is refused before ssh runs; the person, and a launch with --parent,
+        # go on. The commands are read from the source tables.
+        import re
+        source = (ROOT / 'src/cli.rs').read_text()
+        def table(name):
+            found = re.search(r'const ' + name + r': &\[&str\] = &\[(.*?)\];', source, re.S)
+            return re.findall(r'"([a-z_-]+)"', found.group(1))
+        session_commands = table('SESSION_COMMANDS')
+        self.assertIn('send', session_commands)
+        # The launch verbs are pinned here, not only read from the table they
+        # check (zerus-ppd26.10): dropping one from the table fails this test.
+        launches = ['claude', 'codex', 'kimi', 'dsh', 'opencode', 'fork']
+        self.assertEqual(table('LAUNCH_COMMANDS'), launches)
+        machine = '33333333-3333-4333-8333-333333333333'
+        reference = (f'zerus://session?machine={machine}&host=peer&name=codex%2Fp%2Fa&conversation=c&run=r')
+        (self.peer / '.local/bin/hgs').write_text(PEER_HGS.replace(
+            "'hooks-health-v1'", "'hooks-health-v1' 'Desktop creation ABI: guarded-create-v1' '  lifecycle-receipt-status-v1'"
+            " '  session-id-selector-v1' '  session-reference-selector-v1' '  session-keep-warm-v1'"
+            " '  claimed-parent-v1' '  launch-parent-v1'"))
+        hosted = dict(HGS_AGENT='dsh')
+        person = {}
+        parent = '{"session_id":"s","run_id":"r","conversation_id":"c"}'
+        calls = []
+        for command in session_commands:
+            extra = ['--json'] if command in ('send', 'session-action-status') else []
+            calls.append(('reference', [command, reference, *extra]))
+            calls.append(('guarded', ['@peer', '--expect-machine', machine, command, 'codex/p/a', *extra]))
+        for command in launches:
+            target = 'codex/p/a' if command == 'fork' else '/tmp'
+            calls.append(('launch', ['@peer', command, target]))
+        # A word that only looks like --parent names no parent: the value of
+        # another option, or an agent flag after -- (zerus-ppd26.10).
+        for shape in (['claude', '-n', '--parent'], ['claude', '--model', '--parent'], ['codex', '--account', '--parent'],
+                      ['fork', 'codex/p/a', '-n', '--parent'], ['claude', '/tmp', '--', '--parent', parent],
+                      ['dsh', '/tmp', '--parent'], ['kimi', '/tmp', '--parent', 'not a claim'],
+                      # The value of -n or --account, followed by a real claim
+                      # that the peer reads as the project folder.
+                      ['claude', '-n', '--parent', parent], ['codex', '--account', '--parent', parent],
+                      ['fork', 'codex/p/a', '-n', '--parent', parent],
+                      # Neither --parent=CLAIM (no launch parser reads it) nor a
+                      # claim after the value of --parent-link (U5, U6).
+                      ['claude', '/tmp', '--parent=' + parent], ['claude', '--parent-link', '--parent', parent]):
+            calls.append(('shape', ['@peer', *shape]))
+        sent = self.root / 'ssh-args.json'
+
+        def run(call, extra):
+            sent.unlink(missing_ok=True)
+            for name in ('argv.json', 'stdin'):
+                (self.peer / name).unlink(missing_ok=True)
+            env = {k: v for k, v in self.env.items()}
+            env.update(extra, REMOTE_LOGIN_SHELL='/bin/sh')
+            return subprocess.run([str(HGS), *call], input='{}', text=True, capture_output=True, timeout=30, env=env)
+
+        refusals = ('cannot prove its session', "Open another computer's native UI by name")
+        for route, call in calls:
+            with self.subTest(route=route, call=call[:2] if route != 'guarded' else call[3:5], caller='hosted'):
+                refused = run(call, hosted)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                if 'question-routing' in call:
+                    # This operation's machine-readable refusal is on stdout;
+                    # it still fails before any remote hop or native action.
+                    self.assertEqual(json.loads(refused.stdout), dict(ok=False, error='agent_refused'))
+                else:
+                    self.assertTrue(any(text in refused.stderr for text in refusals), refused.stderr)
+                self.assertFalse(sent.exists(), 'ssh must not run')
+                self.assertFalse((self.peer / 'argv.json').exists())
+        forwarded = 0
+        for route, call in calls:
+            with self.subTest(route=route, call=call[:2] if route != 'guarded' else call[3:5], caller='person'):
+                result = run(call, person)
+                self.assertNotIn('cannot prove its session', result.stderr)
+                if (self.peer / 'argv.json').exists():
+                    forwarded += 1
+        # Most of them really reach the peer for the person; none for the call.
+        self.assertGreater(forwarded, len(calls) // 2)
+        for command in launches:
+            target = 'codex/p/a' if command == 'fork' else '/tmp'
+            for route, call in (('launch', ['@peer', command, target, '--parent', parent]),
+                                ('reference', [command, reference, '--parent', parent]) if command == 'fork' else (None, None)):
+                if route is None:
+                    continue
+                with self.subTest(route=route, call=command, caller='hosted with --parent'):
+                    result = run(call, hosted)
+                    self.assertNotIn('cannot prove its session', result.stderr)
+                    self.assertTrue(sent.exists(), result.stdout + result.stderr)
+
     def test_a_reference_takes_exactly_one_verified_hop(self):
         # #1376 review: a reference reaches its computer through one SSH hop the
         # peer verifies; a guarded call never forwards a reference again.
@@ -325,6 +416,45 @@ class RemoteLoginShells(unittest.TestCase):
                 (self.peer / 'shell-pwd').unlink()
 
 
+    def test_stripped_readable_agent_ancestors_stop_person_routes_before_ssh(self):
+        # The child loses its own markers, but its private launching Python
+        # process remains a readable marked ancestor. No real peer is used.
+        import uuid
+        strip = r'''import os,subprocess,sys
+env=dict(os.environ)
+for key in ('HGS_SESSION','HGS_RUN_ID','HGS_SESSION_ID'):env.pop(key,None)
+result=subprocess.run(sys.argv[1:],input=sys.stdin.read(),env=env,text=True,capture_output=True,timeout=30)
+sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.returncode)
+'''
+        marked = dict(self.env, REMOTE_LOGIN_SHELL=login_shells()['sh'],
+                      HGS_SESSION='codex/private-ancestor', HGS_RUN_ID=str(uuid.uuid4()),
+                      HGS_SESSION_ID=str(uuid.uuid4()))
+        machine = '55555555-5555-4555-8555-555555555555'
+        for command in ('task', 'team', 'question-routing'):
+            forms = (['@peer', command, 'x', '--json'],
+                     ['--dry-run', '@peer', command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, '--client', 'other', command, 'x', '--json'],
+                     ['@peer', '__state', command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, '__state', command, 'x', '--json'])
+            for form in forms:
+                with self.subTest(form=form):
+                    (self.root / 'ssh-args.json').unlink(missing_ok=True)
+                    result = subprocess.run([sys.executable, '-c', strip, str(HGS), *form],
+                                            env=marked, input='', text=True, capture_output=True, timeout=40)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("outside the agent's process tree", result.stderr)
+                    self.assertFalse((self.root / 'ssh-args.json').exists(), 'no capability probe or SSH')
+                    self.assertFalse(result.stdout.startswith('ssh '), 'dry run refuses too')
+        for form in (['@peer', 'inspect', 'x'], ['@peer', 'interrupt', 'x'],
+                     ['@peer', 'wait', 'ack', '--json'], ['@peer', 'answer', 'x', '--json']):
+            with self.subTest(agent_safe=form):
+                (self.root / 'ssh-args.json').unlink(missing_ok=True)
+                result = subprocess.run([sys.executable, '-c', strip, str(HGS), *form],
+                                        env=marked, input='', text=True, capture_output=True, timeout=40)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((self.root / 'ssh-args.json').exists())
+
     def test_a_person_only_command_never_reaches_another_computer_from_an_agent(self):
         # zerus-ppd26.9: another computer's hgs sees no marker of the agent that
         # calls it and takes it for the person. So an agent's call of a command
@@ -352,7 +482,8 @@ class RemoteLoginShells(unittest.TestCase):
         def record(name, run, pid, conversation):
             value = dict(version=1, name=name, agent='claude', run_id=run, conversation_id=conversation,
                          session_id=str(uuid.uuid4()), pid=pid, process_start=started(pid), activity='idle',
-                         phase='idle', active_tools={}, subagents={})
+                         phase='idle', active_tools={}, subagents={},
+                         claude_registry_home=str(self.root / 'claude'))
             (state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(value))
 
         # A proven agent: this test process is its agent.
@@ -431,6 +562,59 @@ class RemoteLoginShells(unittest.TestCase):
                 with self.subTest(form=' '.join(form), agent=name):
                     result, reached = run(form, extra)
                     self.assertTrue(reached, (name, result.stderr))
+
+    def test_agent_sandbox_answers_stop_before_ssh_and_other_answers_keep_exact_input(self):
+        # All SSH, including capability probes, goes to this private PATH fake.
+        bindir = self.root/'bin'; bindir.mkdir()
+        ssh = bindir/'ssh'; ssh.write_text(FAKE_SSH); ssh.chmod(0o700)
+        self.env.pop('HGS_SSH', None)
+        self.env['PATH'] = str(bindir)+os.pathsep+self.env['PATH']
+        executable = self.peer/'.local/bin/hgs'
+        executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'guarded-create-v1'"))
+        shell = login_shells()['sh']
+        machine = '55555555-5555-4555-8555-555555555555'
+        forms = (['@peer', 'answer', 'codex/p/a', '--json'],
+                 ['@peer', '--expect-machine', machine, 'answer', 'codex/p/a', '--json'],
+                 ['@peer', '--expect-machine', machine, '--client', 'fixture', 'answer', 'codex/p/a', '--json'],
+                 ['@peer', '__state', 'answer', 'codex/p/a', '--json'],
+                 ['@peer', '--expect-machine', machine, '__state', 'answer', 'codex/p/a', '--json'],
+                 ['@peer', '--expect-machine', machine, '--client', 'fixture', '__state', 'answer', 'codex/p/a', '--json'])
+        callers = ({}, dict(HGS_SESSION='codex/fixture/agent', HGS_RUN_ID='fixture-run'), dict(HGS_AGENT='dsh'))
+        for form in forms:
+            for caller in callers:
+                for question in ('codex-sandbox:'+'a'*64, 'ordinary-question', 'other-source:'+'b'*64):
+                    with self.subTest(form=form, caller=caller, question=question):
+                        (self.root/'ssh-args.json').unlink(missing_ok=True)
+                        body = ' \n'+json.dumps(dict(question_id=question, request_id='fixture-request',
+                            expected_run_id='run', expected_conversation_id='',
+                            answers=[dict(question_id='sandbox', selected_option_ids=['sandbox_2'], text='Пример \\')]),
+                            ensure_ascii=False, indent=2)+'\n '
+                        result = subprocess.run([str(HGS), *form], input=body, text=True,
+                            capture_output=True, timeout=30, env=dict(self.env, REMOTE_LOGIN_SHELL=shell, **caller))
+                        protected = bool(caller) and question.startswith('codex-sandbox:')
+                        if protected:
+                            self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+                            self.assertIn('person', result.stderr)
+                            self.assertFalse((self.root/'ssh-args.json').exists())
+                        elif caller.get('HGS_AGENT') == 'dsh' and '--expect-machine' in form:
+                            # This pre-existing hosted-proof refusal also
+                            # stays intact for every other guarded answer.
+                            self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+                            self.assertIn('cannot prove its session', result.stderr)
+                            self.assertFalse((self.root/'ssh-args.json').exists())
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                            _, received = self.received()
+                            self.assertEqual(received, body)
+
+    def test_oversized_agent_sandbox_answer_never_reaches_ssh(self):
+        body = json.dumps(dict(question_id='codex-sandbox:'+'a'*64, padding='x'*(128*1024)))
+        result = subprocess.run([str(HGS), '@peer', 'answer', 'codex/p/a', '--json'], input=body,
+            text=True, capture_output=True, timeout=30, env=dict(self.env,
+                REMOTE_LOGIN_SHELL=login_shells()['sh'], HGS_SESSION='codex/fixture/agent', HGS_RUN_ID='run'))
+        self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+        self.assertIn('answer payload exceeds128 KiB', result.stderr)
+        self.assertFalse((self.root/'ssh-args.json').exists())
 
 
 if __name__ == '__main__':

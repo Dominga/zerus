@@ -240,14 +240,27 @@ class Questions(unittest.TestCase):
         return result.stderr
 
     def hook(self,event):
-        result=subprocess.run([str(HGS),'__state','hook'],env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id),
-                              input=json.dumps(dict(event,session_id=self.conversation_id)),text=True,capture_output=True,timeout=5)
+        import hook_caller_fixtures
+        payload=dict(event,session_id=self.conversation_id)
+        env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id,HGS_TEST_BIN=str(HGS))
+        if self.record['agent']=='claude':
+            result=hook_caller_fixtures.run(self,payload,env)
+        else:
+            result=subprocess.run([str(HGS),'__state','hook'],input=json.dumps(payload),
+                text=True,capture_output=True,env=env,timeout=12)
         self.assertEqual(result.returncode,0,result.stderr)
 
     def test_recovers_running_native_question_without_hooks_or_input(self):
         self.assertEqual(self.card['source'],'kimi_wire')
         self.assertEqual(len(self.card['questions']),3)
         self.assertTrue(self.card['can_answer'],self.card['answer_unavailable_reason'])
+        listing=subprocess.run([str(HGS),'ls','--local','--json'],env=self.env,
+                               text=True,capture_output=True,timeout=12)
+        self.assertEqual(listing.returncode,0,listing.stderr)
+        row=next(r for r in json.loads(listing.stdout)['sessions'] if r['name']==self.name)
+        for shown in (self.inspect(),row):
+            self.assertEqual(shown['phase'],'input')
+            self.assertEqual(shown['activity_summary'],'Needs attention')
         self.assertEqual(self.received(),b'')
 
     def test_answers_options_multi_and_other_then_confirms_native_wire_receipt(self):

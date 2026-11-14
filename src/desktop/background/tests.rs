@@ -56,6 +56,8 @@ impl Fixture {
         let owner = Arc::new(location.lock().unwrap());
         let mut broker = feed::Broker::new(&epoch);
         let runtime = Runtime {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            teams: crate::desktop::teams::Worker::new(&config, &epoch, owner.clone()),
             fleet: fleet::Runtime::empty_for_test(&epoch),
             producer: broker.claim_internal().unwrap(),
             presence: None,
@@ -246,7 +248,7 @@ fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
     assert!(runtime.drain(&mut store, Duration::ZERO).is_err());
     assert!(!runtime.drained());
     assert!(location.handoff_lock().is_err());
-    assert!(!replacement_permitted(true, runtime.drained(), &location, &store).unwrap());
+    assert!(!replacement_permitted(true, Some(&runtime), &location, &store).unwrap());
     // No frontend call/retry follows the timeout. Only normal actor polling.
     release.send(()).unwrap();
     let until = Instant::now() + Duration::from_secs(3);
@@ -257,23 +259,68 @@ fn slow_replacement_keeps_draining_on_actor_turns_without_a_client_retry() {
         thread::sleep(Duration::from_millis(2));
     }
     assert!(location.handoff_lock().is_ok());
-    assert!(replacement_permitted(true, runtime.drained(), &location, &store).unwrap());
+    assert!(replacement_permitted(true, Some(&runtime), &location, &store).unwrap());
     assert!(
-        !replacement_permitted(false, runtime.drained(), &location, &store).unwrap(),
+        !replacement_permitted(false, Some(&runtime), &location, &store).unwrap(),
         "passive serve cannot start background"
+    );
+    assert!(
+        !replacement_permitted(true, None, &location, &store).unwrap(),
+        "no runtime, nothing drained to replace"
     );
     // Routine update changes only launch eligibility, not the retained grant.
     std::fs::write(&image, b"updated owned fixture image").unwrap();
     assert!(!ownership::service_granted(&store, &location.configuration).unwrap());
-    assert!(replacement_permitted(true, true, &location, &store).unwrap());
+    assert!(replacement_permitted(true, Some(&runtime), &location, &store).unwrap());
     ownership::invalidate(&store.db).unwrap();
     assert!(
-        !replacement_permitted(true, true, &location, &store).unwrap(),
+        !replacement_permitted(true, Some(&runtime), &location, &store).unwrap(),
         "revoke cannot be rearmed by a drained handle"
     );
     drop(runtime);
     drop(owner);
     assert!(location.lock().is_ok());
+}
+
+/// A replacement of the background waits for the Teams worker's own thread.
+/// While that thread runs, the runtime is not drained and no replacement is
+/// permitted, even after every other component has drained.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_replacement_waits_until_the_teams_worker_thread_has_drained() {
+    let _serial = preparation::TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut f = Fixture::new();
+    let state = f.location.root.parent().unwrap().to_owned();
+    platform::private_dir(&state.join("teams")).unwrap();
+    std::fs::write(state.join("teams/preview"), "on").unwrap();
+    let mut hold = crate::desktop::teams::WorkerEntryHold::install(&state);
+    f.runtime
+        .teams
+        .fixture_machine("00000000-0000-4000-8000-0000000000bc");
+    f.runtime.teams.poll();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            hold.entered(Duration::from_secs(10)),
+            "the Teams thread is paused at its run entry"
+        );
+        assert!(f
+            .runtime
+            .drain(&mut f.store, Duration::from_secs(2))
+            .is_err());
+        assert!(!f.runtime.drained());
+        assert!(!replacement_permitted(true, Some(&f.runtime), &f.location, &f.store).unwrap());
+    }));
+    // Released on every exit; the drain then joins the original thread.
+    hold.release();
+    let drained = f.runtime.drain(&mut f.store, Duration::from_secs(5));
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    drained.unwrap();
+    assert!(f.runtime.drained());
+    assert!(replacement_permitted(true, Some(&f.runtime), &f.location, &f.store).unwrap());
 }
 
 #[test]

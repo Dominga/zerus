@@ -8,10 +8,10 @@ use std::{
     time::Duration,
 };
 
-// A parallel fixture's fork may retain a CLOEXEC lock description until exec.
-// Busy refuses before any write. Retry only that refusal, never an offer or an
-// uncertain publication; keep every other result and one fixed wait bound.
-// Shared by every journal fixture (zerus-p1l5z).
+// Historical bounded Busy-only setup helper shared by journal fixtures
+// (zerus-p1l5z). Busy refuses before any write; never retry an offer or an
+// uncertain publication. The owner-release fork regressions use direct
+// attempts without retries.
 #[track_caller]
 pub(super) fn retry_busy<T>(
     mut operation: impl FnMut() -> Result<T, journal::Error>,

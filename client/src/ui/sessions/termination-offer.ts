@@ -14,6 +14,15 @@ export function completeProgramList(value: readonly CleanupProgram[] | undefined
     && (i === 0 || value[i - 1].pid < program.pid));
 }
 export interface CleanupOfferState { offer?: CleanupOffer; error?: string }
+/** A slow optional review cannot park Stop forever. After this UI wait,
+ * ordinary End still goes through the native claim/confirmation guards and
+ * reports the live holder if custody has not released it. */
+export async function waitForCleanupOffer(pending: Promise<string | undefined>): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([pending, new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 5000); })]);
+  } finally { clearTimeout(timer); }
+}
 /** Read-only offer/cancel ports deliberately have no effect or fallback call. */
 export async function readCleanupOffer(
   target: Target,
@@ -21,16 +30,20 @@ export async function readCleanupOffer(
   live: () => boolean,
   publish: (state: CleanupOfferState) => void,
 ) {
+  let cancelling = false;
   try {
     const offer = await ports.offer(target);
-    if (!live()) { if (offer) void ports.cancel(offer.id); return; }
+    if (!live()) { if (offer) { cancelling = true; await ports.cancel(offer.id); } return; }
     if (offer && !completeProgramList(offer.programs)) {
-      void ports.cancel(offer.id);
+      cancelling = true;
+      await ports.cancel(offer.id);
       throw Error(PROGRAM_LIST_CHANGED);
     }
     publish({ offer: offer ?? undefined });
   } catch (error) {
-    if (live()) publish({ error: error instanceof Error ? error.message : String(error) });
+    const message = error instanceof Error ? error.message : String(error);
+    if (live()) publish({ error: message });
+    else if (cancelling) return message;
   }
 }
 export function unavailableServiceRemoval(error: string): boolean {

@@ -86,6 +86,8 @@ export interface PacingRun {
   verdict: PacingVerdict;
   /** Intervals between scroll events (scroll scenarios). */
   scroll_event_ms?: Summary;
+  /** Accepted positions, not requested deltas; bounded counters only. */
+  scroll_travel?: { min_top_px: number; max_top_px: number; span_px: number; total_px: number };
   activity_before?: ActivityContent;
   activity_after?: ActivityContent;
 }
@@ -260,6 +262,8 @@ async function pacingRuns(
   const T = frameBudget(plan.hz);
   const once = async (ms: number): Promise<PacingRun> => {
     const before = activityContent?.();
+    let previousTop = scrollTarget?.scrollTop ?? 0, minTop = previousTop, maxTop = previousTop, travel = 0;
+    const observed = (top: number) => { minTop = Math.min(minTop, top); maxTop = Math.max(maxTop, top); travel += Math.abs(top - previousTop); previousTop = top; };
     const scrollTimes: number[] = [];
     const onScroll = () => scrollTimes.push(performance.now());
     scrollTarget?.addEventListener("scroll", onScroll, { passive: true });
@@ -267,7 +271,7 @@ async function pacingRuns(
     let deltas: number[];
     try {
       deltas = await recordFrames(ms, {
-        onFrame: scrollTarget ? () => advance(scrollTarget, plan.stepPx) : undefined,
+        onFrame: scrollTarget ? () => observed(advance(scrollTarget, plan.stepPx)) : undefined,
       });
     } finally {
       stop?.();
@@ -280,7 +284,11 @@ async function pacingRuns(
       interval_ms: { ...s, max: deltas.length ? Math.max(...deltas) : NaN },
       verdict: passes(s, T),
     };
-    if (scrollTarget) run.scroll_event_ms = summarize(scrollTimes.slice(1).map((t, i) => t - scrollTimes[i]));
+    if (scrollTarget) {
+      observed(scrollTarget.scrollTop);
+      run.scroll_event_ms = summarize(scrollTimes.slice(1).map((t, i) => t - scrollTimes[i]));
+      run.scroll_travel = { min_top_px: minTop, max_top_px: maxTop, span_px: maxTop - minTop, total_px: travel };
+    }
     if (before && after) { run.activity_before = before; run.activity_after = after; }
     return run;
   };
@@ -296,12 +304,16 @@ const directions = new WeakMap<HTMLElement, number>();
 function advance(element: HTMLElement, step: number) {
   const direction = directions.get(element) ?? 1;
   const max = element.scrollHeight - element.clientHeight;
-  let next = element.scrollTop + direction * step;
+  const top = element.scrollTop;
+  let next = top + direction * step;
   if (next >= max || next <= 0) {
     directions.set(element, -direction);
     next = Math.min(Math.max(next, 0), max);
   }
-  element.scrollTop = next;
+  // CSS smooth scrolling would restart its animation every frame, so the
+  // advertised 16 px step would not be the work this scenario drives.
+  element.scrollTo({ top: next, behavior: "instant" });
+  return top;
 }
 
 function pacingResult(id: ScenarioId, plan: Plan, runs: PacingRun[]): ScenarioResult {
@@ -445,15 +457,26 @@ export async function runScenario(id: ScenarioId, targets: DiagnosticsTargets, s
       if (range < plan.stepPx * 4) return skipped(id, "pacing", "interval_ms", `nothing to scroll (${Math.max(0, Math.floor(range))} px)`);
       const top = element.scrollTop;
       try {
+        if (id === "activity-scroll") {
+          // Use Activity's ordinary intent handler to release follow; layout
+          // scroll events intentionally cannot revoke the production end pin.
+          element.dispatchEvent(new WheelEvent("wheel", { deltaY: -plan.stepPx, bubbles: true, cancelable: true }));
+          element.scrollTo({ top: Math.max(0, Math.min(top, range) - plan.stepPx), behavior: "instant" });
+        }
         const content = id === "activity-scroll" ? (): ActivityContent => ({
           scroll_height: element.scrollHeight,
           activity_rows: element.querySelectorAll('[id^="item-"]').length,
           dom_nodes: element.querySelectorAll("*").length,
           events: targets.activityEvents?.() ?? -1,
         }) : undefined;
-        return pacingResult(id, plan, await pacingRuns(plan, () => undefined, element, content));
+        const runs = await pacingRuns(plan, () => undefined, element, content);
+        const result = pacingResult(id, plan, runs);
+        if (runs.some(run => run.frames >= 8 && (run.scroll_travel?.span_px ?? 0) <= plan.stepPx * 2)) {
+          return { ...result, skipped: "scrolling did not traverse the container", verdict: undefined };
+        }
+        return result;
       } finally {
-        element.scrollTop = top;
+        element.scrollTo({ top, behavior: "instant" });
       }
     }
     case "session-open":

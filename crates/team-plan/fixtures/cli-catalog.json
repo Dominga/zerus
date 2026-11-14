@@ -1,0 +1,245 @@
+{
+  "actor": {
+    "interim": true,
+    "kind": "person",
+    "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+    "origin": "cli_interim",
+    "person": "local"
+  },
+  "catalog": {
+    "pipelines": [
+      {
+        "id": "code",
+        "implementer": "developer",
+        "name": "Code: review, test, lead",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      {
+        "id": "reviewed",
+        "implementer": "developer",
+        "name": "Reviewed: review, lead",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          }
+        ]
+      },
+      {
+        "accept": "pipeline",
+        "id": "docs",
+        "implementer": "developer",
+        "name": "Docs: review, then accepted",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          }
+        ]
+      },
+      {
+        "id": "check",
+        "implementer": "developer",
+        "name": "Check: lead"
+      }
+    ],
+    "planning_rules": [
+      "Aim at 20 to 25 tasks in a phase and offer a split above 25.",
+      "Use a hard dependency only where it is needed, and none across phases: use a barrier phase.",
+      "Plan shared foundations first.",
+      "A reviewer never writes what it reviews.",
+      "A tester never implements.",
+      "Make each task text self-contained, with criteria a reviewer can check.",
+      "The lead never builds, tests or merges a member's work by hand."
+    ],
+    "roles": [
+      {
+        "agent": "claude",
+        "id": "developer",
+        "name": "Developer",
+        "prompt": "Implement the task in your own worktree. Start from the base commit named in the task, keep to its write set, run the checks that can fail for your change, commit, and report what you changed and how you checked it."
+      },
+      {
+        "agent": "claude",
+        "id": "reviewer",
+        "name": "Reviewer",
+        "prompt": "Review the reported commit against the task's criteria. You never change what you review. Give a verdict: pass, or return with the exact findings."
+      },
+      {
+        "agent": "claude",
+        "id": "tester",
+        "name": "Tester",
+        "prompt": "Check the reported commit by running it: the task's criteria and the scenarios a person would try. You never implement. Give a verdict: pass, or return with what failed and how to see it."
+      }
+    ],
+    "templates": [
+      {
+        "default_pipeline": "code",
+        "description": "Planned work on one goal: two developers, a reviewer and a tester.",
+        "digest": "a13f8ce303eeec0f3a1eeae443bc1a1594696e48c365e18d5099afec353e722a",
+        "id": "feature-delivery",
+        "lead": {
+          "agent": "claude"
+        },
+        "name": "Feature delivery",
+        "roster": [
+          {
+            "count": 2,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "role": "reviewer"
+          },
+          {
+            "count": 1,
+            "role": "tester"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 6,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "lead",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        }
+      },
+      {
+        "default_pipeline": "reviewed",
+        "description": "A queue of independent fixes: a developer and a reviewer.",
+        "digest": "6d15fdbdd92ac4d5c5bc53f0bd6da7871c0dbf1842f4d4f25bf94aebc95bbb9d",
+        "id": "bugfix",
+        "lead": {
+          "agent": "claude"
+        },
+        "name": "Bugfix",
+        "roster": [
+          {
+            "count": 1,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "role": "reviewer"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 6,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "direct",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        }
+      },
+      {
+        "default_pipeline": "reviewed",
+        "description": "A small task or a tight budget: one implementer and an independent checker.",
+        "digest": "21c4239b52e8ad7d9e94146beb6a88921494c860e3067cec96e8deeecabe59b2",
+        "id": "small",
+        "lead": {
+          "agent": "claude"
+        },
+        "name": "Small",
+        "roster": [
+          {
+            "count": 1,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "role": "reviewer"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 2,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "lead",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        }
+      }
+    ]
+  },
+  "ok": true
+}

@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/kimi-native.yml'
       - 'scripts/ci/kimi-native*'
+      - 'scripts/ci/native_discovery.py'
+      - 'tests/test_native_discovery.py'
       - 'scripts/ci/native-effort-seed.py'
       - 'scripts/ci/kimi-native-manifests/**'
       - 'scripts/ci/install-tmux.sh'
@@ -58,6 +60,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
+      - name: Bounded discovery controls without native execution
+        run: python -B -m unittest discover -s tests -p test_native_discovery.py -v
       - name: Keep Cargo and Rustup in this ephemeral runner's private temporary directory
         shell: bash
         run: |

@@ -724,6 +724,8 @@ impl SignedMembership {
 
 /// The domain of the person's latch statement (zerus-sa9qn.50).
 pub const ROUTE_PERSON_DOMAIN: &str = "zerus-question-route-person-v1";
+/// Revision-CAS statements cannot be stripped or reinterpreted as v1.
+pub const ROUTE_PERSON_REVISION_DOMAIN: &str = "zerus-question-route-person-v2";
 /// The longest a latch statement stays valid, in seconds.
 pub const ROUTE_PERSON_LIFETIME: u64 = 300;
 /// How far a phone's clock may run ahead of the gateway's, in seconds.
@@ -732,7 +734,8 @@ pub const ROUTE_PERSON_SKEW: u64 = 60;
 /// The person's latch on one child's question route (zerus-sa9qn.50): a
 /// phone of the workspace signs it for one gateway, whose desktop service
 /// applies it at most once (by `request_id`) before `expires_at`. It sets
-/// `person_off` to its value; it is not a compare-and-swap.
+/// `person_off` to its value. v2 signs the computer-issued latch revision;
+/// v1 without a revision remains the legacy clock-ordered statement.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RoutePersonStatement {
@@ -746,6 +749,17 @@ pub struct RoutePersonStatement {
     pub request_id: String,
     pub issued_at: u64,
     pub expires_at: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "route_person_revision"
+    )]
+    pub expected_revision: Option<u64>,
+}
+fn route_person_revision<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    u64::deserialize(input).map(Some)
 }
 impl RoutePersonStatement {
     pub fn validate(&self) -> Result<()> {
@@ -766,7 +780,8 @@ impl RoutePersonStatement {
                 return Err(Error::Invalid);
             }
         }
-        if self.issued_at >= self.expires_at
+        if self.expected_revision.is_some_and(|r| r > MAX_WIRE_INTEGER)
+            || self.issued_at >= self.expires_at
             || self.expires_at - self.issued_at > ROUTE_PERSON_LIFETIME
             || self.expires_at > MAX_WIRE_INTEGER
         {
@@ -776,20 +791,32 @@ impl RoutePersonStatement {
     }
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate()?;
+        let off = [u8::from(self.person_off)];
+        let issued = self.issued_at.to_be_bytes();
+        let expires = self.expires_at.to_be_bytes();
+        let revision = self.expected_revision.map(u64::to_be_bytes);
+        let mut fields: Vec<&[u8]> = vec![
+            self.workspace_id.as_bytes(),
+            self.device_id.as_bytes(),
+            self.gateway_id.as_bytes(),
+            self.session_id.as_bytes(),
+            self.run_id.as_bytes(),
+            self.conversation_id.as_bytes(),
+            &off,
+            self.request_id.as_bytes(),
+            &issued,
+            &expires,
+        ];
+        if let Some(revision) = &revision {
+            fields.push(revision);
+        }
         frame(
-            ROUTE_PERSON_DOMAIN,
-            &[
-                self.workspace_id.as_bytes(),
-                self.device_id.as_bytes(),
-                self.gateway_id.as_bytes(),
-                self.session_id.as_bytes(),
-                self.run_id.as_bytes(),
-                self.conversation_id.as_bytes(),
-                &[u8::from(self.person_off)],
-                self.request_id.as_bytes(),
-                &self.issued_at.to_be_bytes(),
-                &self.expires_at.to_be_bytes(),
-            ],
+            if revision.is_some() {
+                ROUTE_PERSON_REVISION_DOMAIN
+            } else {
+                ROUTE_PERSON_DOMAIN
+            },
+            &fields,
         )
     }
     pub fn sign(&self, identity: &Identity) -> Result<String> {

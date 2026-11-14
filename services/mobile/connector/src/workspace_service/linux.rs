@@ -54,7 +54,7 @@ struct Details {
     #[serde(default)]
     managed: Option<Managed>,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Managed {
     process: Process,
@@ -113,12 +113,21 @@ pub struct TestPaths {
     pub binary: PathBuf,
     pub dropin: PathBuf,
     pub cgroup: PathBuf,
+    pub acknowledgement_waiting: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 #[cfg(feature = "test-hooks")]
 tokio::task_local! { static TEST_PATHS: TestPaths; }
 #[cfg(feature = "test-hooks")]
 pub async fn test_scope<T>(paths: TestPaths, future: impl std::future::Future<Output = T>) -> T {
     TEST_PATHS.scope(paths, future).await
+}
+#[cfg(feature = "test-hooks")]
+pub(super) fn acknowledgement_waiting() {
+    let _ = TEST_PATHS.try_with(|paths| {
+        if let Some(waiting) = &paths.acknowledgement_waiting {
+            waiting.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
 }
 fn manager_program() -> PathBuf {
     #[cfg(feature = "test-hooks")]
@@ -1513,57 +1522,82 @@ pub(super) async fn reserve_start(store: &Store, record: &mut Record) -> Result<
         already_running,
     })
 }
+fn running(plan: &StartPlan, current: &Unit) -> Result<Option<(Value, Managed)>> {
+    after_definition(&plan.detail, current)?;
+    if workspace_cli::read_config(&plan.binding.config)?.1 != plan.binding.revision {
+        return Err(refused());
+    }
+    if get(current, "ActiveState")? == "active" {
+        // The main process may not have acquired the journal yet. Only a
+        // fully verified process+generation can complete this reservation.
+        if let Ok(process) = process(current, &plan.binding) {
+            if process.image != plan.detail.desired {
+                return Err(refused());
+            }
+            if let Ok(status) = crate::workspace_lifecycle::status(&plan.state) {
+                if status["running"] == true
+                    && (plan.already_running
+                        || status["generation"].as_str() != plan.previous_generation.as_deref())
+                {
+                    let generation = status["generation"]
+                        .as_str()
+                        .ok_or_else(refused)?
+                        .to_owned();
+                    let control =
+                        workspace_cli::read_private(&plan.state, "workspace-control.json")?
+                            .ok_or_else(refused)?;
+                    let control: Value = serde_json::from_slice(&control).map_err(|_| refused())?;
+                    if control["pid"].as_i64() != Some(process.pid as i64)
+                        || control["generation"] != generation
+                    {
+                        return Err(refused());
+                    }
+                    return Ok(Some((
+                        status,
+                        Managed {
+                            process,
+                            generation,
+                            state: plan.state.clone(),
+                            revision: plan.binding.revision.clone(),
+                        },
+                    )));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 pub(super) async fn start(plan: StartPlan) -> Result<(Value, Managed)> {
     if !plan.already_running {
         manager(&["start", UNIT]).await?;
     }
     loop {
-        let current = unit().await?;
-        after_definition(&plan.detail, &current)?;
-        if workspace_cli::read_config(&plan.binding.config)?.1 != plan.binding.revision {
-            return Err(refused());
-        }
-        if get(&current, "ActiveState")? == "active" {
-            // The main process may not have acquired the journal yet. Only a
-            // fully verified process+generation can complete this reservation.
-            if let Ok(process) = process(&current, &plan.binding) {
-                if process.image != plan.detail.desired {
-                    return Err(refused());
-                }
-                if let Ok(status) = crate::workspace_lifecycle::status(&plan.state) {
-                    if status["running"] == true
-                        && (plan.already_running
-                            || status["generation"].as_str() != plan.previous_generation.as_deref())
-                    {
-                        let generation = status["generation"]
-                            .as_str()
-                            .ok_or_else(refused)?
-                            .to_owned();
-                        let control =
-                            workspace_cli::read_private(&plan.state, "workspace-control.json")?
-                                .ok_or_else(refused)?;
-                        let control: Value =
-                            serde_json::from_slice(&control).map_err(|_| refused())?;
-                        if control["pid"].as_i64() != Some(process.pid as i64)
-                            || control["generation"] != generation
-                        {
-                            return Err(refused());
-                        }
-                        return Ok((
-                            status,
-                            Managed {
-                                process,
-                                generation,
-                                state: plan.state,
-                                revision: plan.binding.revision,
-                            },
-                        ));
-                    }
-                }
-            }
+        if let Some(observed) = running(&plan, &unit().await?)? {
+            return Ok(observed);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+// Revalidate the exact observed generation after Store admission, without a job.
+pub(super) async fn confirm_start(record: &Record, observed: &Managed) -> Result<Value> {
+    let plan = StartPlan {
+        detail: details(record)?,
+        binding: Binding {
+            revision: observed.revision.clone(),
+            node_id: record.managed_node_id.clone().ok_or_else(refused)?,
+            config: record.binding.config.clone(),
+            state: observed.state.clone(),
+            relay_binding: String::new(),
+        },
+        state: observed.state.clone(),
+        previous_generation: None,
+        already_running: true,
+    };
+    let (status, current) = running(&plan, &unit().await?)?.ok_or_else(refused)?;
+    if current != *observed {
+        return Err(refused());
+    }
+    Ok(status)
 }
 pub(super) fn observed(store: &Store, record: &mut Record, observed: Managed) -> Result<()> {
     let mut detail = details(record)?;

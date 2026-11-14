@@ -106,6 +106,7 @@ struct WriteState<W> {
     pipe: Option<W>,
     closed: bool,
     written: bool,
+    owner: Option<super::super::InputOwner>,
 }
 pub(super) struct Writer<W> {
     state: Arc<Mutex<WriteState<W>>>,
@@ -125,12 +126,16 @@ impl<W: Write + Send + 'static> Writer<W> {
         value
     }
     pub fn new(pipe: Option<W>) -> Self {
+        Self::with_owner(pipe, None)
+    }
+    pub fn with_owner(pipe: Option<W>, owner: Option<super::super::InputOwner>) -> Self {
         Self {
             failed: pipe.is_none(),
             state: Arc::new(Mutex::new(WriteState {
                 pipe,
                 closed: false,
                 written: false,
+                owner,
             })),
             worker: None,
             offered: false,
@@ -157,6 +162,9 @@ impl<W: Write + Send + 'static> Writer<W> {
                 state.written = Instant::now() < until
                     && pipe.write_all(&input).and_then(|_| pipe.flush()).is_ok();
                 drop(pipe);
+                if let Some(owner) = state.owner.take() {
+                    state.written &= owner.finish().is_ok();
+                }
                 state.closed = true;
             })
             .ok();
@@ -169,6 +177,9 @@ impl<W: Write + Send + 'static> Writer<W> {
                 // No worker existed (including a failed spawn). The original
                 // unoffered pipe can be closed here without fabricating input.
                 if state.pipe.take().is_some() {
+                    if let Some(owner) = state.owner.take() {
+                        self.failed |= owner.finish().is_err();
+                    }
                     state.closed = true;
                     self.closed = true;
                     self.joined = true;
@@ -182,7 +193,7 @@ impl<W: Write + Send + 'static> Writer<W> {
         }
         self.close_unoffered();
         self.offered = true;
-        if self.closed && self.joined {
+        if self.closed && self.joined && !self.failed {
             self.written = true; // Explicit zero-byte input/EOF, no write task.
             true
         } else {

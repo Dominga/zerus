@@ -168,7 +168,8 @@ impl Session {
             .env_remove("HGS_RUN_ID");
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-        let mut child = command.spawn().map_err(|_| "catalog_relay_unavailable")?;
+        let mut child =
+            crate::platform::spawn_async(&mut command).map_err(|_| "catalog_relay_unavailable")?;
         let admission = Admission {
             charge: Some(charge),
             exited: false,

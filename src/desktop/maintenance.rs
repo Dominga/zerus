@@ -156,7 +156,7 @@ impl Runtime {
                                 &invocation,
                                 &environment,
                                 cancel,
-                                spawn,
+                                spawn_input,
                                 lease,
                             )
                             .map_err(|_| {
@@ -772,4 +772,11 @@ fn unix_now() -> i64 {
 }
 fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     crate::platform::spawn_service_child(command)
+}
+
+fn spawn_input(
+    command: &mut std::process::Command,
+    input: zerus_client_core::run::InputSpawn,
+) -> std::io::Result<std::process::Child> {
+    input.spawn_with(command, spawn)
 }

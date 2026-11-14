@@ -96,9 +96,27 @@ impl Admission {
     /// All three streams must be this child's original pipes. Input stays held
     /// until send's fresh native/source check; missing pipes retain a failure.
     /// The host must not detach/replace the Child inside its check callback.
-    pub fn attach(self, mut child: Child) -> Exchange {
-        let missing = child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none();
-        let input = Writer::new(child.stdin.take());
+    pub fn attach(self, child: Child) -> Exchange {
+        self.attach_owner(child, Ok(None))
+    }
+    pub(super) fn attach_input(self, child: Child, has_input: bool) -> Exchange {
+        let owner = child
+            .stdin
+            .as_ref()
+            .map(|writer| super::InputOwner::acquire(writer, has_input))
+            .transpose();
+        self.attach_owner(child, owner)
+    }
+    fn attach_owner(
+        self,
+        mut child: Child,
+        owner: std::io::Result<Option<super::InputOwner>>,
+    ) -> Exchange {
+        let missing = child.stdin.is_none()
+            || child.stdout.is_none()
+            || child.stderr.is_none()
+            || owner.is_err();
+        let input = Writer::with_owner(child.stdin.take(), owner.ok().flatten());
         let output = Drain::new(child.stdout.take(), STDOUT_BYTES);
         let error = Drain::new(child.stderr.take(), STDERR_BYTES);
         let mut original = Original {

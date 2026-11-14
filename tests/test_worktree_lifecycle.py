@@ -153,6 +153,27 @@ class WorktreeLifecycle(test_pause.Harness):
         name=self.start('codex');self.hgs('pause',name);self.assertTrue(self.project.exists())
         result=self.command('archive',name);self.assertEqual(result['status'],'removed',result);self.assertFalse(self.project.exists())
 
+    def test_changed_archive_after_folder_restore_keeps_the_checkout_without_starting(self):
+        from test_archive_restore_fence import ArchiveRestoreSource
+        name=self.start('claude')
+        result=self.command('terminate',name);self.assertEqual(result['status'],'removed',result)
+        archive=self.archives()[0]
+        path=self.root/'state/archives'/(archive['archive_id']+'.json')
+        changed=dict(json.loads(path.read_text()),layout_transition={'opaque':'changed after checkout'})
+        replacement=json.dumps(changed)
+        ArchiveRestoreSource.replace_on_writer_read(self,path,replacement,at=3)
+        launches=(self.root/'argv.jsonl').read_text()
+        result=subprocess.run([str(test_pause.HGS),'resume',name,'--archive',archive['archive_id'],'-d'],
+                              env=self.env,text=True,capture_output=True,timeout=30)
+        self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+        self.assertIn('select the archive again',result.stderr)
+        self.assertTrue(self.project.is_dir(),'a later refusal must keep the recreated folder for review')
+        self.assertEqual((self.project/'tracked').read_text(),'original')
+        self.assertEqual(self.git('-C',str(self.project),'rev-parse','HEAD'),archive['worktree_cleanup']['head'])
+        self.assertEqual(path.read_text(),replacement)
+        self.assertFalse(self.binding(name))
+        self.assertEqual((self.root/'argv.jsonl').read_text(),launches)
+
     def test_other_session_keeps_folder_until_last_termination(self):
         first=self.start('claude','first');second=self.start('claude','second')
         result=self.command('terminate',first);self.assertEqual(result['status'],'kept',result);self.assertTrue(self.project.exists());self.assertTrue(self.binding(second))

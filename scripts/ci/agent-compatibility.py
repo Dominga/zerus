@@ -92,6 +92,21 @@ AGENTS = {
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
 HINT_METHODS = ('test_lifecycle', 'test_lost_mark', 'test_pre_feature_first_resume', 'test_optouts_and_instructions')
+# The separately selected Agent Teams contract (milestone 1, package 15): one team of
+# one agent kind in a private root and a private desktop service, latest release only.
+# Kimi's class runs in the hosted Kimi workflow; DeepSeek and OpenCode cannot be team
+# members in this milestone. Its waits carry their own bounds; this is the row's bound.
+TEAMS_CLASSES = {'claude': ['test_teams_native.NativeTeamsClaude', 'test_teams_native.NativeTeamsResumeClaude',
+                            'test_teams_native.NativeTeamsResumeUnworkedClaude'],
+                 'codex': ['test_teams_native.NativeTeamsCodex', 'test_teams_native.NativeTeamsTrustCodex',
+                           'test_teams_native.NativeTeamsResumeCodex']}
+TEAMS_TIMEOUT = 2400
+TEAMS_COVERAGE = ('team member launch and identity, delivery into a free member and its own shell, the lead '
+                  'doorbell, the cancel notice, team stop and Terminate, and the resume of an exited member; for '
+                  'Codex the audited repository-scope folder trust by the standing confirmation; for Claude Code the '
+                  'refused restore of a member that never worked, with the command\'s reason on its card. Claude '
+                  'Code folder trust by the standing confirmation waits for the owner\'s decision zerus-63rru.66 '
+                  'and for zerus-63rru.73, and so does an ordinary question after no startup card; a member shell in a private PID namespace for zerus-63rru.76')
 HINT_CLASSES = {
     'claude': ('NativeClaudeHint', 'NativeWindowsClaudeHint'),
     'codex': ('NativeCodexHint', 'NativeWindowsCodexHint'),
@@ -245,12 +260,14 @@ def check_manifest(manifest):
                 raise ValueError(label + ': only an older version may be retained, with its reason')
 
 
+discovery_spec = importlib.util.spec_from_file_location(
+    'zerus_native_discovery', Path(__file__).with_name('native_discovery.py'))
+discovery = importlib.util.module_from_spec(discovery_spec)
+discovery_spec.loader.exec_module(discovery)
+
+
 def fetch_json(url):
-    request = urllib.request.Request(url, headers={'User-Agent': 'Zerus-agent-compatibility'})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = response.read(8 * 1024 * 1024 + 1)
-    if len(data) > 8 * 1024 * 1024:
-        raise ValueError('Upstream metadata exceeds its size limit')
+    data, _ = discovery.fetch_metadata(url, 8 * 1024 * 1024, stage='official npm metadata')
     return json.loads(data)
 
 
@@ -306,7 +323,7 @@ def discover_upstream(manifest):
 def latest_packages(agents, target, upstream):
     """Resolve one exact official package per selected agent before any native run.
 
-    The registry's latest tag is read once, not once per terminal case. Historical
+    The registry's latest tag selects one version, not one per terminal case. Historical
     pins are never a fallback for a missing release, target package or integrity.
     """
     packages, errors = {}, []
@@ -548,7 +565,7 @@ def seed_inputs(receipt, hgs):
     return dict(receipt=str(Path(receipt).resolve(strict=True)), value=helper.verify(ROOT, receipt, hgs))
 
 
-def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=None, effort_seed=None):
+def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=None, effort_seed=None, teams=False):
     # Hint selection has one original 1200-second row end, preparation included.
     # Its fixtures reserve the last 60 seconds for their existing owned cleanup.
     hint_end = time.monotonic() + 1200 if hint_inputs is not None else None
@@ -562,6 +579,8 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
         row.update(contract='agent-hint', source_inputs=hint_inputs, original_end_monotonic=hint_end,
                    coverage='four named hook-output/context lifecycle, lost-mark, real pre-feature migration and opt-out/instruction cases; '
                             'fixture retained-hook interposition, no customer-receipt or kernel-isolation claim')
+    if teams:
+        row.update(contract='teams', coverage=TEAMS_COVERAGE)
     directory = results / agent / version
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -607,6 +626,9 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
                          for geometry in ('95x47', '110x35')
                          for mode, animations in (('animated', 'true'), ('reduced', 'false'))}
         row['cases'] = {}
+        if teams:
+            # Teams adds no terminal-geometry behaviour: one case, its own bound.
+            cases = {'teams': dict(ZERUS_TEAMS_EVIDENCE=str(directory / 'teams-evidence'))}
         if hint_inputs is not None:
             # Context delivery is a separate named contract, not four extra
             # claims about geometry/animation. The default UI matrix is intact.
@@ -617,6 +639,8 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
             if effort_seed is not None:
                 test_env.update(seed_helper().environment(effort_seed['value']))
             suites, timeout = spec['suites'], spec['timeout']
+            if teams:
+                suites, timeout = list(TEAMS_CLASSES[agent]), TEAMS_TIMEOUT
             if hint_inputs is not None:
                 suites = hint_suites(agent, target)
                 timeout = hint_end - time.monotonic()
@@ -626,7 +650,7 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
                                 ZERUS_HINT_RESULTS=str(directory / 'hook-output'),
                                 ZERUS_NATIVE_EXPECTED_IDS=json.dumps(suites), ZERUS_NATIVE_FAILFAST='1')
             arguments = (suites, test_env, timeout, work / agent / version, directory / (case + '.log'))
-            if hint_inputs is None and (agent, target) in (('claude', 'darwin-arm64'), ('codex', 'linux-x64')):
+            if hint_inputs is None and not teams and (agent, target) in (('claude', 'darwin-arm64'), ('codex', 'linux-x64')):
                 # The 57 Codex cases outgrew a serial 180 s row in CI
                 # 43228147234/43238924877. Preserve that end and every occurrence;
                 # use the same checked, private partitioner as macOS Claude.
@@ -703,7 +727,8 @@ def main():
                         help='The hgs build under test; default: HGS_TEST_BIN, else the debug build')
     parser.add_argument('--effort-seed-receipt', type=Path,
                         help='Exact-source private Rust test-image receipt for Unix Claude/Codex ID Effort')
-    parser.add_argument('--contract', choices=['agent-hint'], help='Select the fixed hint-output contract instead of default UI suites')
+    parser.add_argument('--contract', choices=['agent-hint', 'teams'],
+                        help='Select the fixed hint-output contract or the Agent Teams contract instead of default UI suites')
     parser.add_argument('--pre-feature-hgs', type=Path, help='Reviewed real ad328 main CLI for the migration case')
     parser.add_argument('--hook-observer', type=Path, help='Reviewed build of the fixture-only session_start_observer example')
     parser.add_argument('--hgs-source', help='Complete source object bound to --hgs by the reviewed build receipt')
@@ -712,7 +737,14 @@ def main():
                         help='Public official tarballs named by the pin URLs; agent-hint never downloads missing inputs')
     args = parser.parse_args()
     hint_inputs = None
-    if args.contract:
+    teams = args.contract == 'teams'
+    if teams:
+        if any((args.pre_feature_hgs, args.hook_observer, args.hgs_source, args.observer_source, args.native_package_cache,
+                args.effort_seed_receipt)):
+            parser.error('The teams contract takes no hint inputs and no Effort seed')
+        if args.agent and any(agent not in TEAMS_CLASSES for agent in args.agent):
+            parser.error('The teams contract covers Claude Code and Codex; Kimi runs in its hosted workflow')
+    elif args.contract:
         if args.latest or not args.pre_feature_hgs or not args.hook_observer or not args.native_package_cache:
             parser.error('agent-hint requires sealed CLI/observer inputs and --native-package-cache; --latest is separate')
         try:
@@ -733,6 +765,10 @@ def main():
     target = host_target()
     agents = list(dict.fromkeys(args.agent)) if args.agent else [
         agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
+    if teams:
+        if target == WINDOWS:
+            parser.error('The teams contract has no Windows row: the Teams preview cannot be turned on there')
+        agents = [agent for agent in agents if agent in TEAMS_CLASSES]
     if hint_inputs is not None:
         if args.agent and any(agent not in HINT_CLASSES for agent in agents):
             parser.error('The agent-hint contract covers Claude and Codex only')
@@ -741,7 +777,7 @@ def main():
     if not agents or unsupported:
         parser.error('No supported native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
     effort_seed = None
-    if hint_inputs is None and target != WINDOWS and any(agent in ('claude', 'codex') for agent in agents):
+    if hint_inputs is None and not teams and target != WINDOWS and any(agent in ('claude', 'codex') for agent in agents):
         try:
             effort_seed = seed_inputs(args.effort_seed_receipt or ROOT / 'target/debug/hgs-effort-seed.json', args.hgs.resolve())
         except (OSError, ValueError) as error:
@@ -758,6 +794,8 @@ def main():
                             if package['target'] == agent_target(agent, target)] for agent in agents}
     else:
         report['selection_policy'] = 'latest-only'
+        if teams:
+            report['contract'] = 'teams'
         names = {AGENTS[agent]['name'] for agent in agents}
         sources = manifest['upstream'] if args.latest else [source for source in manifest['upstream']
                                                            if source['name'] in names]
@@ -781,7 +819,9 @@ def main():
     with work_context as temporary:
         for agent in agents:
             for package in packages[agent]:
-                if hint_inputs is None:
+                if teams:
+                    row = qualify(agent, package, Path(temporary), results, args.hgs.resolve(), teams=True)
+                elif hint_inputs is None:
                     if effort_seed is not None and agent in ('claude', 'codex'):
                         row = qualify(agent, package, Path(temporary), results, args.hgs.resolve(), effort_seed=effort_seed)
                     else:

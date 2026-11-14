@@ -64,6 +64,13 @@ pub(super) fn observe_refused_child(child: &mut std::process::Child) {
 
 #[test]
 fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
+    accounted_read_guard_with_input(b"private-fixture-frame\n".to_vec());
+}
+#[test]
+fn empty_input_marker_preserves_the_actual_post_observation_guard() {
+    accounted_read_guard_with_input(Vec::new());
+}
+fn accounted_read_guard_with_input(input: Vec<u8>) {
     if crate::test_context::desktop_fixture() {
         return;
     }
@@ -82,6 +89,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
             let check_key = key.clone();
             let root = f.0.clone();
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let input = input.clone();
             let result = tauri::async_runtime::spawn_blocking(move || {
                 AFTER_OBSERVATION.with_borrow_mut(|hook| {
                     *hook = Some(Box::new(move |_| {
@@ -111,7 +119,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
                 });
                 let exit = context.read(&Invocation {
                     args: vec!["desktop".into(), "frontend-request".into(), "--json".into()],
-                    stdin: Some(b"private-fixture-frame\n".to_vec()),
+                    stdin: Some(input),
                     timeout: Duration::from_millis(200),
                     request_id: None,
                 });

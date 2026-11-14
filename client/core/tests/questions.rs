@@ -864,6 +864,34 @@ fn read_only_cards_disable_their_options() {
 }
 
 #[test]
+fn kimi_cache_chooser_lists_native_options_read_only() {
+    let form = question(
+        json!({"question_id":"kimi-cache:fixture","question_hash":"fixture",
+        "source":"kimi_cache_hint","can_answer":false,"answer_transport":"",
+        "answer_unavailable_reason":"Open Terminal to answer this question.",
+        "questions":[{"id":"cache","question":"This session has been idle for 1h 4m and is ~260k tokens.",
+            "allow_other":false,"options":[
+                {"id":"cache_0","label":"Compact and continue"},
+                {"id":"cache_1","label":"Start a new session"},
+                {"id":"cache_2","label":"Continue as-is"},
+                {"id":"cache_3","label":"Don't ask me again"}]}]}),
+    );
+    let view = card(&form, &AnswerDraft::default(), &ctx());
+    assert_eq!(view.forms[0].options.len(), 4);
+    assert!(view.forms[0].options.iter().all(|option| !option.enabled));
+    assert!(!view.submit.visible);
+    assert!(view.status.english().contains("Open Terminal"));
+    assert!(!AnswerDraft::default().apply(
+        &form,
+        Edit::Option {
+            item: "cache".into(),
+            option: "cache_0".into(),
+            checked: true
+        }
+    ));
+}
+
+#[test]
 fn changed_codex_rate_limit_card_opens_terminal_without_answer_options() {
     let form = question(
         json!({"question_id":"codex-rate-limit:fixture","question_hash":"fixture",

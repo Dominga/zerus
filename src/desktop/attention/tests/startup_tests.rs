@@ -57,6 +57,7 @@ fn withdrawn(f: &mut Fixture, token: &str) {
 #[test]
 fn mandatory_startup_questions_post_once_and_answer_withdraws_the_original() {
     for question in [
+        "codex-sandbox:one",
         "codex-trust:one",
         "codex-hooks-trust:one",
         "codex-update:one",

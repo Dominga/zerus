@@ -1383,6 +1383,13 @@ service verifies it through its own connector and applies it once, so an
 agent on the computer cannot clear a phone's "off" with commands. The
 statement's shared vector is
 `services/mobile/crypto/tests/vectors/question-route-person-v1.json`.
+Where both ends additionally advertise `session_question_route_person_status`,
+phones read the exact child's service latch revision and sign it in a v2
+statement (`question-route-person-v2.json`). The computer compares that revision,
+advances it on every accepted decision including no-ops, and durably fences
+that latch against all legacy v1 statements after its first verified v2 request.
+Legacy latches keep the documented clock-ordering risk until then; see the
+person's latch section in `docs/reference.md`.
 Under marker `session-question-routing-v2` the row's `question_routing` also
 carries `person_off`, a display-only mirror of that latch; the phone then
 shows the child off and, without the person's statement, offers no "on".

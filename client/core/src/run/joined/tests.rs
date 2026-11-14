@@ -28,7 +28,9 @@ fn guarded_original_input_returns_only_after_actual_io_joins() {
         &invocation(b"original private input"),
         &[],
         &AtomicBool::new(false),
-        guard(|command: &mut Command| command.spawn().map(GuardedChild::Ready)),
+        guard(|command: &mut Command, input: InputSpawn| {
+            input.spawn(command).map(GuardedChild::Ready)
+        }),
         source,
         |_, _| panic!("original guarded exchange failed"),
     )
@@ -50,8 +52,8 @@ fn withheld_original_never_receives_the_private_envelope_or_returns_success() {
             &invocation(b"must stay withheld"),
             &[],
             &AtomicBool::new(false),
-            guard(move |command: &mut Command| {
-                let mut child = command.spawn()?;
+            guard(move |command: &mut Command, input: InputSpawn| {
+                let mut child = input.spawn(command)?;
                 if close_in_guard {
                     drop(child.stdin.take());
                 }
@@ -77,9 +79,9 @@ fn empty_input_preserves_the_guarded_fast_helper() {
         &call,
         &[],
         &AtomicBool::new(false),
-        guard(|command: &mut Command| {
-            let mut child = command.spawn()?;
-            // Keep the original piped stdin: Child::wait would close it.
+        guard(|command: &mut Command, input: InputSpawn| {
+            let mut child = input.spawn(command)?;
+            // Keep the original stdin marker: Child::wait would close it.
             // An already admitted sealed Linux helper may nevertheless exit
             // before the host finishes its observation.
             let end = Instant::now() + Duration::from_secs(1);
@@ -118,7 +120,7 @@ fn cancellation_and_invalid_input_do_not_spawn() {
             &call,
             &[],
             &AtomicBool::new(cancelled),
-            guard(|_: &mut Command| panic!("refused original started")),
+            guard(|_: &mut Command, _: InputSpawn| panic!("refused original started")),
             source,
             |error, _| assert_eq!(*error, expected),
         );
@@ -145,9 +147,9 @@ fn blocked_output_keeps_resources_after_the_bounded_adapter_returns() {
         &call,
         &[],
         &AtomicBool::new(false),
-        guard(move |command: &mut Command| {
+        guard(move |command: &mut Command, input: InputSpawn| {
             command.stdout(Stdio::from(write));
-            let mut child = command.spawn()?;
+            let mut child = input.spawn(command)?;
             child.stdout = Some(OwnedFd::from(read).into());
             Ok(GuardedChild::Ready(child))
         }),
@@ -182,8 +184,8 @@ fn changed_source_at_the_original_handoff_refuses_empty_and_private_input() {
             &[],
             &AtomicBool::new(false),
             JoinedSpawn {
-                spawn: move |command: &mut Command| {
-                    let child = command.spawn()?;
+                spawn: move |command: &mut Command, input: InputSpawn| {
+                    let child = input.spawn(command)?;
                     started.store(child.id(), Ordering::Release);
                     Ok(GuardedChild::Ready(child))
                 },

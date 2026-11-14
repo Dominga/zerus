@@ -3,6 +3,35 @@
 //! messages, tool output, histories, attachments, or the attempted send body.
 use super::*;
 
+/// Read only the verified same-user agent's environment. Keep no environment
+/// values, and never let an unreadable or replaced process change the refusal.
+pub(super) fn no_color(record: &Value) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let Some(pid) = record["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()) else {
+            return false;
+        };
+        let Some(before) = crate::platform::process_identity(pid) else {
+            return false;
+        };
+        if !process_alive(record) {
+            return false;
+        }
+        let Ok(bytes) = crate::state::task_reconcile::environment(pid) else {
+            return false;
+        };
+        let present = bytes.split(|b| *b == 0).any(|entry| entry.starts_with(b"NO_COLOR="));
+        present
+            && process_alive(record)
+            && crate::platform::process_identity(pid).is_some_and(|after| after.birth == before.birth)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = record;
+        false
+    }
+}
+
 fn row_shape(row: &str) -> Value {
     let cells = styled_cells(row, &mut TerminalStyle::default());
     let plain: String = cells.iter().map(|(ch, _)| ch).collect();

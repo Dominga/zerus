@@ -1,6 +1,7 @@
 //! History-free hints for previously used, unmarked native conversations.
 //! The shared service receives only plugin plumbing. Every model request reads
-//! one decided binding under nonblocking writer locks; environment is no grant.
+//! one decided binding under writer locks, with bounded re-observation only
+//! for temporary contention; environment is no grant.
 use super::*;
 
 const PLUGIN: &str = "zerus.agent-hint.context";
@@ -29,16 +30,55 @@ fn read(path: &Path, bytes: u64) -> Option<Value> {
 fn birth(pid: u32) -> Option<String> {
     crate::platform::process_identity(pid).map(|identity| identity.birth)
 }
-fn existing_lock(path: &Path) -> Option<fs::File> {
-    // A callback must not create state or run writer recovery. All launch
-    // locks already exist; absent/inaccessible/contended means no context.
+/// The plugin's original execFile timeout stays 750 ms. Leave room for
+/// process startup and the one JSON reply; never renew this helper deadline.
+const CALLBACK_BUDGET: Duration = Duration::from_millis(500);
+
+#[derive(Debug)]
+enum LockFailure {
+    Contended,
+    Unavailable,
+}
+
+fn existing_lock(path: &Path) -> std::result::Result<fs::File, LockFailure> {
+    // A callback must not create state or run writer recovery. Only the
+    // lock operation's explicit contention error permits another observation.
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
-        .ok()?;
-    fs2::FileExt::try_lock_exclusive(&file).ok()?;
-    Some(file)
+        .map_err(|_| LockFailure::Unavailable)?;
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+        if error
+            .raw_os_error()
+            .is_some_and(|code| fs2::lock_contended_error().raw_os_error() == Some(code))
+        {
+            LockFailure::Contended
+        } else {
+            LockFailure::Unavailable
+        }
+    })?;
+    Ok(file)
+}
+
+fn callback_locks(deadline: Instant) -> Option<(fs::File, fs::File)> {
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let attempt = (|| {
+            let writer = existing_lock(&root().join(".lock"))?;
+            let bindings = existing_lock(&bindings_lock())?;
+            Ok((writer, bindings))
+        })();
+        match attempt {
+            Ok(locks) => return Some(locks),
+            Err(LockFailure::Contended) => {
+                // Any partial hold was dropped by the failed attempt before
+                // waiting. No binding, registration or identity was read yet.
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(LockFailure::Unavailable) => return None,
+        }
+    }
 }
 
 /// Prepared only on the existing cold-start path. A unique source directory
@@ -189,12 +229,7 @@ fn ready(service: &service::Service, marker: &Value, cwd: &str) -> bool {
     // activating plugins. Observe the exact active source within one bounded
     // readiness window; never restart a host or treat a partial list as ready.
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        if let Ok(v) = service.call_within(
-            "GET",
-            &query,
-            None,
-            remaining.min(Duration::from_millis(250)),
-        ) {
+        if let Ok(v) = service.call_within("GET", &query, None, remaining) {
             if let Some(plugin) = v["data"].as_array().and_then(|plugins| {
                 plugins.iter().find(|p| {
                     p["id"] == PLUGIN
@@ -203,14 +238,16 @@ fn ready(service: &service::Service, marker: &Value, cwd: &str) -> bool {
                 })
             }) {
                 if plugin["state"]["status"] == "active" && plugin["features"]["server"] == true {
-                    return true;
+                    return Instant::now() < deadline;
                 }
                 if plugin["state"]["status"] == "failed" {
                     return false;
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(25).min(remaining));
+        if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(Duration::from_millis(25).min(remaining));
+        }
     }
     false
 }
@@ -343,7 +380,8 @@ fn admitted(record: &Value, marker: &Value, nonce: &str, cwd: &str, conversation
 }
 
 /// Internal bounded read-only helper. Called before ordinary CLI/config/job
-/// dispatch. Any failure, stale record or contended lock emits no context.
+/// dispatch. Temporary lock contention is re-observed within one budget;
+/// other failures, stale records and exhausted contention emit no context.
 pub(crate) fn lookup(args: &[String]) -> Option<&'static str> {
     let [nonce, pid, cwd, conversation] = args else {
         return None;
@@ -358,8 +396,8 @@ pub(crate) fn lookup(args: &[String]) -> Option<&'static str> {
         return None;
     }
     let pid = pid.parse::<u32>().ok()?;
-    let _writer = existing_lock(&root().join(".lock"))?;
-    let _bindings = existing_lock(&bindings_lock())?;
+    let deadline = Instant::now() + CALLBACK_BUDGET;
+    let (_writer, _bindings) = callback_locks(deadline)?;
     let marker = read(&service_path(), 16384)?;
     let service::RegistrationRead::Present(reg) =
         service::read_registration_at(&service::registration_path())
@@ -392,7 +430,9 @@ pub(crate) fn lookup(args: &[String]) -> Option<&'static str> {
             "GET",
             &session_path(&record, ""),
             None,
-            Duration::from_millis(250),
+            deadline
+                .checked_duration_since(Instant::now())?
+                .min(Duration::from_millis(250)),
         )
         .ok()?;
     let native = exact_session(&record, native).ok()?;
@@ -407,7 +447,7 @@ pub(crate) fn lookup(args: &[String]) -> Option<&'static str> {
         return None;
     }
     birth(pid).filter(|b| marker["birth"] == *b)?;
-    Some(agent_hint::HINT)
+    (Instant::now() < deadline).then_some(agent_hint::HINT)
 }
 
 #[cfg(test)]
@@ -417,6 +457,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn readiness_matches_the_overlay_through_a_symlinked_state_parent() {
+        readiness_alias(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_accepts_a_cold_activation_slower_than_one_poll_inside_two_seconds() {
+        readiness_alias(400);
+    }
+
+    #[cfg(unix)]
+    fn readiness_alias(delay_ms: u64) {
+        private_child(
+            "state::opencode::context_hint::tests::readiness_alias_child",
+            delay_ms,
+        );
+    }
+
+    #[cfg(unix)]
+    fn private_child(test: &str, delay_ms: u64) {
         use std::process::{Command, Stdio};
         let temp = tempfile::tempdir().unwrap();
         let physical = temp.path().join("physical");
@@ -426,13 +485,12 @@ mod tests {
         let output = temp.path().join("child.log");
         let log = fs::File::create(&output).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "--ignored",
-                "state::opencode::context_hint::tests::readiness_alias_child",
-            ])
+            .args(["--exact", "--ignored", test])
             .env("HGS_STATE_DIR", alias.join("state"))
+            .env("OPENCODE_CONFIG_DIR", temp.path().join("native-config"))
+            .env("XDG_STATE_HOME", temp.path().join("native-state"))
             .env("ZERUS_OPENCODE_ALIAS_CHILD", "1")
+            .env("ZERUS_OPENCODE_READY_DELAY_MS", delay_ms.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
@@ -507,16 +565,32 @@ mod tests {
                     break;
                 }
             }
+            let delay: u64 = std::env::var("ZERUS_OPENCODE_READY_DELAY_MS")
+                .unwrap()
+                .parse()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(delay));
             let body = json!({"data":[{"id":PLUGIN,"source":{"type":"local","path":source},
                 "state":{"status":"active"},"features":{"server":true}}]})
             .to_string();
-            write!(
+            if let Err(error) = write!(
                 peer,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
-            )
-            .unwrap();
+            ) {
+                // The RED parent may close its short poll before activation.
+                // The decision assertion below, not that expected disconnect,
+                // must identify a readiness failure.
+                assert!(
+                    delay > 0
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                        ),
+                    "{error}"
+                );
+            }
         });
         let service = service::Service {
             reg: service::Registration {
@@ -533,6 +607,172 @@ mod tests {
             active,
             "The active canonical overlay must match through the state alias"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_reobserves_transient_sender_contention_without_caching_identity() {
+        private_child(
+            "state::opencode::context_hint::tests::lookup_contention_child",
+            0,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "private environment child, run by lookup_reobserves_transient_sender_contention_without_caching_identity"]
+    fn lookup_contention_child() {
+        use std::io::{BufRead, Write};
+        use std::sync::{mpsc, Arc, Barrier};
+        assert_eq!(
+            std::env::var("ZERUS_OPENCODE_ALIAS_CHILD").as_deref(),
+            Ok("1")
+        );
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conversation = "ses_private_contention";
+        let cwd = "/example";
+        let (stop, stopping) = mpsc::channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let server = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(10);
+            while matches!(stopping.try_recv(), Err(mpsc::TryRecvError::Empty))
+                && Instant::now() < until
+            {
+                let mut peer = match listener.accept() {
+                    Ok((peer, _)) => peer,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(e) => panic!("private native read: {e}"),
+                };
+                peer.set_nonblocking(false).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                peer.set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut input = std::io::BufReader::new(std::io::Read::take(&mut peer, 8192));
+                let mut line = String::new();
+                input.read_line(&mut line).unwrap();
+                assert_eq!(
+                    line,
+                    format!("GET /api/session/{conversation} HTTP/1.1\r\n")
+                );
+                loop {
+                    line.clear();
+                    assert!(input.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body =
+                    json!({"data":{"id":conversation,"location":{"directory":cwd}}}).to_string();
+                write!(
+                    peer,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let pid = std::process::id();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        atomic(&service::registration_path(), &json!({"id":"private-service","pid":pid,"version":"2.2.7","url":format!("http://127.0.0.1:{port}")}).to_string()).unwrap();
+        atomic(&service_path(), &json!({"nonce":nonce,"pid":pid,"birth":birth(pid).unwrap(),"id":"private-service","home":config_home(),"registration":service::registration_path()}).to_string()).unwrap();
+        let mut record = json!({"name":"opencode/private/contention","backend":"opencode","agent":"opencode","service":"opencode2","run_id":"private-run","conversation_id":conversation,"cwd":cwd,"agent_home":config_home(),"session_id":uuid::Uuid::new_v4().to_string(),
+            "agent_hint_context":{"revision":REVISION,"enabled":true,"state":"ready","run_id":"private-run","conversation_id":conversation,"cwd":cwd,"service_id":"private-service","nonce":nonce}});
+        save(&mut record).unwrap();
+        let locks = [root().join(".lock"), bindings_lock()];
+        for path in &locks {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .unwrap();
+        }
+        let args = vec![nonce, pid.to_string(), cwd.into(), conversation.into()];
+        assert_eq!(
+            lookup(&args),
+            Some(agent_hint::HINT),
+            "the uncontended fixture must be valid"
+        );
+        for path in &locks {
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            fs2::FileExt::lock_exclusive(&held).unwrap();
+            let entered = Arc::new(Barrier::new(2));
+            let ready = entered.clone();
+            let original = args.clone();
+            let (finished, result) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                ready.wait();
+                finished.send(lookup(&original)).unwrap();
+            });
+            entered.wait();
+            assert!(matches!(result.recv_timeout(Duration::from_millis(75)), Err(mpsc::RecvTimeoutError::Timeout)), "temporary sender contention must be re-observed inside the original callback window");
+            drop(held);
+            assert_eq!(
+                result.recv_timeout(Duration::from_millis(650)).unwrap(),
+                Some(agent_hint::HINT)
+            );
+            worker.join().unwrap();
+        }
+        // A changed binding while waiting must be read afresh, never accepted
+        // from a snapshot taken before the lock became available.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(bindings_lock())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&held).unwrap();
+        let original = args.clone();
+        let (finished, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || finished.send(lookup(&original)).unwrap());
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(75)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let path = PROVIDER.label_path(string(&record, "name"));
+        let mut changed = record.clone();
+        changed["run_id"] = json!("replacement-run");
+        atomic(&path, &changed.to_string()).unwrap();
+        let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+        drop(held);
+        assert_eq!(
+            result.recv_timeout(Duration::from_millis(650)).unwrap(),
+            None
+        );
+        worker.join().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before);
+        atomic(&path, &record.to_string()).unwrap();
+        assert_eq!(lookup(&args), Some(agent_hint::HINT));
+        // Long contention still omits within the original 750 ms callback.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(bindings_lock())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&held).unwrap();
+        let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let started = Instant::now();
+        assert_eq!(lookup(&args), None);
+        assert!(started.elapsed() < Duration::from_millis(750));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before);
+        drop(held);
+        // Missing locks never become contention, and no helper creates them.
+        fs::remove_file(bindings_lock()).unwrap();
+        assert_eq!(lookup(&args), None);
+        assert!(!bindings_lock().exists());
+        stop.send(()).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

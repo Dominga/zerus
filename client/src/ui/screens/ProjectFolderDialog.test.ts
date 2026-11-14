@@ -47,13 +47,16 @@ afterEach(() => {
 });
 
 describe("Project folder path validation", () => {
-  it.each(["C:\\Work\\Project", "C:/Work/Project", "\\\\server\\share\\Project", "//server/share/Project"])("accepts a remote Windows absolute path with no optional name: %s", async (value) => {
+  it.each(["C:\\Work\\Project", "C:/Work/Project", "\\\\server\\share\\Project", "//server/share/Project"]
+    .flatMap((value) => ["", " Project notes "].map((name) => ({ value, name }))))("accepts remote Windows path $value with optional name '$name'", async ({ value, name }) => {
     const { save } = mount();
     await setPath(value);
-    expect(input("pf-name").value).toBe("");
+    input("pf-name").value = name;
+    input("pf-name").dispatchEvent(new InputEvent("input", { bubbles: true }));
+    await settle();
     expect(submit().disabled).toBe(false);
     document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    expect(save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ style: "windows" }), value, "");
+    expect(save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ style: "windows" }), value, name.trim());
   });
 
   it.each(["relative", "C:Work", "\\Work", "/Work", "\\\\server", "\\\\?\\C:\\Work", "C:\\Work\\bad\0"])("rejects an invalid remote Windows path: %s", async (value) => {

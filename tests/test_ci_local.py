@@ -20,6 +20,75 @@ with patch.object(sys, "path", [str(ROOT / "scripts/ci"), *sys.path]):
 
 
 class WorkflowBodies(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Arch shared scripts require Linux executables')
+    def test_shared_scripts_propagate_client_format_and_replica_feature_off_failures(self):
+        with tempfile.TemporaryDirectory(prefix='local-ci-shared-') as temporary:
+            home = Path(temporary)
+            cargo = home / 'cargo'
+            cargo.write_text(
+                f'#!{sys.executable}\nimport json,os,pathlib,sys\n'
+                'with pathlib.Path(os.environ["CALLS"]).open("a") as out:out.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                'raise SystemExit(19 if os.environ["FAIL_ON"] in " ".join(sys.argv[1:]) else 0)\n')
+            cargo.chmod(0o700)
+            rustup = home / 'rustup'
+            rustup.write_text('#!/bin/sh\nexit 0\n')
+            rustup.chmod(0o700)
+            for script, failure in [('client-core.sh', 'fmt --check'),
+                                    ('replica.sh', '--features test-without-team')]:
+                with self.subTest(script=script):
+                    calls = home / script
+                    result = subprocess.run(['bash', str(ROOT / 'scripts/ci' / script)],
+                        cwd=ROOT, env=dict(PATH=f'{home}:/usr/bin:/bin', HOME=str(home),
+                                          CALLS=str(calls), FAIL_ON=failure), capture_output=True)
+                    self.assertEqual(result.returncode, 19, result.stderr.decode())
+                    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+                    self.assertIn(failure, ' '.join(commands[-1]))
+                    if script == 'replica.sh':
+                        self.assertIn(['+1.99.1', 'test', '--locked', '--manifest-path',
+                                       'crates/replica/Cargo.toml', '--target-dir', 'target'], commands)
+
+    def test_critical_crate_and_native_checks_use_the_workflows_shared_scripts(self):
+        workflow = CI.load_workflow((ROOT / '.github/workflows/checks.yml').read_bytes())
+        expected = {
+            'Replica crates (format, lints, tests, golden vectors, the mobile binding surface)':
+                'bash scripts/ci/replica.sh',
+            'Desktop client core crate (format, lints, tests)': 'bash scripts/ci/client-core.sh',
+            'Keyless latest Codex, Claude Code and OpenCode compatibility':
+                "bash scripts/ci/native-compatibility.sh '${{ needs.source.outputs.commit }}'",
+        }
+        found = {step.get('name'): step.get('run', '').strip()
+                 for key in ('quick', 'client-core', 'cli') for step in workflow['jobs'][key].get('steps', [])}
+        for name, body in expected.items():
+            with self.subTest(check=name):
+                self.assertEqual(found[name], body)
+
+    def test_exact_source_commit_is_supplied_to_the_mandatory_native_step(self):
+        with tempfile.TemporaryDirectory(prefix='local-ci-native-plan-') as temporary:
+            root = Path(temporary)
+            sha = CI.git(ROOT, 'rev-parse', 'HEAD')
+            with patch.object(CI.sys, 'platform', 'linux'):
+                self.assertEqual(CI.main(['--sha', sha, '--repo', str(ROOT), '--online', '--plan',
+                                         '--jobs', 'cli', '--output', str(root / 'plan'),
+                                         '--cache', str(root / 'cache')]), 2)
+            report = json.loads((root / 'plan/report.json').read_text())
+            job, = [job for job in report['jobs'] if job['id'] == 'cli']
+            native, = [step for step in job['steps'] if step['name'].startswith('Keyless latest')]
+            self.assertIn('body', native, 'the mandatory latest-agent contract was left not run')
+            self.assertIn(sha, native['body'])
+            self.assertNotIn('${{', native['body'])
+
+    def test_arch_plan_defaults_to_four_workers_and_rejects_more(self):
+        with tempfile.TemporaryDirectory(prefix='local-ci-worker-plan-') as temporary:
+            root = Path(temporary)
+            sha = CI.git(ROOT, 'rev-parse', 'HEAD')
+            args = ['--sha', sha, '--repo', str(ROOT), '--output', str(root / 'plan'),
+                    '--cache', str(root / 'cache'), '--plan']
+            with patch.object(CI.sys, 'platform', 'linux'):
+                self.assertEqual(CI.main(args), 2)
+                self.assertEqual(json.loads((root / 'plan/report.json').read_text())['workers'], 4)
+                with self.assertRaises(SystemExit):
+                    CI.main([*args, '--workers', '5'])
+
     def test_cli_continues_after_smoke_and_keeps_exact_python_preparation(self):
         body = (ROOT / "scripts/ci/cli.sh").read_text()
         units = dict(CI.cli_units(body))
@@ -114,6 +183,18 @@ class RealIsolation(unittest.TestCase):
                                     target=None, workers=1, max_load=99999, min_free_gib=0,
                                     online=False, slirp=None, android_cache=None, tool_bin=[])
         self.args.plan, self.args.match = False, None
+        self.args.heavy = self.base / 'heavy'
+        self.heavy_events = self.base / 'heavy-events.jsonl'
+        self.args.heavy.write_text(
+            f'#!{sys.executable}\nimport json,pathlib,subprocess,sys,time\n'
+            f'path=pathlib.Path({str(self.heavy_events)!r})\n'
+            'def event(kind):\n'
+            ' with path.open("a") as log:log.write(json.dumps(dict(kind=kind, at=time.monotonic_ns()))+"\\n")\n'
+            'event("enter")\n'
+            'result=subprocess.run(sys.argv[1:])\n'
+            'event("exit")\n'
+            'raise SystemExit(result.returncode)\n')
+        self.args.heavy.chmod(0o700)
         self.report = {"jobs": [], "completed": False}
         self.runner = CI.Runner(self.args, self.report)
         for folder in (self.runner.output, self.runner.cache / "cargo", self.runner.workspace,
@@ -122,6 +203,66 @@ class RealIsolation(unittest.TestCase):
         self.runner.rustup = self.base / "rustup"
         self.runner.rustup.mkdir()
         self.runner.rustup_source = self.runner.rustup
+
+    def test_each_check_holds_the_shared_wrapper_until_its_body_settles(self):
+        job = dict(id='quick', steps=[])
+        for index in range(2):
+            # Shell quoting is part of this synthetic command, not the runner.
+            body = f"python3 -c 'import pathlib,time;pathlib.Path(\"body-{index}\").write_text(str(time.monotonic_ns()))'"
+            row = dict(name=f'check {index}', index=index, body=body, directory='.', env={}, timeout=10)
+            job['steps'].append(row)
+            self.runner.run(job, row)
+            self.assertEqual(row['status'], 'pass')
+        self.assertTrue(self.heavy_events.exists(), 'the shared heavy wrapper was bypassed')
+        events = [json.loads(line) for line in self.heavy_events.read_text().splitlines()]
+        self.assertEqual([e['kind'] for e in events], ['enter', 'exit', 'enter', 'exit'])
+        for index in range(2):
+            entered = int((self.runner.workspace / f'body-{index}').read_text())
+            self.assertLessEqual(events[index * 2]['at'], entered)
+            self.assertLessEqual(entered, events[index * 2 + 1]['at'])
+
+    def test_a_refused_shared_slot_never_enters_the_check(self):
+        self.args.heavy.write_text('#!/bin/sh\nexit 73\n')
+        job = dict(id='quick', steps=[])
+        row = dict(name='must not start', index=0, body='touch body-started', directory='.', env={}, timeout=10)
+        job['steps'].append(row)
+        self.runner.run(job, row)
+        self.assertEqual(row['status'], 'not run')
+        self.assertFalse((self.runner.workspace / 'body-started').exists())
+
+    def test_resource_refusal_is_retained_for_later_checks(self):
+        job = dict(id='quick', steps=[])
+        for index in range(2):
+            row = dict(name=f'check {index}', index=index, body='touch body-started',
+                       directory='.', env={}, timeout=10)
+            job['steps'].append(row)
+        with patch.object(CI.os, 'getloadavg', return_value=(100000, 0, 0)), \
+             patch.object(CI.time, 'monotonic', side_effect=[0, 601]):
+            self.runner.run(job, job['steps'][0])
+        self.runner.run(job, job['steps'][1])
+        self.assertEqual([row['status'] for row in job['steps']], ['not run', 'not run'])
+        self.assertFalse((self.runner.workspace / 'body-started').exists())
+        self.assertIn('load', job['steps'][1]['reason'])
+
+    def test_load_is_rechecked_after_the_shared_slot_queue(self):
+        row = dict(name='queued load change', index=0, body='touch body-started',
+                   directory='.', env={}, timeout=10)
+        with patch.object(CI.os, 'getloadavg', side_effect=[(0, 0, 0), (100000, 0, 0)]):
+            self.runner.run(dict(id='quick'), row)
+        self.assertEqual(row['status'], 'not run')
+        self.assertFalse((self.runner.workspace / 'body-started').exists())
+        self.assertIn('load', row['reason'])
+
+    def test_disk_is_rechecked_after_the_shared_slot_queue(self):
+        self.args.min_free_gib = 1
+        row = dict(name='queued disk change', index=0, body='touch body-started',
+                   directory='.', env={}, timeout=10)
+        with patch.object(CI.shutil, 'disk_usage', side_effect=[SimpleNamespace(free=10**12),
+                    *[SimpleNamespace(free=0)] * 3]):
+            self.runner.run(dict(id='quick'), row)
+        self.assertEqual(row['status'], 'not run')
+        self.assertFalse((self.runner.workspace / 'body-started').exists())
+        self.assertIn('disk', row['reason'])
 
     def test_real_failure_does_not_hide_later_check_and_logs_are_hashed(self):
         job = {"id": "quick", "steps": []}
@@ -269,6 +410,14 @@ PY
         self.assertEqual((self.runner.workspace / "source").read_text(), "original")
         self.assertEqual((self.runner.pristine / "source").read_text(), "original")
         self.assertNotEqual(first.stat().st_ino, (self.runner.workspace / "source").stat().st_ino)
+
+    def test_new_job_does_not_inherit_another_jobs_tools_or_agent_receipt(self):
+        self.runner.pristine.mkdir()
+        self.runner.github_path = ['/home/test/runner-temp/previous-node/bin']
+        self.runner.github_env = dict(ZERUS_TEST_DSH_RECEIPT='/home/test/previous-receipt.json')
+        self.runner.new_checkout({'id': 'next-job'})
+        self.assertEqual(self.runner.github_path, [])
+        self.assertEqual(self.runner.github_env, {})
 
     def network_fixture(self, refuse_first):
         self.args.online = True

@@ -48,6 +48,40 @@ pub const RECEIPT_IN_PROGRESS: &str = "deferred_send_in_progress";
 pub const RECEIPT_MISMATCH: &str = "deferred_send_receipt_mismatch";
 /// The CLI receipt is oversized or not a readable receipt.
 pub const RECEIPT_INVALID: &str = "deferred_send_receipt_invalid";
+/// Diagnostic only: the child's exit never proves whether input was sent.
+pub const STDERR_BYTES: usize = 1024;
+
+pub mod refusal;
+pub use refusal::Refusal;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CliExit {
+    pub code: i32,
+    pub stderr: String,
+}
+impl CliExit {
+    /// Keep only the bounded first line, without terminal control characters.
+    pub fn new(code: i32, stderr: &str) -> Self {
+        let mut kept = String::new();
+        for ch in stderr
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .filter(|ch| !ch.is_control())
+        {
+            if kept.len() + ch.len_utf8() > STDERR_BYTES {
+                break;
+            }
+            kept.push(ch);
+        }
+        Self { code, stderr: kept }
+    }
+    fn valid(&self) -> bool {
+        self.stderr.len() <= STDERR_BYTES && !self.stderr.chars().any(char::is_control)
+    }
+}
 /// The session is not a terminal agent's. An OpenCode or DeepSeek session's
 /// `hgs send` goes to its own native backend, which writes its own receipts
 /// and has its own rules, never `input_receipts`; such a send stays on the
@@ -653,6 +687,8 @@ struct CliReceipt {
     digest: String,
     status: String,
     transport: String,
+    #[serde(default)]
+    refusal_schema: Option<u32>,
 }
 impl Outcome {
     pub fn matches(&self, plan: &Plan) -> bool {
@@ -678,7 +714,7 @@ impl Outcome {
             && receipt.conversation_id == plan.conversation_id
             && receipt.digest == plan.input_sha256
             && receipt.transport == "terminal";
-        if !exact {
+        if !exact || receipt.refusal_schema.is_some() {
             return Err(RECEIPT_MISMATCH);
         }
         match receipt.status.as_str() {
@@ -703,6 +739,14 @@ pub struct Receipt {
     pub drained: bool,
     pub code: String,
     pub outcome: Option<Outcome>,
+    /// Original child diagnostic, retained across drain and read-only recovery.
+    /// Omitted for old receipts so their serialized CAS identity stays unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_exit: Option<CliExit>,
+    /// An exact CLI pre-input refusal, read from the original store after drain.
+    /// Old receipts keep their serialized CAS identity when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Refusal>,
 }
 impl std::fmt::Debug for Receipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -726,6 +770,13 @@ impl Receipt {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
             && (!self.drained || self.phase.terminal())
+            && self.cli_exit.as_ref().is_none_or(|exit| {
+                exit.valid() && matches!(self.phase, Phase::Recorded | Phase::Unknown)
+            })
+            && (self.code == refusal::CODE) == self.refusal.is_some()
+            && self.refusal.as_ref().is_none_or(|refusal| {
+                self.phase == Phase::Unknown && self.drained && refusal.agrees(&self.binding)
+            })
             && match self.phase {
                 Phase::Recorded => self.drained && self.outcome.is_some(),
                 // Only the closed no-spawn boundary fails.

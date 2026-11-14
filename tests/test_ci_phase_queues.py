@@ -1,11 +1,14 @@
 """Exercise the Dev-only phase admission, dependency gates and bounded locks."""
 import itertools
+import json
 import os
 from pathlib import Path
 import re
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+import yaml
 
 import test_ci_security as security
 from test_ci_security import field, inline_python, job
@@ -14,7 +17,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def evaluate(expression, *, event='push', repository='ufna/zerus', ref='refs/heads/main',
-             enabled='true', private=False, test_ref='', run_id=100, cancelled=False):
+             enabled='true', private=False, test_ref=None, run_id=100, cancelled=False):
+    # BaseLoader preserves the event key 'on' and string defaults such as 'off'.
+    workflow = yaml.load((ROOT / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    inputs = {}
+    for name, declaration in workflow['on']['workflow_dispatch']['inputs'].items():
+        kind = declaration['type']
+        value = declaration.get('default', {'boolean': 'false', 'number': '0'}.get(kind, ''))
+        inputs[name] = json.loads(value) if kind in ('boolean', 'number') else value
+    if test_ref is not None:
+        inputs['ref'] = test_ref
     expression = expression.removeprefix('${{ ').removesuffix(' }}')
     expression = expression.replace('&&', ' and ').replace('||', ' or ')
     expression = re.sub(r'!(?!=)', 'not ', expression)
@@ -24,13 +36,63 @@ def evaluate(expression, *, event='push', repository='ufna/zerus', ref='refs/hea
             sha='a' * 40, workflow='CI', run_id=run_id,
             event=SimpleNamespace(repository=SimpleNamespace(private=private))),
         'vars': SimpleNamespace(DEV_UPDATES_ENABLED=enabled),
-        'inputs': SimpleNamespace(ref=test_ref), 'cancelled': lambda: cancelled,
+        'inputs': SimpleNamespace(**inputs), 'cancelled': lambda: cancelled,
         'format': lambda template, *values: template.format(*values),
     })
 
 
 def concurrency_value(expression, **context):
     return evaluate(expression, **context) if expression.startswith('${{ ') else expression
+
+
+class DeclaredInputDefaults(unittest.TestCase):
+    def evaluate_fixture(self, expression, **overrides):
+        workflow = """on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        type: string
+        default: 'declared-ref'
+      future_opt_in:
+        type: boolean
+        default: false
+      enabled:
+        type: boolean
+        default: true
+      rounds:
+        type: number
+        default: 7
+      label:
+        type: string
+        default: 'off'
+      no_default:
+        type: string
+      no_boolean_default:
+        type: boolean
+      no_number_default:
+        type: number
+"""
+        with patch.object(Path, 'read_text', return_value=workflow):
+            return evaluate(expression, **overrides)
+
+    def test_declared_defaults_keep_their_boolean_number_and_string_types(self):
+        self.assertIs(self.evaluate_fixture('inputs.future_opt_in'), False)
+        self.assertIs(self.evaluate_fixture('inputs.enabled'), True)
+        self.assertEqual(self.evaluate_fixture('inputs.rounds'), 7)
+        self.assertEqual(self.evaluate_fixture('inputs.label'), 'off')
+        self.assertEqual(self.evaluate_fixture('inputs.no_default'), '')
+        self.assertIs(self.evaluate_fixture('inputs.no_boolean_default'), False)
+        self.assertEqual(self.evaluate_fixture('inputs.no_number_default'), 0)
+
+    def test_explicit_ref_overrides_only_the_declared_ref_default(self):
+        self.assertEqual(self.evaluate_fixture('inputs.ref'), 'declared-ref')
+        self.assertEqual(self.evaluate_fixture('inputs.ref', test_ref='reviewed-ref'), 'reviewed-ref')
+        self.assertEqual(self.evaluate_fixture('inputs.ref', test_ref=''), '')
+        self.assertIs(self.evaluate_fixture('inputs.enabled', test_ref='reviewed-ref'), True)
+
+    def test_undeclared_names_stay_errors_instead_of_assumed_false(self):
+        with self.assertRaises(AttributeError):
+            self.evaluate_fixture('inputs.not_declared')
 
 
 class PhaseQueues(unittest.TestCase):

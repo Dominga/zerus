@@ -1,0 +1,6 @@
+<resources>
+    <string name="activity_previous_own">Ваше предыдущее сообщение</string>
+    <string name="activity_next_own">Ваше следующее сообщение</string>
+    <string name="activity_reading_previous_own">Поиск ваших предыдущих сообщений…</string>
+    <string name="activity_reading_next_own">Поиск ваших следующих сообщений…</string>
+</resources>

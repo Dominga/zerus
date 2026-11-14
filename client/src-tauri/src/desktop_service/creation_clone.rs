@@ -207,13 +207,20 @@ impl Read {
             self.clone(),
             registration.as_ref().map(Registration::resources),
         ));
+        let exchange_stage = if help {
+            "help"
+        } else if registration.is_some() {
+            "admission"
+        } else {
+            "result"
+        };
         let result = run::run_owned(
             helper,
             &invocation,
             &[],
             &self.cancel,
-            move |command| {
-                let child = command.spawn()?;
+            move |command, input_spawn| {
+                let child = input_spawn.spawn(command)?;
                 if let Some(registration) = registration {
                     let _ = registration.bind_original(&child);
                 }
@@ -223,7 +230,7 @@ impl Read {
         )
         .map_err(|error| {
             // OwnedError is a closed body-free enum; never print helper stderr.
-            eprintln!("zerus-client: creation_read_refused code=helper_exchange refusal={error:?}");
+            eprintln!("zerus-client: creation_read_refused code=helper_exchange stage={exchange_stage} refusal={error:?}");
             creation::READ_FAILED
         })?;
         if !self.current()

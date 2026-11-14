@@ -1,4 +1,8 @@
 use super::*;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 fn value(n: u128, conversation: &str, run: &str, agent: &str, at: f64) -> Value {
     json!({"request_id":uuid::Uuid::from_u128(n).to_string(),"name":"codex/fixture/receipt","run_id":run,"conversation_id":conversation,"agent_id":agent,
@@ -1516,3 +1520,103 @@ mod proven_pin;
 
 #[path = "witness_tests.rs"]
 mod witness_token;
+fn changed_work_at(
+    catalog: &Catalog,
+    scope: &Scope,
+    cursor: &str,
+    limit: usize,
+    files: bool,
+) -> (ChangedPage, usize) {
+    let work = Arc::new(AtomicUsize::new(0));
+    let counter = work.clone();
+    catalog.db.progress_handler(
+        1,
+        Some(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    );
+    let page = catalog.changed_page(scope, cursor, limit, files).unwrap();
+    catalog.db.progress_handler(0, None::<fn() -> bool>);
+    (page, work.load(Ordering::Relaxed))
+}
+
+#[test]
+fn changed_pages_keep_work_bounded_and_honor_the_files_filter() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let transaction = catalog.db.unchecked_transaction().unwrap();
+    let directory = catalog.state.join(Source::Terminal.directory());
+    let insert = |n: u128, conversation: &str, run: &str, first: bool, files: bool| {
+        let mut record = value(n, conversation, run, "", n as f64);
+        record["first_message"] = json!(first);
+        if !files {
+            record["attachments"] = json!([]);
+        }
+        fs::create_dir_all(&directory).unwrap();
+        let name = format!("{}.json", record["request_id"].as_str().unwrap());
+        let path = directory.join(name);
+        fs::write(&path, record.to_string()).unwrap();
+        catalog.remember(Source::Terminal, &path, &record).unwrap();
+    };
+    // One run with a large regular directory, its one-way initial message,
+    // and attachment receipts after the text-only rows.
+    for n in 1..=10_000 {
+        insert(n, "wanted", "run", false, false);
+    }
+    insert(20_000, "", "run", true, false);
+    insert(30_001, "wanted", "run", false, true);
+    insert(30_002, "wanted", "run", false, true);
+    // A separate small run keeps the one-way first-message behavior visible.
+    insert(40_001, "", "oneway", true, false);
+    insert(40_002, "oneway-conv", "oneway", false, false);
+    transaction.commit().unwrap();
+    // Take the row-set witness now: its bounded delta check is a fixed
+    // per-source cost that would otherwise mask the page query work.
+    catalog.witness().unwrap();
+
+    let wanted = scope("wanted", "run", "");
+    // The initial-message query must not scan the whole same-run directory.
+    let (page, work) = changed_work_at(&catalog, &wanted, "", 100, false);
+    println!("CHANGED WORK {work}");
+    assert!(
+        work < 5_000,
+        "{work} SQLite VM steps over the run directory"
+    );
+    assert!(page.rows.len() <= 100);
+
+    // files=true must not hand text-only receipts to the attachment importer.
+    let (files_page, files_work) = changed_work_at(&catalog, &wanted, "", 1, true);
+    assert!(
+        files_work < 5_000,
+        "{files_work} SQLite VM steps for files=true"
+    );
+    assert_eq!(files_page.rows.len(), 1);
+    let original = catalog.original(&files_page.rows[0].locator).unwrap();
+    assert!(
+        original["attachments"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "a text-only receipt reached the attachment importer"
+    );
+
+    // The initial message is delivered once, before its run's regular receipts.
+    let (first, _) = changed_work_at(&catalog, &scope("oneway-conv", "oneway", ""), "", 1, false);
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(
+        first.rows[0].locator.id,
+        uuid::Uuid::from_u128(40_001).to_string()
+    );
+    let (second, _) = changed_work_at(
+        &catalog,
+        &scope("oneway-conv", "oneway", ""),
+        &first.cursor,
+        1,
+        false,
+    );
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(
+        second.rows[0].locator.id,
+        uuid::Uuid::from_u128(40_002).to_string()
+    );
+}

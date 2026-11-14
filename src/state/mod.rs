@@ -5,6 +5,7 @@
 mod answer_channel;
 mod agent_hint;
 mod archive;
+mod record_source;
 pub(crate) mod archive_catalog;
 mod archive_references;
 mod claude_trust;
@@ -44,9 +45,14 @@ mod goals;
 mod hooks;
 mod heartbeat;
 mod command_guard;
+mod hook_caller;
 pub(crate) mod hook_health;
 mod input;
 mod input_hold;
+pub(crate) use input::dialog_clause;
+// Its only callers are the Teams actor's tests, which run on Linux and macOS.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) mod listing_fixture;
 pub(crate) use input::task_refusal;
 pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 // The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
@@ -57,6 +63,7 @@ mod input_queue;
 mod journal;
 mod keep_warm;
 mod kimi_cache_hint;
+mod kimi_expiry;
 mod kimi_messages;
 mod kimi_completion;
 mod kimi_approval;
@@ -66,6 +73,8 @@ mod kimi_trust;
 mod kimi_tui_choice;
 pub(crate) mod kimi_permissions;
 mod lifecycle;
+#[cfg(all(test, unix))]
+pub(crate) mod resume_settlement_fixture;
 mod kimi_launch;
 mod provider_errors;
 mod recovery;
@@ -73,6 +82,10 @@ mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
+// Process projection data. The advisory writer never grants caller authority.
+mod process_index;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_index_writer;
 mod labels;
 /// How every reader decides what the label index proves (zerus-ucck P3a);
 /// the native readers that need it outside this module run on Unix.
@@ -91,6 +104,7 @@ mod questions;
 mod codex_questions;
 mod codex_approval;
 mod codex_trust;
+mod codex_sandbox;
 mod codex_hooks_trust;
 mod codex_update;
 mod codex_goal_resume;
@@ -99,6 +113,7 @@ mod read_marks;
 mod notifications;
 /// The per-child switch of the owner-approved question route (zerus-sa9qn.32).
 pub(crate) mod question_routing;
+pub(crate) mod question_route_outcomes;
 pub(crate) mod parent_link;
 mod recipes;
 mod rename;
@@ -155,6 +170,26 @@ mod workspace;
 mod git_status;
 pub(crate) mod repositories;
 mod launch_observation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use launch_observation::{
+    observe_team_launch, observe_team_session, TeamObservation, TeamRecord, TeamSession,
+};
+pub(crate) use questions::native_identity;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use questions::read_answer_request;
+/// The maintained ownership reader; Teams supplies the exact generated path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn team_worktree_ownership(
+    state: &Path,
+    common: &Path,
+    path: &Path,
+) -> std::result::Result<Option<Value>, worktree_lifecycle::OwnershipUnavailable> {
+    worktree_lifecycle::owned_in(state, common, path)
+}
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn team_worktree_receipt_path(state: &Path, common: &Path, path: &Path) -> PathBuf {
+    worktree_lifecycle::receipt_path_in(state, common, path)
+}
 pub(crate) mod launch_identity;
 /// Evidence about original launch `launch` under this process's own state
 /// root (`HGS_STATE_DIR` or its default), read within `deadline`. A root that
@@ -178,6 +213,10 @@ pub(crate) use {
     worktrees::{Control as WorktreeControl, Step as WorktreeStep},
 };
 mod worktree_cleanup;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_cleanup::LEFTOVER_DELETE_TIME;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_lifecycle::AFTER_ARCHIVE_FIXED_TIME;
 mod worktree_caches;
 mod worktree_inspection;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -186,6 +225,7 @@ mod worktree_programs;
 pub(crate) use worktree_programs::{ProgramRemovalClaim, ProgramStopClaim};
 mod worktree_lifecycle;
 mod worktree_lock;
+mod worktree_references;
 mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.
@@ -596,13 +636,10 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // this read did not. A row read while a write is in flight is its last
     // committed state.
     let mut phases = slow_calls::Phases::start();
-    let ((snapshot, mut names), (archived, bindings)) = if root().exists() {
+    let ((snapshot, mut names), bindings) = if root().exists() {
         let (snapshot, names) = live_sessions()?;
-        let saved = if include_archives {
-            (archive::records()?, storage::records()?)
-        } else {
-            (Vec::new(), archive::read_active(&snapshot)?)
-        };
+        // Archived rows come from the bounded archive preview below.
+        let saved = archive::read_active(&snapshot)?;
         ((snapshot, names), saved)
     } else {
         (live_sessions()?, Default::default())
@@ -613,6 +650,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     phases.mark("marks");
     let keep_warm_settings = keep_warm::load();
     let question_routing = question_routing::load();
+    let route_outcomes = question_route_outcomes::Reader::load();
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -655,16 +693,18 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             .ok_or("invalid session")?
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
-    // Bounds question indexing for the whole listing.
-    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), keep_warm: keep_warm_settings.as_ref(), question_routing: question_routing.as_ref(), budget: read_marks::question_budget() };
+    let mut archive_page = if include_archives { Some(archive_catalog::preview(&marks)?) } else { None };
+    let archived: &[Value] = archive_page.as_ref().and_then(|page| page["sessions"].as_array()).map_or(&[], Vec::as_slice);
+    // Archive preparation does not consume the live question-indexing budget.
+    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), keep_warm: keep_warm_settings.as_ref(), question_routing: question_routing.as_ref(), route_outcomes: route_outcomes.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
     // Task 234: the rows loop's parts, summed over its rows.
     let (mut live_ms, mut probe_ms, mut saved_ms, mut saved_rows) = (0u64, 0u64, 0u64, 0u64);
     let ms = |at: std::time::Instant| at.elapsed().as_millis() as u64;
     for record in bindings {
-        if archive::equivalent(&record, &archived) {
-            continue;
-        }
+        // An archive written before its binding was removed wins, as before.
+        // Consult only this preview so older archives never add listing I/O.
+        if archive::equivalent(&record, archived) { continue; }
         let name = string(&record, "name");
         // Live rows are the terminals' (P3b): a record finds its row by its
         // own terminal, and that row then lists under the record's label.
@@ -716,22 +756,9 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     phases.note("rows_terminal_probe", probe_ms);
     phases.note("rows_saved", saved_ms);
     phases.note("rows_saved_count", saved_rows);
-    for record in archived {
-        let name = string(&record, "name");
-        let parts: Vec<&str> = name.splitn(3, '/').collect();
-        let mut session = json!({"name": name, "cmd": record["agent"], "project": parts.get(1),
-            "tag": parts.get(2), "attached": 0, "clients": [], "created": record["created"],
-            "state": "archived", "resumable": !string(&record, "conversation_id").is_empty(),
-            "archive_id": record["archive_id"], "archived_at": record["archived_at"]});
-        session.as_object_mut().unwrap().extend(
-            journal::summary(&record, false)
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
-        notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
-        sessions.push(session);
+    if let Some(page) = archive_page.as_mut() {
+        sessions.append(page["sessions"].as_array_mut().ok_or("invalid archive page")?);
+        page.as_object_mut().unwrap().remove("sessions");
     }
     phases.mark("rows");
     sessions.extend(dsh::snapshots()?);
@@ -742,6 +769,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     phases.mark("finish_rows");
     // Task 193: a listing over SLOW_MS is one slow-calls line with its phases.
     phases.finish("ls", string(&box_value, "host"));
+    if let Some(page) = archive_page { box_value["archive_page"] = page; }
     Ok(box_value)
 }
 
@@ -751,6 +779,7 @@ struct Shared<'a> {
     preferences: Option<&'a notifications::Store>,
     keep_warm: Option<&'a keep_warm::Store>,
     question_routing: Option<&'a question_routing::Store>,
+    route_outcomes: Option<&'a question_route_outcomes::Reader>,
     /// Bounds question indexing for the whole listing.
     budget: std::time::Instant,
 }
@@ -796,7 +825,9 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
         .as_ref()
         .ok()
         .and_then(|questions| questions.as_deref());
-    parent_link::mark_human_request(session, pending, false);
+    let escalated = shared.route_outcomes.is_some_and(|outcomes| outcomes.escalated(session, pending));
+    telemetry::pending_input_summary(session, pending.is_some_and(|questions| !questions.is_empty()));
+    parent_link::mark_human_request(session, pending, escalated);
     read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
     phases.mark("questions");
     notifications::enrich(session, shared.preferences, journal::journal_name(&record));
@@ -1210,12 +1241,32 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 /// conversation, the way `hgs send` does, and returns the durable receipt.
 pub(crate) fn submit_task_message(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
     local_sessions()?;
+    if session.session.starts_with("dsh/") {
+        let request = input::task_reply(session, "", &uuid::Uuid::new_v4().to_string(), text, attachments, Continuation::SameConversation)?;
+        return match dsh::witness::submit_witnessed(&session.session, &request, std::time::Duration::from_secs(10)) {
+            dsh::witness::Witnessed::Receipt(receipt) => Ok(receipt),
+            dsh::witness::Witnessed::NotOffered { code, reason, .. } => Err(format!("DeepSeek cancel notice refused ({}): {reason}", code.code())),
+            dsh::witness::Witnessed::Unknown { code, .. } => Err(format!("DeepSeek cancel notice uncertain ({}); it is never sent again", code.code())),
+        };
+    }
     input::submit_task(session, text, attachments)
 }
 
-pub(crate) fn prepare_task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id: &str, text: &str, attachments: &[Value]) -> Result<Value> {
+/// The terminal gate's sentence for a terminal that holds input, for the
+/// Teams tests that answer as the task command does (zerus-63rru.79).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use input::DRAFT as TERMINAL_DRAFT;
+pub(crate) use input::{Continuation, CONVERSATION_GONE};
+pub(crate) fn prepare_task_reply(
+    session: &zerus_replica::SessionKey,
+    dispatch: &str,
+    id: &str,
+    text: &str,
+    attachments: &[Value],
+    continuation: Continuation,
+) -> Result<Value> {
     local_sessions()?;
-    input::task_reply(session, dispatch, id, text, attachments)
+    input::task_reply(session, dispatch, id, text, attachments, continuation)
 }
 pub(crate) fn submit_task_reply(name: &str, request: &Value) -> Result<Value> {
     input::submit(name, request.to_string().as_bytes(), None)
@@ -1269,6 +1320,36 @@ impl Unresolved {
     fn ambiguous((text, value): (String, Value)) -> Self {
         Self { text, value: Some(value), code: session_id::AMBIGUOUS }
     }
+}
+
+/// The real `hgs inspect` reply for `record`, after this component's own
+/// writer saved it: the Teams confirmation's tests read inspections from here
+/// (zerus-63rru.56).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn inspection_for_test(record: &mut Value) -> Result<Value> {
+    storage::write(record)?;
+    journal::inspection(string(record, "name"), 0, None, false)
+}
+/// `record` as a completed pause leaves it, saved by this component.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn pause_for_test(record: &mut Value) -> Result<()> {
+    let _guard = lock(None)?;
+    lifecycle::mark_paused(record);
+    storage::write(record)
+}
+/// Archives `record` through this component's own archive, as an exit's
+/// archive does, and returns the archive ID.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn archive_for_test(record: &Value) -> Result<String> {
+    let _guard = lock(None)?;
+    archive::save(record)
+}
+/// The real `hgs inspect NAME --archive ID` reply, as the Teams confirmation
+/// reads an exited member's archive (zerus-63rru.62): after every event,
+/// without processes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn archive_inspection_for_test(name: &str, id: &str) -> Result<Value> {
+    journal::inspection_with(name, i64::MAX, Some(id), false, false)
 }
 
 /// zerus-ucck P3a: a label a command names without a selection, resolved
@@ -1916,6 +1997,11 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod late_child_event;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod subagent_order;
+
 #[cfg(all(test, unix))]
 mod hosted_ancestry_tests;
 #[cfg(test)]
@@ -2078,3 +2164,6 @@ mod control_console_tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) mod trust_fixture;

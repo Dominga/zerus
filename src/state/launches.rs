@@ -88,17 +88,35 @@ pub(crate) fn started(id: &str, name: &str) -> Result<()> {
     write_started(&folder, id, name, now())
 }
 
-fn write_started(folder: &Path, id: &str, name: &str, at: f64) -> Result<()> {
-    atomic(
-        &started_path(folder, id),
-        &format!(
-            "{}\n",
-            json!({"launch_id": id, "name": name, "started_at": at,
-                "unreported_diagnostic": zerus_client_core::creation::SUPERVISOR_REPORT_MISSING})
-        ),
-    )
+/// The same launch evidence, with the already allocated session identity.
+/// Older readers ignore the optional extra field; no identity is allocated here.
+pub(crate) fn started_with_session(id: &str, name: &str, session: &str) -> Result<()> {
+    local_sessions()?;
+    if !valid(id) || !valid(session) {
+        return Err("Invalid launch/session identity".into());
+    }
+    let folder = folder();
+    prune(&folder, SystemTime::now());
+    write_started_with_session(&folder, id, name, now(), Some(session))
 }
 
+fn write_started(folder: &Path, id: &str, name: &str, at: f64) -> Result<()> {
+    write_started_with_session(folder, id, name, at, None)
+}
+fn write_started_with_session(
+    folder: &Path,
+    id: &str,
+    name: &str,
+    at: f64,
+    session: Option<&str>,
+) -> Result<()> {
+    let mut value = json!({"launch_id":id,"name":name,"started_at":at,
+        "unreported_diagnostic":zerus_client_core::creation::SUPERVISOR_REPORT_MISSING});
+    if let Some(session) = session {
+        value["session_id"] = json!(session);
+    }
+    atomic(&started_path(folder, id), &format!("{value}\n"))
+}
 /// Remove the files in `folder` last written more than `KEPT` before `now`.
 fn prune(folder: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(folder) else {
@@ -416,6 +434,19 @@ mod tests {
         assert_eq!(ending(&many.join("\n"), None), many[12..].join("\n"));
     }
 
+    #[test]
+    fn optional_session_identity_does_not_change_existing_evidence_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = 1_800_000_000.0;
+        write_started(dir.path(), ONE, "claude/example/one", at).unwrap();
+        let before = Evidence::read_in(dir.path(), at).ended(&[]);
+        write_started_with_session(dir.path(), ONE, "claude/example/one", at, Some(TWO)).unwrap();
+        let after = Evidence::read_in(dir.path(), at).ended(&[]);
+        assert_eq!(before, after);
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(started_path(dir.path(), ONE)).unwrap()).unwrap();
+        assert_eq!(value["session_id"], TWO);
+    }
     #[test]
     fn a_listing_reports_the_launches_that_none_of_its_sessions_carries() {
         let folder = tempfile::tempdir().unwrap();

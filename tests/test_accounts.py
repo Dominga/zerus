@@ -64,6 +64,19 @@ class Accounts(unittest.TestCase):
         self.ls()
         self.assertIn('--version',self.opencode_calls.read_text().splitlines())
         self.assertFalse((self.root/'xdg-state/opencode').exists(),'a service registration appeared')
+    def test_kimi_compact_on_expiry_default_and_revision_guard(self):
+        def catalog():return json.loads(self.run_hgs('account','ls','--json').stdout)
+        def kimi(c):return next(p for p in c['profiles'] if p['id']=='native-kimi')
+        original=catalog();self.assertTrue(kimi(original)['compact_on_expiry_supported']);self.assertTrue(kimi(original)['compact_on_expiry'])
+        changed=json.loads(self.run_hgs('account','compact-on-expiry','native-kimi','--revision',original['revision'],'--enabled','false').stdout)
+        self.assertFalse(kimi(changed)['compact_on_expiry'])
+        self.run_hgs('account','compact-on-expiry','native-kimi','--revision',original['revision'],'--enabled','true',ok=False)
+        self.assertFalse(kimi(catalog())['compact_on_expiry'])
+        for account,value in [('native-codex','true'),('native-kimi','invalid')]:
+            self.run_hgs('account','compact-on-expiry',account,'--revision',changed['revision'],'--enabled',value,ok=False)
+        self.assertFalse(kimi(catalog())['compact_on_expiry'])
+        self.assertFalse((self.home/'.kimi-code/tui.toml').exists())
+
     def test_opencode_full_catalog_never_starts_and_checks_its_folder(self):
         catalog=json.loads(self.run_hgs('account','models','native-opencode','--json').stdout)
         self.assertEqual((catalog['catalog_state'],catalog['models'],catalog['model_options']),('not_running',[],[]))

@@ -18,6 +18,7 @@ vi.mock("@tanstack/solid-virtual", async original => ({
   }),
 }));
 
+import { OwnMessageNavigation } from "./OwnMessageNavigation";
 import { ActivityView, following, jumpToLatest } from "./Activity";
 import { loadMarkdown } from "./markdown";
 
@@ -64,14 +65,16 @@ function mount() {
   const [rows, setRows] = createSignal(events(1));
   const [loaded, setLoaded] = createSignal(true);
   const [loadingOlder, setLoadingOlder] = createSignal(false);
+  const [olderDone, setOlderDone] = createSignal(false);
+  const [error, setError] = createSignal<string>();
   const loadOlder = vi.fn();
   const source: ActivitySource = {
     target: () => ({ id: target() }), events: rows, loaded, loadOlder,
-    summary: () => undefined, loadingOlder, olderDone: () => false, ended: () => false, error: () => undefined,
+    summary: () => undefined, loadingOlder, olderDone, ended: () => false, error,
   };
   const host = document.createElement("div"); document.body.append(host);
-  dispose = render(() => createComponent(ActivityView, { source }), host);
-  return { scroller: host.querySelector<HTMLElement>(".act-scroll")!, source, target, setTarget, setRows, setLoaded, setLoadingOlder, loadOlder };
+  dispose = render(() => [createComponent(ActivityView, { source }), createComponent(OwnMessageNavigation, {})], host);
+  return { scroller: host.querySelector<HTMLElement>(".act-scroll")!, source, target, setTarget, setRows, setLoaded, setLoadingOlder, setOlderDone, setError, loadOlder, host };
 }
 async function read(scroller: HTMLElement, top: number) {
   scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
@@ -193,4 +196,133 @@ it("returns to Latest and follows when the saved session's transcript was cleare
   view.setRows(events(30, 10)); await settle();
   expect(following()).toBe(true);
   expect(view.scroller.scrollTop).toBe(view.scroller.scrollHeight - 400);
+});
+
+const own = (seq: number, more: Partial<ActivityEvent> = {}): ActivityEvent => ({ seq, type: "UserPromptSubmit", source: "desktop", detail: `My message ${seq}`, ...more });
+const nav = (host: HTMLElement, direction: "Previous" | "Next") => host.querySelector<HTMLButtonElement>(`button[aria-label="${direction} message from you"]`)!;
+const highlighted = (host: HTMLElement) => host.querySelector(".act-own-highlight [id^='item-']")?.id;
+
+it("navigates only this session's person rows in both directions and highlights briefly", async () => {
+  const view = mount();
+  view.setOlderDone(true);
+  view.setRows([own(1), ...events(2, 2), own(4, { origin: "peer_message", sender: "codex/example/peer" }),
+    own(5, { inherited_from: "another session" }), own(6, { agent_id: "child" }),
+    { seq: 7, type: "PreToolUse", detail: "Tool" }, own(8, { source: "phone" }), ...events(9, 10)]);
+  await settle();
+  const previous = nav(view.host, "Previous"), next = nav(view.host, "Next");
+  expect(previous).not.toBeNull(); expect(next.disabled).toBe(true);
+  previous.click(); await settle();
+  expect(highlighted(view.host)).toBe("item-s8");
+  expect(view.host.querySelector("#item-s8")!.getBoundingClientRect().top).toBe(0);
+  expect(following()).toBe(false); expect(next.disabled).toBe(true);
+  previous.click(); await settle();
+  expect(highlighted(view.host)).toBe("item-s1"); expect(previous.disabled).toBe(true); expect(next.disabled).toBe(false);
+  next.click(); await settle(); expect(highlighted(view.host)).toBe("item-s8");
+  await vi.advanceTimersByTimeAsync(2000); expect(highlighted(view.host)).toBeUndefined();
+  jumpToLatest(); await settle(); expect(next.disabled).toBe(true); expect(previous.disabled).toBe(false);
+});
+
+it("reads one bounded older page at a time and stops as soon as an own message is found", async () => {
+  const view = mount(); view.setRows(events(40));
+  view.loadOlder.mockImplementation(() => view.setLoadingOlder(true)); await settle();
+  const previous = nav(view.host, "Previous"); previous.click(); await settle();
+  expect(view.loadOlder).toHaveBeenCalledExactlyOnceWith();
+  expect(previous.disabled).toBe(true); expect(previous.getAttribute("aria-busy")).toBe("true");
+  expect(previous.title).toContain("Reading earlier messages"); expect(view.host.querySelector("[role=status]")?.textContent).toContain("Reading earlier messages");
+  batch(() => { view.setRows([...events(20), ...events(40)]); view.setLoadingOlder(false); }); await settle();
+  expect(view.loadOlder).toHaveBeenCalledTimes(2);
+  batch(() => { view.setRows([own(19), ...events(20), ...events(40)]); view.setLoadingOlder(false); }); await settle();
+  expect(highlighted(view.host)).toBe("item-s19"); expect(view.loadOlder).toHaveBeenCalledTimes(2);
+  expect(previous.getAttribute("aria-busy")).toBe("false");
+});
+
+it("disables exhausted directions and cancels an older search on session change, error or Latest", async () => {
+  const view = mount(); view.setRows(events(40));
+  view.loadOlder.mockImplementation(() => view.setLoadingOlder(true)); await settle();
+  nav(view.host, "Previous").click(); await settle();
+  batch(() => { view.setOlderDone(true); view.setLoadingOlder(false); }); await settle();
+  expect(nav(view.host, "Previous").disabled).toBe(true); expect(nav(view.host, "Next").disabled).toBe(true);
+  view.setOlderDone(false); nav(view.host, "Previous").click(); await settle();
+  batch(() => { view.setTarget("replacement-" + serial); view.setRows([own(1), ...events(2)]); view.setLoadingOlder(false); }); await settle();
+  expect(highlighted(view.host)).toBeUndefined(); expect(view.loadOlder).toHaveBeenCalledTimes(2);
+  view.setRows(events(40)); nav(view.host, "Previous").click(); await settle();
+  batch(() => { view.setError("Unavailable"); view.setLoadingOlder(false); }); await settle();
+  expect(nav(view.host, "Previous").getAttribute("aria-busy")).toBe("false"); expect(view.loadOlder).toHaveBeenCalledTimes(3);
+  view.setError(undefined); nav(view.host, "Previous").click(); await settle(); jumpToLatest();
+  batch(() => { view.setRows([own(1), ...events(40)]); view.setLoadingOlder(false); }); await settle();
+  expect(highlighted(view.host)).toBeUndefined(); expect(following()).toBe(true);
+});
+
+it("includes the person's phone recording and rebases navigation after manual reading", async () => {
+  const view = mount(); view.setOlderDone(true);
+  view.setRows([own(1), ...events(2, 4), own(6, { source: "hgs_voice", voice: { state: "submitted", duration_ms: 1200 } }), ...events(7, 15)]);
+  await settle();
+  nav(view.host, "Previous").click(); await settle(); expect(highlighted(view.host)).toBe("item-s6");
+  await read(view.scroller, 4 * 110 + 40);
+  nav(view.host, "Previous").click(); await settle(); expect(highlighted(view.host)).toBe("item-s1");
+});
+
+it("runs the registered shortcut from the composer without editing or moving its focus", async () => {
+  const { installShortcutRouter, platform, route } = await import("../../store/shortcuts");
+  const view = mount(); view.setOlderDone(true); view.setRows([own(1), ...events(2)]); await settle();
+  const field = document.createElement("textarea"); field.dataset.shortcutContext = "composer"; field.value = "Unsent draft"; view.host.append(field); field.focus();
+  const stop = installShortcutRouter();
+  try {
+    const key = new KeyboardEvent("keydown", { key: "ArrowUp", code: "ArrowUp", ctrlKey: platform !== "macos", metaKey: platform === "macos", altKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    // happy-dom aliases AltGraph to Alt; this is a physical Ctrl+Alt chord.
+    Object.defineProperty(key, "getModifierState", { value: () => false });
+    expect(route(key)).toEqual({ run: "activity.previousOwn", consume: true });
+    field.dispatchEvent(key); await settle();
+    expect(key.defaultPrevented).toBe(true); expect(highlighted(view.host)).toBe("item-s1");
+    expect(field.value).toBe("Unsent draft"); expect(document.activeElement).toBe(field);
+  } finally { stop(); }
+});
+
+it("cancels an unpainted jump when a resumed run retains the same display window", async () => {
+  const view = mount(); view.setOlderDone(true); view.setRows([own(1), ...events(2)]);
+  const display = "retained-display-" + serial;
+  view.source.displayKey = () => display;
+  view.setTarget("before-resume-" + serial); await settle();
+  const top = view.scroller.scrollTop;
+  nav(view.host, "Previous").click();
+  view.setTarget("after-resume-" + serial); await settle();
+  expect(highlighted(view.host)).toBeUndefined(); expect(view.scroller.scrollTop).toBe(top);
+});
+
+it("keeps both direction states through a scroll burst and recomputes only after idle", async () => {
+  const view = mount(); view.setOlderDone(true);
+  view.setRows([own(1), ...events(2, 6), own(8), ...events(9, 20)]); await settle();
+  const previous = nav(view.host, "Previous"), next = nav(view.host, "Next");
+  const disabled = () => [previous.disabled, next.disabled];
+  expect(disabled()).toEqual([false, true]);
+  const flips: MutationRecord[] = [];
+  const observer = new MutationObserver(records => flips.push(...records));
+  observer.observe(previous, { attributes: true, attributeFilter: ["disabled"] });
+  observer.observe(next, { attributes: true, attributeFilter: ["disabled"] });
+  try {
+    for (const top of [700, 300, 0]) {
+      view.scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+      view.scroller.scrollTop = top; view.scroller.dispatchEvent(new Event("scroll"));
+      await vi.advanceTimersByTimeAsync(50); await settle();
+      expect(disabled()).toEqual([false, true]); expect(flips).toHaveLength(0);
+    }
+    await vi.advanceTimersByTimeAsync(199); await settle();
+    expect(disabled()).toEqual([false, true]); expect(flips).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1); await settle();
+    expect(disabled()).toEqual([true, false]);
+  } finally { observer.disconnect(); }
+});
+
+it("honors an enabled navigation click once the existing scroll gesture settles", async () => {
+  const view = mount(); view.setOlderDone(true);
+  view.setRows([own(1), ...events(2, 6), own(8), ...events(9, 20)]); await settle();
+  view.scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -1, bubbles: true }));
+  view.scroller.scrollTop = 500; view.scroller.dispatchEvent(new Event("scroll"));
+  nav(view.host, "Previous").click();
+  // The browser's remaining scroll events do not cancel the explicit click.
+  view.scroller.scrollTop = 450; view.scroller.dispatchEvent(new Event("scroll"));
+  await settle(); expect(highlighted(view.host)).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(250); await settle();
+  expect(highlighted(view.host)).toBe("item-s1");
+  expect(view.host.querySelector("#item-s1")!.getBoundingClientRect().top).toBe(0);
 });

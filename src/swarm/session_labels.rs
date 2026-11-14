@@ -65,14 +65,7 @@ pub(crate) fn context(config: &Config) -> Result<wire::Context> {
     let data = read_store(config)?;
     let _primary =
         super::session_memberships::Memberships::load(&config.dir.join("swarm"), &data.catalog)?;
-    let members = match read_regular(
-        &config.dir.join("swarm/session-id-peers.json"),
-        MEMBERS_BYTES,
-    ) {
-        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, String>>(&bytes)?,
-        Err(Unread::Missing) => BTreeMap::new(),
-        Err(reason) => anyhow::bail!("session-label members unavailable: {reason:?}"),
-    };
+    let members = super::session_membership_peers::read_strict(&config.dir.join("swarm"))?;
     let snapshot = data.snapshot(config);
     let machines = snapshot["machines"]
         .as_array()
@@ -392,7 +385,10 @@ mod tests {
         store.save().unwrap();
         drop(store);
         assert!(!context(&config).unwrap().membership_by_id);
-        let path = config.dir.join("swarm/session-id-peers.json");
+        let twins = config.dir.join("swarm/session-id-peers.json");
+        std::fs::write(&twins, serde_json::to_vec(&BTreeMap::from([("peer", node)])).unwrap()).unwrap();
+        assert!(!context(&config).unwrap().membership_by_id, "twins alone do not prove primary ID support");
+        let path = config.dir.join("swarm/session-id-membership-peers.json");
         std::fs::write(
             &path,
             serde_json::to_vec(&BTreeMap::from([("peer", node)])).unwrap(),
@@ -520,7 +516,7 @@ mod tests {
     #[test]
     fn irregular_inputs_refuse_without_waiting_or_creating_anything() {
         let (_dir, config) = fixture();
-        let path = config.dir.join("swarm/session-id-peers.json");
+        let path = config.dir.join("swarm").join(super::super::session_membership_peers::FILE);
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let start = Instant::now();

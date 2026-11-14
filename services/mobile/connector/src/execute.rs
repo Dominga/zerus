@@ -680,6 +680,15 @@ impl<N: Native + 'static> Connector<N> {
                 crate::session_question_route_person::UNAVAILABLE,
             ));
         }
+        if (operation == crate::session_question_route_person::REVISION_OPERATION
+            || operation == crate::session_question_route_person::OPERATION
+                && payload.is_some_and(|p| p["statement"].get("expected_revision").is_some()))
+            && !flags.question_route_person_revision
+        {
+            return Err(Failure::text(
+                crate::session_question_route_person::UNAVAILABLE,
+            ));
+        }
         if operation == "mark_read" && !flags.read {
             return Err(Failure::text("native shared read ABI is unavailable"));
         }
@@ -803,6 +812,26 @@ impl<N: Native + 'static> Connector<N> {
                 }
                 Ok(result)
             }
+            crate::session_question_route_person::REVISION_OPERATION => {
+                let payload = payload.expect("validated");
+                if self.peer {
+                    return Err(Failure::text(crate::session_question_route_person::PEER));
+                }
+                let result = self
+                    .call(
+                        Call::new(["desktop", "request", "--json"])
+                            .payload(crate::session_question_route_person::status_request(
+                                payload, request_id,
+                            ))
+                            .failure_json(),
+                    )
+                    .await?;
+                if !crate::session_question_route_person::status_valid(&result, payload, request_id)
+                {
+                    return Err(Failure::text("The computer did not confirm this child's question routing. Refresh and try again."));
+                }
+                Ok(result)
+            }
             crate::session_question_route_person::OPERATION => {
                 let payload = payload.expect("validated");
                 if self.peer {
@@ -819,6 +848,9 @@ impl<N: Native + 'static> Connector<N> {
                     return Err(Failure::text(
                         "native person question route acknowledgement did not match",
                     ));
+                }
+                if result["accepted"] == false && result["code"] == "upgrade_required" {
+                    return Err(Failure::text(crate::session_question_route_person::UPGRADE));
                 }
                 Ok(result)
             }

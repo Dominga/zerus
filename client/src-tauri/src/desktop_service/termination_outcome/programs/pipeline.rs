@@ -100,6 +100,11 @@ impl Offer {
                 (Call::Native, invocation)
             }
         };
+        // Presentation metadata only; the original claim, custody and
+        // confirmation deadlines are unchanged by its operation caption.
+        self.running.describe(zerus_client_core::source!(
+            "Terminate and remove working folder"
+        ));
         Ok(Confirmation {
             source: self.source,
             capture: self.capture,

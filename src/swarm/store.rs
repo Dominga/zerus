@@ -116,11 +116,12 @@ fn flag_outdated(
 
 /// Whether a desktop may read session membership by ID: every machine of the
 /// catalog is this computer, or a direct peer whose last sync listed the
-/// `session_id` kind. A machine without such a peer fails closed.
+/// `session_id_memberships_v1` capability. Twins alone cannot prove that a
+/// member can maintain primary grouping. A missing positive fails closed.
 fn flag_membership(
     snapshot: &mut Value,
     peers: &BTreeMap<String, Peer>,
-    session_ids: &BTreeMap<String, String>,
+    primary_peers: &BTreeMap<String, String>,
 ) {
     let missing: Vec<Value> = snapshot["machines"]
         .as_array()
@@ -131,7 +132,7 @@ fn flag_membership(
             !machine["connection"].as_str().is_some_and(|alias| {
                 peers
                     .get(alias)
-                    .is_some_and(|peer| session_ids.get(alias) == Some(&peer.node))
+                    .is_some_and(|peer| primary_peers.get(alias) == Some(&peer.node))
             })
         })
         .map(|machine| machine["id"].clone())
@@ -148,6 +149,7 @@ pub fn snapshot_files(config: &Config) -> Vec<PathBuf> {
         dir.join(OUTDATED),
         dir.join(REPLICA_OUTDATED),
         dir.join(SESSION_IDS),
+        dir.join(super::session_membership_peers::FILE),
         dir.join(super::session_ids::FILE),
         dir.join(super::session_memberships::FILE),
     ]
@@ -202,7 +204,7 @@ pub fn read_snapshot(config: &Config) -> Result<Value> {
     let mut snapshot = data.snapshot(config);
     flag_outdated(&mut snapshot, &data.peers, &members(OUTDATED), &members(REPLICA_OUTDATED),
     );
-    flag_membership(&mut snapshot, &data.peers, &members(SESSION_IDS));
+    flag_membership(&mut snapshot, &data.peers, &super::session_membership_peers::read(&dir));
     Ok(snapshot)
 }
 
@@ -490,6 +492,9 @@ impl LockedStore {
             peers,
             &mut self.session_ids_original,
         )?;
+        super::session_membership_peers::prune(
+            self.path.parent().expect("catalog directory"), peers,
+        )?;
         // A member's replica record goes with its membership, at this save.
         super::replica_members::prune(&self.path.with_file_name(super::replica_members::FILE), peers,
         )
@@ -615,7 +620,8 @@ impl LockedStore {
         let mut snapshot = self.data.snapshot(config);
         flag_outdated(&mut snapshot, &self.data.peers, &self.outdated, &self.replica_outdated,
         );
-        flag_membership(&mut snapshot, &self.data.peers, &self.session_ids);
+        flag_membership(&mut snapshot, &self.data.peers,
+            &super::session_membership_peers::read(self.path.parent().expect("catalog directory")));
         snapshot
     }
     pub fn backup(&self, reason: &str) -> Result<PathBuf> {
@@ -833,9 +839,9 @@ mod tests {
         assert!(LockedStore::load(&config).unwrap().data.peers.contains_key("b"), "nothing was published");
     }
 
-    /// zerus-ucck P2c-1: a desktop reads membership by ID only when every
+    /// A desktop reads primary membership by ID only when every
     /// machine of the catalog is this computer or a peer whose last sync
-    /// listed the `session_id` kind; any other machine fails closed.
+    /// listed `session_id_memberships_v1`; any other machine fails closed.
     #[test]
     fn membership_by_id_is_ready_only_when_every_machine_lists_the_kind() {
         let peer = |node: &str| Peer { node: node.into(), ..Peer::default() };

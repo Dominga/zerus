@@ -132,9 +132,11 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let restore_pending = !string(record, "restore_archive_id").is_empty() || cleanup_pending;
     let restorable =
         archived && recipe && !cleanup_pending && !record_path(string(record, "name")).exists();
-    // One bounded metadata read, only for an archive that may otherwise
-    // restore (zerus-wyrqg).
-    let conversation = !restorable || recipes::restore_conversation_saved(record);
+    // The restore's own history check decides, through the shared code:
+    // one bounded metadata read, only for a Claude or Codex archive that
+    // may otherwise restore (zerus-63rru.70). Kimi, DeepSeek and OpenCode
+    // keep today's decision and are not read here.
+    let conversation = !restorable || recipes::conversation_persisted(record);
     let decisions = [
         (
             "pause",
@@ -686,5 +688,188 @@ mod tests {
         }
         // Kimi keeps its own check in the restore itself.
         assert!(restore(&record("kimi", folder.path())).0);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn offered_restore(summary: &Value) -> bool {
+        summary["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("restore"))
+    }
+
+    /// Runs one ignored archive fixture alone in a child of this test binary
+    /// with a private state, configuration and tmux root: the archive writer
+    /// needs its own root, never the machine's, and never a real tmux server.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn isolated_archive_fixture(test: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored", "--test-threads=1"])
+            .env("HGS_STATE_DIR", temp.path().join("state"))
+            .env("HGS_CONFIG_DIR", temp.path().join("config"))
+            .env("TMUX_TMPDIR", temp.path().join("tmux"))
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A Claude archive through the state's own archive writer, then the
+    /// state's own archive reader: every field the summary decides on is
+    /// product output.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn archived_record(name: &str, transcript: &Path) -> Value {
+        let unique = uuid::Uuid::new_v4().to_string();
+        let mut record = crate::state::listing_fixture::launched_record(
+            "claude",
+            name,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            &unique,
+            "/",
+            "account-example",
+        );
+        crate::state::listing_fixture::confirmed(&mut record, &format!("conversation-{unique}"));
+        record["transcript"] = json!(transcript);
+        let id = crate::state::archive_for_test(&record).unwrap();
+        crate::state::archive::read_archive(name, &id).unwrap()
+    }
+
+    /// zerus-63rru.70: a Claude archive that exited before its first message
+    /// (a conversation ID but no transcript) offers no restore, with the
+    /// pinned reason; a saved one offers restore; the restore's own history
+    /// check still refuses the first.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_claude_archive_offers_restore_only_for_a_saved_conversation() {
+        isolated_archive_fixture(
+            "state::session_action::tests::a_claude_archive_never_saved_fixture",
+        );
+    }
+
+    #[test]
+    #[ignore = "run by its isolated wrapper"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_claude_archive_never_saved_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved.jsonl");
+        std::fs::write(&saved, "{\"type\":\"user\"}\n").unwrap();
+        // The conversation that was never saved: no transcript file.
+        let before_first =
+            archived_record("claude/example/never-saved", &dir.path().join("missing.jsonl"));
+        let offered = summary(&before_first, false, &None);
+        assert!(!offered_restore(&offered), "{offered}");
+        assert_eq!(offered["action_reasons"]["restore"], NO_CONVERSATION);
+        // The restore command's own check still refuses it, unchanged.
+        assert!(crate::state::recipes::verify_history(&before_first, true).is_err());
+        // The saved conversation offers restore and passes its own check.
+        let persisted = archived_record("claude/example/saved", &saved);
+        let offered = summary(&persisted, false, &None);
+        assert!(offered_restore(&offered), "{offered}");
+        assert!(crate::state::recipes::verify_history(&persisted, true).is_ok());
+    }
+
+    /// zerus-63rru.70: the real summary, over an archive the state's own
+    /// writer and reader produced, reads the transcript metadata exactly once.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn deciding_one_archives_actions_reads_the_transcript_at_most_once() {
+        isolated_archive_fixture(
+            "state::session_action::tests::deciding_one_archives_actions_reads_the_transcript_at_most_once_fixture",
+        );
+    }
+
+    #[test]
+    #[ignore = "run by its isolated wrapper"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn deciding_one_archives_actions_reads_the_transcript_at_most_once_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved.jsonl");
+        std::fs::write(&saved, "{\"type\":\"user\"}\n").unwrap();
+        let record = archived_record("claude/example/counted", &saved);
+        crate::state::journal::read_order::take();
+        let offered = summary(&record, false, &None);
+        let steps = crate::state::journal::read_order::take();
+        assert!(offered_restore(&offered), "{offered}");
+        assert_eq!(
+            steps.iter().filter(|step| **step == "transcript").count(),
+            1,
+            "{steps:?}"
+        );
+        // A missing conversation ID refuses before any transcript metadata I/O.
+        let mut unconfirmed = crate::state::listing_fixture::launched_record(
+            "claude",
+            "claude/example/unconfirmed",
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+            "/",
+            "account-example",
+        );
+        crate::state::listing_fixture::confirmed(&mut unconfirmed, "conversation-unconfirmed");
+        unconfirmed["conversation_id"] = json!("");
+        unconfirmed["transcript"] = json!(saved);
+        let id = crate::state::archive_for_test(&unconfirmed).unwrap();
+        let unconfirmed =
+            crate::state::archive::read_archive("claude/example/unconfirmed", &id).unwrap();
+        crate::state::journal::read_order::take();
+        let offered = summary(&unconfirmed, false, &None);
+        let steps = crate::state::journal::read_order::take();
+        assert!(!offered_restore(&offered), "{offered}");
+        assert!(
+            steps.iter().all(|step| *step != "transcript"),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn other_agents_keep_todays_restore_decision_without_a_transcript_read() {
+        isolated_archive_fixture(
+            "state::session_action::tests::other_agents_keep_todays_restore_decision_without_a_transcript_read_fixture",
+        );
+    }
+
+    #[test]
+    #[ignore = "run by its isolated wrapper"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn other_agents_keep_todays_restore_decision_without_a_transcript_read_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let agent = "kimi";
+            let unique = uuid::Uuid::new_v4().to_string();
+            let name = format!("{agent}/example/member-{unique}");
+            let mut record = crate::state::listing_fixture::launched_record(
+                agent,
+                &name,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                &unique,
+                "/",
+                "account-example",
+            );
+            crate::state::listing_fixture::confirmed(&mut record, &format!("conversation-{unique}"));
+            record["transcript"] = json!(dir.path().join("missing.jsonl"));
+            let record = {
+                let id = crate::state::archive_for_test(&record).unwrap();
+                crate::state::archive::read_archive(&name, &id).unwrap()
+            };
+            crate::state::journal::read_order::take();
+            let offered = summary(&record, false, &None);
+            let steps = crate::state::journal::read_order::take();
+            assert!(offered_restore(&offered), "{agent}: {offered}");
+            assert!(
+                steps.iter().all(|step| *step != "transcript"),
+                "{agent}: {steps:?}"
+            );
+        }
     }
 }

@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "session_question_route_person_status",
     "send_receipt",
     "repository_check",
     "repository_status",
@@ -86,6 +87,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "session_question_route_person_status",
     "send_receipt",
     "repository_check",
     "repository_clone",
@@ -640,6 +642,21 @@ pub fn request(v: &Value) -> Result<()> {
         {
             return Err(Error::BAD);
         }
+    } else if op == "session_question_route_person_status" {
+        fields(
+            p,
+            &["session_id", "expected_run_id", "expected_conversation_id"],
+            &[],
+        )?;
+        for (key, maximum) in [
+            ("session_id", 36),
+            ("expected_run_id", 128),
+            ("expected_conversation_id", 256),
+        ] {
+            if text(&p[key], maximum, false)?.len() > maximum {
+                return Err(Error::BAD);
+            }
+        }
     } else if op == "session_question_route_person" {
         // A phone's signed latch statement (zerus-sa9qn.50): exact fields;
         // the gateway's service verifies the signature and applies it once.
@@ -659,8 +676,13 @@ pub fn request(v: &Value) -> Result<()> {
                 "issued_at",
                 "expires_at",
             ],
-            &[],
+            &["expected_revision"],
         )?;
+        if s.get("expected_revision")
+            .is_some_and(|r| !r.as_u64().is_some_and(|n| n <= 9_007_199_254_740_991))
+        {
+            return Err(Error::BAD);
+        }
         for (key, maximum) in [
             ("workspace_id", 128),
             ("device_id", 128),

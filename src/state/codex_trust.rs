@@ -8,6 +8,11 @@
 //! the folder is that root: there a note naming the folder names no other root.
 //! A root in another form than the folder (`/c/…` for a drive folder) is
 //! unfamiliar text, so the panel keeps only the native wording.
+//! A long folder wraps without a marker: Codex 0.167 breaks a generated
+//! member's 89-character worktree at 76 columns of an 80-column pane and
+//! starts the rest on the next row. The folder is every row up to the first
+//! blank one, joined as wrapped, within FOLDER_ROWS and FOLDER_BYTES; a
+//! wrapped folder is accepted only when it is exactly the session's.
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -17,6 +22,8 @@ const EXPLANATION: &str = "Trust this folder? Codex can read, edit, and run file
 const GIT_ROOT: &str = "Note: You’re in a subdirectory of a Git project. Trusting will apply to the repository root:";
 const LABELS: [&str; 2] = ["Trust and continue", "Quit"];
 const DESCRIPTIONS: [&str; 2] = ["Trust this folder and remember the decision.", "Exit without trusting this folder."];
+const FOLDER_ROWS: usize = 8;
+const FOLDER_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cancel {
@@ -47,6 +54,8 @@ impl Cancel {
 
 struct Panel {
     folder: String,
+    // The rows the folder was shown on; more than one is a wrapped folder.
+    folder_rows: usize,
     disclosure: String,
     // Codex trusts this repository root instead of the launch folder.
     root: Option<String>,
@@ -71,6 +80,11 @@ fn parse(screen: &str) -> Option<Panel> {
     let hint = *rows.last()?;
     let cancel = [Cancel::Quit, Cancel::Overview].into_iter().find(|cancel| hint == cancel.hint())?;
     let options=filled.len()-3;
+    // The folder ends at its first blank row, before any choice.
+    let end=1+rows[1..].iter().position(|row| row.is_empty())?;
+    if end-1>FOLDER_ROWS || end>=filled[options] {return None;}
+    let folder=rows[1..end].concat();
+    if folder.len()>FOLDER_BYTES {return None;}
     let mut selected=None;
     for i in 0..2 {
         let row=rows[filled[options+i]];
@@ -80,7 +94,7 @@ fn parse(screen: &str) -> Option<Panel> {
         if label!=format!("{}. {}",i+1,cancel.labels()[i]) {return None;}
     }
     // Wrapped rows are rejoined per paragraph; a clipped disclosure is incomplete.
-    let paragraphs: Vec<_> = rows[2..filled[options]].split(|r| r.is_empty()).filter(|p| !p.is_empty()).collect();
+    let paragraphs: Vec<_> = rows[end..filled[options]].split(|r| r.is_empty()).filter(|p| !p.is_empty()).collect();
     if paragraphs.is_empty() || paragraphs.concat().iter().any(|r| r.contains('…')) {return None;}
     // The root has the folder's own form: a Unix path, or a Windows drive path.
     let windows=shown_path::drive(rows[1]);
@@ -94,12 +108,12 @@ fn parse(screen: &str) -> Option<Panel> {
         else if let Some(path)=note(p).filter(|_| !noted) {
             noted=true;
             // Only Windows Codex names the folder itself (lower-cased) as root.
-            if !(windows && shown_path::same(&path, rows[1])) {root=Some(path);}
+            if !(windows && shown_path::same(&path, &folder)) {root=Some(path);}
         }
         else {known=false;}
     }
     let disclosure=paragraphs.iter().map(|p| p.join(" ")).collect::<Vec<_>>().join("\n\n");
-    Some(Panel{folder:rows[1].into(),disclosure,root,known:known&&explained,selected:selected?,cancel})
+    Some(Panel{folder,folder_rows:end-1,disclosure,root,known:known&&explained,selected:selected?,cancel})
 }
 
 // Unreviewed text keeps the native labels and verbatim disclosure only.
@@ -128,7 +142,13 @@ fn eligible(record: &Value) -> bool {
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
-    if !eligible(record) || !shown_path::same(&panel.folder, string(record, "launch_dir")) {
+    let launch = string(record, "launch_dir");
+    let shown = if panel.folder_rows == 1 {
+        shown_path::same(&panel.folder, launch)
+    } else {
+        panel.folder == launch
+    };
+    if !eligible(record) || !shown {
         return None;
     }
     let (question, descriptions) = wording(panel);
@@ -158,6 +178,13 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
             "body":format!("{}\n\n{}",panel.folder,panel.disclosure),"multi_select":false,"allow_other":false,
             "options":panel.cancel.labels().iter().enumerate().map(|(i,label)|json!({"id":format!("trust_{i}"),"label":label,"description":descriptions[i]})).collect::<Vec<_>>()}]}),
     )
+}
+
+/// The card this producer writes for `record` at `screen`, its startup panel:
+/// the route the readers of these cards test with (zerus-63rru.60).
+#[cfg(test)]
+pub(super) fn produced(record: &Value, screen: &str) -> Option<Value> {
+    card(record, &parse(screen)?)
 }
 
 fn snapshot(record: &Value, screen: &str) -> Option<(Value, usize)> {
@@ -364,6 +391,139 @@ mod tests {
         assert_eq!((msys.root, msys.known), (None, false));
         let drive = parse(&GIT_ROOT_SCREEN.replace("/work/repository", r"C:\work\repository")).unwrap();
         assert_eq!((drive.root, drive.known), (None, false));
+    }
+    // Codex 0.167.2 for a generated member worktree in the 80x24 pane the
+    // service launches it in (first real-agent probe), with synthetic paths
+    // of the real lengths: the 89-character folder wraps after 76 columns.
+    const MEMBER: &str =
+        include_str!("../../tests/fixtures/codex-folder-trust-member-0167-80x24.txt");
+    const MEMBER_DIR: &str =
+        "/work/example-team/fixtures/codex-00001/w/zerus-team-00000000-0000-4000-8000-0000000000c2";
+    const MEMBER_ROOT: &str = "/work/example-team/fixtures/codex-00001/w/proj";
+    fn member(folder: &str) -> Value {
+        let mut record = record();
+        record["launch_dir"] = json!(folder);
+        record
+    }
+    /// The member screen with its folder shown on `rows` instead.
+    fn shown_on(rows: &[&str]) -> String {
+        let shown = rows
+            .iter()
+            .map(|row| format!("  {row}\n"))
+            .collect::<String>();
+        MEMBER.replacen(
+            &format!("  {}\n  {}\n", &MEMBER_DIR[..76], &MEMBER_DIR[76..]),
+            &shown,
+            1,
+        )
+    }
+    #[test]
+    fn a_wrapped_member_folder_is_read_whole_and_only_as_the_session_folder() {
+        assert!(MEMBER.lines().all(|row| row.chars().count() <= 80));
+        assert!(MEMBER.contains(&format!(
+            "  {}\n  {}\n\n",
+            &MEMBER_DIR[..76],
+            &MEMBER_DIR[76..]
+        )));
+        let panel = parse(MEMBER).unwrap();
+        assert_eq!(
+            (
+                panel.folder.as_str(),
+                panel.folder_rows,
+                panel.root.as_deref(),
+                panel.known,
+                panel.cancel,
+                panel.selected
+            ),
+            (MEMBER_DIR, 2, Some(MEMBER_ROOT), true, Cancel::Overview, 0)
+        );
+        let question = card(&member(MEMBER_DIR), &panel).unwrap();
+        assert_eq!(
+            (
+                &question["source"],
+                &question["can_answer"],
+                &question["answer_transport"]
+            ),
+            (
+                &json!("codex_folder_trust"),
+                &json!(true),
+                &json!("codex_tui")
+            )
+        );
+        let native = &question["questions"][0];
+        assert!(native["body"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{MEMBER_DIR}\n\nNote: You’re in a subdirectory")));
+        // Codex trusts the project's repository root for a member worktree.
+        assert_eq!(native["question"], "Trust this Git repository?");
+        assert_eq!(
+            native["options"][0]["description"],
+            format!("Trust the repository root {MEMBER_ROOT} and remember the decision.")
+        );
+        // The navigator's recheck sees the same identity, whichever row is selected.
+        let moved = MEMBER
+            .replace("› 1.", "  1.")
+            .replace("  2. Back", "› 2. Back");
+        assert_eq!(
+            snapshot(&member(MEMBER_DIR), &moved),
+            Some((question["question_hash"].clone(), 1))
+        );
+        // Joined exactly as wrapped: any other folder, the shown first row
+        // alone, an added space or another letter case is not this session's.
+        for folder in [
+            &MEMBER_DIR[..76],
+            &format!("{} {}", &MEMBER_DIR[..76], &MEMBER_DIR[76..]),
+            &MEMBER_DIR.to_uppercase(),
+            &MEMBER_DIR.replace("c2", "c3"),
+            &format!("{MEMBER_DIR}/sub"),
+            MEMBER_ROOT,
+        ] {
+            assert!(card(&member(folder), &panel).is_none(), "{folder}");
+        }
+        let other = shown_on(&[&MEMBER_DIR[..76], "-0000000000c3"]);
+        assert!(card(&member(MEMBER_DIR), &parse(&other).unwrap()).is_none());
+        // A wrapped Windows drive folder is exact too, letter case included.
+        let drive = r"C:\Users\user01\example-team\fixtures\codex-00001\w\zerus-team-00000000-0000-4000-8000-0000000000c2";
+        let panel = parse(&shown_on(&[&drive[..76], &drive[76..]])).unwrap();
+        assert_eq!((panel.folder.as_str(), panel.folder_rows), (drive, 2));
+        assert!(card(&member(drive), &panel).is_some());
+        assert!(card(&member(&drive.to_uppercase()), &panel).is_none());
+    }
+    #[test]
+    fn a_wrapped_folder_is_bounded_in_rows_and_bytes() {
+        let rows = |n: usize, width: usize| -> (String, Vec<String>) {
+            let folder = format!("/{}", "a".repeat(n * width - 1));
+            let shown = folder
+                .as_bytes()
+                .chunks(width)
+                .map(|c| String::from_utf8(c.to_vec()).unwrap())
+                .collect();
+            (folder, shown)
+        };
+        for (n, width, recognized) in [
+            (FOLDER_ROWS, 20, true),
+            (FOLDER_ROWS + 1, 20, false),
+            (2, FOLDER_BYTES / 2, true),
+            (2, FOLDER_BYTES / 2 + 1, false),
+        ] {
+            let (folder, shown) = rows(n, width);
+            let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+            let panel = parse(&shown_on(&shown));
+            assert_eq!(
+                panel.as_ref().map(|p| p.folder_rows),
+                recognized.then_some(n),
+                "{n}x{width}"
+            );
+            assert_eq!(
+                panel.and_then(|p| card(&member(&folder), &p)).is_some(),
+                recognized,
+                "{n}x{width}"
+            );
+        }
+        // The folder must end in a blank row before the choices.
+        let unended = MEMBER.replacen("-0000000000c2\n\n", "-0000000000c2\n", 1);
+        assert!(parse(&unended).is_none_or(|panel| card(&member(MEMBER_DIR), &panel).is_none()));
     }
     #[test]
     fn startup_identity_pins_folder_and_run_but_not_highlight() {

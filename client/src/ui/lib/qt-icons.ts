@@ -59,6 +59,19 @@ const PAUSE = `<path d="M8 5V19M16 5V19"/>`;
 const BOLT = `<path d="M13 3L5 13H11L10 21L19 10H13Z"/>`;
 
 export const QT_ICONS: Record<string, QtGlyph> = {
+  // Teams pipeline symbols extend the same 24-unit, round-pen family. These
+  // small role/stage marks are not provider artwork or executable fork code.
+  crown: { body: `<path d="M3 6L7 12L12 4L17 12L21 6L19 19H5Z"/><path d="M6 16H18"/>` },
+  "search-check": { body: `<circle cx="10" cy="10" r="6"/><path d="M15 15L21 21M7 10L9 12L13 8"/>` },
+  "flask-conical": { body: `<path d="M9 3H15M10 3V9L4 19Q3 21 6 21H18Q21 21 20 19L14 9V3M7 15H17"/>` },
+  workflow: { body: `<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><path d="M6 9V18H15M9 6H18V15"/>` },
+  "columns-3": { body: `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4V20M15 4V20"/>` },
+  "panels-top-left": { body: `<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9H21M10 9V20"/>` },
+  server: { body: `<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5H7.1M7 17.5H7.1M11 6.5H17M11 17.5H17"/>` },
+  code: { body: `<path d="M8 6L2 12L8 18M16 6L22 12L16 18M14 3L10 21"/>` },
+  "circle-play": { body: `<circle cx="12" cy="12" r="9"/><path d="M10 8L16 12L10 16Z"/>` },
+  "circle-arrow-right": { body: `<circle cx="12" cy="12" r="9"/><path d="M7 12H17M13 8L17 12L13 16"/>` },
+  "circle-check": { body: `<circle cx="12" cy="12" r="9"/><path d="M7 12L10 15L17 8"/>` },
   sessions: { body: SESSIONS },
   all: { body: SESSIONS },
   calendar: {

@@ -98,6 +98,9 @@ int main(int argc, char **argv) {
     return 0;
 }
 '''
+import hook_caller_fixtures
+AGENT = test_input.SIGNAL_SAFE_READ + hook_caller_fixtures.scripted_source() + AGENT[len(test_input.SIGNAL_SAFE_READ):]
+
 class ClearContext(unittest.TestCase):
  script=test_input.InputTransport.script
  write_record=test_input.InputTransport.write_record
@@ -121,7 +124,7 @@ class ClearContext(unittest.TestCase):
   self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
  def hook(self,event):
   env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id)
-  result=subprocess.run([str(test_input.HGS),'__state','hook'],env=env,input=json.dumps(event),text=True,capture_output=True,timeout=12)
+  result=hook_caller_fixtures.run(self,event,env) if self.record['agent']=='claude' else subprocess.run([str(test_input.HGS),'__state','hook'],env=env,input=json.dumps(event),text=True,capture_output=True,timeout=12)
   self.assertEqual(result.returncode,0,result.stderr)
  def usage_history(self,sid,tokens,cache):
   path=self.root/('rollout-'+sid+'.jsonl')

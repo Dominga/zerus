@@ -20,6 +20,7 @@ test-hooks = []
 zerus-relay = { path = "../relay", default-features = false }
 zerus-mobile-crypto = { path = "../crypto" }
 zerus-watch-protocol = { path = "../../../crates/watch-protocol" }
+zerus-file-lock = { path = "../../../crates/file-lock" }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 # The journal stays the SQLite file the Python connector writes; bundled like hgs.

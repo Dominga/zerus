@@ -101,7 +101,7 @@ pub(super) fn binding_exists(name: &str) -> Result<bool> {
         return Ok(false);
     }
     let record = read(name)?;
-    if archive::equivalent(&record, &archive::records()?) {
+    if archive::equivalent(&record, &archive::complete_records()?) {
         return Ok(false);
     }
     // Reads do not retire the record. The launch runner repeats this decision

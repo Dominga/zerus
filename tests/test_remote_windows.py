@@ -303,7 +303,7 @@ class WindowsTarget(unittest.TestCase):
         self.assertEqual(self.operations(),[{'argv':['send','codex/project/tag','--json'],'stdin':'{"text":"synthetic"}'}])
 
 
-def async_stdin_pipe():
+def async_stdin_pipe(buffer_size=4096):
     """Match Windows OpenSSH's inherited overlapped stdin, not Popen's sync pipe."""
     import ctypes
     from ctypes import wintypes
@@ -323,7 +323,7 @@ def async_stdin_pipe():
     name = r'\\.\pipe\hgs-ssh-stdin-' + uuid.uuid4().hex
     security = Security(ctypes.sizeof(Security), None, True)
     # Inbound, first-instance, overlapped byte pipe; the sole writer is synchronous.
-    read = kernel.CreateNamedPipeW(name, 1 | 0x80000 | 0x40000000, 0, 1, 4096, 4096, 0,
+    read = kernel.CreateNamedPipeW(name, 1 | 0x80000 | 0x40000000, 0, 1, buffer_size, buffer_size, 0,
                                   ctypes.byref(security))
     invalid = ctypes.c_void_p(-1).value
     if read == invalid: raise ctypes.WinError(ctypes.get_last_error())
@@ -346,9 +346,175 @@ def async_stdin_pipe():
         if read is not None: kernel.CloseHandle(read)
 
 
+# A single paste token fills redirected stdin's existing 4 KiB .NET buffer,
+# so the input witness is visible before EOF without changing the transport.
+DECODER_MARKER = b'\x1b[200~' + b'hgs-lease-clock'.ljust(4084, b'x') + b'\x1b[201~'
+
+
+def decoder_failure_snapshot(root, child, readers, *, shell, sustained, started, budget, renewals,
+                             stage='startup', marker_observed=False, renewals_enabled=True):
+    """Bounded observation of this fixture's original child and fixed leaves only."""
+    files = {}
+    for name in ('ready.json', 'record.jsonl', 'stdout', 'stderr'):
+        try:
+            with (root/name).open('rb') as file:
+                size = file.seek(0, 2)
+                file.seek(max(0, size-4096))
+                tail = file.read(4096).decode('utf-8', errors='replace')
+            files[name] = dict(exists=True, size=size, tail=tail)
+        except OSError as error:
+            files[name] = dict(exists=False, error=type(error).__name__)
+    return dict(shell=shell, sustained=sustained, stage=stage, marker_observed=marker_observed,
+                renewals_enabled=renewals_enabled, budget_ms=int(budget*1000),
+                elapsed_ms=None if started is None else int((time.monotonic()-started)*1000),
+                child_returncode=child.returncode, stdin_closed=child.stdin.closed,
+                renewals=renewals, readers_alive=[reader.is_alive() for reader in readers], files=files)
+
+
+def decoder_file_bytes(path, limit):
+    if os.name != 'nt':
+        with path.open('rb') as file:
+            return file.read(limit)
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                               ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    kernel.ReadFile.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # Rename is already visible while its publisher still holds DELETE access.
+    # The C-runtime opener cannot share that handle; CreateFile can.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 1 | 2 | 4, None, 3, 0, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_string_buffer(limit)
+        count = wintypes.DWORD()
+        if not kernel.ReadFile(handle, buffer, limit, ctypes.byref(count), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return buffer.raw[:count.value]
+    finally:
+        if not kernel.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def decoder_readiness(path):
+    try:
+        data = decoder_file_bytes(path, 8193)
+    except FileNotFoundError:
+        return None
+    assert len(data) <= 8192, 'decoder fixture ready file exceeded its bound'
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+class DecoderFixtureFiles(unittest.TestCase):
+    def test_readiness_coexists_with_an_atomic_publishers_delete_handle(self):
+        import ctypes
+        from ctypes import wintypes
+        from types import SimpleNamespace
+        from unittest import mock
+        with tempfile.TemporaryDirectory(prefix='decoder-ready-share-') as temporary:
+            ready = Path(temporary) / 'ready.json'
+            body = b'{"argv":["synthetic"]}\n'
+            ready.write_bytes(body)
+            def create(path, access, sharing, *rest):
+                # Win32 rejects an opener that does not share an existing
+                # publisher's DELETE access, even after its rename is visible.
+                if not sharing & 4:
+                    raise PermissionError(13, 'publisher still holds DELETE access')
+                return 11
+            def read(handle, buffer, limit, count, overlapped):
+                ctypes.memmove(buffer, body, len(body))
+                count._obj.value = len(body)
+                return 1
+            kernel = SimpleNamespace(CreateFileW=create, ReadFile=read,
+                                     CloseHandle=mock.Mock(return_value=1))
+            # The ordinary C-runtime reader has no FILE_SHARE_DELETE.
+            with mock.patch.object(os, 'name', 'nt'), \
+                 mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 mock.patch.object(Path, 'open', side_effect=PermissionError(13, 'rename sharing')):
+                try:
+                    value = decoder_readiness(ready)
+                except PermissionError as error:
+                    self.fail(f'readiness cannot read during atomic publication: {error}')
+            self.assertEqual(value, {'argv': ['synthetic']})
+            kernel.CloseHandle.assert_called_once_with(11)
+
+    def test_readiness_keeps_missing_partial_size_and_permission_outcomes_distinct(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory(prefix='decoder-ready-bounds-') as temporary:
+            ready = Path(temporary) / 'ready.json'
+            self.assertIsNone(decoder_readiness(ready))
+            ready.write_bytes(b'{')
+            self.assertIsNone(decoder_readiness(ready))
+            ready.write_bytes(b'x' * 8193)
+            with self.assertRaises(AssertionError):
+                decoder_readiness(ready)
+            with mock.patch(__name__ + '.decoder_file_bytes', side_effect=PermissionError(13, 'denied')):
+                with self.assertRaises(PermissionError):
+                    decoder_readiness(ready)
+
+
+def decoder_rows(path):
+    """Only complete records from this small fixture; a publishing tail waits."""
+    try:
+        with path.open('rb') as file:
+            data = file.read(65537)
+    except FileNotFoundError:
+        return []
+    assert len(data) <= 65536, 'decoder fixture record exceeded its bound'
+    return [json.loads(line) for line in data.split(b'\n')[:-1] if line]
+
+
 @unittest.skipUnless(os.name == 'nt', 'native PowerShell 5.1/cmd decoder controls run on Windows')
 class WindowsNativeTransport(unittest.TestCase):
-    def run_decoder(self, shell, lease=False, code=0, slow=False, sustained=False):
+    def test_ready_file_is_read_while_the_native_publisher_retains_delete_access(self):
+        import ctypes
+        import errno
+        from ctypes import wintypes
+        from unittest import mock
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        with tempfile.TemporaryDirectory(prefix='decoder-native-rename-') as temporary:
+            pending, ready = (Path(temporary) / name for name in ('pending.json', 'ready.json'))
+            value = {'argv': ['synthetic'], 'pid': 123}
+            pending.write_text(json.dumps(value), encoding='utf-8')
+            publisher = kernel.CreateFileW(str(pending), 0x10000, 1 | 2 | 4, None, 3, 0, None)
+            self.assertNotEqual(publisher, ctypes.c_void_p(-1).value)
+            try:
+                pending.rename(ready)
+                denied = kernel.CreateFileW(str(ready), 0x80000000, 1 | 2, None, 3, 0, None)
+                sharing_error = ctypes.get_last_error()
+                if denied != ctypes.c_void_p(-1).value:
+                    self.assertTrue(kernel.CloseHandle(denied))
+                self.assertEqual(denied, ctypes.c_void_p(-1).value)
+                self.assertEqual(sharing_error, 32)
+                # Revert the actual readiness reader to its former opener.
+                def old_read(path, limit):
+                    with path.open('rb') as file:
+                        return file.read(limit)
+                with mock.patch(__name__ + '.decoder_file_bytes', side_effect=old_read):
+                    with self.assertRaises(PermissionError) as refused:
+                        decoder_readiness(ready)
+                # The CRT reader reports EACCES without retaining Win32's code.
+                self.assertEqual(refused.exception.errno, errno.EACCES)
+                self.assertEqual(decoder_readiness(ready), value)
+            finally:
+                self.assertTrue(kernel.CloseHandle(publisher))
+            self.assertEqual(json.loads(ready.read_bytes()), value)
+
+    def run_decoder(self, shell, lease=False, code=0, slow=False, sustained=False, renew=True):
         import base64
         import shutil
         import struct
@@ -380,7 +546,7 @@ class WindowsNativeTransport(unittest.TestCase):
             if sustained:
                 render = root/'render'
                 render.write_bytes(b''.join(json.dumps({'i': n}).encode().ljust(63, b' ')+b'\n' for n in range(20)))
-                env.update(FAKE_AGENT_RENDER=str(render), FAKE_AGENT_RENDER_CHUNK='64', FAKE_AGENT_RENDER_DELAY='1000')
+                env.update(FAKE_AGENT_RENDER_CHUNK='64', FAKE_AGENT_RENDER_DELAY='1000')
             data = base64.b64encode(json.dumps(words, ensure_ascii=False, separators=(',', ':')).encode()).decode()
             script = '\n'.join(line.strip() for line in (ROOT/'src/remote_shell/windows.ps1').read_text().splitlines()
                                if line.strip() and not line.strip().startswith('#')).replace('__HGS_ARGUMENTS__', data)
@@ -394,7 +560,9 @@ class WindowsNativeTransport(unittest.TestCase):
                               +encoded+"'))))"+'"')
                 argv, executable = '"'+str(cmd)+'" /d /s /c "'+invocation+'"', str(cmd)
             self.assertLess(len(invocation), 8000)
-            reader, writer = async_stdin_pipe() if sustained else (None, None)
+            # Fit the marker and both headers before the decoder starts reading;
+            # a blocked writer must not bypass the startup deadline checks.
+            reader, writer = async_stdin_pipe(buffer_size=len(DECODER_MARKER)*2) if sustained else (None, None)
             try:
                 child = subprocess.Popen(argv, executable=executable, cwd=root, env=env,
                                          stdin=reader if sustained else subprocess.PIPE,
@@ -420,27 +588,81 @@ class WindowsNativeTransport(unittest.TestCase):
                 reader.start(); readers.append(reader)
             body = bytes(range(256)) + 'π 日本語\r\n'.encode()
             fallback = False
+            primary = None
+            started = None
+            budget = 8
+            stage = 'startup'
+            marker_observed = False
+            marker = DECODER_MARKER if sustained else b''
+            startup_ms = render_ms = None
+            marker_sent = lease_elapsed_ms = None
+            renewals = 0
+            lease_expired = False
+
+            def publish_control(text):
+                pending = root/'control.next'
+                pending.write_text(text, encoding='utf-8')
+                pending.replace(control)
+
             try:
                 child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
-                # The fake renders before writing ready; keep renewing while
-                # its twenty-second output crosses OpenSSH's original lease.
                 started = time.monotonic()
-                deadline = started+(25 if sustained else 8)
-                next_ping = started+2
-                while not slow and not ready.exists():
-                    if sustained and time.monotonic() >= next_ping:
-                        child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
-                        next_ping = time.monotonic()+2
+                deadline = started+budget
+                value = None
+                while not slow:
+                    value = decoder_readiness(ready)
+                    if value is not None: break
                     status = child.poll()
                     self.assertIsNone(status, (root/'stderr').read_bytes() if status is not None else None)
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
-                if not slow: self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
-                if sustained: self.assertGreaterEqual(time.monotonic()-started, 19)
+                if not slow: self.assertEqual(value['argv'], words)
+                if sustained:
+                    # An exact input record proves the decoder has consumed the
+                    # frame and renewed its own clock, after Add-Type. No ping
+                    # is queued between this marker and starting the render.
+                    marker_sent = time.monotonic()
+                    child.stdin.write(struct.pack('<I', len(marker))+marker); child.stdin.flush()
+                    while True:
+                        received = b''.join(bytes.fromhex(row['hex']) for row in decoder_rows(record) if 'hex' in row)
+                        self.assertTrue(marker.startswith(received), 'framed marker bytes changed')
+                        if received == marker: break
+                        status = child.poll()
+                        self.assertIsNone(status, (root/'stderr').read_bytes() if status is not None else None)
+                        self.assertLess(time.monotonic(), deadline, 'original decoder did not acknowledge its marker')
+                        time.sleep(.02)
+                    marker_observed = True
+                if not slow: startup_ms = int((time.monotonic()-started)*1000)
+                if sustained:
+                    stage, budget, started = 'render', 25, time.monotonic()
+                    deadline, next_ping = started+budget, started+2
+                    publish_control('render render\n')
+                    while not any(row.get('kind') == 'render' and row.get('bytes') == 1280
+                                  and row.get('steps') == 20 for row in decoder_rows(record)):
+                        if renew and time.monotonic() >= next_ping:
+                            child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
+                            renewals += 1
+                            next_ping = time.monotonic()+2
+                        status = child.poll()
+                        if status is not None:
+                            if not renew and status == 127:
+                                lease_expired = True
+                                break
+                            raise AssertionError(f'original decoder exited before render completed: {status}')
+                        self.assertLess(time.monotonic(), deadline, 'original fake did not finish its render')
+                        time.sleep(.02)
+                    render_ms = int((time.monotonic()-started)*1000)
+                    if lease_expired:
+                        lease_elapsed_ms = int((time.monotonic()-marker_sent)*1000)
+                        self.assertGreaterEqual(lease_elapsed_ms, 14000)
+                        self.assertFalse(any(row.get('kind') == 'render' for row in decoder_rows(record)))
+                    else:
+                        self.assertGreaterEqual(render_ms, 19000)
+                stage, budget = 'exit', 20 if lease else 8
                 started = time.monotonic()
                 if slow:
                     child.stdin.write(struct.pack('<I', 0)); child.stdin.flush()
-                elif not lease:
+                elif not lease and not lease_expired:
                     frame = struct.pack('<I', len(body))+body
                     child.stdin.write(frame[:2]); child.stdin.flush()
                     child.stdin.write(frame[2:]+struct.pack('<I', 0)); child.stdin.flush()
@@ -448,32 +670,52 @@ class WindowsNativeTransport(unittest.TestCase):
                 # wrapper exits: its EOF/lease handling must do the work.
                 child.wait(timeout=20 if lease else 8)
                 self.assertFalse(child.stdin.closed)
-                self.assertEqual(child.returncode, 127 if lease else code)
+                self.assertEqual(child.returncode, 127 if lease or lease_expired else code)
                 if lease: self.assertGreaterEqual(time.monotonic()-started, 14)
                 for reader in readers:
                     reader.join(timeout=3); self.assertFalse(reader.is_alive())
-                if lease:
+                if os.name == 'nt': child._handle.Close()  # Original exited; both captures physically joined.
+                if lease or lease_expired:
                     self.assertIn(b'remote Windows invocation failed', (root/'stderr').read_bytes())
+                    if lease_expired:
+                        self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in decoder_rows(record)
+                                                 if 'hex' in row), marker)
                 elif slow:
                     self.assertEqual((root/'stdout').read_bytes(), (version+'\n').encode())
                     self.assertEqual((root/'stderr').read_bytes(), b'')
                 else:
                     rows = [json.loads(line) for line in record.read_text().splitlines()]
-                    self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in rows if 'hex' in row), body)
+                    self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in rows if 'hex' in row), marker+body)
                     self.assertEqual((root/'stderr').read_bytes(), b'')
                     if sustained:
                         self.assertEqual([json.loads(line) for line in (root/'stdout').read_bytes().splitlines()],
                                          [{'i': n} for n in range(20)])
+            except BaseException as error:
+                primary = error
+                try:
+                    detail = decoder_failure_snapshot(root, child, readers, shell=shell,
+                        sustained=sustained, started=started, budget=budget, renewals=renewals,
+                        stage=stage, marker_observed=marker_observed, renewals_enabled=renew)
+                    print('WINDOWS_DECODER_FAILURE ' + json.dumps(detail), file=sys.stderr)
+                except Exception as observation_error:
+                    error.add_note('Decoder observation unavailable: ' + type(observation_error).__name__)
+                raise
             finally:
                 if child.poll() is None:
                     fallback = True
-                    control.write_text('exit 7\n')
+                    publish_control('exit 7\n')
                     try: child.wait(timeout=18)
                     except subprocess.TimeoutExpired:
                         child.terminate(); child.wait(timeout=5)  # same original wrapper only
                 child.stdin.close()
                 for reader in readers: reader.join(timeout=3)
-                self.assertFalse(fallback, 'original decoder required fallback; this is a failed control')
+                if fallback and primary is not None:
+                    primary.add_note('original decoder required fallback; this is a failed control')
+                else:
+                    self.assertFalse(fallback, 'original decoder required fallback; this is a failed control')
+            return dict(startup_ms=startup_ms, render_ms=render_ms, renewals=renewals,
+                        marker_observed=marker_observed, lease_expired=lease or lease_expired,
+                        lease_elapsed_ms=lease_elapsed_ms, returncode=child.returncode)
 
     def test_native_decoder_preserves_argv_bytes_eof_and_exit_code(self):
         for shell in ('powershell', 'cmd'):
@@ -491,3 +733,11 @@ class WindowsNativeTransport(unittest.TestCase):
     def test_async_ssh_stdin_keeps_a_live_stream_through_repeated_lease_renewal(self):
         for shell in ('powershell', 'cmd'):
             with self.subTest(shell=shell): self.run_decoder(shell, sustained=True)
+
+    def test_sustained_render_without_renewals_expires_on_the_original_lease(self):
+        for shell in ('powershell', 'cmd'):
+            with self.subTest(shell=shell):
+                result = self.run_decoder(shell, sustained=True, renew=False)
+                self.assertTrue(result['lease_expired'])
+                self.assertEqual(result['renewals'], 0)
+                print('WINDOWS_NO_RENEWAL_MUTANT ' + json.dumps(dict(shell=shell, **result)), file=sys.stderr)

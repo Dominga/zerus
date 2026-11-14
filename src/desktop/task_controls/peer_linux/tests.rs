@@ -72,6 +72,53 @@ impl Fixture {
             _dir: dir,
         }
     }
+    fn exec_and_wait(&mut self, rejected: impl Fn(Instant) -> bool, deadline: Instant) {
+        // A first refusal can be the non-leader exec transition (even Z), not
+        // the new image. Only the replacement cat can echo these queued bytes.
+        const WITNESS: &[u8] = b"replacement-ready";
+        self.socket.write_all(b"x").unwrap();
+        self.socket.write_all(WITNESS).unwrap();
+        self.socket
+            .set_read_timeout(Some(
+                deadline.checked_duration_since(Instant::now()).unwrap(),
+            ))
+            .unwrap();
+        let mut echoed = [0; WITNESS.len()];
+        let received = self.socket.read_exact(&mut echoed);
+        assert!(
+            received.is_ok(),
+            "replacement acknowledgement: {received:?}, child={:?}",
+            self.child.try_wait()
+        );
+        assert_eq!(echoed, WITNESS);
+        assert!(Instant::now() < deadline, "original exec deadline");
+        assert!(
+            rejected(deadline),
+            "the replacement image must lose the original proof"
+        );
+    }
+    fn pause(&mut self) {
+        self.socket.write_all(b"s").unwrap();
+        let deadline = until();
+        loop {
+            let mut status = 0;
+            // SAFETY: our unreaped private child only; observe its fixture stop.
+            let pid = unsafe {
+                libc::waitpid(
+                    self.child.id() as i32,
+                    &mut status,
+                    libc::WUNTRACED | libc::WNOHANG,
+                )
+            };
+            if pid == self.child.id() as i32 {
+                assert!(libc::WIFSTOPPED(status));
+                return;
+            }
+            assert_eq!(pid, 0);
+            assert!(Instant::now() < deadline, "private child did not pause");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
     fn stop(&mut self) {
         self.socket.write_all(b"q").unwrap();
         let deadline = until();
@@ -98,10 +145,20 @@ fn the_original_socket_peer_proves_its_actual_native_ancestor() {
         socket.write_all(b"r").unwrap();
         let mut command = [0];
         socket.read_exact(&mut command).unwrap();
+        if command == *b"s" {
+            // SAFETY: stop this private helper, never another process.
+            assert_eq!(unsafe { libc::raise(libc::SIGSTOP) }, 0);
+            socket.read_exact(&mut command).unwrap();
+        }
         if command == *b"x" {
             panic!(
                 "exec failed: {}",
-                Command::new("/bin/sleep").arg("20").exec()
+                Command::new("/bin/cat")
+                    .stdin(Stdio::from(std::os::fd::OwnedFd::from(
+                        socket.try_clone().unwrap()
+                    )))
+                    .stdout(Stdio::from(std::os::fd::OwnedFd::from(socket)))
+                    .exec()
             );
         }
         return;
@@ -144,13 +201,52 @@ fn a_same_birth_exec_cannot_keep_the_loaded_cli_proof() {
     peer.executor(std::process::id(), &own_start(), until())
         .unwrap();
     let original = peer.process.birth.clone();
-    fixture.socket.write_all(b"x").unwrap();
-    let deadline = until();
-    while peer.current(deadline).is_ok() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    fixture.exec_and_wait(|deadline| peer.current(deadline).is_err(), until());
     // Rejection came from the loaded-image/argv check, not a new birth/death.
+    assert_eq!(birth(&peer.process.directory).unwrap(), original);
+    alive(&peer.process.handle).unwrap();
+    assert!(fixture.child.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn an_early_refusal_does_not_complete_the_exec_fixture() {
+    let mut fixture = Fixture::new();
+    let peer = Peer::capture(&fixture.socket, trusted(), until()).unwrap();
+    let original = peer.process.birth.clone();
+    fixture.pause();
+    assert!(
+        peer.current(until()).is_err(),
+        "a stopped original peer is refused"
+    );
+    alive(&peer.process.handle).unwrap();
+    let deadline = until();
+    std::thread::scope(|scope| {
+        let (completed, receipt) = std::sync::mpsc::channel();
+        let fixture = &mut fixture;
+        let peer = &peer;
+        let worker = scope.spawn(move || {
+            fixture.exec_and_wait(|deadline| peer.current(deadline).is_err(), deadline);
+            completed.send(()).unwrap();
+        });
+        let early = receipt.recv_timeout(Duration::from_millis(20));
+        // SAFETY: the original private child's retained pidfd, still unreaped.
+        let resumed = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                peer.process.handle.as_raw_fd(),
+                libc::SIGCONT,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        assert_eq!(resumed, 0);
+        worker.join().unwrap();
+        assert_eq!(
+            early,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "refusal while stopped cannot stand in for the replacement image's acknowledgement"
+        );
+    });
     assert_eq!(birth(&peer.process.directory).unwrap(), original);
     alive(&peer.process.handle).unwrap();
     assert!(fixture.child.try_wait().unwrap().is_none());
@@ -209,12 +305,7 @@ fn the_loaded_resident_supervisor_and_its_agent_stay_pinned_independently() {
         until()
     )
     .is_err());
-    f.socket.write_all(b"x").unwrap();
-    let deadline = until();
-    while resident.current(deadline).is_ok() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    f.exec_and_wait(|deadline| resident.current(deadline).is_err(), until());
     assert_eq!(birth(&directory).unwrap(), original);
     assert!(f.child.try_wait().unwrap().is_none());
 }

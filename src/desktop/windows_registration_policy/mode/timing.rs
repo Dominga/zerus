@@ -151,7 +151,7 @@ mod tests {
         snapshot["unattributed_ms"] = 0.into();
         assert_eq!(
             snapshot,
-            json!({"abi":"desktop-mode-stop-timing-v1","budget_ms":2000,
+            json!({"abi":"desktop-mode-stop-timing-v1","budget_ms":4000,
             "elapsed_ms":0,"unattributed_ms":0,"steps":{
                 "native_rechecks":{"calls":0,"elapsed_ms":0},
                 "metadata_sync":{"calls":0,"elapsed_ms":0},

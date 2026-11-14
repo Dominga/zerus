@@ -563,6 +563,7 @@ class ScreenModelDifferential(unittest.TestCase):
 
     @classmethod
     def tmux_bytes(cls, *args):
+        assert cls.socket.parent.is_dir(), "the private tmux socket directory is gone"
         result = subprocess.run([TMUX, "-S", str(cls.socket), "-f", "/dev/null", *args], env=cls.env,
                                 capture_output=True, timeout=20)
         if result.returncode != 0:

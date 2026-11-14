@@ -28,6 +28,14 @@ def headers(**values):
     return result
 
 
+def current_metadata(version):
+    """Synthetic agreeing current pointers for independent artifact controls."""
+    return [(version.encode(), {}),
+            (json.dumps(dict(name='@moonshot-ai/kimi-code', version=version)).encode(), {}),
+            (json.dumps(dict(tag_name='@moonshot-ai/kimi-code@' + version, draft=False, prerelease=False,
+                             html_url='https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%40' + version)).encode(), {})]
+
+
 class Response:
     def __init__(self, body, declared=None):
         self.body, self.status, self.url, self.reads = body, 200, 'https://cdn.kimi.com/kimi-code/binaries/2.2.0/fixture', 0
@@ -65,12 +73,14 @@ class KimiNativeCI(unittest.TestCase):
         manifest = dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
                         platforms={'linux-x64': dict(filename='kimi-code-linux-x64', checksum=sha)})
         raw = json.dumps(manifest).encode()
-        with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1\n', {}), (raw, {}), (b'', {'size': 5})]) as get:
+        with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(raw, {}), (b'', {'size': 5})]) as get:
             record, observed, _ = ci.resolve_latest('linux-x64')
         self.assertEqual(record, dict(schema=1, version='2.3.1', target='linux-x64', image_size=5,
                                      manifest_sha256=hashlib.sha256(raw).hexdigest(), image_sha256=sha))
         self.assertEqual(observed, raw)
         self.assertEqual(get.call_args_list, [mock.call('https://code.kimi.com/kimi-code/latest', 64),
+            mock.call('https://registry.npmjs.org/@moonshot-ai/kimi-code/latest', 65536, policy='no-redirect'),
+            mock.call('https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest', 262144, policy='no-redirect'),
             mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/manifest.json', 65536),
             mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64', ci.IMAGE_LIMIT, method='HEAD')])
         for body in (b'', b'latest', b'2.3.1-beta', b'2.3.1/../2.2.0', b'2.3.1\n2.2.0'):
@@ -80,34 +90,28 @@ class KimiNativeCI(unittest.TestCase):
                 get.assert_called_once()
         for key, value in (('version', '2.2.0'), ('tag', '@other/code@2.3.1')):
             changed = json.dumps(dict(manifest, **{key: value})).encode()
-            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (changed, {})]) as get:
+            with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(changed, {})]) as get:
                 with self.assertRaises(ValueError):
                     ci.resolve_latest('linux-x64')
-                self.assertEqual(get.call_count, 2)
+                self.assertEqual(get.call_count, 4)
 
-    def test_latest_metadata_refuses_bad_lengths_encoding_late_reads_and_redirects(self):
+    def test_latest_metadata_refuses_bad_lengths_encoding_and_redirects(self):
         for body, declared in ((b'2.3.1', 5), (b'2.3.1', 4), (b'2.3', 5)):
             response = Response(body, declared)
             with mock.patch.object(ci.urllib.request, 'build_opener') as build:
                 build.return_value.open.return_value = response
                 if len(body) == declared:
-                    self.assertEqual(ci.metadata('https://code.kimi.com/kimi-code/latest', 64)[0], body)
+                    self.assertEqual(ci.discovery.read_metadata('https://code.kimi.com/kimi-code/latest', 64, policy='kimi')[0], body)
                 else:
                     with self.assertRaises(ValueError):
-                        ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
+                        ci.discovery.read_metadata('https://code.kimi.com/kimi-code/latest', 64, policy='kimi')
         response = Response(b'2.3.1')
         response.headers['Content-Encoding'] = 'gzip'
         with mock.patch.object(ci.urllib.request, 'build_opener') as build:
             build.return_value.open.return_value = response
             with self.assertRaises(ValueError):
-                ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
+                ci.discovery.read_metadata('https://code.kimi.com/kimi-code/latest', 64, policy='kimi')
             self.assertEqual(response.reads, 0)
-        response = Response(b'2.3.1')
-        with mock.patch.object(ci.urllib.request, 'build_opener') as build, \
-                mock.patch.object(ci.time, 'monotonic', side_effect=[0, 1, 61]):
-            build.return_value.open.return_value = response
-            with self.assertRaises(ValueError):
-                ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
         source = 'https://code.kimi.com/kimi-code/latest'
         request = ci.OfficialRedirect().redirect_request(urllib.request.Request(source), None, 302, '',
                         headers(Location=source.replace('code.', 'cdn.')), source.replace('code.', 'cdn.'))
@@ -125,12 +129,12 @@ class KimiNativeCI(unittest.TestCase):
             with mock.patch.object(ci.urllib.request, 'build_opener') as build:
                 build.return_value.open.return_value = response
                 if accepted:
-                    self.assertEqual(ci.metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
-                                    ci.IMAGE_LIMIT, method='HEAD')[1]['size'], 5)
+                    self.assertEqual(ci.discovery.read_metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
+                                    ci.IMAGE_LIMIT, method='HEAD', policy='kimi')[1]['size'], 5)
                 else:
                     with self.assertRaises(ValueError):
-                        ci.metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
-                                    ci.IMAGE_LIMIT, method='HEAD')
+                        ci.discovery.read_metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
+                                    ci.IMAGE_LIMIT, method='HEAD', policy='kimi')
                 self.assertEqual(response.reads, 0)
         source = 'https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64'
         redirected = ci.OfficialRedirect('HEAD').redirect_request(urllib.request.Request(source, method='HEAD'),
@@ -143,10 +147,10 @@ class KimiNativeCI(unittest.TestCase):
                       dict(good, checksum=True), dict(good, checksum='')):
             raw = json.dumps(dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
                                   platforms={'linux-x64': entry})).encode()
-            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (raw, {})]) as get:
+            with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(raw, {})]) as get:
                 with self.assertRaises(ValueError):
                     ci.resolve_latest('linux-x64')
-                self.assertEqual(get.call_count, 2)
+                self.assertEqual(get.call_count, 4)
 
     def test_one_release_is_staged_nonexecutable_before_its_record_is_admitted(self):
         root = self.root(); images, evidence = root / 'images', root / 'evidence'
@@ -262,12 +266,144 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
-        self.assertEqual(len(ci.METHODS),21)
+        self.assertEqual(len(ci.METHODS), 24)
+        self.assertIn('test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_hint_reaches_model_through_real_hgs_hook',ci.METHODS)
+        self.assertIn('test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message', ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_manual_compaction_reaches_native_hooks',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_id_settings_before_first_message_preserves_empty_conversation_and_defaults',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_id_unprimed_pending_settings_then_message_makes_one_model_call_and_keeps_defaults',ci.METHODS)
         self.assertEqual(ci.METHODS[-1],'test_kimi_native.NativeKimi.test_id_effort_preserves_raw_request_identity_and_shared_defaults')
+
+    def test_teams_mode_has_its_own_reviewed_inventory_and_outcome(self):
+        self.assertEqual(ci.checked_teams_methods(), ci.TEAMS_METHODS)
+        self.assertEqual(len(ci.TEAMS_METHODS), 5)
+        self.assertTrue(all(m.startswith('test_teams_native.NativeTeamsKimi.test_') for m in ci.TEAMS_METHODS))
+        self.assertFalse(set(ci.TEAMS_METHODS) & set(ci.METHODS), 'the original inventory is unchanged')
+        good = dict(tests=len(ci.TEAMS_METHODS), started=list(ci.TEAMS_METHODS), completed=list(ci.TEAMS_METHODS),
+                    failures=0, errors=0, skipped=0, expected_failures=0, unexpected_successes=0)
+        self.assertTrue(ci.outcome(good, 0, ci.TEAMS_METHODS))
+        self.assertFalse(ci.outcome(good, 0), 'a Teams result never passes as the original cases')
+        self.assertFalse(ci.outcome(dict(good, skipped=1), 0, ci.TEAMS_METHODS), 'a skip is no evidence')
+        self.assertIn('all 5 exact cases', ci.failure_summary(dict(good, failures=1), ci.TEAMS_METHODS))
+
+    def test_teams_mode_lifts_only_the_effort_seed_guard(self):
+        temporary = self.root()
+        env = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
+                   RUNNER_TEMP=str(temporary), GITHUB_WORKSPACE=str(ci.ROOT))
+
+        def args(teams):
+            # The original mode carries its seed; --teams carries none.
+            return SimpleNamespace(hgs=temporary / 'hgs', tmux=temporary / 'tmux', teams=teams,
+                                   effort_seed_receipt=None if teams else temporary / 'hgs-effort-seed.json',
+                                   output=ci.ROOT / 'artifacts/test-results/kimi-teams')
+        ci.hosted_paths(args(True), env)
+        ci.hosted_paths(args(False), env)
+        for name, change in (('GITHUB_ACTIONS', dict(GITHUB_ACTIONS='')),
+                             ('RUNNER_ENVIRONMENT', dict(RUNNER_ENVIRONMENT='self-hosted')),
+                             ('workspace', dict(GITHUB_WORKSPACE=str(temporary))),
+                             ('hgs', dict(hgs=Path('/usr/bin/hgs'))), ('tmux', dict(tmux=Path('/usr/bin/tmux'))),
+                             ('output', dict(output=temporary / 'elsewhere'))):
+            sentences = []
+            for teams in (False, True):
+                values = args(teams)
+                for key, value in change.items():
+                    if hasattr(values, key):
+                        setattr(values, key, value)
+                with self.subTest(violation=name, teams=teams), self.assertRaises(ValueError) as refused:
+                    ci.hosted_paths(values, dict(env, **{k: v for k, v in change.items() if k in env}))
+                sentences.append(str(refused.exception))
+            self.assertEqual(sentences[0], sentences[1], name)
+        original = args(False)
+        original.effort_seed_receipt = None
+        with self.assertRaisesRegex(ValueError, 'seed receipt'):
+            ci.hosted_paths(original, env)
+        with mock.patch.object(sys, 'argv', [str(ci.__file__), '--teams', '--source-sha', 'a' * 40, '--hgs', 'hgs',
+                                             '--tmux', 'tmux', '--effort-seed-receipt', 'seed.json', '--output', 'out']), \
+                mock.patch.object(ci, 'hosted_paths'), mock.patch.object(ci, 'stage_latest') as staged:
+            with self.assertRaisesRegex(ValueError, 'takes no Effort seed'):
+                ci.main()
+        staged.assert_not_called()
+
+    def test_teams_mode_refuses_outside_linux_before_staging_or_reservation(self):
+        output = self.root() / 'out'
+        with mock.patch.object(sys, 'argv', [str(ci.__file__), '--teams', '--source-sha', 'a' * 40, '--hgs', 'hgs',
+                                             '--tmux', 'tmux', '--output', str(output)]), \
+                mock.patch.object(ci, 'hosted_paths'), mock.patch.object(ci.subprocess, 'check_output', return_value='a' * 40), \
+                mock.patch.object(ci, 'target', return_value='darwin-arm64'), \
+                mock.patch.object(ci, 'stage_latest') as staged:
+            with self.assertRaisesRegex(ValueError, 'only on Linux'):
+                ci.main()
+        staged.assert_not_called()
+        self.assertFalse(output.exists(), 'no reservation is written')
+
+    def test_teams_inventory_is_what_will_run(self):
+        good = ('class TeamsContract:\n    def test_1_launch_and_identity(self): pass\n'
+                '    def test_2_delivery_and_member_shell(self): pass\n    def test_3_lead_doorbell(self): pass\n'
+                '    def test_4_cancel_notice(self): pass\n'
+                '    def test_5_stop_and_terminate(self): pass\n    def waiting_6(self): pass\n'
+                'class NativeTeamsKimi(TeamsContract, unittest.TestCase):\n    agent = "kimi"\n')
+        for name, text, refusal in (
+                ('good', good, None),
+                ('no contract', good.replace('class TeamsContract:', 'class Other:'), 'TeamsContract is missing'),
+                ('no Kimi class', good.replace('NativeTeamsKimi', 'NativeTeamsOther'), 'NativeTeamsKimi is missing'),
+                ('another base', good.replace('(TeamsContract, unittest.TestCase)', '(unittest.TestCase)'), 'from TeamsContract'),
+                ('its own case', good + '    def test_extra(self): pass\n', 'explicit review'),
+                ('a changed list', good.replace('test_5_stop', 'test_6_stop'), 'explicit review')):
+            root = self.root()
+            (root / 'tests').mkdir()
+            (root / 'tests/test_teams_native.py').write_text(text)
+            with self.subTest(case=name), mock.patch.object(ci, 'ROOT', root):
+                if refusal is None:
+                    self.assertEqual(ci.checked_teams_methods(), ci.TEAMS_METHODS)
+                else:
+                    with self.assertRaisesRegex(ValueError, refusal):
+                        ci.checked_teams_methods()
+
+    def test_teams_child_killed_during_setup_keeps_its_root_and_logs(self):
+        runtime = self.root()
+        os.chmod(runtime, 0o700)
+        (runtime / 'tmp').mkdir(mode=0o700)
+        custody = runtime / 'custody.jsonl'
+        native = runtime / 'kimi-code'
+        native.write_bytes(b'synthetic image')
+        sys.path.insert(0, str(ci.ROOT / 'tests'))
+        import teams_native_fixture as fixture
+        with mock.patch.dict(os.environ, TMPDIR=str(runtime / 'tmp'), ZERUS_TEAMS_EVIDENCE=str(runtime / 'evidence')), \
+                mock.patch.object(fixture, 'ROOT_CREATED', ci.teams_custody(custody)):
+            fx = fixture.TeamFixture('kimi', native, 'NativeTeamsKimi')
+            fx.build()
+        # The child is killed here: no stopTest and no teardown ran. The wrappers log
+        # straight into the uploaded evidence folder, so their logs need no archive.
+        for log in ('tmux-calls.log', 'refused-calls.log'):
+            self.assertTrue((runtime / 'evidence/NativeTeamsKimi' / log).is_file(), log)
+        self.assertIn(str(runtime / 'evidence/NativeTeamsKimi'), (fx.root / 'bin/tmux').read_text())
+        row = json.loads(custody.read_text().splitlines()[0])
+        self.assertEqual((row['path'], row['case'], row['inode']),
+                         (str(fx.root), 'test_teams_native.NativeTeamsKimi', fx.root.stat().st_ino))
+        archive = self.root() / 'unknown-runtime.tar.gz'
+        ci.retain([custody], runtime, archive)
+        with tarfile.open(archive) as retained:
+            names = retained.getnames()
+        self.assertTrue(any(name.endswith(fx.root.name + '/bin/tmux') for name in names), names[:20])
+        # The Teams child itself installs that hook before any case runs.
+        with mock.patch.object(fixture, 'ROOT_CREATED', None), \
+                mock.patch.object(ci, 'run_child', return_value=0) as child:
+            self.assertEqual(ci.suite_child(runtime / 'result.json', custody, teams=True), 0)
+            self.assertIsNotNone(fixture.ROOT_CREATED)
+        self.assertEqual(child.call_args.args[2], ci.TEAMS_METHODS)
+
+    def test_method_inventory_refuses_missing_extra_and_duplicate_entries(self):
+        reviewed = ci.METHODS
+        expiry = 'test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message'
+        for reason, methods in (
+            ('missing', tuple(method for method in reviewed if method != expiry)),
+            ('extra', reviewed + ('test_kimi_native.NativeKimi.test_unreviewed',)),
+            ('duplicate', reviewed + (reviewed[0],)),
+        ):
+            with self.subTest(reason=reason), mock.patch.object(ci, 'METHODS', methods):
+                with self.assertRaisesRegex(ValueError, 'native method inventory needs an explicit review'):
+                    ci.checked_methods()
 
     def test_the_only_redirect_is_one_exact_302_to_the_cdn(self):
         source = 'https://code.kimi.com/kimi-code/binaries/2.2.0/manifest.json'

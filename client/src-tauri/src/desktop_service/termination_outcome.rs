@@ -322,7 +322,7 @@ impl Controller {
             NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
             Arc::new((self.context.hold.clone(), self.context.clone())),
-            move |command| current.spawn(command),
+            move |command, input_spawn| current.spawn_input(command, input_spawn),
         )
         .ok()
         .filter(|_| !self.context.rejected.load(Ordering::Acquire))
@@ -604,7 +604,11 @@ impl Context {
             Ok(())
         }
     }
-    fn spawn(&self, command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    fn spawn_input(
+        &self,
+        command: &mut std::process::Command,
+        input_spawn: run::InputSpawn,
+    ) -> std::io::Result<std::process::Child> {
         if !self.current() {
             self.trace.fail(Reason::PreSpawnCurrent);
             return Err(std::io::ErrorKind::PermissionDenied.into());
@@ -614,8 +618,8 @@ impl Context {
             .inspect_err(|_| self.trace.fail(Reason::ImageBeforeSpawn))?;
         #[cfg(all(test, target_os = "linux"))]
         tests::after_spawn_check();
-        let mut child = command
-            .spawn()
+        let mut child = input_spawn
+            .spawn(command)
             .inspect_err(|_| self.trace.fail(Reason::Spawn))?;
         let observed = self.image.observe_child(&mut child);
         if let Err(failure) = &observed {
@@ -692,30 +696,31 @@ impl Context {
         let invocation = helper_invocation(&invocation);
         // Keep all existing image/context/original-registration checks in
         // their same guarded spawn, before either runner releases any input.
-        let spawn =
-            move |command: &mut std::process::Command| -> std::io::Result<std::process::Child> {
-                environment.apply(command);
-                let mut child = original.spawn(command)?;
-                let refused = original.rejected.load(Ordering::Acquire)
-                    || registration
-                        .as_ref()
-                        .is_some_and(|registration| !registration.bind_original(&child));
+        let spawn = move |command: &mut std::process::Command,
+                          input_spawn: run::InputSpawn|
+              -> std::io::Result<std::process::Child> {
+            environment.apply(command);
+            let mut child = original.spawn_input(command, input_spawn)?;
+            let refused = original.rejected.load(Ordering::Acquire)
+                || registration
+                    .as_ref()
+                    .is_some_and(|registration| !registration.bind_original(&child));
+            #[cfg(all(test, target_os = "linux"))]
+            tests::after_original_binding(&mut child);
+            if refused || !original.same_context() {
+                original.trace.fail(if refused {
+                    Reason::OriginalRegistration
+                } else {
+                    Reason::ContextAfterBinding
+                });
+                // Withhold the envelope but keep THIS child in the owned
+                // runner's stop/reap/pipe custody, including on refusal.
+                original.reject_child(&mut child);
                 #[cfg(all(test, target_os = "linux"))]
-                tests::after_original_binding(&mut child);
-                if refused || !original.same_context() {
-                    original.trace.fail(if refused {
-                        Reason::OriginalRegistration
-                    } else {
-                        Reason::ContextAfterBinding
-                    });
-                    // Withhold the envelope but keep THIS child in the owned
-                    // runner's stop/reap/pipe custody, including on refusal.
-                    original.reject_child(&mut child);
-                    #[cfg(all(test, target_os = "linux"))]
-                    tests::observe_refused_child(&mut child);
-                }
-                Ok(child)
-            };
+                tests::observe_refused_child(&mut child);
+            }
+            Ok(child)
+        };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let result = {
             let rejected = self.rejected.clone();
@@ -726,8 +731,9 @@ impl Context {
                 &[],
                 &self.cancel,
                 run::JoinedSpawn {
-                    spawn: move |command: &mut std::process::Command| {
-                        let child = spawn(command)?;
+                    spawn: move |command: &mut std::process::Command,
+                                 input_spawn: run::InputSpawn| {
+                        let child = spawn(command, input_spawn)?;
                         Ok(if rejected.load(Ordering::Acquire) {
                             run::GuardedChild::Withheld(child)
                         } else {
@@ -782,7 +788,7 @@ impl Context {
             zerus_client_core::worktree_review::REVIEW_LIMIT,
             &self.cancel,
             Arc::new((self.clone(), resources)),
-            move |command| original.spawn(command),
+            move |command, input_spawn| original.spawn_input(command, input_spawn),
         );
         self.trace.read(&exit);
         if self.finish_call().is_err()

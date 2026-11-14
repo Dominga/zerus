@@ -18,8 +18,8 @@ UNUSED_TOOLS = (
     "/opt/hostedtoolcache/CodeQL",
 )
 RELAY_TARGETS = ("target", "services/mobile/relay/target", "services/mobile/crypto/target")
-REPORT_JOBS = ("quick", "relay", "client-native-linux")
-CLEANUP_JOBS = ("quick", "relay", "client-native-linux")
+REPORT_JOBS = ("quick", "client-core", "relay", "client-native-linux")
+CLEANUP_JOBS = ("quick", "client-core", "relay", "client-native-linux")
 NATIVE_MIN_FREE_BYTES = 24 * 1024**3
 
 

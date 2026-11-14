@@ -1703,6 +1703,14 @@ unsafe extern "system" fn interrupted(event: u32) -> i32 {
 /// runs in a job of its own (`spawn`), which ends once its output has been
 /// relayed.
 pub fn wait_interactive(command: &mut Command) -> Result<i32> {
+    wait_interactive_from(command, None)
+}
+/// A checked answer file uses the same overlapped SSH relay and console
+/// interrupt handling as ordinary forwarding, never a synchronous pipe.
+pub fn wait_interactive_with_input(command: &mut Command, input: fs::File) -> Result<i32> {
+    wait_interactive_from(command, Some(input))
+}
+fn wait_interactive_from(command: &mut Command, input: Option<fs::File>) -> Result<i32> {
     struct Handler;
     impl Drop for Handler {
         fn drop(&mut self) {
@@ -1714,7 +1722,7 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
     INTERRUPTED.store(false, Ordering::Relaxed);
     // Never SetConsoleCtrlHandler(NULL, TRUE): children would inherit ignoring Ctrl+C.
     let _handler = (unsafe { SetConsoleCtrlHandler(Some(interrupted), 1) } != 0).then_some(Handler);
-    let relay = Relay::prepare(command, None)?;
+    let relay = Relay::prepare(command, input)?;
     let spawned = spawn(command);
     let pumps = relay.start(command);
     let mut child = spawned.map_err(|e| {

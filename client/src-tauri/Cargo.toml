@@ -103,7 +103,7 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 # the optional live watch/data feature.
 zerus-client-core = { path = "../core" }
 unicode-casefold = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Recovery", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Recovery", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 cc = "1"
@@ -112,10 +112,10 @@ tauri-build = { version = "2", features = [] }
 embed-resource = "3"
 
 [dev-dependencies]
+# Portable action tests also run on Windows.
+tempfile = "3"
 # The subscriber's silence deadline is tested without thirty wall-clock seconds.
 tokio = { version = "1", default-features = false, features = ["test-util"] }
-# A relaunch test keeps its count in a scratch folder (task 440); every platform runs it.
-tempfile = "3"
 
 # Dependencies optimised once keep the debug app responsive.
 [profile.dev.package."*"]

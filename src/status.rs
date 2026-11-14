@@ -77,7 +77,7 @@ fn this(config: &Config) -> Result<Value> {
     let listing = crate::cli::local_json(config)?;
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
     Ok(json!({"host":config.host(),"ok":true,"hgs_version":VERSION,"executable":executable,
-        "local_sessions":listing["local_sessions"] != false,"sessions":counts(&listing["sessions"]),
+        "local_sessions":listing["local_sessions"] != false,"sessions":listing_counts(&listing),
         "services":{"desktop":desktop(),"swarm_worker":swarm(config),
             "recovery_worker":crate::state::recovery_worker_running().map(running),
             "team_worker":crate::state::team_worker_running().map(running),
@@ -105,6 +105,15 @@ fn counts(sessions: &Value) -> Value {
     }
     json!({"live":working + attention + ready + other,"working":working,"attention":attention,
         "ready":ready,"other":other,"stopped":stopped,"archived":archived})
+}
+
+fn listing_counts(listing: &Value) -> Value {
+    let mut result = counts(&listing["sessions"]);
+    if let Some(total) = listing["archive_page"]["total"].as_u64() {
+        result["archived"] = json!(total);
+        result["archived_total_capped"] = json!(listing["archive_page"]["total_capped"] == true);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -210,7 +219,7 @@ fn peer(config: &Config, peer: &str) -> Value {
         // An older hgs: its listing still has its version and sessions.
         Ok(listing) if listing["sessions"].is_array() => json!({"host":peer,"ok":true,
             "hgs_version":listing["hgs_version"],"local_sessions":listing["local_sessions"] != false,
-            "sessions":counts(&listing["sessions"]),"services":null}),
+            "sessions":listing_counts(&listing),"services":null}),
         _ => json!({"host":peer,"ok":false,"error":"bad_response","detail":"Invalid response from hgs on the remote machine"}),
     }
 }
@@ -241,7 +250,8 @@ fn render(machine: &Value, this: bool) -> String {
     }
     for (key, label) in [("stopped", "stopped or paused"), ("archived", "archived")] {
         if n(key) > 0 {
-            parts.push(format!("{} {label}", n(key)));
+            let capped = if key == "archived" && sessions["archived_total_capped"] == true { "+" } else { "" };
+            parts.push(format!("{}{capped} {label}", n(key)));
         }
     }
     text += &format!("  Sessions: {}\n", parts.join("; "));
@@ -285,6 +295,18 @@ mod tests {
         assert_eq!(counts(&sessions), json!({"live":6,"working":1,"attention":3,"ready":1,"other":1,
             "stopped":2,"archived":1}));
         assert_eq!(counts(&Value::Null)["live"], 0);
+    }
+
+    #[test]
+    fn archive_counts_retain_the_previews_lower_bound() {
+        let listing = json!({"sessions":[{"state":"archived"}],
+            "archive_page":{"total":50,"total_capped":true}});
+        let counts = listing_counts(&listing);
+        assert_eq!(counts["archived"], 50);
+        assert_eq!(counts["archived_total_capped"], true);
+        let machine = json!({"host":"example","ok":true,"sessions":counts,"services":null});
+        assert!(render(&machine, false).contains("50+ archived"));
+        assert!(listing_counts(&json!({"sessions":[]})).get("archived_total_capped").is_none());
     }
 
     #[test]

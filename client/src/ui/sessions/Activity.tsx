@@ -1,3 +1,4 @@
+import { sendErrorText } from "./send-error";
 import { nativeRoute } from "./native-entry";
 import { withoutHeld } from "./held-message";
 import { tr, trNoop } from "../../i18n";
@@ -38,11 +39,12 @@ import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-ac
 import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
 import { emptyActivity } from "./activity-empty";
-import { refreshRouteActivity, routeActivityOf, routeSessionOf } from "../../store/questionRouteActivity";
+import { inspectionRouteActivity, refreshRouteActivity, routeActivityOf, routeSessionOf } from "../../store/questionRouteActivity";
 import { markdownReady, markdownTree } from "./markdown";
 import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
 import { searchHitItems } from "./search-hit";
 import { ActivityPending } from "./ActivityPending";
+import { createOwnMessageNavigation, setOwnMessageNavigation } from "./own-message-navigation";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -592,7 +594,7 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
           )}</For>
         </Show>
       </Show>
-      <Show when={it().local?.error}><p class="act-error">{it().local!.error}</p></Show>
+      <Show when={it().local?.error}><p class="act-error">{sendErrorText(it().local!.error!)}</p></Show>
       <Show when={it().code}><pre class="act-code mono">{it().code}</pre></Show>
       <Show when={it().attachments}>
         <div class="act-attachments">
@@ -913,7 +915,8 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   }
   const built = createMemo(() => {
     const items = project(!!subagentOpen(), displayTarget(), source().events(), source().transcriptSummary?.() ?? source().summary(), local(),
-      subagentOpen() ? [] : routeActivityOf(routeSession()));
+      subagentOpen() || props.source || source().target()?.id !== s()?.key ? []
+        : inspectionRouteActivity(source().summary(), s()?.sessionId, routeActivityOf(routeSession())));
     // Task 244: a lead session shows team notices and its replies to them as its mode says.
     const row = s();
     return row && !subagentOpen() && isLeadSession(row) ? foldNoticeTurns(items, leadNoticeMode(row)) : items;
@@ -1097,16 +1100,49 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   const settleReading = (before = false) => { if (before) reading.beforeChange(); else reading.changed(); };
   const scrollIntent = () => {
     if (!placed()) return; // Initial placement owns the hidden loading layout.
-    setLayoutHeld(true); motion.intent(); latestAfterScroll = false;
+    setLayoutHeld(true); ownNavigation.cancelQueued(); setOwnReveal(undefined); motion.intent(); latestAfterScroll = false;
     end.release(); setFollowing(false); reading.remember();
   };
   const latest = () => {
+    ownNavigation.reset();
+    setOwnReveal(undefined); setOwnPivot(undefined);
     setRestoring(undefined);
     holdSelection();
     if (motion.active()) { latestAfterScroll = true; return; }
     reading.reset(); end.pin();
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
   };
+  const [ownReveal, setOwnReveal] = createSignal<{ id: string; target: string | undefined }>();
+  const [ownPivot, setOwnPivot] = createSignal<string>();
+  const ownNavigation = createOwnMessageNavigation({
+    source, items: () => view.items,
+    available: () => placed() && !preview() && !restoring() && !layoutHeld(),
+    scrolling: layoutHeld,
+    pivot: () => {
+      const index = view.items.findIndex(item => `item-${item.id}` === ownPivot());
+      return index < 0 ? view.items.length : index;
+    },
+    begin: () => { setRestoring(undefined); end.release(); setFollowing(false); reading.remember(); },
+    reveal: id => setOwnReveal({ id, target: source().target()?.id }),
+  });
+  // Wait for the same projection/measurement gate as normal reading. A target
+  // outside the virtual window first uses its estimate, then the named anchor
+  // corrects it when the row mounts and receives its actual height.
+  createEffect(() => {
+    const request = ownReveal();
+    if (!request || request.target !== source().target()?.id || measuring().length || !markdownReady() || motion.active() || selectionInside()) return;
+    const frame = requestAnimationFrame(() => {
+      if (request.target !== source().target()?.id || request !== ownReveal()) return;
+      const key = `item-${request.id}`, offset = measuredOffset(key);
+      if (offset === undefined) return;
+      scroller.scrollTo({ top: scroller.scrollTop + offset, behavior: "instant" });
+      virtualizer.scrollOffset = scroller.scrollTop;
+      virtualizer.measure();
+      reading.restore([{ key, offset: 0 }]);
+      setOwnReveal(undefined);
+    });
+    onCleanup(() => cancelAnimationFrame(frame));
+  });
   const showsReply = (key: string, reply: string) => {
     const shown = source();
     if (shown.readOnly || subagentOpen() || shown.target()?.id !== key || !scroller.isConnected) return false;
@@ -1124,6 +1160,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     liveScroller = scroller;
     liveLatest = latest;
     liveReply = showsReply;
+    setOwnMessageNavigation(ownNavigation);
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
@@ -1196,9 +1233,12 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     if (liveScroller === scroller) liveScroller = undefined;
     if (liveLatest === latest) liveLatest = undefined;
     if (liveReply === showsReply) liveReply = undefined;
+    setOwnMessageNavigation(current => current === ownNavigation ? undefined : current);
   });
   const onScroll = () => {
     if (motion.active()) {
+      ownNavigation.moved(); setOwnReveal(undefined);
+      setOwnPivot(activityReadingRows(scroller).visible()[0]?.key);
       motion.moved(); reading.remember();
       if (!olderQueued && !preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
         const target = source().target()?.id;
@@ -1226,6 +1266,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     if (layoutTarget === target) return;
     savePosition();
     layoutTarget = target;
+    ownNavigation.reset(); setOwnReveal(undefined); setOwnPivot(undefined);
     const saved = activityPositions.get(target);
     setRestoring(saved && !saved.following ? saved : undefined);
     restoredPage = false; windowEvents = [];
@@ -1301,6 +1342,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     if (sends.added.length) jumpToLatest();
   }));
   createEffect(on(preview, (match) => {
+    ownNavigation.reset(); setOwnReveal(undefined); setOwnPivot(undefined);
     showingPreview = !!match;
     if (match) {
       setRestoring(undefined);
@@ -1450,7 +1492,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
                     const item = () => byId().get(id);
                     // Solid writes data-index after this ref, so supply it before measuring.
                     return (
-                      <div class="act-virtual-row" data-index={indexOf().get(id) ?? 0} data-start={flow().starts.get(id) ?? 0}
+                      <div class="act-virtual-row" classList={{ "act-own-highlight": ownNavigation.highlight() === id }} data-index={indexOf().get(id) ?? 0} data-start={flow().starts.get(id) ?? 0}
                         ref={(node) => {
                           const index = indexOf().get(id) ?? 0;
                           node.dataset.index = String(index);

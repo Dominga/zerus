@@ -406,6 +406,7 @@ object NativeParser {
             val next = metadata.copy(originalIds = (metadata.originalIds + listOfNotNull(accepted?.id)).distinct().take(8))
             if (old < 0) rows += next else if (rows[old].voice!!.revision < voice.revision) rows[old] = next
         }
+        rows += QuestionRouteActivity.events(raw)
         return if (raw.string("history_epoch").isNotBlank()) rows.toList() else rows.sortedBy { it.at }
     }
     fun messageBlockReason(raw: JSONObject?): String {

@@ -57,8 +57,8 @@ fn native_mac_current_routing_cannot_replace_original_observation_or_child_custo
         &invocation,
         &[],
         &AtomicBool::new(false),
-        move |command| {
-            let mut child = command.spawn()?;
+        move |command, input_spawn| {
+            let mut child = input_spawn.spawn(command)?;
             observed_pid.store(child.id(), Ordering::Release);
             let original_live = child.try_wait().is_ok_and(|s| s.is_none());
             // Nominal routing freshness is not a native selection/permission.
@@ -111,4 +111,58 @@ fn native_mac_current_routing_cannot_replace_original_observation_or_child_custo
         io::Error::last_os_error().raw_os_error(),
         Some(libc::ECHILD)
     );
+}
+
+#[test]
+fn native_mac_refused_socket_input_reaches_eof_before_the_guard_returns() {
+    let temp = tempfile::tempdir().unwrap();
+    let received = temp.path().join("input");
+    let completed = temp.path().join("completed");
+    let read = received.clone();
+    let done = completed.clone();
+    let path = PathBuf::from("/bin/zsh");
+    let routing = Arc::new(relay::Connection::select(&path).unwrap());
+    let call = Invocation {
+        args: vec![
+            "-f".into(),
+            "-c".into(),
+            "cat > \"$1\"; : > \"$2\"".into(),
+            "zerus-fixture".into(),
+            received.to_string_lossy().into(),
+            completed.to_string_lossy().into(),
+        ],
+        stdin: Some(b"private input must stay withheld".to_vec()),
+        timeout: Duration::from_secs(3),
+        request_id: None,
+    };
+    let refused = Arc::new(AtomicBool::new(false));
+    let observed = refused.clone();
+    let result = run::run_owned(
+        &path,
+        &call,
+        &[],
+        &AtomicBool::new(false),
+        move |command, input| {
+            let mut child = input.spawn(command)?;
+            if observe_mac_child(&routing, &mut child, || true).is_err() {
+                observed.store(true, Ordering::Release);
+                drop(child.stdin.take());
+            }
+            // A hidden writer duplicate must not delay EOF inside this same
+            // observation callback. No runner input handoff has happened yet.
+            let until = Instant::now() + Duration::from_secs(2);
+            while !done.exists() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(child)
+        },
+        Arc::new(()),
+    );
+    assert!(refused.load(Ordering::Acquire));
+    assert!(result.is_err());
+    assert!(
+        completed.exists(),
+        "refused original input did not reach EOF before callback return"
+    );
+    assert_eq!(std::fs::read(read).unwrap(), b"");
 }

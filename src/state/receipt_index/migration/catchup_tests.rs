@@ -76,14 +76,44 @@ fn appends_and_rewrites_during_a_walk_converge_in_that_walk() {
         original(&catalog, n);
     }
     let mut migration = walker(temp.path());
-    let mut changed = false;
-    let attempts = drive(&mut migration, |_| {
-        if !changed {
-            // While discovery runs: a new original and a rewritten one.
-            raw(&catalog, 1_000, 1_000.0);
-            raw(&catalog, 5, 50.0);
-            changed = true;
+    let mut rewritten = None;
+    let attempts = drive(&mut migration, |migration| {
+        if rewritten.is_some()
+            || migration
+                .walk
+                .as_ref()
+                .is_none_or(|walk| walk.entries.is_none())
+        {
+            return;
         }
+        // ReadDir order and the number read before a 25 ms yield vary. Choose
+        // an unread row whose projection will change, not a fixed filename
+        // that Windows may already have listed (zerus-opa8s).
+        let request: String = migration
+            .catalog
+            .db
+            .query_row(
+                "SELECT request FROM receipt_rows WHERE source='terminal' AND at<>50
+               AND request NOT IN (SELECT request FROM receipt_walk_seen)
+               ORDER BY request LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let n = uuid::Uuid::parse_str(&request).unwrap().as_u128();
+        let legacy_seen: bool = migration
+            .catalog
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM receipt_walk_seen WHERE request=?)",
+                [uuid::Uuid::from_u128(5).to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        eprintln!("CATCHUP_FIXTURE selected_unread={n} legacy_five_already_read={legacy_seen}");
+        raw(&catalog, 1_000, 1_000.0);
+        raw(&catalog, n, 50.0);
+        rewritten = Some(n);
     });
     // #5 is rewritten with a new `at`. When discovery had already passed it,
     // the first catch-up rereads it, the rebound trigger rotates the epoch on
@@ -94,6 +124,37 @@ fn appends_and_rewrites_during_a_walk_converge_in_that_walk() {
     assert!(migration.catalog.coverage_verified());
     let directory = temp.path().join(Source::Terminal.directory());
     assert_eq!(sealed_stamp(&catalog), stamp(&directory).unwrap());
+    assert_eq!(row_at(&catalog, 1_000), Some(1_000.0));
+    assert_eq!(row_at(&catalog, rewritten.unwrap()), Some(50.0));
+}
+
+#[test]
+fn an_already_discovered_rewrite_converges_after_rewitnessing() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    for n in 1..=150 {
+        original(&catalog, n);
+    }
+    let mut migration = walker(temp.path());
+    let mut changed = false;
+    let attempts = drive(&mut migration, |migration| {
+        if !changed
+            && migration
+                .walk
+                .as_ref()
+                .is_some_and(|walk| walk.entries.is_none())
+        {
+            // Unlike the unread case above, catch-up must update this row's
+            // projection itself. Its epoch rotation requires a second listing.
+            raw(&catalog, 1_000, 1_000.0);
+            raw(&catalog, 5, 50.0);
+            changed = true;
+        }
+    });
+    assert!(changed);
+    assert_eq!(attempts, 2);
+    assert_eq!(state(&migration), (151, true));
+    assert!(migration.catalog.coverage_verified());
     assert_eq!(row_at(&catalog, 1_000), Some(1_000.0));
     assert_eq!(row_at(&catalog, 5), Some(50.0));
 }
@@ -228,6 +289,25 @@ fn a_rewrite_that_keeps_size_and_mtime_is_reread_near_the_walk_start() {
             .as_ref()
             .is_some_and(|walk| walk.entries.is_none());
         if discovered && !rewritten {
+            let (before_stamp, file_at) = file_state(&path).unwrap();
+            // Model a coarse clock explicitly. Seeding 150 durable rows on a
+            // slow runner need not finish within the real two-second window.
+            // The input clock is one second after this original's mtime.
+            eprintln!(
+                "CATCHUP_CLOCK real_setup_age={} window={COARSE_CLOCK}",
+                migration.walk.as_ref().unwrap().at - file_at
+            );
+            migration.walk.as_mut().unwrap().at = file_at + 1.0;
+            let cached: String = migration
+                .catalog
+                .db
+                .query_row(
+                    "SELECT stamp FROM receipt_rows WHERE source='terminal' AND request=?",
+                    [uuid::Uuid::from_u128(9).to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(cached, before_stamp);
             let modified = fs::metadata(&path).unwrap().modified().unwrap();
             let before = fs::read_to_string(&path).unwrap();
             let after = before.replace("\"submitted_at\":9.0", "\"submitted_at\":8.0");
@@ -242,6 +322,7 @@ fn a_rewrite_that_keeps_size_and_mtime_is_reread_near_the_walk_start() {
                 .set_times(fs::FileTimes::new().set_modified(modified))
                 .unwrap();
             fs::rename(&staged, &path).unwrap();
+            assert_eq!(file_stamp(&path).unwrap(), before_stamp);
             rewritten = true;
         }
     });

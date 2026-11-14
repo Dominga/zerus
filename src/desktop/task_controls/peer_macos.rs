@@ -418,3 +418,6 @@ impl Resident {
         Ok(self.arguments.clone())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -19,6 +19,8 @@ use std::{
 const POLL_EVENTS: usize = 16;
 
 pub(super) struct Runtime {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    teams: super::teams::Worker,
     fleet: fleet::Runtime,
     producer: Arc<feed::Producer>,
     presence: Option<presence_worker::Runtime>,
@@ -61,13 +63,17 @@ pub(super) struct Runtime {
 
 /// The actor can replace only an already admitted background runtime after its
 /// actual original drain. A display-ready slot or client retry grants nothing.
+/// The caller passes the runtime it holds; whether it drained, which includes
+/// the Teams worker's own thread, is decided here and nowhere else.
 pub(super) fn replacement_permitted(
     background_mode: bool,
-    drained: bool,
+    background: Option<&Runtime>,
     location: &Location,
     store: &Store,
 ) -> Result<bool> {
-    Ok(background_mode && drained && super::revoke::background_permitted(location, store)?)
+    Ok(background_mode
+        && background.is_some_and(Runtime::drained)
+        && super::revoke::background_permitted(location, store)?)
 }
 
 #[cfg(test)]
@@ -126,6 +132,8 @@ impl Runtime {
                 stopping: false,
                 #[cfg(windows)]
                 swarm: super::swarm_windows::Runtime::new(config, owner.clone()),
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                teams: super::teams::Worker::new(config, epoch, owner.clone()),
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
@@ -192,6 +200,8 @@ impl Runtime {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.observe(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.teams.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.worktree.observe(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.launch.observe(&event);
@@ -232,6 +242,8 @@ impl Runtime {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.reject(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.teams.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.worktree.reject(&event);
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.launch.reject(&event);
@@ -264,6 +276,8 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.teams.poll();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.worktree.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -637,6 +651,8 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.worktree.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.teams.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.launch.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.message.request_stop();
@@ -681,6 +697,8 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.teams.poll();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.worktree.poll(store, self.notifications.handoff());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.launch.poll(store, self.notifications.handoff());
@@ -717,6 +735,7 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.drained = self.drained
+                && self.teams.drained()
                 && self.creation.drained()
                 && self.worktree.drained()
                 && self.launch.drained()

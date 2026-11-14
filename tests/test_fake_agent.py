@@ -215,6 +215,7 @@ class TerminalAgent(Fixture):
         self.addCleanup(self.stop_server)
 
     def tmux(self, *args, check=True):
+        assert self.socket.parent.is_dir(), "the private tmux socket directory is gone"
         result = subprocess.run([TMUX, "-S", str(self.socket), "-f", os.devnull, *args], env=self.env,
                                 capture_output=True, text=True, timeout=5)
         if check:

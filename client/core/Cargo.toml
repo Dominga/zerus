@@ -22,9 +22,11 @@ uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["parsing"] }
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 zerus-desktop-migration = { path = "../../crates/desktop-migration" }
+zerus-team-plan = { path = "../../crates/team-plan" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+zerus-file-lock = { path = "../../crates/file-lock" }
 socket2 = "0.6"
 
 # Konsole tabs and raising over the session D-Bus (libdbus); the Linux app

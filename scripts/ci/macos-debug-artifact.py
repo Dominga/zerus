@@ -21,6 +21,7 @@ FILES = {'hgs': 'target/debug/hgs', 'fake_agent': 'target/debug/examples/fake_ag
          'effort_seed': 'target/debug/hgs-effort-seed'}
 HELPERS = ('scripts/ci/cli.sh', 'scripts/ci/macos-debug-artifact.py',
            'scripts/ci/agent-compatibility.py', 'scripts/ci/agent-compatibility.json',
+           'scripts/ci/native_discovery.py',
            'scripts/ci/native-effort-seed.py')
 ARCHES = {'arm64': ('aarch64-apple-darwin', 0x0100000C),
           'x86_64': ('x86_64-apple-darwin', 0x01000007)}

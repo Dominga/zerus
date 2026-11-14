@@ -79,6 +79,15 @@ fn a_raw_null_conversation_survives_transfer_and_original_input_proof() {
     control("cid-null");
 }
 #[test]
+fn a_missing_conversation_key_survives_transfer_without_becoming_null() {
+    control("cid-missing");
+}
+#[test]
+fn missing_to_null_and_null_to_missing_refuse_the_original_commit() {
+    control("cid-race-missing-to-null");
+    control("cid-race-null-to-missing");
+}
+#[test]
 fn a_raw_empty_conversation_survives_transfer_and_original_input_proof() {
     control("cid-empty");
 }
@@ -282,17 +291,25 @@ fn fixture() {
     let legacy = legacy_record_path(string(&data.original, "name"));
     if case.starts_with("cid-") {
         let cid = match case.as_str() {
-            "cid-null" | "cid-race-null" => Value::Null,
-            "cid-empty" | "cid-race-empty" => json!(""),
-            "cid-number" => json!(7),
-            "cid-object" => json!({"invalid":true}),
-            "cid-array" => json!([]),
-            "cid-bool" => json!(false),
+            "cid-missing" | "cid-race-missing-to-null" => None,
+            "cid-null" | "cid-race-null" | "cid-race-null-to-missing" => Some(Value::Null),
+            "cid-empty" | "cid-race-empty" => Some(json!("")),
+            "cid-number" => Some(json!(7)),
+            "cid-object" => Some(json!({"invalid":true})),
+            "cid-array" => Some(json!([])),
+            "cid-bool" => Some(json!(false)),
             _ => panic!("Unknown raw conversation control"),
         };
-        data.original["conversation_id"] = cid.clone();
+        if let Some(cid) = &cid {
+            data.original["conversation_id"] = cid.clone();
+        } else {
+            data.original
+                .as_object_mut()
+                .unwrap()
+                .remove("conversation_id");
+        }
         let mut job = value(&data.job).unwrap();
-        job["identity"][1] = cid.clone();
+        job["identity"][1] = cid.clone().unwrap_or(Value::Null);
         data.job = encoded(&job).unwrap();
         atomic(&legacy, &data.original.to_string()).unwrap();
         atomic(
@@ -326,13 +343,24 @@ fn fixture() {
             assert!(attempted.is_err());
             let transaction = root().join(DIRECTORY).join(&data.sid);
             let before = fs::read(transaction.join("before.json")).unwrap();
-            assert_eq!(value(&before).unwrap()["record"]["conversation_id"], cid);
+            assert_eq!(
+                value(&before).unwrap()["record"].get("conversation_id"),
+                cid.as_ref()
+            );
             let mut foreign = value(&fs::read(&legacy).unwrap()).unwrap();
-            foreign["conversation_id"] = if cid.is_null() {
-                json!("")
-            } else {
-                Value::Null
-            };
+            match case.as_str() {
+                "cid-race-missing-to-null" => foreign["conversation_id"] = Value::Null,
+                "cid-race-null-to-missing" => {
+                    foreign.as_object_mut().unwrap().remove("conversation_id");
+                }
+                _ => {
+                    foreign["conversation_id"] = if cid.as_ref().unwrap().is_null() {
+                        json!("")
+                    } else {
+                        Value::Null
+                    }
+                }
+            }
             let changed = encoded(&foreign).unwrap();
             atomic(&legacy, std::str::from_utf8(&changed).unwrap()).unwrap();
             assert_eq!(
@@ -348,12 +376,12 @@ fn fixture() {
         }
         let after = begin(&writer, &data.original, until).unwrap();
         data.check(&after);
-        assert_eq!(after["conversation_id"], cid);
+        assert_eq!(after.get("conversation_id"), cid.as_ref());
         let transaction = root().join(DIRECTORY).join(&data.sid);
         let before = fs::read(transaction.join("before.json")).unwrap();
         assert_eq!(value(&before).unwrap()["record"], data.original);
         let retained = value(&fs::read(transaction.join("legacy-record.json")).unwrap()).unwrap();
-        assert_eq!(retained["conversation_id"], cid);
+        assert_eq!(retained.get("conversation_id"), cid.as_ref());
         let input = input_domain::Input::acquire(&after, until).unwrap();
         input.verify().unwrap();
         for key in [&data.old, &data.sid] {

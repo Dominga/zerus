@@ -10,7 +10,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::fs::MetadataExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -81,11 +81,16 @@ impl Fixture {
     }
     fn run(&self, args: &[&str], input: &[u8]) -> Output {
         fn drain(reader: &mut impl Read, bytes: &mut Vec<u8>, ended: &mut bool) {
-            if *ended { return; }
+            if *ended {
+                return;
+            }
             loop {
                 let mut chunk = [0; 8192];
                 match reader.read(&mut chunk) {
-                    Ok(0) => { *ended = true; return; }
+                    Ok(0) => {
+                        *ended = true;
+                        return;
+                    }
                     Ok(n) => {
                         assert!(bytes.len() + n <= 128 << 10, "private CLI output bound");
                         bytes.extend_from_slice(&chunk[..n]);
@@ -104,7 +109,10 @@ impl Fixture {
         for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             assert!(flags >= 0);
-            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+                0
+            );
         }
         let (mut output, mut error) = (Vec::new(), Vec::new());
         let (mut stdout_ended, mut stderr_ended) = (false, false);
@@ -195,6 +203,63 @@ fn grant(root: &Path) {
     db.execute("UPDATE desktop_ownership SET state='service',owner_epoch=?1,origin=?2,rearm_required=0 WHERE id=1",
         rusqlite::params![uuid::Uuid::new_v4().to_string(),serde_json::to_string(&origin).unwrap()]).unwrap();
 }
+fn input_stage(imports: &Path, import_id: &str) -> Option<(PathBuf, PathBuf, Value)> {
+    fs::read_dir(imports).unwrap().take(32).find_map(|entry| {
+        let path = entry.ok()?.path();
+        if !path.file_name()?.to_str()?.ends_with(".owner-v1.json") {
+            return None;
+        }
+        let file = fs::File::open(&path).ok()?;
+        if file.metadata().ok()?.len() > 4096 {
+            return None;
+        }
+        let mut bytes = vec![];
+        file.take(4097).read_to_end(&mut bytes).ok()?;
+        if bytes.len() > 4096 {
+            return None;
+        }
+        let record: Value = serde_json::from_slice(&bytes).ok()?;
+        if record["import_id"] != import_id {
+            return None;
+        }
+        let stage = imports.join(record["stage"].as_str()?);
+        // Lease::input reads its new marker before stage() creates these.
+        // Rewriting the marker sooner can race that original bounded read.
+        if !stage.join("snapshots").is_dir() || !stage.join("pages").is_dir() {
+            return None;
+        }
+        Some((path, stage, record))
+    })
+}
+
+#[test]
+fn an_owner_marker_is_not_yet_an_initialised_input_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join(".stage-private");
+    fs::create_dir(&stage).unwrap();
+    let marker = dir.path().join(".stage-private.owner-v1.json");
+    let record = json!({"import_id":"private-import", "stage":".stage-private", "created":123});
+    let original = serde_json::to_vec(&record).unwrap();
+    fs::write(&marker, &original).unwrap();
+    assert!(
+        input_stage(dir.path(), "private-import").is_none(),
+        "the creator has published its marker but still needs to read it back"
+    );
+    fs::create_dir(stage.join("snapshots")).unwrap();
+    assert!(
+        input_stage(dir.path(), "private-import").is_none(),
+        "both input directories must exist after the original lease read"
+    );
+    assert_eq!(fs::read(&marker).unwrap(), original);
+    fs::create_dir(stage.join("pages")).unwrap();
+    let (found_marker, found_stage, found_record) =
+        input_stage(dir.path(), "private-import").unwrap();
+    assert_eq!(
+        (found_marker, found_stage, found_record),
+        (marker, stage, record)
+    );
+}
+
 #[test]
 fn actual_cli_publishes_through_the_granted_service_actor_and_retains_immutable_identity() {
     let bus = bus::Bus::new();
@@ -300,25 +365,7 @@ fn actual_cli_publishes_through_the_granted_service_actor_and_retains_immutable_
     let imports = fixture.root.path().join("state/desktop/imports");
     assert!(imports.is_dir());
     let (stale_marker, stale_path) = loop {
-        let found = fs::read_dir(&imports).unwrap().take(32).find_map(|entry| {
-            let path = entry.ok()?.path();
-            if !path.file_name()?.to_str()?.ends_with(".owner-v1.json") {
-                return None;
-            }
-            let file = fs::File::open(&path).ok()?;
-            if file.metadata().ok()?.len() > 4096 {
-                return None;
-            }
-            let mut bytes = vec![];
-            file.take(4097).read_to_end(&mut bytes).ok()?;
-            if bytes.len() > 4096 {
-                return None;
-            }
-            let mut record: Value = serde_json::from_slice(&bytes).ok()?;
-            if record["import_id"] != stale_id {
-                return None;
-            }
-            let stage = imports.join(record["stage"].as_str()?);
+        let found = input_stage(&imports, &stale_id).map(|(path, stage, mut record)| {
             record["created"] = json!(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -327,7 +374,7 @@ fn actual_cli_publishes_through_the_granted_service_actor_and_retains_immutable_
                     - 86460
             );
             fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-            Some((path, stage))
+            (path, stage)
         });
         if let Some(found) = found {
             break found;
@@ -354,7 +401,11 @@ fn actual_cli_publishes_through_the_granted_service_actor_and_retains_immutable_
         .into_iter()
         .flatten()
         .take(32)
-        .filter_map(|entry| entry.ok().map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
         .collect();
     let creator = abandoned.0.try_wait().unwrap();
     let creator_state = match creator {

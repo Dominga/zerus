@@ -655,13 +655,8 @@ fn spawn_held(program: &str, args: &[&str]) -> Option<(Helper, std::os::fd::Owne
         .map(|e| e.as_ptr() as *mut _)
         .chain([std::ptr::null_mut()])
         .collect();
-    let mut ends = [0; 2];
-    // SAFETY: pipe2 fills two new descriptors, owned below.
-    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return None;
-    }
-    // SAFETY: fresh descriptors that nothing else owns.
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    let turn = zerus_client_core::unix_spawn::turn();
+    let (read, write) = zerus_client_core::unix_spawn::pipe_in_turn(&turn).ok()?;
     // SAFETY: the actions and attributes are initialised before use and
     // destroyed after the spawn; every pointer outlives the call.
     unsafe {
@@ -923,13 +918,13 @@ fn systemd_now(unit: &str) -> Service {
 fn launchd_now(label: &str) -> Service {
     // SAFETY: getuid cannot fail.
     let uid = unsafe { libc::getuid() };
-    let Ok(child) = Command::new("launchctl")
-        .args(["print", &format!("gui/{uid}/{label}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+    let Ok(child) = crate::child_environment::spawn(
+        Command::new("launchctl")
+            .args(["print", &format!("gui/{uid}/{label}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    ) else {
         return Service::default();
     };
     let pid = child.id();
@@ -1510,7 +1505,8 @@ fn listen(
         .expect("instance listener is nonblocking");
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped = stop.clone();
-    let (wake, awakened) = UnixStream::pair().expect("instance wake socket");
+    let (wake, awakened) =
+        zerus_client_core::unix_spawn::socket_pair().expect("instance wake socket");
     let thread = std::thread::Builder::new()
         .name("zerus-client-instance".into())
         .spawn(move || {
@@ -2938,4 +2934,31 @@ mod tests {
         assert!(!lock.exists());
         assert!(matches!(try_lock(&lock, &own), LockAttempt::Taken(_)));
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+#[ignore = "opt-in before/after synthetic pidfd spawn cost measurement"]
+fn unix_spawn_cost_pidfd() {
+    let mut samples = Vec::new();
+    for n in 0..72 {
+        let before = Instant::now();
+        let Some((mut child, output)) = spawn_held("/usr/bin/true", &[]) else {
+            println!("SPAWN_COST {{\"family\":\"tauri-pidfd\",\"available\":false}}");
+            return;
+        };
+        let elapsed = before.elapsed().as_micros();
+        drop(output);
+        assert!(child.wait().unwrap().success());
+        if n >= 8 {
+            samples.push(elapsed);
+        }
+    }
+    samples.sort_unstable();
+    println!(
+        "SPAWN_COST {}",
+        serde_json::json!({"family":"tauri-pidfd", "samples":samples.len(),
+        "median_us":samples[samples.len()/2], "p95_us":samples[samples.len()*95/100],
+        "min_us":samples[0], "phase":std::env::var("ZERUS_SPAWN_COST_PHASE").unwrap_or_default()})
+    );
 }

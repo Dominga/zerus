@@ -211,6 +211,59 @@ fn a_never_started_send_releases_its_identity_and_an_unknown_one_waits_for_allow
 }
 
 #[test]
+fn a_retained_refusal_stays_visible_in_the_failed_row_and_after_a_read_only_reload() {
+    let detail = "Message was not sent. hgs refused before typing: the composer has a draft";
+    for pending in [false, true] {
+        let root = dir(&format!("handed-retained-refusal-{pending}"));
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let service = Arc::new(Service::default());
+        route(&c, &service);
+        answer(&service, move |plan| {
+            if pending {
+                SendAnswer::Pending(plan.clone())
+            } else {
+                SendAnswer::Unconfirmed(detail.into())
+            }
+        });
+        let view = open_local(&c);
+        send(&c, &view, "keep this draft");
+        until(&c, |v| !v.sending);
+        if pending {
+            lock(&service.checks)
+                .push_back(Checked::Settled(SendAnswer::Unconfirmed(detail.into())));
+            ticks(&c, &fake, FIRST, |v| !v.delivery_pending);
+        }
+        let view = c.current().unwrap();
+        assert_eq!(view.local[0].status, Status::Error);
+        assert_eq!(view.local[0].error, detail);
+        assert!(view.local[0].uncertain && view.uncertain && !view.can_send);
+        assert_eq!(view.text, "keep this draft");
+        assert!(held(&c).is_some());
+        assert!(sent(&fake).is_empty());
+        assert_eq!(lock(&service.offered).len(), 1);
+        c.flush();
+        store.flush();
+        drop(c);
+
+        let (again, fake) = send_hub_on(&store);
+        let lookup = Arc::new(Service::default());
+        route(&again, &lookup);
+        answer(&lookup, |_| panic!("a refusal reload cannot resend"));
+        lock(&lookup.checks).push_back(Checked::Settled(SendAnswer::Unconfirmed(detail.into())));
+        open_local(&again);
+        let view = ticks(&again, &fake, 0.0, |view| {
+            !lock(&lookup.checked).is_empty() && view.status == detail && !view.delivery_pending
+        });
+        // Reloads show the draft itself, not a duplicate local outgoing row.
+        assert!(view.local.is_empty());
+        assert_eq!(view.status, detail);
+        assert!(view.uncertain && !view.can_send && held(&again).is_some());
+        assert!(lock(&lookup.offered).is_empty() && sent(&fake).is_empty());
+    }
+}
+
+#[test]
 fn a_send_the_service_still_holds_is_checked_with_back_off_only_while_shown_and_open() {
     let root = dir("handed-pending");
     let (c, fake) = send_hub_on(&drafts(&root));

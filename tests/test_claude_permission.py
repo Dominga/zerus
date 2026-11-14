@@ -248,6 +248,7 @@ class PermissionModeGuard(unittest.TestCase):
         # may advance the clock before the TUI consumes an already queued key.
         self.script('tmux','#!'+sys.executable+'\n'+
             'import os,sys\nfrom pathlib import Path\n'+
+            f'if not Path({str(self.socket.parent)!r}).is_dir(): print("private tmux socket directory is gone", file=sys.stderr); sys.exit(97)\n'+
             f'CLOCK=Path({str(self.clock)!r})\nSTAMP=Path({str(self.root/"queued-enter")!r})\n'+
             'args=sys.argv[1:]\n'+
             "if args and args[0]=='send-keys':STAMP.write_bytes(CLOCK.read_bytes()[:8])\n"+

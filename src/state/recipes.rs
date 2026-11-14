@@ -239,31 +239,37 @@ pub(super) fn verify_history(record: &Value, allow_error: bool) -> Result<()> {
         {
             return Err(format!("{name}: saved Kimi conversation no longer exists"));
         }
-    } else if !transcript_saved(record) {
-        return Err(format!(
-            "{name}: persisted conversation is missing or empty"
-        ));
+    } else if !conversation_persisted(record) {
+        return Err(format!("{name}: persisted conversation is missing or empty"));
     }
     Ok(())
+}
+
+/// The conversation the restore's own history check would accept, for
+/// Claude and Codex (zerus-63rru.70): the confirmed conversation ID and a
+/// non-empty transcript, one metadata read. Kimi, DeepSeek and OpenCode
+/// keep today's decision and are never read here; the presentation gate in
+/// session_action reuses this same code, never a second rule.
+pub(super) fn conversation_persisted(record: &Value) -> bool {
+    if matches!(string(record, "agent"), "claude" | "codex") {
+        !string(record, "conversation_id").is_empty() && transcript_saved(record)
+    } else {
+        true
+    }
 }
 
 /// Whether the record's transcript (Claude's transcript, Codex's rollout) is
 /// a non-empty regular file: one metadata read, never its content.
 fn transcript_saved(record: &Value) -> bool {
+    #[cfg(test)]
+    crate::state::journal::read_order::note("transcript");
     Path::new(string(record, "transcript"))
         .metadata()
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
         .unwrap_or(false)
 }
 
-/// Whether a Claude or Codex archive has the conversation a restore resumes
-/// (zerus-wyrqg): a session that exited before its first message reported a
-/// conversation ID but wrote no transcript. A presentation gate; the
-/// restore's own `verify_history` stays the authority. Other agents are not
-/// read here (Kimi's check runs its CLI).
-pub(super) fn restore_conversation_saved(record: &Value) -> bool {
-    !matches!(string(record, "agent"), "claude" | "codex") || transcript_saved(record)
-}
+
 
 #[cfg(test)]
 mod tests {

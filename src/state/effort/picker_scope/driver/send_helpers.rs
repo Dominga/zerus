@@ -2,7 +2,7 @@
 use super::*;
 use std::{
     process::{Command, Stdio},
-    sync::atomic::Ordering,
+    sync::{atomic::Ordering, Mutex},
 };
 use zerus_client_core::run::writer_custody::Admission;
 
@@ -34,8 +34,24 @@ fn absent(error: &str, buffer: &str) -> bool {
             .is_some_and(|path| !path.is_empty())
 }
 
+// Reservation retains the same owner but is not a running helper. Once a
+// discard can spawn, its active charge follows the original physical exchange.
+struct CleanupSource {
+    owner: Arc<owner::Owner>,
+    active: Mutex<Option<Arc<owner::Charge>>>,
+}
+impl CleanupSource {
+    fn activate(&self) -> Result<()> {
+        let mut active = self.active.lock().map_err(|_| "Send cleanup source unavailable")?;
+        if active.is_some() { return Err("Send cleanup helper was already started".into()); }
+        *active = Some(self.owner.charge());
+        Ok(())
+    }
+}
+
 pub(super) struct Cleanup {
     owner: Arc<owner::Owner>,
+    source: Arc<CleanupSource>,
     progress: Arc<send::Progress>,
     admission: Option<Admission>,
     until: Instant,
@@ -49,10 +65,12 @@ impl Cleanup {
             .until
             .checked_add(Duration::from_secs(2))
             .ok_or("Invalid Send cleanup deadline")?;
-        let admission = Admission::reserve(owner.charge(), until)
+        let source = Arc::new(CleanupSource { owner: owner.clone(), active: Mutex::new(None) });
+        let admission = Admission::reserve(source.clone(), until)
             .map_err(|e| format!("Send cleanup custody refused: {e:?}"))?;
         Ok(Self {
             owner: owner.clone(),
+            source,
             progress,
             admission: Some(admission),
             until,
@@ -88,6 +106,7 @@ impl Cleanup {
             if Instant::now() >= self.until {
                 return Err("buffer cleanup uncertain: cleanup lease expired".into());
             }
+            self.source.activate()?;
             // This is the sole lease bypass: same keeper and inherited server,
             // exact parent UUID, no actor/key/native/record/analytics write.
             command

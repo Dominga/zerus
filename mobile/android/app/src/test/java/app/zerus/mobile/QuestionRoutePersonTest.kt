@@ -33,6 +33,21 @@ class QuestionRoutePersonTest {
         }
     }
 
+    @Test fun v2SignsTheComputerIssuedRevisionAndCannotBeStrippedToV1() {
+        val signed = JSONObject(vector.getJSONObject("statement").toString()).put("expected_revision",7)
+        val statement = RoutePersonStatement.parse(signed)
+        val signature = Ed25519Sign(WorkspaceProtocol.decode(vector.getString("phone_signing_seed"),32)).sign(statement.frame())
+        val publicKey = WorkspaceProtocol.decode(vector.getString("phone_signing_public_key"),32)
+        val shared=JSONObject(javaClass.classLoader!!.getResource("question-route-person-v2.json")!!.readText())
+        assertEquals(shared.getString("canonical_hex"),hex(statement.frame()))
+        assertEquals(shared.getString("signature"),WorkspaceProtocol.encode(signature))
+        WorkspaceCrypto.verify(publicKey,signature,statement.frame())
+        val changed = RoutePersonStatement.parse(JSONObject(signed.toString()).put("expected_revision",8))
+        assertThrows(Exception::class.java) { WorkspaceCrypto.verify(publicKey,signature,changed.frame()) }
+        assertThrows(Exception::class.java) { WorkspaceCrypto.verify(publicKey,signature,RoutePersonStatement.parse(vector.getJSONObject("statement")).frame()) }
+        assertEquals(7L,statement.json().getLong("expected_revision"))
+    }
+
     @Test fun onlyAValidStatementWithinItsLifetimeIsMade() {
         val good = RoutePersonStatement.parse(vector.getJSONObject("statement"))
         for(bad in listOf<() -> Any>({ good.copy(expiresAt = good.issuedAt) }, { good.copy(expiresAt = good.issuedAt + 301) },
@@ -91,4 +106,24 @@ class QuestionRoutePersonTest {
         assertEquals("The conversation changed. Refresh its exact identity before applying.",
             SessionActionPolicies.inspectReason(target,SessionQuestionRouting.personOperation,args(),JSONObject(raw.toString()).put("session_id","00000000-0000-4000-8000-0000000000c2")))
     }
+    @Test fun revisionStatusIsCapabilityGatedAndBoundToTheExactChildRead() {
+        val capability=setOf(SessionQuestionRouting.personRevisionOperation)
+        assertEquals("read",WorkspaceProtocol.operationClass(SessionQuestionRouting.personRevisionOperation))
+        assertTrue(SessionQuestionRouting.revisioned(capability,capability))
+        assertFalse(SessionQuestionRouting.revisioned(emptySet(),capability))
+        assertFalse(SessionQuestionRouting.revisioned(capability,emptySet()))
+        val status=JSONObject().put("request_id","read-id").put("op","question_route_child_status").put("accepted",true).put("durable",false)
+            .put("session_id",sessionId).put("run_id",target.run).put("conversation_id",target.conversation).put("person_off",true).put("revision",7)
+        assertEquals(7L,SessionQuestionRouting.latchRevision(status,"read-id",sessionId,target.run,target.conversation))
+        for((key,value) in listOf("request_id" to "other","run_id" to "other","conversation_id" to "other","session_id" to "other",
+                "accepted" to false,"durable" to true,"person_off" to "true","revision" to -1,"revision" to 7.0,"extra" to 1))
+            assertThrows(IllegalArgumentException::class.java) { SessionQuestionRouting.latchRevision(JSONObject(status.toString()).put(key,value),"read-id",sessionId,target.run,target.conversation) }
+    }
+
+    @Test fun anOrdinaryFailedReceiptShowsTheUpdateMessageEvenForALegacyAction() {
+        val message="Update the Zerus app on this phone to change this child's question routing."
+        val result=SessionActionPolicies.result(action(),JSONObject().put("request_id",action().requestId).put("state","failed").put("error",message))
+        assertEquals("failed",result.status);assertEquals(message,result.error)
+    }
+
 }

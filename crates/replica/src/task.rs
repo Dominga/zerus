@@ -21,6 +21,24 @@ use sha2::{Digest, Sha256};
 mod attempts;
 pub use attempts::{Settled, Settlement};
 
+#[cfg(test)]
+#[path = "task_team_tests.rs"]
+mod team_key_tests;
+
+#[cfg(test)]
+#[path = "task_team_finish_tests.rs"]
+mod team_finish_tests;
+
+#[cfg(test)]
+#[path = "task_team_handover_tests.rs"]
+mod team_handover_tests;
+
+#[cfg(not(feature = "test-without-team"))]
+#[path = "task_team.rs"]
+mod team;
+#[cfg(not(feature = "test-without-team"))]
+pub use team::TaskTeam;
+
 pub struct NewTask<'a> {
     pub project: &'a str,
     pub id: &'a str,
@@ -74,10 +92,20 @@ pub(crate) fn check_new_stage(stage: Stage) -> Result<()> {
 }
 
 pub(crate) fn check_title(title: &str) -> Result<()> {
-    if title.trim().is_empty() || title.len() > 512 || title.chars().any(char::is_control) {
-        return Err(Error::new("task title must be nonempty, at most 512 UTF-8 bytes and contain no control characters"));
+    // One shared rule: the nine bidirectional characters are refused as
+    // control characters are (zerus-63rru.75), in this one place.
+    if title.trim().is_empty() || title.len() > 512 || crate::forbidden_char(title).is_some() {
+        return Err(Error::new(
+            "task title must be nonempty, at most 512 UTF-8 bytes and contain no control or bidirectional characters",
+        ));
     }
     Ok(())
+}
+
+/// Whether an edit only drops files from the current set: no new media is
+/// added, so it may still run when the retained history is already full.
+fn removal_only(current: &[TaskAttachment], files: &[TaskAttachment]) -> bool {
+    files.len() < current.len() && files.iter().all(|file| current.contains(file))
 }
 
 impl TaskDoc {
@@ -104,6 +132,27 @@ impl TaskDoc {
         }
         if title.is_none() || !task.text.trim().is_empty() {
             check_text(task.text, "prompt")?;
+            // The plain card's title is the prompt's first line: it refuses
+            // only the line separators and the nine bidirectional characters
+            // (zerus-63rru.75 round 2). The prompt check already owns the
+            // tabs and the other control characters, so a pasted table or
+            // code keeps working; the explicit title keeps the full rule.
+            if title.is_none()
+                && task
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .any(|ch| {
+                        let point = ch as u32;
+                        matches!(point, 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2066..=0x2069)
+                    })
+            {
+                return Err(Error::new(
+                    "task title must be nonempty, at most 512 UTF-8 bytes and contain no control or bidirectional characters",
+                ));
+            }
         } else if !task.text.is_empty() {
             return Err(Error::new(
                 "an empty description must contain no whitespace",
@@ -341,6 +390,16 @@ impl TaskDoc {
     #[cfg(test)]
     pub(crate) fn set_raw_field(&mut self, key: &str, value: &str) {
         self.fields().insert(key, value).unwrap();
+        self.doc.commit();
+    }
+
+    /// Writes the cancelled mark and its reason exactly as an older build's
+    /// set_stage left them, for tests of the stale-mark intake and the
+    /// binding write's clear (zerus-63rru.36 round 3).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_cancelled_for_test(&mut self, at: i64, reason: &str) {
+        self.fields().insert("cancelled_at", at).unwrap();
+        self.fields().insert("cancel_reason", reason).unwrap();
         self.doc.commit();
     }
 
@@ -706,6 +765,10 @@ impl TaskDoc {
                 author,
                 stage,
                 target,
+                #[cfg(not(feature = "test-without-team"))]
+                team: self.team()?,
+                #[cfg(not(feature = "test-without-team"))]
+                team_invalid: self.team_invalid(),
                 rank: self.rank(),
                 session,
                 worker: match string(&fields, "worker")
@@ -838,14 +901,29 @@ impl TaskDoc {
         )?;
         check_attachments(files)?;
         self.check_media_budget(files, &[])?;
-        if files == self.attachments()? {
+        let current = self.attachments()?;
+        if files == current {
             return Ok(());
+        }
+        let encoded = serde_json::to_string(files)?;
+        // Every replacement appends the whole set to the operation history.
+        // Stop before the document outgrows what a phone can assemble, but
+        // keep removals available so an oversized legacy task can be reduced.
+        let retained = self.snapshot()?.len();
+        if retained
+            .saturating_add(encoded.len())
+            .saturating_add(64 * 1024)
+            > crate::MAX_TASK_DOCUMENT
+            && !removal_only(&current, files)
+        {
+            return Err(Error::new(
+                "this task's attachment history is full; remove attachments or start a new task",
+            ));
         }
         // Never lower this after removal: old binaries must not mutate a task
         // whose media history they cannot preserve or deliver.
         self.upgrade_schema(BASE_TASK_SCHEMA)?;
-        self.fields()
-            .insert("attachments", serde_json::to_string(files)?)?;
+        self.fields().insert("attachments", encoded)?;
         self.count_requirement()?;
         self.log("attachments", actor, now, "Updated attachments", None)?;
         self.commit()?;
@@ -972,6 +1050,15 @@ impl TaskDoc {
         }
         self.fields().insert("stage", to.as_str())?;
         self.fields().insert("stage_at", now)?;
+        // A task that leaves Review or Done for a stage where no work has
+        // started is no longer cancelled: the mark and its reason go with
+        // the stage, in the same commit (zerus-63rru.36). Every other move
+        // keeps them.
+        if matches!(from, Stage::Review | Stage::Done) && matches!(to, Stage::Todo | Stage::Backlog)
+        {
+            self.fields().delete("cancelled_at")?;
+            self.fields().delete("cancel_reason")?;
+        }
         self.log("stage", actor, now, to.as_str(), None)?;
         self.commit()?;
         Ok(())
@@ -1818,6 +1905,256 @@ mod tests {
             session: "codex/api".into(),
             ..Default::default()
         }
+    }
+
+    /// zerus-63rru.36 rule 1: leaving Review or Done for To do clears the
+    /// cancelled mark and its reason in the same commit; every other move
+    /// keeps them.
+    #[test]
+    fn moving_a_cancelled_task_to_a_stage_without_work_clears_the_mark() {
+        // Review -> To do, after a real cancel.
+        let mut cancelled = task(Stage::Todo);
+        cancelled
+            .record_send(&api(), "request-1", &Actor::Person, 2)
+            .unwrap();
+        cancelled
+            .record_cancel("Superseded", &Actor::Person, 3)
+            .unwrap();
+        assert!(cancelled.view().unwrap().cancelled_at.is_some());
+        cancelled.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        let view = cancelled.view().unwrap();
+        assert_eq!(view.cancelled_at, None);
+        assert_eq!(view.cancel_reason, "");
+
+        // Done -> To do: the mark survives Done (a report does not clear it),
+        // and the departure from Done clears it.
+        let mut done = task(Stage::Todo);
+        done.record_send(&api(), "request-1", &Actor::Person, 2)
+            .unwrap();
+        done.record_cancel("Wrong approach", &Actor::Person, 3)
+            .unwrap();
+        done.set_stage(Stage::Done, &Actor::Person, 4).unwrap();
+        assert!(done.view().unwrap().cancelled_at.is_some());
+        done.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
+        assert_eq!(done.view().unwrap().cancelled_at, None);
+        assert_eq!(done.view().unwrap().cancel_reason, "");
+
+        // Review -> Done keeps the mark: work has not restarted.
+        let mut kept = task(Stage::Todo);
+        kept.record_send(&api(), "request-1", &Actor::Person, 2)
+            .unwrap();
+        kept.record_cancel("Superseded", &Actor::Person, 3).unwrap();
+        kept.set_stage(Stage::Done, &Actor::Person, 4).unwrap();
+        assert!(kept.view().unwrap().cancelled_at.is_some());
+    }
+
+    /// zerus-63rru.36: a cancel and a move-back merged in either order leave
+    /// one of the four safe combinations; the two concurrent move-backs both
+    /// land on To do with the mark cleared.
+    #[test]
+    fn a_cancel_and_a_move_back_merge_into_a_safe_state_in_either_order() {
+        // Two copies at In progress: A cancels; B cancels and then moves the
+        // task back. The syncs happen in either order; every merged state is
+        // one of the safe combinations (the stage To do or Review, the mark
+        // set or cleared), and a set mark always refuses the intake.
+        let mut base = task(Stage::Todo);
+        base.record_send(&api(), "request-1", &Actor::Person, 2)
+            .unwrap();
+        let base = base.snapshot().unwrap();
+        for order in 0..2 {
+            let mut cancelling = TaskDoc::from_bytes(&base).unwrap();
+            let mut reviving = TaskDoc::from_bytes(&base).unwrap();
+            cancelling
+                .record_cancel("Superseded", &Actor::Person, 3)
+                .unwrap();
+            reviving
+                .record_cancel("Superseded", &Actor::Person, 3)
+                .unwrap();
+            reviving.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+            let (mut first, second) = if order == 0 {
+                (reviving, cancelling)
+            } else {
+                (cancelling, reviving)
+            };
+            assert!(first.import_block(&second.export_since_vv(&first.current_vv()).unwrap()));
+            let view = first.view().unwrap();
+            assert!(
+                matches!(view.stage, Stage::Todo | Stage::Review),
+                "{view:?}"
+            );
+            match (view.stage, view.cancelled_at.is_some()) {
+                (Stage::Todo, false) | (Stage::Todo, true) | (Stage::Review, true) => {}
+                (Stage::Review, false) => {
+                    // The move-back's clear beat the cancel's mark; the task
+                    // is In review without a mark: the intake refuses by
+                    // stage, so this is still conservative.
+                }
+                other => panic!("unsafe merged state: {other:?}"),
+            }
+        }
+
+        // Two concurrent move-backs land on To do, the mark cleared.
+        let mut shared = TaskDoc::from_bytes(&base).unwrap();
+        shared
+            .record_cancel("Superseded", &Actor::Person, 3)
+            .unwrap();
+        let marked = shared.snapshot().unwrap();
+        let mut one = TaskDoc::from_bytes(&marked).unwrap();
+        let mut two = TaskDoc::from_bytes(&marked).unwrap();
+        one.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        two.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
+        assert!(one.import_block(&two.export_since_vv(&one.current_vv()).unwrap()));
+        let view = one.view().unwrap();
+        assert_eq!(view.stage, Stage::Todo);
+        assert_eq!(view.cancelled_at, None);
+        assert_eq!(view.cancel_reason, "");
+    }
+
+    /// zerus-63rru.36: an older build's document — To do with the mark the
+    /// older set_stage left — is not cleared by this build's set_stage (it
+    /// clears only on the departure from Review or Done); the send, start
+    /// and reopen paths still clear it. Stated in the report as the
+    /// remaining older-document gap.
+    #[test]
+    fn an_older_builds_stale_mark_on_a_todo_task_is_not_cleared_by_set_stage() {
+        let mut doc = task(Stage::Todo);
+        // The old writer's leftover, reconstructed with the fields API: the
+        // new set_stage cannot produce it.
+        doc.fields().insert("cancelled_at", 2).unwrap();
+        doc.fields().insert("cancel_reason", "Superseded").unwrap();
+        // No move from To do departs Review or Done: the mark survives.
+        doc.set_stage(Stage::Backlog, &Actor::Person, 3).unwrap();
+        doc.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
+        let view = doc.view().unwrap();
+        assert!(view.cancelled_at.is_some(), "{view:?}");
+        // The paths that still clear it: a send.
+        doc.record_send(&api(), "request-1", &Actor::Person, 5)
+            .unwrap();
+        assert_eq!(doc.view().unwrap().cancelled_at, None);
+    }
+
+    /// zerus-63rru.36 round 2: the team-binding write clears the cancelled
+    /// mark and its reason in the same commit, whatever the stage; the
+    /// other fields of the document are untouched.
+    #[test]
+    #[cfg(not(feature = "test-without-team"))]
+    fn the_team_binding_write_clears_the_mark() {
+        let mut doc = task(Stage::Todo);
+        doc.fields().insert("cancelled_at", 2).unwrap();
+        doc.fields().insert("cancel_reason", "Superseded").unwrap();
+        let before = doc.view().unwrap();
+        doc.set_team_named(
+            Some(&crate::TaskTeam {
+                team: "00000000-0000-4000-8000-00000000beef".into(),
+                home: "00000000-0000-4000-8000-00000000beef".into(),
+            }),
+            "Example team",
+            &Actor::Person,
+            3,
+        )
+        .unwrap();
+        let view = doc.view().unwrap();
+        assert_eq!(view.cancelled_at, None, "{view:?}");
+        assert_eq!(view.cancel_reason, "", "{view:?}");
+        assert!(view.team.is_some());
+        // Nothing else new: the stage, the title and the author stay.
+        assert_eq!(view.stage, before.stage);
+        assert_eq!(view.title, before.title);
+        assert_eq!(view.author, before.author);
+    }
+
+    /// zerus-63rru.75: each of the nine bidirectional characters is refused
+    /// in a title as a control character is, through the one title check.
+    #[test]
+    fn each_bidirectional_character_is_refused_in_a_title() {
+        for ch in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let mut task = task(Stage::Todo);
+            let error = task
+                .set_title(&format!("Title{ch}name"), &Actor::Person, 2)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("no control or bidirectional"),
+                "{ch:?}: {error:?}"
+            );
+        }
+    }
+
+    /// zerus-63rru.75 round 2: the plain card's first line refuses only the
+    /// line separators and the nine bidirectional characters; a tab (a
+    /// pasted table or code) stays accepted there, while the explicit title
+    /// keeps the full rule.
+    #[test]
+    fn a_plain_cards_first_line_refuses_only_the_separators_and_bidirectionals() {
+        let plain = TaskDoc::create(NewTask {
+            project: "p1",
+            id: "T-tabbed",
+            text: "Column\twith\ta\ttab",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        assert_eq!(plain.title(), "");
+        let error = TaskDoc::create(NewTask {
+            project: "p1",
+            id: "T-202e01",
+            text: "First\u{202E}line",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .err()
+        .unwrap();
+        assert!(
+            error.to_string().contains("no control or bidirectional"),
+            "{error:?}"
+        );
+        // The explicit title keeps the full rule: the tab is refused there.
+        let error = TaskDoc::create_named(
+            NewTask {
+                project: "p1",
+                id: "T-ttab01",
+                text: "",
+                stage: Stage::Todo,
+                target: Target::Any,
+                author: Actor::Person,
+                rank: "V",
+                now: 1,
+            },
+            "Explicit\u{0009}title",
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.to_string().contains("no control or bidirectional"),
+            "{error:?}"
+        );
+    }
+
+    /// zerus-63rru.75: a title with non-ASCII letters is accepted; a title
+    /// that already holds a forbidden character still loads and moves.
+    #[test]
+    fn a_non_ascii_title_is_accepted_and_an_old_one_still_moves() {
+        let mut named = task(Stage::Todo);
+        named
+            .set_title("Заголовок Ångström 東京", &Actor::Person, 2)
+            .unwrap();
+        assert_eq!(named.title(), "Заголовок Ångström 東京");
+        // The value an older build stored: it still loads and moves.
+        let mut old = task(Stage::Todo);
+        old.fields().insert("title", "Old\u{202D}title").unwrap();
+        old.doc.commit();
+        assert_eq!(old.view().unwrap().title, "Old\u{202D}title");
+        old.set_stage(Stage::Backlog, &Actor::Person, 2).unwrap();
+        assert_eq!(old.view().unwrap().title, "Old\u{202D}title");
     }
 
     #[test]
@@ -2985,5 +3322,56 @@ mod tests {
             crowded.doc.commit();
             assert!(crowded.view().unwrap_err().to_string().contains("too many"));
         }
+    }
+
+    #[test]
+    fn replacing_a_full_media_set_beyond_the_task_document_cap_is_refused() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let size = crate::attachment::MAX_ATTACHMENT;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut media = |name: &str| {
+            let mut bytes = Vec::with_capacity(size);
+            while bytes.len() < size {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                bytes.extend_from_slice(&state.to_le_bytes());
+            }
+            bytes.truncate(size);
+            TaskAttachment {
+                name: name.into(),
+                mime: "application/octet-stream".into(),
+                data_base64: STANDARD.encode(bytes),
+                reference: String::new(),
+            }
+        };
+        let first = media("first.bin");
+        let second = media("second.bin");
+        let mut task = task(Stage::Todo);
+        task.set_attachments(&[first.clone(), second.clone()], &Actor::Person, 2)
+            .unwrap();
+        let retained = task.snapshot().unwrap().len();
+        assert!(
+            retained <= crate::MAX_TASK_DOCUMENT,
+            "the current document must fit the cap: {retained}"
+        );
+        let error = task
+            .set_attachments(
+                &[media("third.bin"), media("fourth.bin")],
+                &Actor::Person,
+                3,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("attachment history is full"),
+            "{error}"
+        );
+        assert_eq!(task.attachments().unwrap(), [first.clone(), second]);
+        assert_eq!(task.snapshot().unwrap().len(), retained);
+        // Removing attached files stays possible even when their retained
+        // history no longer fits another full set.
+        task.set_attachments(std::slice::from_ref(&first), &Actor::Person, 4)
+            .unwrap();
+        assert_eq!(task.attachments().unwrap(), [first]);
     }
 }

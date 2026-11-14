@@ -96,9 +96,8 @@ mod tests {
         .unwrap()
         .unwrap()
     }
-    // Every lock after a fixture's first may meet a parallel fork's inherited
-    // description (zerus-p1l5z): those steps wait for Busy, the no-write
-    // refusal, and keep every other result exactly.
+    // Preserve the bounded Busy-only fixture setup helper (zerus-p1l5z).
+    // Every other refusal remains exact; offers/publications are never retried.
     fn cancelled(f: &Fixture) -> Saved {
         drop(
             Journal::prepare(
@@ -144,19 +143,16 @@ mod tests {
         .unwrap();
         assert_eq!(current.saved().reconcile_id(), fresh.as_str());
     }
-    /// The reported step (zerus-p1l5z): while a parallel fork's child still
-    /// holds an inherited description of the metadata lock, a later discard
-    /// cycle's prepare refuses Busy before any write; the shared retry waits
-    /// for that description and then prepares the exact next ID.
+    /// A later discard cycle waits for the live metadata owner without
+    /// writing. An inherited description alone cannot extend that exclusion.
     #[test]
-    fn a_later_discard_cycle_waits_for_an_inherited_lock_description() {
+    fn a_later_discard_cycle_waits_only_for_the_metadata_owner() {
         let f = Fixture::new();
         let original = cancelled(&f);
         let next = original.next_check_id().unwrap();
         // Like fork before exec, this clone shares the lock's open file description.
         let lock = retry_busy(|| original.slot.lock(false)).unwrap();
         let inherited = lock.try_clone().unwrap();
-        drop(lock);
         let path = f.file.with_extension("reconcile");
         let bytes = fs::read(&path).unwrap();
         assert_eq!(
@@ -185,9 +181,10 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(8))
                 .unwrap();
             assert_eq!(fs::read(&path).unwrap(), bytes);
-            drop(inherited);
+            drop(lock);
             assert_eq!(waiter.join().unwrap().unwrap(), next.as_str());
         });
+        drop(inherited);
     }
     #[test]
     fn original_file_and_version_are_retained_across_identical_replacement_or_edit() {

@@ -524,6 +524,7 @@ impl Composers {
                 cleanup: None,
             },
             Checked::Settled(SendAnswer::Unsent(detail)) => Outcome::Failed { detail },
+            Checked::Settled(SendAnswer::Unconfirmed(detail)) => Outcome::Uncertain { detail },
             Checked::Settled(_) => Outcome::Uncertain {
                 detail: deferred_send::UNCONFIRMED.into(),
             },

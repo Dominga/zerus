@@ -204,8 +204,15 @@ fn rendered(
         request_id,
         acknowledgement_mode,
     );
-    let request =
-        crate::state::prepare_task_reply(to, "", request_id, &prompt, &files).map_err(fail)?;
+    let request = crate::state::prepare_task_reply(
+        to,
+        "",
+        request_id,
+        &prompt,
+        &files,
+        crate::state::Continuation::SameRun,
+    )
+    .map_err(fail)?;
     if request["expected_run_id"].as_str() != Some(selection.run_id.as_str())
         || request["expected_conversation_id"].as_str() != Some(selection.conversation_id.as_str())
     {
@@ -232,6 +239,22 @@ fn proven_result(mut reply: Value, proof: Option<task_refusal::Proof>) -> Result
     Ok(reply)
 }
 
+fn mode_refusal_result(
+    observed: std::result::Result<Observed, String>,
+    reply: impl FnOnce(&str, &str) -> Result<Value>,
+) -> Result<Value> {
+    match observed {
+        Ok(Observed::Refused { same_plan, proof }) => proven_result(
+            reply("refused", if same_plan { MODE_CHANGED } else { ANOTHER })?,
+            proof,
+        ),
+        _ => reply("uncertain", UNCERTAIN),
+    }
+}
+
+#[cfg(test)]
+mod mode_refusal_tests;
+
 pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     // The attempt's one budget counts from here (desktop-u's condition 1).
     let deadline = std::time::Instant::now() + super::attempts::BUDGET;
@@ -239,7 +262,7 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
     // The catalog and the project's lock within that budget too (#1519
     // review, zerus-9gzdp): a held lock refuses as busy, never waits on.
     let (machines, projects) = super::entry_until(config, deadline)?;
-    if actor(&machines.here, args, false)? != Actor::Person {
+    if super::teams::actor(config, &machines, args, false, false)? != Actor::Person {
         return Err(fail(
             "task start plans are for the person's explicit desktop Start",
         ));
@@ -247,6 +270,11 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
     let r = super::reference_by(config, args, &Actor::Person, Some((&projects, deadline)))?;
     let mut store = super::store_until(config, &r.project.0, deadline)?;
     let mut task = store.find(&r.task).map_err(fail)?;
+    super::attempts::pause_at(body["id"].as_str().unwrap_or_default(), "start_read");
+    {
+        let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
+        super::teams::guard(config, &machines, &task, "send", args, &mut meeting)?;
+    }
     let current = task.view().map_err(fail)?;
     let (selection, to) = if action == "start-plan" {
         let prepare: Prepare = serde_json::from_value(body.clone()).map_err(fail)?;
@@ -451,6 +479,13 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                     *detail.borrow_mut() = why;
                     Ok(Err(Closed { node: None, reason }))
                 };
+                super::attempts::pause_at(&plan.id, "start_managed");
+                let mut meeting = crate::teams::tasks::Meeting::Admitted(&mut *admitted);
+                if let Err(error) =
+                    super::teams::guard(config, &machines, task, "send", args, &mut meeting)
+                {
+                    return refuse("not_sendable", error.message);
+                }
                 // The frozen plan's business binding, against the task as
                 // admitted (after the proof's imports) and the current
                 // executor, selection and settings (condition 2).
@@ -514,6 +549,8 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
         };
         match admission {
             Admission::Reserved { .. } => {
+                #[cfg(test)]
+                delivery_canary();
                 let delivered = super::attempts::deliver(
                     config,
                     &r.project.0,
@@ -540,17 +577,9 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                         ),
                         _ => Err("Missing frozen Start mode".into()),
                     };
-                    return match observed {
-                        Ok(Observed::Refused { same_plan, proof }) => proven_result(
-                            result(
-                                "refused",
-                                if same_plan { MODE_CHANGED } else { ANOTHER },
-                                &reload()?,
-                            )?,
-                            proof,
-                        ),
-                        _ => result("uncertain", UNCERTAIN, &reload()?),
-                    };
+                    return mode_refusal_result(observed, |state, text| {
+                        result(state, text, &reload()?)
+                    });
                 }
                 let (state, text) = super::attempts::refusal(&closed, &detail.borrow());
                 return result(state, &text, &reload()?);
@@ -563,6 +592,11 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
         }
         store = super::store(config, &r.project.0)?;
         task = store.load(&uuid).map_err(fail)?;
+        super::attempts::pause_at(&plan.id, "start_legacy");
+        {
+            let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
+            super::teams::guard(config, &machines, &task, "send", args, &mut meeting)?;
+        }
         let current = task.view().map_err(fail)?;
         return legacy(
             &store,
@@ -605,7 +639,7 @@ fn delivered_result(
     let task = super::store(config, project)?.load(uuid).map_err(fail)?;
     match delivered {
         super::attempts::Delivered::Submitted(_) => result("submitted", "", &task),
-        super::attempts::Delivered::NotAdmitted(reason) => result("refused", &reason, &task),
+        super::attempts::Delivered::NotAdmitted { reason, .. } => result("refused", &reason, &task),
         super::attempts::Delivered::Uncertain(text) => result("uncertain", &text, &task),
     }
 }
@@ -656,6 +690,8 @@ fn legacy(
     if let Err(error) = check {
         return result("refused", &error.message, task);
     }
+    #[cfg(test)]
+    delivery_canary();
     if let Err(error) = crate::state::submit_task_reply(&to.session, &plan.request) {
         return result("uncertain", &error, task);
     }
@@ -669,6 +705,13 @@ fn legacy(
             .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     }
     result("submitted", "", task)
+}
+
+#[cfg(test)]
+fn delivery_canary() {
+    if let Some(path) = std::env::var_os("HGS_TEST_TASK_START_DELIVERY") {
+        std::fs::write(path, "native submission reached").unwrap();
+    }
 }
 
 #[cfg(test)]

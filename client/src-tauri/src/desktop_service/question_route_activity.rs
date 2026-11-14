@@ -42,25 +42,17 @@ fn text(value: &Value, bytes: usize) -> bool {
 /// One line exactly as the service builds it, about `session`.
 fn line(value: &Value, session: &str) -> bool {
     let parent = value["role"] == "parent";
-    let shape = if parent {
-        keys(
-            value,
-            &[
-                "request_id",
-                "at",
-                "role",
-                "child",
-                "parent",
-                "question",
-                "text",
-            ],
-        )
-    } else {
-        keys(
-            value,
-            &["request_id", "at", "role", "child", "parent", "question"],
-        )
-    };
+    let mut expected = vec!["request_id", "at", "role", "child", "parent", "question"];
+    if parent {
+        expected.push("text");
+    }
+    if value.get("outcome").is_some() {
+        if parent || !matches!(value["outcome"].as_str(), Some("not_sent" | "uncertain")) {
+            return false;
+        }
+        expected.push("outcome");
+    }
+    let shape = keys(value, &expected);
     let (child, owner, question) = (&value["child"], &value["parent"], &value["question"]);
     let preview = question["preview"].as_str().unwrap_or("\n");
     shape
@@ -138,6 +130,20 @@ mod tests {
     fn reply(routes: Vec<Value>) -> Value {
         json!({"request_id": ID, "accepted": true, "durable": false, "op": OP,
             "session_id": SESSION, "routes": routes})
+    }
+
+    #[test]
+    fn settled_outcomes_follow_the_shared_mobile_contract() {
+        let contract: Value = serde_json::from_str(include_str!("../../../../mobile/android/app/src/test/resources/question-route-outcome-contract.json")).unwrap();
+        for case in contract["activity"].as_array().unwrap() {
+            let parsed = routes(&reply(vec![case["line"].clone()]), ID, SESSION);
+            assert_eq!(
+                parsed.is_some(),
+                case["accepted"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]

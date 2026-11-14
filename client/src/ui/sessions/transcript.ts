@@ -507,7 +507,7 @@ export function mergeRoutes(events: readonly ActivityEvent[], routes: readonly R
   const out: DisplayEvent[] = events.slice();
   for (const route of [...routes].sort((a, b) => a.at - b.at)) {
     const line: RouteLine = { requestId: route.requestId, role: route.role, child: route.child.name, reference: route.child.reference,
-      parent: route.parent.name, preview: route.question.preview };
+      parent: route.parent.name, preview: route.question.preview, ...(route.outcome ? { outcome: route.outcome } : {}) };
     const event: DisplayEvent = { type: "QuestionRoute", at: route.at, activity_display_key: `route-${route.requestId}`, [ROUTE]: line };
     const text = route.text;
     const folds = text === undefined ? [] : out.flatMap((e, i) => !routeOf(e) && e.type !== "LocalMessage" && e.source !== "hgs_voice"
@@ -567,7 +567,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     const at = timeText(e.at);
     const route = routeOf(e);
     if (route) {
-      items.push({ id, kind: "receipt", at, sender: route.role === "child" ? tr("Question sent to the parent session") : tr("Question from a child session"), route });
+      items.push({ id, kind: "receipt", at, sender: route.outcome === "not_sent" ? tr("Question not sent to %1", route.parent.split("/").at(-1) ?? route.parent) : route.outcome === "uncertain" ? tr("Question delivery to %1 uncertain", route.parent.split("/").at(-1) ?? route.parent) : route.role === "child" ? tr("Question sent to the parent session") : tr("Question from a child session"), route });
       i++; continue;
     }
     if (e.turn_origin === "keep_warm" || e.origin === "keep_warm") {

@@ -6,7 +6,7 @@ import { desktopService } from "./desktopService";
  * The background service's submitted question routes of one local session
  * (zerus-sa9qn.33), as Activity lines: the newest 20 where it is the child or
  * the parent. Read-only: nothing here sends, answers or retries anything, and
- * refused or unknown routes are not shown. The child's words appear only as
+ * settled failures are shown to the child. The child's words appear only as
  * the route's own preview of at most 300 characters; a parent's line also
  * holds the exact text it received, so its own message folds into the line.
  */
@@ -20,6 +20,7 @@ export interface RouteActivity {
   question: { kind: string; questions: number; options: number; preview: string };
   /** The parent's exact received text; the child's line has none. */
   text?: string;
+  outcome?: "not_sent" | "uncertain";
 }
 
 export const ROUTE_LIMIT = 20;
@@ -37,10 +38,11 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
 function line(v: unknown, sessionId: string): RouteActivity | undefined {
   const parentRole = record(v) && v.role === "parent";
-  const keys = ["request_id", "at", "role", "child", "parent", "question", ...(parentRole ? ["text"] : [])];
+  const keys = ["request_id", "at", "role", "child", "parent", "question", ...(parentRole ? ["text"] : []), ...(record(v) && "outcome" in v ? ["outcome"] : [])];
   if (!exact(v, keys) || (v.role !== "child" && !parentRole)) return undefined;
   const { child, parent, question } = v;
-  if (!canonical(v.request_id) || !count(v.at, 1)) return undefined;
+  if ("outcome" in v && (parentRole || (v.outcome !== "not_sent" && v.outcome !== "uncertain"))) return undefined;
+  if (!canonical(v.request_id) || typeof v.at !== "number" || !Number.isSafeInteger(v.at) || v.at <= 0) return undefined;
   if (!exact(child, ["name", "reference", "session_id"]) || !bounded(child.name, 512) || !canonical(child.session_id)
     || !bounded(child.reference, 1024) || !child.reference.startsWith("zerus://session?")) return undefined;
   if (!exact(parent, ["name", "session_id"]) || !bounded(parent.name, 512) || !canonical(parent.session_id)) return undefined;
@@ -55,6 +57,7 @@ function line(v: unknown, sessionId: string): RouteActivity | undefined {
     parent: { name: parent.name, sessionId: parent.session_id },
     question: { kind: question.kind, questions: question.questions, options: question.options, preview: question.preview },
     ...(parentRole ? { text: v.text as string } : {}),
+    ...("outcome" in v ? { outcome: v.outcome as "not_sent" | "uncertain" } : {}),
   };
 }
 
@@ -63,6 +66,18 @@ export function parseRouteActivity(value: unknown, sessionId: string): RouteActi
   if (!exact(value, ["routes"]) || !Array.isArray(value.routes) || value.routes.length > ROUTE_LIMIT) return [];
   const lines = value.routes.map((route) => line(route, sessionId));
   return lines.every((l): l is RouteActivity => !!l) ? lines : [];
+}
+
+/** Bounded inspection outcomes also work for a remote computer. The shown
+ * session must match exactly; the service's local poll wins over an older
+ * inspection of the same immutable route. Nothing is retained per session. */
+export function inspectionRouteActivity(summary: Record<string, unknown> | undefined, sessionId: string | undefined,
+  polled: readonly RouteActivity[] = []): RouteActivity[] {
+  const inspected = sessionId && summary?.session_id === sessionId
+    ? parseRouteActivity({ routes: summary.question_route_activity }, sessionId) : [];
+  const byId = new Map(inspected.map((route) => [route.requestId, route]));
+  for (const route of polled) byId.set(route.requestId, route);
+  return [...byId.values()].sort((a, b) => b.at - a.at).slice(0, ROUTE_LIMIT);
 }
 
 /**

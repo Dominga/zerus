@@ -23,6 +23,15 @@ fn default_is_off() {
     assert!(crate::settings::find(ERROR).is_some());
 }
 #[test]
+fn kimi_cache_chooser_never_gets_an_automatic_selection() {
+    let mut question = q();
+    question["source"] = json!("kimi_cache_hint");
+    question["answer_transport"] = json!("kimi_tui");
+    for provider in ["kimi", "claude", "opencode", "dsh"] {
+        assert!(once(provider, &question).is_none());
+    }
+}
+#[test]
 fn only_supported_live_candidates_with_both_identities_are_considered() {
     let mut r = row();
     assert!(candidate("peer", &r).is_some());

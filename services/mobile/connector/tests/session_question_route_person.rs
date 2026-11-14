@@ -212,3 +212,93 @@ async fn without_the_marker_or_with_another_receipt_nothing_completes() {
     };
     assert_ne!(failed["state"], "completed");
 }
+
+#[test]
+fn v2_signs_a_bounded_revision_and_confirms_the_next_decision_even_without_a_value_change() {
+    let mut p = payload();
+    p["statement"]["expected_revision"] = json!(1);
+    session_question_route_person::validate(&p).unwrap();
+    assert!(session_question_route_person::result_valid(&receipt(), &p));
+    let mut same = receipt();
+    same["applied"] = json!(false);
+    assert!(session_question_route_person::result_valid(&same, &p));
+    same["revision"] = json!(1);
+    assert!(!session_question_route_person::result_valid(&same, &p));
+    for bad in [
+        json!(null),
+        json!(-1),
+        json!(1.0),
+        json!("1"),
+        json!(9_007_199_254_740_992u64),
+    ] {
+        p["statement"]["expected_revision"] = bad;
+        assert!(session_question_route_person::validate(&p).is_err());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_additive_status_read_is_gated_identity_bound_and_not_a_mutation() {
+    let op = session_question_route_person::REVISION_OPERATION;
+    assert!(!is_mutation(op));
+    let mut r = request(1);
+    r["operation"] = json!(op);
+    r["payload"] = json!({"session_id":payload()["statement"]["session_id"],"expected_run_id":"run-1","expected_conversation_id":"conversation-1"});
+    let status = json!({"request_id":r["request_id"],"op":"question_route_child_status","accepted":true,"durable":false,
+        "session_id":r["payload"]["session_id"],"run_id":"run-1","conversation_id":"conversation-1","person_off":false,"revision":7});
+    let scratch = Scratch::new("route-person-status");
+    let help = format!(
+        "{HELP_MARKER}\n{}",
+        session_question_route_person::REVISION_HELP_MARKER
+    );
+    let node = connector(&scratch, status.clone(), &help);
+    let Outcome::Finished(done) = node.execute(r.clone()).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(done["state"], "completed");
+    assert_eq!(done["result"], status);
+    assert_eq!(node.native.calls.borrow().len(), 1);
+    for (key, value) in [
+        ("request_id", json!("other")),
+        ("session_id", json!("other")),
+        ("run_id", json!("other")),
+        ("conversation_id", json!("other")),
+        ("accepted", json!(false)),
+        ("durable", json!(true)),
+        ("revision", json!(-1)),
+        ("extra", json!(1)),
+    ] {
+        let mut wrong = status.clone();
+        wrong[key] = value;
+        assert!(
+            !session_question_route_person::status_valid(
+                &wrong,
+                &r["payload"],
+                r["request_id"].as_str().unwrap()
+            ),
+            "{key}"
+        );
+    }
+    let scratch = Scratch::new("route-person-status-legacy");
+    let old = connector(&scratch, status, HELP_MARKER);
+    let Outcome::Finished(unavailable) = old.execute(r).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(unavailable["state"], "failed");
+    assert!(old.native.calls.borrow().is_empty());
+    assert!(!Flags::from_help(HELP_MARKER).question_route_person_revision);
+    assert!(Flags::from_help(&help).question_route_person_revision);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_fenced_legacy_statement_returns_a_clear_failed_receipt_for_old_apps() {
+    let p = payload();
+    let refused = json!({"request_id":p["statement"]["request_id"],"op":"question_route_child","accepted":false,"durable":false,"code":"upgrade_required"});
+    let scratch = Scratch::new("route-person-legacy-fenced");
+    let node = connector(&scratch, refused, HELP_MARKER);
+    let Outcome::Finished(reply) = node.execute(request(1)).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(reply["state"], "failed");
+    assert_eq!(reply["error"], session_question_route_person::UPGRADE);
+    assert_eq!(node.native.calls.borrow().len(), 1);
+}

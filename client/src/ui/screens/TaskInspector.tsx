@@ -4,7 +4,7 @@ import { openTaskAssignment } from "../../store/taskAssignment";
 import { pendingExecutor, taskExecutors, setTaskExecutorReview } from "../../store/taskExecutors";
 import { onTaskExecutors } from "../../bridge";
 import { taskStarts, supportsTaskStart, taskStartBlocker, pendingStart, reviewTaskStart } from "../../store/taskStart";
-import { PAUSE_REASON } from "../../store/taskCancel";
+import { PAUSE_REASON, requestAttemptCancellation } from "../../store/taskCancel";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { attachmentPin, attachmentUnpin, inTauri, openTaskAttachment } from "../../bridge";
@@ -88,6 +88,7 @@ export function TaskInspector(props: { project: string; task: Task; presentation
     <Show when={tab() !== "Task"}><div class="tv-section"><span class="eyebrow">{tab()}</span><span class="grow" /><button class="link tv-back" onClick={() => setTab("Task")}><Icon name="chevron-left" size={12} />{tr("Task and discussion")}</button></div></Show>
     <Show when={taskDetails.error()}><p class="notice danger" role="alert">Task could not be read: {taskDetails.error()}</p><button class="btn small" disabled={taskDetails.loading()} onClick={taskDetails.refresh}>{tr("Refresh")}</button></Show>
     <Show when={detail()} fallback={<p class="tasks-empty">{taskDetails.loading() ? tr("Loading task…") : tr("Task details are unavailable.")}</p>}>{(d) => <>
+      <For each={d().unknownAttempts}>{(attempt) => <div class="tv-blocker"><Icon name="triangle-alert" size={13} /><span>{tr("Attempt delivery is unknown")} <code>{attempt}</code></span><span class="grow" /><button class="btn small" disabled={!d().writable || !!writingTask()} onClick={(e) => requestAttemptCancellation(props.project, d(), attempt, e.currentTarget)}>{tr("Abandon attempt…")}</button></div>}</For>
       <Show when={d().stage === "active" && !d().started}><p class="notice">Dispatched to {assignmentLabel(d())} — start unconfirmed</p></Show>
       <Show when={tab() === "Task"}>
         <Show when={(d().stage === "review" || d().stage === "done") && (d().summary || d().cancelReason)}><article class="act-msg tv-entry tv-result k-agent"><header><b>{item().worker || "Agent"}</b><span class="chip">{d().cancelledAt ? tr("Cancelled") : tr("Result")}</span></header><div class="act-body"><Body text={d().cancelReason || d().summary} /></div></article></Show>

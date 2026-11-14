@@ -5,7 +5,7 @@
 use std::{
     io,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -40,8 +40,11 @@ fn wait_for_release(dropped: &AtomicBool) {
         "owned resources did not end"
     );
 }
-fn spawn(command: &mut Command) -> io::Result<Child> {
-    command.env("OWNED_SPAWN_HOOK", "yes").spawn()
+fn spawn_input(
+    command: &mut Command,
+    input: zerus_client_core::run::InputSpawn,
+) -> io::Result<Child> {
+    input.spawn(command.env("OWNED_SPAWN_HOOK", "yes"))
 }
 fn invocation(code: &str, input: Vec<u8>, timeout: Duration) -> Invocation {
     Invocation {
@@ -58,7 +61,7 @@ fn run(code: &str, input: Vec<u8>) -> Result<Vec<u8>, OwnedError> {
         &invocation(code, input, Duration::from_secs(5)),
         &[],
         &AtomicBool::new(false),
-        spawn,
+        spawn_input,
         resources,
     );
     wait_for_release(&dropped);
@@ -72,7 +75,7 @@ fn diagnostic_observation_preserves_failure_and_original_resource_accounting() {
     let result = run_owned_observed(
         Path::new("python3"),
         &invocation("import sys;sys.stdin.buffer.read();sys.stderr.write('hgs: frontend process image unavailable\\n');sys.exit(1)", vec![], Duration::from_secs(5)),
-        &[], &AtomicBool::new(false), spawn, resources,
+        &[], &AtomicBool::new(false), spawn_input, resources,
         |error, stderr| observed = Some((format!("{error:?}"), stderr.unwrap_or("").to_owned())),
     );
     assert_eq!(result, Err(OwnedError::ChildFailed));
@@ -106,7 +109,7 @@ sys.stdout.buffer.write(b'x'*1048576)
         ),
         &[("HGS_SESSION", "discard"), ("HGS_RUN_ID", "discard")],
         &AtomicBool::new(false),
-        spawn,
+        spawn_input,
         resources,
     )
     .unwrap();
@@ -142,9 +145,9 @@ fn oversized_missing_input_invalid_deadline_and_pre_cancel_never_spawn() {
             &inv,
             &[],
             &AtomicBool::new(cancel),
-            move |command| {
+            move |command, input_spawn| {
                 count.fetch_add(1, Ordering::Relaxed);
-                spawn(command)
+                spawn_input(command, input_spawn)
             },
             resources,
         );
@@ -162,7 +165,7 @@ fn guarded_spawn_refusal_exposes_no_private_error_and_releases_admission() {
         &invocation("", vec![], Duration::from_secs(1)),
         &[],
         &AtomicBool::new(false),
-        |_| Err(io::Error::other("private host diagnostic")),
+        |_, _| Err(io::Error::other("private host diagnostic")),
         resources,
     );
     assert_eq!(result, Err(OwnedError::StartFailed));
@@ -179,13 +182,14 @@ fn a_guarded_spawn_cannot_succeed_without_every_owned_pipe() {
             &invocation("print('{}')", vec![], Duration::from_secs(5)),
             &[],
             &AtomicBool::new(false),
-            move |command| {
+            move |command, input_spawn| {
+                let mut child = spawn_input(command, input_spawn)?;
                 match missing {
-                    0 => command.stdin(Stdio::null()),
-                    1 => command.stdout(Stdio::null()),
-                    _ => command.stderr(Stdio::null()),
+                    0 => drop(child.stdin.take()),
+                    1 => drop(child.stdout.take()),
+                    _ => drop(child.stderr.take()),
                 };
-                spawn(command)
+                Ok(child)
             },
             resources,
         );
@@ -242,7 +246,7 @@ fn timeout_requires_owned_child_exit_even_when_both_outputs_have_closed() {
         ),
         &[],
         &AtomicBool::new(false),
-        spawn,
+        spawn_input,
         resources,
     );
     assert_eq!(result, Err(OwnedError::TimedOut));
@@ -269,7 +273,7 @@ fn cancellation_ends_the_owned_child_and_blocked_input_writer() {
         ),
         &[],
         &cancel,
-        spawn,
+        spawn_input,
         resources,
     );
     setter.join().unwrap();
@@ -290,7 +294,7 @@ fn inherited_stdout_keeps_admission_after_bounded_return_without_partial_success
         ),
         &[],
         &AtomicBool::new(false),
-        spawn,
+        spawn_input,
         resources,
     );
     assert_eq!(result, Err(OwnedError::TimedOut));
@@ -313,7 +317,7 @@ fn inherited_stdin_keeps_admission_after_child_and_both_outputs_end() {
         ),
         &[],
         &AtomicBool::new(false),
-        spawn,
+        spawn_input,
         resources,
     );
     assert_eq!(result, Err(OwnedError::TimedOut));

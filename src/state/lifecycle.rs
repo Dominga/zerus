@@ -2,6 +2,8 @@ use super::*;
 use crate::platform::ExitInfo;
 use std::time::{Duration, Instant};
 
+mod archive_source;
+
 fn required_env(name: &str) -> Result<String> {
     nonempty_env(name).ok_or_else(|| format!("missing {name} in tracked agent launch"))
 }
@@ -225,19 +227,32 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         };
         let infer_project = startup_kind == "new" && replaced.is_none()
             && nonempty_env("HGS_FORK_PARENT_ID").is_none();
-        let mut record = json!({"version": 1, "run_identity_version": 1, "name": name, "agent": agent, "run_id": token, "pane": pane,
-            "cwd": cwd, "launch_dir": cwd, "base": base, "hgs": required_env("HGS_EXECUTABLE")?,
-            "shell": nonempty_env("SHELL").unwrap_or_else(|| "/bin/bash".into()), "created": now() as i64,
-            "activity": "unknown", "phase": "unknown", "conversation_state": "unknown", "conversation_id": null,
-            "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
-            "process_start": process_start(std::process::id()),
-            "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        let mut record = started_record(Started {
+            name: &name,
+            agent: &agent,
+            run: &token,
+            pane: &pane,
+            cwd: &cwd,
+            base: &base,
+            hgs: required_env("HGS_EXECUTABLE")?,
+            shell: nonempty_env("SHELL").unwrap_or_else(|| "/bin/bash".into()),
+            startup_kind,
+            launch: nonempty_env("HGS_LAUNCH_ID"),
+            account: nonempty_env("HGS_ACCOUNT_ID"),
+            home: nonempty_env(home_var(&agent)?),
+            session: allocation.as_ref().map(|allocation| allocation.session()),
+        });
         // U60 (#658 N4): the binding names the model server and model it runs
         // on, so a later resume applies the same provider or refuses.
         if let Some(model_server) = model_server_record() {
             record["model_server"] = model_server;
         }
-        if let Some(allocation)=&allocation {record["session_id"]=json!(allocation.session());}
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if agent == "claude" {
+            if let Some(directory) = continuations::launch_registry_home() {
+                record["claude_registry_home"] = json!(directory);
+            }
+        }
         // The live tracked agent that launched this new session, proven by the
         // launching hgs (zerus-sa9qn.2). A resume never adopts its launcher.
         if startup_kind == "new" || nonempty_env("HGS_FORK_PARENT_ID").is_some() {
@@ -310,33 +325,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             record["expected_id"] = json!(expected);
             record["conversation_id"] = json!(expected);
             record["transcript"] = previous["transcript"].clone();
-            for key in [
-                "prompt",
-                "launch_id",
-                "last_message",
-                "model",
-                "effort",
-                "effort_source_path",
-                "effort_source_offset",
-                "resume_settings",
-                "pending_settings",
-                "fork_parent_id",
-                "fork_source_name",
-                "fork_lineage",
-                "fork_lineage_labels",
-                "cleared_conversations",
-                "permission_override",
-                "session_id",
-                "worktree_protection",
-                "layout_transition",
-                "launch_label",
-                "layout",
-                "parent",
-            ] {
-                if let Some(value) = previous.get(key) {
-                    record[key] = value.clone();
-                }
-            }
+            carry_resumed(&previous, &mut record);
             if record["pending_settings"].is_object() {
                 record["pending_settings"]["run_id"] = json!(token);
             }
@@ -721,8 +710,7 @@ pub(super) fn pause_one_quiet(record: &Value, scope: Option<&session_action::Sco
         if current["run_id"] != record["run_id"] {
             return Err("session changed while pausing".into());
         }
-        current["paused"] = json!(true);
-        current.as_object_mut().unwrap().remove("pausing");
+        mark_paused(&mut current);
         write(&mut current)?;
     }
     if remaining {
@@ -1115,6 +1103,71 @@ fn print_resume(spec: &backend::LaunchSpec) {
 /// continues that attempt's journal as before, the label's or its ID journal,
 /// and its launch label. hgs v0.47.0 and later read `journal_name` and keep it
 /// on resume, rename, Clear, Start fresh and restore.
+/// A new run's record as the supervisor first builds it, before anything is
+/// carried into it from an earlier record of the session. Also the source of
+/// the records that tests of record readers write (zerus-63rru.53).
+pub(super) struct Started<'a> {
+    pub name: &'a str,
+    pub agent: &'a str,
+    pub run: &'a str,
+    pub pane: &'a str,
+    pub cwd: &'a Path,
+    pub base: &'a [String],
+    pub hgs: String,
+    pub shell: String,
+    pub startup_kind: &'a str,
+    pub launch: Option<String>,
+    pub account: Option<String>,
+    pub home: Option<String>,
+    pub session: Option<&'a str>,
+}
+pub(super) fn started_record(s: Started<'_>) -> Value {
+    let pid = std::process::id();
+    let mut record = json!({"version": 1, "run_identity_version": 1, "name": s.name, "agent": s.agent, "run_id": s.run, "pane": s.pane,
+        "cwd": s.cwd, "launch_dir": s.cwd, "base": s.base, "hgs": s.hgs,
+        "shell": s.shell, "created": now() as i64,
+        "activity": "unknown", "phase": "unknown", "conversation_state": "unknown", "conversation_id": null,
+        "transcript": null, "startup_kind":s.startup_kind,"launch_id":s.launch, "account_id": s.account, "agent_home": s.home, "pid": pid,
+        "process_start": process_start(pid),
+        "supervisor": {"pid": pid, "start": process_start(pid)}});
+    if let Some(session) = s.session {
+        record["session_id"] = json!(session);
+    }
+    record
+}
+/// What a resume carries from the record it resumes, beside its transcript,
+/// journal and agent hint.
+const RESUMED: [&str; 21] = [
+    "prompt",
+    "launch_id",
+    "last_message",
+    "model",
+    "effort",
+    "effort_source_path",
+    "effort_source_offset",
+    "resume_settings",
+    "pending_settings",
+    "fork_parent_id",
+    "fork_source_name",
+    "fork_lineage",
+    "fork_lineage_labels",
+    "cleared_conversations",
+    "permission_override",
+    "session_id",
+    "worktree_protection",
+    "layout_transition",
+    "launch_label",
+    "layout",
+    "parent",
+];
+/// Carries [`RESUMED`] from `previous`, the record a resume continues.
+pub(super) fn carry_resumed(previous: &Value, record: &mut Value) {
+    for key in RESUMED {
+        if let Some(value) = previous.get(key) {
+            record[key] = value.clone();
+        }
+    }
+}
 fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
     match retried {
         None => {
@@ -1135,10 +1188,17 @@ fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
     }
 }
 
+// Both Restore admission and standing-resume observation use this predicate.
+// The caller holds the state writer lock across a final admission check.
+pub(super) fn restore_name_busy(name: &str) -> Result<bool> {
+    Ok(live()?.contains_key(name) || storage::label_taken(name))
+}
+
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     // A restore never creates the ID layout in P3a: it is written at its
     // label's path and needs a free label, whatever its archive says.
     let mut archived = archive::read_archive(name, id)?;
+    let source = archive_source::Source::capture(&archived);
     if let Some(fields) = archived.as_object_mut() {
         fields.remove("layout");
         fields.remove("terminal_name");
@@ -1148,23 +1208,19 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     if let Some(scope)=scope {scope.check(&archived)?;}
     {
         let _guard = lock(None)?;
-        if live()?.contains_key(name) || storage::label_taken(name) { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+        if restore_name_busy(name)? { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+        source.check(name, id)?;
     }
     if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
     let (spec, secrets) = resume_spec_for(&archived, &run_id, Some(id), dry)?;
     let _guard = lock(None)?;
-    if live()?.contains_key(name) || storage::label_taken(name) {
+    if restore_name_busy(name)? {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
     }
-    let current_archive = archive::read_archive(name, id)?;
+    let current_archive = source.check(name, id)?;
     refuse_unsettled_clear(&current_archive)?;
     if let Some(scope)=scope {scope.check(&current_archive)?;}
-    if current_archive["run_id"] != archived["run_id"]
-        || current_archive["conversation_id"] != archived["conversation_id"]
-    {
-        return Err("archived binding changed; retry resume".into());
-    }
     if dry {
         print_resume(&spec);
         return Ok(0);
@@ -1361,7 +1417,7 @@ pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped
 // A legacy-to-ID move or rename can preserve both run and conversation.
 // Keep the prepared recipe bound to the same selected storage and terminal,
 // including opaque negative transition evidence. Missing and null differ.
-fn saved_binding(record: &Value) -> Value {
+pub(super) fn saved_binding(record: &Value) -> Value {
     json!([
         record["run_id"],
         record["conversation_id"],
@@ -1417,9 +1473,12 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if let Some(id) = &requested {
             verify_requested(&read(&name)?, &snapshot, id)?;
         }
-        let record = read(&name)?;
-        terminating::check_mutation(&record)?;
-        if already_live(&record, &snapshot)? {
+        let changed = || format!("{name}: saved source changed or is unavailable; select the session again before resuming");
+        let slot = std::path::absolute(storage::record_path(&name)).map_err(|_| changed())?;
+        let source = storage::selected_source::Snapshot::capture(&slot, &name).map_err(|_| changed())?;
+        let record = source.record();
+        terminating::check_mutation(record)?;
+        if already_live(record, &snapshot)? {
             if scope.is_some() {return Err("Session is already live; no resume was launched".into());}
             continue;
         }
@@ -1466,17 +1525,21 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                 "{name}: this session is archived; restore it using --archive ID"
             ));
         }
-        refuse_unsettled_clear(&record)?;
-        recipes::verify_history(&record, true)?;
-        let restore_id = nonempty_value(&record, "restore_archive_id");
+        refuse_unsettled_clear(record)?;
+        recipes::verify_history(record, true)?;
+        let restore_id = nonempty_value(record, "restore_archive_id");
         let new_run=uuid::Uuid::new_v4().to_string();
-        let (spec, secrets) = resume_spec_for(&record, &new_run, restore_id.as_deref(), dry)?;
-        recipes.push((name, spec, secrets, saved_binding(&record), new_run));
+        let (spec, secrets) = resume_spec_for(record, &new_run, restore_id.as_deref(), dry)?;
+        let binding = saved_binding(record);
+        // Batches retain only the original locator/digest, never one full raw
+        // Value per prepared recipe. Conversion cannot refresh the source.
+        recipes.push((name, spec, secrets, binding, new_run, source.into_fence()));
     }
     let _guard = lock(None)?;
-    for (name, spec, secrets, original_binding, new_run) in recipes {
+    for (name, spec, secrets, original_binding, new_run, source) in recipes {
+        let changed = || format!("{name}: saved source changed or is unavailable; select the session again before resuming");
         let current_snapshot = live()?;
-        let current = read(&name)?;
+        let current = read(&name).map_err(|_| changed())?;
         refuse_unsettled_clear(&current)?;
         if let Some(scope)=scope {scope.check(&current)?;}
         if let Some(id) = &requested {
@@ -1489,6 +1552,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if current_snapshot.contains_key(&spec.name) {
             return Err(format!("{name}: terminal {} was taken before the resume; retry", spec.name));
         }
+        source.recheck().map_err(|_| changed())?;
         if saved_binding(&current) != original_binding {
             return Err(format!("{name}: saved binding changed; retry resume"));
         }
@@ -1552,23 +1616,30 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
         _ => return Err("usage: hgs resume <session> --fresh [--expected-run-id ID] [-d]".into()),
     };
     archive::reconcile()?;
-    let record = read(name)?;
-    refuse_unsettled_clear(&record)?;
-    if !AGENTS.contains(&string(&record, "agent")) {
+    let changed = || format!("{name}: saved source changed or is unavailable; select the session again before starting fresh");
+    let slot = std::path::absolute(storage::record_path(name)).map_err(|_| changed())?;
+    let source = storage::selected_source::Snapshot::capture(&slot, name).map_err(|_| changed())?;
+    // Prepare from the exact raw frame that was fingerprinted. Ordinary
+    // read() adds native/process projections which are not stored evidence.
+    let record = source.record();
+    refuse_unsettled_clear(record)?;
+    if !AGENTS.contains(&string(record, "agent")) {
         return Err(format!("{name}: only Claude, Codex and Kimi sessions can start fresh"));
     }
-    let argv = recipes::fresh_argv(string(&record, "agent"), &recipes::argv(&record)?)?;
+    let argv = recipes::fresh_argv(string(record, "agent"), &recipes::argv(record)?)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let (spec, secrets) = session_spec(
-        &record,
-        effort::resume_argv(&record, argv),
+        record,
+        effort::resume_argv(record, argv),
         &run_id,
         None,
-        Some(string(&record, "run_id")),
+        Some(string(record, "run_id")),
         dry,
     )?;
     let _guard = lock(None)?;
-    let current = read(name)?;
+    // Retain today's namespace/identity check as well as the fixed-slot fence:
+    // a route may now name another holder while the original slot still exists.
+    let current = read(name).map_err(|_| changed())?;
     refuse_unsettled_clear(&current)?;
     let snapshot = live()?;
     if already_live(&current, &snapshot)? {
@@ -1577,13 +1648,18 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     if snapshot.contains_key(&spec.name) {
         return Err(format!("{name}: terminal {} was taken before the fresh start; retry", spec.name));
     }
+    // Keep the original slot even if a label route or holder changes. This
+    // adds a source refusal, never a lease or permission to start by itself.
+    source.recheck().map_err(|_| changed())?;
     if expected_run.is_some_and(|run| run != string(&current, "run_id"))
-        || saved_binding(&current) != saved_binding(&record)
+        || saved_binding(&current) != saved_binding(record)
     {
         return Err(format!("{name}: saved binding changed; refresh before starting fresh"));
     }
-    if archive::equivalent(&current, &archive::records()?) {
-        return Err(format!("{name}: this session is archived; restore it using --archive ID"));
+    if archive::equivalent(&current, &archive::complete_records()?) {
+        return Err(format!(
+            "{name}: this session is archived; restore it using --archive ID"
+        ));
     }
     if pause_active(&current) || current["resume_pending"] == true {
         return Err(format!("{name}: wait for the current pause or restore to finish"));
@@ -1611,6 +1687,14 @@ fn verify_requested(record: &Value, snapshot: &Snapshot, requested: &str) -> Res
         ));
     }
     Ok(())
+}
+
+/// What a completed pause records on the session: paused, no longer pausing.
+pub(super) fn mark_paused(record: &mut Value) {
+    record["paused"] = json!(true);
+    if let Some(fields) = record.as_object_mut() {
+        fields.remove("pausing");
+    }
 }
 
 #[cfg(all(test, unix))]

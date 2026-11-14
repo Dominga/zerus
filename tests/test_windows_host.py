@@ -20,6 +20,7 @@ known to run (the host's kill-on-close job then ends anything left). Consoles
 stay hidden.
 """
 import ctypes
+import codex_refusal_artifacts
 import json
 import os
 from pathlib import Path
@@ -96,6 +97,7 @@ class HostCase(unittest.TestCase):
         self.addCleanup(self.stop_host)
 
     def cleanup_temp(self):
+        codex_refusal_artifacts.preserve(self.root, self.id(), REPO / "artifacts/test-results/python")
         self.temp.cleanup()
 
     # The host and its tools.

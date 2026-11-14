@@ -527,7 +527,7 @@ impl Job {
             &call,
             &[],
             &self.cancel,
-            |c| c.spawn(),
+            |c, input_spawn| input_spawn.spawn(c),
             held,
             |error, stderr| self.failure(step, error, stderr),
         )
@@ -809,7 +809,7 @@ impl Job {
             &call,
             &[],
             &self.cancel,
-            move |command| {
+            move |command, input_spawn| {
                 // The target/cancellation fence survives registration and any
                 // later ownership-side wait. No mutating child on refusal.
                 if let Some(check) = check {
@@ -820,7 +820,7 @@ impl Job {
                         return Err(std::io::Error::other(code));
                     }
                 }
-                let child = command.spawn()?;
+                let child = input_spawn.spawn(command)?;
                 original.store(true, Ordering::Release);
                 let _ = registration.bind_original(&child);
                 Ok(child) // Always return the original, including a refused binding.

@@ -63,7 +63,7 @@ fn canonical_uuid(value: &str) -> bool {
 
 // The same bounded native boot sources used by worktree process discovery.
 #[cfg(target_os = "linux")]
-fn boot() -> Result<String> {
+pub(in crate::state) fn boot() -> Result<String> {
     let mut value = String::new();
     fs::File::open("/proc/sys/kernel/random/boot_id")
         .map_err(|_| UNVERIFIABLE)?
@@ -80,7 +80,7 @@ fn boot() -> Result<String> {
     Ok(id.to_string())
 }
 #[cfg(target_os = "macos")]
-fn boot() -> Result<String> {
+pub(in crate::state) fn boot() -> Result<String> {
     let mut bytes = [0u8; 129];
     let mut size = bytes.len();
     if unsafe {
@@ -104,7 +104,7 @@ fn boot() -> Result<String> {
     Ok(id.to_string())
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn boot() -> Result<String> {
+pub(in crate::state) fn boot() -> Result<String> {
     Err(UNVERIFIABLE.into())
 }
 
@@ -357,6 +357,28 @@ pub(in crate::state) fn record_running_for_test(dir: &Path, pid: u32) -> Result<
         birth: identity.birth,
         pid_file: Stamp(0, 0, 0, 0),
         boot: None,
+    });
+    atomic(
+        &dir.join(FILE),
+        &serde_json::to_string(&record).map_err(|_| UNVERIFIABLE)?,
+    )
+}
+
+/// The running record `spawn` writes for a host this boot (version 2, with
+/// this boot's identity), naming `pid`, which a test's own process serves:
+/// the Teams caller proof's tests take their host record from this component
+/// (zerus-63rru.28). The PID-file stamp is not read for a running record.
+#[cfg(all(test, unix))]
+pub(crate) fn record_this_boot_for_test(dir: &Path, pid: u32) -> Result<()> {
+    let identity = crate::platform::process_identity(pid)
+        .filter(|process| valid_birth(&process.birth))
+        .ok_or(UNVERIFIABLE)?;
+    let record = Record::Running(Running {
+        version: 2,
+        pid,
+        birth: identity.birth,
+        pid_file: Stamp(0, 0, 0, 0),
+        boot: Some(boot()?),
     });
     atomic(
         &dir.join(FILE),

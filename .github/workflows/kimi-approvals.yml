@@ -8,6 +8,8 @@ on:
       - '.github/workflows/kimi-approvals.yml'
       - 'scripts/ci/kimi-approvals.py'
       - 'scripts/ci/kimi-native.py'
+      - 'scripts/ci/native_discovery.py'
+      - 'tests/test_native_discovery.py'
       - 'scripts/ci/kimi-native-pins.json'
       - 'scripts/ci/kimi-native-manifests/**'
       - 'scripts/ci/outside-job.py'
@@ -68,6 +70,7 @@ jobs:
       - name: Finite source and memory controls, with no native cases
         shell: bash
         run: |
+          python -B -m unittest discover -s tests -p test_native_discovery.py -v
           python -B -m unittest discover -s tests -p test_kimi_approvals_ci.py -v
           python -B -m unittest discover -s tests -p test_kimi_release.py -v
       - name: Keep compiler state in this disposable runner

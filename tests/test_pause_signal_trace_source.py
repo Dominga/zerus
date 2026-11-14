@@ -260,7 +260,40 @@ ARCHIVE_RESTORE_EXPECTATION_UPDATE = """        # #2162 / zerus-wyrqg: a missing
 """
 
 
+# Reviewed updates of the protected sources after their pins were set. Each is
+# removed (or restored to the reviewed original) exactly once before hashing,
+# so the original pins still hold and any other change still fails.
+# #2219 / zerus-ppd26.16 adds one Lifecycle test of the native Claude registry home.
+LIFECYCLE_REGISTRY_TEST_UPDATE = '\n    @unittest.skipUnless(sys.platform in ("linux", "darwin"), "Linux/macOS recorded registry metadata")\n    def test_default_claude_registry_home_is_captured_without_setting_native_config(self):\n        self.env.pop("CLAUDE_CONFIG_DIR", None)\n        name = self.start("claude", "native-registry")\n        record = self.binding(name)\n        self.assertFalse(record.get("agent_home"), "the native default must stay unset")\n        self.assertEqual(record.get("claude_registry_home"), str(self.root / ".claude"))\n        observed = json.loads((self.root / ("claude-config-observed-" + record["run_id"])).read_text())\n        self.assertEqual(observed, {"present": False, "value": None})\n        registry = self.root / ".claude/sessions"; registry.mkdir(parents=True, exist_ok=True)\n        for pid, entry in [(os.getpid(), dict(kind="bg", jobId="native-default-job")),\n                           (record["pid"], dict(parkedJobId="native-default-job"))]:\n            (registry / f"{pid}.json").write_text(json.dumps(dict(pid=pid, **entry)))\n        event = dict(hook_event_name="PreToolUse", session_id=record["conversation_id"],\n                     tool_name="Bash", tool_use_id="toolu_native_default", tool_input=dict(command="true"))\n        env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=record["run_id"],\n                   CLAUDE_PID=str(os.getpid()), CLAUDE_CODE_SESSION_ID=record["conversation_id"])\n        result = subprocess.run([str(HGS), "__state", "hook"], input=json.dumps(event),\n            env=env, text=True, capture_output=True, timeout=15)\n        self.assertEqual(result.returncode, 0, result.stderr)\n        self.assertIn("toolu_native_default", self.binding(name)["active_tools"])\n'
+LIFECYCLE_REGISTRY_TEST = "test_default_claude_registry_home_is_captured_without_setting_native_config"
+# The fake agent's reviewed updates, as (updated text, reviewed original):
+# #2219 / zerus-ppd26.16 records whether CLAUDE_CONFIG_DIR reached the agent;
+# #2218 / zerus-63rru.90 writes the SIGUSR1 stack dump to a file the report polls.
+AGENT_UPDATES = (
+    ('if agent == "claude":\n    (home / ("claude-config-observed-" + os.environ.get("HGS_RUN_ID", "probe"))).write_text(\n        json.dumps({"present": "CLAUDE_CONFIG_DIR" in os.environ, "value": os.environ.get("CLAUDE_CONFIG_DIR")}))\n', ""),
+    ('# Only stop_report sends this. The stacks go to a file the report polls:\n# the pane\'s terminal loses the dump\'s race under load (zerus-63rru.90).\nimport faulthandler\nstacks = open(home / ("stacks-" + sid), "w")\nfaulthandler.register(signal.SIGUSR1, all_threads=True, file=stacks)\n',
+     "# Only stop_report sends this: the Python stacks go to the pane's terminal.\nimport faulthandler\nfaulthandler.register(signal.SIGUSR1, all_threads=True)\n"),
+)
+
+
+def mac_agent_projection(text):
+    for updated, original in AGENT_UPDATES:
+        if text.count(updated) != 1:
+            raise AssertionError("a reviewed fake-agent update is missing, changed or duplicated")
+        text = text.replace(updated, original, 1)
+    return text
+
+
 def mac_protected_source(name, text):
+    if name == "Lifecycle":
+        lifecycle = ast.parse(text).body[0]
+        method = next((node for node in lifecycle.body if isinstance(node, ast.FunctionDef)
+                       and node.name == LIFECYCLE_REGISTRY_TEST), None)
+        update = LIFECYCLE_REGISTRY_TEST_UPDATE
+        if (method is None or text.count(update) != 1
+                or ast.get_source_segment(text, method) not in update):
+            raise AssertionError("reviewed Lifecycle registry test is missing, changed, duplicated or moved")
+        return text.replace(update, "", 1)
     if name != "Archive":
         return text
     archive = ast.parse(text).body[0]
@@ -317,6 +350,33 @@ class MacPauseObserverSource(unittest.TestCase):
         with self.assertRaises(AssertionError):
             mac_protected_source("Archive", moved)
 
+    def test_reviewed_lifecycle_and_agent_updates_are_exact(self):
+        lifecycle = next(node for node in TREE.body if isinstance(node, ast.ClassDef) and node.name == "Lifecycle")
+        text = ast.get_source_segment(SOURCE, lifecycle)
+        update = LIFECYCLE_REGISTRY_TEST_UPDATE
+        projected = mac_protected_source("Lifecycle", text)
+        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), MAC_PROTECTED["Lifecycle"])
+        for kind, replacement in (("missing", ""), ("changed", update.replace("toolu_native_default", "toolu_other", 1)),
+                                  ("duplicated", update + update)):
+            with self.subTest(kind=kind):
+                with self.assertRaises(AssertionError):
+                    mac_protected_source("Lifecycle", text.replace(update, replacement, 1))
+        # Any other change to Lifecycle still breaks its original pin.
+        other = text.replace("def wrapped_hooks(", "def wrapped_hooks_(", 1)
+        self.assertNotEqual(hashlib.sha256(mac_protected_source("Lifecycle", other).encode()).hexdigest(),
+                            MAC_PROTECTED["Lifecycle"])
+        self.assertEqual(hashlib.sha256(mac_agent_projection(AGENT).encode()).hexdigest(), MAC_AGENT_SHA256)
+        for updated, original in AGENT_UPDATES:
+            for kind, replacement in (("missing", original), ("duplicated", updated + updated)):
+                with self.subTest(agent=updated[:24], kind=kind):
+                    with self.assertRaises(AssertionError):
+                        mac_agent_projection(AGENT.replace(updated, replacement, 1))
+        changed = AGENT.replace("faulthandler.register(", "faulthandler.enable(", 1)
+        with self.assertRaises(AssertionError):
+            mac_agent_projection(changed)
+        elsewhere = AGENT.replace("sys.exit(143)", "sys.exit(142)", 1)
+        self.assertNotEqual(hashlib.sha256(mac_agent_projection(elsewhere).encode()).hexdigest(), MAC_AGENT_SHA256)
+
     def test_exact_darwin_case_only_and_original_agent_lifecycle_linux_bodies_are_preserved(self):
         namespace = load_mac()
         selected = namespace['MacPauseProbe'].selected
@@ -330,7 +390,7 @@ class MacPauseObserverSource(unittest.TestCase):
             node = next(node for node in TREE.body if getattr(node, 'name', None) == name)
             text = mac_protected_source(name, ast.get_source_segment(SOURCE, node))
             self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), expected, name)
-        self.assertEqual(hashlib.sha256(AGENT.encode()).hexdigest(), MAC_AGENT_SHA256)
+        self.assertEqual(hashlib.sha256(mac_agent_projection(AGENT).encode()).hexdigest(), MAC_AGENT_SHA256)
         probe = mac_probe(namespace)
         wrapped = ast.parse(probe.agent())
 

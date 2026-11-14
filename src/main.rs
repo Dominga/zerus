@@ -39,6 +39,7 @@ mod status;
 mod swarm;
 mod tasks;
 mod test_discipline;
+mod teams;
 #[cfg(all(test, unix))]
 mod test_process;
 mod watch;
@@ -67,6 +68,11 @@ fn main() {
     // environment and starts nothing.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Err(error) = desktop::creation_launch::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::teams::adopt_custody() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }
@@ -179,7 +185,7 @@ fn main() {
             );
             // One write (eprintln! writes each piece on its own), so that no
             // frame a pseudoconsole paints shows the prefix without the message.
-            let line = format!("hgs: {}\n", err.message);
+            let line = cli::error_line(&err.message);
             eprint!("{line}");
             err.code
         }

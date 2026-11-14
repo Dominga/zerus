@@ -115,7 +115,7 @@ impl Composers {
         }));
         let reply = match called {
             // The session's Lane::Inbox was taken: no call ran.
-            Ok(Err(error)) if error == crate::actions::BUSY => RemoveReply::Busy,
+            Ok(Err(error)) if crate::actions::is_busy(&error) => RemoveReply::Busy,
             other => match outcome_of(other, "") {
                 Outcome::Done { .. } => RemoveReply::Removed,
                 Outcome::Failed { detail } => RemoveReply::Failed { detail },

@@ -119,8 +119,8 @@ impl Controller {
             &call,
             &[],
             &cancel,
-            move |command| {
-                let mut child = command.spawn()?;
+            move |command, input_spawn| {
+                let mut child = input_spawn.spawn(command)?;
                 #[cfg(windows)]
                 let image_current = image.matches_process(&child).is_ok();
                 #[cfg(not(windows))]

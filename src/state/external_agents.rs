@@ -220,6 +220,15 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
     let terminal = ["Stop", "SubagentStop", "SessionEnd", "StopFailure"].contains(&string(event,"hook_event_name"));
     let ignored = ended && !terminal && !verified;
     let child = &mut record["subagents"][&id];
+    // Explicit retirement of an unbound legacy record was not proof of an
+    // exit. Preserve that route's verified recovery before the journal's
+    // final-child guard; a proven process exit or native completion never
+    // uses this exception; a non-start hook with a mismatching birth refuses.
+    if ended && verified && !terminal && child["completion_source"] == "explicit_retirement" {
+        child["state"] = json!("working");
+        child.as_object_mut().unwrap().remove("completion_source");
+        child.as_object_mut().unwrap().remove("display_state");
+    }
     if !ignored && (starting || child.get("original_process").is_none()) {
         if let Some(original) = original { child["original_process"] = original; }
     }

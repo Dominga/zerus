@@ -5,6 +5,7 @@ import hook_command_fixtures as shell_probes
 import receipt_locator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import codex_refusal_artifacts
 import json
 import tomllib
 import os
@@ -73,6 +74,9 @@ if sys.argv[1:] == ['--version']:
 if agent == "kimi" and sys.argv[1:3] == ["session", "list"]:
     print(json.dumps([{"id": p.stem} for p in (home / "history").glob("*.jsonl")]))
     sys.exit(0)
+if agent == "claude":
+    (home / ("claude-config-observed-" + os.environ.get("HGS_RUN_ID", "probe"))).write_text(
+        json.dumps({"present": "CLAUDE_CONFIG_DIR" in os.environ, "value": os.environ.get("CLAUDE_CONFIG_DIR")}))
 with open(home / "argv.jsonl", "a") as f:
     f.write(json.dumps({"agent": agent, "argv": sys.argv[1:], "codex_home": os.environ.get("CODEX_HOME"),
                         "hgs_session_id": os.environ.get("HGS_SESSION_ID")}) + "\n")
@@ -120,9 +124,11 @@ def stop(*args):
     event("SessionEnd", reason="exit" if agent == "kimi" else "other")
     sys.exit(143)
 signal.signal(signal.SIGTERM, stop)
-# Only stop_report sends this: the Python stacks go to the pane's terminal.
+# Only stop_report sends this. The stacks go to a file the report polls:
+# the pane's terminal loses the dump's race under load (zerus-63rru.90).
 import faulthandler
-faulthandler.register(signal.SIGUSR1, all_threads=True)
+stacks = open(home / ("stacks-" + sid), "w")
+faulthandler.register(signal.SIGUSR1, all_threads=True, file=stacks)
 if (home / "record-interrupts").exists():
     def interrupted(*args):
         with open(home / ("interrupts-" + sid), "a") as log:
@@ -151,6 +157,10 @@ for line in sys.stdin:
 event("SessionEnd")
 '''
 
+
+import hook_caller_fixtures
+AGENT = AGENT.replace('\nevent("SessionStart")\nfor line in sys.stdin:',
+    '\n' + hook_caller_fixtures.scripted_source() + '\nevent("SessionStart")\nfor line in sys.stdin:')
 
 def direct_signal_agent():
     """Opt-in diagnostics for Archive's three Linux direct-signal subcases only.
@@ -678,6 +688,7 @@ class Harness(unittest.TestCase):
         # kill-server returns before the supervised agents have drained and
         # synced their final records. Identify only this private socket's pane
         # processes and recorded processes whose start identity still matches.
+        assert Path(self.socket).parent.is_dir(), "the private tmux socket directory is gone"
         panes = subprocess.run([TMUX, "-S", self.socket, "list-panes", "-a", "-F", "#{pane_pid}"],
                                env=self.env, capture_output=True, text=True)
         table = process_table()
@@ -713,6 +724,7 @@ class Harness(unittest.TestCase):
                     if pid in table and table[pid][2] == started and not table[pid][1].startswith(("Z", "X"))}
 
         live_owned(table)
+        assert Path(self.socket).parent.is_dir(), "the private tmux socket directory is gone"
         subprocess.run([TMUX, "-S", self.socket, "kill-server"], env=self.env, capture_output=True)
         deadline = time.monotonic() + 6
         while remaining := live_owned(process_table()):
@@ -722,7 +734,18 @@ class Harness(unittest.TestCase):
         self.remove_fixture_root()
 
     def remove_fixture_root(self):
-        shutil.rmtree(self.root)
+        codex_refusal_artifacts.preserve(self.root, self.id(), REPO / "artifacts/test-results/python")
+        wal = self.root / "state" / "delivery-receipts-v1.sqlite3-wal"
+
+        def failed(function, path, exception):
+            # SQLite can remove this sidecar after rmtree enumerates it.
+            # Keep every other cleanup failure visible, including permissions.
+            error = exception[1]
+            if function is os.unlink and Path(path) == wal and isinstance(error, FileNotFoundError):
+                return
+            raise error.with_traceback(exception[2])
+
+        shutil.rmtree(self.root, onerror=failed)
 
     def script(self, name, text):
         path = self.bin / name
@@ -915,6 +938,30 @@ class Harness(unittest.TestCase):
         def python_stacks():
             if not state["signalled"]:
                 return
+            home = self.env.get("HOME")
+            if home:
+                # The dump writes asynchronously to each agent's stacks file:
+                # a thread header can precede its frames. Wait for the fake's
+                # module frame, keeping the generous #2218 window, and render
+                # that same snapshot rather than racing another file read.
+                def dumped_stack():
+                    for path in sorted(Path(home).glob("stacks-*")):
+                        text = path.read_text(errors="ignore").splitlines()
+                        starts = [i for i, line in enumerate(text) if re.match(r"(Current thread|Thread) 0x", line)]
+                        for start, end in zip(starts, starts[1:] + [len(text)]):
+                            thread = text[start:end]
+                            if any(re.search(r"line \d+ in <module>$", line) for line in thread):
+                                return " | ".join(line.strip() for line in thread if line.strip())[:1500]
+                    return None
+
+                until = time.monotonic() + 30
+                stack = dumped_stack()
+                while stack is None and time.monotonic() < until:
+                    time.sleep(0.05)
+                    stack = dumped_stack()
+                lines.extend(f"python in {pane[1]}: " + (stack or "no complete stack in its dump file")
+                             for pane in state["panes"])
+                return
             time.sleep(max(0, min(0.3, deadline - time.monotonic())))
             for pane in state["panes"]:
                 screen = run([str(self.bin / "tmux"), "capture-pane", "-p", "-J", "-S", "-200", "-t", pane[1]], 3,
@@ -1033,11 +1080,15 @@ class Harness(unittest.TestCase):
         env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=r["run_id"])
         return self.hook(event, env)
 
-    def hook(self, event, env):
+    def hook(self, event, env, check=True):
         command = (["python3", LEGACY_STATE, "hook"] if LEGACY_STATE else
                    [str(HGS), "__state", "hook"])
-        return subprocess.run(command, env=env,
-                              input=json.dumps(event), text=True, capture_output=True, check=True)
+        if LEGACY_STATE:
+            return subprocess.run(command, env=env,
+                                  input=json.dumps(event), text=True, capture_output=True, check=check)
+        result = hook_caller_fixtures.lifecycle(self, event, env)
+        if check: result.check_returncode()
+        return result
 
     def move_to_id_layout(self, name):
         """Moves the saved session `name` into the ID layout by hand, as a later
@@ -1083,6 +1134,60 @@ class Harness(unittest.TestCase):
         path = state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         path.write_text(json.dumps(record) + "\n")
         return record, path
+
+
+class FixtureRootCleanup(unittest.TestCase):
+    def fixture(self, root):
+        fixture = Harness()
+        fixture.root = root / "fixture"
+        state = fixture.root / "state"
+        state.mkdir(parents=True)
+        return fixture, state / "delivery-receipts-v1.sqlite3-wal"
+
+    def test_receipt_wal_can_vanish_between_the_walk_and_unlink(self):
+        with tempfile.TemporaryDirectory(prefix="receipt-wal-cleanup-") as temporary:
+            fixture, wal = self.fixture(Path(temporary))
+            wal.write_bytes(b"synthetic WAL")
+            unlink = os.unlink
+            vanished = []
+
+            def concurrent_unlink(path, *args, **kwargs):
+                if Path(path).name == wal.name:
+                    unlink(path, *args, **kwargs)
+                    vanished.append(wal)
+                return unlink(path, *args, **kwargs)
+
+            with mock.patch.object(os, "unlink", side_effect=concurrent_unlink):
+                fixture.remove_fixture_root()
+            self.assertEqual(vanished, [wal])
+            self.assertFalse(fixture.root.exists())
+
+    def test_other_cleanup_errors_remain_failures(self):
+        with tempfile.TemporaryDirectory(prefix="receipt-wal-errors-") as temporary:
+            fixture, wal = self.fixture(Path(temporary))
+            cases = [(os.unlink, wal, PermissionError("denied")),
+                     (os.unlink, wal.with_name("other.json"), FileNotFoundError("other file")),
+                     (os.unlink, fixture.root / "other" / wal.name, FileNotFoundError("other state")),
+                     (os.rmdir, wal, FileNotFoundError("not an unlink"))]
+            for function, path, error in cases:
+                with self.subTest(function=function.__name__, path=path.name, error=type(error).__name__):
+                    # Deliver the traversal error explicitly on every Python
+                    # version, including versions that suppress descendant ENOENT.
+                    def rmtree(root, onerror=None):
+                        if onerror is None:
+                            raise error
+                        onerror(function, str(path), (type(error), error, None))
+                    with mock.patch.object(shutil, "rmtree", side_effect=rmtree):
+                        with self.assertRaises(type(error)) as caught:
+                            fixture.remove_fixture_root()
+                    self.assertIs(caught.exception, error)
+
+    def test_a_missing_fixture_root_still_fails(self):
+        with tempfile.TemporaryDirectory(prefix="receipt-wal-root-") as temporary:
+            fixture, _ = self.fixture(Path(temporary))
+            shutil.rmtree(fixture.root)
+            with self.assertRaises(FileNotFoundError):
+                fixture.remove_fixture_root()
 
 
 class SessionIdentity(Harness):
@@ -1889,6 +1994,28 @@ exec {tmux} "$@"
 
 
 class Lifecycle(Harness):
+    @unittest.skipUnless(sys.platform in ("linux", "darwin"), "Linux/macOS recorded registry metadata")
+    def test_default_claude_registry_home_is_captured_without_setting_native_config(self):
+        self.env.pop("CLAUDE_CONFIG_DIR", None)
+        name = self.start("claude", "native-registry")
+        record = self.binding(name)
+        self.assertFalse(record.get("agent_home"), "the native default must stay unset")
+        self.assertEqual(record.get("claude_registry_home"), str(self.root / ".claude"))
+        observed = json.loads((self.root / ("claude-config-observed-" + record["run_id"])).read_text())
+        self.assertEqual(observed, {"present": False, "value": None})
+        registry = self.root / ".claude/sessions"; registry.mkdir(parents=True, exist_ok=True)
+        for pid, entry in [(os.getpid(), dict(kind="bg", jobId="native-default-job")),
+                           (record["pid"], dict(parkedJobId="native-default-job"))]:
+            (registry / f"{pid}.json").write_text(json.dumps(dict(pid=pid, **entry)))
+        event = dict(hook_event_name="PreToolUse", session_id=record["conversation_id"],
+                     tool_name="Bash", tool_use_id="toolu_native_default", tool_input=dict(command="true"))
+        env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID=record["run_id"],
+                   CLAUDE_PID=str(os.getpid()), CLAUDE_CODE_SESSION_ID=record["conversation_id"])
+        result = subprocess.run([str(HGS), "__state", "hook"], input=json.dumps(event),
+            env=env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("toolu_native_default", self.binding(name)["active_tools"])
+
     def wrapped_hooks(self, agent, wrapper):
         """hgs's tracking entries per event, and answer channels, that run `wrapper`."""
         if agent == "kimi":
@@ -3243,11 +3370,17 @@ class ActivitySummary(Harness):
         self.assertEqual(self.row(name)["activity"], "busy")
         write("turn_aborted", reason="interrupted")
         self.counts(self.row(name), 0, 1, 1)
-        # A transcript for a different parent cannot complete a newer hook turn.
+        # A late hook cannot revive that finished ID. A genuinely new hook
+        # child gets a fresh ID, and foreign-parent native evidence cannot end it.
         self.send_event(name, "SubagentStart", agent_id=child, agent_type="Review")
-        header["payload"]["parent_thread_id"] = str(uuid.uuid4())
+        self.counts(self.row(name), 0, 1, 1)
+        child = str(uuid.uuid4())
+        self.send_event(name, "SubagentStart", agent_id=child, agent_type="Review")
+        with sqlite3.connect(account / "state_5.sqlite") as db:
+            db.execute("INSERT INTO threads VALUES(?,?,?)", (child, str(rollout), str(self.project)))
+        header["payload"].update(id=child, parent_thread_id=str(uuid.uuid4()))
         write("task_complete", last_agent_message="Foreign result")
-        self.counts(self.row(name), 1, 0, 1)
+        self.counts(self.row(name), 1, 1, 2)
 
     def test_kimi_native_catalog_separates_same_profile_children(self):
         name = self.start("kimi")
@@ -3351,12 +3484,16 @@ class ActivitySummary(Harness):
         self.send_event(name, "Stop", last_assistant_message="The worker hit its limit")
         self.assertEqual(self.binding(name)["activity"], "idle")
         self.assertEqual(self.row(name)["activity"], "idle")
-        # A resumed child is current work again.
+        # Late events cannot revive a finished hook child or erase its error.
         self.send_event(name, "PreToolUse", agent_id="worker", tool_name="Bash", tool_use_id="later")
-        self.counts(self.row(name), 1, 0, 1)
-        self.send_event(name, "SubagentStop", agent_id="worker")
         self.counts(self.row(name), 0, 1, 1)
-        self.assertNotIn("display_state", self.binding(name)["subagents"]["worker"])
+        self.assertEqual(self.binding(name)["subagents"]["worker"]["display_state"], "error")
+        self.send_event(name, "SubagentStart", agent_id="worker-next", agent_type="Research")
+        self.send_event(name, "PreToolUse", agent_id="worker-next", tool_name="Bash", tool_use_id="fresh")
+        self.counts(self.row(name), 1, 1, 2)
+        self.send_event(name, "SubagentStop", agent_id="worker-next")
+        self.counts(self.row(name), 0, 2, 2)
+        self.assertNotIn("display_state", self.binding(name)["subagents"]["worker-next"])
 
     def test_unknown_child_status_is_not_reported_as_completed(self):
         name = self.start("codex")
@@ -5044,7 +5181,7 @@ class StopReportControls(unittest.TestCase):
         self.children.append(child)
         return child
 
-    def report(self, hang=False, platform="darwin"):
+    def report(self, hang=False, platform="darwin", sleep=None):
         self.hang, self.proc = hang, []
         real_open, real_realpath = open, os.path.realpath
         # /proc is recorded, never read: the mocked PIDs belong to no real pane.
@@ -5060,7 +5197,7 @@ class StopReportControls(unittest.TestCase):
             return real_realpath(path, *args, **options)
         with mock.patch.object(subprocess, "Popen", side_effect=self.spawn), mock.patch.object(sys, "platform", platform), \
                 mock.patch("builtins.open", side_effect=proc_open), mock.patch.object(os.path, "realpath", side_effect=proc_realpath), \
-                mock.patch.object(time, "sleep"), mock.patch.object(os, "getloadavg", return_value=(5.5, 4.25, 3.0)), \
+                mock.patch.object(time, "sleep", side_effect=sleep), mock.patch.object(os, "getloadavg", return_value=(5.5, 4.25, 3.0)), \
                 mock.patch.object(os, "cpu_count", return_value=3):
             return self.stop_report()
 
@@ -5093,6 +5230,57 @@ class StopReportControls(unittest.TestCase):
             self.assertRegex(report, rf"(?m)^process: {pid} ")
         # A listed path match is informational only: it is never sampled.
         self.assertEqual(self.sampled(), {"500", "501", "502", "503", "504"})
+
+    def test_a_thread_header_does_not_finish_a_delayed_file_dump(self):
+        import threading
+        self.env["HOME"] = str(self.root)
+        path = self.root / "stacks-fixture"
+        background = 'Thread 0x2 (most recent call first):\n' + '  File "helper", line 12 in wait\n' * 60 + '\n'
+        header = "Current thread 0x1 (most recent call first):\n"
+        frame = '  File "claude", line 73 in <module>\n'
+        release, written, published = threading.Event(), threading.Event(), threading.Event()
+        kills, sleeps = os.kill, []
+
+        def finish_dump():
+            release.wait()
+            with path.open("a") as file:
+                file.write(header + frame)
+            written.set()
+
+        writer = threading.Thread(target=finish_dump)
+        writer.start()
+        try:
+            def signal_dump(pid, number):
+                kills(pid, number)
+                if (pid, number) == (501, signal.SIGUSR1):
+                    path.write_text(background)
+                    published.set()
+
+            def poll(seconds):
+                # subprocess.wait also sleeps. Only the collector's poll after
+                # this dump started may release the delayed frames.
+                if seconds != 0.05 or not published.is_set() or written.is_set():
+                    return
+                sleeps.append(seconds)
+                # The header arrived; scheduling the remaining writes is delayed
+                # until the collector yields for another poll, not a wall clock.
+                release.set()
+                self.assertTrue(written.wait(5), "delayed private dump writer did not finish")
+
+            with mock.patch.object(os, "kill", side_effect=signal_dump):
+                poll(0.001)
+                poll(0.05)
+                self.assertFalse(release.is_set())
+                report = self.report(sleep=poll)
+        finally:
+            release.set()
+            writer.join(timeout=5)
+        self.assertFalse(writer.is_alive())
+        self.assertRegex(report, r"(?m)^python in %\d+: (Current thread|Thread) 0x.*line \d+ in <module>")
+        self.assertIn('python in %0: Current thread 0x1', report)
+        self.assertEqual(sleeps, [0.05])
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
+        self.assertFalse(any(command[1:2] == ["capture-pane"] for command in self.commands))
 
     def test_a_reused_pid_is_neither_signalled_nor_sampled(self):
         self.identity["501"] = "Sun Oct 18 00:00:09 2026"

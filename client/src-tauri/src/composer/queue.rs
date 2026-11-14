@@ -145,7 +145,7 @@ impl Composers {
             }));
             // Lane::Queue busy means no call ran. Qt stays quiet (251).
             let outcome = match called {
-                Ok(Err(error)) if error == crate::actions::BUSY => None,
+                Ok(Err(error)) if crate::actions::is_busy(&error) => None,
                 other => Some(outcome_of(other, rules::NOTHING_QUEUED)),
             };
             me.queue_sent(&delivery.key, outcome.as_ref());

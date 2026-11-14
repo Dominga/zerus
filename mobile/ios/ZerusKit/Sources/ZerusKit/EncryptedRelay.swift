@@ -141,15 +141,27 @@ extension RelayClient {
     /// A phone's signed latch statement for the gateway that routes `computer` (zerus-sa9qn.50): built and signed once,
     /// when the person's action is sent; that gateway's own service verifies it. The payload of session_question_route_person.
     public func signRoutePerson(_ connection: Connection, computer: String, sessionId: String, run: String, conversation: String,
-                         personOff: Bool, requestId: String) async throws -> JSONObject {
+                         personOff: Bool, requestId: String, useRevision: Bool = false, session: String = "") async throws -> JSONObject {
         let state = try await synchronizeWorkspace(connection), membership = try state.active()
         guard let route = state.routes[computer], membership.members[route.gatewayId]?.role == "computer" else {
             throw ZerusError.mismatch("Refresh this computer's encrypted route before sending.")
         }
+        let revision: Int64?
+        if useRevision {
+            guard !session.isEmpty else { throw ZerusError.invalid("Invalid question route session.") }
+            let id = UUID().uuidString.lowercased()
+            let payload: JSONObject = ["session_id": .string(sessionId), "expected_run_id": .string(run), "expected_conversation_id": .string(conversation)]
+            let initial = try await post(connection, computerId: computer, session: session, operation: SessionQuestionRouting.personRevisionOperation, payload: payload, id: id)
+            let receipt = try await waitForReceipt(connection, initial: initial)
+            guard receipt["request_id"] == .string(id), receipt["state"] == .string("completed"), let result = receipt.object("result") else {
+                throw ZerusError.mismatch(receipt.string("error").isEmpty ? "The child's question routing was not confirmed." : receipt.string("error"))
+            }
+            revision = try SessionQuestionRouting.latchRevision(result, id: id, session: sessionId, run: run, conversation: conversation)
+        } else { revision = nil }
         let now = Self.nowSeconds
         let statement = try RoutePersonStatement(workspaceId: membership.workspaceId, deviceId: state.identity.device.deviceId,
             gatewayId: route.gatewayId, sessionId: sessionId, runId: run, conversationId: conversation, personOff: personOff,
-            requestId: requestId, issuedAt: now, expiresAt: now + RoutePersonStatement.lifetime)
+            requestId: requestId, issuedAt: now, expiresAt: now + RoutePersonStatement.lifetime, expectedRevision: revision)
         let signature = try WorkspaceCrypto.sign(state.identity.keys, message: statement.frame())
         return ["statement": .object(statement.json), "signature": .string(WorkspaceProtocol.encode(signature))]
     }

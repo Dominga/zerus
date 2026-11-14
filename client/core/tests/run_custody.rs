@@ -287,9 +287,9 @@ fn isolated_worker() {
                 &inv,
                 &[],
                 &AtomicBool::new(false),
-                move |command| {
+                move |command, input_spawn| {
                     spawned.inherit(command)?;
-                    command.spawn()
+                    input_spawn.spawn(command)
                 },
                 lock,
             );

@@ -1361,13 +1361,14 @@ pub(crate) fn tray_delivery(
 fn macos_tray_notify(title: &str, body: &str) {
     use std::process::Stdio;
     use zerus_client_core::shell;
-    let spawned = crate::child_environment::command("osascript")
-        .arg("-e")
-        .arg(shell::notification_script(title, body))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let spawned = crate::child_environment::spawn(
+        crate::child_environment::command("osascript")
+            .arg("-e")
+            .arg(shell::notification_script(title, body))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     match spawned {
         Ok(mut child) => {
             std::thread::spawn(move || {

@@ -527,12 +527,14 @@ class BackendProfileRetention(unittest.TestCase):
     def test_confirmed_backend_absence_allows_original_profile_cleanup(self):
         from unittest.mock import Mock
         from test_windows_installer_survival import Installer
-        case = object.__new__(Installer)
-        case.backend_clean = True
-        case.temp = Mock()
-        Installer.cleanup_temp(case)
-        case.temp.cleanup.assert_called_once_with()
-        case.temp._finalizer.detach.assert_not_called()
+        with tempfile.TemporaryDirectory(prefix="installer-cleanup-") as folder:
+            case = Installer()
+            case.root = Path(folder)
+            case.backend_clean = True
+            case.temp = Mock()
+            Installer.cleanup_temp(case)
+            case.temp.cleanup.assert_called_once_with()
+            case.temp._finalizer.detach.assert_not_called()
 
 
 if __name__ == "__main__":

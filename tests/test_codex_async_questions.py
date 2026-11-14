@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Optional Codex questions: real private PTY, no model/network or user sessions."""
+import contextlib
 import json
 import os
+import select
 import signal
 import subprocess
+import sys
 import time
 import unittest
 import uuid
@@ -219,6 +222,76 @@ class CodexAsync(unittest.TestCase):
         self.assertEqual(worker.returncode,0,worker.stderr)
         import sqlite3
         return sqlite3.connect('file:'+str(self.state/'delivery-receipts-v1.sqlite3')+'?mode=ro',uri=True)
+    @contextlib.contextmanager
+    def receipt_writer(self):
+        # Only this fixture's state: hold a real WAL writer until the parent
+        # releases it, rather than racing a sleep against the inspection.
+        receipt_locator.settle(fixtures.HGS,self.env)
+        script = '''import sqlite3,sys
+db=sqlite3.connect(sys.argv[1])
+db.execute('BEGIN IMMEDIATE')
+db.execute("UPDATE receipt_meta SET value=value WHERE key='epoch'")
+print('held',flush=True)
+sys.stdin.buffer.read(1)
+db.rollback()
+db.close()
+'''
+        writer=subprocess.Popen([sys.executable,'-u','-c',script,str(self.state/'delivery-receipts-v1.sqlite3')],
+                                env=self.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            self.assertTrue(select.select([writer.stdout],[],[],15)[0],'private writer did not acquire its lock')
+            self.assertEqual(writer.stdout.readline(),'held\n')
+            yield
+        finally:
+            writer.stdin.close()
+            try:writer.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                writer.kill();writer.wait();raise
+            error=writer.stderr.read();writer.stdout.close();writer.stderr.close()
+            self.assertEqual(writer.returncode,0,error)
+    def test_receipt_writer_keeps_the_complete_question_answerable(self):
+        self.configure(panel=True)
+        card=self.request()
+        self.assertTrue(card['can_answer'],card.get('answer_unavailable_reason'))
+        with self.receipt_writer():
+            result=self.inspect_once()
+            self.assertIs(result['pending_questions_complete'],True,result)
+            self.assertNotIn('pending_questions_error',result)
+            self.assertEqual([c['question_id'] for c in result['pending_questions']],[card['question_id']])
+            current=result['pending_questions'][0]
+            self.assertTrue(current['can_answer'],current.get('answer_unavailable_reason'))
+            self.assertEqual(self.received(),b'')
+        response,_=self.answer(card)
+        self.assertEqual(response.returncode,0,response.stderr)
+    def test_receipt_writer_does_not_relax_duplicate_question_checks(self):
+        self.configure(panel=True)
+        self.request()
+        self.append(dict(type='response_item',payload=dict(type='function_call',name='request_user_input_async',call_id='call_two',arguments=json.dumps(dict(questions=[dict(title='Which option?',options=self.options)])))))
+        self.append(dict(type='response_item',payload=dict(type='function_call_output',call_id='call_two',output='{"accepted":true}')))
+        self.assertEqual(len(self.inspect()['pending_questions']),2)
+        with self.receipt_writer():
+            result=self.inspect_once()
+            self.assertIs(result['pending_questions_complete'],True,result)
+            self.assertEqual(len(result['pending_questions']),2)
+            for card in result['pending_questions']:
+                self.assertFalse(card['can_answer'])
+                self.assertIn('same text',card['answer_unavailable_reason'])
+            self.assertEqual(self.received(),b'')
+    def test_answer_waits_for_receipt_contention_and_expiry_sends_no_input(self):
+        self.configure(panel=True)
+        card=self.request()
+        with self.receipt_writer():
+            started=time.monotonic()
+            response,payload=self.answer(card)
+            elapsed=time.monotonic()-started
+            self.assertNotEqual(response.returncode,0)
+            self.assertIn('SQLite DatabaseBusy',response.stderr)
+            # The writer stays held until this refusal, so no timed release
+            # races the admission. Scheduling delays can only increase this.
+            self.assertGreaterEqual(elapsed,0.7,'admission used the background 20ms busy wait')
+            self.assertEqual(self.received(),b'')
+        response,_=self.answer(card,request_id=payload['request_id'])
+        self.assertEqual(response.returncode,0,response.stderr)
     def warm_with_old_marker(self):
         # A completed, warm question cache, plus an older build's completion
         # marker for this run: neither may stand in for current receipts.

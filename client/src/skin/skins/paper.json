@@ -47,7 +47,8 @@
       "row-hover": "#f1ebdf",
       "row-selected": "#ece2cb",
       "row-selected-border": "#b9a272",
-      "status-attention": "#d9a43a"
+      "status-attention": "#d9a43a",
+      "members-surface": "#f1ede4"
     },
     "font": {
       "ui": [

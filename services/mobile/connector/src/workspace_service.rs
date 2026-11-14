@@ -318,6 +318,29 @@ pub(crate) fn activated(store: &Store, node_id: &str, revision: &str) -> Result<
     record.start_reserved = false;
     save(store, &record)
 }
+// A successful manager job is never replayed while acknowledgement waits.
+// Only transient Store contention yields; all admission errors still refuse.
+#[cfg(target_os = "linux")]
+async fn acknowledgement_store(private: &Path, deadline: tokio::time::Instant) -> Result<Store> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(failure());
+        }
+        let store = Store::try_lock(private, false).map_err(|_| failure())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(failure());
+        }
+        if let Some(store) = store {
+            return Ok(store);
+        }
+        #[cfg(feature = "test-hooks")]
+        linux::acknowledgement_waiting();
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + std::time::Duration::from_millis(50)).min(deadline),
+        )
+        .await;
+    }
+}
 /// Invoked after the workspace Store guard has been dropped, never by status.
 /// One absolute deadline includes all awaited manager calls and observation.
 pub(crate) async fn start(
@@ -334,7 +357,8 @@ pub(crate) async fn start(
         }
         return Ok(None);
     }
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    tokio::time::timeout_at(deadline, async {
         let store = Store::lock(private, false).map_err(|_| failure())?;
         let Some(record) = read(&store)? else {
             if failed_start_revision.is_some() {
@@ -374,9 +398,19 @@ pub(crate) async fn start(
         drop(store);
         #[cfg(target_os = "linux")]
         {
-            let (status, observed) = linux::start(plan).await?;
-            let store = Store::lock(private, false).map_err(|_| failure())?;
+            let (_, observed) = linux::start(plan).await?;
+            let store = acknowledgement_store(private, deadline).await?;
             if Store::revision(store.read(RECORD).map_err(|_| failure())?.as_deref()) != expected
+                || workspace_cli::read_config(config)?.1 != revision
+            {
+                return Err(failure());
+            }
+            // Native proof can age while another operation owns the Store.
+            // This is a fresh read-only check, never another manager Start.
+            let status = linux::confirm_start(&record, &observed).await?;
+            if tokio::time::Instant::now() >= deadline
+                || Store::revision(store.read(RECORD).map_err(|_| failure())?.as_deref())
+                    != expected
                 || workspace_cli::read_config(config)?.1 != revision
             {
                 return Err(failure());
@@ -469,6 +503,30 @@ pub async fn test_reserve_start_only(private: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn acknowledgement_contention_uses_the_original_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        let _held = Store::lock(&private, true).unwrap();
+        let started = tokio::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(15);
+        assert!(acknowledgement_store(&private, deadline).await.is_err());
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(15));
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn acknowledgement_path_errors_refuse_without_waiting() {
+        let missing = tempfile::tempdir().unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(acknowledgement_store(
+            &missing.path().join("missing"),
+            started + std::time::Duration::from_secs(15)
+        )
+        .await
+        .is_err());
+        assert!(started.elapsed().is_zero());
+    }
     #[test]
     fn status_is_read_only_and_does_not_adopt_a_different_pending_identity() {
         let dir = tempfile::tempdir().unwrap();

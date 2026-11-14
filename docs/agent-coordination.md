@@ -44,6 +44,16 @@ four open-dependency previews per waiter; the durable journal provides bounded
 pages for the complete record. No message body is parsed to infer a dependency.
 The former desktop Graph visualization is [retired](retired-features/session-graph.md).
 
+## Waits, tasks and Agent Teams
+
+An [Agent Teams](agent-teams.md) team does not use `hgs wait`. Its service
+hands each task to a member as a Zerus task attempt and takes the member's
+report from that attempt; the lead reads reports and questions with `hgs team
+inbox` and decides with `hgs team`. A stage moves on only by its holder's
+`hgs team verdict`. Prose, a native Stop and an idle member settle nothing in a
+team, just as they complete no wait. A wait between a team session and a
+session outside the team follows the rules below unchanged.
+
 ## Declare and hand off
 
 Check the selected installed CLI's help for `hgs [@host] wait`. Older versions

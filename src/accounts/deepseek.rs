@@ -305,15 +305,27 @@ mod tests {
         use super::*;
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         const DRIVER: &str = r#"
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const request = JSON.parse(input);
+let timeoutArgument;
+if (request.error_name) {
+  const nativeTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = function (milliseconds) {
+    timeoutArgument ??= milliseconds;
+    return nativeTimeout.call(this, milliseconds);
+  };
+}
 let result;
 try { result = {ok: await apiBalance(request.key, request.url, request.timeout)}; }
-catch { result = {failed: true}; }
+catch (error) {
+  result = {failed: true};
+  if (request.error_name) result.error_name = error.name;
+}
+if (request.error_name) result.timeout_ms = timeoutArgument;
 process.stdout.write(JSON.stringify(result));
 "#;
 
@@ -353,13 +365,21 @@ process.stdout.write(JSON.stringify(result));
         }
 
         fn run(url: &str, timeout_ms: u64) -> Value {
+            run_with_error_name(url, timeout_ms, false)
+        }
+
+        fn run_with_error_name(url: &str, timeout_ms: u64, error_name: bool) -> Value {
+            // The Kimi inspection tests replace `node` on PATH while they run.
+            let _lock = crate::accounts::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut command = Command::new("node");
             command.args([
                 "--input-type=module",
                 "-e",
                 &format!("{}\n{DRIVER}", include_str!("../dsh/account-balance.mjs")),
             ]);
-            let input = json!({"key":"sk-test-balance","url":url,"timeout":timeout_ms});
+            let input = json!({"key":"sk-test-balance","url":url,"timeout":timeout_ms,"error_name":error_name});
             let output = inspection::capture(command, input.to_string().as_bytes(), 20)
                 .expect("node runs the balance script");
             serde_json::from_slice(&output).unwrap()
@@ -433,23 +453,37 @@ process.stdout.write(JSON.stringify(result));
         #[test]
         fn a_silent_server_is_bounded_by_the_timeout() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}/user/balance", listener.local_addr().unwrap());
             let (done, finished) = std::sync::mpsc::channel::<()>();
             let worker = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                read_request(&mut stream);
-                // Hold the connection open without answering until the run ends.
+                // A timeout may fire before the request connects. Teardown
+                // must also finish then, without waiting in accept forever.
+                let _stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            match finished.recv_timeout(Duration::from_millis(10)) {
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                _ => return,
+                            }
+                        }
+                        Err(error) => panic!("accept balance request: {error}"),
+                    }
+                };
+                // Without the API timeout this closes the socket, yielding a
+                // fetch TypeError instead of the required TimeoutError.
                 let _ = finished.recv_timeout(Duration::from_secs(10));
             });
-            let started = Instant::now();
-            assert_eq!(run(&url, 300), json!({"failed":true}));
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "{:?}",
-                started.elapsed()
-            );
+            // Assert the request's own timeout, independently of Node startup
+            // and shutdown on a loaded runner. capture still bounds the child.
+            let result = run_with_error_name(&url, 300, true);
             drop(done);
             worker.join().unwrap();
+            assert_eq!(
+                result,
+                json!({"failed":true,"error_name":"TimeoutError","timeout_ms":300})
+            );
         }
     }
 }

@@ -1,5 +1,5 @@
 //! Read-only published-catalog discovery. No download, install or notification.
-use super::{spawn, unix_now, Lease};
+use super::{spawn_input, unix_now, Lease};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -35,7 +35,8 @@ fn run(program: &Path, args: &[&str], cancel: &AtomicBool, lease: Arc<Lease>) ->
         request_id: None,
     };
     let output =
-        zerus_client_core::run::run_owned(program, &invocation, &[], cancel, spawn, lease).ok()?;
+        zerus_client_core::run::run_owned(program, &invocation, &[], cancel, spawn_input, lease)
+            .ok()?;
     if output.len() > 32 * 1024 {
         return None;
     }

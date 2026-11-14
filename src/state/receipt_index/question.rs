@@ -82,12 +82,13 @@ fn question_page_at(
     if deadline.is_none() && after.is_none() {
         // A fresh explicit authority read seals the current original family,
         // including writers from older builds that do not update the locator.
+        let _wait = admission::Wait::new();
         let mut migration = migration::Migration::questions(state)?;
         while !migration.step()? {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    let catalog = match Catalog::open(state, false) {
+    let catalog = match Catalog::read_until(state, deadline) {
         Ok(catalog) => catalog,
         Err(error) => {
             if deadline.is_none() {
@@ -187,6 +188,53 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let id = uuid::Uuid::from_u128(n).to_string();
         fs::write(directory.join(format!("{id}.json")),json!({"request_id":id,"name":name,"run_id":run,"conversation_id":conversation,"status":"submitted","question_id":format!("q-{n}"),"question_hash":"fixture-hash","digest":"fixture-digest","submitted_at":n as f64}).to_string()).unwrap();
+    }
+    #[test]
+    fn inspection_uses_a_read_only_connection_with_a_bounded_busy_wait() {
+        let temp = tempfile::tempdir().unwrap();
+        let _worker = worker_lease(temp.path());
+        original(temp.path(), 1, "codex/p/tag", "run", "conversation");
+        let mut migration = migration::Migration::questions(temp.path()).unwrap();
+        while !migration.step().unwrap() {}
+        drop(migration);
+        let reader = Catalog::open(temp.path(), false).unwrap();
+        assert!(reader.db.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+        let wait: u64 = reader
+            .db
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            (1..=100).contains(&wait),
+            "reader lock wait must be nonzero and bounded: {wait}"
+        );
+        let expired = Catalog::read_until(temp.path(), Some(Instant::now())).unwrap();
+        let wait: u64 = expired
+            .db
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            wait, 0,
+            "the busy wait must not extend the inspection deadline"
+        );
+        // A WAL writer does not prevent a complete, exact read of committed
+        // evidence. In particular the projection must never upgrade to a writer.
+        let writer = Connection::open(temp.path().join(DATABASE)).unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE receipt_meta SET value=value WHERE key='epoch'")
+            .unwrap();
+        let page = question_page_at(
+            temp.path(),
+            "codex/p/tag",
+            "run",
+            "conversation",
+            None,
+            64,
+            Some(Instant::now() + Duration::from_secs(60)),
+        )
+        .unwrap();
+        assert_eq!(page.coverage, Coverage::Complete);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(reader.db.total_changes(), 0);
     }
     #[test]
     fn expired_call_has_no_filesystem_effect_and_keeps_the_cursor() {

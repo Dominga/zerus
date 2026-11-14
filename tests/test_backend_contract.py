@@ -116,6 +116,7 @@ class Tmux:
         test.env["SHELL"] = str(test.bin / "shell")
 
     def command(self, *args):
+        assert self.socket.parent.is_dir(), "the private tmux socket directory is gone"
         return subprocess.run([TMUX, "-S", str(self.socket), "-f", os.devnull, *args], capture_output=True,
                               text=True, timeout=10)
 
@@ -1059,6 +1060,10 @@ class Input(Contract):
                             {frozenset({("dim", True)})} and frame["cursor"] == dict(x=2, y=0), "a dim placeholder")
         self.assertEqual(style(styled(frame["screen"]), PROMPT.strip()), {frozenset()})
         self.assertEqual(self.send(name, payload)["status"], "submitted")
+        receipt = json.loads((self.root / "state" / "input_receipts" /
+                              (payload["request_id"] + ".json")).read_text())
+        self.assertEqual(receipt["status"], "submitted")
+        self.assertNotIn("refusal_schema", receipt)
         # The refused sends typed nothing: only the draft, its erasure and this message.
         self.wait_for(lambda: len(self.tokens(pid)) == 8, "the message")
         self.assertEqual(self.received(pid),

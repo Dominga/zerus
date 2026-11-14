@@ -96,7 +96,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         std::thread::sleep(Duration::from_millis(50));
     }
     let _guard = lock(None)?;
-    if let Some(archived) = archive::records()?.into_iter().find(|entry| {
+    if let Some(archived) = archive::complete_records()?.into_iter().find(|entry| {
         entry["name"] == original["name"]
             && entry["conversation_id"] == original["conversation_id"]
             && (entry["run_id"] == original["run_id"]
@@ -106,8 +106,12 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
         if forget {
             // Check every retained binding and recovery reference before the
             // first removal. A newly launched/awaiting restore owns its source.
-            let current = if record_path(name).exists() {Some(read(name)?)} else {None};
-            forget_archive_preflight(&archived,current.as_ref(),scope)?;
+            let current = if record_path(name).exists() {
+                Some(read(name)?)
+            } else {
+                None
+            };
+            forget_archive_preflight(&archived, current.as_ref(), scope)?;
             let snapshot = live()?;
             let running = match current.as_ref() {
                 Some(record) => terminal_live(&snapshot, record)? || process_alive(record),
@@ -116,20 +120,27 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             if running {
                 return Err("Session is still running; no archive or binding was forgotten".into());
             }
-            if let Some(scope)=scope {scope.changing();}
-            archive::remove_synced(&archive::path(string(&archived,"archive_id"))?)?;
-            if let Some(record)=&current {
+            if let Some(scope) = scope {
+                scope.changing();
+            }
+            archive::remove_synced(&archive::path(string(&archived, "archive_id"))?)?;
+            if let Some(record) = &current {
                 storage::remove_record(record)?;
             }
             worktree_lock::left(&archived);
-            if let Some(record)=current.filter(|record| record["session_id"]!=archived["session_id"]) {
+            if let Some(record) =
+                current.filter(|record| record["session_id"] != archived["session_id"])
+            {
                 worktree_lock::left(&record);
             }
         } else {
             drop(_guard);
             super::worktree_lifecycle::after_archive(&archived, string(&archived, "archive_id"));
-            if let Some(scope)=scope {scope.result_record(&archived);}
-            else {println!("hgs: archived {name} ({})", string(&archived, "archive_id"));}
+            if let Some(scope) = scope {
+                scope.result_record(&archived);
+            } else {
+                println!("hgs: archived {name} ({})", string(&archived, "archive_id"));
+            }
         }
         return Ok(0);
     }

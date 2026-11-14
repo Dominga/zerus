@@ -61,6 +61,7 @@ mod inventory {
         ("codex_rate_limit", NativePrompt),
         ("codex_goal_resume", NativePrompt),
         ("codex_folder_trust", NativePrompt),
+        ("codex_sandbox_setup", NativePrompt),
         ("kimi_folder_trust", NativePrompt),
         ("kimi_cache_hint", NativePrompt),
         ("startup_terminal_choice", NativePrompt),
@@ -72,6 +73,7 @@ mod inventory {
         ("dsh_native_api", OtherProvider),
         ("opencode_native", OtherProvider),
         ("adopt", NotACard),
+        ("agent/disposed", NotACard),
         ("auto", NotACard),
         ("claude", NotACard),
         ("claude_goal_status_v1", NotACard),
@@ -94,6 +96,9 @@ mod inventory {
         ("hgs_voice", NotACard),
         ("hooks", NotACard),
         ("journal", NotACard),
+        // Read-only Kimi cache-duration config provenance for the pre-send
+        // compaction decision/receipt, never a question card.
+        ("kimi_estimated_cache_duration", NotACard),
         ("kimi_goal_v1", NotACard),
         ("kimi_session_state", NotACard),
         ("kimi_tasks", NotACard),

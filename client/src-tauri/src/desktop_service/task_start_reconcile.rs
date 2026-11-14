@@ -210,8 +210,8 @@ impl Read {
             &invocation,
             &[],
             &self.cancel,
-            move |command| {
-                let mut child = command.spawn()?;
+            move |command, input_spawn| {
+                let mut child = input_spawn.spawn(command)?;
                 if registration
                     .as_ref()
                     .is_some_and(|r| !r.bind_original(&child))

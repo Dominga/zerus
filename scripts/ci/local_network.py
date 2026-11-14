@@ -5,6 +5,8 @@ from pathlib import Path
 import select
 import signal
 import subprocess
+import sys
+import uuid
 import time
 
 
@@ -86,3 +88,62 @@ class Network:
             except subprocess.TimeoutExpired:
                 os.killpg(self.helper.pid, signal.SIGKILL)
                 self.helper.wait(timeout=5)
+
+
+HOLD = "import sys;print(sys.argv[1],flush=True);sys.stdin.buffer.read(1)"
+
+
+class HeavySlot:
+    def __init__(self, executable, output, home):
+        self.executable, self.output, self.home = executable, output, home
+        self.child = None
+
+    def acquire(self):
+        if self.executable is None or not Path(self.executable).is_file():
+            raise RuntimeError("shared heavy wrapper is required; no check started")
+        nonce = uuid.uuid4().hex
+        self.child = subprocess.Popen(
+            [str(self.executable), sys.executable, "-I", "-c", HOLD, nonce],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.output,
+            start_new_session=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)},
+        )
+        try:
+            deadline = time.monotonic() + 1800
+            ready = b""
+            while len(ready) < 128 and not ready.endswith(b"\n"):
+                if self.child.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("shared heavy wrapper did not admit the check")
+                if not select.select([self.child.stdout], [], [], 1)[0]:
+                    continue
+                part = os.read(self.child.stdout.fileno(), 128 - len(ready))
+                if not part:
+                    break
+                ready += part
+            if ready != (nonce + "\n").encode():
+                raise RuntimeError("shared heavy wrapper refused before the check")
+            if self.child.poll() is not None:
+                raise RuntimeError("shared heavy wrapper ended before the check")
+        except BaseException:
+            self.finish(admitted=False)
+            raise
+
+    def finish(self, admitted=True):
+        if self.child is None:
+            return
+        child, self.child = self.child, None
+        alive = child.poll() is None
+        try:
+            child.stdin.close()
+            try:
+                code = child.wait(timeout=10)
+                if not select.select([child.stdout], [], [], 10)[0] or child.stdout.read(1):
+                    raise RuntimeError("shared heavy holder did not close its original pipe")
+            except (subprocess.TimeoutExpired, RuntimeError):
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=10)
+                raise
+            if admitted and (not alive or code != 0):
+                raise RuntimeError("shared heavy wrapper ended before the original check settled")
+        finally:
+            child.stdout.close()

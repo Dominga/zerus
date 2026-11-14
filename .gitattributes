@@ -26,6 +26,8 @@ tests/fixtures/*.patch -text -whitespace
 tests/fixtures/session-start-context.json -text
 # Task #20: compared byte for byte by details_contract; a Windows checkout kept CRLF.
 client/core/tests/fixtures/inspect-details.json text eol=lf
+# Template digests pin the canonical UTF-8/LF encoding on every host.
+crates/team-plan/fixtures/template-create-canonical.json -text
 src/state/data/*.txt -text -whitespace
 
 # Keep vendored libvterm byte-for-byte identical to the documented upstream.

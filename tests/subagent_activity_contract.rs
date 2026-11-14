@@ -272,6 +272,82 @@ fn exactly_two_hundred_and_native_truncation_have_distinct_truth() {
 }
 
 #[test]
+fn recorded_hook_overflow_is_disclosed_without_changing_the_replacement_page() {
+    use sha2::{Digest, Sha256};
+    for count in [201, 200] {
+        let dir = isolated_root();
+        let root = dir.path();
+        write_codex_session(root, None);
+        write_hooks(root, count);
+        if count == 201 {
+            // The overflow probe must not decode a 201st payload. SQLite can
+            // index this JSON's child ID, but serde refuses the huge number.
+            let payload = format!("{{\"agent_id\":\"{CODEX_CHILD}\",\"at\":1e9999}}");
+            assert!(serde_json::from_str::<Value>(&payload).is_err());
+            let db = rusqlite::Connection::open(root.join("state/events.sqlite3")).unwrap();
+            db.execute("UPDATE events SET payload=? WHERE seq=1", [payload])
+                .unwrap();
+        }
+        let record = root
+            .join("state")
+            .join(format!("{:x}.json", Sha256::digest(NAME.as_bytes())));
+        let before = std::fs::read(&record).unwrap();
+        let target = codex_target();
+        let read = || {
+            parse_subagent_activity(&target, CODEX_CHILD, answered(root, &target, CODEX_CHILD))
+                .expect("recorded hook Activity")
+        };
+        let page = read();
+        assert_eq!(page["history_truncated"] == true, count > 200, "{page}");
+        let events = page["events"].as_array().unwrap();
+        assert_eq!(events.len(), 200);
+        assert_eq!(events.first().unwrap()["at"], count - 199);
+        assert_eq!(events.last().unwrap()["at"], count);
+        assert_eq!(
+            page["cursor"], 0,
+            "child Activity remains a replacement page"
+        );
+        assert_eq!(page["read_only"], true);
+        assert_eq!(page["tracked"], true);
+        assert_eq!(page["parent_conversation_id"], CONVERSATION);
+        assert_eq!(
+            page["conversation_id"],
+            format!("{CONVERSATION}/{CODEX_CHILD}")
+        );
+        assert_eq!(page["run_id"], RUN);
+        assert_eq!(page["agent_id"], CODEX_CHILD);
+        assert_eq!(
+            read(),
+            page,
+            "an unchanged journal has the same bounded page"
+        );
+
+        let db = rusqlite::Connection::open(root.join("state/events.sqlite3")).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='events_subagent_activity'",
+            [], |r| r.get::<_, i64>(0)).unwrap(), 1, "the production reader installs the child range index");
+        let event =
+            json!({"type":"PreToolUse","agent_id":CODEX_CHILD,"at":count + 1,"detail":"new hook"});
+        db.execute(
+            "INSERT INTO events(name,conversation,payload) VALUES(?,?,?)",
+            rusqlite::params![NAME, CONVERSATION, event.to_string()],
+        )
+        .unwrap();
+        let next = read();
+        assert_eq!(next["history_truncated"], true);
+        let events = next["events"].as_array().unwrap();
+        assert_eq!(events.len(), 200);
+        assert_eq!(events.first().unwrap()["at"], count - 198);
+        assert_eq!(events.last().unwrap()["at"], count + 1);
+        assert_eq!(next["cursor"], 0);
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            before,
+            "inspection never rewrites the binding"
+        );
+    }
+}
+
+#[test]
 fn recorded_only_summary_external_and_archive_paths_stay_intact() {
     let dir = isolated_root();
     write_codex_session(dir.path(), None);

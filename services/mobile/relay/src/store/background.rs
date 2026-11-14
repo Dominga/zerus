@@ -363,6 +363,12 @@ impl Store {
                 "requests INDEXED BY send_receipt_reads_v1"
             };
             rows.extend(t.all(&format!("SELECT id,workspace_id FROM {send_reads} WHERE operation='send_receipt' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-self.db.cfg.retention.min(3600) as f64,batch]).await?);
+            let latch_reads = if self.db.postgres {
+                "requests"
+            } else {
+                "requests INDEXED BY question_route_person_status_reads_v1"
+            };
+            rows.extend(t.all(&format!("SELECT id,workspace_id FROM {latch_reads} WHERE operation='session_question_route_person_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-self.db.cfg.retention.min(3600) as f64,batch]).await?);
             let projection_reads = if self.db.postgres {
                 "requests"
             } else {

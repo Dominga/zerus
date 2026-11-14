@@ -79,8 +79,21 @@ fn run(values: &BTreeMap<u32, Snapshot>, markers: &[u32]) -> Result<Vec<u32>> {
                 .ok_or_else(|| anyhow::anyhow!("unreadable short info"))
         },
         |v| {
+            let mut bytes = 1_i32.to_ne_bytes().to_vec();
+            bytes.extend_from_slice(v.image.as_bytes());
+            bytes.extend_from_slice(b"\0\0");
+            bytes.extend_from_slice(v.image.as_bytes());
+            bytes.push(0);
+            // All other own-user ancestors have a withheld environment, as
+            // restricted shells and signed desktop applications can have.
+            bytes.extend_from_slice(if markers.contains(&v.pid) {
+                b"HGS_RUN_ID=fixture\0"
+            } else {
+                b"\0\0"
+            });
             ensure!(
-                !markers.contains(&v.pid) && !super::super::agent_image(&v.image),
+                !super::super::procargs_agent_environment(&bytes)?
+                    && !super::super::agent_image(&v.image),
                 "agent-descended frontend request refused"
             );
             Ok(v.pid)
@@ -89,8 +102,12 @@ fn run(values: &BTreeMap<u32, Snapshot>, markers: &[u32]) -> Result<Vec<u32>> {
 }
 
 #[test]
-fn terminal_login_bridge_continues_and_launchd_parented_gui_uses_the_same_walk() {
+fn terminal_login_bridge_keeps_native_proof_with_withheld_environments() {
     assert_eq!(run(&terminal(), &[]).unwrap(), [9, 8, 7, 5]);
+}
+
+#[test]
+fn installed_gui_keeps_native_proof_with_withheld_environments() {
     let dock = [
         node(9, 8, "/private/example/hgs"),
         node(8, 1, "/private/example/hgs-tray"),

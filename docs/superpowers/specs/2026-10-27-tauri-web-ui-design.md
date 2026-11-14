@@ -24,7 +24,7 @@ design work reaches the product.
 | Visual base | The WhiteWh fork prototype's *base style* only: fonts, radii, density, motion. None of its specific solutions or runtime. Since round 4 the palette is Qt's (below) |
 | Session list | Today's Zerus structure, sizes and cards. Only the prototype's nested tree lines are borrowed, for the existing one-level subagent nesting |
 | Parity | Every function of the current Qt GUI, including those the prototype lacks |
-| Orchestration | No fork orchestrator (teams, phases, task graph, iron rules, cache hold, designer). Zerus Tasks are redesigned in the new style |
+| Orchestration | Replaced on 2026-11-11 by owner decision D1 of `2026-11-11-agent-teams-design.md`: Agent Teams (teams, then phases, the task graph and the designer) come in by milestones, behind a per-computer preview that is off by default; the first milestone is the queue team, described in `docs/agent-teams.md`. Iron rules and cache hold stay excluded. Zerus Tasks are redesigned in the new style |
 | Navigation | The main screen switcher stays on the side |
 | Scope | No new features from the prototype. The skin system is the one requested addition |
 | Process | A mocked-data design is reviewed and approved before implementation |

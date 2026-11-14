@@ -23,7 +23,7 @@ use std::time::Instant;
 
 /// The one window for the settle and the proof, from the end of the paste.
 /// It fits inside the desktop's whole-send deadline (30 s, lock wait included).
-pub(super) const WINDOW: Duration = Duration::from_secs(8);
+pub(in crate::state) const WINDOW: Duration = Duration::from_secs(8);
 /// How long the settled composer must stay the same before Enter.
 const STABLE: Duration = Duration::from_millis(150);
 /// How often the composer or transcript is read again.
@@ -34,23 +34,23 @@ pub(crate) const RESIDUE_CHARS: usize = 2_000;
 const TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The agents whose submissions need this proof.
-pub(super) fn applies(agent: &str) -> bool {
+pub(in crate::state) fn applies(agent: &str) -> bool {
     agent == "claude"
 }
 
-pub(super) fn plain(row: &str) -> String {
+pub(in crate::state) fn plain(row: &str) -> String {
     styled_row(row).iter().map(|(ch, _)| ch).collect()
 }
 
 /// Claude's unindented full-width rule above and below its composer.
-pub(super) fn separator(plain: &str) -> bool {
+pub(in crate::state) fn separator(plain: &str) -> bool {
     !plain.starts_with(char::is_whitespace)
         && plain.chars().count() >= 12
         && plain.chars().all(|ch| "─━╌".contains(ch))
 }
 
 /// Claude's footer while it still processes a paste.
-pub(super) fn pasting(screen: &str) -> bool {
+pub(in crate::state) fn pasting(screen: &str) -> bool {
     let rows: Vec<String> = screen.lines().map(plain).collect();
     let Some(last_rule) = rows.iter().rposition(|row| separator(row)) else {
         return false;
@@ -61,7 +61,12 @@ pub(super) fn pasting(screen: &str) -> bool {
 /// The text of Claude's composer around `cursor_y`: from its `❯` row to the
 /// rule below, without the prompt glyph or the continuation indent, bounded.
 /// None when no composer is recognized there.
-pub(super) fn composer_text(agent: &str, screen: &str, cursor_y: usize) -> Option<String> {
+pub(in crate::state) fn composer_text(agent: &str, screen: &str, cursor_y: usize) -> Option<String> {
+    Some(composer_full(agent, screen, cursor_y)?.chars().take(RESIDUE_CHARS).collect())
+}
+
+// The Enter fence compares all captured composer text; only evidence is shortened.
+fn composer_full(agent: &str, screen: &str, cursor_y: usize) -> Option<String> {
     let rows: Vec<String> = screen.lines().map(plain).collect();
     let text = match agent {
         "claude" => {
@@ -102,7 +107,7 @@ pub(super) fn composer_text(agent: &str, screen: &str, cursor_y: usize) -> Optio
         }
     };
     let text = text.trim().to_owned();
-    Some(text.chars().take(RESIDUE_CHARS).collect())
+    Some(text)
 }
 
 /// The pane's cursor for a frame. WhiteWh fork (owner, 2026-11-13): the
@@ -136,7 +141,7 @@ pub(crate) fn frame(terminal: &dyn backend::TerminalBackend, claim: &backend::In
 }
 
 /// The composer's text now, as evidence (bounded), or None.
-pub(super) fn residue(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim) -> Option<String> {
+pub(in crate::state) fn residue(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim) -> Option<String> {
     let (screen, _, y) = frame(terminal, claim)?;
     composer_text(claim.agent, &screen, y).filter(|text| !text.is_empty())
 }
@@ -144,32 +149,50 @@ pub(super) fn residue(terminal: &dyn backend::TerminalBackend, claim: &backend::
 /// One frame of the composer: its text when it shows a settled paste
 /// (recognized, not empty, no `Pasting…`), and its text at all. None when
 /// the cursor moved during the read.
-fn settled(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim) -> Option<(Option<String>, Option<String>)> {
+fn settled(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, complete: bool) -> Option<(Option<String>, Option<String>)> {
     let (screen, x, y) = frame(terminal, claim)?;
-    let text = composer_text(claim.agent, &screen, y).filter(|text| !text.is_empty());
+    let text = if complete { composer_full(claim.agent, &screen, y) } else { composer_text(claim.agent, &screen, y) };
+    let text = text.filter(|text| !text.is_empty());
     let shown = text.clone().filter(|_| !pasting(&screen) && !composer_empty_for_model(claim.agent, &screen, x, y, None));
     Some((shown, text))
 }
 
 /// Whether the composer still shows exactly `text`, settled: the check made
 /// under the state lock immediately before the one Enter (zerus-iitw8.5).
-pub(super) fn still(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, text: &str) -> bool {
-    settled(terminal, claim).and_then(|(shown, _)| shown).as_deref() == Some(text)
+pub(in crate::state) fn still(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, text: &str) -> bool {
+    settled(terminal, claim, false).and_then(|(shown, _)| shown).as_deref() == Some(text)
+}
+
+/// Pending-Send's Enter fence compares the complete captured composer;
+/// the ordinary lane and bounded receipt previews retain their existing form.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn still_complete(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, text: &str) -> bool {
+    settled(terminal, claim, true).and_then(|(shown, _)| shown).as_deref() == Some(text)
 }
 
 /// Waits until the composer shows the paste settled: recognized, not empty,
 /// no `Pasting…`, and the same text on reads at least `STABLE` apart. Ok holds
 /// that text; Err the composer's last text when `deadline` passes first. Only
 /// the terminal is read, so the caller holds no lock meanwhile.
-pub(super) fn settle(
+pub(in crate::state) fn settle(
     terminal: &dyn backend::TerminalBackend,
     claim: &backend::InputClaim,
     deadline: Instant,
 ) -> std::result::Result<String, Option<String>> {
+    wait_settled(terminal, claim, deadline, false)
+}
+
+/// Same stable-read window, with no truncation in the pending-Send comparator.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::state) fn settle_complete(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, deadline: Instant) -> std::result::Result<String, Option<String>> {
+    wait_settled(terminal, claim, deadline, true)
+}
+
+fn wait_settled(terminal: &dyn backend::TerminalBackend, claim: &backend::InputClaim, deadline: Instant, complete: bool) -> std::result::Result<String, Option<String>> {
     let mut seen: Option<(String, Instant)> = None;
     let mut last = None;
     loop {
-        if let Some((shown, text)) = settled(terminal, claim) {
+        if let Some((shown, text)) = settled(terminal, claim, complete) {
             last = text.or(last);
             match (shown, &seen) {
                 (Some(text), Some((before, at))) if &text == before => {
@@ -182,7 +205,7 @@ pub(super) fn settle(
             }
         }
         if Instant::now() >= deadline {
-            return Err(last);
+            return Err(last.map(|text: String| text.chars().take(RESIDUE_CHARS).collect()));
         }
         std::thread::sleep(POLL);
     }
@@ -191,7 +214,7 @@ pub(super) fn settle(
 /// Claude's transcript from its length before the paste: where the proof of
 /// this submission must appear. Each read continues after the last complete
 /// line (zerus-iitw8.6), at most `TRANSCRIPT_BYTES` after the start in all.
-pub(super) struct Transcript {
+pub(in crate::state) struct Transcript {
     path: PathBuf,
     /// Where the next read starts: the start plus every complete line read.
     next: u64,
@@ -202,13 +225,13 @@ pub(super) struct Transcript {
 }
 
 impl Transcript {
-    pub(super) fn at(path: PathBuf, start: u64) -> Self {
+    pub(in crate::state) fn at(path: PathBuf, start: u64) -> Self {
         Transcript { path, next: start, read: 0, partial: Vec::new() }
     }
 
     /// The transcript the record names, from its length now. None when the
     /// record names none yet.
-    pub(super) fn of(record: &Value) -> Option<Self> {
+    pub(in crate::state) fn of(record: &Value) -> Option<Self> {
         let path = PathBuf::from(string(record, "transcript"));
         if !path.is_absolute() {
             return None;
@@ -258,7 +281,7 @@ impl Transcript {
 
 /// What proved the submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Proof {
+pub(in crate::state) enum Proof {
     /// A new typed user row of the transcript is the message.
     Transcript,
     /// Claude queued it while busy: a new transcript `enqueue` is the message.
@@ -269,7 +292,7 @@ pub(super) enum Proof {
 }
 
 impl Proof {
-    pub(super) fn name(self) -> &'static str {
+    pub(in crate::state) fn name(self) -> &'static str {
         match self {
             Proof::Transcript => "transcript",
             Proof::Queued => "queue",
@@ -279,7 +302,7 @@ impl Proof {
 
     /// Whether Claude itself recorded the message, in its transcript or its
     /// queue. An emptied composer alone does not show that it accepted it.
-    pub(super) fn recorded(self) -> bool {
+    pub(in crate::state) fn recorded(self) -> bool {
         matches!(self, Proof::Transcript | Proof::Queued)
     }
 }
@@ -287,7 +310,7 @@ impl Proof {
 /// Waits for Claude's own record of the submission until `deadline`. Err
 /// holds the composer's text then, as evidence. `pasted_at` is the wall clock
 /// just before the paste: no proving row may be older.
-pub(super) fn confirm(
+pub(in crate::state) fn confirm(
     terminal: &dyn backend::TerminalBackend,
     claim: &backend::InputClaim,
     mut transcript: Option<&mut Transcript>,
@@ -457,7 +480,7 @@ fn significant(text: &str) -> Vec<String> {
 
 /// Whether `recorded` is exactly `message`: the same significant lines in the
 /// same order, none missing and none added (zerus-iitw8.4).
-pub(super) fn same(message: &str, recorded: &str) -> bool {
+pub(in crate::state) fn same(message: &str, recorded: &str) -> bool {
     let wanted = significant(message);
     !wanted.is_empty() && wanted == significant(recorded)
 }
@@ -475,6 +498,20 @@ mod tests {
         format!("● Fixture complete.\n{}\n❯ {composer}\n{}\n  {footer}\n", rule(), rule())
     }
     const SETTLED: &str = "[Image #1] [Image #2][Pasted text #3 +35 lines]";
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_changed_composer_tail_cannot_hide_behind_the_evidence_bound() {
+        let prefix = "x".repeat(RESIDUE_CHARS);
+        let before = format!("{prefix} original");
+        let after = format!("{prefix} changed");
+        let terminal = Frames::new(vec![(screen(&after, ""), 2, 2)]);
+        assert!(!still_complete(&terminal, &claim(), &before));
+        // The displayed composer, not its evidence preview, is the fence.
+        let terminal = Frames::new(vec![(screen(&before, ""), 2, 2)]);
+        assert!(still_complete(&terminal, &claim(), &before));
+        assert_eq!(composer_text("claude", &screen(&before, ""), 2).unwrap().chars().count(), RESIDUE_CHARS);
+    }
+
 
     /// One captured screen with the cursor column and row.
     type Frame = (String, usize, usize);

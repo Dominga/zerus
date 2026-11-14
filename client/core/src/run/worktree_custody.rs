@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 
 const SETUP: Duration = Duration::from_secs(10);
 const MAX_REPLIES: usize = 3 * wire::MAX_PHASES + 2;
-type OriginalSpawn = Arc<dyn Fn(&mut Command) -> std::io::Result<Child> + Send + Sync>;
+type OriginalSpawn = Arc<dyn Fn(&mut Command, InputSpawn) -> std::io::Result<Child> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -139,9 +139,9 @@ impl Owner {
                     256 << 10,
                     Some(&stop),
                     Pipes {
-                        spawn: Some(Box::new(move |command| {
+                        spawn: Some(Box::new(move |command, input| {
                             frozen.apply(command);
-                            original(command)
+                            original(command, input)
                         })),
                         readers: Some(owned.clone()),
                         require_complete: true,
@@ -188,9 +188,9 @@ impl Owner {
                     wire::FRAME_BYTES,
                     Some(&stop),
                     Pipes {
-                        spawn: Some(Box::new(move |command| {
+                        spawn: Some(Box::new(move |command, input| {
                             environment.apply(command);
-                            spawn(command)
+                            spawn(command, input)
                         })),
                         input: Some(Box::new(move |mut pipe| {
                             if pipe.write_all(&initial).and_then(|_| pipe.flush()).is_err() {

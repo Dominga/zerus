@@ -195,11 +195,11 @@ fn the_frozen_accounted_runner_executes_the_retained_image_and_keeps_its_input()
         64 << 10,
         &AtomicBool::new(false),
         image.clone(),
-        move |command| {
+        move |command, input_spawn| {
             #[cfg(windows)]
             command.env(MARKER, "1");
             checked.before_spawn(command)?;
-            let mut child = command.spawn()?;
+            let mut child = input_spawn.spawn(command)?;
             if !checked.matches_child(&mut child) {
                 drop(child.stdin.take());
             }

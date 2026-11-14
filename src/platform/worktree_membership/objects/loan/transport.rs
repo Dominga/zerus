@@ -300,30 +300,138 @@ mod tests {
         Instant::now() + std::time::Duration::from_secs(3)
     }
     /// The descriptors of this process that share `file`'s open file
-    /// description (kcmp KCMP_FILE): `file` itself and every received copy of
+    /// description: `file` itself and every received copy of
     /// a right to it. Not every descriptor on its inode: another thread of the
     /// test process may hold a brief new open of the same file, such as the
     /// worktree membership scan's O_PATH open of each /proc/self/fd entry,
     /// which is a description of its own (zerus-yskhm).
     #[cfg(target_os = "linux")]
     fn copies(file: &File) -> usize {
+        copies_after_probe(file, shares(file, file.as_raw_fd()))
+    }
+    #[cfg(target_os = "linux")]
+    fn shares(file: &File, fd: libc::c_int) -> io::Result<bool> {
         const KCMP_FILE: libc::c_int = 0;
         let pid = std::process::id() as libc::pid_t;
-        let shares = |fd: libc::c_int| unsafe {
-            libc::syscall(libc::SYS_kcmp, pid, pid, KCMP_FILE, file.as_raw_fd(), fd) == 0
+        match unsafe { libc::syscall(libc::SYS_kcmp, pid, pid, KCMP_FILE, file.as_raw_fd(), fd) } {
+            -1 => Err(io::Error::last_os_error()),
+            result => Ok(result == 0),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn copies_after_probe(file: &File, probe: io::Result<bool>) -> usize {
+        match probe {
+            Ok(true) => {}
+            Ok(false) => panic!("kcmp self comparison mismatched"),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EPERM | libc::EACCES | libc::ENOSYS)
+                ) =>
+            {
+                return locked_copies(file);
+            }
+            Err(error) => panic!("kcmp self comparison failed: {error}"),
         };
-        // Without kcmp the count would prove nothing.
-        assert!(
-            shares(file.as_raw_fd()),
-            "kcmp KCMP_FILE: {}",
-            io::Error::last_os_error()
-        );
         std::fs::read_dir("/proc/self/fd")
             .unwrap()
-            .filter_map(Result::ok)
+            .map(Result::unwrap)
             .filter_map(|fd| fd.file_name().to_str()?.parse::<libc::c_int>().ok())
-            .filter(|&fd| shares(fd))
+            .filter(|&fd| match shares(file, fd) {
+                Ok(shared) => shared,
+                // Another thread can close its descriptor during the census.
+                Err(error) if error.raw_os_error() == Some(libc::EBADF) => false,
+                Err(error) => panic!("kcmp descriptor comparison failed: {error}"),
+            })
             .count()
+    }
+    #[cfg(target_os = "linux")]
+    fn locked_copies(file: &File) -> usize {
+        use std::os::unix::fs::MetadataExt;
+        // flock is tied to the open file description, just like SCM_RIGHTS.
+        // Keep the private original locked: duplicates share its lock, while
+        // independent opens of its inode cannot acquire that exclusive lock.
+        let lock = |file: &File| {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        };
+        lock(file).unwrap();
+        let independent = File::open(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap();
+        assert_eq!(
+            lock(&independent).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(independent);
+        let original = file.metadata().unwrap();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .map(Result::unwrap)
+            .filter_map(|fd| fd.file_name().to_str()?.parse::<libc::c_int>().ok())
+            .filter(|&fd| {
+                // Pin this descriptor before inspecting it; another fixture
+                // may close/reuse a census entry. Never lock a different inode.
+                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+                if duplicate < 0 {
+                    let error = io::Error::last_os_error();
+                    assert_eq!(error.raw_os_error(), Some(libc::EBADF), "{error}");
+                    return false;
+                }
+                let held = unsafe { File::from_raw_fd(duplicate) };
+                let metadata = held.metadata().unwrap();
+                if (metadata.dev(), metadata.ino()) != (original.dev(), original.ino()) {
+                    return false;
+                }
+                let flags = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_GETFL) };
+                assert!(flags >= 0);
+                if flags & libc::O_PATH != 0 {
+                    return false;
+                }
+                match lock(&held) {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+                    Err(error) => panic!("private file-description lock failed: {error}"),
+                }
+            })
+            .count()
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_kcmp_still_counts_duplicates_but_not_independent_or_path_opens() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let file = named.as_file();
+        let _independent = File::open(named.path()).unwrap();
+        let _path = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(named.path())
+            .unwrap();
+        for error in [libc::EPERM, libc::EACCES, libc::ENOSYS] {
+            let count = || copies_after_probe(file, Err(io::Error::from_raw_os_error(error)));
+            assert_eq!(count(), 1);
+            let duplicate = file.try_clone().unwrap();
+            assert_eq!(count(), 2, "a leaked received copy must remain visible");
+            drop(duplicate);
+            assert_eq!(count(), 1);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[should_panic(expected = "kcmp self comparison mismatched")]
+    fn a_self_mismatch_never_selects_the_unavailable_kernel_fallback() {
+        copies_after_probe(&tempfile::tempfile().unwrap(), Ok(false));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[should_panic(expected = "kcmp self comparison failed")]
+    fn unexpected_kcmp_errors_still_fail_the_control() {
+        copies_after_probe(
+            &tempfile::tempfile().unwrap(),
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+        );
     }
     #[test]
     fn real_rights_keep_the_same_native_file_and_close_on_exec() {

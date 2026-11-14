@@ -111,6 +111,35 @@ The exact-main CLI reader is qualified before adding this writer. Windows
 namespace durability is not yet qualified (`zerus-cg5h.4.8.2`), so its new
 writer returns Unknown; successful ordinary previews do not qualify that path.
 
+The opt-in `qualify_start_refusal` manual Windows check runs the maintained
+native publisher and refusal controls as a fresh ordinary user on NTFS. It
+checks original-file flush, no-replace preservation, the pinned root and native
+input exclusion, retained Unknown after publication and restart, and the old
+reader's present/Unknown result. Runtime mutants remove namespace completion,
+read-back completion, no-replace, and the caller's uncertain result separately.
+The restart helper must execute exactly one test; a zero-match helper mutation
+must fail too.
+The final control restores the original source and the const-false gate.
+These controls qualify the conservative Unknown response; they do not establish
+namespace durability or authorize queue activation.
+
+These filesystem controls use a real new logon token without loading a user
+profile hive, with explicit private home/app-data/temp directories. The kernel
+user SID must match the created ordinary account and its token must contain no
+Administrators SID. Hosted profile loading has a separately recorded pre-handle
+stall (`zerus-5wmh.66.3.27.4.1`); this control neither retries an unknown launch
+nor qualifies cold-profile, registry or installed-GUI behavior.
+
+The retained Windows directory handles are read-only and deny write/delete
+sharing to keep the original ancestry pinned. `FILE_FLAG_BACKUP_SEMANTICS`
+permits opening a directory but does not establish successful namespace flush.
+[`FlushFileBuffers`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires a handle with `GENERIC_WRITE`; a volume-wide flush requires privileged
+access. This path neither weakens the original sharing pins nor introduces a
+privileged volume flush. The compatibility `platform::sync_dir` no-op continues
+to provide no durability evidence. A separately reviewed native namespace
+completion mechanism remains an activation prerequisite.
+
 Only a complete synced retained read-back can construct the local Start reply's
 `refusal` proof: exactly `schema: 1`, `request_id`, `plan_digest`, and the closed
 reason `acknowledgement_mode_changed`. Core recomputes the digest from its own
@@ -387,6 +416,25 @@ and introduces no automatic dispatch, Resume or scheduler.
 
 ## Qualification
 
+### Desktop execution reader
+
+The first `.4.9` reader leaf preserves the CLI's existing replica execution
+projection in Core's `TaskItem.execution`. It copies one typed current attempt
+with its exact saved identity, phase and integer timestamps. Submitted remains
+distinct from Running; Running requires recorded begin evidence. Explicit legacy
+projections retain their legacy flag and generation zero. Missing, malformed,
+overlong or future phase/origin data is unavailable, never evidence of legacy
+work, an empty executor slot or exited native work.
+
+The DTO retains conflict and nonempty unknown/unexplained evidence as flags,
+without copying those ID arrays, histories or frozen native input. Session
+labels and resolution metadata remain saved references, not native peer or
+Person proof. It supplies no live runtime freshness or executor queue position;
+the existing project To do order keeps its separate meaning. There is no new
+renderer action, mobile binding, dispatch admission or activation in this leaf.
+
+### Native and activation controls
+
 Record controls cover lazy/no-op storage, exact identities and slot CAS,
 cross-project/child ownership, concurrent claims, immutable request no-replay,
 observed versus unseen Pause/Stop facts, person Stop crossing versus agent or
@@ -407,9 +455,33 @@ confirmed versus submitted/unknown interruption, original receipt recovery,
 loaded adapter capability and no replay. Activation adds the isolated latest
 native contract campaign and coordinator-owned Arch/Mac preview.
 
-The macOS audit-token/csops/argv path has only been cross-typechecked so far.
-Before `.4.8` activation it requires actual non-display private tests on a Mac
-(`zerus-cg5h.4.8.1`), including wrong/reused identities, loaded-image changes,
-ancestry and both compatibility directions. Neither a cross-check nor the
-ordinary GUI preview qualifies that native path. No live agent or owner
-display is needed for that prerequisite.
+The macOS audit-token/csops/argv path has native non-display controls in
+`src/desktop/task_controls/peer_macos/tests.rs` (`zerus-cg5h.4.8.1`). They use
+owned socket peers and resident supervisor/child processes, the actual loaded
+unit-test image, audit-token-bound kernel status/CodeDirectory hashes, native
+argv and birth/ancestry queries. Controls reject another peer, stale token
+versions and saved generations, witnessed same-birth exec, a different valid
+ad-hoc CodeDirectory, and unsigned helper execution. Saved-generation controls
+do not force system-wide PID reuse. The one ignored helper entry point is
+explicitly executed by the controls, not counted as a skipped qualification.
+
+Before activation, run these on a Mac with private configuration/state, a short
+temporary directory, cleared inherited `HGS_*`, and the shared heavy lock:
+
+```sh
+cargo +1.99.1 test --locked --bin hgs desktop::task_controls:: -j 4 -- --test-threads=4 --nocapture
+cargo +1.99.1 build --locked --bin hgs -j 4
+HGS_TEST_BIN="$CARGO_TARGET_DIR/debug/hgs" PYTHONPATH=tests:. python3 -m unittest test_task_control_service.InactiveBridge tests.test_task_controls.InactiveControlCommands -v
+```
+
+Record the exact source, loaded signing status/hash, results and target cleanup.
+The native test image is locally built; its exact loaded hash is the fixture's
+trust reference, not a claim about a published Developer ID build. Signing
+receipts describe the ad-hoc negative fixture; no on-disk hash or signature
+label substitutes for the production kernel loaded-code proof. The integration
+controls retain gate-off bytes and old/missing-service refusal without effects.
+
+This qualification does not activate `.4.8`: `TASK_CONTROLS` stays false and the
+non-Linux authority guard-export paths still refuse. A cross-check or ordinary
+GUI preview alone never qualifies the native path. No live agent or owner
+display is needed or used for these controls.

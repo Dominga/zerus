@@ -330,7 +330,7 @@ fn a_plain_drop_unlocks_once() {
 fn a_foreign_owner_never_unlocks_on_drop() {
     reset_unlock_seam();
     let mut lock = FileLock::held(tempfile::tempfile().unwrap());
-    lock.owner_pid = std::process::id().wrapping_add(1);
+    zerus_file_lock::testing::set_owner_pid(&mut lock.inner, std::process::id().wrapping_add(1));
     drop(lock);
     assert_eq!(unlock_attempts(), 0);
 }

@@ -600,23 +600,30 @@ pub(super) fn fit(record: &Value, card: &Value) {
     }
 }
 pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
-    available_with(record, card, || current(record))
+    let mut terminal = Native::new(record, card);
+    available_with(record, card, || terminal.screen(), || current(record))
 }
 /// `available` against the pending Codex questions an inspection already
 /// read from a complete index, without indexing again.
 pub(super) fn available_among(record: &Value, card: &Value, pending: &[Value]) -> Result<()> {
-    available_with(record, card, || Ok(pending.to_vec()))
+    let terminal = Native::new(record, card);
+    available_with(
+        record,
+        card,
+        || terminal.screen_among(pending),
+        || Ok(pending.to_vec()),
+    )
 }
 fn available_with(
     record: &Value,
     card: &Value,
+    screen: impl FnOnce() -> Result<String>,
     pending: impl FnOnce() -> Result<Vec<Value>>,
 ) -> Result<()> {
     if card["answer_delivery"]["status"] == "submitted" {
         return Err("An answer was already submitted. Wait for Codex to record it.".into());
     }
-    let mut terminal = Native::new(record, card);
-    let screen = terminal.screen()?;
+    let screen = screen()?;
     if visible_panel(&screen, card)? {
         if !unique(card, &pending()?) {
             return Err(
@@ -630,6 +637,7 @@ fn available_with(
     }
     input::checked_terminal(record, true)
 }
+
 fn answer_text(card: &Value, answer: &Value) -> Result<String> {
     if let Some(id) = answer["selected_option_ids"]
         .as_array()

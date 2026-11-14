@@ -25,6 +25,7 @@ use zerus_client_core::{
 /// saved and the rows.
 type StaleRows = (String, f64, Vec<(String, ViewRow)>);
 
+mod service;
 mod terminations;
 pub(crate) use terminations::{Termination, MAX_TERMINATIONS};
 
@@ -52,7 +53,7 @@ struct Inner {
     /// Task 8: where a computer's stream team heads go (the Teams pollers).
     team_heads: Option<TeamHeadsHook>,
     terminations: terminations::Terminations,
-    service: Option<zerus_client_core::desktop::service::Snapshot>,
+    service: Option<service::Cached>,
     service_changed: bool,
     /// Task 235: computers showing their cached rows, and the marks the next
     /// batch carries (saved at, or None once live rows replaced them).
@@ -431,6 +432,10 @@ impl Pump {
 
     /// Everything pending, waiting up to `park` while nothing is.
     pub fn take(&self, park: Duration) -> Batch {
+        self.take_with_clock(park, std::time::Instant::now)
+    }
+
+    fn take_with_clock(&self, park: Duration, now: impl FnOnce() -> std::time::Instant) -> Batch {
         let inner = self.lock();
         #[cfg(test)]
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -451,7 +456,7 @@ impl Pump {
         batch.groups = groups;
         batch.grouping = grouping;
         if std::mem::take(&mut inner.service_changed) {
-            batch.desktop_service = inner.service.clone();
+            batch.desktop_service = inner.service.as_ref().map(|cached| cached.replay(now()));
         }
         batch.stale = std::mem::take(&mut inner.stale_out);
         // Task 235: the first rows the webview gets, cached or live.
@@ -532,11 +537,27 @@ impl Pump {
     }
 
     pub fn service(&self, snapshot: zerus_client_core::desktop::service::Snapshot) {
+        self.service_at(snapshot, std::time::Instant::now());
+    }
+
+    fn service_at(
+        &self,
+        snapshot: zerus_client_core::desktop::service::Snapshot,
+        received: std::time::Instant,
+    ) {
         let mut inner = self.lock();
-        if inner.service.as_ref() == Some(&snapshot) {
+        if inner
+            .service
+            .as_ref()
+            .is_some_and(|cached| cached.matches(&snapshot))
+        {
             return;
         }
-        inner.service = Some(snapshot);
+        inner.service = Some(service::Cached::receive(
+            snapshot,
+            inner.service.as_ref(),
+            received,
+        ));
         inner.service_changed = true;
         self.wake(inner);
     }
@@ -1610,6 +1631,82 @@ mod tests {
             key: key.into(),
             row: row(name),
         }
+    }
+
+    fn waiting_service(
+        incarnation: u64,
+        serial: u64,
+        remaining: u64,
+    ) -> zerus_client_core::desktop::service::Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "connected":true,"epoch":"fixture","generation":1,"background":{},"attention_counts":null,
+            "automatic_approvals":false,"details_available":true,"code":"",
+            "fleet_computers":[{"id":"studio","status":"reconnecting","attempt":2,"incarnation":incarnation,
+                "retry":{"phase":"waiting","serial":serial,"attempt":2,"delay_ms":10000,"remaining_ms":remaining}}]
+        })).unwrap()
+    }
+
+    fn service_remaining(pump: &Pump, at: Instant) -> u64 {
+        pump.take_with_clock(Duration::ZERO, || at)
+            .desktop_service
+            .unwrap()
+            .fleet_computers
+            .unwrap()[0]
+            .retry
+            .as_ref()
+            .unwrap()
+            .remaining_ms
+            .unwrap()
+    }
+
+    #[test]
+    fn service_reconnect_replay_ages_after_a_webview_reload() {
+        let pump = Pump::default();
+        let arrived = Instant::now();
+        pump.service_at(waiting_service(7, 3, 5000), arrived);
+        assert_eq!(service_remaining(&pump, arrived), 5000);
+        // The new webview has no previous performance.now() anchor. Its replay
+        // must already exclude time spent in the native cache.
+        pump.resend();
+        assert_eq!(
+            service_remaining(&pump, arrived + Duration::from_secs(3)),
+            2000
+        );
+        pump.resend();
+        assert_eq!(
+            service_remaining(&pump, arrived + Duration::from_secs(8)),
+            0
+        );
+    }
+
+    #[test]
+    fn service_reconnect_later_frames_only_shorten_the_same_wait() {
+        let pump = Pump::default();
+        let arrived = Instant::now();
+        let first = waiting_service(7, 3, 5000);
+        pump.service_at(first.clone(), arrived);
+        assert_eq!(service_remaining(&pump, arrived), 5000);
+        // Republishing an unrelated field cannot give the cached wait a new receipt time.
+        let mut unrelated = first;
+        unrelated.code = "unrelated_status".into();
+        pump.service_at(unrelated, arrived + Duration::from_secs(2));
+        assert_eq!(
+            service_remaining(&pump, arrived + Duration::from_secs(3)),
+            2000
+        );
+        let later = arrived + Duration::from_secs(3);
+        pump.service_at(waiting_service(7, 3, 4000), later);
+        assert_eq!(service_remaining(&pump, later), 2000);
+        pump.service_at(waiting_service(7, 3, 500), later);
+        assert_eq!(service_remaining(&pump, later), 500);
+        let expired = later + Duration::from_millis(500);
+        pump.resend();
+        assert_eq!(service_remaining(&pump, expired), 0);
+        // A new wait or supervisor gets its own receipt.
+        pump.service_at(waiting_service(7, 4, 4000), expired);
+        assert_eq!(service_remaining(&pump, expired), 4000);
+        pump.service_at(waiting_service(8, 4, 6000), expired);
+        assert_eq!(service_remaining(&pump, expired), 6000);
     }
 
     #[test]

@@ -28,6 +28,19 @@ describe("restart countdown", () => {
     expect(anchorRetry(sooner, waiting(3, 9000), 4500, "7")!.dueAt).toBe(5000);
   });
 
+  it("anchors an aged native replay after the webview's monotonic clock resets", () => {
+    const beforeReload = anchorRetry(undefined, waiting(3, 5000), 120_000, "7")!;
+    expect(secondsLeft(beforeReload, 123_000)).toBe(2);
+    // Rust keeps the receipt instant through reload and replays the two
+    // seconds left, rather than the original five. This view starts afresh.
+    const reloaded = anchorRetry(undefined, waiting(3, 2000), 10, "7")!;
+    expect(secondsLeft(reloaded, 10)).toBe(2);
+    expect(secondsLeft(reloaded, 1010)).toBe(1);
+    const later = anchorRetry(reloaded, waiting(3, 4000), 1010, "7")!;
+    expect(later.dueAt).toBe(2010);
+    expect(secondsLeft(later, 2010)).toBe(0);
+  });
+
   it("ignores wall-clock jumps", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-10T12:00:00Z"));

@@ -19,7 +19,7 @@ import { setSetting } from "../../store/settings";
 import { sessionForks } from "../../store/sessionForks";
 import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
-import { readCleanupOffer, type CleanupProgram } from "./termination-offer";
+import { readCleanupOffer, waitForCleanupOffer, type CleanupProgram } from "./termination-offer";
 import { TerminationPrograms } from "./TerminationPrograms";
 import { CleanupOfferNotice } from "./CleanupOfferNotice";
 import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
@@ -233,7 +233,8 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   // The live child sessions as the dialog opened; a verified shell has none.
   const children = shell ? { ending: [], staying: [] } : untrack(() => childOfferFor(props.row, "terminate"));
   const [alsoChildren, setAlsoChildren] = createSignal(false);
-  let closed = false, consumed = false;
+  let closed = false, consumed = false, submitting = false;
+  let cleanupRead: Promise<string | undefined> | undefined;
   onMount(() => {
     if (shell) {
       void captureUntrackedShell(props.row).then((action) => { if (!closed) setTerminal(action); })
@@ -242,7 +243,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
     }
     const target = targetOf(props.row, "terminate");
     if (copy.action !== "terminate" || !target || !target.conversation_id || props.row.gitWorktree === false) return;
-    void readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
+    cleanupRead = readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
       setOffer(state.offer?.id); setRemove(state.offer?.checked ?? false); setOfferError(state.error ?? "");
       setPrograms(state.offer?.programs ?? []);
     });
@@ -250,12 +251,20 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
   const submit = async () => {
     if (shell && !terminal()) return;
+    if (submitting) return;
+    submitting = true;
     const chosen = alsoChildren() ? children.ending : [];
     const id = remove() ? offer() : undefined;
     const released = !id ? offer() : undefined;
     consumed = !!id || !!released;
     if (offer() && !remove()) void setSetting("workspace/removeWorktreeAfterTermination", false);
     props.close();
+    // An unpublished review already owns the native write lane. Its late
+    // offer must finish cancellation before the ordinary End can reserve it.
+    if (!id && cleanupRead) {
+      const refusal = await waitForCleanupOffer(cleanupRead);
+      if (refusal) { notify("error", refusal, true); void endAfter("terminate", props.row, undefined, chosen); return; }
+    }
     if (released) {
       try { await terminationCleanupCancel(released); }
       catch (error) { notify("error", String(error), true); void endAfter("terminate", props.row, undefined, chosen); return; }

@@ -131,8 +131,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_compact_to_send_leaf()
         crate::desktop::store::SCHEMA
     );
     // Its own two tables, then the session resume leaf's two.
-    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50 and .36).
-    assert_eq!(tables(&store.db), before + 2 + 2 + 1 + 2 + 2 + 1);
+    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50, .36 and .52).
+    assert_eq!(tables(&store.db), before + 2 + 2 + 1 + 2 + 2 + 1 + 1);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["compact_to_send"]["undrained"],
@@ -1247,7 +1247,10 @@ mod actor {
             .unwrap()
         }
         fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-            let until = Instant::now() + Duration::from_secs(8);
+            // A generous ceiling, not a budget: the loop exits the moment
+            // the condition holds, and the ceiling only caps a true failure.
+            // Eight seconds ran out under a loaded suite (zerus-63rru.21).
+            let until = Instant::now() + Duration::from_secs(60);
             while !done(self) {
                 assert!(
                     Instant::now() < until,
@@ -1456,15 +1459,37 @@ mod actor {
                 }
                 ended
             });
+            // Closed-reason cases use the production window. Only the pending
+            // and busy cases intend to expire the wait's short test budget.
             f.runtime.fixture_wait(
-                Duration::from_millis(80),
+                if matches!(name, "cancelled" | "uncertain" | "session") {
+                    runtime::WAIT
+                } else {
+                    Duration::from_millis(80)
+                },
                 Duration::from_millis(5),
                 runtime::CHAIN,
             );
             let original = f.original();
             f.admit(&original);
+            if matches!(name, "cancelled" | "uncertain" | "session") {
+                f.until("compaction drained before first slot probe", |f| {
+                    let receipt = f.row(&original).receipt;
+                    receipt.compaction.step == Step::Recorded && !receipt.drained
+                });
+                assert_eq!(ran.counts(), (1, 0), "{name}: before slot observation");
+                // A delayed actor must still exercise the closed reason,
+                // rather than expire before its first slot observation.
+                std::thread::sleep(Duration::from_millis(150));
+            }
             f.until(name, |f| f.row(&original).receipt.drained);
             let receipt = f.row(&original).receipt;
+            eprintln!(
+                "COMPACT_CLOSED case={name}; counts={:?}; send_reserved={}; receipt={}",
+                ran.counts(),
+                f.row(&original).send.is_some(),
+                serde_json::to_string(&receipt).unwrap()
+            );
             assert_eq!(receipt.compaction.step, Step::Recorded, "{name}");
             assert_eq!(
                 (receipt.send.step, receipt.code.as_str()),

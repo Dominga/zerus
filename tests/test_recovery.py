@@ -1,5 +1,6 @@
 """Durable worker and terminal delivery contracts, with private fake agents only."""
 import json
+import hook_caller_fixtures
 import os
 import subprocess
 import sys
@@ -43,8 +44,9 @@ class Recovery(unittest.TestCase):
     def inspect(self):return self.command('inspect',self.name)
     def tick(self):self.command('recovery','tick')
     def hook(self,kind,**values):
-        result=subprocess.run([str(fixtures.HGS),'__state','hook'],env=dict(self.env,HGS_SESSION=self.name,HGS_RUN_ID=self.run_id),
-            input=json.dumps(dict(hook_event_name=kind,session_id=self.conversation_id,**values)),text=True,capture_output=True,timeout=10)
+        event=dict(hook_event_name=kind,session_id=self.conversation_id,**values)
+        env=dict(self.env,HGS_TEST_BIN=str(fixtures.HGS),HGS_SESSION=self.name,HGS_RUN_ID=self.run_id)
+        result=hook_caller_fixtures.run(self,event,env)
         self.assertEqual(result.returncode,0,result.stderr)
 
     def exercise(self,agent):

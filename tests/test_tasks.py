@@ -101,7 +101,7 @@ class Fixture(unittest.TestCase):
         # Each test stops its own private server, never another one.
         if TMUX:
             self.addCleanup(lambda: subprocess.run([TMUX, "-S", str(self.socket), "kill-server"], capture_output=True))
-            self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+            self.script("tmux", '#!/bin/sh\n[ -d "' + str(self.socket.parent) + '" ] || { echo "private tmux socket directory is gone" >&2; exit 97; }\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
         else:
             self.script("tmux", "#!/bin/sh\nexit 1\n")
         catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []},
@@ -523,8 +523,8 @@ class AgentIdentity(Fixture):
                                 text=True, capture_output=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("names the agent session codex/api", result.stderr)
-        # A person's shell in the session's tmux inherits its variables: say the way out.
-        self.assertIn("or unset HGS_SESSION and HGS_RUN_ID to act as yourself", result.stderr)
+        # Person actions must come from outside the agent's process tree.
+        self.assertIn("person actions require a terminal outside the agent's process tree", result.stderr)
         self.assertEqual(self.ids("todo"), [])
         # A record without the owned process proves nothing either.
         agent_record(self.state, self.env, "codex/api", "run-stale", process_start="not this process")
@@ -541,7 +541,7 @@ class AgentIdentity(Fixture):
             self.addCleanup(process.wait)
             self.addCleanup(process.kill)
         conversation, job = str(uuid.uuid4()), str(uuid.uuid4())
-        agent_record(self.state, self.env, "claude/api", "run-window", pid=window.pid, conversation_id=conversation)
+        agent_record(self.state, self.env, "claude/api", "run-window", pid=window.pid, conversation_id=conversation, agent_home=str(self.root / ".claude"))
         agent_record(self.state, self.env, "codex/web", "run-token", pid=token.pid)
         registry = self.root / ".claude/sessions"
         registry.mkdir(parents=True)
@@ -1184,6 +1184,66 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(sent["state"], "submitted")
         self.wait_received("Waits behind it")
         self.assertEqual(self.execution(second)["attempts"], 2)
+
+    def test_the_person_abandons_one_exact_unknown_attempt_without_replay(self):
+        warm = self.add("Initialises private receipts", "--target", self.name)
+        self.hgs("start-deliver", warm["ref"], text=json.dumps(self.start_plan(warm)))
+        self.confirm()
+        task = self.add("Unknown original delivery", "--target", self.name)
+        plan = self.start_plan(task)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        try:
+            unknown = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        finally:
+            receipts.chmod(0o700)
+        self.assertEqual(unknown["state"], "uncertain")
+        before = self.hgs("get", task["ref"], "--history-limit", "8")["task"]
+        self.assertIn(plan["id"], before["execution"]["unknown"])
+        received = self.received()
+        args = ("cancel-attempt", task["ref"], "--attempt", plan["id"])
+        cancelled = self.hgs(*args, "--reason", "Reviewed; delivery remains unknown")
+        self.assertEqual(cancelled["attempt"]["delivery"], "unknown")
+        self.assertEqual(cancelled["attempt"]["state"], "cancelled")
+        after = cancelled["task"]
+        self.assertNotIn("log", after, "the disposition reply never expands the history")
+        self.assertEqual(after["stage"], before["stage"])
+        self.assertEqual(after["execution"]["current"]["phase"], "cancelled")
+        self.assertNotIn("unknown", after["execution"])
+        self.assertEqual(self.received(), received, "abandonment sends no native input")
+        audit = self.hgs("get", task["ref"], "--history-limit", "8")["task"]["log"]
+        self.assertEqual(len([e for e in audit if e["kind"] == "attempt_cancelled"
+                             and e.get("request_id") == plan["id"]]), 1)
+        repeated = self.hgs(*args)["task"]
+        self.assertEqual(repeated["history_revision"], after["history_revision"],
+                         "an exact repeat writes no audit twice")
+        self.assertEqual(self.hgs("get", task["ref"], "--history-limit", "8")["task"]["log"], audit)
+        self.assertEqual(self.received(), received)
+        wrong = self.hgs("cancel-attempt", task["ref"], "--attempt", str(uuid.uuid4()), ok=False)
+        self.assertIn("unknown delivery", wrong)
+        self.assertIn("only the person", self.as_agent(*args, ok=False))
+        # An agent cannot gain person authority by clearing its own markers:
+        # the private marked ancestor remains readable to the existing check.
+        code = ("import os,subprocess,sys; e=dict(os.environ); "
+                "e.pop('HGS_SESSION',None); e.pop('HGS_RUN_ID',None); "
+                "r=subprocess.run(sys.argv[1:],env=e,text=True,capture_output=True); "
+                "sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)")
+        marked = subprocess.run(["python3", "-c", code, str(HGS), "task", *args],
+                                env=dict(self.env, HGS_SESSION="codex/private-ancestor",
+                                         HGS_RUN_ID=str(uuid.uuid4())),
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(marked.returncode, 0)
+        self.assertIn("outside the agent's process tree", marked.stderr)
+        self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
+        self.assertEqual(self.received(), received, "the abandoned UUID never replays")
+        later = self.start_plan(task)
+        self.assertNotEqual(later["id"], plan["id"])
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(later))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received(task["text"])
+        self.assertEqual(self.received().count(task["text"]), 1)
+        self.assertIn("unknown delivery", self.hgs("cancel-attempt", task["ref"], "--attempt",
+                                                 later["id"], ok=False))
 
     def test_a_start_whose_receipt_marker_cannot_be_written_stays_unknown(self):
         # desktop-u's (a): a failure while writing the input's receipt marker

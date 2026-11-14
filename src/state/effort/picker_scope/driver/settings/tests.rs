@@ -114,6 +114,104 @@ fn schedule_commit_rechecks_actual_child_liveness_after_staging() {
     run("liveness-change");
 }
 
+#[test]
+fn schedule_fence_refuses_own_receipt_bytes_at_foreign_destinations() {
+    run("foreign-receipt-destination");
+    run("foreign-record-destination");
+}
+
+#[test]
+fn final_schedule_preimage_follows_only_the_exact_progress_original() {
+    for case in [
+        "follow-positive",
+        "follow-status",
+        "follow-request-id",
+        "follow-digest",
+        "follow-name",
+        "follow-replaced",
+    ] {
+        run(case);
+    }
+}
+
+fn follow_progress_control(owner: &Arc<owner::Owner>, receipt: &Value, case: &str) {
+    let id = owner.control.frame().request_id.clone();
+    let witness = Schedule::new(Liveness::Stopped, None, receipt.clone());
+    // Both stages exist before the first actual commit, as in scheduled().
+    let mut final_receipt = stage_receipt(owner, &id, receipt, None).unwrap();
+    let mut progress = receipt.clone();
+    progress["status"] = json!("in_progress");
+    let staged = stage_receipt(owner, &id, &progress, None).unwrap();
+    let fence = publication::CommitFence::schedule(owner, &staged, &witness).unwrap();
+    let original = receipt_commit(owner, &id, staged, fence).unwrap();
+    if case == "follow-positive" {
+        final_receipt
+            .follow_own_settings_receipt(owner, &original)
+            .unwrap();
+        let fence = publication::CommitFence::schedule(owner, &final_receipt, &witness).unwrap();
+        let final_original = receipt_commit(owner, &id, final_receipt, fence).unwrap();
+        owner
+            .with_scope(|scope| {
+                assert_eq!(final_original.record(&scope.receipts)?, *receipt);
+                Ok(())
+            })
+            .unwrap();
+        return;
+    }
+    let own = format!("{id}.json");
+    let foreign = format!("{}.json", uuid::Uuid::new_v4());
+    let mut replacement = progress.clone();
+    match case {
+        "follow-status" => replacement["status"] = json!("scheduled"),
+        "follow-request-id" => replacement["request_id"] = json!(uuid::Uuid::new_v4().to_string()),
+        "follow-digest" => replacement["digest"] = json!("0".repeat(64)),
+        "follow-name" | "follow-replaced" => (),
+        _ => panic!("unknown progress control"),
+    }
+    let (current, path, bytes) = owner
+        .with_scope(|scope| {
+            let path = scope.receipts.path.join(&own);
+            let destination = if case == "follow-name" {
+                foreign.as_str()
+            } else {
+                own.as_str()
+            };
+            fs::rename(&path, scope.receipts.path.join("retained-progress.json"))
+                .map_err(|error| error.to_string())?;
+            let bytes = replacement.to_string().into_bytes();
+            scope.receipts.write_new(destination, &bytes)?;
+            Ok((
+                Original::open(&scope.receipts, destination.into())?,
+                scope.receipts.path.join(destination),
+                bytes,
+            ))
+        })
+        .unwrap();
+    // Content guards each get a fresh, internally valid Original, so only
+    // the selected status/UUID/digest/name predicate can reject it. The inode
+    // replacement control instead retains the SAME first-commit Original.
+    let selected = if case == "follow-replaced" {
+        &original
+    } else {
+        &current
+    };
+    assert!(
+        final_receipt
+            .follow_own_settings_receipt(owner, selected)
+            .is_err(),
+        "{case}"
+    );
+    assert!(
+        final_receipt.expected_version().is_none(),
+        "{case}: preimage advanced on refusal"
+    );
+    assert_eq!(
+        fs::read(path).unwrap(),
+        bytes,
+        "{case}: replacement was overwritten"
+    );
+}
+
 struct OwnChild(std::process::Child);
 impl Drop for OwnChild {
     fn drop(&mut self) {
@@ -211,7 +309,38 @@ fn fixture() {
     let receipt = json!({"request_id":frame.request_id,"name":record["name"],"run_id":record["run_id"],
         "conversation_id":record["conversation_id"],"digest":format!("{:x}",Sha256::digest(&frame.raw)),
         "status":"scheduled","model":"fixture-model","effort":"high","scope":"session","at":now(),"apply_when":"resume"});
-    if case.starts_with("guard-") {
+    if case.starts_with("follow-") {
+        follow_progress_control(&owner, &receipt, &case);
+    } else if case.starts_with("foreign-") {
+        let witness = Schedule::new(Liveness::Stopped, None, receipt.clone());
+        let valid = stage_receipt(&owner, &frame.request_id, &receipt, None).unwrap();
+        publication::CommitFence::schedule(&owner, &valid, &witness).unwrap();
+        drop(valid);
+        let destination = format!("{}.json", uuid::Uuid::new_v4());
+        let (staged, path) = owner
+            .with_scope(|scope| {
+                let parent = if case == "foreign-receipt-destination" {
+                    &scope.receipts
+                } else {
+                    &scope.sessions
+                };
+                Ok((
+                    publication::Staged::prepare(
+                        parent,
+                        &destination,
+                        receipt.to_string().as_bytes(),
+                    )?,
+                    parent.path.join(&destination),
+                ))
+            })
+            .unwrap();
+        assert!(
+            publication::CommitFence::schedule(&owner, &staged, &witness).is_err(),
+            "{case}"
+        );
+        drop(staged);
+        assert!(!path.exists(), "{case}: foreign destination was published");
+    } else if case.starts_with("guard-") {
         let native = request_guard(frame.operation, &frame.raw).unwrap();
         let path = root().join("settings_receipts").join("ordinary.json");
         let mut value = record.clone();

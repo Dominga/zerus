@@ -10,6 +10,14 @@ function setup() {
   return { open,apply,close,notice, state:createAccountManagement({open,apply,close,notice}) };
 }
 describe("captured account catalog actions",()=>{
+  it("saves a Kimi cache-expiry choice once, including a differing account member",async()=>{
+    const t=setup();let differs=false;
+    t.open.mockImplementation(async(_a,_p,kind)=>({handle:"cache",kind,label:"Kimi",machine:"studio",provider:"kimi",compact_on_expiry:true,differs}));
+    await t.state.open("cache_expiry","group","peer",origin);await t.state.confirm({mode:"on"});expect(t.apply).not.toHaveBeenCalled();
+    await t.state.open("cache_expiry","group","peer",origin);await t.state.confirm({mode:"off"});await t.state.confirm({mode:"off"});
+    expect(t.apply).toHaveBeenCalledExactlyOnceWith("cache",{mode:"off"});
+    differs=true;await t.state.open("cache_expiry","group","peer",origin);await t.state.confirm({mode:"on"});expect(t.apply).toHaveBeenCalledTimes(2);
+  });
   it("an old dialog close or submit cannot affect a newer snapshot",async()=>{
     const t=setup();let next=0;t.open.mockImplementation(async(_a,_p,kind)=>({handle:`handle-${++next}`,kind,label:"Example",machine:"studio",provider:"codex"}));
     await t.state.open("remove","group","peer",origin);t.state.close("handle-1");

@@ -19,7 +19,7 @@ class BackgroundContinuation(unittest.TestCase):
 
     def setUp(self):
         test_input.InputTransport.setUp(self)
-        self.record.update(agent="claude", transcript=self.transcript(self.conversation_id))
+        self.record.update(agent="claude", agent_home=str(self.root / ".claude"), transcript=self.transcript(self.conversation_id))
         self.write_record()
         # The session sent to the background: its pane now shows the background job.
         name = "claude/meadow"
@@ -28,7 +28,7 @@ class BackgroundContinuation(unittest.TestCase):
         pid = int(self.tmux("display-message", "-p", "-t", target, "#{pane_pid}"))
         start = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="],
                                         env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
-        self.other = dict(version=1, name=name, agent="claude", run_id=str(uuid.uuid4()),
+        self.other = dict(version=1, name=name, agent="claude", agent_home=str(self.root / ".claude"), run_id=str(uuid.uuid4()),
                           conversation_id=str(uuid.uuid4()), pid=pid, process_start=start,
                           pane=self.tmux("display-message", "-p", "-t", target, "#{pane_id}").strip(),
                           activity="busy", phase="input", main_done=False, active_tools={}, subagents={},
@@ -73,8 +73,12 @@ class BackgroundContinuation(unittest.TestCase):
             env.pop(variable, None)
         if claude:
             env.update(CLAUDE_PID=str(claude), CLAUDE_CODE_SESSION_ID=event["session_id"])
-        result = subprocess.run([str(test_input.HGS), "__state", "hook"], env=env, input=json.dumps(dict(event, cwd="/fixture")),
-                                text=True, capture_output=True, timeout=12)
+        if claude in (None, self.record["pid"]):
+            import hook_caller_fixtures
+            result = hook_caller_fixtures.run(self, dict(event, cwd="/fixture"), env)
+        else:
+            result = subprocess.run([str(test_input.HGS), "__state", "hook"], env=env, input=json.dumps(dict(event, cwd="/fixture")),
+                                    text=True, capture_output=True, timeout=12)
         self.assertEqual(result.returncode, expected, result.stderr)
 
     def saved(self, path):

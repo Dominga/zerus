@@ -206,6 +206,11 @@ variables, in the environment it gives every later pane, and an agent starts
 without them even when a server already holds them. `hgs send` reads the agent's
 styled prompt; under `NO_COLOR` Claude Code's placeholder looks like a draft and
 every send is refused while it shows.
+Existing agents keep their launch environment. When a send refuses an unstyled
+Claude composer and the same verified agent process's readable environment
+contains `NO_COLOR`, the refusal explains that the session needs a restart.
+Unreadable or changed process evidence keeps the generic refusal. Zerus never
+restarts the session automatically or accepts unstyled hint text as an empty input.
 
 ### Session references
 
@@ -952,6 +957,31 @@ observed callbacks and provider-effective settings/trust are different evidence:
 settings, policy, native trust or a running agent's already-loaded settings can
 make its effective hooks differ. Attaching does not retrofit them.
 
+On Linux and macOS, a Claude hook's `HGS_SESSION` and `HGS_RUN_ID` select a
+record; they do not prove its caller. A pinned record also requires a stable
+native process ancestry from the hook to its recorded Claude PID and start
+time, outside any resident DeepSeek host. A held Claude background job uses
+its own proven ancestry and the matching window/job hold in the window's
+recorded account registry; a missing account directory refuses background routing.
+Caller-selected config and home directories grant no authority.
+New Claude launches record the effective registry directory separately from
+`agent_home`, preserving an unset native config directory and its macOS Keychain
+namespace. Older records without either directory retain foreground hooks;
+their separate background jobs cannot be proven and receive a diagnostic.
+Unproven callers receive a bounded diagnostic on stderr before any hook or
+continuation update, or answer-channel registration. The Claude answer channel
+only binds Claude records and refuses a later provider change. Channels recheck
+their proof before claiming and emitting an offer; losing proof after a claim
+leaves its result uncertain and never authorizes another delivery.
+
+Older, unversioned records without a complete PID/start pin retain their
+existing hook behavior with a visible legacy diagnostic. A record carrying a
+pin never uses this exception, and a versioned native launch with a missing
+pin is refused. An unavailable ancestry walk refuses pinned records visibly;
+it does not silently discard their hooks. Windows retains its existing hook
+path pending native qualification. Hooks outside Zerus, without the session
+and run markers, remain no-ops.
+
 Explicit configuration repair is native-only:
 `hgs hooks --account ID --repair --json`. Its stdin must contain a fresh UUID
 `request_id`, `expected_provider`, `expected_account_id`,
@@ -1104,6 +1134,9 @@ Late events from a previous run and child-agent events cannot rebind the parent.
 terminal, agent process and native conversation. `SessionEnd` alone does not prove
 process exit. A live process without verified activity shows **Status unknown**;
 **Agent exited** means the process ended while its tmux terminal still exists.
+Archive listings and `inspect --archive ID` report `activity` and `phase` as
+`ended`. The immutable archive retains its last hook state and native conversation
+identity for history and restore; those saved hooks do not establish current work.
 
 ### Child sessions
 
@@ -1390,12 +1423,35 @@ parent's name, or **Question from a child session** with the child's name,
 then the route's own preview of at most 300 characters as plain text and the
 child's reference with Copy. The parent's own message of exactly the routed
 text folds into its line, behind **Show the received message**; any other
-line is placed by its time. Refused, reserved and unknown routes show nothing
-in this version. The lines come from the background service's read-only
+line is placed by its time. A refused or unknown route shows a line only in
+the child's Activity on desktop, Android and iOS (zerus-sa9qn.52): **Question
+not sent to PARENT** or **Question delivery to PARENT uncertain**, with the
+parent's display name, the literal preview and the child's reference. Reserved
+routes stay pending until settled or recovered. A settled refusal (including
+invalid text, the per-parent bound and not started) or unknown result immediately
+makes that exact still-pending question a human request: **Needs you**, with the
+existing question notification. The person can still answer it. There is no F3
+retry and an unknown result is never replayed. Turning either switch off or
+changing the person-only latch does not retry, cancel or erase an outcome.
+The shared fixture is `question-route-outcome-contract.json` beside the Android
+test resources; every client tests the same outcomes and wording. The local
+listing and inspection read the service ledger without creating or migrating it,
+using the exact machine/session/run/conversation/question/hash ledger key, independently
+of the Activity window. A later question never inherits escalation. A constant-size
+failure revision makes watch refresh the listing, without reacting to unrelated
+service writes. Store schema 41 retains immutable metadata even for a refusal
+before send admission; upgrades recover existing originals' metadata. A historical
+refusal with no saved original has no recoverable Activity metadata; its exact
+still-pending question can nevertheless escalate by the ledger key.
+Inspection carries at most 20 lines in `question_route_activity` for the phones
+and remote desktop views; local desktop polling and inspection lines deduplicate
+by the immutable route request ID.
+The desktop lines come from the background service's read-only
 `question_route_activity` request (`request_id` and the session's durable
-`session_id`, exactly): at most the 20 newest submitted routes where the
-session is the child or the parent, read by two partial indexes of the route
-ledger (Store schema 38) and each route's own saved original. The read sends,
+`session_id`, exactly): at most the 20 newest outcomes for the child or
+submitted routes for the parent, read by partial indexes of the route ledger.
+Submitted routes still require their exact saved send original; failed routes
+never claim that the parent received their text. The read sends,
 settles and grants nothing. The desktop reads it for a local session in
 background service mode: once when the session is shown, then at most every
 3 s while its Activity changes, and a shown child every 15 s.
@@ -1486,16 +1542,49 @@ The person has two switches, both on by default (zerus-sa9qn.32):
   that statement for this gateway, and must reply exactly `{ok, verifier:
   "question-route-person-v1", verified}`. Any failure, timeout or other
   output is the closed refusal `not_verified`. The service then sets the
-  latch once per request ID, and the host file follows. Decisions apply in
-  the order the person made them (zerus-sa9qn.53): the latch keeps the
-  time of its last decision (a desktop decision records the computer's
-  time). A statement not issued after it, such as one delivered late, is
-  the closed refusal `stale_decision` and changes nothing. A decision that
-  changes nothing still records its time. The phone then refreshes and
-  asks again. Peers and Windows
-  gateways do not offer it, and a legacy connection keeps the host switch.
-  The shared vector is
-  `services/mobile/crypto/tests/vectors/question-route-person-v1.json`.
+  latch once per request ID, and the host file follows.
+
+  With `question-route-person-v2`, the Rust connector additionally offers
+  the read-only `session_question_route_person_status` operation. Its exact
+  payload is `{session_id, expected_run_id, expected_conversation_id}`; it
+  reads the service's latch at that visible local child's identity, returning
+  the request ID, session/run/conversation, `person_off` and `revision`.
+  It grants no write authority. It is an additive API v1 operation, counted
+  and retained as a bounded read without changing the connector journal's
+  existing schema or frozen predicates. A phone uses it only when both relay
+  and computer advertise it, then signs `expected_revision` in domain
+  `zerus-question-route-person-v2`. There is no fallback to v1 if that read
+  or the v2 request fails or is uncertain.
+
+  Desktop and v2 phone decisions compare-and-swap the computer-issued,
+  durable per-latch revision (zerus-sa9qn.55). Every accepted new decision
+  advances it, including a decision that keeps the same value. A replay
+  returns its original receipt. A stale phone revision is the closed
+  `stale_decision` refusal; cross-device wall clocks never order v2
+  decisions. Signed issue/expiry timestamps still limit signature lifetime.
+  The first verified v2 statement for a child durably fences that entire
+  latch against v1, even when its compare-and-swap conflicts or its child
+  is temporarily absent or on another run. Refusals keep the latch value
+  and revision; a new fence keeps their defaults and shares the latch cap.
+  This fence survives restart, is never removed and applies to every phone.
+  A new v1 request on a fenced latch is `upgrade_required`; the updated
+  connector returns an ordinary failed receipt telling even an old app to
+  update before changing this switch. Looking up an already accepted
+  request remains read-only and returns its original receipt.
+
+  Compatibility: never-upgraded latches and computers/connectors without
+  the v2 capability retain the legacy v1 statement shape and time ordering
+  (zerus-sa9qn.53). The latch keeps `decided_at`; a phone statement's signed
+  `issued_at` must be later, and desktop decisions retain the maximum of
+  their local time and the stored time. This legacy path trusts device
+  clocks: a fast phone's delayed statement can override a newer choice,
+  and a computer clock corrected after running ahead can block legacy
+  phone decisions until time catches up. Those clock risks remain only on
+  latches that have not been fenced by v2. Peers and Windows gateways do not
+  offer the signed latch operations; a legacy connection keeps the host
+  switch. Shared vectors cover both domains in
+  `services/mobile/crypto/tests/vectors/question-route-person-v1.json` and
+  `question-route-person-v2.json`.
 
 The router reads nothing while the global switch is off. Every reservation
 reads both switches and the latch again in its own transaction, so a switch turned off
@@ -1612,7 +1701,29 @@ is archived. Corrupt host preferences remain unknown. Native pages keep their
 768 KiB, within the 1 MiB response bound, so a valid 384 KiB preference can still
 be read. The compatibility preview remains capped at 128 KiB and omits an
 oversized row.
-The legacy `ls --json` default remains compatible. The native, read-only ABI is:
+Plain `ls --json` retains archived rows with the same session fields, including
+`archive_id`, `archived_at` and native action availability, but includes only a
+recent preview: at most 50 archives in `(archived_at, archive_id)` descending
+order, subject to the archive page's byte budget. Live and Saved rows remain
+complete. The additive host-level `archive_page` describes this preview without
+duplicating its rows: `total`, `total_capped`, `next_cursor`, `previous_cursor`,
+`position`, `from`, `until`, `query`, and `command: ["archives","--json","--bounded"]`.
+Its total counts at most 50 archives; `total_capped: true` means a lower bound,
+and an empty `next_cursor` means there are no older rows. To continue, pass
+`next_cursor` as `cursor` with the same range/query to the command in the
+descriptor. New completions appear on Refresh; additions do not shift a
+continuation's date/ID keyset. Agents must follow this cursor to enumerate the
+whole archive. `--no-archives` continues to omit archives and the preview
+descriptor, retaining `archive_paging` and `archive_revision` for client discovery.
+Only the preview's rows open summaries or check transcript metadata for actions;
+ordinary indexed polls do the same bounded work with 50 or 20,000 archives.
+Initial index creation and directory-generation reconciliation retain the
+existing one-time metadata indexing described below.
+`hgs status` forwards the preview's count as `sessions.archived`, with additive
+`archived_total_capped` when a preview is present; its text shows `50+ archived`
+for a capped count.
+
+The native, read-only archive ABI is:
 
 ```sh
 printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' | hgs archives --json
@@ -1653,6 +1764,25 @@ agent or changes read marks. New archive pages use the additive mobile
 view and need an updated CLI/connector/relay for paging. Archive IDs are admitted
 from validated pages for one hour (bounded to 2,000 recently paged instances),
 while native inspection and lifecycle actions still verify name/archive/run.
+
+Archive metadata decoding uses the same 16 MiB byte bound as live session
+records. Inputs must be regular files, opened without following a final symbolic
+link or waiting on a FIFO. The opened file's native version and the object still
+named by its path must agree after the bounded read. Selected reads, legacy
+enumeration and preliminary catalog decoding share these checks without changing
+normalized archive identities or label selection.
+
+Ordinary legacy enumeration warns and skips unreadable unrelated archives, so
+resume, search and reference lookup can still use other exact names. A partial
+list never authorizes removal or replacement. Termination checks require a
+complete inventory. Global reconciliation retains every binding if the
+inventory is incomplete. An indexed
+archive match must also pass a fresh body/identity check before it can replace
+the current binding; a failed read keeps that binding available for review.
+Catalog search omission never makes missing or stale cleanup-reference coverage
+empty. Warm catalog pages retain their indexed path without new full scans;
+reference count, aggregate byte and deadline bounds remain unchanged.
+
 An already-open older archive also survives a connector restart or cache expiry:
 `hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one
 authoritative record without scanning the catalog or transcript, and returns its
@@ -2271,6 +2401,18 @@ never establish current work. The CLI's `process_work` summary uses current
 owned OS trees (one process-table sample per fleet listing) or the native
 DeepSeek job registry, with at most eight `jobs`; it does not scan native
 transcripts on each fleet poll.
+
+Saved session records retain unresolved shell-job identities and at most 16
+explicitly settled jobs within a 64 KiB history budget, with 1 KiB output tails.
+Existing live and archived records are compacted on their next ordinary write;
+reading a record does not rewrite it. Unknown jobs and calls still awaiting hook
+settlement keep their evidence, including prior-run identities. This storage
+limit does not change Background status, reply deferral or process ownership.
+Process output reads use the provider's native log when available. Otherwise
+they return retained text, marking shortened tails as truncated. A pruned job
+or missing native log returns
+an explicit unavailable result. Earlier history can be read from the provider's
+existing logs where available, rather than accumulating in every session record.
 
 Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
 stopped or unverifiable parent sessions. Recorded children contribute no current
@@ -4867,6 +5009,14 @@ Reading older history preserves scroll and selection; **Jump to latest** returns
 to live events without resizing the timeline. Its double-down-arrow icon sits beside
 Voice in the composer toolbar, outside the messages; the tooltip includes the
 number of new events. Subagents use the same icon in their own toolbar.
+The adjacent up/down buttons jump between this session's messages from you,
+including phone text and recordings, and briefly outline the destination.
+They skip agent replies, tools, system notices, peer messages and inherited
+history. Previous reads older pages one at a time until it finds your message
+or reaches the end, showing a spinner while reading. A direction is disabled
+when no matching message remains. The default shortcuts are
+**Ctrl+Alt+Shift+Up/Down** (**Command+Option+Shift+Up/Down** on macOS);
+Settings > Keyboard shortcuts can change them without changing composer keys.
 Pressing Enter on a session or subagent row opens Activity and performs the same
 jump. Double-clicking a subagent row also jumps to latest; double-clicking a
 session row toggles its compact presentation.
@@ -5064,6 +5214,15 @@ can reconcile that family synchronously, then must validate every original and
 drain a complete snapshot before treating recovery as complete. A cursor from an
 incomplete snapshot requires a fresh chain after migration finishes. Locator
 coverage alone never proves an answer's submission.
+Codex terminal availability uses the same completed inspection snapshot and
+rechecks the live terminal identity without starting another receipt migration.
+Receipt readers open SQLite read-only with a bounded lock wait; a question
+inspection caps that wait at its remaining deadline. Actual answer input still
+requires fresh receipt recovery and the terminal's exact pending-question check.
+An explicit answer shares one 750 ms receipt-write busy-wait deadline across
+its nested checks and connections. Expiry before admission refuses without
+input; it never certifies stale coverage. Inspection retains its separate short
+read budget.
 
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
@@ -5219,24 +5378,61 @@ Delivery verifies the exact run, process, conversation and native input state.
 A busy Claude or Codex session can accept a message through its native queue
 when its empty composer is recognized. An unknown busy layout or a draft refuses
 with `agent busy` before submission; wait or inspect Terminal rather than typing
-through that refusal. Deliberate send refusals keep only the latest private
+through that refusal. Diagnostic screen samples keep only the latest private
 `input_diagnostics/codex.json` or `claude.json` under the session state directory.
 Each sample is at most 16 KiB: cursor coordinates, bounded cursor-row text and
 structural metadata for at most eight nearby rows. Text from other rows and the
 attempted message is omitted. Listing sessions does not create samples.
+For a desktop service deferred send, a completed nonzero `hgs send` exit also
+retains its exit code and at most 1024 UTF-8 bytes of the first stderr line in
+the original receipt, without control characters. The failed Activity row shows
+that diagnostic. It never proves that nothing was sent: a missing input receipt
+stays Unknown, with the existing check-Terminal caution and no automatic retry.
+An ordinary public terminal send with a live `NotOffered` witness also retains
+an additive `refusal_schema: 1`, `status: refused_before_input` record in
+`input_receipts/<request_id>.json`, under the original input lock and before any
+settings or message input. It binds the exact request ID, session, run,
+conversation, stdin digest and terminal transport. The record is at most 8 KiB;
+its reason keeps only the first 1024 UTF-8 bytes of the first line, without
+control characters, and no message
+or attachment body. This exact negative evidence does not spend the request
+UUID. A deliberate public send with the same UUID and exactly matching session,
+run, conversation, stdin digest and terminal transport checks the ordinary
+guards again. Under the same input lock, a renewed refusal atomically replaces
+the matching negative; reaching input atomically replaces it with the ordinary
+input receipt before typing. A different digest remains a content conflict;
+different identities, malformed or unreadable evidence and any non-refusal
+record keep their existing refusal or submitted-receipt behavior.
+After the child drains, the desktop retains this exact refusal as a bounded
+diagnostic on its Unknown receipt and shows its reason in Activity, including
+after read-only recovery. Known native reasons are translated in the English
+and Russian interfaces; other native diagnostics remain verbatim. This negative
+record never counts as submission, authorizes no automatic desktop retry and
+never clears the draft. Missing, mismatched or unreadable evidence and possible
+prior input remain Unknown. Only exact `submitted` evidence can mark the message delivered.
 For Claude and Kimi messages ending in a literal backslash, the paste includes a
 final newline so the single Enter submits the unchanged message instead of
 activating the agent's backslash-Enter line continuation. This is verified
 against native history; no second Enter is sent as an automatic retry.
 On Unix, a public send to an existing-ID Claude, Codex or Kimi session can apply
 one exact scheduled Settings change before its message. The same custodian keeps
-the original Root and SID exclusions and one original 25-second deadline across
-both steps. This path keeps the normal 64 KiB text limit and admits at most one attachment
+the original SID exclusion, pinned Root object and one original 25-second deadline
+across both steps. Claude releases only the Root exclusion while its composer
+settles and its native transcript confirms the message. The same pinned Root
+object must be reacquired within the original budget before the single Enter
+and before receipt publication. The request-bound typing marker blocks other
+input and Clear input meanwhile. Both waits share one eight-second window after
+paste, clamped to the original deadline; neither renews it. Only a new typed
+user row or queue enqueue with exactly the significant message lines, stamped
+no earlier than paste, proves submission. Missing proof keeps the original
+receipt uncertain, with a bounded composer preview when its source still permits
+publication. No key or message is replayed. This path keeps the normal 64 KiB text limit and admits at most one attachment
 with at most 1 MiB decoded data. These exact count and byte decisions precede
 selection, receipts and terminal input; larger attachment requests use their
 existing send path, including the normal 20 MiB total attachment limit. Its outer input
 receipt precedes the first Settings key;
-`input_pending_at` still immediately precedes the message paste. After input is
+`input_pending_at` and `input_pending_request` bind the outer request immediately
+before the message paste. After input is
 offered to that custodian, a refusal or lost acknowledgement means delivery is
 uncertain and never authorizes retry. These observations omit the best-effort
 diagnostic screen sample. Zero-pending sends, Background or busy sends and
@@ -5477,6 +5673,29 @@ offers neither action. A changed question, session or draft cancels consent.
 Kimi's native cold-cache chooser already provides the explicit cost and context
 choices. Its selected row is submitted directly, without a second full-context
 confirmation; the same identity and durable delivery checks still apply.
+While that complete chooser holds a submitted message, the session shows
+**Needs you**, with the four native options and **Open terminal**. Recognition
+requires the exact title, explanation, navigation hint, descriptions, selection
+and complete frame, bound to the pending input request, process, pane, run and
+conversation. Inspection never selects, presses Enter or retypes the held input;
+its original submitted or uncertain receipt is retained. A newer native input
+acceptance or the chooser disappearing clears this observation; an earlier turn
+ending does not accept the held message. The person's existing answer path stays
+available only with verified writable terminal mode; otherwise the options are
+read-only. A verified agent caller of this child's exact recorded launch parent
+(`source=launch`) may explicitly answer **Compact and continue** only. This proof
+applies on the child's computer. The local machine, parent
+session/run/conversation and original child question hash/run/conversation must
+all match; a link or environment markers alone do not prove the caller. Siblings,
+grandparents, unrelated agents and adopted/manual/claimed/forwarded parent links
+cannot answer; assigning a parent grants no such authority. The exception never
+selects Start a new session, Continue as-is or Don't ask me again,
+and never retypes the held message. Each navigation step rechecks the parent;
+the existing durable receipt prevents a second input on replay or an uncertain
+result. The person's choices in Zerus or Terminal stay unchanged. Automatic
+approvals and question routing still exclude this chooser. Remote CLI answers
+retain their existing generic authority; a person-only remote boundary remains
+separate follow-up work.
 App-owned desktop and Android dialog action rows place **Cancel**, **Close** or
 the equivalent dismissal at the far right, after the available actions. Long
 Android rows wrap, keeping dismissal last and visible with larger text. Destructive
@@ -5980,7 +6199,7 @@ unknown counts remain unknown. An unknown child never keeps its parent from Read
 A Claude child that stops on a provider error, such as a usage limit, gets no
 SubagentStop: its StopFailure, or a `failed` entry for its current start in the
 workflow journal with no newer child event, settles it as **Error** with that
-message, and a later event of the same child resumes it. Ordinary child
+message, and any later event of the same child but its Start resumes it. Ordinary child
 results/errors stay out of the attention count, while explicit input/approval
 requests remain visible. DeepSeek
 continuable children can receive messages through the native API with parent
@@ -6075,6 +6294,11 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
+Kimi's external Fork requires its source instance to be closed, even when the
+session is Ready. Live Kimi sessions show Fork disabled with a reason to pause
+or close the source first. Pause is a separate explicit action; Fork never
+pauses the source automatically. Confirmed paused, saved and archived Kimi
+sources can still fork their saved context.
 DeepSeek uses the native fork of a supported resident host
 ([DeepSeek](#deepseek)). A session name is a label: an archived session never
 blocks a new session or a fork from its name. Without `-n` the fork is named
@@ -6447,9 +6671,13 @@ reads one; only members that list the kind exchange them. `swarm get` lists
 the ID form as `projects[].session_ids` ("machine\nsession ID") only while the
 operation a twin mirrors is still the selected label membership, so any later
 move by label, from any hgs or desktop, hides it. `swarm get` also reports
-`membership_by_id {ready, missing}`. It is ready when every machine of the
-catalog is this computer or a peer whose last sync listed the kind; any other
-machine fails closed. Desktops and the Rust mobile connector read the ID form
+`membership_by_id {ready, missing}`. It is ready when primary data is available
+and every machine of the catalog is this computer or a peer whose last verified
+hello listed `session_id_memberships_v1`. The older `session_id` twins capability
+alone is insufficient. Primary-capability observations are node-bound and kept
+separately in the bounded `swarm/session-id-membership-peers.json`; existing
+twins observations never initialize that evidence. Desktops and the Rust mobile
+connector read the ID form
 only when it is ready. The connector keeps sessions with the same label separate
 by ID; a missing or invalid session ID never falls back to that label's project.
 With a legacy catalog, only unique labels receive label-based membership; twins
@@ -6467,6 +6695,12 @@ lock without replacing an existing ID record. An exact primary null/conflict
 means unassigned; only an absent ID record allows name membership fallback.
 Unreadable primary data stays unavailable and is not repaired automatically.
 Older builds preserve this file but cannot edit its ID grouping.
+Native project queries and assignments for a verified legacy record without a
+session ID continue through the name catalog when primary data is unavailable.
+An ID-bearing native record still requires primary evidence, including when a
+request omits its session ID. Missing, null and empty ID fields retain legacy
+behavior; malformed native IDs refuse. Legacy operations leave unavailable
+primary data untouched.
 
 The `session-labels-v1` transition gate requires fresh positives from this
 computer, every configured peer and every catalog machine. An unaddressed,
@@ -7264,6 +7498,12 @@ The shared directory-removal wrapper also refuses both nested and root removals
 on macOS. A future authorized native window must run the ignored
 `state::worktree_cleanup::tests::macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names`
 probe with `--exact --ignored` before re-enablement is considered.
+It is a containment probe: it requires an `Unsupported` refusal and intact
+payloads, and does not call raw XNU directory removal. The separate ignored
+`state::worktree_cleanup::tests::macos_raw_appledouble_observations_do_not_qualify_deletion`
+probe observes raw syscalls on fresh synthetic directories; its passing result
+does not authorize deletion. The [native qualification](native-macos-leftover-qualification.md)
+records the verified late-swap data loss and the unsuccessful held-fd candidates.
 
 On Linux, deleting the remaining files needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
@@ -7574,6 +7814,42 @@ task and works with them offline. Every command prints
 JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 `T-` plus six characters, and `PROJECT/T-xxxxxx` names it anywhere.
 
+On Linux and macOS, ordinary task commands use a refusal-only interim check
+before acting as the person or accepting a forwarded `--agent`: at most 64
+same-user processes from the caller upward, with each readable environment
+bounded to 1 MiB. An ancestor carrying `HGS_SESSION` or `HGS_RUN_ID`, even an
+empty value, refuses person actions; no ancestor's session identity is adopted.
+The DeepSeek host refusal runs first. An unreadable or macOS-withheld
+environment is no evidence of an agent: Terminal.app's system shell keeps
+working, while a readable agent above it still causes refusal. Windows keeps
+its existing caller path. The check reads no session inventory and runs only
+where the task state lives; `hgs @host` carries no `HGS_*` to that computer.
+
+This is an interim guard within one user's process tree, not verified Person
+authority. An agent started without markers and a process reparented out of its
+agent's tree, such as a detached `setsid` helper whose parent exits, are not
+detected. The bounded walk also cannot see beyond an unreadable process table
+or its 64-process limit. A reverse process index (zerus-j43fm) and verified
+Person authority (zerus-cg5h.4.11) are separate work. Team commands keep their
+existing stricter proof, including its unreadable-environment refusal.
+
+With the Agent Teams preview on, a task's `team` key identifies its team and
+home computer. Agents cannot send, hand off, retarget, cancel, reorder, edit,
+rename or change the stage of a live team's task. Its delivered holder may
+acknowledge its own attempt or legacy dispatch, register a worker and report;
+comments and messages that only add text remain available. The person can
+override these restrictions. A person's retarget away from the team clears the
+key and releases its live node under the same project lock; a refused release
+keeps the task unchanged.
+
+Turning the preview off makes a local team's marked tasks dormant: ordinary
+task commands do not open the team store or apply its guards. A foreign-home
+or invalid key still refuses agent control without opening the store, whether
+the preview is on or off. The refusal points the person to `hgs task target
+REF any` to clear the key. When a key is cleared or replaced on another
+computer, the home service releases the node at its next observation; that
+sync and observation window is accepted.
+
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
 hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
@@ -7734,6 +8010,27 @@ not queued feedback and is never delivered by itself, and only the receipt
 moves the task back to In progress. Feedback to a task In progress
 (`--mode send`) stays an ordinary message.
 
+When recovery cannot settle an unknown delivery, the person can use
+`hgs task cancel-attempt REF --attempt UUID [--reason TEXT]`. This abandons
+only that exact unknown attempt, records a `Cancelled` fact and an
+`attempt_cancelled` audit entry, and releases its hold. Delivery remains
+unknown: the original request and evidence stay, the task keeps its stage,
+and no cancel notice or other native input is sent. An exact repeat observes
+the original disposition without another write; wrong or already-settled
+attempts refuse. Other unknown attempts still hold the task. A later send
+uses a new attempt, and an old request is never replayed.
+The reply contains one task row; read its audit through the bounded task
+history command.
+
+The task view shows each unknown attempt with **Abandon attempt…**, followed
+by a separate confirmation. A team-owned task requires the person's command
+on the team's home computer. Running, Paused, Draft and Planning teams refuse;
+Stopped, Finished, Archived or a missing home team allow the disposition.
+The team writer admission is retained across the task save. With preview off,
+an existing store is read without migration or Team data writes under the same
+admission; an absent store stays absent, and a schema needing migration refuses.
+The team key and its facts stay intact.
+
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
 with the same rows, except that a prompt longer than 2 KiB is cut at a
@@ -7853,8 +8150,9 @@ Run inside a session (`HGS_SESSION` and
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names. A DeepSeek host's tool call
-(`HGS_AGENT=dsh`) never acts as the person; while its session cannot be proven,
-`hgs task` refuses it (see Session markers of hosted tool calls).
+(`HGS_AGENT=dsh`) never acts as the person: it acts as its hosted session when
+the hosted caller proof holds, and `hgs task` refuses it otherwise (see Session
+markers of hosted tool calls).
 
 Another computer's hgs, reached as `hgs @host …`, sees no marker of the agent
 that calls it and takes the caller for the person. So an agent's process
@@ -7869,16 +8167,33 @@ never forwards a command whose handler tells the person from an agent that way
 - **Who counts as an agent:** a process that claims a session (`HGS_SESSION`
   and `HGS_RUN_ID`, proven or not), a resident DeepSeek tool call
   (`HGS_AGENT=dsh`), or a process a live session proves as its caller, a
-  Claude background job included.
+  Claude background job included. On Linux and macOS, the same readable
+  marked-ancestor refusal as local task commands runs before forwarding:
+  clearing the child's own session markers does not hide that ancestor.
+  This keeps the local interim ancestry check's bounds and limitations;
+  reparenting can sever the chain and grants no verified Person authority.
 - **What the agent does instead:** it runs `hgs task` on its own computer,
-  which reaches every computer's copy. A person's shell that inherited an
-  agent's variables can unset them.
+  which reaches every computer's copy. A person's shell outside the agent's
+  process tree can unset inherited agent variables.
 - **Unchanged:** tasks' own forwarding of `send` and `cancel` to the
   executor's computer (`--agent NODE/SESSION`).
-- **Still forwarded for an agent:** `answer`, `interrupt` and terminal input
-  act the same for an agent and the person; `wait` acts on its ticket;
+- **Still forwarded for an agent:** ordinary `answer` payloads, `interrupt`
+  and terminal input; the answer-source exceptions are below. `wait` acts on
+  its ticket;
   `parent` and `wait begin` refuse a caller the other computer cannot see;
   `desktop` and `approval-log` refuse every other computer.
+
+An agent cannot forward an `answer` whose outer `question_id` starts with
+`codex-sandbox:` or `kimi-cache:`. The check runs locally before any SSH or
+peer capability probe, through the same routes listed above. Agent answer
+input is bounded to 128 KiB; other answer sources retain their exact original
+bytes. Person and GUI answers keep their existing forwarding path.
+
+Any permission for a verified launch parent to choose **Compact and continue**
+in Kimi's Cache expired chooser is local to that exact child. This proof does
+not cross computers, so every agent-originated remote answer to this chooser
+refuses, including that parent's Compact choice. Ask the person to answer in
+Zerus or Terminal instead. This does not change other answer sources.
 
 This guards against accidental agent use, not against an agent that clears its
 own environment. Forwarding a verified caller instead is future work.
@@ -8449,6 +8764,361 @@ and selected Task View share one polling controller. Full execution and result
 milestones remain specified in
 `superpowers/specs/2026-10-26-activity-task-execution-design.md`.
 
+## Agent Teams
+
+`hgs team` drives Agent Teams: a lead session and member sessions that work a
+queue of Zerus tasks through review and test stages, with accepted work
+merged into an integration branch. The guide for a person is
+[agent-teams.md](agent-teams.md); the design is
+`superpowers/specs/2026-11-11-agent-teams-design.md`. Teams were designed and
+first built by WhiteWh in the `WhiteWh/zerus` fork (pull request #322).
+
+The preview is off on every computer. While it is off every `hgs team` command
+except `preview` answers `{"ok":false,"error":{"code":"teams_inactive",...}}`
+with exit 1 and creates no file. `preview on` creates the marker
+`teams/preview` in the `hgs` state directory; the store
+`teams/teams-v1.sqlite3` appears with the first team. The person's catalog is
+`teams/catalog.json` in the `hgs` configuration directory, merged over the
+built-in catalog by ID. `catalog import` replaces that file; `template save`
+and `template import` add or replace one template; `template remove` removes a
+template of the person's own and answers whether a built-in one with that ID
+is still available. Nothing is written when the merged catalog is invalid.
+
+```sh
+hgs team preview on|off|status
+hgs team catalog show|export
+hgs team catalog import < catalog.json
+hgs team template list
+hgs team template show|export|remove TEMPLATE
+hgs team template save < template.json
+hgs team template import < bundle.json
+hgs team create --template TEMPLATE < request.json
+hgs team list [--limit 1..200] [--after CURSOR]
+hgs team waiting [--limit 1..200] [--after CURSOR]
+hgs team status [--team TEAM] [--bundle]
+hgs team inbox|queue|cards|journal [--team TEAM] [--limit 1..200] [--after CURSOR]
+hgs team current
+hgs team settings|pause|resume|stop|archive|decide < request.json
+hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
+hgs team pause-member|resume-member|stop-member|archive-member < request.json
+hgs team ask|verdict < request.json
+```
+
+Every command prints one JSON object. A refusal is
+`{"ok":false,"error":{"code","message","refs"}}` with exit 1; callers match on
+`code`, never on `message`. A command that has input reads one JSON object on
+stdin, at most 262,144 bytes, and refuses unknown fields with `unknown_field`.
+Unknown options and repeated valued options are refused ("given twice");
+a repeated switch is accepted and reads as once. `--team` takes a lowercase
+canonical UUID; a lead or a member may omit it for its own team.
+
+**Who runs a command.** `hgs team` proves its caller with one interim check.
+With the preview on, so does an `hgs task` command that touches a team: one
+with `--team`, or one on a task whose team key guards it. Every other task
+command behaves as with the preview off. A command carrying a session's markers
+is that session only when its live run, birth and process ancestry verify, or
+when a DeepSeek host proves that conversation's tool call with its per-call
+token, and
+it maps to a lead or a member only by the team's exact `(machine, session_id)`
+binding, never by a name. A command without markers is the person's only when
+no live agent session is among its process ancestors; replies then carry
+`actor.origin: "cli_interim"`, `actor.interim: true` and a `note` that states
+the limits of this interim rule. A command inside a sandbox with its own user
+namespace is refused, marked or not. On macOS an unmarked command below a
+program whose environment the system hides, usually a system shell, cannot be
+checked and is refused; the Zerus window runs `hgs` with no shell between.
+A command below a live DeepSeek host, matched by its record or its own exact
+host arguments, or below OpenCode's registered shared service is not a
+person's. Other marked claims below that host are refused; only a
+DeepSeek per-call proof names its hosted session. DeepSeek can hold a lead or
+member seat with per-call caller proof, witnessed task input and hosted
+lifecycle observations; an older host is never restarted or reloaded to add
+those capabilities. OpenCode's shared-service sessions cannot hold a seat.
+The caller proof also refuses a private process namespace that hides the
+host, with its own cause and the remedy to run outside it or turn that
+namespace off. See [Official DeepSeek Harness](#official-deepseek-harness)
+for the token proof and its limits. The interim rule guards against accidents and against a command
+that merely drops its markers, not against an agent that sets out to pass as
+the person. Windows has no Teams preview. A request never names its actor or
+its operation: `op`, `actor` and any other foreign field are refused.
+
+| Command | Person | Lead | Member | Input fields besides the envelope |
+|---|---|---|---|---|
+| `preview on`, `preview off` | yes | | | none, no stdin |
+| `preview status`, `list` | yes | yes | yes | none |
+| `catalog ...`, `template ...` | yes | | | the catalog, template or bundle JSON |
+| `create --template` | yes | | | `project`, `name`, `goal`, `home`, `integration_branch`, `base_commit`, optional `expected_template` and `delegations` |
+| `waiting` | yes | | | none |
+| `status` | yes | yes | yes | none |
+| `inbox`, `queue`, `cards`, `journal` | yes | yes | | none |
+| `current` | | yes | yes | none |
+| `settings` | yes | | | `settings`, the complete settings object |
+| `pause`, `resume` | yes | yes | | none |
+| `stop`, `archive` | yes | | | none |
+| `decide` | yes | | | `card`, `decision` |
+| `admit`, `hold`, `release` | yes | yes | | `node` |
+| `route` | yes | yes | | `node`, `role`, `pipeline`, optional `deps`, `writes`, `assignee` |
+| `accept` | yes | with the delegation | | `node` |
+| `return`, `cancel` | yes | yes | | `node`, `reason` |
+| `reassign` | yes | yes | | `node`, `member`, `reason` |
+| `reply` | yes | with the delegation | | `item`, `text` |
+| `pause-member`, `resume-member` | yes | yes | | `member` |
+| `stop-member`, `archive-member` | yes | | | `member` |
+| `ask` | | | the attempt's holder | `node`, `generation`, `text` |
+| `verdict` | | | the stage's holder | `node`, `generation`, `pass`, `text` |
+
+The envelope of every write is `request_id` (a fresh lowercase UUID), `team`
+(the team's UUID, chosen by the caller for `create`) and `expected_revision`
+(the team's revision from `status`, 0 for `create`). A changed revision is
+refused with `stale_revision`; read again before a new request. The same
+`request_id` with the same content from the same actor returns the first reply,
+success or refusal; different content is refused with `duplicate`. A write
+answers `{ok, revision, node?, item?, actor, team}`: `node` for a created
+queue entry, `item` for an inbox item or a card the write opened. A write waits
+8 seconds for the store; one that still cannot begin is refused with
+`store_busy`, nothing was written, and it may be sent again. `storage_failed`
+means the result is not known: repeat the same request with the same
+`request_id`, never a new one.
+
+Rules the store enforces beyond the table: a lead's `accept` and `reply` need
+the team's `accept_results` and `answer_members` delegations; a lead accepts
+only a report its pipeline handed to it, and a stage node is accepted or
+cancelled only by the person, since a stage ends by its holder's verdict. A
+node has one unsettled decision at a time. `return` needs a reported task with
+a holder; `reassign` needs an active member of the node's role that is not the
+lead and, for a stage, not its implementer. `route` refuses a stage: its role
+is the pipeline's and its member is chosen by the hand-out. Removing a member
+puts its open work back to the lead. A task already handed out stays held
+until its observation moves; it takes no free member. A settings change
+touches only the live nodes, and only when the integration setting actually
+changed; the archive keeps the value each node ended with. The lead does not
+resume a team the person paused or a member the person stopped. `decide` takes `approve` or
+`reject` for the `integration` and `pipeline_acceptance` cards, `acknowledged`
+for an ordinary card without a stored list, and only a listed word for a card
+that stores its list; a wrong word is refused and nothing is written. `create` records the
+team as `running` with every member `not_created` and launches nothing; the
+desktop service launches the members. `expected_template` is the template's
+`digest` from the catalog read: when the template the command is about to use
+has another digest, `create` is refused with `template_changed` before anything
+is written. `delegations` names all five booleans (`accept_results`,
+`answer_members`, `confirm_trust`, `resume_exited`, `merge_accepted`), which
+the team gets in place of the template's. Without the two fields the team takes
+the template as the catalog holds it.
+
+**Replies.** The read shapes are pinned in `crates/team-plan/fixtures/`:
+`cli-list.json` (`list`: `{ok, actor, rows, next}`, each row
+`{id, project, name, status, lead, home, revision, lead_session}`),
+`cli-waiting.json` (`waiting`: open cards of every team, oldest first, each
+with its `team`), `cli-status.json` (`status`: `{ok, actor, team, members,
+counts, service_running, health, service_items}`; the team without its
+`bundle` unless `--bundle`). `service_items` lists the team's named service
+conditions, each with its kind, sentence, count and next try; a refusal of
+every hand-out by the project's own limits appears here as
+`kind: "project_limit"` for as long as the fact stands, `cli-queue.json`,
+`cli-inbox.json`, `cli-cards.json` and `cli-journal.json` (`{ok, actor, team,
+rows, next}`). A queue row carries `kind` (`task` or `stage`) and `rounds`; a
+stage row adds `stage: {kind, target, round}` with the kind `review`, `test` or
+`land`. A member row carries `model` when its role names one. `current` answers
+`{ok, actor, team, revision, member, nodes}`, each held node with its
+`generation`. A held node also carries `questions`, the member's own questions
+of the current attempt as `{item, question, state, answer}`, newest first and
+at most ten, with `questions_more` when there are more; a question of an
+earlier attempt is not shown. The catalog commands answer `catalog`,
+`templates`, `template`, `bundle`, `saved`, `imported` or `removed` with
+`still_available`; each template row of the catalog read carries `digest`, the
+value `create` takes as `expected_template`. `preview` answers
+`{ok, preview: "on"|"off", note}`. A reader of a reply ignores fields it does
+not know: replies gain fields.
+
+Queue rows also carry `holder`, `pending_decision` and `pending_replaceable`:
+a new Return, Reassign or Cancel can supersede a pending Return or Reassign
+only before its reopen is reserved. A stopped or archived team's row may
+carry `stop_outcome: {code, reason?}` for its current recorded stop. Codes are
+`cancelled`, `released`, `cancel_refused`, `key_cleared`, `key_clear_refused`,
+`pending` and `unchanged`; refusal reasons are data, not a code inferred from
+text. An older stop without a recorded stop identity carries no such field.
+
+Report, inbox and waiting-card reads keep member `text` separate from the
+service's additive `notes: [{code, text?}]`. Known codes are `text_shortened`
+and `worktree_dirty`; the service retains at most 15,000 bytes of report text.
+The lead's, stages' and dependencies' prompts quote each member-written line
+and put service notes under a separate heading. A member-written heading or
+sentence is never reinterpreted as a note. Old rows without notes read with
+an empty array; the notes columns require no Teams store version bump.
+
+A row of `list` for a team that is planning, running or paused also carries
+`member_sessions`, the bound sessions of its members as `{member, machine,
+session_id}`, at most the roster's size; a removed member is left out.
+`status` reports whether the desktop service answered: `service_running` is
+`true` or `false`, or `null` when its state could not be read in time, and
+`health` is `null` or `{code, at_ms}` with `launch_notification_overflow` or
+`launch_worker_fault`. Without the service, `hgs team` still records
+decisions and answers reads; nothing is handed out.
+
+**Pages.** `--limit` is 1 to 200 and defaults to 50. `next` is an opaque
+cursor (`t1.` followed by the store's own cursor) for `--after`; it belongs to
+the list that issued it, and pages stay stable while new rows arrive. `null`
+marks the last page. `status` returns at most 200 members and `current` reads
+at most three pages of the queue.
+
+**Statuses** as replies show them.
+
+| Record | Values |
+|---|---|
+| Team `status` | `running`, `paused`, `stopped`, `archived`; `draft`, `planning` and `finished` belong to planned work and are not reached in this milestone |
+| Member `state` | `not_created`, `active`, `paused`, `removed` |
+| Queue row `state` | `waiting` (not admitted or not routed), `pending` (To do), `in_progress`, `reported` (In review), `accepted` (Done), `cancelled` |
+| Stage `kind` | `review`, `test`, `land` |
+| Inbox item | `state` `open` or `closed`; `kind` `report`, `question:N` (with `reply` and `reply_actor` once answered), `integration_conflict`, `delivery_uncertain`, `cancel_refused:N`, `unstaffed:` with the kernel's reason (no member can take a ready task; one item per episode, at most 500 current episodes, and an item the lead closes is not told again), and from the timers `no_report`, `not_started`, `report_reminder` |
+| Card | `state` `open` or `closed`; `decision` null while open, then the person's word or `stale` when the card was overtaken; `kind` `integration` and `pipeline_acceptance` (approve or reject), `launch_blocked`, `launch_uncertain`, `launch_capacity`, `standing_confirmation`, `team_actor_blocked`, `rejected_merge` (acknowledged), and from the timers and the stop `report_waiting`, `silent_lead`, `late_session` |
+| Journal entry | `kind` is the operation, with `seq`, `at_ms`, `actor`, `refs`, `request_id` and `text` |
+
+**Bounds** a caller can meet: 6 members besides the lead by default (the
+`max_members` cap); 500 admitted open tasks (`max_open_tasks`, at most 500)
+and 100 tasks waiting for admission per team; 3 open questions per attempt
+(`max_open_questions`); 200 dependencies and 200 write paths per route; 16,384
+bytes for a reason or a text; 200 entries in a conflict list; 600 open
+decisions per team, one for each live task. Decided queue tasks move to an
+archive and stop counting.
+
+At admission, team and template names refuse control characters, U+2028,
+U+2029 and the nine bidirectional embedding, override and isolate characters.
+Ordinary Unicode letters stay valid. Template, role, pipeline and member IDs
+are at most 64 ASCII characters: `[a-z0-9]` first, then `[a-z0-9_-]`.
+Existing teams and catalogs remain readable; create, save and import enforce
+the rules. Task titles use the replica's shared forbidden-character rule;
+an explicit title is nonempty and at most 512 UTF-8 bytes. A plain task's
+first prompt line still accepts tabs, but refuses the line separators and
+bidirectional characters. Older task titles remain readable and movable.
+
+**Problem codes.**
+
+| Code | Meaning |
+|---|---|
+| `teams_inactive` | The preview is off on this computer |
+| `not_found` | No such team, template, card, record or command |
+| `stale_revision` | `expected_revision` is not the team's revision |
+| `template_changed` | The template's digest is not `expected_template`; nothing was written |
+| `not_allowed` | The caller may not run this command or operation |
+| `invalid_state` | The request is malformed or the team, task or member is not in a state that allows it |
+| `store_busy` | The team store stayed busy; nothing was written; try again |
+| `unknown_role` | The role is not in the team's template, or has no seat |
+| `unknown_pipeline` | The pipeline is not in the team's template |
+| `unknown_member` | No such member in the team |
+| `unknown_account` | A named account is missing, of another agent or signed out |
+| `no_account_available` | No account of the role's agent has room; `refs` holds the earliest reset |
+| `no_seat_for_stage` | A pipeline names a role with no seat in the roster |
+| `dependency_cycle` | A route would create a dependency cycle |
+| `over_cap` | A size, page or capacity bound is reached |
+| `duplicate` | A repeated ID, a request ID reused with other content, or a task already in another team |
+| `unknown_field` | The request or catalog file has a field the command does not know |
+| `integration_conflict` | The accepted work conflicts with the integration branch |
+| `integration_unavailable` | The repository or Git cannot be integrated safely |
+| `delivery_uncertain` | An effect's result is unknown; it is never repeated |
+| `storage_failed` | Storage failed or its result was lost; repeat the same request with the same request ID |
+
+**Tasks and teams.** `hgs task add --team TEAM [--role ROLE] [--pipeline
+PIPELINE]` files a task into a team's queue, and `hgs task target REF team
+TEAM` sends an existing Backlog or To do task; see [Project tasks](#project-tasks)
+for what agents may do with a team's task. The task is created even when the
+team refuses it; the reply then has `team.queued: false`, `team.error` and the
+message `Task REF exists and was not queued (CODE): REASON`. After a refusal or
+`store_busy` the task's team key is what it was before the command: absent for
+a first send, the same team for a repeat. After `storage_failed` the key stays,
+because the team may hold the task; sending it again finds that entry by the
+task's identity and never queues it twice.
+
+**Facts about the team and its members.** A hand-out refused by the project's
+own limits (`agents_other` or the hourly `agent_limit`) is a fact about the
+team: the service records it with the command's sentence and the count, hands
+nothing out and no reopen while it stands, and opens one `team_actor_blocked`
+card per team, bound to no task, at the first refusal, with the decisions
+`retry` (a probe on the next pass) and `acknowledged`. One hand-out is tried
+as a probe after the retry table's 1, 2, 4, 8 and 15 minute delays; a probe
+the project admits ends the fact, closes the card and the queue goes on. The
+lead reads the fact among the `service_items` of `status`. A member whose
+terminal holds input, such as an open question, an unsent draft or a dialog
+waiting for the person, or one the service cannot read, is likewise a fact,
+with one typed cause for all of them: the
+member is not free, another member is tried, and the member is tried again on
+the same delays; a ready task that only such a member can take gets a
+`team_actor_blocked` card after the wait.
+
+**Service commands.** Five `hgs task` commands belong to the desktop service on
+the team's home computer: `team-deliver` (a hand-out or a reopen), `team-done`
+(an accepted task to Done), `team-stage` (the task of a stage), `team-cancel`
+(a cancel decision) and `team-clear` (removes the team key of a released task
+or of a stopped team's task). Each takes its authority from a decision or an
+effect the team store already holds, never from its caller, and repeating one
+with the same input changes nothing. Nobody runs them by hand.
+
+`team-cancel` acts on one attempt: the one the store last observed, or the
+node's own delivered hand-out. It answers `cancelled` (running work with a
+known delivery is cancelled with the task's ordinary notice), `released` (a
+task with nothing running loses its team key and stays in its stage),
+`refused` (a task whose delivery is unknown, or that is Done, is left as it is;
+in a live team the lead gets an inbox item), `stale` (the task changed since
+the store last observed it; the service observes it and asks again) or
+`cutting_over`. In a running or paused team the node ends only when the service
+observes the task cancelled; a person's new run of the task is taken over and
+never cancelled. After a stop, a task a person started again is refused with a
+reason that begins `attempt_changed:` and is left to that person.
+
+Stop and Archive also schedule a bounded, keyset-paged sweep of closed tasks.
+It silently clears only this team's key on an unbound closed task, without
+adding history; another team's key or a new live binding is kept. A completed
+sweep is not repeated until another Stop or Archive. Unreadable documents
+are skipped and a key arriving behind the cursor is not rediscovered by that
+pass. A cancelled task moved back to To do can be sent again: the move clears
+its mark and reason, and a send clears stale marks in Backlog or To do. The
+send settles the old cancelled node before creating a new one; In review is
+not a stage from which a resend creates a node.
+
+Rejecting an Integration card does not undo a merge already recorded for its
+decision. The service opens one `rejected_merge` card (shown as **Rejected
+result is merged**) and one lead inbox item, naming the task, commit and
+branch. The card takes `acknowledged`; only a revert on that integration
+branch removes the merged work. A later recorded fact for that rejected
+decision gives the same notice, without finishing a newer task attempt.
+
+**Doorbells and timers.** The service rings the lead with one `hgs send` that
+says how many inbox items wait and names `hgs team inbox`, and rings a member
+the same way for answers to its questions, naming `hgs team current`. A
+doorbell carries no text of an item, a question or an answer. It rings while
+the team is running and the session is live and idle with no pending request,
+for items newer than the previous doorbell, at most once per
+`inbox_interval_seconds`, bound to the run and conversation it read; one whose
+delivery is unknown is never sent again. The team's `timers` settings name the
+waits: `report_timeout_seconds` (a turn ended without a report),
+`start_timeout_seconds` (a hand-out not started), `remind_lead_minutes` and
+`remind_person_minutes` (an undecided report) and `lead_stall_minutes` (a lead
+that does not work while its inbox waits). Each fires once for its node and
+generation or its inbox item, only while its condition holds and never while
+the team is paused or stopped. `answer_escalate_minutes` belongs to a later
+milestone.
+
+**Standing confirmations.** Under the team's `confirm_trust` and
+`resume_exited` delegations, and nothing else, the service answers the startup
+folder trust prompt of a Claude, Codex or Kimi member whose worktree Zerus
+created for that team, and resumes a member whose agent exited by itself, at
+most three times an hour, in its own conversation with a brief that points it
+at `hgs team current`. Each is checked against the exact run, conversation,
+prompt and hash, reserved in the approval journal under its own categories
+(`team_folder_trust`, `team_resume`) before delivery and finished from the
+receipt; an unknown delivery is never repeated. Ordinary automatic tool
+approvals never admit these categories. Anything the service cannot confirm
+opens a `standing_confirmation` card.
+
+Folder trust applies on the member's account to the team's main Git checkout
+and its subfolders, as the permission checkbox states. A Codex repository
+prompt's root must match the Git-resolved main checkout; a bare repository,
+separate Git directory or submodule does not establish that scope. The
+approval journal carries the recorded `scope` in its bounded list and detail
+reads. In **Settings > Approvals**, only a confirmed folder-trust grant says
+**Trusted for ... and its subfolders on this account**; failed, cancelled,
+unconfirmed and unknown outcomes say it was requested but not confirmed.
+Resume and other ordinary approval rows do not claim that trust grant.
+
 ## Machines and accounts
 
 **Machines** edits local SSH aliases and overrides in
@@ -8673,6 +9343,28 @@ not mean the native account is signed out. Explicit native sign-in status takes
 precedence; older authentication problems are labelled **Last reported** when
 their report is stale or offline. Viewing accounts never refreshes Claude's
 credentials on Zerus's behalf.
+
+Kimi Code's quota inspection calls the provider's endpoints with the native
+token. The Zerus test seam `HGS_TEST_KIMI_API_BASE` points a test build at a
+private stand-in only when the value is an `http` or `https` URL whose host is
+`127.0.0.1`, `::1` or `localhost` and whose port, when present, is a number in
+curl's range; the token is sent there exactly as to the provider, and curl runs
+without any config file or proxy (no `~/.curlrc`, `$CURL_HOME`, ambient proxy
+variable or `HTTP_PROXY`). A valid test value takes precedence over
+`KIMI_CODE_BASE_URL`. An empty test value is treated as unset. Any other test
+value is ignored; the `detail` names the variable, and the rule below then
+applies. The seam is read only by the
+inspection. Zerus removes it from the native children it starts for login and
+inspection, and sets it empty (which the inspection treats as unset) in account
+sessions; a launch without an account has no account environment, so it
+inherits whatever the launching environment holds. `KIMI_CODE_BASE_URL`
+keeps the Kimi CLI's own meaning: with a live token, any non-default value,
+including an empty one and a loopback address, makes the inspection send no
+request and no token, and names it in `detail`. An expiring token still runs
+the native CLI's refresh first, as before, so the person keeps that answer; the
+refresh no longer depends on the base. Unset, the value
+`https://api.kimi.com/coding/v1` and that value with a trailing slash use the
+provider as before.
 
 Claude usage refreshes share a cache on the account's owning computer. Account
 views and the selected session footer normally request usage every five minutes;
@@ -8902,6 +9594,32 @@ inspection or launch. It passes system session authority, not passwords or token
 starts on demand and exits after a minute idle. A logged-in desktop session is
 required; screen lock differs from logout. If Keychain is actually locked in that
 session, unlock it there. Authentication diagnostics distinguish these cases.
+
+### Kimi cache expiry before sending
+
+Kimi accounts default to **Compact after cache expiry: On** in Settings > Accounts.
+The account option applies to existing sessions on their next ordinary message,
+including agent sends. Change it with the account controls or
+`hgs account compact-on-expiry ID --enabled false --revision REV`.
+
+Zerus reads Kimi's fresh `estimated_cache_duration` cache, the exact upstream
+model resolved for the current native profile alias, the conversation's context
+token count and its last confirmed provider activity. It uses Kimi's rule:
+idle strictly longer than `cache_duration` seconds, with at least `min_tokens_to_hint`
+tokens. Missing, stale or ambiguous inputs skip compaction; Zerus does not fetch
+configuration or guess a TTL. Other agents and keep-warm pings keep their existing
+behavior.
+
+An expired-cache send reserves its original request receipt and payload before
+using the same native `/compact` path as Compact context. It waits up to 20
+seconds for matching completion hooks, then uses the ordinary guarded send once.
+The receipt and inspection include the rule and compaction result. Failure,
+timeout or unknown completion never permits a replay or a second compaction for
+that request. If the native composer or identity is unsafe, the delivery remains
+unconfirmed and its original text and attachments remain available for a manual
+send after the person clears Terminal. Inspection's `pre_send_compaction` also
+keeps the bounded original message. Compaction summarizes older context and
+itself uses provider tokens.
 
 <a id="local-models"></a>
 
@@ -9260,15 +9978,85 @@ sets these per call.
 
 A hosted tool call is never the person. `hgs task` and the desktop's
 agent-descended refusal treat `HGS_AGENT=dsh` without a session they can prove
-as an agent, and refuse person actions plainly. Until a hosted session can be
-proven, its `hgs task` commands are refused and its sends are unattributed.
+as an agent, and refuse person actions plainly.
+
+Each call's processes also carry `HGS_DSH_CALL_TOKEN`, a fresh random token of
+256 bits. The host keeps it, naming the calling top-level conversation, while
+the call runs and, for a background or promoted job the call starts, until that
+job settles; the table is bounded and an evicted token is unknown. Each
+conversation holds at most 512 live tokens and makes room only from its own
+oldest, so a full table never evicts another conversation's live token: a call
+that finds it full of other conversations' tokens gets none and stays unproven.
+Everything the host's private socket serves, such as a running job's output that
+printed its environment or an error that echoes a request, shows a live token as
+`[hidden call token]`, wherever it stands in the text and however often. That
+hides a live token printed whole: a call can always disclose its own token split
+or encoded, which no redaction catches. A job's output is served as its last
+32 KiB, so a token cut at that window's start shows only its final characters.
+What the host's own web UI shows is outside this: reaching it takes the sign-in
+address in the host's private log. A command
+then acts as its hosted session for `hgs task` and for the source of `hgs send`
+when the hosted caller proof holds:
+
+1. the binding its `HGS_SESSION`, `HGS_RUN_ID` and `HGS_SESSION_ID` name, read
+   by its exact route, is that DeepSeek session's;
+2. the binding's agent home selects the host folder, whose record of this boot
+   names a process and its birth;
+3. that process, with that birth, is an ancestor of the command;
+4. the command's `DSH_HOME` is the binding's agent home;
+5. the host, asked over its private socket, holds the token for the
+   binding's conversation; the socket's peer credentials (`SO_PEERCRED` on
+   Linux, `LOCAL_PEERPID` on macOS), which name the process that created the
+   listening socket, must be the very process and birth of step 3, so the
+   answering socket is the host's; one 2-second deadline bounds the whole
+   exchange.
+
+An older host that does not advertise call tokens, no answer, an unknown token
+or another conversation refuses; so do another session's markers with a call's
+own token, a made-up token and the token of a call that has ended. `hgs self`
+reports such a proof as `identity_source` `hosted_call`, with its limit.
+
+Peer credentials do not show which process accepted a connection: a process
+that held the host's listening descriptor, such as a child that inherited it or
+the host re-executed while listening, would answer as the host. The host never
+hands its listener to a child, because it is opened close-on-exec, and never
+re-executes while listening. On Linux the end-to-end suite checks that no
+process of a tool call holds a descriptor of `host.sock` and that the host's
+listener is close-on-exec; on macOS this rests on the same Node behaviour.
+
+A command that carries `HGS_AGENT=dsh` but whose hosted proof fails (no token,
+a wrong or ended token, or any other refusal) is never the person: `hgs send`
+and `send-now` refuse it, and so does a launch without `--parent`, each with a
+sentence naming the missing proof. Neither sends nor launches as nobody. Every
+route to another computer passes one check before anything is forwarded: by
+`@host`, by a session reference (its verified hop, or `inspect` of it) or by
+`--expect-machine`, such a call sends nothing and launches nothing without
+`--parent`, and on a route that names a machine it runs no other command,
+because the peer cannot see who calls. A launch names its parent only with
+`--parent` followed by a claim of the parent's session, run and conversation
+IDs among its own options: the value of another option, or a word after `--`,
+is no parent. A launch Zerus does not track
+(`HGS_TRACKING=0`, or a plain shell session) records no parent at all and is
+outside this rule. Hosts an older Zerus started never set `HGS_AGENT=dsh`, so
+their calls are unaffected.
 
 The limit: one process serves all hosted sessions, so process ancestry proves
 only that a command runs under the host serving a session, not which hosted
-agent ran it. The markers are claims that the host sets per call, which ends
-accidental attribution to another session; an agent that deliberately sets
-another hosted session's markers, or edits the same-user identity file, is not
-detected by them.
+agent ran it; the per-call token proves which conversation's call started it.
+A same-user process that reads another tool call's environment can copy its
+token: that is deliberate instrumentation and outside this proof, as is an agent
+that edits the same-user identity file.
+
+A command below a recorded resident agent host that carries the markers of
+another session is refused: a command there can only be a session that host
+serves, and only a hosted call's token proves one. The host is found from the
+host records and the process tree, never from a marker, and a check that cannot
+tell refuses. The shared `state::dsh::hosted_ancestor` also recognizes a live host by its
+own exact arguments, including the patch path under this state's `dsh/hosts`.
+Removing or editing the records does not conceal an ancestor with that shape;
+reparenting or a host with neither a record nor matching arguments remains
+outside this interim proof. Agent Teams keeps OpenCode's separate, untrusted
+service-file refusal check.
 
 A host an older Zerus started keeps the markers it inherited and its adapter
 until it exits on its own; it is never restarted or reloaded for this. Its
@@ -9281,8 +10069,9 @@ check of recorded host ancestry below refuses them.
 
 Under a recorded host, no other identity (zerus-ppd26.15). The process tree and
 the host records decide this, never a marker the caller sets. hgs reads the host
-records first: a computer or account that records no DeepSeek host is never
-affected by the rest of this check. Otherwise hgs walks a command's ancestry
+records first. With no records it still looks for a live host by its own
+arguments, but does not adopt an unreadable or changing walk's refusals. With
+records, those refusals stand. hgs walks a command's ancestry
 through processes of the same user, at most 64, up to the first process of
 another user. When that walk contains a DeepSeek host this
 computer records in `dsh/hosts`, matched by process ID and birth, the command is
@@ -9313,13 +10102,20 @@ task reads included, when:
 Each cause has its own refusal. A record's refusal names the exact path and how
 to clear it: close the DeepSeek sessions of that agent home, then remove the
 record. The desktop shows it. Agent Teams' caller proof uses the same check,
-`state::dsh::hosted_ancestor`.
+`state::dsh::hosted_ancestor`. The Teams caller surfaces this cause with
+its own sentence: the member's report or team command inside such a
+sandbox is refused with the named sentence (the separate process
+namespace, and the remedy: run outside the sandbox, or turn its private
+process namespace off); no report is stored, and the lead is told through
+the existing path. The person and the lead see the same limit in
+`hgs guide teams` and `hgs guide team-lead`.
 Records of an earlier boot never block anyone. A host's records are written
 atomically (a synced temporary file renamed into place, then the folder synced),
 so a crash leaves the previous record or the new one. Outside this check:
 - a command that leaves the host's tree (a double fork, setsid, or a background
   job whose shell exits), which the user's service manager adopts;
-- a host started by an attempt that ended before its running record.
+- a host with neither a record nor the exact host argument shape under this
+  state directory.
 
 The official minimal composition's persistent `bash` tool keeps one shell per
 agent across calls, which starts with the environment of the call that opened
@@ -9526,6 +10322,165 @@ and reasoning are excluded. Searching never starts, resumes or reloads a host.
 Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
 older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
+
+A team member's hosted lifecycle is observed read-only through the advertised
+`teamLifecycle` capability and `session-lifecycle` RPC. A live Agent answers
+`live`; only the host's own `agent/disposed` event answers `ended`, with its
+source and timestamp. The host retains at most 4096 end records. A missing
+record, an older adapter, a changed host generation or an unreachable host is
+unknown, never an inferred exit or permission to resume. The standing terminal
+confirmation scan skips DeepSeek members. Live hosts are never reloaded for
+this capability.
+
+A task input to a hosted DeepSeek session is witnessed (`zerus-hfw2s`). The
+caller is the Agent Teams task delivery; it uses
+`state::dsh::witness::submit_witnessed(name, request, deadline)`. For recovery
+it uses `recorded(name, request)`, which reads the store under the same
+per-request lock and answers `Absent`, `Conflict` (the request ID holds another
+input) or `Outcome(code)`. A lock or store that cannot be read is an error.
+Only `Absent` means that no witnessed submit offered, or is offering, this
+exact request. Each input answers with exactly one fixed
+code. Codes are never folded, retried or promoted. A repeat of exactly the same
+request ID, digest, name, run and conversation replays the stored code without
+sending. A well-formed receipt of the same request ID with any other payload or
+binding is refused as an identity conflict, and the stored outcome is kept.
+The receipt path is read without following links. A link, another
+non-regular file, an unparsable file, or a parsed value that is not a
+well-formed receipt of this request ID proves nothing about what was offered.
+Each is `Unknown{unseen}`, with no host call and nothing written. The opened
+descriptor is checked again, so a path replaced after its check is no
+receipt either. A pending
+marker whose write reports a failure is answered by what the store then holds:
+no receipt is `NotOffered{host_refused}`, and a receipt is `Unknown{pending}`.
+
+- `Receipt`: the conversation durably recorded this request's own message. It
+  carries the same message ID and request ID, and the offered content digest.
+- `NotOffered{host_refused}`: refused before the pending marker, by HGS or the
+  host. This also covers a host whose `ping` lacks `inputWitness` ("This
+  DeepSeek host cannot witness a task input; it can after its next own start").
+  It also covers the host's own refusal of this exact request before its
+  prompt, and a stored binding without its run or conversation ID ("Session
+  identity is incomplete"), whose receipt would not read as well-formed.
+- `NotOffered{unsafe_content}`: a text block HGS would insert contains the
+  case-sensitive literal `dsh-session:`. The host's session-reference plugin
+  rewrites such a mention or fails the turn on it. This is checked before any
+  marker.
+- `NotOffered{host_disposed}`: the queued input was canceled while the adapter
+  disposed of the agent itself (Pause or Forget). `NotOffered{canceled}`: it was
+  canceled by anyone else, which the log does not name.
+- `NotOffered{dropped_after_claim}`: a turn claimed the input and ended without
+  recording it. A claimed input is never queued again, after a later turn,
+  Forget and resume, or a host restart.
+- `Unknown{pending}`: still queued, claimed or not yet durable at the caller's
+  deadline. `Unknown{changed}`: recorded with other content, for example after
+  an edit in the native UI.
+- `Unknown{host_gone}`: the host stopped answering or changed generation.
+  `Unknown{unseen}`: no witness exists for the request. Either the host holds
+  no record of it, or an earlier call may already have offered it. That happens
+  when exactly this request was recorded by an ordinary send without a witness,
+  or when its receipt, its receipt path or the store's lock could not be read. It is never a
+  refusal and never sent again.
+
+The digest is SHA-256 over each content block's type and, for a text block, its
+text, each followed by NUL. The host keeps images as attachment references, so
+**a Receipt does not prove image bytes**. Its receipt says
+`"digest_scope": "text_and_block_types"`.
+
+The adapter's `ping` advertises `inputWitness: true`. Its `send` binds a request
+to the first message the harness inserts with that request ID as `rpcId`.
+`input-witness {sessionId, requestId, generation, waitMs <= 25000, fromSeq?}`
+reports facts only:
+
+- it waits until the message settles or `waitMs` passes;
+- it flushes the session;
+- it returns at most 4096 log events, forward from the inserting splice or
+  `fromSeq`: inbox splices, that session's `user/message` digests and
+  `turn/end`;
+- `complete` says whether the page reached the log's end;
+- it also returns the adapter's own disposal windows and whether the flush made
+  them durable.
+- After the adapter disposes of a session itself, each record bound to it keeps
+  its final facts (`frozen: true`) instead of the disposed session's log.
+
+HGS pages forward from `through` and classifies the events. A receipt, a
+changed message or a cancellation is concluded only from a complete slice.
+`dropped_after_claim` may be concluded from any prefix. The deadline is the
+caller's: about 20 seconds for a Teams hand-out and about 90 seconds for a
+person's send. A foreground bash step alone can last 60 seconds, so a hand-out
+during a long tool call often ends `Unknown{pending}`. The deadline budgets the
+whole call (`zerus-hfw2s.8`):
+
+- The wait for the request's lock ends at the deadline. Another call that still
+  holds the request may be offering it, so this answers `Unknown{unseen}` and
+  this call sends nothing.
+- `ping` and `inspect` each get at most what is left. Running out before the
+  marker, or less than one second left to offer and read, answers
+  `NotOffered{host_refused}` ("The deadline passed before the input was
+  offered; nothing was written or sent").
+- After the marker, the send and the reads share what is left. Running out
+  answers `Unknown{pending}`.
+
+`tests/fixtures/dsh-input-witness-facts.json` records the pinned reviewed host
+it was captured on. It is regenerated only on that host, where the native test
+also compares its live facts with it. Receipts live in
+`dsh/receipts/<request_id>.json`. They are written with a temporary file,
+fsync, rename and directory fsync. Their states are `pending`, `submitted`, or
+`not_offered` with its `code`; an unknown outcome keeps `pending` with its
+`code`.
+
+Exclusivity is per request ID, never per computer (`zerus-hfw2s.5`): a
+witnessed submit holds `dsh/witness-locks/<request_id>.lock` from before its
+store check until after its send. `recorded()` takes the same lock, and so does
+an ordinary send around its receipt check, marker and send, under its session
+guard without holding the machine-wide binding lock. The witness path never
+takes the machine-wide `dsh/bindings.lock`, so one
+slow host never delays a witnessed submit or `recorded()` for another session.
+The binding record is read without that lock: the run and conversation
+identity check before the marker is the gate, and the offer and its witness
+stay with the request's own conversation. A request lock file is removed on release; a
+crash leaves at most one per in-flight request, and that request's next use
+removes it.
+
+Ordinary send, settings, answer, interrupt and compact operations serialize by
+native conversation (`zerus-l75cn`), as do the binding-changing dispatch paths
+pause, resume, rename and forget. The guard in
+`dsh/session-locks/<native_identity_digest>.lock` is keyed by the stored native
+home and conversation ID; renaming a display label or resuming a run keeps the
+same guard. Its initial atomic metadata read only chooses the guard. After
+waiting, the binding is read again under the brief machine-wide file lock and
+a replaced native identity refuses. The order is always session guard first,
+then the machine-wide lock for binding reads/writes, never a session wait under
+the machine-wide lock. Binding updates recheck the full saved record before
+writing, so an intervening metadata writer is not overwritten. The per-request
+witness lock and pending-marker no-replay rules above are unchanged.
+
+Scoped lifecycle, existing-name launch, fork preflight, parent-link writers
+and the DeepSeek launch-project gate use the same per-conversation guard
+(`zerus-keboc`). Host RPCs in these paths run outside the binding-file lock.
+A claimed parent's liveness is checked after waiting for the child's guard
+and before machine-wide locks; its full saved binding is checked again during
+the local parent-link transaction. Launch-project inspects and lists the exact native
+handle under its session guard, then rechecks the full binding before assigning
+metadata. Concurrent metadata changes refuse rather than overwrite an update.
+
+Two creation reservations deliberately remain wide. A **new-name launch**
+holds the binding lock from its second vacancy check through host setup,
+permission checks, persistence, native creation and account-default settings.
+An **actual fork** holds it from destination reallocation and durable intent
+through the native fork and child-binding publication; its ping/inspection
+preflight runs outside the lock. Neither has an independent destination-name
+reservation protocol. Dropping those holds could let concurrent creators choose
+the same free name, so these portions can still delay other sessions. An
+uncertain launch retains its persisted native conversation ID; an uncertain
+fork retains its original request UUID, host generation and destination. No
+new creation identity is minted to bypass an uncertain result.
+
+The session-project and pinned-project gates are already metadata-only, with
+no host RPC under their binding locks; their existing bounded locking stays
+unchanged. Scoped recovery edits already inspect before taking the binding
+lock and recheck the captured record before editing a waiting job. Automatic
+recovery's separate state-writer lock is unchanged. Witness request locks,
+exact delivery evidence, refusals and no-replay rules are unchanged.
 
 A DeepSeek row in `hgs ls` and the GUI reports its background work without an
 inspection, so an idle session with a running background job shows
@@ -10672,7 +11627,10 @@ used for different content`, or `This request ID was already used for another
 message` for DeepSeek and OpenCode) and delivers nothing. Without that receipt,
 for example when an earlier attempt stopped before the recipient recorded it or
 the receipt is gone, the retry is a new delivery under the ordinary guards,
-even if an earlier attempt arrived. The source ledger retains attempts for 30
+even if an earlier attempt arrived. An exact terminal `refused_before_input`
+record also permits a deliberate retry with its original UUID and unchanged
+binding, under those same guards; it proves that attempt typed nothing and is
+never a submitted receipt. The source ledger retains attempts for 30
 days. If the source ledger still has a conflicting entry for the same native
 sender and request ID, hgs warns that attribution could not be recorded and
 still forwards the send under the ordinary guards. A refusal says nothing about
@@ -10959,7 +11917,10 @@ read` compares a mark with for that provider, owned by the session's name.
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances
 the cursor. Reset it when conversation ID changes. `history_truncated` discloses
-journal limits; `tracked: false` identifies an unbound session. Folder/Git fields
+journal limits; `tracked: false` identifies an unbound session.
+An input phase with a pending native question reports `Needs attention` in
+`activity_summary`; a specific sign-in request keeps `Sign in required`.
+Folder/Git fields
 include `cwd`, `cwd_source`, `cwd_canonical`, `git_root`, `git_common_dir`, branch,
 worktree, detached state and metadata status. Git metadata has a bounded read and
 15-second cache, independent of pause eligibility.
@@ -11211,6 +12172,16 @@ reports `running`, `ownership`, `configuration`, executable `version`, schema,
 generation/epoch, pending counts, component state and incomplete upstream
 coverage. IPC connectivity does not establish peer freshness. An absent service
 reports `running:false`; an unsafe or incompatible endpoint is an error.
+Before a status/watch projection or ordinary command, the actor checks its
+original configuration, generation and epoch against the durable service row.
+Missing, unreadable or changed metadata stops admission and drains that actor
+through the existing shutdown path. It never adopts another opener's epoch or
+advertises its cached scope as current. A later service starts with a fresh
+scope; retained original results still require exact scoped, read-only queries.
+Operation recovery also checks the current service epoch inside its write
+transaction before changing attempts, so an old actor cannot mark a newer
+service's reserved work Unknown.
+Retiring an old Unix listener preserves a later socket or file at its endpoint.
 
 `serve` holds an exclusive OS file lock under `HGS_STATE_DIR/desktop`, opens the
 private versioned `state.sqlite3` and serves a same-user Unix socket or Windows

@@ -22,10 +22,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::{
-        atomic::{AtomicI32, Ordering},
-        Mutex, MutexGuard,
-    },
+    sync::atomic::{AtomicI32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -109,7 +106,7 @@ pub fn spawn_ssh(
             set(command, Stdio::piped());
         }
     }
-    let mut child = command.spawn()?;
+    let mut child = zerus_client_core::unix_spawn::spawn(command)?;
     Ok(super::SshChild {
         stdin: child.stdin.take().map(|pipe| Box::new(pipe) as _),
         stdout: child.stdout.take().map(|pipe| Box::new(pipe) as _),
@@ -297,11 +294,11 @@ pub fn agent_command(argv: &[String]) -> io::Result<Command> {
 /// `Command::spawn`. On Windows the child also gets a job of its own that ends
 /// with this process and that nothing it starts can leave (spec D4).
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
-    command.spawn()
+    zerus_client_core::unix_spawn::spawn(command)
 }
 /// `spawn` in a process group of its own (`own_process_group`).
 pub fn spawn_group(command: &mut Command) -> io::Result<Child> {
-    own_process_group(command).spawn()
+    zerus_client_core::unix_spawn::spawn(own_process_group(command))
 }
 /// On macOS std creates a child's pipes with pipe() and marks them close-on-exec
 /// only afterwards, and posix_spawn passes on every descriptor without that flag.
@@ -309,13 +306,12 @@ pub fn spawn_group(command: &mut Command) -> io::Result<Child> {
 /// first child's input or output open until it exits itself, so an exchange that
 /// waits for end of file stalls with it. Threads that spawn at the same time
 /// therefore take turns (`spawn_in_turn`), on every Unix alike.
-static SPAWN: Mutex<()> = Mutex::new(());
 /// The spawn turn: while it is held, no `spawn_in_turn` creates pipes or starts
 /// a child.
-pub fn spawn_turn() -> MutexGuard<'static, ()> {
-    SPAWN.lock().unwrap_or_else(|e| e.into_inner())
+pub fn spawn_turn() -> zerus_client_core::unix_spawn::Turn {
+    zerus_client_core::unix_spawn::turn()
 }
-/// `Command::spawn` in the spawn turn (`SPAWN`), for every spawn that can run
+/// `Command::spawn` in the shared spawn turn, for every spawn that can run
 /// while another thread of this process spawns.
 pub fn spawn_in_turn(command: &mut Command) -> io::Result<Child> {
     let _turn = spawn_turn();
@@ -326,13 +322,13 @@ pub fn spawn_in_turn(command: &mut Command) -> io::Result<Child> {
 /// Preserve the original deadline across turn contention and preparation.
 pub fn spawn_prepared_in_turn_before<T>(
     until: std::time::Instant,
-    prepare: impl FnOnce() -> io::Result<(Command, T)>,
+    prepare: impl FnOnce(&zerus_client_core::unix_spawn::Turn) -> io::Result<(Command, T)>,
 ) -> io::Result<(Child, T)> {
-    let _turn = spawn_turn();
+    let turn = spawn_turn();
     if std::time::Instant::now() >= until {
         return Err(io::ErrorKind::TimedOut.into());
     }
-    let (mut command, resources) = prepare()?;
+    let (mut command, resources) = prepare(&turn)?;
     if std::time::Instant::now() >= until {
         return Err(io::ErrorKind::TimedOut.into());
     }
@@ -358,29 +354,7 @@ pub fn kill_process_group(child: &mut Child) {
 /// `fcntl` under the spawn turn, as the worktree borrower's socket does
 /// (zerus-taljw).
 fn nonblocking_socket() -> io::Result<std::os::unix::net::UnixStream> {
-    use std::os::fd::FromRawFd;
-    #[cfg(target_os = "macos")]
-    let _turn = spawn_turn();
-    #[cfg(target_os = "macos")]
-    let kind = libc::SOCK_STREAM;
-    #[cfg(not(target_os = "macos"))]
-    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
-    let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        let descriptor = socket.as_raw_fd();
-        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-            || unsafe { libc::fcntl(descriptor, libc::F_SETFL, libc::O_NONBLOCK) } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(socket)
+    zerus_client_core::unix_spawn::nonblocking_stream()
 }
 
 /// The same non-blocking socket for the process-isolated fixtures.
@@ -464,6 +438,22 @@ pub fn connect_unix(path: &Path, limit: Duration) -> io::Result<std::os::unix::n
         }
         // A full listen queue has no event to wait for: retry until the deadline.
         std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+pub(crate) fn receive_timeout_result(result: io::Result<()>, apple: bool) -> io::Result<()> {
+    // The supplied timeout is already valid, nonzero and bounded. XNU's
+    // sosetoptlock rejects options with EINVAL after both socket directions
+    // shut down. Reading can then drain queued bytes/EOF without blocking.
+    // Keep the read itself and both absolute deadline checks authoritative.
+    if apple
+        && result
+            .as_ref()
+            .is_err_and(|e| e.raw_os_error() == Some(libc::EINVAL))
+    {
+        Ok(())
+    } else {
+        result
     }
 }
 
@@ -1367,7 +1357,7 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
             Ok(())
         });
     }
-    command.spawn()
+    zerus_client_core::unix_spawn::spawn(command)
 }
 
 /// Run `command` without input in a process group of its own, collecting at
@@ -1394,26 +1384,52 @@ pub fn run_bounded_stdin(
 ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     helper_group::admit().map_err(RunError::Spawn)?;
+    let turn = spawn_turn_before(deadline, cancelled).map_err(|_| RunError::Stopped)?;
+    run_bounded_in_turn(command, limits, deadline, cancelled, turn)
+}
+/// A failed turn reservation proves no child started. Callers may wait
+/// before taking their own write admission; no store lock is held here.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpawnTurnNotStarted {
+    Deadline,
+    Cancelled,
+}
+pub(crate) fn spawn_turn_before(
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<zerus_client_core::unix_spawn::Turn, SpawnTurnNotStarted> {
+    loop {
+        if cancelled() {
+            return Err(SpawnTurnNotStarted::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(SpawnTurnNotStarted::Deadline);
+        }
+        match zerus_client_core::unix_spawn::try_turn() {
+            Ok(turn) => return Ok(turn),
+            Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(
+                Duration::from_millis(2).min(deadline.saturating_duration_since(Instant::now())),
+            ),
+        }
+    }
+}
+/// Run with a turn already reserved. The caller starts its execution clock
+/// after obtaining that turn and retains its own admission until this returns.
+pub(crate) fn run_bounded_in_turn(
+    command: &mut Command,
+    limits: [usize; 2],
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+    turn: zerus_client_core::unix_spawn::Turn,
+) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
     command
         .process_group(0)
         .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = {
-        // Keep the original budget while another thread owns the spawn turn.
-        let _turn = loop {
-            if cancelled() || Instant::now() >= deadline {
-                return Err(RunError::Stopped);
-            }
-            match SPAWN.try_lock() {
-                Ok(turn) => break turn,
-                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(
-                    Duration::from_millis(2)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                ),
-            }
-        };
+        let _turn = turn;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         helper_group::admit().map_err(RunError::Spawn)?;
         // The turn, policy query or cancellation check can consume time.
@@ -1525,7 +1541,7 @@ pub fn output_until(
     command.stdout(Stdio::from(stdout.try_clone().map_err(RunError::Io)?));
     command.stderr(Stdio::from(stderr.try_clone().map_err(RunError::Io)?));
     command.stdin(Stdio::null());
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut child = zerus_client_core::unix_spawn::spawn(command).map_err(RunError::Spawn)?;
     let deadline = Instant::now() + duration;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(RunError::Io)? {
@@ -1762,6 +1778,17 @@ extern "C" fn forward_signal(signal: libc::c_int) {
 }
 /// Keep terminal restoration in normal Rust control flow even on SIGINT/TERM/HUP.
 pub fn wait_interactive(command: &mut Command) -> Result<i32> {
+    wait_interactive_from(command, None)
+}
+/// Preserve interactive signal/exit handling while replaying a checked input
+/// file; the forwarding guard never rewrites the original answer bytes.
+pub fn wait_interactive_with_input(command: &mut Command, input: fs::File) -> Result<i32> {
+    wait_interactive_from(command, Some(input))
+}
+fn wait_interactive_from(command: &mut Command, input: Option<fs::File>) -> Result<i32> {
+    if let Some(input) = input {
+        command.stdin(input);
+    }
     struct Handlers(Vec<(i32, libc::sighandler_t)>);
     impl Drop for Handlers {
         fn drop(&mut self) {
@@ -1784,7 +1811,7 @@ pub fn wait_interactive(command: &mut Command) -> Result<i32> {
             })
             .collect(),
     );
-    let mut child = command.spawn().map_err(|e| {
+    let mut child = zerus_client_core::unix_spawn::spawn(command).map_err(|e| {
         Error::new(
             127,
             format!("{}: {e}", command.get_program().to_string_lossy()),
@@ -2850,3 +2877,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod spawn_turn_tests;

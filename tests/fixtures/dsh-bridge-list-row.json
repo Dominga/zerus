@@ -102,7 +102,9 @@
   },
   "ping": {
     "accountPermissions": true,
+    "callTokens": false,
     "generation": "<generation>",
+    "inputWitness": true,
     "listJobs": true,
     "nativeOperations": [
       "fork",
@@ -113,6 +115,7 @@
     "schedule": false,
     "sessionActions": true,
     "shellIdentity": false,
+    "teamLifecycle": true,
     "version": "0.2.1-rc.2"
   }
 }

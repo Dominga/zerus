@@ -580,6 +580,13 @@ but cannot restore released Read caches.
 
 ### Explicit recovery after an unobserved failed Start
 
+After a managed Linux Start observes its worker, acknowledgement may wait for
+temporary private-Store contention within the same original 15-second deadline.
+It rechecks the record/config revisions and exact native process, service and
+generation before saving. Waiting submits no further Start job. Timeout or a
+changed binding keeps the existing reservation unacknowledged; it never grants
+permission to repeat an inactive unknown Start.
+
 Ordinary Start never repeats an unknown managed-service reservation. On Linux,
 an operator may pass `failed_start_revision` to `--workspace start`: it must be
 the SHA256 of the exact current private `legacy-service-handover.json` record,

@@ -386,6 +386,7 @@ fn terminal_unknown_and_restart_unknown_cannot_be_replaced_by_late_success() {
         let admitted = f.seed(&mut db);
         let ticket = f.reserve(&mut db, &admitted);
         if restart {
+            zerus_desktop_ledger::begin_service(&mut db, OTHER).unwrap();
             assert_eq!(ledger::recover_batch(&mut db, OTHER).unwrap(), 1);
         } else {
             ledger::finish(
@@ -444,6 +445,7 @@ fn file_backed_reopen_preserves_exact_original_and_unknown_resource_charge() {
     let ticket = f.reserve(&mut db, &admitted);
     drop(db);
     let mut db = Connection::open(&path).unwrap();
+    zerus_desktop_ledger::begin_service(&mut db, OTHER).unwrap();
     assert_eq!(ledger::recover_batch(&mut db, OTHER).unwrap(), 1);
     let loaded = Loaded::load(&db, &admitted).unwrap();
     assert_eq!(loaded.verified.raw, f.raw);

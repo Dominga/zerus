@@ -128,8 +128,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_send_leaf() {
         crate::desktop::store::SCHEMA
     );
     // This leaf, then the later deferred answer and compact-to-send leaves.
-    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50 and .36).
-    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 1);
+    // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50, .36 and .52).
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 1 + 1);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["deferred_send"]["undrained"],
@@ -302,6 +302,8 @@ fn legacy_history(
             } else {
                 String::new()
             },
+            cli_exit: None,
+            refusal: None,
             outcome: (!unknown).then(|| wire::Outcome {
                 request_id: v.plan.request_id.clone(),
                 status: wire::SUBMITTED.into(),
@@ -461,6 +463,8 @@ fn budget_history_overflow_is_bounded_and_store_reports_null_not_zero() {
             phase: Phase::Unknown,
             drained: true,
             code: "deferred_send_interrupted".into(),
+            cli_exit: None,
+            refusal: None,
             outcome: None,
         };
         tx.execute("INSERT INTO desktop_deferred_sends(request_id,session,fingerprint,source,checkpoint,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'unknown',1,?9)",
@@ -1329,15 +1333,32 @@ mod actor {
             .unwrap()
         }
         fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-            let until = Instant::now() + Duration::from_secs(8);
+            let started = Instant::now();
+            let until = started + Duration::from_secs(8);
+            let mut polls = 0;
+            let mut longest_poll = Duration::ZERO;
+            let mut status = self.runtime.status();
+            let mut progress = std::collections::VecDeque::from([(0, status.clone())]);
             while !done(self) {
                 assert!(
                     Instant::now() < until,
-                    "timed out: {what}, {}",
-                    self.runtime.status()
+                    "timed out: {what}, {}; elapsed={:?}, polls={polls}, longest_poll={longest_poll:?}, progress={progress:?}",
+                    self.runtime.status(),
+                    started.elapsed()
                 );
+                let poll_started = Instant::now();
                 self.runtime
                     .poll(&mut self.store, Some(self.exclusion.clone()));
+                longest_poll = longest_poll.max(poll_started.elapsed());
+                polls += 1;
+                let current = self.runtime.status();
+                if current != status {
+                    if progress.len() == 64 {
+                        progress.pop_front();
+                    }
+                    progress.push_back((started.elapsed().as_millis(), current.clone()));
+                    status = current;
+                }
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -1383,7 +1404,7 @@ mod actor {
                 plan.input_sha256
             );
             submitted(state, plan);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         let original = f.original();
         let admission = f.admit(&original);
@@ -1412,26 +1433,26 @@ mod actor {
         }
         for (ended, record, phase, code) in [
             (
-                Ended::Exited { code: 0 },
+                Ended::Exited { code: 0, stderr: String::new() },
                 Record::None,
                 Phase::Unknown,
                 super::super::receipt::MISSING,
             ),
             (
-                Ended::Exited { code: 0 },
+                Ended::Exited { code: 0, stderr: String::new() },
                 Record::InProgress,
                 Phase::Unknown,
                 wire::RECEIPT_IN_PROGRESS,
             ),
             (
-                Ended::Exited { code: 1 },
+                Ended::Exited { code: 1, stderr: String::new() },
                 Record::OtherStdin,
                 Phase::Unknown,
                 wire::RECEIPT_MISMATCH,
             ),
             // The CLI's exact record, whatever the exit said.
             (
-                Ended::Exited { code: 2 },
+                Ended::Exited { code: 2, stderr: String::new() },
                 Record::Exact,
                 Phase::Recorded,
                 "",
@@ -1487,6 +1508,117 @@ mod actor {
             (Phase::Failed, wire::NOT_STARTED)
         );
         assert!(receipt.not_started(&original.plan));
+    }
+
+    #[test]
+    fn a_cli_refusal_record_keeps_its_reason_after_stdout_drain_without_delivery_or_replay() {
+        let reason = "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt";
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sent = calls.clone();
+        let mut f = Fixture::new(move |state, plan, _, input, lock, resources| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            let mut record = cli_record(plan, "refused_before_input");
+            record["refusal_schema"] = json!(1);
+            record["reason"] = json!(reason);
+            write_receipt(state, &plan.request_id, record.to_string().as_bytes());
+            child::run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "cat >/dev/null; printf '%s\\n' \"$1\"; exit 1".into(),
+                    "stdout-refusal".into(), reason.into()],
+                input, lock, resources, Instant::now() + Duration::from_secs(5), |_| Ok(()),
+            )
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("refusal drain", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        let retained = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(retained["refusal"]["reason"], reason, "the CLI's stdout reason must survive in the desktop receipt");
+        assert_eq!(receipt.code, "deferred_send_refused_before_input");
+        assert_eq!(receipt.phase, Phase::Unknown, "a refusal never becomes delivery");
+        assert!(receipt.outcome.is_none());
+        assert!(!receipt.not_started(&original.plan));
+        assert_eq!(receipt.result(&original.plan), None);
+        assert_eq!(f.admit(&original).receipt, Some(receipt.clone()), "duplicate admission only reads the original");
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+        ledger::startup(&mut f.store.db).unwrap();
+        assert_eq!(f.row(&original).receipt, receipt);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_original_refusal_survives_drain_and_read_only_recovery_without_replay() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sent = calls.clone();
+        let mut f = Fixture::new(move |_, _, _, input, lock, resources| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            child::run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "cat >/dev/null; printf 'hgs: agent busy: composer has a draft\\nprivate next line\\n' >&2; exit 1".into()],
+                input, lock, resources, Instant::now() + Duration::from_secs(5), |_| Ok(()),
+            )
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!((receipt.phase, receipt.code.as_str()), (Phase::Unknown, super::super::receipt::MISSING));
+        assert_eq!(receipt.cli_exit, Some(wire::CliExit::new(1, "hgs: agent busy: composer has a draft")));
+        assert!(!receipt.not_started(&original.plan));
+        assert_eq!(receipt.result(&original.plan), None);
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+        ledger::startup(&mut f.store.db).unwrap();
+        assert_eq!(f.row(&original).receipt, receipt);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_typed_waiting_gate_reaches_the_durable_refusal_without_replay() {
+        let private = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::input::tests::no_color_gate_fixture", "--ignored", "--nocapture"])
+            .env("HOME", private.path())
+            .env("HGS_STATE_DIR", private.path().join("state"))
+            .env("HGS_CONFIG_DIR", private.path().join("config"))
+            .env("NO_COLOR", "1")
+            .env("ZERUS_TEST_NO_COLOR_GATE", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let reason = stdout.lines().find_map(|line| line.strip_prefix("TYPED_GATE_REASON "))
+            .expect("the production typed gate's reason").to_owned();
+        let expected = format!("hgs: {reason}");
+        let stderr = expected.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sent = calls.clone();
+        let mut f = Fixture::new(move |_, _, _, input, lock, resources| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            child::run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "cat >/dev/null; printf '%s\\nprivate next line\\n' \"$1\" >&2; exit 1".into(),
+                    "gate-refusal".into(), stderr.clone()],
+                input, lock, resources, Instant::now() + Duration::from_secs(5), |_| Ok(()),
+            )
+        });
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(receipt.cli_exit, Some(wire::CliExit::new(1, &expected)));
+        assert_eq!(serde_json::to_value(&receipt).unwrap()["cli_exit"]["stderr"], expected);
+        assert_eq!(receipt.phase, Phase::Unknown, "a diagnostic is no input receipt");
+        assert!(!receipt.not_started(&original.plan));
+        assert_eq!(receipt.result(&original.plan), None);
+        f.runtime.request_stop();
+        f.until("stopped", |f| f.runtime.drained());
+        ledger::startup(&mut f.store.db).unwrap();
+        assert_eq!(f.row(&original).receipt, receipt);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     /// The real original path, without an executor: the runtime's pinned
@@ -1833,7 +1965,7 @@ os._exit(0)"#;
         let count = sent.clone();
         let mut f = Fixture::new(move |_, _, _, _, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         let original = f.original();
         f.revoke();
@@ -1951,7 +2083,7 @@ os._exit(0)"#;
             let mut f = Fixture::new(move |state, plan, _, _, _, _| {
                 count.fetch_add(1, Ordering::SeqCst);
                 submitted(state, plan);
-                Ended::Exited { code: 0 }
+                Ended::Exited { code: 0, stderr: String::new() }
             });
             change(&f.config.state);
             let original = f.original();
@@ -2050,7 +2182,7 @@ os._exit(0)"#;
         let released = std::sync::Mutex::new(released);
         let mut f = Fixture::new(|state, plan, _, _, _, _| {
             submitted(state, plan);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         f.runtime.fixture_read(
             Some(Arc::new(move || {
@@ -2110,7 +2242,7 @@ os._exit(0)"#;
     fn a_receipt_read_past_its_deadline_is_unknown_however_exact() {
         let mut f = Fixture::new(|state, plan, _, _, _, _| {
             submitted(state, plan);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         f.runtime.fixture_read(
             Some(Arc::new(|| std::thread::sleep(Duration::from_millis(300)))),
@@ -2131,7 +2263,7 @@ os._exit(0)"#;
     fn store_recovery_leaves_the_runtimes_own_original_to_it() {
         let mut f = Fixture::new(|state, plan, _, _, _, _| {
             submitted(state, plan);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         let original = f.original();
         assert!(f.admit(&original).accepted);
@@ -2175,7 +2307,7 @@ os._exit(0)"#;
         let f = Fixture::new(move |state, plan, _, _, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             submitted(state, plan);
-            Ended::Exited { code: 0 }
+            Ended::Exited { code: 0, stderr: String::new() }
         });
         (sent, f)
     }
@@ -2295,6 +2427,22 @@ os._exit(0)"#;
         assert_eq!(sent.load(Ordering::SeqCst), 0);
         assert_eq!(budget(&f.store.db).2, 32);
         f.runtime.request_stop();
+        // Retire one canceled original per actor poll. Keep the existing wait
+        // bound for each decrease, rather than for the whole 32-original queue.
+        // Status is cached; read the durable charge count before the first poll.
+        let started = Instant::now();
+        let mut active = budget(&f.store.db).2;
+        while active > 0 {
+            f.until("next original charge retires", |f| {
+                budget(&f.store.db).2 < active
+            });
+            let remaining = budget(&f.store.db).2;
+            eprintln!(
+                "CAPACITY_RETIRE_PROGRESS elapsed={:?}, active={active}, remaining={remaining}",
+                started.elapsed()
+            );
+            active = remaining;
+        }
         f.until("queued originals retire without input", |f| {
             f.runtime.drained()
         });
@@ -2390,7 +2538,7 @@ os._exit(0)"#;
                       _: &Arc<dyn Send + Sync>| {
                     sent.fetch_add(1, Ordering::SeqCst);
                     submitted(&state, plan);
-                    Ended::Exited { code: 0 }
+                    Ended::Exited { code: 0, stderr: String::new() }
                 }
             }),
         );
@@ -2876,7 +3024,7 @@ mod spent_deadline {
             soon(),
             |_| Ok(()),
         );
-        assert_eq!(ended, Ended::Exited { code: 0 });
+        assert_eq!(ended, Ended::Exited { code: 0, stderr: String::new() });
     }
 }
 
@@ -2944,3 +3092,6 @@ fn the_target_check_refuses_a_listed_candidate_without_its_identity() {
     mode(&twin, 0o600);
     assert!(current());
 }
+
+#[path = "tests/raw_storage.rs"]
+mod raw_storage;

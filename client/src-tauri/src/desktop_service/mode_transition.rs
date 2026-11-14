@@ -726,7 +726,7 @@ impl Controller {
             &inv,
             &[],
             &self.stop,
-            move |command| {
+            move |command, input_spawn| {
                 selected.check().map_err(std::io::Error::other)?;
                 if let Some(veto) = &veto {
                     veto().map_err(std::io::Error::other)?;
@@ -736,7 +736,7 @@ impl Controller {
                     use std::os::windows::process::CommandExt;
                     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
                 }
-                command.spawn()
+                input_spawn.spawn(command)
             },
             held,
         );

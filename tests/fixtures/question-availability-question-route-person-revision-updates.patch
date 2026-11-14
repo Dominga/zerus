@@ -1,0 +1,14 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index fbfe3766b..06d4735b2 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -2126,7 +2126,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+                 val payload = if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.payload(target,arguments)
+                     else if(operation == SessionQuestionRouting.operation) SessionQuestionRouting.payload(target,arguments)
+                     else if(operation == SessionQuestionRouting.personOperation) api.signRoutePerson(connection,target.computerId,arguments.getString("session_id"),
+-                        target.run,target.conversation,!arguments.getBoolean("send_to_parent"),action.requestId)
++                        target.run,target.conversation,!arguments.getBoolean("send_to_parent"),action.requestId,
++                        SessionQuestionRouting.revisioned(relayOperations[target.connectionId].orEmpty(),machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()),target.session)
+                     else JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
+                 if(target.archiveId.isNotBlank()) payload.put("archive_id",target.archiveId)
+                 attempted=true

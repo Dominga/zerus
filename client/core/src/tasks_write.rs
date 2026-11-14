@@ -279,6 +279,33 @@ impl TaskCall {
         TaskCall::new(with_project(args, project), "")
     }
 
+    /// Sends an existing task into a team's queue (`task target REF team TEAM`,
+    /// package 6): the team is on this computer and the person's own.
+    pub fn target_team(project: &str, task: &str, team: &str) -> TaskCall {
+        TaskCall::new(
+            with_project(words(&["target", task, "team", team]), project),
+            "",
+        )
+    }
+
+    /// A named card reserved for a team's queue (`task add --team TEAM`,
+    /// package 6): the queue takes it, so no session, host or start is named.
+    pub fn add_team_named(project: &str, title: &str, request_id: &str, team: &str) -> TaskCall {
+        let args = words(&[
+            "add",
+            "--project",
+            project,
+            "--team",
+            team,
+            "--title",
+            title,
+            "--request-id",
+            request_id,
+            "--content-json",
+        ]);
+        TaskCall::new(args, content("", &[]))
+    }
+
     /// Send now. A task for any session goes to the open one, on whichever
     /// computer runs it.
     pub fn send(
@@ -1283,6 +1310,40 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&named.input).unwrap(),
             json!({"text": "", "attachments": []})
+        );
+        // Package 6's queue forms: the team is a UUID on the command line, and
+        // a queued card names no session, host or target.
+        let queued = TaskCall::add_team_named(
+            "alpha",
+            "Ship",
+            "uuid-1",
+            "33333333-3333-4333-8333-333333333333",
+        );
+        assert_eq!(
+            queued.args,
+            [
+                "add",
+                "--project",
+                "alpha",
+                "--team",
+                "33333333-3333-4333-8333-333333333333",
+                "--title",
+                "Ship",
+                "--request-id",
+                "uuid-1",
+                "--content-json"
+            ]
+        );
+        assert_eq!(
+            TaskCall::target_team("alpha", "uuid-1", "33333333-3333-4333-8333-333333333333").args,
+            [
+                "target",
+                "uuid-1",
+                "team",
+                "33333333-3333-4333-8333-333333333333",
+                "--project",
+                "alpha"
+            ]
         );
     }
 

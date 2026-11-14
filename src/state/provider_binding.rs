@@ -237,8 +237,11 @@ impl Provider {
             }
             self.label_path(name)
         };
+        let references = worktree_references::Scope::publishing(record)?;
         let before = native_identity::before_write(self);
+        if let Some(references) = &references { references.verify()?; }
         atomic(&path, &record.to_string())?;
+        if let Some(references) = &references { references.verify()?; }
         // A write the index could not record stays unaccounted: the next
         // lookup sees an unaccounted change instead of a clean ledger
         // (zerus-8g1je).

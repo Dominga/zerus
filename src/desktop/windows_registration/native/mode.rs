@@ -107,9 +107,10 @@ pub(in crate::desktop::windows_registration) fn command(
     let references: Vec<_> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let output = zerus_client_core::run::run_owned(
         &helper, &invocation, &references, &AtomicBool::new(false),
-        move |command| {
+        move |command, input_spawn| {
             proof.check().map_err(std::io::Error::other)?;
-            command.env_clear().envs(child_env).creation_flags(if attached { 0 } else { CREATE_NO_WINDOW }).spawn()
+            command.env_clear().envs(child_env).creation_flags(if attached { 0 } else { CREATE_NO_WINDOW });
+            input_spawn.spawn(command)
         }, admission,
     ).map_err(|error| anyhow::anyhow!("Desktop mode result is unavailable ({error:?}); inspect status and retain the original pending UUID."))?;
     ensure!(output.len() <= CAP, "Mode response exceeds its bound.");
@@ -779,6 +780,7 @@ fn effect(
     })();
     fence.stop_timing = None;
     stopped.map_err(|error| timing.failure(error))?;
+    let stop_timing = timing.snapshot();
     fence.phase(Budget::Update);
     record.advance(Phase::Stopped, Phase::UpdateOffered)?;
     save(location, passive, &record, &mut || fence.check())?;
@@ -834,7 +836,7 @@ fn effect(
         Ok(())
     })?;
     Ok(
-        json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"request_id":id,"changed":true,"instance":ready.observation()}),
+        json!({"abi":MODE_ABI,"schema":1,"configuration":location.configuration,"task_name":passive.name,"selected_mode":desired.name(),"running_mode":desired.name(),"pending":null,"request_id":id,"changed":true,"instance":ready.observation(),"stop_timing":stop_timing}),
     )
 }
 

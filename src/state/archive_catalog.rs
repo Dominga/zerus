@@ -106,6 +106,11 @@ pub(super) fn existing() -> Result<Option<Connection>> {
     Ok((current == prior).then_some(db))
 }
 
+#[cfg(all(test, unix))]
+std::thread_local! {
+    pub(super) static BEFORE_METADATA_READ: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
 pub(super) fn catalog() -> Result<Connection> {
     private_dir(&root())?;
     let mut db = sql(Connection::open(root().join("archive-catalog-v1.sqlite3")))?;
@@ -169,10 +174,14 @@ pub(super) fn catalog() -> Result<Connection> {
             if unchanged {
                 continue;
             }
+            #[cfg(all(test, unix))]
+            BEFORE_METADATA_READ.with(|slot| {
+                if let Some(hook) = slot.take() {
+                    hook(&path);
+                }
+            });
             let loaded = (|| -> Result<Value> {
-                let value: Value =
-                    serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
+                let value = archive_references::read_metadata(&path)?;
                 archive::read_archive(string(&value, "name"), id)
             })();
             let record = match loaded {
@@ -502,9 +511,7 @@ const SUMMARY_PAGE_BYTES: usize = 250_000;
 const SINGLE_SUMMARY_BYTES: usize = 768 * 1024;
 
 /// The page's bounded session summaries: read after the catalog lock is released.
-fn sessions_of(rows: &[Listed], records: &[Value]) -> Result<Vec<Value>> {
-    // The relay's preference ledger refuses a known conversation whose row
-    // lacks its preferences, so archived rows carry them exactly as `ls` does.
+fn sessions_of(rows: &[Listed], records: &[Value], marks: Option<&Value>) -> Result<Vec<Value>> {
     let preferences = notifications::load();
     let mut summaries = Vec::new();
     for ((id, name, at), record) in rows.iter().zip(records) {
@@ -515,6 +522,9 @@ fn sessions_of(rows: &[Listed], records: &[Value]) -> Result<Vec<Value>> {
             row["title"] = json!(title.chars().take(1024).collect::<String>());
         }
         notifications::enrich(&mut row, preferences.as_ref(), journal::journal_name(record));
+        if let Some(marks) = marks {
+            read_marks::enrich_listing(&mut row, marks, journal::journal_name(record), Ok(Some(Vec::new())));
+        }
         summaries.push(row);
     }
     workspace::enrich(&mut summaries, &BTreeMap::new());
@@ -541,6 +551,18 @@ fn sessions_of(rows: &[Listed], records: &[Value]) -> Result<Vec<Value>> {
 /// One archive page; `bounded` (zerus-080n8) caps its counts and scans, and
 /// without it the page is exactly what older clients read.
 pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
+    page_with_bounds(value, bounded.then_some(BOUNDS), None)
+}
+
+/// Plain `ls` retains a recent archive window. Even its count reads only one
+/// row past that window; older rows are reached through the ordinary cursor.
+pub(super) fn preview(marks: &Value) -> Result<Value> {
+    let mut page = page_with_bounds(&json!({}), Some(Bounds { count: 50, examine: 51 }), Some(marks))?;
+    page["command"] = json!(["archives", "--json", "--bounded"]);
+    Ok(page)
+}
+
+fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>) -> Result<Value> {
     let q = validate(value)?;
     let _guard = lock(None)?;
     let db = catalog()?;
@@ -559,8 +581,8 @@ pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
             "archive cursor belongs to another computer or rebuilt catalog; refresh".into(),
         );
     }
-    if bounded {
-        let w = bounded_window(&db, &q, cursor.as_ref(), BOUNDS)?;
+    if let Some(bounds) = bounds {
+        let w = bounded_window(&db, &q, cursor.as_ref(), bounds)?;
         let newer = cursor.as_ref().is_some_and(|c| c.newer);
         // zerus-m0boz: the byte limit keeps the rows nearest the cursor, the
         // newest going Older and the oldest going Newer, so the next page in
@@ -568,7 +590,7 @@ pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
         let nearest: Vec<Listed> = if newer { w.rows.iter().rev().cloned().collect() } else { w.rows.clone() };
         let records = records_of(&nearest, q.limit)?;
         drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
-        let mut sessions = sessions_of(&nearest, &records)?;
+        let mut sessions = sessions_of(&nearest, &records, marks)?;
         let encode = |at: f64, id: &str, newer: bool| encode_cursor(&q, &catalog, at, id, newer);
         let (mut next, mut previous, mut position) = (w.next.clone(), w.previous.clone(), w.position);
         if !sessions.is_empty() && sessions.len() < nearest.len() {
@@ -627,7 +649,7 @@ pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
     };
     let records = records_of(&rows, q.limit)?;
     drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
-    let sessions = sessions_of(&rows, &records)?;
+    let sessions = sessions_of(&rows, &records, marks)?;
     let encode = |at: f64, id: &str, newer: bool| -> Result<String> {
         Ok(URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Cursor {

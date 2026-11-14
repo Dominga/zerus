@@ -1120,7 +1120,7 @@ mod native {
                 &call,
                 &[],
                 &AtomicBool::new(false),
-                |command| command.env(CONTROL, "child").spawn(),
+                |command, input_spawn| input_spawn.spawn(command.env(CONTROL, "child")),
                 Arc::new(()),
             )
             .unwrap();

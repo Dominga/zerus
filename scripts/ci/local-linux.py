@@ -18,17 +18,18 @@ import subprocess
 import sys
 import time
 
-from local_network import Network
+from local_network import HeavySlot, Network
 from local_services import Postgres
 from local_container import Container
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/checks.yml"
 RUST = "1.99.1"
-SUPPORTED = {"quick", "client-frontend", "cli", "client-native-linux", "connector", "relay", "arch-package", "android"}
+SUPPORTED = {"quick", "client-core", "client-frontend", "cli", "client-native-linux", "connector", "relay", "arch-package", "android"}
 RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
               'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"')
 APT_PREREQUISITES = {
+    'sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config',
     'sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config fish',
     'sudo apt-get update && sudo apt-get install --no-install-recommends -y libasound2-dev libgstreamer1.0-dev '
     'libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good '
@@ -134,7 +135,9 @@ def summarize(steps):
     return "pass"
 
 
-def plan(workflow, cli, selected=None, online=False):
+def plan(workflow, cli, selected=None, online=False, source_commit=None):
+    if source_commit is not None and not re.fullmatch(r'[0-9a-f]{40}', source_commit):
+        raise ValueError('local source expression requires a resolved full commit')
     jobs = []
     for key, job in workflow["jobs"].items():
         item = {"id": key, "name": job.get("name", key), "status": "not run", "steps": []}
@@ -165,6 +168,10 @@ def plan(workflow, cli, selected=None, online=False):
         if job.get("container"):
             item["container_image"] = job["container"]["image"]
         for index, step in enumerate(job.get("steps", [])):
+            original_body = step.get("run")
+            if source_commit is not None and isinstance(original_body, str):
+                rendered = original_body.replace('${{ needs.source.outputs.commit }}', source_commit)
+                step = dict(step, run=rendered)
             supplied_dbus = "sudo apt-get update && sudo apt-get install --no-install-recommends -y dbus-daemon\n"
             if key == "quick" and step.get("run", "").startswith(supplied_dbus) and shutil.which("dbus-daemon"):
                 step = dict(step, run=step["run"][len(supplied_dbus):],
@@ -216,6 +223,7 @@ def plan(workflow, cli, selected=None, online=False):
                 if step.get("local_provisioning"):
                     target["local_provisioning"] = step["local_provisioning"]
                 target.update(body=script, body_sha256=digest(script.encode()),
+                              source_body_sha256=digest(original_body.encode()) if isinstance(original_body, str) else None,
                               condition=condition,
                               directory=step.get("working-directory", "."),
                               env={**job.get("env", {}), **step.get("env", {})},
@@ -248,6 +256,8 @@ class Runner:
         self.github_path = []
         self.postgres = None
         self.container = None
+        self.heavy = Path(args.heavy).resolve() if getattr(args, 'heavy', None) else None
+        self.resource_error = None
         self.objects = []
         self.android_enabled = any(job["id"] == "android" and job["steps"] for job in report["jobs"])
         self.android_cache = (args.android_cache.resolve() if args.android_cache else self.cache / "android")
@@ -327,6 +337,8 @@ class Runner:
             self.report["environment"][tool] = {"exit_code": result.returncode, "version": result.stdout.strip()}
 
     def new_checkout(self, job):
+        self.github_env = {}
+        self.github_path = []
         destination = self.output / "checkouts" / job["id"]
         destination.mkdir(parents=True, exist_ok=False)
         # Independent files, preserving source mtimes for the shared build cache.
@@ -406,14 +418,19 @@ class Runner:
                 raise
 
     def run(self, job, step):
+        if self.resource_error:
+            step.update(status="not run", reason=self.resource_error)
+            return
         deadline = time.monotonic() + 600
         while os.getloadavg()[0] > self.args.max_load:
             if time.monotonic() >= deadline:
-                step.update(status="not run", reason="load stayed above configured ceiling for 10 minutes")
+                self.resource_error = "load stayed above configured ceiling for 10 minutes; no new checks started"
+                step.update(status="not run", reason=self.resource_error)
                 return
             time.sleep(10)
         if shutil.disk_usage(self.output).free < self.args.min_free_gib * 1024**3:
-            step.update(status="not run", reason="disk floor reached; no new work started")
+            self.resource_error = "disk floor reached; no new work started"
+            step.update(status="not run", reason=self.resource_error)
             return
         directory = Path(step["directory"])
         if directory.is_absolute() or ".." in directory.parts:
@@ -485,8 +502,22 @@ class Runner:
         with log.open("wb") as output:
             command = (self.container.command(script, directory, env) if self.container
                        else self.command(script, directory, home, env))
-            child = network = None
+            child = network = slot = None
             try:
+                slot = HeavySlot(self.heavy, output, home)
+                queued = time.monotonic()
+                slot.acquire()
+                step["heavy_wait_seconds"] = round(time.monotonic() - queued, 3)
+                step["heavy_wrapper"] = str(self.heavy)
+                step["admission_load"] = os.getloadavg()[0]
+                if step["admission_load"] > self.args.max_load:
+                    self.resource_error = "load rose above configured ceiling while queued; no new checks started"
+                    raise RuntimeError(self.resource_error)
+                if min(shutil.disk_usage(path).free for path in
+                       (self.output, self.cache, self.target)) < self.args.min_free_gib * 1024**3:
+                    self.resource_error = "disk floor reached while queued; no new checks started"
+                    raise RuntimeError(self.resource_error)
+                # A shared-slot queue is preparation, not the check's budget.
                 deadline = time.monotonic() + step["timeout"]
                 child, network = self.spawn(command, output, step, home)
                 while True:
@@ -497,6 +528,8 @@ class Runner:
                         code = child.wait(timeout=min(2, remaining))
                         break
                     except subprocess.TimeoutExpired:
+                        if slot.child.poll() is not None:
+                            raise RuntimeError("shared heavy wrapper ended during the check")
                         if min(shutil.disk_usage(path).free for path in
                                (self.output, self.cache, self.target)) < self.args.min_free_gib * 1024**3:
                             raise RuntimeError("disk floor reached during check; original namespace stopped")
@@ -517,8 +550,17 @@ class Runner:
                 if isinstance(error, RuntimeError):
                     step["reason"] = str(error)
             finally:
-                if network:
-                    network.finish()
+                try:
+                    if network:
+                        network.finish()
+                finally:
+                    if slot:
+                        try:
+                            slot.finish()
+                        except (RuntimeError, subprocess.SubprocessError) as error:
+                            code = 124
+                            step["reason"] = str(error)
+                            job["prerequisite_error"] = "original shared heavy holder failed; no further checks"
         step.update(status=("pass" if code == 0 else "fail") if step.get("execution_started") else "not run", exit_code=code,
                     seconds=round(time.time() - step["started_at"], 2), log_sha256=file_digest(log))
         print(f"{step['status'].upper()} {job['id']}: {step['name']} ({step['seconds']}s)", flush=True)
@@ -590,7 +632,9 @@ def main(argv=None):
     parser.add_argument("--target", type=Path, help="exclusive reusable Cargo target (cache lock required)")
     parser.add_argument("--android-cache", type=Path, help="private SDK/JDK cache, optionally on a larger filesystem")
     parser.add_argument("--tool-bin", type=Path, action="append", default=[], help="read-only private fixture tool directory")
-    parser.add_argument("--workers", type=int, choices=range(1, 13), default=12)
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=4)
+    parser.add_argument("--heavy", type=Path, default=shutil.which("heavy"),
+                        help="shared heavy wrapper, held until each original namespace/helper settles")
     parser.add_argument("--max-load", type=float, default=20)
     parser.add_argument("--jobs", help="comma-separated subset; every other job stays explicitly not run")
     parser.add_argument("--match", help="run only matching step names; omitted checks keep job not run")
@@ -601,6 +645,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("phase 1 requires Linux with unprivileged bubblewrap and a private D-Bus")
+    if not args.plan and (args.heavy is None or not Path(args.heavy).is_file()
+                          or not os.access(args.heavy, os.X_OK)):
+        parser.error('--heavy must name the shared executable wrapper; no checks started')
     commit = resolve(args.repo, args.sha)
     workflow_bytes = subprocess.check_output(["git", "-C", str(args.repo), "show", commit + ":" + WORKFLOW])
     cli = git(args.repo, "show", commit + ":scripts/ci/cli.sh") + "\n"
@@ -613,7 +660,8 @@ def main(argv=None):
               "network_helper_sha256": file_digest(Path(__file__).with_name("local_network.py")),
               "platform": "Arch/Linux local preflight", "network": "private outbound" if args.online else "offline",
               "rust": RUST, "workers": args.workers,
-              "jobs": plan(workflow, cli, selected, args.online), "completed": False}
+              "heavy_wrapper": str(Path(args.heavy).resolve()) if args.heavy else None,
+              "jobs": plan(workflow, cli, selected, args.online, commit), "completed": False}
     report["harness_files"] = {path.name: file_digest(path) for path in Path(__file__).parent.glob("local*.py")}
     if args.plan:
         args.output.mkdir(parents=True, exist_ok=False)
@@ -628,8 +676,12 @@ def main(argv=None):
         if runner.created_output:
             save(runner.output / "report.json", report)
         raise
+    save(runner.output / "report.json", report)
     for job in report["jobs"]:
         try:
+            if runner.resource_error and any("body" in step for step in job["steps"]):
+                job["reason"] = runner.resource_error
+                continue
             if any("body" in step for step in job["steps"]):
                 runner.new_checkout(job)
             if job.get("container_image"):

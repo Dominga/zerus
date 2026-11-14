@@ -15,8 +15,15 @@ import uuid
 import test_input
 
 AGENT = test_input.SIGNAL_SAFE_READ + r'''
-import json, os, pathlib, sys, termios, tty
+import json, os, pathlib, subprocess, sys, termios, tty
 root = pathlib.Path(os.environ['INPUT_FIXTURE'])
+children = []
+def launch_hook(*args):
+    request = json.loads((root / 'nested-launch.json').read_text())
+    with (root / 'nested.log').open('ab') as log:
+        children.append(subprocess.Popen(request['argv'], env=request['env'],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log))
+signal.signal(signal.SIGUSR2, launch_hook)
 fd = sys.stdin.fileno(); original = termios.tcgetattr(fd); tty.setraw(fd)
 ROWS = [('Default (recommended)', 'Use the default model (currently Opus 5.5) · $4/$20 per Mtok', None),
         ('Opus', 'Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok', 'Opus 5.5'),
@@ -277,9 +284,9 @@ class ClaudeSettings(unittest.TestCase):
                      transcript_path=str(self.transcript))
         # A foreign run's hook cannot settle this run's uncertain keys.
         for run in ('old-run', self.run_id):
-            result = subprocess.run([str(test_input.HGS), '__state', 'hook'],
-                                    env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=run),
-                                    input=json.dumps(event), text=True, capture_output=True, timeout=10)
+            import hook_caller_fixtures
+            result = hook_caller_fixtures.run(self, event,
+                dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=run))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.received(), before)
             if run == 'old-run':

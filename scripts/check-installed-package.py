@@ -118,6 +118,7 @@ def main():
         finally:
             socket = sockets / f"tmux-{os.getuid()}" / "default"
             if socket.exists():
+                assert sockets.is_dir(), "the private tmux socket directory is gone"
                 run("tmux", "-S", str(socket), "kill-server")
     print("Installed system binaries, idempotent user setup and isolated terminal session verified.")
 

@@ -7,6 +7,43 @@ struct Fixture {
 
 #[cfg(unix)]
 #[test]
+fn the_desktop_list_and_detail_carry_the_recorded_scope() {
+    // zerus-63rru.66 round 3: a production-written trust row, read through
+    // the desktop service's own readers, carries the granted scope; the
+    // list stays bounded on an oversized row.
+    let mut f = Fixture::new();
+    let reserved;
+    {
+        let mut db = crate::approval_log::open(&f.reader.root).unwrap();
+        let question = crate::state::trust_fixture::startup_card("codex");
+        let payload = json!({"host":"a.example","session":"agent/project/fixture","provider":"codex",
+            "question":question,"scope":"/work/repository"});
+        reserved = crate::approval_log::begin_team(&mut db, &payload, crate::approval_log::TeamKind::FolderTrust).unwrap();
+        assert_eq!(reserved["eligible"], true, "{reserved}");
+        db.execute("INSERT INTO attempts(identity,request_id,at,host,session,provider,prompt,question) VALUES('big','big',99,'a.example','agent/project/fixture','codex','big',?1)", [json!({"question":{"padding":"x".repeat(4 << 20)},"answers":[],"scope":"/work/repository"}).to_string()]).unwrap();
+    }
+    // The writer is closed before the first read, as the reviewer's probe
+    // ran it: the first page then contains both rows, and the trust row's
+    // scope is reachable in the list itself (zerus-63rru.66 round 4).
+    let list = f.reader.request(&f.query());
+    let entries = list["result"]["entries"].as_array().unwrap();
+    let trust_row = entries.iter().find(|e| e["id"] == reserved["id"]).unwrap();
+    assert_eq!(trust_row["scope"], "/work/repository", "{list}");
+    // The oversized row's scope stays unparsed: the reader extracts it in
+    // SQLite under the byte bound (zerus-63rru.66 round 3).
+    let big = entries.iter().find(|e| e["prompt"] == "big").unwrap();
+    assert!(big["scope"].is_null(), "{list}");
+    let id: i64 = {
+        let db = crate::approval_log::open(&f.reader.root).unwrap();
+        db.query_row("SELECT id FROM attempts WHERE prompt='Trust this folder?'", [], |r| r.get(0)).unwrap()
+    };
+    let detail = f.reader.request(&json!({"op":"approval_audit_detail","request_id":uuid::Uuid::new_v4().to_string(),
+        "configuration":f.reader.configuration,"epoch":f.reader.epoch,"journal":list["journal"],"id":id}));
+    assert_eq!(detail["result"]["scope"], "/work/repository", "{detail}");
+}
+
+#[cfg(unix)]
+#[test]
 fn reader_drop_keeps_the_live_writer_lock_on_fresh_open_and_restart() {
     let mut f = Fixture::new();
     drop(f.rows(1));
@@ -26,6 +63,7 @@ fn reader_drop_keeps_the_live_writer_lock_on_fresh_open_and_restart() {
     }
 }
 
+#[cfg(unix)]
 #[cfg(unix)]
 #[test]
 fn a_failed_reader_check_keeps_the_live_writer_lock_after_restart() {

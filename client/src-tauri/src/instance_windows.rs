@@ -1076,8 +1076,8 @@ mod tests {
                 &inv,
                 &[],
                 &AtomicBool::new(false),
-                move |command| {
-                    let child = command.spawn()?;
+                move |command, input_spawn| {
+                    let child = input_spawn.spawn(command)?;
                     let _ = registration.bind_original(&child);
                     Ok(child)
                 },

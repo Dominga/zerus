@@ -882,7 +882,7 @@ class WindowsTaskMode(unittest.TestCase):
         self.assertIn('deadline reached', refused['error'])
         timing = refused['stop_timing']
         self.assertEqual(timing['abi'], 'desktop-mode-stop-timing-v1')
-        self.assertEqual(timing['budget_ms'], 2000)  # Documented Stop contract.
+        self.assertEqual(timing['budget_ms'], 4000)  # Documented Stop contract.
         self.assertLessEqual(timing['elapsed_ms'], 60000)
         self.assertEqual(set(timing['steps']), {'native_rechecks', 'metadata_sync',
                                                'instance_stop', 'physical_exit'})

@@ -1778,6 +1778,7 @@ mod tests {
             request_id: uuid::Uuid::new_v4().to_string(),
             issued_at,
             expires_at: issued_at + 120,
+            expected_revision: None,
         };
         let verify = |statement: &RoutePersonStatement, signer: &Identity| {
             let input =
@@ -1795,6 +1796,14 @@ mod tests {
         assert_eq!(
             verified,
             json!({"ok": true, "verifier": "question-route-person-v1", "verified": good})
+        );
+        // v2 carries the authenticated latch revision through the same
+        // current-membership and executing-gateway verifier.
+        let mut revisioned = good.clone();
+        revisioned.expected_revision = Some(7);
+        assert_eq!(
+            verify(&revisioned, &phone).unwrap()["verified"]["expected_revision"],
+            7
         );
         // Another computer, an expired statement, a computer's signature
         // and an unknown phone are all refused.

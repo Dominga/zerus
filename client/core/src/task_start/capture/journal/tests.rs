@@ -25,8 +25,8 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
     .unwrap()
 }
-// Every caller expects a successful prepare: a later one may meet a parallel
-// fork's inherited lock description, so wait for Busy only (zerus-3bix9).
+// Retain the historical bounded Busy-only setup helper (zerus-3bix9).
+// The fork regressions check owner release directly, without a retry.
 fn prepared(f: &Fixture) -> Journal {
     retry_busy(|| {
         Journal::prepare(
@@ -381,11 +381,8 @@ fn stale_prepared_snapshot_and_missing_lock_never_discard_an_offered_or_unknown_
     journal.offer().unwrap();
     drop(journal);
     // discard consumes this exact stale snapshot; do not reconstruct or replay
-    // it. Wait for the old writer, then unlock the fixture probe explicitly so
-    // a parallel fork cannot keep that probe's description locked until exec.
-    let idle = retry_busy(|| before.slot.lock(false)).unwrap();
-    idle.unlock().unwrap();
-    drop(idle);
+    // it. The fixture probe uses the same owner-unlock guard as the writer.
+    drop(retry_busy(|| before.slot.lock(false)).unwrap());
     assert_eq!(
         before.discard_prepared(&f.intent.reconcile_id),
         Err(Error::Unavailable)
@@ -557,10 +554,9 @@ fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
     const LEAF: &str = "ZERUS_TEST_TASK_PUBLICATION_BEFORE_TRACKING";
     if let Some(root) = std::env::var_os(LEAF) {
         let intent = wire::test_intent();
-        // The parent prepared this same fixture before spawning this leaf; a
-        // parallel fork there may still hold that lock description, so only
-        // this prepare waits for Busy, re-reading the unchanged source each
-        // time (zerus-puowk). The offer and its candidate-sync cut stay exact.
+        // Retain the bounded prepare-only fixture retry (zerus-puowk),
+        // re-reading the unchanged source each time. The offer and its
+        // candidate-sync cut stay exact and are never retried.
         let mut journal = retry_busy(|| {
             let source = Captured::read(
                 Path::new(&root),
@@ -659,12 +655,11 @@ fn older_cancelled_id_cannot_return_after_a_second_explicit_discard() {
 }
 
 #[test]
-fn fixture_waits_for_the_inherited_description_and_never_retries_other_refusals() {
+fn fixture_waits_for_the_metadata_owner_and_never_retries_other_refusals() {
     let f = Fixture::new();
     let original = prepared(&f);
     // Like fork before exec, this clone shares the original open file description.
     let inherited = original.lock.try_clone().unwrap();
-    drop(original);
     let bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
     let (busy, observed) = std::sync::mpsc::sync_channel(1);
     std::thread::scope(|threads| {
@@ -682,9 +677,11 @@ fn fixture_waits_for_the_inherited_description_and_never_retries_other_refusals(
             .unwrap();
         assert_eq!(saved(&f).phase(), Phase::Prepared);
         assert_eq!(fs::read(f.file.with_extension("reconcile")).unwrap(), bytes);
-        drop(inherited);
+        // Only the live owner excludes the waiter; the clone remains open.
+        drop(original);
         waiter.join().unwrap().unwrap();
     });
+    drop(inherited);
     assert_eq!(saved(&f).phase(), Phase::CancelledBeforeOffer);
     for error in [
         Error::Unavailable,

@@ -8,6 +8,54 @@ use serde_json::{json, Map, Value};
 const CHANGED: &str = "The task execution changed. Nothing was cancelled. Refresh the task.";
 const UNCONFIRMED: &str = "Cancellation unconfirmed. Refresh the task before changing it again.";
 
+/// Disposition only: the native command admits the exact unknown attempt (or
+/// observes its original disposition) under its project and Team writers.
+pub fn abandon(
+    project: &str,
+    task: &str,
+    attempt: &str,
+    reason: &str,
+    mut run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
+) -> Result<(), String> {
+    if !crate::creation::canonical_uuid(attempt)
+        || reason.len() > 64 * 1024
+        || reason.contains('\0')
+    {
+        return Err(CHANGED.into());
+    }
+    let read = task_details::document_call(project, task)?;
+    let current = task_details::checked(&run(&read)?, project, task)?;
+    if current["writable"] != true {
+        return Err(CHANGED.into());
+    }
+    // Do not infer idempotence from the latest displayed attempt. The native
+    // command owns both the exact original disposition and stale-ID refusal.
+    let call = TaskCall {
+        args: vec![
+            "cancel-attempt".into(),
+            task.into(),
+            "--project".into(),
+            project.into(),
+            "--attempt".into(),
+            attempt.into(),
+            "--reason".into(),
+            reason.trim().into(),
+            "--json".into(),
+        ],
+        input: String::new(),
+    };
+    let reply = run(&call)?;
+    if reply["task"]["uuid"].as_str() != Some(task)
+        || reply["task"]["project"].as_str() != Some(project)
+        || reply["attempt"]["id"].as_str() != Some(attempt)
+        || reply["attempt"]["state"] != "cancelled"
+        || reply["attempt"]["delivery"] != "unknown"
+    {
+        return Err(UNCONFIRMED.into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Execution {
@@ -92,6 +140,91 @@ mod tests {
     }
     fn reply() -> Map<String, Value> {
         json!({"project":{"id":"example"},"task":{"uuid":TASK,"project":"example","stage":"active","stage_at":123,"writable":true,"dispatch_id":"dispatch-1","session":{"machine":"node-example","session_id":"run_id:example"},"history_schema":1,"log":[],"history_next":null}}).as_object().unwrap().clone()
+    }
+    const ATTEMPT: &str = "22222222-2222-4222-8222-222222222222";
+    fn abandoned() -> Map<String, Value> {
+        json!({"task":{"uuid":TASK,"project":"example","stage":"todo"},
+            "attempt":{"id":ATTEMPT,"state":"cancelled","delivery":"unknown","already_cancelled":true}})
+            .as_object().unwrap().clone()
+    }
+    #[test]
+    fn abandonment_reads_exact_task_then_sends_only_the_original_uuid_once() {
+        let mut calls = vec![];
+        abandon("example", TASK, ATTEMPT, " --agent ", |call| {
+            calls.push(call.clone());
+            Ok(if calls.len() == 1 {
+                reply()
+            } else {
+                abandoned()
+            })
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].args[0], "get");
+        assert_eq!(
+            calls[1].args,
+            [
+                "cancel-attempt",
+                TASK,
+                "--project",
+                "example",
+                "--attempt",
+                ATTEMPT,
+                "--reason",
+                "--agent",
+                "--json"
+            ]
+        );
+        assert!(calls[1].input.is_empty());
+    }
+    #[test]
+    fn abandonment_refuses_bad_identity_readonly_or_an_unconfirmed_receipt() {
+        let mut calls = 0;
+        assert!(abandon("example", TASK, "latest", "", |_| {
+            calls += 1;
+            Ok(reply())
+        })
+        .is_err());
+        assert_eq!(calls, 0);
+        for key in ["uuid", "project", "writable"] {
+            calls = 0;
+            assert!(abandon("example", TASK, ATTEMPT, "", |_| {
+                calls += 1;
+                let mut answer = reply();
+                answer["task"][key] = json!(false);
+                Ok(answer)
+            })
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+        for key in ["id", "state", "delivery"] {
+            calls = 0;
+            assert!(abandon("example", TASK, ATTEMPT, "", |_| {
+                calls += 1;
+                if calls == 1 {
+                    return Ok(reply());
+                }
+                let mut answer = abandoned();
+                answer["attempt"][key] = json!("changed");
+                Ok(answer)
+            })
+            .is_err());
+            assert_eq!(calls, 2);
+        }
+    }
+    #[test]
+    fn abandonment_never_falls_back_or_retries_an_unknown_native_result() {
+        let mut calls = 0;
+        assert!(abandon("example", TASK, ATTEMPT, "", |_| {
+            calls += 1;
+            if calls == 1 {
+                Ok(reply())
+            } else {
+                Err("unknown outcome".into())
+            }
+        })
+        .is_err());
+        assert_eq!(calls, 2);
     }
     #[test]
     fn exact_execution_and_reason_are_sent_once_with_undelivered_result() {

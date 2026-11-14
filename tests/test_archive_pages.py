@@ -1,10 +1,13 @@
 """Indexed archive pages on private synthetic records; no agent or live mark is touched."""
 import json
+import hashlib
 import os
 import shlex
 from pathlib import Path
 import sqlite3
 import subprocess
+import shutil
+import sys
 import tempfile
 import unittest
 import uuid
@@ -17,7 +20,7 @@ class ArchivePages(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='zerus-archive-pages-');self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.state=self.root/'state';self.archives=self.state/'archives';self.archives.mkdir(parents=True)
         socket=self.root/'tmux-private';socket.mkdir(mode=0o700)
-        self.env={k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ('TMUX','TMUX_PANE','TMUX_TMPDIR')}
+        self.env={k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ('TMUX','TMUX_PANE','TMUX_TMPDIR','CLAUDE_CONFIG_DIR','CODEX_HOME','KIMI_CODE_HOME')}
         self.env.update(HOME=str(self.root),HGS_STATE_DIR=str(self.state),HGS_CONFIG_DIR=str(self.root/'config'),HGS_SELF='archive-fixture',HGS_PEERS='',TMUX_TMPDIR=str(socket))
         # Metadata commands need the ordinary explicit local-session opt-in on Windows.
         (self.root/'config').mkdir();(self.root/'config'/'local-sessions').touch()
@@ -29,6 +32,32 @@ class ArchivePages(unittest.TestCase):
         r=subprocess.run([str(HGS),'archives','--json']+(['--bounded'] if bounded else []),input=json.dumps(query or {}),capture_output=True,text=True,env=self.env,timeout=30)
         if fail:self.assertNotEqual(r.returncode,0,r.stdout);return r
         self.assertEqual(r.returncode,0,r.stderr);return json.loads(r.stdout)
+    def test_exited_archive_status_is_ended_without_rewriting_the_restore_source(self):
+        value=self.record(0,activity='busy',phase='working',pid=0,process_start='exited-fixture',conversation_state='active')
+        value.update(agent='kimi',name='kimi/example/completed')
+        path=self.archives/(value['archive_id']+'.json')
+        path.write_text(json.dumps(value),encoding='utf-8');before=path.read_bytes()
+        commands=(['ls','--json','--local'],['archives','--json'],['archives','--json','--bounded'],
+                  ['inspect',value['name'],'--archive',value['archive_id']])
+        for args in commands:
+            with self.subTest(command=args):
+                result=subprocess.run([str(HGS),*args],input='{}',capture_output=True,text=True,env=self.env,timeout=30)
+                self.assertEqual(result.returncode,0,result.stderr)
+                output=json.loads(result.stdout)
+                row=output if args[0]=='inspect' else output['sessions'][0]
+                self.assertEqual(row['activity'],'ended')
+                self.assertEqual(row['phase'],'ended')
+                self.assertEqual(row['process_state'],'exited')
+                self.assertEqual(row['runtime_state'],'stopped')
+                self.assertEqual(row['activity_summary'],'Archived')
+                for key in ('archive_id','run_id','conversation_id'):
+                    self.assertEqual(row[key],value[key])
+                self.assertEqual(row['conversation_state'],'active')
+                self.assertEqual(path.read_bytes(),before,'Listing never rewrites the restore source')
+        # A name alone selects a current binding, not an archived instance.
+        result=subprocess.run([str(HGS),'inspect',value['name']],capture_output=True,text=True,env=self.env,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(json.loads(result.stdout)['tracked'])
     def test_thousands_bounded_pages_ties_and_complete_no_duplicates(self):
         for i in range(2043):self.record(i,100+i//30)
         first=self.run_query({'limit':50});self.assertEqual(first['total'],2043);self.assertEqual(len(first['sessions']),50)
@@ -98,6 +127,114 @@ class ArchivePages(unittest.TestCase):
         result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives'],env=self.env,capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr);snapshot=json.loads(result.stdout)
         self.assertTrue(snapshot['archive_paging']);self.assertEqual(snapshot['sessions'],[])
+        self.assertNotIn('archive_page',snapshot)
+    def test_default_listing_work_is_bounded_by_the_recent_preview(self):
+        transcript=self.root/'saved.jsonl';transcript.write_text('{}\n')
+        measurements=[];snapshots=[]
+        for count in (50,20000):
+            for index in range(0 if count==50 else 50,count):
+                self.record(index,100+index,base=['codex'],launch_dir=str(self.root),transcript=str(transcript))
+            # Existing files are indexed once; ordinary polls reuse that index.
+            self.run_query({'limit':1})
+            argv=[str(HGS),'ls','--json','--local']
+            trace=self.root/'listing.trace'
+            if shutil.which('strace'):
+                argv=['strace','-f','-qq','-e','trace=%file','-o',str(trace),*argv]
+            result=subprocess.run(argv,env=self.env,capture_output=True,text=True,timeout=120)
+            self.assertEqual(result.returncode,0,result.stderr)
+            snapshot=json.loads(result.stdout)
+            rows=[row for row in snapshot['sessions'] if row.get('state')=='archived']
+            self.assertEqual(len(rows),50,'Default ls must not summarize the whole archive')
+            self.assertEqual([row['run_id'] for row in rows],[f'run-{i}' for i in range(count-1,count-51,-1)])
+            snapshots.append(snapshot)
+            self.assertIn('restore',rows[0]['allowed_actions'])
+            if trace.exists():
+                lines=trace.read_text().splitlines()
+                files=sum('/archives/' in line for line in lines)
+                transcripts=sum(str(transcript) in line for line in lines)
+                self.assertLessEqual(files,100,'Only returned archives may be read')
+                self.assertLessEqual(transcripts,150,'Action lookup must stay within the preview')
+                measurements.append((len(lines),files,transcripts))
+        if measurements:
+            self.assertLessEqual(measurements[1][0],measurements[0][0]+100,'A larger archive must not add per-record I/O to ls')
+        for count,snapshot in zip((50,20000),snapshots):
+            descriptor=snapshot['archive_page']
+            self.assertEqual(descriptor['total'],50)
+            self.assertEqual(descriptor['total_capped'],count>50)
+            self.assertEqual(bool(descriptor['next_cursor']),count>50)
+            self.assertEqual(descriptor['command'],['archives','--json','--bounded'])
+            self.assertNotIn('sessions',descriptor)
+    def test_default_preview_cursor_continues_without_duplicates_after_an_insert(self):
+        for index in range(137):self.record(index,100+index//5)
+        result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr);snapshot=json.loads(result.stdout)
+        rows=snapshot['sessions'];self.assertEqual(len(rows),50)
+        descriptor=snapshot['archive_page'];self.assertTrue(descriptor['total_capped'])
+        self.record(200,1000)
+        query={key:descriptor[key] for key in ('from','until','query')}
+        cursor=descriptor['next_cursor']
+        while cursor:
+            page=self.run_query(dict(query,cursor=cursor),bounded=True)
+            rows.extend(page['sessions']);cursor=page['next_cursor']
+        identities=[row['archive_id'] for row in rows]
+        self.assertEqual(len(identities),137);self.assertEqual(len(set(identities)),137)
+        self.assertNotIn('run-200',[row['run_id'] for row in rows])
+        self.assertEqual([(r['archived_at'],r['archive_id']) for r in rows],sorted(((r['archived_at'],r['archive_id']) for r in rows),reverse=True))
+    @unittest.skipUnless(os.name=='posix','The private process birth fixture uses ps')
+    def test_preview_archive_wins_over_its_retained_binding_without_hiding_other_runs(self):
+        child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],env=self.env)
+        try:
+            self.env.update(LC_ALL='C',TZ='UTC')
+            start=subprocess.check_output(['ps','-p',str(child.pid),'-o','lstart='],env=self.env,text=True).strip()
+            self.assertTrue(start)
+            archived=self.record(0,1000,pid=child.pid,process_start=start)
+            archive_path=self.archives/(archived['archive_id']+'.json');archive_path.unlink()
+            binding={key:value for key,value in archived.items() if key not in ('archive_id','archived_at','state')}
+            path=self.state/(hashlib.sha256(binding['name'].encode()).hexdigest()+'.json')
+            original=json.dumps(binding).encode();path.write_bytes(original)
+            archive_path.write_text(json.dumps(archived))
+            def listing(*extra):
+                result=subprocess.run([str(HGS),'ls','--json','--local',*extra],env=self.env,capture_output=True,text=True,timeout=30)
+                self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
+            # The original process birth keeps the binding present across the
+            # archive-write/remove-binding crash cut; no real agent is used.
+            active=listing('--no-archives')['sessions']
+            self.assertEqual(len(active),1);self.assertEqual(active[0]['run_id'],binding['run_id'])
+            self.assertIsNone(child.poll());self.assertEqual(path.read_bytes(),original)
+            rows=listing()['sessions']
+            self.assertEqual(len(rows),1,'The archive and its retained binding must not list twice')
+            self.assertEqual(rows[0]['archive_id'],archived['archive_id'])
+            self.assertEqual(rows[0]['state'],'archived')
+            self.assertEqual(path.read_bytes(),original,'Projection never removes the retained binding')
+            for key in ('run_id','conversation_id'):
+                changed=dict(binding);changed[key]='another-'+key;path.write_text(json.dumps(changed))
+                rows=listing()['sessions']
+                self.assertEqual(len(rows),2,'A different run or conversation remains a current binding')
+                self.assertEqual(sum(row.get('state')=='archived' for row in rows),1)
+            path.write_bytes(original)
+            for index in range(1,51):self.record(index,2000+index)
+            page=listing()
+            self.assertEqual(len(page['sessions']),51,'Archives outside the preview never hide a binding')
+            self.assertEqual(sum(row.get('state')=='archived' for row in page['sessions']),50)
+            self.assertTrue(page['archive_page']['next_cursor'])
+            self.assertEqual(len(listing('--no-archives')['sessions']),1)
+        finally:
+            if child.poll() is None:child.terminate()
+            child.wait(timeout=5)
+    def test_preview_preserves_the_original_journal_read_mark_and_row_fields(self):
+        owner='session:00000000-0000-4000-8000-000000000050'
+        record=self.record(0,journal_name=owner)
+        mark=dict(reply_id='read-reply',attention_signature=None,at=123)
+        (self.state/'read-marks.json').write_text(json.dumps(dict(version=1,sessions={owner:{record['conversation_id']:mark}})))
+        result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr);row=json.loads(result.stdout)['sessions'][0]
+        self.assertEqual(row['read'],mark)
+        self.assertEqual(row['optional_questions'],{'count':0})
+        self.assertIsNone(row['attention_signature'])
+        explicit=self.run_query()['sessions'][0]
+        self.assertNotIn('read',explicit,'Explicit pages retain their existing row projection')
+        for key in ('archive_id','archived_at','run_id','conversation_id','state','resumable','allowed_actions','action_reasons','notification_preferences'):
+            self.assertEqual(row[key],explicit[key],key)
     def test_archived_preferences_follow_the_original_journal_and_current_store(self):
         owner='session:00000000-0000-4000-8000-000000000050'
         row=self.record(0,journal_name=owner)

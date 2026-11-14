@@ -617,8 +617,13 @@ impl Runtime {
         });
         let Some(intent) = intent.filter(|intent| intent.clone().verify_route().is_ok()) else {
             // Its fixed text or send is not valid: never routed.
-            if ledger::refuse(&mut store.db, &record, at, ledger::INVALID).is_ok() {
-                self.counts.refused += 1;
+            match ledger::refuse(&mut store.db, &record, at, ledger::INVALID, &self.state) {
+                Ok(true) => self.counts.refused += 1,
+                Ok(false) => {
+                    self.counts.off += 1;
+                    self.forget(key, &edge.signature);
+                }
+                Err(_) => self.counts.unavailable += 1,
             }
             return Ok(());
         };

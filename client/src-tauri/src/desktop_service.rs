@@ -2224,7 +2224,8 @@ async fn connection(
         .env_remove("HGS_SESSION")
         .env_remove("HGS_SESSION_ID")
         .env_remove("HGS_RUN_ID");
-    let mut child = command.spawn().map_err(|_| "service_unavailable")?;
+    let mut child =
+        crate::platform::spawn_async(&mut command).map_err(|_| "service_unavailable")?;
     // Keep stdin open: EOF is the proxy's explicit detach instruction.
     let stdin = child.stdin.take();
     let mut stdout = child.stdout.take().ok_or("service_unavailable")?;

@@ -18,7 +18,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+use zerus_file_lock::OwnedLock;
 
+mod change_reader;
 mod copy_review;
 pub use copy_review::{CopyReview, CopyReviewOutcome};
 #[cfg(all(test, unix))]
@@ -479,33 +481,6 @@ pub struct ProjectStore {
     /// files. A document whose base is older is merged into the files'
     /// current state before it is saved, never written over it.
     durable: std::sync::Mutex<std::collections::HashMap<String, VersionVector>>,
-}
-
-/// Releases an acquired exclusion on every scope exit, including errors before
-/// a ProjectStore exists. An inherited copy cannot unlock its original owner.
-struct OwnedLock {
-    file: File,
-    owner_pid: u32,
-}
-
-impl OwnedLock {
-    fn acquired(file: File) -> Self {
-        Self {
-            file,
-            owner_pid: std::process::id(),
-        }
-    }
-}
-
-impl Drop for OwnedLock {
-    fn drop(&mut self) {
-        // A pre-exec child can retain this open file description after our
-        // close. Release it explicitly, but never from a fork child's copy:
-        // that would unlock the original process's still-live store.
-        if self.owner_pid == std::process::id() {
-            let _ = FileExt::unlock(&self.file);
-        }
-    }
 }
 
 fn private_options() -> OpenOptions {

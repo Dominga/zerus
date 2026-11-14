@@ -289,6 +289,19 @@ describe("the header's keep-warm mark (zerus-yacns)", () => {
     expect([mark()!.textContent, mark()!.getAttribute("aria-label")]).toEqual(["∞", "Keep cache warm: Always"]);
   });
 
+  it("keeps the remote session's mark directly after its model and effort (zerus-63zvg)", async () => {
+    const row = { ...warmRow(on(null)), model: "claude-opus-5-5", effort: "xhigh", machine: "Remote fixture" };
+    const computer = "warm-remote", key = `run:${row.run_id}`;
+    receive({ ...emptyBatch(), computers: [{ computer, status: "live", attempt: 0 }], upserts: [{ computer, key, row }] });
+    setSelectedKey(`${computer}\n${key}`); await vi.dynamicImportSettled(); await flush();
+    expect(selected()?.computer).toBe(computer);
+    const model = host.querySelector(".detail-head .dh-model")!;
+    expect(model.textContent).toBe("claude-opus-5-5 xhigh");
+    expect(model.nextElementSibling).toBe(mark());
+    expect(mark()?.getAttribute("aria-label")).toBe("Keep cache warm: Always");
+    receive({ ...emptyBatch(), replaces: [{ computer, rows: [] }] });
+  });
+
   it("shows nothing while keep-warm is off or not reported", async () => {
     const row = warmRow({ ...on(null), enabled: false, state: "off" }); await open(row);
     expect(mark()).toBeNull();

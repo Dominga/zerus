@@ -1,0 +1,21 @@
+[package]
+name = "zerus-file-lock"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Acquisition-owner release for ordinary Zerus file exclusions"
+publish = false
+
+[features]
+# Fault injection for consumers' unit tests; never enabled by product builds.
+test-support = []
+
+[dependencies]
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

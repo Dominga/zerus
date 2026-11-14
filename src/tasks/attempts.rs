@@ -16,6 +16,18 @@ use zerus_replica::Settlement;
 /// One admission's whole budget, counted once from the command's entry and
 /// never renewed (desktop-u's condition 1).
 pub(super) const BUDGET: Duration = Duration::from_secs(15);
+/// The actor's deadline for one hand-out child
+/// (desktop/teams/actor/native/tasks.rs).
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
+pub(crate) const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+/// The hand-out command's first wait for the project's task-store lock
+/// (zerus-63rru.72). It must stay well below [`CHILD_DEADLINE`]: a held lock
+/// then answers not_started, instead of the actor killing the child at its
+/// deadline and reading the kill as an uncertain delivery.
+pub(super) const STORE_WAIT: Duration = Duration::from_secs(5);
 
 /// The digest a native receipt records for `request`: SHA-256 of its exact
 /// JSON, as `state::submit_task_reply` submits it.
@@ -36,7 +48,11 @@ pub(super) fn native(to: &SessionKey, request: &Value) -> NativeRequest {
             .as_str()
             .unwrap_or_default()
             .into(),
-        digest: digest(request),
+        digest: if to.session.starts_with("dsh/") {
+            format!("{:x}", Sha256::digest(json!([to.session, request]).to_string().as_bytes()))
+        } else {
+            digest(request)
+        },
     }
 }
 
@@ -84,7 +100,7 @@ fn attempt_actor(task: &TaskDoc, id: &str) -> Result<Actor> {
 /// Settles attempt `id` as never admitted, under a fresh project lock,
 /// against the original attempt: only after its own submission witnessed
 /// that the payload was never offered.
-fn not_admitted(config: &Config, project: &str, uuid: &str, id: &str) -> Result<()> {
+pub(super) fn not_admitted(config: &Config, project: &str, uuid: &str, id: &str) -> Result<()> {
     let store = store(config, project)?;
     let mut task = store.load(uuid).map_err(fail)?;
     let actor = attempt_actor(&task, id)?;
@@ -100,7 +116,17 @@ pub(super) enum Delivered {
     /// The exact submission witnessed that its payload was never offered,
     /// and the attempt was settled as not admitted: the task can be sent
     /// again, by a new explicit action with a new ID.
-    NotAdmitted(String),
+    /// `waiting` when the refusal was the typed one for a session that waits
+    /// for a person (`state::input::Gate::Waiting`, zerus-63rru.79): only the
+    /// team route answers it, as a fact about the member; every other caller
+    /// answers it as any refusal before input.
+    NotAdmitted {
+        reason: String,
+        waiting: bool,
+        /// Which dialog the member's terminal waits on, when one is known
+        /// (zerus-63rru.83).
+        dialog: Option<String>,
+    },
     /// Whether the input arrived, or its receipt was recorded, is unknown:
     /// nothing is submitted again.
     Uncertain(String),
@@ -143,7 +169,11 @@ pub(super) fn deliver(
                 return Delivered::Uncertain(format!("{UNCONFIRMED} {}", witness.reason));
             }
             match not_admitted(config, project, uuid, id) {
-                Ok(()) => Delivered::NotAdmitted(witness.reason),
+                Ok(()) => Delivered::NotAdmitted {
+                    reason: witness.reason,
+                    waiting: witness.waiting,
+                    dialog: witness.dialog.map(str::to_owned),
+                },
                 Err(error) => Delivered::Uncertain(format!(
                     "{UNCONFIRMED} {} It was refused before any input, but that could not be recorded: {}.",
                     witness.reason, error.message
@@ -268,12 +298,21 @@ pub(super) fn admitted_starts(
         })
 }
 
-/// Debug builds only, never compiled into a release image: a test holds a
-/// frozen request between its freeze and its admission, for a bounded time,
+/// Test/debug builds only, never compiled into a product release image. The
+/// CLI fixtures re-execute the test image, including with `cargo test --release`.
+/// A test holds a frozen request between its freeze and admission for a bounded time,
 /// to change the task in that window (#1519 review). It only waits: no lock
 /// is held, nothing is skipped, and the one budget keeps running.
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 pub(super) fn pause(id: &str) {
+    pause_at(id, "admission");
+}
+
+#[cfg(any(test, debug_assertions))]
+pub(super) fn pause_at(id: &str, phase: &str) {
+    if std::env::var("HGS_TEST_ATTEMPT_PAUSE_AT").unwrap_or_else(|_| "admission".into()) != phase {
+        return;
+    }
     let Some(folder) = std::env::var_os("HGS_TEST_ATTEMPT_PAUSE") else {
         return;
     };
@@ -287,8 +326,11 @@ pub(super) fn pause(id: &str) {
     }
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(test, debug_assertions)))]
 pub(super) fn pause(_: &str) {}
+
+#[cfg(not(any(test, debug_assertions)))]
+pub(super) fn pause_at(_: &str, _: &str) {}
 
 /// Freezes the request a `task send` or `task handoff` would submit to `to`,
 /// under the project lock the command holds, before any admission.
@@ -310,7 +352,18 @@ pub(super) fn freeze(
     // The hourly limit is counted in the final admission only: no scan of
     // the project's tasks here, outside every bound (#1519 R2).
     let id = uuid::Uuid::new_v4().to_string();
-    let request = render(&settings, 0, task, project_name, to, pin, who, &id)?;
+    let request = render(
+        &settings,
+        0,
+        task,
+        project_name,
+        to,
+        pin,
+        who,
+        &id,
+        prepare_failed,
+        crate::state::Continuation::SameRun,
+    )?;
     let view = task.view().map_err(fail)?;
     Ok(Frozen {
         id,
@@ -324,7 +377,7 @@ pub(super) fn freeze(
 /// The native request for a send or handoff of `task` to `to`, rendered as
 /// the legacy paste renders it (after an agent's pin).
 #[allow(clippy::too_many_arguments)]
-fn render(
+pub(super) fn render(
     settings: &Settings,
     starts: usize,
     task: &TaskDoc,
@@ -333,6 +386,8 @@ fn render(
     pin: bool,
     who: &Actor,
     id: &str,
+    refused: fn(String) -> Error,
+    continuation: crate::state::Continuation,
 ) -> Result<Value> {
     settings.check_agent(who, to, true, starts).map_err(fail)?;
     let mut view = task.view().map_err(fail)?;
@@ -340,9 +395,18 @@ fn render(
     if pin {
         view.target = Target::Session(to.clone());
     }
-    let (mut prompt, attachments) = super::dispatch_content(settings, &view, project_name, subagent)?;
+    let (mut prompt, attachments) =
+        super::dispatch_content(settings, &view, project_name, subagent)?;
     super::controls::pin_dispatch(&mut prompt, project_name, &view.id, id);
-    crate::state::prepare_task_reply(to, "", id, &prompt, &attachments).map_err(fail)
+    crate::state::prepare_task_reply(
+        to,
+        "",
+        id,
+        &prompt,
+        &attachments,
+        continuation,
+    )
+    .map_err(refused)
 }
 
 /// A `task send` or `task handoff` through the attempt admission. `Some`
@@ -377,6 +441,17 @@ pub(super) fn send(
             *detail.borrow_mut() = why;
             Ok(Err(Closed { node: None, reason }))
         };
+        let mut meeting = crate::teams::tasks::Meeting::Admitted(&mut *admitted);
+        if let Err(error) = super::teams::guard(
+            config,
+            machines,
+            task,
+            if handoff { "handoff" } else { "send" },
+            args,
+            &mut meeting,
+        ) {
+            return refuse("not_sendable", error.message);
+        }
         let check = if handoff {
             super::handoff_check(task, who)
         } else {
@@ -422,6 +497,8 @@ pub(super) fn send(
             pin,
             who,
             &frozen.id,
+            prepare_failed,
+            crate::state::Continuation::SameRun,
         ) {
             Ok(request) if request == frozen.request => {}
             Ok(_) => return refuse("changed", super::dispatch::CHANGED.into()),
@@ -441,7 +518,7 @@ pub(super) fn send(
         Admission::Reserved { .. } => {
             match deliver(config, project, uuid, &frozen.id, to, &frozen.request) {
                 Delivered::Submitted(receipt) => Ok(Some(receipt)),
-                Delivered::NotAdmitted(reason) => Err(fail(reason)),
+                Delivered::NotAdmitted { reason, .. } => Err(fail(reason)),
                 Delivered::Uncertain(text) => Err(fail(format!("delivery uncertain: {text}"))),
             }
         }
@@ -549,13 +626,49 @@ pub(super) fn reopen_request(
     to: &SessionKey,
     dispatch: &str,
 ) -> Result<Value> {
-    let mut prompt = super::messages::prompt(
+    reopen_request_from(
+        project_name,
+        view,
+        id,
+        text,
+        files,
+        to,
+        dispatch,
+        None,
+        prepare_failed,
+        crate::state::Continuation::SameRun,
+    )
+}
+
+/// How the task commands other than a team's delivery answer a member
+/// session's refusal of a prepared input: a plain failure, as before. The
+/// team delivery passes its own rule refusal (zerus-63rru.58).
+pub(super) fn prepare_failed(message: String) -> Error {
+    fail(message)
+}
+
+/// The service has proved the stored return's author under its team lock.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reopen_request_from(
+    project_name: &str,
+    view: &zerus_replica::TaskView,
+    id: &str,
+    text: &str,
+    files: &[TaskAttachment],
+    to: &SessionKey,
+    dispatch: &str,
+    notice: Option<&str>,
+    refused: fn(String) -> Error,
+    continuation: crate::state::Continuation,
+) -> Result<Value> {
+    let mut prompt = super::messages::prompt_from(
         project_name,
         &view.id,
         id,
         "reopen",
         text,
         view.worker.as_ref(),
+        notice,
     );
     super::controls::pin_dispatch(&mut prompt, project_name, &view.id, id);
     let attachments = files
@@ -563,7 +676,8 @@ pub(super) fn reopen_request(
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(fail)?;
-    crate::state::prepare_task_reply(to, dispatch, id, &prompt, &attachments).map_err(fail)
+    crate::state::prepare_task_reply(to, dispatch, id, &prompt, &attachments, continuation)
+        .map_err(refused)
 }
 
 /// A fresh reopen through the attempt admission (desktop-u's (b)). In the
@@ -585,6 +699,7 @@ pub(super) fn reopen(
     frozen: &Value,
     bound: (&Target, i64),
     who: &Actor,
+    args: &[String],
     deadline: Instant,
 ) -> Result<Option<Value>> {
     pause(id);
@@ -594,6 +709,10 @@ pub(super) fn reopen(
             *detail.borrow_mut() = why;
             Ok(Err(Closed { node: None, reason }))
         };
+        let mut meeting = crate::teams::tasks::Meeting::Admitted(&mut *admitted);
+        if let Err(error) = super::teams::guard(config, machines, task, "reopen", args, &mut meeting) {
+            return refuse("not_sendable", error.message);
+        }
         let view = task.view()?;
         // The target and stage time it was frozen with (zerus-frehz).
         let normalized = |target: &Target| super::dispatch::normalized(target, machines);
@@ -662,7 +781,7 @@ pub(super) fn reopen(
     let (state, error) = match admission {
         Admission::Reserved { .. } => match deliver(config, &project.0, uuid, id, to, frozen) {
             Delivered::Submitted(_) => ("submitted", String::new()),
-            Delivered::NotAdmitted(reason) => ("refused", reason),
+            Delivered::NotAdmitted { reason, .. } => ("refused", reason),
             Delivered::Uncertain(text) => ("uncertain", text),
         },
         Admission::Legacy(_) => return Ok(None),

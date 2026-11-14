@@ -1,3 +1,4 @@
+import outcomeContract from "../../../../mobile/android/app/src/test/resources/question-route-outcome-contract.json";
 import { describe, expect, it } from "vitest";
 // Submitted question routes as Activity lines (zerus-sa9qn.33).
 import { buildTranscript, createTranscriptProjection, mergeRoutes } from "./transcript";
@@ -71,4 +72,12 @@ describe("question route lines", () => {
     expect(text).not.toContain("waits for an answer");
     expect(activityText([items[1]], { [items[1].id]: true })).toContain("waits for an answer");
   });
+});
+
+it("shows the approved shared outcome wording without claiming the parent received a message", () => {
+  for (const c of outcomeContract.activity.filter((c) => c.accepted)) {
+    const route = { ...childRoute(), outcome: c.line.outcome as "not_sent" | "uncertain", parent: { name: "codex/project/lead", sessionId: "parent" } };
+    const items = buildTranscript([], undefined, [], [route]);
+    expect(items[0]).toMatchObject({ sender: c.label, route: { outcome: c.line.outcome } });
+  }
 });

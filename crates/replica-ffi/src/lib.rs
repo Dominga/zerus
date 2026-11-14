@@ -82,11 +82,14 @@ impl From<TaskStage> for replica::Stage {
     }
 }
 
-/// A session on a computer: the computer's swarm identity and the session name.
+/// A session on a computer. The retained identity survives a rename; the name
+/// remains a display/routing hint. Empty identity is a legacy name-only key.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct SessionRef {
     pub machine: String,
     pub session: String,
+    #[uniffi(default = "")]
+    pub session_id: String,
 }
 
 impl From<replica::SessionKey> for SessionRef {
@@ -94,6 +97,7 @@ impl From<replica::SessionKey> for SessionRef {
         Self {
             machine: key.machine,
             session: key.session,
+            session_id: key.session_id,
         }
     }
 }
@@ -103,7 +107,7 @@ impl From<SessionRef> for replica::SessionKey {
         Self {
             machine: key.machine,
             session: key.session,
-            ..Default::default()
+            session_id: key.session_id,
         }
     }
 }

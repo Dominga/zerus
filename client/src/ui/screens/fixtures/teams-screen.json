@@ -1,0 +1,549 @@
+{
+  "empty": {
+    "next": null,
+    "teams": [],
+    "truncated": false
+  },
+  "pages": [
+    {
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAxIn0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b001",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c001"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c001"
+            }
+          ],
+          "name": "Team 1",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAxIn0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAyIn0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b002",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c002"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c002"
+            }
+          ],
+          "name": "Team 2",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAyIn0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAzIn0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b003",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c003"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c003"
+            }
+          ],
+          "name": "Team 3",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDAzIn0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA0In0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b004",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c004"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c004"
+            }
+          ],
+          "name": "Team 4",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA0In0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA1In0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b005",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c005"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c005"
+            }
+          ],
+          "name": "Team 5",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA1In0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA2In0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b006",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c006"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c006"
+            }
+          ],
+          "name": "Team 6",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA2In0",
+      "next": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA3In0",
+      "teams": [
+        {
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "id": "00000000-0000-4000-8000-00000000b007",
+          "lead": "lead",
+          "lead_session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-00000000c007"
+          },
+          "member_sessions": [
+            {
+              "machine": "00000000-0000-4000-8000-0000000000aa",
+              "member": "lead",
+              "role": "lead",
+              "session_id": "launch_id:00000000-0000-4000-8000-00000000c007"
+            }
+          ],
+          "name": "Team 7",
+          "progress": {
+            "accepted": 0,
+            "accepted_more": false,
+            "members": 1,
+            "members_more": false,
+            "phases": 1,
+            "phases_done": 0,
+            "phases_done_more": false,
+            "phases_more": false,
+            "questions": 0,
+            "questions_more": false,
+            "stuck": false,
+            "tasks": 0,
+            "tasks_more": false
+          },
+          "project": "example-project",
+          "revision": 2,
+          "status": "running"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "after": "t1.eyJzY29wZSI6Imdsb2JhbDp0ZWFtcyIsImNlaWxpbmciOjcsImFmdGVyIjowLCJyYW5rIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBiMDA3In0",
+      "next": null,
+      "teams": [],
+      "truncated": false
+    }
+  ],
+  "running": {
+    "next": null,
+    "teams": [
+      {
+        "home": "00000000-0000-4000-8000-0000000000aa",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "lead": "lead",
+        "lead_session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "member_sessions": [
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "lead",
+            "role": "lead",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m1",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m2",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000032"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m3",
+            "role": "reviewer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000033"
+          }
+        ],
+        "name": "Fixes",
+        "progress": {
+          "accepted": 1,
+          "accepted_more": false,
+          "members": 4,
+          "members_more": false,
+          "phases": 1,
+          "phases_done": 0,
+          "phases_done_more": false,
+          "phases_more": false,
+          "questions": 1,
+          "questions_more": false,
+          "stuck": false,
+          "tasks": 3,
+          "tasks_more": false
+        },
+        "project": "example-project",
+        "revision": 16,
+        "status": "running"
+      }
+    ],
+    "truncated": false
+  },
+  "stuck": {
+    "next": null,
+    "teams": [
+      {
+        "home": "00000000-0000-4000-8000-0000000000aa",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "lead": "lead",
+        "lead_session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "member_sessions": [
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "lead",
+            "role": "lead",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m1",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m2",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000032"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m3",
+            "role": "reviewer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000033"
+          }
+        ],
+        "name": "Fixes",
+        "progress": {
+          "accepted": 1,
+          "accepted_more": false,
+          "members": 4,
+          "members_more": false,
+          "phases": 1,
+          "phases_done": 0,
+          "phases_done_more": false,
+          "phases_more": false,
+          "questions": 1,
+          "questions_more": false,
+          "stuck": true,
+          "tasks": 3,
+          "tasks_more": false
+        },
+        "project": "example-project",
+        "revision": 17,
+        "status": "running"
+      }
+    ],
+    "truncated": false
+  },
+  "team": {
+    "bar": {
+      "base_commit": "0123456789abcdef0123456789abcdef01234567",
+      "counts": {
+        "cards": 0,
+        "inbox": 0,
+        "members": {
+          "active": 1,
+          "not_created": 3,
+          "paused": 0,
+          "removed": 0,
+          "total": 4
+        },
+        "nodes": {
+          "accepted": 0,
+          "cancelled": 0,
+          "in_progress": 0,
+          "pending": 0,
+          "reported": 0,
+          "waiting": 0
+        }
+      },
+      "goal": "",
+      "id": "00000000-0000-4000-8000-00000000b007",
+      "integration_branch": "zerus/team/browse-7",
+      "lead": "lead",
+      "name": "Team 7",
+      "project": "example-project",
+      "revision": 2,
+      "status": "running"
+    },
+    "groups": [
+      {
+        "cards": [],
+        "state": "draft"
+      },
+      {
+        "cards": [],
+        "state": "waiting"
+      },
+      {
+        "cards": [],
+        "state": "pending"
+      },
+      {
+        "cards": [],
+        "state": "in_progress"
+      },
+      {
+        "cards": [],
+        "state": "reported"
+      },
+      {
+        "cards": [],
+        "state": "accepted"
+      },
+      {
+        "cards": [],
+        "state": "cancelled"
+      }
+    ],
+    "members": [
+      {
+        "account": "account-example",
+        "agent": "claude",
+        "id": "lead",
+        "lead": true,
+        "model": null,
+        "person_stopped": false,
+        "role": "lead",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-00000000c007"
+        },
+        "state": "active"
+      },
+      {
+        "account": "",
+        "agent": "claude",
+        "id": "m1",
+        "lead": false,
+        "model": null,
+        "person_stopped": false,
+        "role": "developer",
+        "session": null,
+        "state": "not_created"
+      },
+      {
+        "account": "",
+        "agent": "claude",
+        "id": "m2",
+        "lead": false,
+        "model": null,
+        "person_stopped": false,
+        "role": "developer",
+        "session": null,
+        "state": "not_created"
+      },
+      {
+        "account": "",
+        "agent": "claude",
+        "id": "m3",
+        "lead": false,
+        "model": null,
+        "person_stopped": false,
+        "role": "reviewer",
+        "session": null,
+        "state": "not_created"
+      }
+    ],
+    "next": null,
+    "revision": 2,
+    "truncated": false
+  }
+}

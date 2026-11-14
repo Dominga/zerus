@@ -55,6 +55,45 @@ class Mobile(test_tasks.DeliveryFixture):
         self.wait_received("Add rate limiting")
         self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
 
+    def test_identity_bound_send_uses_the_original_even_with_a_stale_name(self):
+        help_text = subprocess.check_output([str(HGS), "--help"], env=self.env, text=True, timeout=30)
+        self.assertIn("Mobile task identity ABI: task-session-identity-v2", [line.strip() for line in help_text.splitlines()])
+        task = self.add("Send to the selected original")
+        request = dict(self.send_request(task, "codex/stale-label"), schema=2,
+                       session_id="run_id:" + self.run_id)
+        answer = self.mobile("mobile-send", request)
+        self.assertEqual(answer["session"]["session_id"], request["session_id"])
+        self.assertEqual(answer["receipt"]["run_id"], self.run_id)
+        self.wait_received(task["text"])
+        self.assertEqual(self.received().count(task["text"]), 1)
+
+    def test_identity_bound_send_never_falls_back_to_a_reused_name(self):
+        task = self.add("Never send this to a replacement")
+        request = dict(self.send_request(task), schema=2,
+                       session_id="run_id:" + str(uuid.uuid4()))
+        refused = self.mobile("mobile-send", request, ok=False)
+        self.assertIn("session", refused["error"])
+        self.assertNotIn("unknown request schema", refused["error"])
+        self.assertNotIn("uncertain", refused)
+        self.assertEqual(self.received(), "")
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+
+    def test_identity_bound_send_requires_a_nonempty_string_identity(self):
+        task = self.add("Keep the exact selection")
+        base = dict(self.send_request(task), schema=2)
+        for extra in ({}, {"session_id": ""}, {"session_id": "   "}, {"session_id": 7},
+                      {"session_id": "run_id:a\nb"}, {"session_id": "x" * 1025}):
+            with self.subTest(extra=extra):
+                refusal = self.mobile("mobile-send", dict(base, **extra), ok=False)
+                self.assertIn("session_id", refusal["error"])
+        self.assertEqual(self.received(), "")
+
+    def test_legacy_send_keeps_ignoring_an_extra_identity_field(self):
+        task = self.add("Legacy host selection")
+        # Schema 1 has always ignored extra fields; it still selects by name.
+        self.mobile("mobile-send", dict(self.send_request(task), session_id={"unknown": True}))
+        self.wait_received(task["text"])
+
     def test_a_person_can_review_and_accept_active_managed_work_without_an_agent_report(self):
         task = self.add("Explicit human review", "--target", self.name)
         sent = self.hgs("send", task["ref"])["task"]
@@ -160,6 +199,20 @@ class Mobile(test_tasks.DeliveryFixture):
         broken = {"schema": 1, "project": "project-1", "limit": 50, "session": {"session": self.name}}
         self.assertIn("invalid request", self.mobile("mobile-done", broken, ok=False)["error"])
 
+    def test_identity_bound_done_keeps_the_selected_original(self):
+        task = self.add("An original Done task", "--target", self.name)
+        self.accept(task)
+        session = {"machine": self.hgs("get", task["ref"])["task"]["session"]["machine"],
+                   "session": "codex/stale-label", "session_id": "run_id:" + self.run_id}
+        request = {"schema": 2, "project": "project-1", "limit": 50, "session": session}
+        page = self.mobile("mobile-done", request)
+        self.assertEqual([row["uuid"] for row in page["tasks"]], [task["uuid"]])
+        request["session"] = dict(session, session=self.name, session_id="run_id:replacement")
+        self.assertEqual(self.mobile("mobile-done", request)["tasks"], [])
+        for selected in (dict(session, session_id=""), {k: v for k, v in session.items() if k != "session_id"}, None):
+            refusal = self.mobile("mobile-done", dict(request, session=selected), ok=False)
+            self.assertIn("session_id", refusal["error"])
+
     def test_mobile_answers_stay_small(self):
         # A long prompt and 4 MiB of comments: the answer carries neither.
         prompt = "Add rate limiting " + hashlib.sha256(b"prompt").hexdigest() * 900
@@ -201,7 +254,7 @@ class Mobile(test_tasks.DeliveryFixture):
     def test_invalid_mobile_requests_are_refused_in_json(self):
         task = self.add("Add rate limiting")
         base = self.send_request(task)
-        self.assertIn("unknown request schema 2", self.mobile("mobile-send", dict(base, schema=2), ok=False)["error"])
+        self.assertIn("unknown request schema 3", self.mobile("mobile-send", dict(base, schema=3), ok=False)["error"])
         self.assertIn("no project", self.mobile("mobile-send", dict(base, project="nowhere"), ok=False)["error"])
         self.assertIn("not a task UUID", self.mobile("mobile-send", dict(base, task="T-a1b2c3"), ok=False)["error"])
         self.assertIn("invalid request", self.mobile("mobile-cancel", {"schema": 1}, ok=False)["error"])

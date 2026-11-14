@@ -346,6 +346,22 @@ receipt with its reason, and any other outcome once the call began (a prompt
 sent but not recorded, a crash, a timeout) is uncertain. `task_done` is a short
 read like the exchange (`TASK_READ_SQL`).
 
+The additional exact help line `Mobile task identity ABI: task-session-identity-v2`
+advertises `task_session_identity_v2` only when those native task operations are
+available. Action-request schema 2 adds the required nonempty opaque `session_id`
+to `task_send`; the CLI passes it unchanged to the existing `--session-id` guard.
+For `task_done`, schema 2 requires a session filter containing `machine`, the
+label hint `session`, and `session_id`. Labels may be stale; a missing immutable
+identity never falls back to a matching label. Results keep the schema-1 envelope.
+
+Phones select schema 2 only when the selected target computer advertises the
+feature and the relay accepts it; older routes retain their existing schema-1
+requests upfront. A schema-2 refusal or uncertain outcome never causes a
+schema-1 retry. The request UUID and the payload remain the original ones on
+recovery. `task_cancel`, project exchange, and replicated document schemas and
+write limits are unchanged. This is additive protocol support, not a deployment
+or upgrade of a live gateway.
+
 ## Divergences from the Python connector
 
 Each divergence is listed in the design; this build implements every row.

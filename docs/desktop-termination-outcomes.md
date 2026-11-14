@@ -259,6 +259,9 @@ matching label); a proved different run may reuse an old label without blocking
 the claim. Unknown or incomplete intent inventories refuse. Kernel liveness
 and hook-caller checks never fall back to a `ps` helper while holding this lock.
 Other hook callers and normal writer recovery keep their existing behavior.
+The fresh binding read uses its observed fixed location and bounded metadata,
+without a fleet scan or presentation repair. Special or changed bindings refuse;
+the original channel deadline is checked again after these reads before claim.
 
 This preclaim gate does not serialize final stdout delivery with a future
 marker publisher or prove physical writer/pipe settlement. That integration

@@ -503,6 +503,16 @@ fn should_close_with(
     None
 }
 
+/// The already observed binding's fixed location. No run scan, presentation
+/// repair, special-file wait or normal writer recovery inside claim admission.
+fn claim_record(observed: &Value) -> Result<Value> {
+    let path = storage::own_path(observed)?;
+    let bytes = storage::binding_bytes(&path).map_err(|e| e.to_string())?;
+    let record = storage::verify_metadata_at(&path, string(observed, "name"), &bytes)?;
+    session_id::verify(&record)?;
+    Ok(record)
+}
+
 /// Notices a transcript `tool_result` for the bound tool use: an answer, a
 /// decline or a cancellation in Terminal. It reads only bytes added since its
 /// last look, so a long wait stays cheap.
@@ -689,7 +699,7 @@ fn wait() -> Result<()> {
             // Read-only exclusion, not the normal writer's recovery entry:
             // a channel must not launch tmux or repair unrelated bindings.
             let Some(writer) = existing_lock_until(&root.join(".lock"), until)? else { return Ok(None); };
-            let latest = read_own_run(&name, &token)?;
+            let latest = Some(claim_record(current.as_ref().ok_or("session ended before claim")?)?);
             if let Some(reason) = should_close_with(kind, latest.as_ref(), &record, &card, hook_caller::native_alive) {
                 close(&dir, reason);
                 return Err(reason.into());
@@ -701,6 +711,10 @@ fn wait() -> Result<()> {
             if let Err(error) = caller.recheck_for_claim(latest.as_ref().unwrap()) {
                 close(&dir, "caller proof lost before claim");
                 return Err(error);
+            }
+            if now() >= waiting.deadline || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, "deadline or terminated before claim");
+                return Err("answer channel ended before claim".into());
             }
             Ok(Some(writer))
         })?;

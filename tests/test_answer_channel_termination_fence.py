@@ -153,6 +153,22 @@ class AnswerChannelTerminationFence(unittest.TestCase):
             self.assertFalse((directory / 'claimed.json').exists())
             self.assertFalse((directory / 'emitted.json').exists())
 
+    def test_special_binding_refuses_without_waiting_or_claiming(self):
+        with self.channel() as fixture:
+            worker, directory, path, offer, *_ = fixture
+            with (directory / 'handover.lock').open('a+b') as handover:
+                fcntl.flock(handover, fcntl.LOCK_EX)
+                self.publish(directory / 'answer.json', offer)
+                self.until(lambda: self.kernel_lock(worker, handover, blocked=True),
+                           'worker never reached held handover before the source-read control')
+                path.unlink()
+                os.mkfifo(path, 0o600)
+            self.assertEqual(self.finished(worker), '', 'special bindings cannot admit a claim')
+            self.assertFalse((directory / 'claimed.json').exists())
+            self.assertEqual(json.loads((directory / 'answer.json').read_text()), offer)
+            with (path.parent / '.lock').open('r+b') as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_unmarked_offer_emits_once_and_original_claim_is_never_replayed(self):
         with self.channel() as fixture:
             worker, directory, path, offer, command, env, event = fixture

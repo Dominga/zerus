@@ -340,17 +340,33 @@ class ClaudeHookCaller(unittest.TestCase):
         self.assertFalse((directory / 'claimed.json').exists())
         self.assertFalse((directory / 'emitted.json').exists())
 
-    @unittest.skipUnless(sys.platform == 'linux', 'Linux private child lock-wait witness')
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux private postclaim FIFO witness')
     def test_lost_pin_after_claim_preserves_uncertainty_without_decision(self):
-        worker, directory, other = self.waiting_question()
-        with (directory / 'handover.lock').open('w') as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
-            self.offer(directory)
-            # This is our owned hgs child, blocked in claim() after its initial
-            # caller recheck. No PID or descriptor of an owner session is read.
-            self.wait_for(lambda: 'lock' in Path(f'/proc/{worker.pid}/wchan').read_text())
+        worker, directory, other = self.waiting_question(blocking_transcript=True)
+        self.wait_for(lambda: 'partner' in Path(f'/proc/{worker.pid}/wchan').read_text())
+
+        def release_reader(next_fifo):
+            held = os.open(self.transcript_fifo, os.O_PATH)
+            try:
+                self.transcript_fifo.unlink()
+                if next_fifo: os.mkfifo(self.transcript_fifo)
+                else: self.transcript_fifo.write_text('')
+                fd = os.open(f'/proc/self/fd/{held}', os.O_WRONLY | os.O_NONBLOCK)
+                os.close(fd)
+            finally:
+                os.close(held)
+
+        # Release the first transcript check onto an offer, leaving a new FIFO
+        # for the unconditional postclaim check. Handover contention is now a
+        # preclaim boundary, so it cannot stand in for this uncertainty proof.
+        self.offer(directory)
+        release_reader(next_fifo=True)
+        self.wait_for(lambda: (directory / 'claimed.json').exists()
+                      and 'partner' in Path(f'/proc/{worker.pid}/wchan').read_text())
+        with (self.state / '.lock').open('r+b') as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.change_pin(other)
-            fcntl.flock(held, fcntl.LOCK_UN)
+        release_reader(next_fifo=False)
         output, errors = worker.communicate(timeout=8)
         self.assertEqual(output, '')
         self.assertIn('caller', errors.lower())

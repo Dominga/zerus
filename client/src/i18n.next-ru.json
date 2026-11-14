@@ -239,7 +239,6 @@
   "All accounts": "Все учётные записи",
   "All agents": "Все агенты",
   "Allow land stages": "Разрешить этапы публикации",
-  "Allow landing": "Разрешить публикацию",
   "Allow tools": "Разрешать инструменты",
   "Also archive %n child sessions": [
     "Также переместить в архив %n дочернюю сессию",
@@ -744,7 +743,6 @@
   "Legacy execution record": "Запись о выполнении старого формата",
   "Legacy project lists": "Прежние списки проектов",
   "Less than a minute left": "Осталось меньше минуты",
-  "Let land stages land this team's tasks? A land stage runs the catalog's command and may merge or push.": "Разрешить этапам публикации публиковать задачи этой команды? Такой этап запускает команду из каталога и может сливать изменения или отправлять их на сервер.",
   "Lightness": "Яркость",
   "Limit tasks started by agents: use 0 to 1000 per hour.": "Лимит задач, запускаемых агентами: от 0 до 1000 в час.",
   "Limits %1 min ago, rate limited": "Лимиты %1 мин назад, запросы ограничены",
@@ -1193,6 +1191,7 @@
   "Saved read marks could not be transferred. Marking sessions as read is paused. Retry to continue.": "Не удалось перенести сохранённые отметки о прочтении. Отметка сессий как прочитанных приостановлена. Повторите попытку, чтобы продолжить.",
   "Saved sessions (paused or stopped)": "Сохранённые сессии (приостановленные или остановленные)",
   "Saved sign-in available": "Есть сохранённый вход",
+  "Saved with the team; landing is not gated by this setting yet": "Сохраняется с командой; эта настройка пока не ограничивает этапы публикации",
   "Saved. Each machine uses the new schedule from its next wait.": "Сохранено. Каждая машина использует новое расписание со следующего ожидания.",
   "Saved. The background service could not apply the schedule now: %1": "Сохранено. Фоновая служба не смогла сейчас применить расписание: %1",
   "Saved. The background service keeps its previous schedule: %1": "Сохранено. Фоновая служба оставила прежнее расписание: %1",

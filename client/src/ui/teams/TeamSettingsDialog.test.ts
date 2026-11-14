@@ -73,12 +73,16 @@ it("keeps zero timers as zero and never turns an empty timer into zero", async (
   expect(wholeNumber("1e3", 0, 0xffffffff)).toBeUndefined();
 });
 
-it("asks before widening landing, and Cancel does not save", async () => {
-  const f = setup(); f.input("land_allowed").click(); await f.submit();
-  expect(f.calls).toHaveLength(0); expect(f.host.querySelector("[role=alertdialog]")).not.toBeNull();
-  f.host.querySelector<HTMLButtonElement>("[role=alertdialog] .btn")!.click(); expect(f.calls).toHaveLength(0);
-  await f.submit(); f.host.querySelector<HTMLButtonElement>("[data-allow-landing]")!.click(); await tick();
-  expect(f.calls).toHaveLength(1); expect((f.calls[0].action.settings as ReturnType<typeof written>).land_allowed).toBe(true);
+it.each([false, true])("shows stored landing %s read-only, without promising enforcement or asking a confirmation", async (allowed) => {
+  const stored = view(); stored.settings!.land_allowed = allowed;
+  const f = setup(undefined, stored);
+  expect(f.input("land_allowed").checked).toBe(allowed);
+  expect(f.input("land_allowed").disabled).toBe(true);
+  f.input("land_allowed").click(); f.change("routing", "lead"); await f.submit();
+  expect((f.calls[0].action.settings as ReturnType<typeof written>).land_allowed).toBe(allowed);
+  expect(f.host.querySelector("[role=alertdialog]")).toBeNull();
+  expect(f.host.querySelector("[data-landing-note]")?.textContent).toBe("Saved with the team; landing is not gated by this setting yet");
+  expect(f.host.textContent).not.toContain("catalog's command");
 });
 
 it("keeps the revision and unedited values that were shown when a refreshed view arrives", async () => {

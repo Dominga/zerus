@@ -10,7 +10,7 @@ import { CAPS, DELEGATIONS, TIMERS, capMax, completeSettings, wholeNumber, type 
 import "./team-settings.css";
 
 // Adapted from WhiteWh's TeamSettingsDialog: one saved settings object, the
-// phase choice and an explicit landing confirmation. Only our settings op is
+// phase choice. Only our settings op is
 // used; fork-specific rules, models, tests and intake operations do not map here.
 export interface TeamSettingsDialogProps {
   /** A snapshot of the view the person opened, including its revision. */
@@ -43,7 +43,6 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [settings, setSettings] = createSignal(initial);
   const [numbers, setNumbers] = createSignal<Record<string, string>>(initial ? Object.fromEntries([...Object.entries(initial.caps), ...Object.entries(initial.timers)].map(([key, value]) => [key, String(value)])) : {});
   const [busy, setBusy] = createSignal(false);
-  const [asking, setAsking] = createSignal(false);
   const [stale, setStale] = createSignal(false);
   const [error, setError] = createSignal("");
   const title = createUniqueId();
@@ -70,7 +69,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       if (number === undefined) return undefined;
       timers[key] = number;
     }
-    return { ...draft, caps, timers };
+    return { ...draft, land_allowed: initial!.land_allowed, caps, timers };
   };
   const changed = () => !!initial && JSON.stringify(value()) !== JSON.stringify(initial);
   const save = async () => {
@@ -89,11 +88,6 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       else setError(outcome.confirmation.text);
     } finally { setBusy(false); }
   };
-  const requestSave = () => {
-    if (locked() || !value() || !changed()) return;
-    if (settings()?.land_allowed && !initial?.land_allowed) { setAsking(true); return; }
-    void save();
-  };
   return <dialog ref={dialog} class="dlg team-settings-dialog" aria-labelledby={title} data-team-settings
     onCancel={(event) => { event.preventDefault(); close(); }}>
     <div class="dlg-head"><Icon name="settings" size={18} /><h2 id={title}>{tr("Team settings")}</h2><span class="grow" />
@@ -101,7 +95,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     <div class="dlg-body">
       <p class="hint">{current.bar.name}</p>
       <Show when={settings()} fallback={<p role="alert">{tr("This version cannot show all team settings. Update Zerus and hgs before changing them.")}</p>}>
-        <fieldset class="team-settings-fields" disabled={locked() || asking()}>
+        <fieldset class="team-settings-fields" disabled={locked()}>
           <section><h3>{tr("Delegations")}</h3><For each={DELEGATIONS}>{(key) => <label class="check team-setting-check">
             <input type="checkbox" data-setting={key} checked={settings()!.delegations[key]} onChange={(event) => set("delegations", { ...settings()!.delegations, [key]: event.currentTarget.checked })} />
             <span>{delegationWords(key).name}<small class="hint">{delegationWords(key).sentence}</small></span>
@@ -128,20 +122,16 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
             <label><span>{tr("Accepted work")}</span><select data-setting="integration" value={settings()!.integration} onChange={(event) => set("integration", event.currentTarget.value as TeamSettings["integration"])}>
               <option value="branch" disabled={!current.bar.integration_branch}>{tr("Merge into the integration branch")}</option><option value="none">{tr("Keep each task's branch")}</option></select></label>
             <Show when={current.bar.integration_branch}><p class="hint mono">{current.bar.integration_branch}</p></Show>
-            <label class="check"><input type="checkbox" data-setting="land_allowed" checked={settings()!.land_allowed} onChange={(event) => set("land_allowed", event.currentTarget.checked)} />{tr("Allow land stages")}</label>
+            <label class="check"><input type="checkbox" data-setting="land_allowed" checked={settings()!.land_allowed} disabled />{tr("Allow land stages")}</label>
+            <p class="hint" data-landing-note>{tr("Saved with the team; landing is not gated by this setting yet")}</p>
           </section>
         </fieldset>
         <Show when={!value()}><p class="notice danger" role="alert">{tr("Enter whole numbers within the shown limits.")}</p></Show>
       </Show>
       <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>
       <Show when={stale()}><p class="hint">{tr("Close and reopen settings to review the current values.")}</p></Show>
-      <Show when={asking()}><section class="notice warn" role="alertdialog" aria-label={tr("Allow landing")}>
-        <p>{tr("Let land stages land this team's tasks? A land stage runs the catalog's command and may merge or push.")}</p>
-        <div class="row"><button type="button" class="btn" onClick={() => setAsking(false)}>{tr("Cancel")}</button>
-          <button type="button" class="btn primary" data-allow-landing disabled={locked()} onClick={() => { setAsking(false); void save(); }}>{tr("Allow landing")}</button></div>
-      </section></Show>
     </div>
     <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" data-initial disabled={busy()} onClick={close}>{tr("Cancel")}</button>
-      <button type="button" class="btn primary" data-settings-save disabled={locked() || asking() || !value() || !changed()} onClick={requestSave}>{tr("Save")}</button></div>
+      <button type="button" class="btn primary" data-settings-save disabled={locked() || !value() || !changed()} onClick={() => void save()}>{tr("Save")}</button></div>
   </dialog>;
 }

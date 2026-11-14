@@ -46,3 +46,10 @@ it("renders the kernel schema's pipeline, lead, roster and settings controls", a
   tabs[2].click();await tick();expect(host.textContent).toContain("Lead rules");expect(host.textContent).toContain("Roster");expect(host.textContent).toContain("Maximum open questions");
   expect([...host.querySelectorAll("label")].some(x=>x.textContent==="About")).toBe(false);
 });
+it("reveals a newly added role even when the catalog list was filtered", async()=>{
+  const editor=createCatalogEditor({async load(){return fixture;},async validate(v){return v;},async importFile(){return null;},async import(v){return v as typeof fixture.person;},async exportFile(){return true;},async save(v){return {outcome:"done",request_id:v.request_id,revision:"r2"};},async receipt(id){return {outcome:"uncertain",request_id:id};}});
+  const host=document.createElement("div");document.body.append(host);dispose=render(()=>createComponent(TeamCatalogEditor,{editor}),host);await tick();
+  const search=host.querySelector('.cat-list input') as HTMLInputElement;search.value="Developer";search.dispatchEvent(new Event("input",{bubbles:true}));
+  (host.querySelector('.cat-add') as HTMLButtonElement).click();await tick();
+  expect(host.querySelector('.cat-item-head b')?.textContent).toBe("New item");expect(search.value).toBe("");
+});

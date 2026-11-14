@@ -28,7 +28,7 @@ export function TeamCatalogEditor(props: { editor?: CatalogEditorStore }): JSX.E
   onMount(() => { void editor.load(); });
   const add = () => {
     const rows = editor.items(tab()); let i = 1; while (rows.some((item) => item.id === `new-${i}`)) i++;
-    const id = `new-${i}`; editor.setItem(tab(), id, { ...blank(specs()), id, name: tr("New item") }); setSelection(id);
+    const id = `new-${i}`; setFilter(""); editor.setItem(tab(), id, { ...blank(specs()), id, name: tr("New item") }); setSelection(id);
   };
   const own = () => (editor.working()[tab()] ?? []).some((row) => row.id === chosen()?.id);
   const builtIn = () => (editor.snapshot()?.builtin[tab()] ?? []).some((row) => row.id === chosen()?.id);

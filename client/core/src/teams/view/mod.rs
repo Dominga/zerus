@@ -10,6 +10,7 @@
 //! queue as the board's groups in [`board`]) and the open owner cards
 //! ([`waiting`]).
 pub mod board;
+pub mod graph;
 pub mod list;
 
 pub use board::team;
@@ -466,6 +467,17 @@ pub(crate) fn task_ref(node: &Value) -> Option<TaskRefView> {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct QueueCard {
     pub node: u64,
+    /// Dependency facts are kept even when the other endpoint is off-page.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<zerus_team_plan::model::Dep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u32>,
+    /// The longest dependency path within this bounded queue page; absent
+    /// at layer zero, preserving older empty-edge view shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u32>,
     pub title: String,
     pub state: String,
     pub task: Option<TaskRefView>,

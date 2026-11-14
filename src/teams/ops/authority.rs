@@ -51,7 +51,8 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::StopMember { .. }
         | Operation::ArchiveMember { .. }
         | Operation::ChangeSettings { .. }
-        | Operation::DecideCard { .. } => person,
+        | Operation::DecideCard { .. }
+        | Operation::SetDeps { .. } => person,
         Operation::AddTask { .. } => true,
         Operation::Ask { .. } => member || person,
         Operation::Accept { .. } => person || (lead && team.settings.delegations.accept_results),

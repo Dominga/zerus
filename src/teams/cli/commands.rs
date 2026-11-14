@@ -23,6 +23,7 @@ pub(super) fn variant(command: &str) -> Option<&'static str> {
         "decide" => "decide_card",
         "admit" => "admit",
         "route" => "route",
+        "set-deps" => "set_deps",
         "accept" => "accept",
         "return" => "return",
         "reassign" => "reassign",

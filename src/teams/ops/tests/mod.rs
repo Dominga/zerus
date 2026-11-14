@@ -3,6 +3,7 @@ mod apply;
 mod authority;
 mod cards;
 mod decisions;
+mod dependencies;
 mod delegation;
 mod handout;
 mod integration;

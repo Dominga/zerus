@@ -75,6 +75,12 @@ fn is_stage(node: &Value) -> bool {
 fn card(node: &Value) -> QueueCard {
     QueueCard {
         node: count(node, "id"),
+        deps: graph::dependencies(node),
+        phase: node.get("phase").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0),
+        origin: node.get("origin").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()),
+        layer: None,
         title: text(node, "title", LINE_CHARS),
         state: or_default(node, "state", "draft"),
         task: task_ref(node),
@@ -176,7 +182,8 @@ fn group_by_state(mut cards: Vec<QueueCard>) -> Vec<BoardGroup> {
 
 /// The queue as the board's groups.
 pub(super) fn board(nodes: &[Value]) -> (Vec<BoardGroup>, bool) {
-    let (cards, truncated) = fold_stages(nodes);
+    let (mut cards, truncated) = fold_stages(nodes);
+    graph::layers(&mut cards);
     (group_by_state(cards), truncated)
 }
 

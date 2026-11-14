@@ -15,6 +15,8 @@ import { Icon } from "../lib/icons";
 import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
 import { followTeamScope, type TeamScope } from "./team-tab-scope";
+import { TaskDependencies } from "./TaskDependencies";
+import { PlanView } from "./PlanView";
 import { TeamTaskCard } from "./TeamTaskCard";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
@@ -22,8 +24,7 @@ import "../styles/teams.css";
 // The Team tab (the fork's TeamWorkspace, adapted to M1): the team bar, the
 // member column and the Board with the queue as its own group, each card with
 // its stages, a card's detail and decisions, Add task and the next page. The
-// graph, the phase header, the editor, the feed, proposals and the profile are
-// not part of M1 and are not here. Data comes only from the store's followed
+// graph adds bounded dependency editing. Data comes only from the store's followed
 // team view; every action is one intent through the store.
 
 function columnLabel(column: BoardColumn): string {
@@ -54,6 +55,7 @@ export function TeamWorkspace(props: {
   onPage: (cursor: string | null) => void;
   onAddTask: () => void;
 }) {
+  const [planMode, setPlanMode] = createSignal<"board" | "graph">("board");
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
@@ -114,12 +116,12 @@ export function TeamWorkspace(props: {
       </Show>
       <div class="team-body">
         <section class="team-main">
-          <header class="team-board-head"><Icon name="columns-3" size={14} /><b>{tr("Board")}</b><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
+          <header class="team-board-head"><Icon name="columns-3" size={14} /><button type="button" class="btn small" aria-pressed={planMode() === "board"} onClick={() => setPlanMode("board")}>{tr("Board")}</button><button type="button" class="btn small" data-team-graph-mode aria-pressed={planMode() === "graph"} onClick={() => setPlanMode("graph")}>{tr("Graph")}</button><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
           <div class="team-canvas">
             <Show when={all().length} fallback={
               <div class="empty team-empty"><Icon name="list-todo" size={24} /><h3>{tr("The queue is empty.")}</h3><p>{tr("Send a task to the team from the task board.")}</p></div>
             }>
-              <div class="team-board" data-team-board>
+              <Show when={planMode() === "graph"} fallback={<div class="team-board" data-team-board>
                 <For each={groups()}>
                   {(group) => (
                     <section class="team-column" data-group={group.key}>
@@ -131,7 +133,9 @@ export function TeamWorkspace(props: {
                     </section>
                   )}
                 </For>
-              </div>
+              </div>}>
+                <PlanView view={props.view} busy={props.busy} selected={selectedNode()} onSelect={select} onSetDeps={(node, deps) => send("set_deps", { node, deps })} />
+              </Show>
             </Show>
             <Show when={card()}>
               {(shown) => (
@@ -163,6 +167,7 @@ export function TeamWorkspace(props: {
                       )}</For>
                     </dl>
                   </Show>
+                  <TaskDependencies task={shown()} status={props.view.bar.status} busy={props.busy} onSetDeps={(deps) => send("set_deps", { node: shown().node, deps })} />
                   <TaskActions card={shown()} teamStatus={props.view.bar.status} busy={props.busy} onAction={(kind) => send(kind, { node: shown().node })}
                     onReason={(button) => { setAsking(button); setReason(""); }} />
                   <Show when={asking()}>

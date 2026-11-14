@@ -115,6 +115,11 @@ pub enum TeamAction {
         #[serde(default)]
         assignee: Option<String>,
     },
+    /// Changes only an undecided task's dependencies, for the person.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
+    },
     /// Accepts a node's report.
     Accept {
         node: NodeId,

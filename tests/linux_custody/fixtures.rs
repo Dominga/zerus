@@ -2,6 +2,10 @@
 use super::*;
 
 pub(super) fn root(case: &str, dir: &Path) {
+    if case == "cleanup-late" {
+        std::thread::sleep(Duration::from_millis(100));
+        std::process::exit(17);
+    }
     if case == "external" {
         let mut byte = [0];
         assert_eq!(std::io::stdin().read(&mut byte).unwrap(), 0);

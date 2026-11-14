@@ -1,3 +1,5 @@
+#[path = "cleanup.rs"]
+mod cleanup;
 #[path = "fixtures.rs"]
 mod fixtures;
 use super::custody::{Custody, Failure, Snapshot};
@@ -79,15 +81,15 @@ pub fn main() {
         match args[1].as_str() {
             "--owner" => owner(&args[2], Path::new(&args[3])),
             "--root" => fixtures::root(&args[2], Path::new(&args[3])),
+            "--cleanup" => cleanup::probe(&args[2], Path::new(&args[3])),
             _ => panic!("unknown private mode"),
         }
         return;
     }
-    // Fixture-only outer reaper prevents failed mutants leaving orphan zombies.
-    assert_eq!(
-        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
-        0
-    );
+    cleanup::run(None, false, suite);
+}
+
+fn suite(domain: &mut cleanup::Domain) {
     let mut unrelated = command("--root", "external", Path::new("."))
         .stdin(Stdio::piped())
         .spawn()
@@ -116,10 +118,10 @@ pub fn main() {
         "expired",
         "long-budget",
     ] {
-        let home = tempfile::tempdir().unwrap();
-        let after_owner = UnixListener::bind(home.path().join("after-owner.sock")).unwrap();
+        let home = domain.namespace();
+        let after_owner = UnixListener::bind(home.join("after-owner.sock")).unwrap();
         after_owner.set_nonblocking(true).unwrap();
-        let mut child = command("--owner", case, home.path())
+        let mut child = command("--owner", case, &home)
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
@@ -156,6 +158,29 @@ pub fn main() {
     }
     drop(unrelated.stdin.take());
     assert_eq!(unrelated.wait().unwrap().code(), Some(17));
+    for case in ["normal", "unwind", "expiry"] {
+        let home = domain.namespace();
+        let mut child = command("--cleanup", case, &home).spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < until,
+                "cleanup probe not physically settled: {case}"
+            );
+            tick();
+        };
+        assert_eq!(status.success(), case == "normal");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("cleanup.json")).unwrap()).unwrap();
+        assert_eq!(report["settled"], true);
+        assert_eq!(report["unwound"], case == "unwind");
+        assert_eq!(report["deadline_failed"], case == "expiry");
+        assert_eq!(report["reaped"], 1);
+        println!("PASS cleanup-{case}");
+    }
 }
 
 fn owner(case: &str, dir: &Path) {

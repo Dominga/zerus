@@ -43,6 +43,12 @@ conservative change selection, including both sides of renames.
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
+Manual checks may pin a source older than the client-core job split. If that
+source's disk helper does not support the job, client-core omits only its disk
+preparation/diagnostics and cache restore, building cold to avoid extracting
+Quick's full target cache onto an unprepared runner. Format, strict Clippy,
+tests and the required suite result still run against the exact pinned source.
+
 PR #430's first native-client run at `b3716dd8` (run `40898847326`) measured an
 11-minute-19-second green Linux check run, a 65-minute macOS check-run span that
 ended in cancellation at the 60-minute job timeout, and a 1-minute-51-second

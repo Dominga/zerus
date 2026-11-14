@@ -47,39 +47,56 @@ export function waitingKindLabel(item: Pick<WaitingItem, "kind">): string {
   }
 }
 
+/** A card's parameters as the core sends them: absent, invalid, or the
+ * service writer's bounded pairs. */
+type ParsedParameters =
+  | { state: "absent" }
+  | { state: "invalid" }
+  | { state: "valid"; values: Map<string, string> };
+
 /** The card's parameters as the service's writer bounds them: at most eight
  * pairs, each key lower-case ASCII letters and underscores, each value
  * nonempty, at most 256 characters and free of control characters, line or
- * paragraph separators and bidirectional marks. Anything else, or a duplicate
+ * paragraph separators and bidirectional marks. The core already keeps an
+ * invalid row distinct; this check stays as the window's own guard for an
+ * older core and for anything it did not bound. Anything else, or a duplicate
  * key, means the stored sentence stands and no value is interpolated. */
-function cardParameters(raw: WaitingItem["parameters"]): Map<string, string> | null {
-  if (raw === undefined) return new Map();
-  if (!Array.isArray(raw) || raw.length > 8) return null;
+function cardParameters(raw: WaitingItem["parameters"]): ParsedParameters {
+  if (raw === undefined || raw === null) return { state: "absent" };
+  if (!Array.isArray(raw) || raw.length > 8) return { state: "invalid" };
   const values = new Map<string, string>();
   for (const pair of raw) {
-    if (!Array.isArray(pair) || pair.length !== 2) return null;
+    if (!Array.isArray(pair) || pair.length !== 2) return { state: "invalid" };
     const [key, value] = pair;
-    if (typeof key !== "string" || typeof value !== "string") return null;
-    if (!/^[a-z_]+$/.test(key) || values.has(key)) return null;
-    if (value.trim().length === 0) return null;
-    if ([...value].length > 256) return null;
-    if (/[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value)) return null;
+    if (typeof key !== "string" || typeof value !== "string") return { state: "invalid" };
+    if (!/^[a-z_]+$/.test(key) || values.has(key)) return { state: "invalid" };
+    if (value.trim().length === 0) return { state: "invalid" };
+    if ([...value].length > 256) return { state: "invalid" };
+    if (/[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value)) return { state: "invalid" };
     values.set(key, value);
   }
-  return values;
+  return { state: "valid", values };
 }
+
+/** The kinds whose writer names a member. With no parameters at all, only the
+ * card's stored sentence says what happened; a generic description would drop
+ * the fact that a member is involved. The capacity notice is team-wide and
+ * legitimately carries none (F5). */
+const NAMES_A_MEMBER = new Set(["launch_blocked", "launch_uncertain", "standing_confirmation"]);
 
 /** One sentence that says what a card of this kind is about. The kinds whose
  * writer sends bounded parameters substitute them (zerus-63rru.34); an
- * invalid parameter, or a kind this version does not describe, keeps the
- * stored sentence itself, never a generic description. The capacity notice is
- * team-wide: the budget marker is not a member (F5). */
+ * invalid parameter, an absent one on a card that names a member, or a kind
+ * this version does not describe keeps the stored sentence itself, never a
+ * generic description. The capacity notice is team-wide: the budget marker is
+ * not a member (F5). */
 export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters" | "text">): string {
   const parameters = cardParameters(item.parameters);
-  if (parameters === null) return item.text;
+  if (parameters.state === "invalid") return item.text;
+  if (parameters.state === "absent" && NAMES_A_MEMBER.has(item.kind)) return item.text;
   // The ledger's internal markers (@budget, @branch) are not member names:
   // a card that still carries one reads as a team-wide sentence.
-  const written = parameters.get("member");
+  const written = parameters.state === "valid" ? parameters.values.get("member") : undefined;
   const member = written !== undefined && !written.startsWith("@") ? written : undefined;
   switch (item.kind) {
     case "note": return tr("A note that the lead, the service or you left for the person.");

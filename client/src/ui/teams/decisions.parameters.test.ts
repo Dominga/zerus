@@ -30,15 +30,38 @@ describe("a card's parameters", () => {
     );
   });
 
-  it("keeps the generic sentence when the writer sent no parameter", () => {
-    const words = waitingKindSentence(item({}));
-    expect(words).toBe(
-      "A team member could not be started; the card says why and whether Zerus tries again.",
-    );
-    expect(words).not.toContain("MEMBER_MISSING");
+  it("keeps the stored sentence when a member-naming card has no parameters", () => {
+    for (const kind of ["launch_blocked", "launch_uncertain", "standing_confirmation"]) {
+      const card = item({ kind });
+      expect(waitingKindSentence(card), kind).toBe(card.text);
+      expect(waitingKindSentence(card), kind).not.toContain("MEMBER_MISSING");
+    }
   });
 
-  const INVALID: Array<[string, Array<[string, string]>]> = [
+  it("keeps the generic sentence for a valid empty pair list", () => {
+    const card = item({ parameters: [] });
+    expect(waitingKindSentence(card)).toBe(
+      "A team member could not be started; the card says why and whether Zerus tries again.",
+    );
+  });
+
+  it("words a team-wide capacity card that carries no parameters", () => {
+    const card = item({ kind: "launch_capacity" });
+    expect(waitingKindSentence(card)).toBe(
+      "New team members wait until there is room for another session or account.",
+    );
+  });
+
+  it("words a kind that needs no member without parameters", () => {
+    const card = item({ kind: "note" });
+    expect(waitingKindSentence(card)).toBe(
+      "A note that the lead, the service or you left for the person.",
+    );
+  });
+
+  type Raw = WaitingItem["parameters"];
+  const INVALID: Array<[string, Raw]> = [
+    ["the core's invalid marker", "invalid"],
     ["an oversized value", [["member", "x".repeat(257)]]],
     ["a control value", [["member", "a\u0000b"]]],
     ["a bidi value", [["member", "a\u202eb"]]],
@@ -47,6 +70,8 @@ describe("a card's parameters", () => {
     ["a bad key", [["Member", "one"]]],
     ["too many pairs", Array.from({ length: 9 }, (_, n) => ["k" + "a".repeat(n), "v"])],
     ["an empty value", [["member", "  "]]],
+    ["a triplet pair", [["member", "Alice", "extra"]] as unknown as Raw],
+    ["a mixed invalid pair", [["member", "Alice"], ["code", false]] as unknown as Raw],
   ];
   it.each(INVALID)("keeps the stored sentence on %s", (_case, parameters) => {
     const card = item({ parameters });

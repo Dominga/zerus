@@ -493,9 +493,35 @@ pub struct WaitingItem {
     /// The decisions the card takes, in the row's order (see [`decisions`]).
     pub decisions: Vec<String>,
     /// The card's bounded parameters the service's writer sent
-    /// (zerus-63rru.34): at most 8 `[a-z_]` keys; an older store has none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parameters: Vec<(String, String)>,
+    /// (zerus-63rru.34), in the three states the window tells apart: absent
+    /// (a missing or null field), [`CardParameters::Pairs`] (the writer's
+    /// bounded list) and [`CardParameters::Invalid`] (anything else). An
+    /// older store has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<CardParameters>,
+}
+
+/// A card row's parameters, kept in one of the three states the window must
+/// tell apart (zerus-63rru.34, F6). The core never drops, cuts or normalizes
+/// invalid metadata: an invalid row makes the window show the card's stored
+/// sentence instead of substituting a value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardParameters {
+    /// The service writer's bounded pair list, possibly empty.
+    Pairs(Vec<(String, String)>),
+    /// The row's metadata is not that pair list.
+    Invalid,
+}
+
+impl Serialize for CardParameters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Pairs(pairs) => pairs.serialize(serializer),
+            // A marker the window cannot mistake for a pair list. The card's
+            // stored sentence stands for it.
+            Self::Invalid => serializer.serialize_str("invalid"),
+        }
+    }
 }
 
 /// `hgs team waiting`: the open owner cards of every team, oldest first.

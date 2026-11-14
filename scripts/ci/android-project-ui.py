@@ -24,6 +24,17 @@ IMAGE = "system-images;android-35;google_apis;x86_64"
 SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
 HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1", "20261023.334.3", "20261111.370.1"})
+RUNTIME_PACKAGES = {
+    "libpulse0": "1:16.1+dfsg1-2ubuntu10.1",
+    "libnss3": "2:3.98-1ubuntu0.3",
+    "libnspr4": "2:4.35-1.1build1",
+    "libpng16-16t64": "1.6.43-5ubuntu0.7",
+    "libexpat1": "2.6.1-2ubuntu0.6",
+    "libdrm2": "2.4.125-1ubuntu0.1~24.04.2",
+    "libxi6": "2:1.8.1-1build1",
+    "libxext6": "2:1.3.4-1build2",
+    "libxkbfile1": "1:1.1.0-1build4"
+}
 
 
 def select_suite(arguments):
@@ -255,12 +266,100 @@ def sha(path):
 
 
 def revision(path):
+    if path.name == "source.properties":
+        return emulator_properties(path.read_bytes())
     root = ET.parse(path).getroot()
     rev = next(item for item in root.iter() if item.tag.rsplit("}", 1)[-1] == "revision")
     fields = {item.tag.rsplit("}", 1)[-1]: item.text for item in rev}
     value = ".".join(fields.get(name, "0") for name in ("major", "minor", "micro"))
     assert re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", value)
     return value
+
+
+def install_emulator(archive, destination, selected):
+    """Verify the complete published archive before staging any executable bytes."""
+    import shutil
+    import stat
+    from pathlib import PurePosixPath
+    expected = selected["archive"]
+    assert selected["revision"] == REVISIONS["emulator"] and expected["checksum_type"] == "sha1"
+    assert not destination.exists() and not destination.is_symlink(), "emulator destination already exists"
+    assert not archive.is_symlink() and archive.stat().st_size == expected["bytes"] <= 512 * 1024 ** 2, "emulator archive size"
+    with archive.open("rb") as source:
+        sha1, sha256 = hashlib.sha1(), hashlib.sha256()
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            sha1.update(block); sha256.update(block)
+        assert sha1.hexdigest() == expected["checksum"], "emulator published checksum"
+        assert sha256.hexdigest() == expected["sha256"], "emulator archive SHA256"
+        source.seek(0)
+        with zipfile.ZipFile(source) as package:
+            entries = package.infolist()
+            assert 0 < len(entries) <= 1024 and sum(entry.file_size for entry in entries) <= 1024 ** 3, "emulator archive expansion"
+            names = set()
+            for entry in entries:
+                name = entry.filename; path = PurePosixPath(name)
+                assert len(name) <= 1024 and "\\" not in name and path.parts and path.parts[0] == "emulator"
+                assert not path.is_absolute() and ".." not in path.parts and name == path.as_posix() + ("/" if entry.is_dir() else "")
+                assert name not in names and not entry.flag_bits & 1, "emulator duplicate/encrypted entry"
+                names.add(name)
+                kind = stat.S_IFMT(entry.external_attr >> 16)
+                assert kind in ({0, stat.S_IFDIR} if entry.is_dir() else {0, stat.S_IFREG}), "emulator archive entry type"
+                assert entry.is_dir() or len(path.parts) > 1
+            assert {"emulator/emulator", "emulator/source.properties"} <= names
+            assert package.getinfo("emulator/source.properties").file_size <= 4096, "emulator properties size"
+            assert emulator_properties(package.read("emulator/source.properties")) == selected["revision"], "emulator archive revision"
+            destination.mkdir(mode=0o700)
+            try:
+                for entry in entries:
+                    target = destination / entry.filename
+                    if entry.is_dir():
+                        target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        with package.open(entry) as incoming, target.open("xb") as output:
+                            shutil.copyfileobj(incoming, output, 1024 * 1024)
+                        target.chmod(0o700 if entry.external_attr >> 16 & 0o111 else 0o600)
+                assert (destination / "emulator/emulator").stat().st_mode & 0o100, "emulator executable mode"
+            except BaseException:
+                shutil.rmtree(destination)
+                raise
+    return destination / "emulator"
+
+
+def emulator_properties(raw):
+    assert len(raw) <= 4096, "emulator properties size"
+    fields = {}
+    for line in raw.decode("utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        assert separator and key not in fields, "emulator properties fields"
+        fields[key] = value
+    assert fields.get("Pkg.Path") == "emulator" and fields.get("Pkg.BuildId") == "16428233"
+    value = fields.get("Pkg.Revision", "")
+    assert re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", value)
+    return value
+
+
+def emulator_runtime_version(text):
+    assert len(text.encode("utf-8")) <= 65536
+    versions = [line for line in text.splitlines() if line.startswith("Android emulator version ")]
+    assert len(versions) == 1 and re.fullmatch(r"Android emulator version 37\.2\.12\.0 \(build_id 16428233\)(?: \(CL:[ -~]{1,80}\))?", versions[0]), "emulator runtime revision"
+
+
+def emulator_runtime_libraries(text):
+    assert len(text.encode("utf-8")) <= 65536 and "not found" not in text, "unresolved emulator library"
+    pulse = re.findall(r"(?m)^\s*libpulse\.so\.0\s+=>\s+/[^\s]+\s+\(0x[0-9a-f]+\)\s*$", text)
+    assert len(pulse) == 1, "libpulse resolution unknown"
+
+
+def verified_runtime_packages(text):
+    assert len(text.encode("utf-8")) <= 65536
+    found = {}
+    for line in text.splitlines():
+        name, separator, version = line.partition("=")
+        assert separator and name not in found, "runtime package fields"
+        found[name] = version
+    assert found == RUNTIME_PACKAGES, "runtime package version"
+    return found
 
 
 def defined_classes(apk):
@@ -407,17 +506,33 @@ def main():
         save("source.json", {"commit": source, "files": source_before, "scope": "owned disposable VM; no installed/production/tool-closure claim"})
         save("selected-packages.json", pins)
         save("java-release.json", java_identity)
+        packages = run("runtime-packages", ["dpkg-query", "-W", "-f=${Package}=${Version}\n", *RUNTIME_PACKAGES], 30)
+        save("runtime-packages.json", verified_runtime_packages(packages))
         sdkmanager = sdk / "cmdline-tools/latest/bin/sdkmanager"
         assert "Pkg.Revision=12.0" in (sdkmanager.parent.parent / "source.properties").read_text().splitlines()
         save("setup-tools.json", {str(path): sha(path) for path in (java / "release", java / "bin/java", sdkmanager,
              project / "mobile/android/gradle/wrapper/gradle-wrapper.jar", project / "mobile/android/gradle/wrapper/gradle-wrapper.properties")})
-        run("sdk-packages", [sdkmanager, "--channel=0", "platforms;android-36", "build-tools;36.0.0", "emulator", IMAGE], 240, b"y\n" * 8)
+        run("sdk-packages", [sdkmanager, "--channel=0", "platforms;android-36", "build-tools;36.0.0", IMAGE], 240, b"y\n" * 8)
+        selected = pins["packages"]["emulator"]
+        archive = root / "emulator.zip"
+        run("emulator-download", ["curl", "--fail", "--location", "--silent", "--show-error", "--proto", "=https",
+            "--proto-redir", "=https", "--retry", "0", "--max-time", "180", "--max-filesize", str(selected["archive"]["bytes"]),
+            "--output", archive, selected["archive"]["url"]], 190)
+        emulator_root = install_emulator(archive, root / "pinned-sdk", selected)
+        save("emulator-provisioning.json", {"archive": selected["archive"], "actual_sha256": sha(archive),
+            "source_properties_sha256": sha(emulator_root / "source.properties"), "revision": revision(emulator_root / "source.properties")})
+        archive.unlink()
         image = sdk / "system-images/android-35/google_apis/x86_64"
-        assert revision(sdk / "emulator/package.xml") == os.environ["EXPECTED_EMULATOR_REVISION"]
+        assert revision(emulator_root / "source.properties") == os.environ["EXPECTED_EMULATOR_REVISION"]
         assert revision(image / "package.xml") == os.environ["EXPECTED_SYSTEM_IMAGE_REVISION"]
         assert "Pkg.Revision=37.0.1" in (sdk / "platform-tools/source.properties").read_text().splitlines()
         assert "Pkg.Revision=36.0.0" in (sdk / "build-tools/36.0.0/source.properties").read_text().splitlines()
-        adb, emulator = sdk / "platform-tools/adb", sdk / "emulator/emulator"
+        adb, emulator = sdk / "platform-tools/adb", emulator_root / "emulator"
+        library_path = ":".join(str(emulator_root / name) for name in ("lib64", "lib64/qt/lib", "lib64/gles_swiftshader"))
+        libraries = run("emulator-ldd", ["env", "LD_LIBRARY_PATH=" + library_path, "ldd", emulator_root / "qemu/linux-x86_64/qemu-system-x86_64"], 30)
+        emulator_runtime_libraries(libraries)
+        version = run("emulator-version", [emulator, "-version"], 30)
+        emulator_runtime_version(version)
         build = sdk / "build-tools/36.0.0"
         for path in [adb, emulator, build / "aapt", build / "apksigner", build / "lib/apksigner.jar", sdk / "platforms/android-36/android.jar"]:
             tools_before[str(path)] = sha(path)

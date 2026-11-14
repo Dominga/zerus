@@ -161,7 +161,34 @@ jobs:
       - name: Check result and APK admission controls without an SDK
         run: |
           python3 -I -B tests/test_android_project_ui.py
+          python3 -I -B tests/test_android_emulator_pin.py
+          python3 -I -B tests/test_android_emulator_runtime.py
           python3 -I -B tests/test_approval_ui_harness.py
+      - name: Provision the reviewed emulator runtime libraries
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          export LC_ALL=C
+          sudo apt-get update -qq
+          runtime_pins=(libpulse0=1:16.1+dfsg1-2ubuntu10.1 libnss3=2:3.98-1ubuntu0.3 libnspr4=2:4.35-1.1build1 libpng16-16t64=1.6.43-5ubuntu0.7 libexpat1=2.6.1-2ubuntu0.6 'libdrm2=2.4.125-1ubuntu0.1~24.04.2' libxi6=2:1.8.1-1build1 libxext6=2:1.3.4-1build2 libxkbfile1=1:1.1.0-1build4)
+          for runtime_pin in "${runtime_pins[@]}"; do
+            runtime_package="${runtime_pin%%=*}"
+            runtime_version="${runtime_pin#*=}"
+            runtime_candidate="$(apt-cache policy "$runtime_package" | awk '/Candidate:/ {print $2}')"
+            test "$runtime_candidate" = "$runtime_version"
+          done
+          sudo apt-get install --yes --no-install-recommends "${runtime_pins[@]}"
+          runtime_record="$RUNNER_TEMP/android-project-ui-admission/runtime-packages.txt"
+          test ! -e "$runtime_record"
+          for runtime_pin in "${runtime_pins[@]}"; do
+            runtime_package="${runtime_pin%%=*}"
+            runtime_version="${runtime_pin#*=}"
+            runtime_installed="$(dpkg-query -W -f='${Version}' "$runtime_package")"
+            test "$runtime_installed" = "$runtime_version"
+            printf '%s=%s\n' "$runtime_package" "$runtime_installed" >> "$runtime_record"
+          done
       - name: Prepare pinned task-replica libraries on this disposable VM
         timeout-minutes: 15
         shell: bash

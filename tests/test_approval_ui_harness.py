@@ -44,6 +44,30 @@ reverse_focus_wait = _focus_projection.reverse_focus_wait
 BASELINES = _focus_projection.BASELINES
 
 
+EMULATOR_PROVISIONING_PATCH = ROOT / "tests/fixtures/android-ui-pinned-emulator.patch"
+EMULATOR_PROVISIONING_PATCH_SHA = "578d5b5f371df92b128a5d53204ad9cfab961f50683f64deaf0a43a413e5b2ef"
+
+
+def without_pinned_emulator_provisioning(source):
+    """Reverse the exact reviewed provisioning delta without changing any driver oracle."""
+    raw = EMULATOR_PROVISIONING_PATCH.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == EMULATOR_PROVISIONING_PATCH_SHA
+    sections = raw.decode().split("diff --git ")
+    assert sections[0] == "" and len(sections) == 2
+    header, body = sections[1].split("\n", 1)
+    assert header == "a/scripts/ci/android-project-ui.py b/scripts/ci/android-project-ui.py"
+    hunks = re.split(r"(?m)^@@[^\n]*\n", body)[1:]
+    assert hunks
+    for hunk in hunks:
+        lines = hunk.splitlines(keepends=True)
+        assert lines and all(line[:1] in (" ", "+", "-") for line in lines)
+        old = "".join(line[1:] for line in lines if line[0] in " -")
+        new = "".join(line[1:] for line in lines if line[0] in " +")
+        assert old and new and old != new and source.count(new) == 1, "emulator provisioning postimage"
+        source = source.replace(new, old, 1)
+    return source
+
+
 def without_reviewed_hosted_image_update(source):
     """Reverse only the exact reviewed image-list delta; keep every UI driver pin."""
     reviewed = 'HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1", "20261023.334.3", "20261111.370.1"})\n'
@@ -1303,7 +1327,8 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
-        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(without_native_tool_preparation(without_reviewed_hosted_image_update(source))).encode()).hexdigest(),
+        original = without_pinned_emulator_provisioning(source)
+        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(without_native_tool_preparation(without_reviewed_hosted_image_update(original))).encode()).hexdigest(),
                          "49c3814a3ef8cdb7be01e3a4792a6f5045559fb7c89db87fd53784feb4e76450")
         for path, digest in {
             "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt": "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
@@ -1332,6 +1357,18 @@ class ApprovalHarnessTests(unittest.TestCase):
         for replacement in (line.replace("20261111.370.1", "20261111.370.2"), "", line * 2):
             with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
                 without_reviewed_hosted_image_update(source.replace(line, replacement))
+
+    def test_emulator_provisioning_projection_refuses_changed_missing_or_duplicate_hunks(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        without_pinned_emulator_provisioning(source)
+        hunks = re.split(r"(?m)^@@[^\n]*\n", EMULATOR_PROVISIONING_PATCH.read_text())[1:]
+        for index, hunk in enumerate(hunks):
+            new = "".join(line[1:] for line in hunk.splitlines(keepends=True) if line[0] in " +")
+            addition = next(line[1:] for line in hunk.splitlines(keepends=True) if line[0] == "+" and line[1:].strip())
+            changed = new.replace(addition, addition.rstrip("\n") + " # changed\n", 1)
+            for altered in ("", new + new, changed):
+                with self.subTest(hunk=index, altered=altered[:80]), self.assertRaises(AssertionError):
+                    without_pinned_emulator_provisioning(source.replace(new, altered, 1))
 
     def test_android_focus_capture_has_one_owned_filtered_read_and_no_new_clock(self):
         calls = []

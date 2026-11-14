@@ -72,6 +72,10 @@ pub(in crate::desktop::teams::actor) fn sentence(
     }
     const FINAL: &str = "This seat cannot be bound again; archive the member.";
     let (what, next) = match fact {
+        Fact::FirstMessage => (
+            "waiting for its first-message readiness",
+            "Finish startup in the member's terminal. The service checks its native first-message gate again.",
+        ),
         // The member can be read; its terminal is what is not free
         // (zerus-63rru.79). The sentence names the dialog the gate knew
         // (zerus-63rru.83).

@@ -145,6 +145,13 @@ and the other members ordered by role and member ID. Each row shows its role.
 Membership uses the team roster's computer and launch/run bindings, including
 when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
+
+Before its first conversation, a member the team launched can take its first task
+when the native first-message gate verifies its empty composer. A pending question
+or known background or subagent work keeps it from taking that task. If its
+terminal cannot be verified as ready, the usual three-minute service card names
+the member as "waiting for its first-message readiness". Members with a
+conversation keep the usual idle and known-zero work checks.
 Ordinary sessions and the Sessions list with the preview off keep their usual
 status and grouping rules.
 

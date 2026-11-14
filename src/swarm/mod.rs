@@ -200,6 +200,15 @@ pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
     Ok(snapshot)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn fixture_project(config: &Config, machine: &str, project: &str) {
+    let mut store = LockedStore::load_bootstrap(config).unwrap();
+    store.data.node_id = machine.into();
+    store.data.import_missing(&json!({"projects":[{"id":project,"name":"example","color":"#123456","sessions":[],"folders":[]}]})).unwrap();
+    store.data.imported = true;
+    store.save().unwrap();
+}
+
 /// The files [`organization`] reads, for a reader that follows changes,
 /// with the worker's marker, which a restarted worker rewrites.
 pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {

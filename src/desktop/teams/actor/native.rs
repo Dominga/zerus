@@ -9,6 +9,7 @@ mod tasks;
 #[allow(unused_imports)]
 pub(super) use tasks::{clear_request, stage_arguments, stage_request, task_reply};
 mod admission;
+mod fresh;
 mod cancels;
 use super::*;
 use crate::{
@@ -100,6 +101,12 @@ impl Native {
                 return Err(problem("The member has another active task"));
             }
         }
+        // Native terminal reads cannot run inside the final spawn admission.
+        // The child still checks the native gate again before offering input.
+        let first = match member {
+            Some(member) => self.first_witness(team, member)?,
+            None => None,
+        };
         let args = task_arguments(task, action);
         let input = task_request(team, node, member, id);
         #[cfg(test)]
@@ -115,7 +122,7 @@ impl Native {
             Instant::now() + Duration::from_secs(30),
             &self.stop,
             || {
-                self.admit(team, node, member, id, decision)
+                self.admit(team, node, member, id, decision, first.as_ref())
                     .inspect_err(|e| {
                         if e.code == crate::teams::store::actor_reads::ADMISSION_BUSY {
                             retry = Some(e.clone());
@@ -275,7 +282,8 @@ impl Ports for Native {
         if session.machine != self.machine {
             return Ok(ports::Availability::Busy);
         }
-        match super::availability::availability(&self.config, &self.epoch, &team.id, m, true)? {
+        match super::availability::with_first(&self.config, &self.epoch, &team.id, m, true,
+            |row| self.first_on(m, row).is_some())? {
             ports::Availability::Free if !self.unoccupied(m)? => Ok(ports::Availability::Busy),
             answer => Ok(answer),
         }

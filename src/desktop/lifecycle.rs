@@ -3,6 +3,25 @@
 //! passive kernel must never advertise workers which have not been started.
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+/// Reuse the existing heartbeat frame when cached component readiness changes.
+#[derive(Default)]
+pub(super) struct ReadinessPublication(Option<[bool; 5]>);
+
+impl ReadinessPublication {
+    pub(super) fn refresh(
+        &mut self,
+        readiness: Option<[bool; 5]>,
+        now: Instant,
+        heartbeat: &mut Instant,
+    ) {
+        if self.0 != readiness {
+            self.0 = readiness;
+            *heartbeat = now;
+        }
+    }
+}
 
 pub(super) const ABI: &str = "desktop-lifecycle-v1";
 
@@ -10,6 +29,25 @@ pub(super) const ABI: &str = "desktop-lifecycle-v1";
 /// created for it alone (a logon-task start before Windows 11 24H2). Always
 /// false elsewhere: 24H2 and later give the service no console at all.
 pub(super) static CONSOLE_RELEASED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn decorate_mode(value: &mut Value, background_requested: bool) {
+    let requested = if background_requested {
+        "background"
+    } else {
+        "passive"
+    };
+    let effective =
+        if value["ownership"] == "background_service" && value["writers_enabled"] == true {
+            "background"
+        } else {
+            "passive"
+        };
+    // mode is the original requested-mode field. Add observed state without
+    // changing its meaning for registration helpers or older clients.
+    value["lifecycle"]["mode"] = requested.into();
+    value["lifecycle"]["requested_mode"] = requested.into();
+    value["lifecycle"]["effective_mode"] = effective.into();
+}
 
 pub(super) fn unavailable(configuration: &str) -> Value {
     // A missing endpoint is not proof that every old process has exited.
@@ -58,6 +96,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn readiness_changes_publish_before_the_heartbeat_without_steady_state_polling() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut heartbeat = now + Duration::from_secs(10);
+        let mut publication = ReadinessPublication::default();
+        publication.refresh(None, now, &mut heartbeat);
+        assert_eq!(heartbeat, now + Duration::from_secs(10));
+        let mut ready = [false; 5];
+        publication.refresh(Some(ready), now, &mut heartbeat);
+        assert_eq!(heartbeat, now, "starting background must publish promptly");
+        for component in 0..5 {
+            let changed = now + Duration::from_millis(200 * (component + 1) as u64);
+            heartbeat = changed + Duration::from_secs(10);
+            publication.refresh(Some(ready), changed, &mut heartbeat);
+            assert_eq!(heartbeat, changed + Duration::from_secs(10));
+            ready[component] = true;
+            publication.refresh(Some(ready), changed, &mut heartbeat);
+            assert_eq!(heartbeat, changed, "component {component} became ready");
+        }
+        let failed = now + Duration::from_secs(2);
+        heartbeat = failed + Duration::from_secs(10);
+        ready[0] = false;
+        publication.refresh(Some(ready), failed, &mut heartbeat);
+        assert_eq!(heartbeat, failed, "failures must also publish promptly");
+        heartbeat = failed + Duration::from_secs(10);
+        publication.refresh(None, failed, &mut heartbeat);
+        assert_eq!(heartbeat, failed, "revocation must publish promptly");
+    }
+
+    #[test]
     fn endpoint_readiness_does_not_claim_background_ownership() {
         let value = status("configuration", "epoch-one", 7);
         assert_eq!(value["ipc_ready"], true);
@@ -101,5 +169,48 @@ mod tests {
         assert_eq!(value["environment"]["HGS_STATE_DIR"], "/private/state");
         assert_eq!(value["environment"].as_object().unwrap().len(), 2);
         assert_eq!(value["expected_configuration"], "expected");
+    }
+
+    #[test]
+    fn requested_mode_stays_compatible_and_effective_mode_follows_the_live_writer() {
+        for requested in [false, true] {
+            for (ownership, writer, expected) in [
+                ("passive", false, "passive"),
+                ("revoked", false, "passive"),
+                ("revoked", true, "passive"),
+                ("background_readonly", false, "passive"),
+                ("background_service", false, "passive"),
+                ("background_service", true, "background"),
+                ("unavailable", true, "passive"),
+            ] {
+                let mut value = json!({"ownership":ownership,"writers_enabled":writer,
+                    "lifecycle":{"abi":ABI,"phase":"serving","ipc_ready":true}});
+                if ownership == "passive" {
+                    value["background_start"] =
+                        json!({"admitted":false,"code":"explicit_handoff_required"});
+                }
+                decorate_mode(&mut value, requested);
+                let requested = if requested { "background" } else { "passive" };
+                assert_eq!(
+                    value["lifecycle"]["mode"], requested,
+                    "legacy mode must not change"
+                );
+                assert_eq!(value["lifecycle"]["requested_mode"], requested);
+                assert_eq!(
+                    value["lifecycle"]["effective_mode"], expected,
+                    "ownership={ownership}, writer={writer}"
+                );
+                assert_eq!(value["lifecycle"]["abi"], ABI);
+                assert_eq!(value["lifecycle"]["ipc_ready"], true);
+                assert_eq!(value["ownership"], ownership);
+                assert_eq!(value["writers_enabled"], writer);
+                if ownership == "passive" {
+                    assert_eq!(
+                        value["background_start"]["code"],
+                        "explicit_handoff_required"
+                    );
+                }
+            }
+        }
     }
 }

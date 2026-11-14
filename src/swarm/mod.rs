@@ -6,6 +6,8 @@
 mod adoption;
 mod bootstrap;
 mod catalog;
+mod diagnostics;
+pub(crate) use diagnostics::diagnostic_machine_label;
 pub(crate) mod drive_folders;
 pub(crate) mod fence;
 pub(crate) mod drive_footprint;
@@ -19,7 +21,6 @@ mod session_ids;
 mod session_memberships;
 mod session_membership_peers;
 pub(crate) mod session_labels;
-#[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod replica;
@@ -36,7 +37,6 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
 
-#[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
 pub(crate) use replica_members::open_reason as cutover_open;

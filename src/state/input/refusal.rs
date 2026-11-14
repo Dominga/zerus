@@ -91,8 +91,9 @@ pub(super) fn prepare(witness: &NotOffered) -> Result<()> {
     ) {
         return Err("Pre-input refusal binding changed".into());
     }
-    receipt_index::persist(
-        &witness.receipts,
+    receipt_index::persist_pinned(
+        &receipts,
+        &format!("{}.json", witness.request_id),
         &json!({
             "request_id": witness.request_id, "name": witness.name,
             "run_id": witness.run_id, "conversation_id": witness.conversation_id,
@@ -103,6 +104,11 @@ pub(super) fn prepare(witness: &NotOffered) -> Result<()> {
 }
 
 pub(super) fn remember(witness: &NotOffered) -> Result<()> {
+    let value = value(witness)?;
+    publish(witness, &value)
+}
+
+fn value(witness: &NotOffered) -> Result<Value> {
     let value = Refusal::new(
         &witness.request_id,
         &witness.name,
@@ -113,7 +119,22 @@ pub(super) fn remember(witness: &NotOffered) -> Result<()> {
     )
     .and_then(|value| value.cli_record())
     .ok_or("Invalid pre-input refusal binding")?;
-    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
+/// Only the original live, untyped witness may mint the opted-in terminal form.
+/// Missing identity still spends the UUID, but never yields a positive proof.
+pub(super) fn remember_terminal(witness: &NotOffered) -> Result<Value> {
+    let mut value = value(witness)?;
+    value["refusal_schema"] = json!(2);
+    value["status"] = json!("not_offered");
+    if let Some(binding) = outcome::binding(witness) { value["delivery_binding"] = binding; }
+    publish(witness, &value)?;
+    outcome::decode(&serde_json::to_vec(&value).map_err(|e| e.to_string())?)
+}
+
+fn publish(witness: &NotOffered, value: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     if bytes.len() > refusal::BYTES {
         return Err("Pre-input refusal exceeds its bound".into());
     }
@@ -318,6 +339,25 @@ mod tests {
                 "aliases are not retry evidence"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pending_settings_retirement_keeps_the_original_directory_pinned() {
+        let private = tempfile::tempdir().unwrap();
+        let root = private.path().canonicalize().unwrap();
+        let witness = witness(&root, "a real composer draft");
+        remember(&witness).unwrap();
+        let original = Directory::open(witness.receipts.parent().unwrap()).unwrap();
+        let moved = root.join("replaced-receipts");
+        assert!(fs::rename(&original.path, &moved).is_err());
+        prepare(&witness).unwrap();
+        assert!(fs::rename(&original.path, &moved).is_err(), "retirement released directory custody");
+        let retained: Value = serde_json::from_slice(&fs::read(&witness.receipts).unwrap()).unwrap();
+        assert_eq!(retained["status"], "preparing");
+        assert_eq!(retained["request_id"], witness.request_id);
+        assert!(retained.get("refusal_schema").is_none());
+        original.verify().unwrap();
     }
 
     #[test]

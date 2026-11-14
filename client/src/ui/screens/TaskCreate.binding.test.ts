@@ -40,7 +40,7 @@ import TaskCreate from "./TaskCreate";
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.clearAllMocks(); });
 
-const fixes = { id: TEAM, project: "example-project", name: "Fixes" };
+const fixes = { id: TEAM, project: "example-project", name: "Fixes", status: "running" };
 const card = (project: string, over: Record<string, unknown> = {}) => ({ project, text: "Task title", handle: 1, blocked: false, read_only: false, recovery: false, error: "", ...over });
 function setup(project: () => string) {
   const host = document.createElement("div");
@@ -85,13 +85,13 @@ it("keeps the choice while the title is edited", async () => {
 });
 
 it("refuses a choice the form no longer offers and sends nothing", async () => {
-  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other" }], truncated: false, next: null });
+  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other", status: "running" }], truncated: false, next: null });
   f.setView(card("example-project"));
   const host = setup(() => "example-project");
   choose(host);
   expect(chooser(host)!.textContent).toContain("Fixes");
   // The team leaves the list while the form is open.
-  f.setList({ teams: [{ id: OTHER, project: "example-project", name: "Other" }], truncated: false, next: null });
+  f.setList({ teams: [{ id: OTHER, project: "example-project", name: "Other", status: "running" }], truncated: false, next: null });
   enter(host);
   await Promise.resolve();
   expect(f.create).not.toHaveBeenCalled();
@@ -99,7 +99,7 @@ it("refuses a choice the form no longer offers and sends nothing", async () => {
 });
 
 it("a reserved card keeps its destination and the chooser cannot change it", async () => {
-  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other" }], truncated: false, next: null });
+  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other", status: "running" }], truncated: false, next: null });
   f.setView(card("example-project", { recovery: true, team: TEAM }));
   const host = setup(() => "example-project");
   expect(chooser(host)!.disabled).toBe(true);
@@ -160,7 +160,7 @@ it("an answer for another project's card shows no not-queued notice", async () =
 });
 
 it("a notice naming another team than the one sent is not taken", async () => {
-  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other" }], truncated: false, next: null });
+  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other", status: "running" }], truncated: false, next: null });
   f.setView(card("example-project"));
   const created = "55555555-5555-4555-8555-555555555555";
   f.create.mockImplementationOnce(async () => {
@@ -177,7 +177,7 @@ it("a notice naming another team than the one sent is not taken", async () => {
 });
 
 it("a team chosen while the submit was in flight is kept", async () => {
-  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other" }], truncated: false, next: null });
+  f.setList({ teams: [fixes, { id: OTHER, project: "example-project", name: "Other", status: "running" }], truncated: false, next: null });
   f.setView(card("example-project"));
   let finish!: (value: boolean) => void;
   f.create.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }));

@@ -61,7 +61,7 @@ function toasts() {
   return () => [...document.querySelectorAll<HTMLElement>("[data-toasts] .toast")].map((toast) => toast.textContent ?? "");
 }
 
-const fixes = { id: TEAM, project: "example-project", name: "Fixes" };
+const fixes = { id: TEAM, project: "example-project", name: "Fixes", status: "running" };
 const card = (over: Record<string, unknown> = {}) => ({ project: "example-project", text: "Task title", handle: 1, blocked: false, read_only: false, recovery: false, error: "", ...over });
 const row = (uuid: string, over: Record<string, unknown> = {}) => ({ uuid, stage: "todo", writable: true, title: uuid === FIRST ? "First task" : "Second task", ...over });
 const settle = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); };

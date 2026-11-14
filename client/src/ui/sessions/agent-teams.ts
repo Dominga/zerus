@@ -67,6 +67,42 @@ export function agentTeamProjects(groups: Map<string, Session[]>, index: Readonl
 /** A live, quiet member without its first conversation is waiting for work. */
 export function agentTeamSession(s: Session, member: AgentTeamMember | undefined, online: boolean): Session {
   if (!member || member.lead || !online || s.state !== "running" || s.processState !== "running" || s.conversationId
-    || s.status !== "ready" || s.attention || s.backgroundJobs || s.draft) return s;
+    || s.status !== "ready" || s.attention || (s.backgroundJobs ?? 0) > 0 || s.draft) return s;
   return { ...s, caption: "Waiting for a task" };
+}
+
+/** Team membership supplies the same display parent relation as a native link. */
+export function agentTeamParents(index: ReadonlyMap<string, AgentTeamMember>): Map<string, string> {
+  const leads = new Map<string, string>();
+  for (const [key, member] of index) if (member.lead) leads.set(member.team, key);
+  const parents = new Map<string, string>();
+  for (const [key, member] of index) {
+    const lead = leads.get(member.team);
+    if (!member.lead && lead && lead !== key) parents.set(key, lead);
+  }
+  return parents;
+}
+
+/** Keep ordinary order, ordering each team's own children by role and member. */
+export function orderTeamSessions(sessions: readonly Session[], index: ReadonlyMap<string, AgentTeamMember> | undefined): readonly Session[] {
+  if (!index?.size) return sessions;
+  const groups = new Map<string, Session[]>();
+  for (const s of sessions) {
+    const member = index.get(s.key);
+    if (member) {
+      const group = groups.get(member.team) ?? [];
+      group.push(s); groups.set(member.team, group);
+    }
+  }
+  for (const group of groups.values()) group.sort((a, b) => {
+    const x = index.get(a.key)!, y = index.get(b.key)!;
+    return Number(y.lead) - Number(x.lead) || x.role.localeCompare(y.role) || x.member.localeCompare(y.member);
+  });
+  const result: Session[] = [], seen = new Set<string>();
+  for (const s of sessions) {
+    const member = index.get(s.key);
+    if (!member) result.push(s);
+    else if (!seen.has(member.team)) { seen.add(member.team); result.push(...groups.get(member.team)!); }
+  }
+  return result;
 }

@@ -58,6 +58,15 @@ fn boot() -> anyhow::Result<String> {
     Ok(boot)
 }
 fn system() -> anyhow::Result<(String, String)> {
+    #[cfg(test)]
+    if let Some(machine) = FIXTURE_MACHINE.with(|value| value.borrow().clone()) {
+        return Ok((machine, boot()?));
+    }
+    #[cfg(test)]
+    anyhow::ensure!(
+        !NATIVE_MACHINE_UNAVAILABLE.with(std::cell::Cell::get),
+        "Native machine identity unavailable"
+    );
     static MACHINE: OnceLock<String> = OnceLock::new();
     if let Some(machine) = MACHINE.get() {
         return Ok((machine.clone(), boot()?));
@@ -566,6 +575,12 @@ pub(super) fn remove_at<T>(
         |reason| lost(&directory, epoch.as_deref(), Some(&key), reason),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FIXTURE_MACHINE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static NATIVE_MACHINE_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+import { taskTeamChoices } from "../teams/task-choices";
 import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { createCard, newCard } from "../../store/taskForms";
@@ -25,9 +26,7 @@ export default function TaskCreate(props: { project?: string; scope: string; bac
   createEffect(on(() => props.project, () => recovery.dismiss(), { defer: true }));
   let field!: HTMLInputElement;
   /** The project's teams on the list's first page, while the preview is on: the card can join one's queue. */
-  const teamChoices = createMemo(() => teams.available() === true
-    ? (teams.list()?.teams ?? []).filter((candidate) => candidate.project === props.project).slice(0, 8)
-    : []);
+  const teamChoices = createMemo(() => taskTeamChoices(teams.available(), teams.list()?.teams ?? [], props.project));
   createEffect(on(() => [props.project, props.accessible] as const, ([project, accessible]) => { setCreating(false); newCard.follow(project && accessible ? { project, task: "", mode: "new_card" } : undefined); }));
   onCleanup(() => newCard.follow());
   const view = () => newCard.view()?.project === props.project ? newCard.view() : undefined;
@@ -38,7 +37,7 @@ export default function TaskCreate(props: { project?: string; scope: string; bac
   createEffect(on(binding, () => { setTeam(""); setRefusal(""); }, { defer: true }));
   /** A reserved card keeps the destination it was reserved with. */
   const reserved = () => view()?.recovery ? view()?.team ?? "" : undefined;
-  const reservedName = () => teamChoices().find((candidate) => candidate.id === reserved())?.name ?? reserved() ?? "";
+  const reservedName = () => teamChoices().find((candidate) => candidate.id === reserved())?.label ?? reserved() ?? "";
   createEffect(on(() => view()?.handle, () => { if (view()?.text || view()?.recovery) setCreating(true); }));
   createEffect(on(() => [creating(), view()?.handle] as const, () => { if (creating() && view()) queueMicrotask(() => field?.focus()); }));
   const submit = async () => {
@@ -51,14 +50,14 @@ export default function TaskCreate(props: { project?: string; scope: string; bac
       return;
     }
     setRefusal(""); recovery.dismiss();
-    const name = teamChoices().find((candidate) => candidate.id === chosen)?.name ?? chosen;
+    const name = teamChoices().find((candidate) => candidate.id === chosen)?.label ?? chosen;
     if (await createCard(project, chosen ? false : props.backlog, selected(), chosen || undefined)) {
       // The answer settles this submit only: its project's card, and the team
       // choice it sent, never one the person made meanwhile.
       setCreating(false); if (team() === chosen) setTeam("");
       const done = newCard.view();
       const id = done?.project === project ? done.created : undefined, refused = done?.not_queued;
-      if (id && refused && refused.task === id && (!chosen || refused.team === chosen)) recovery.show({ project, task: id, team: refused.team, name: refused.team === chosen ? name : teamChoices().find((candidate) => candidate.id === refused.team)?.name ?? refused.team, reason: refused.reason, code: refused.code ?? "" });
+      if (id && refused && refused.task === id && (!chosen || refused.team === chosen)) recovery.show({ project, task: id, team: refused.team, name: refused.team === chosen ? name : teamChoices().find((candidate) => candidate.id === refused.team)?.label ?? refused.team, reason: refused.reason, code: refused.code ?? "" });
       if (id) requestTaskDescription(project, id);
     }
   };
@@ -71,7 +70,7 @@ export default function TaskCreate(props: { project?: string; scope: string; bac
         value={reserved()!} onChange={() => {}} options={[{ value: reserved()!, textValue: reservedName(), label: () => <TeamChip name={reservedName()} /> }]} />
     </Show><Show when={creating() && reserved() === undefined && teamChoices().length}>
       <Dropdown class="field tk-team" aria-label={tr("Team")} title={tr("Send the new task to a team's queue")}
-        value={team()} onChange={(value) => { setTeam(value); setRefusal(""); }} options={[{ value: "", label: tr("No team") }, ...teamChoices().map((candidate) => ({ value: candidate.id, textValue: candidate.name, label: () => <TeamChip name={candidate.name} /> }))]} />
+        value={team()} onChange={(value) => { setTeam(value); setRefusal(""); }} options={[{ value: "", label: tr("No team") }, ...teamChoices().map((candidate) => ({ value: candidate.id, textValue: candidate.label, label: () => <TeamChip name={candidate.label} /> }))]} />
     </Show><button class="tk-sq add" aria-label={tr("New task")} title={tr("New task")} disabled={!props.project || !props.accessible} onClick={() => { setCreating(true); queueMicrotask(() => field?.focus()); }}><Icon name="plus" size={16} /></button>{props.children}</div>
     <Show when={(refusal() || newCard.error()) && creating()}><div class="tk-create-error" role="alert">{refusal() || newCard.error()}</div></Show>
     <Show when={recovery.notice()?.project === props.project ? recovery.notice() : undefined}>{(created) => <div class="tk-create-error" role="alert" data-not-queued>

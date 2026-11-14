@@ -744,6 +744,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
     let mut heartbeat = Instant::now() + HEARTBEAT;
+    let mut readiness_publication = lifecycle::ReadinessPublication::default();
     let mut fleet_publication = fleet::Publication::default();
     let mut collect_at = Instant::now();
     let mut failed = false;
@@ -882,6 +883,14 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     );
                 }
             }
+            // Readiness may settle after the switch's status reply. Reuse the
+            // watch heartbeat on a change instead of waiting ten seconds or
+            // adding steady-state client polls. This grants no writer authority.
+            readiness_publication.refresh(
+                background.as_ref().map(background::Runtime::readiness),
+                Instant::now(),
+                &mut heartbeat,
+            );
             frontend.tick(&location);
             store.recover_operation_custody(&location);
             if let Some(runtime) = task_runtime.as_mut() {
@@ -978,18 +987,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     )?;
                     value["frontend_read_delivery"] = frontend.status();
                     value["notification_controls"] = notification_controls.projection(&store);
-                    value["lifecycle"]["mode"] = if background_mode {
-                        "background"
-                    } else {
-                        "passive"
-                    }
-                    .into();
                     value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     if let Some(runtime) = &background {
                         runtime.decorate(&mut value);
                     } else if background_blocked {
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
+                    lifecycle::decorate_mode(&mut value, background_mode);
                     upgrade.decorate(&mut value);
                     #[cfg(any(windows, all(test, target_os = "linux")))]
                     if hello.op == "status" && hello.request.is_none() {
@@ -1699,18 +1703,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 )?;
                 value["frontend_read_delivery"] = frontend.status();
                 value["notification_controls"] = notification_controls.projection(&store);
-                value["lifecycle"]["mode"] = if background_mode {
-                    "background"
-                } else {
-                    "passive"
-                }
-                .into();
                 value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 if let Some(runtime) = &background {
                     runtime.decorate(&mut value);
                 } else if background_blocked {
                     value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                 }
+                lifecycle::decorate_mode(&mut value, background_mode);
                 upgrade.decorate(&mut value);
                 fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
                 heartbeat = Instant::now() + HEARTBEAT;

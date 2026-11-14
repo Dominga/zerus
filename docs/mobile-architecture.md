@@ -233,6 +233,17 @@ with the expected UUID, rather than bypassing its guard. Copying a gateway
 configuration or resetting native machine identity must not execute a previously
 bound request on a different machine. Discovery may use a fixed private
 `swarm __mobile-peer-identity --json` helper returning only native UUID and name.
+Windows provides these target identity/local helpers with the same closed argv
+and native UUID checks. Its gateway discovery, peer forwarding and transport
+supervisor remain unsupported. After consuming the bounded JSON envelope to EOF,
+the target dispatches in the same process with an anonymous payload file as stdin.
+On Windows this is a one-way `STD_INPUT_HANDLE` handoff retained until process
+exit, matching Unix's `dup2`; it adds no helper child or custody keeper. Rust's
+shared stdin buffer is exhausted before the handoff, and its mutex is released
+before native dispatch. Unsupported native operations retain their own refusals.
+The [Rust 1.99.1 Windows stdin implementation](https://github.com/rust-lang/rust/blob/1.99.1/library/std/src/sys/stdio/windows.rs)
+reads the current [standard handle](https://learn.microsoft.com/en-us/windows/console/setstdhandle)
+for each raw read. Native Windows CI exercises payload reads after envelope EOF.
 Production connector calls use `hgs swarm mobile-peers --json` and
 `hgs swarm mobile-peer --json`. The existing `swarm` namespace rejects unknown
 subcommands on older binaries. This remains safe when a binary is downgraded

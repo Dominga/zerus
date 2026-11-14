@@ -10,10 +10,12 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { attachmentPin, attachmentUnpin, inTauri, openTaskAttachment } from "../../bridge";
 import { notify } from "../../store/actions";
 import { taskDetails, type TaskEntry } from "../../store/taskDetails";
+import { tasks } from "../../store/tasks";
 import { taskFileCard, taskFiles } from "../../store/taskFiles";
 import type { Fetched } from "../../types";
 import { TaskWorkflow } from "./TaskWorkflow";
 import { TaskTitle } from "./TaskTitle";
+import { TaskExecution } from "./TaskExecution";
 import { taskRenameRequest, setTaskRenameRequest, taskDescriptionRequest, setTaskDescriptionRequest } from "../../store/taskNavigation";
 import { TaskInput } from "./TaskInput";
 import { setMenu } from "../../store/ui";
@@ -88,6 +90,7 @@ export function TaskInspector(props: { project: string; task: Task; presentation
     <Show when={tab() !== "Task"}><div class="tv-section"><span class="eyebrow">{tab()}</span><span class="grow" /><button class="link tv-back" onClick={() => setTab("Task")}><Icon name="chevron-left" size={12} />{tr("Task and discussion")}</button></div></Show>
     <Show when={taskDetails.error()}><p class="notice danger" role="alert">Task could not be read: {taskDetails.error()}</p><button class="btn small" disabled={taskDetails.loading()} onClick={taskDetails.refresh}>{tr("Refresh")}</button></Show>
     <Show when={detail()} fallback={<p class="tasks-empty">{taskDetails.loading() ? tr("Loading task…") : tr("Task details are unavailable.")}</p>}>{(d) => <>
+      <TaskExecution execution={d().execution} stale={!!taskDetails.error() || tasks.project() === props.project && !!tasks.error()} />
       <For each={d().unknownAttempts}>{(attempt) => <div class="tv-blocker"><Icon name="triangle-alert" size={13} /><span>{tr("Attempt delivery is unknown")} <code>{attempt}</code></span><span class="grow" /><button class="btn small" disabled={!d().writable || !!writingTask()} onClick={(e) => requestAttemptCancellation(props.project, d(), attempt, e.currentTarget)}>{tr("Abandon attempt…")}</button></div>}</For>
       <Show when={d().stage === "active" && !d().started}><p class="notice">Dispatched to {assignmentLabel(d())} — start unconfirmed</p></Show>
       <Show when={tab() === "Task"}>

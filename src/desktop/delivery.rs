@@ -967,13 +967,13 @@ impl Runtime {
             && self.jobs.is_empty()
             && self.leases.iter().all(|lease| lease.strong_count() == 0)
     }
-    fn reads_ready(&self) -> bool {
+    pub(super) fn reads_ready(&self) -> bool {
         self.writer
             && !self.stopping
             && self.read_error.is_none()
             && self.read_status["recovery_error"] == false
     }
-    fn approvals_ready(&self) -> bool {
+    pub(super) fn approvals_ready(&self) -> bool {
         self.writer && !self.stopping && self.policy.is_some() && self.approval_error.is_none()
     }
     fn component(&self, ready: bool, policy: Option<bool>) -> Value {

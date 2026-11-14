@@ -341,6 +341,12 @@ pub(super) fn read_metadata(name: &str) -> Result<Value> {
     read_metadata_at(&path, name)
 }
 
+/// One already-selected native slot, without telemetry repairs or observations.
+/// The returned bytes add no launch/input authority.
+pub(super) fn read_selected_metadata(name: &str) -> Result<Value> {
+    read_metadata_at(&record_path(name), name)
+}
+
 fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {
     let bytes = record_bytes(path, Some(ID_RECORD_BYTES)).map_err(|e| not_found(name, e))?;
     let record = verify_metadata_at(path, name, &bytes)?;

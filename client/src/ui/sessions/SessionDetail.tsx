@@ -13,6 +13,7 @@ import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { KeepWarmChip } from "./KeepWarmChip";
+import { ShowInListButton } from "./ShowInList";
 import { AgentBadge, MachineBadge, captionText, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { teams } from "../../store/teams";
@@ -134,6 +135,7 @@ function Header() {
     <header class="detail-head">
       <div class="dh-row1">
         <h1 class="ell" title={s().name}>{s().project} / {s().title}<Show when={subagentOpen()}> / {s().subagents?.find((k) => k.id === subagentOpen())?.name}</Show></h1>
+        <ShowInListButton />
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title={tr("Waiting for the remote read")} /></Show>
         <span class="grow" />
         <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>

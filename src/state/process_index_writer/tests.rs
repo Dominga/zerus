@@ -2,13 +2,37 @@ use super::*;
 use std::fs;
 use std::process::{Child, Command};
 
-fn fixture() -> (tempfile::TempDir, PathBuf, Value) {
-    let root = tempfile::tempdir().unwrap();
+mod identity;
+
+struct Root {
+    directory: tempfile::TempDir,
+    _machine: identity::Machine,
+}
+impl Root {
+    fn new() -> Self {
+        Self {
+            directory: tempfile::tempdir().unwrap(),
+            _machine: identity::Machine::new(),
+        }
+    }
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+fn fixture() -> (Root, PathBuf, Value) {
+    let root = Root::new();
     let scope = scope(root.path()).unwrap();
+    let record = record(&scope.boot);
+    let path = root
+        .path()
+        .join(format!("{}.json", hash(b"claude/private/one")));
+    (root, path, record)
+}
+fn record(boot: &str) -> Value {
     let mut record = json!({"version":1,"name":"claude/private/one","agent":"claude","session_id":uuid::Uuid::new_v4().to_string(),"run_id":"original-run","conversation_id":null,"pid":42,"process_start":"private-start","supervisor":{"pid":41,"start":"private-supervisor"}});
     let pin = index::pins::Pin::capture(
         &record,
-        &scope.boot,
+        boot,
         Process {
             pid: 42,
             birth: Birth::Linux(100),
@@ -21,10 +45,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, Value) {
     )
     .unwrap();
     record[index::pins::FIELD] = serde_json::to_value(pin).unwrap();
-    let path = root
-        .path()
-        .join(format!("{}.json", hash(b"claude/private/one")));
-    (root, path, record)
+    record
 }
 fn write(root: &Path, path: &Path, record: &mut Value) -> SourceResult<()> {
     write_at(root, path, record, |record| {
@@ -149,6 +170,7 @@ fn canonical_removal_retires_the_exact_binding_without_replaying_the_file_action
 }
 #[test]
 fn original_spawn_captures_the_precise_child_and_correlated_supervisor() {
+    let _unavailable = identity::Unavailable::new();
     struct Owned(Child);
     impl Drop for Owned {
         fn drop(&mut self) {
@@ -161,7 +183,7 @@ fn original_spawn_captures_the_precise_child_and_correlated_supervisor() {
     let own = std::process::id();
     let mut record = json!({"name":"claude/private/spawn","agent":"claude","session_id":uuid::Uuid::new_v4().to_string(),"run_id":"owned-run","pid":child.0.id(),"process_start":super::super::storage::process_start(child.0.id()),"supervisor":{"pid":own,"start":super::super::storage::process_start(own)}});
     capture_spawn(&mut record, &identity);
-    let pin = index::pins::Pin::read(&record, &system().unwrap().1)
+    let pin = index::pins::Pin::read(&record, &boot().unwrap())
         .unwrap()
         .expect("capture must happen at original spawn");
     assert_eq!(pin.child.pid, child.0.id());
@@ -445,6 +467,7 @@ fn bootstrap_never_upgrades_a_legacy_coarse_pid_record() {
 #[test]
 #[ignore = "explicit private disk-backed write-cost benchmark"]
 fn record_write_cost_at_10k_and_100k_sessions() {
+    let _machine = identity::Machine::new();
     use std::time::Instant;
     let base =
         std::env::var_os("PROCESS_INDEX_BENCH_ROOT").expect("explicit private benchmark directory");
@@ -578,7 +601,7 @@ fn record_write_cost_at_10k_and_100k_sessions() {
         );
         println!(
             "PROCESS_WRITER_BENCH {}",
-            json!({"sessions":count,"canonical_bytes":fs::metadata(&path).unwrap().len(),"database_bytes":fs::metadata(cache_path(root).unwrap()).unwrap().len(),"cold_owner_open_ms":cold_open_ms,"baseline_canonical_fsync":percentiles(baseline),"stable_binding_write":percentiles(stable),"binding_change_write":percentiles(changed),"stable_added_paired":percentiles(stable_added),"change_added_paired":percentiles(changed_added),"foreground_inventory_reads":0,"inventory_evidence":"source review: no directory inventory API in the writer path","scope":"debug native publisher with canonical source fsync; 10 warmups then 100 samples; native system identity cached after first open; no process proof"})
+            json!({"sessions":count,"canonical_bytes":fs::metadata(&path).unwrap().len(),"database_bytes":fs::metadata(cache_path(root).unwrap()).unwrap().len(),"cold_owner_open_ms":cold_open_ms,"baseline_canonical_fsync":percentiles(baseline),"stable_binding_write":percentiles(stable),"binding_change_write":percentiles(changed),"stable_added_paired":percentiles(stable_added),"change_added_paired":percentiles(changed_added),"foreground_inventory_reads":0,"inventory_evidence":"source review: no directory inventory API in the writer path","scope":"debug native publisher with canonical source fsync; 10 warmups then 100 samples; synthetic machine identity and native boot; no process proof"})
         );
     }
 }

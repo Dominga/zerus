@@ -1805,6 +1805,8 @@ they return retained text, marking shortened tails as truncated. A pruned job
 or missing native log returns
 an explicit unavailable result. Earlier history can be read from the provider's
 existing logs where available, rather than accumulating in every session record.
+Native completion metadata alone does not establish an empty output. A native
+result that explicitly records empty text remains a valid empty result.
 
 Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
 stopped or unverifiable parent sessions. Recorded children contribute no current
@@ -1917,6 +1919,13 @@ Changing the state, machine, project or account filter only changes the session 
 The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.
+
+**Show in session list**, beside the conversation title, opens the Sessions
+panel, expands the row's groups and centers it without changing the open
+conversation. Hiding filters are adjusted with a brief notice. The row pulses
+twice, or uses a static highlight with reduced motion. Archived conversations
+open in Archive; an already-known selection outside its loaded page is shown
+with an explicit notice.
 
 When the open session is terminated or removed, the conversation pane returns
 to **Select a session**. Polling, new sessions and filter changes keep this
@@ -2259,7 +2268,7 @@ malformed or unsupported native IDs remain unknown and are never exposed as deli
 A verified submitted original returns body-free metadata, its submission time,
 queue flag and an exact native message ID only when the original records one.
 This proves admission to the original input path, not completion of agent work.
-Every other readable outcome is `status: unknown` with a bounded reason. Missing,
+In the default schema 1, every other readable outcome is `status: unknown` with a bounded reason. Missing,
 corrupt, oversized, pending, unbound or mismatched evidence never means Not sent
 and never authorizes replay. New sends record their immutable machine/session
 binding before delivery; older receipts without that binding stay unknown even
@@ -2273,6 +2282,35 @@ state stays missing. Its existing computer-identity check is read-only too.
 The `delivery-receipt-v1` capability marker gates remote forwarding to prevent an
 older CLI from treating the command as a launch. This CLI operation is the first
 part of mobile ordinary-send recovery; connector and phone support ship separately.
+
+The `native-send-outcome-v2` capability advertises an opt-in terminal refusal for
+ordinary Claude, Codex and Kimi sends:
+`hgs send SESSION --delivery-outcome-v2 --json`. A live `NotOffered` witness under
+the original native input lock, before any settings key, input marker or payload,
+can publish `refusal_schema: 2`, `status: not_offered` in the same private input
+receipt store. Its machine, durable session and provider binding comes from the
+exact selected record under that lock. A missing binding leaves an unknown
+outcome and a spent UUID. No other error or receipt absence establishes this proof.
+
+An exact positively bound refusal prints a schema-2 JSON outcome on stdout while
+retaining exit status 1. It carries `proof: native_input_lock`, `request_id`,
+`name`, `machine_id`, `session_id`, `run_id`, `conversation_id`, `provider`, the
+unchanged raw-stdin SHA-256 as `native_digest`, and a bounded `reason`. Submitted
+sends retain their existing successful receipt shape. Exit codes and stderr
+sentences carry no negative proof. This opt-in terminal negative spends its UUID:
+an exact opt-in duplicate returns the original outcome without keys or writes,
+and an ordinary legacy send cannot re-admit it. A person can edit or discard the
+kept message and make a separate explicit send with a new UUID. Ordinary sends
+without the option retain today's retryable `refused_before_input` schema.
+
+The same read-only delivery lookup accepts optional `schema: 2`. An exact
+terminal negative returns schema 2 and `status: not_offered` with its closed
+proof and original bindings; `request_id` identifies the read and
+`message_request_id` identifies the send. It reads at most 8 KiB for the negative
+form and never upgrades an old retryable refusal. Unsupported, corrupt, missing,
+unbound, changed or possibly offered evidence stays unknown. The default schema-1
+lookup remains unchanged. Connector and phone adoption of this mode ships in
+separate compatible slices; this CLI contract alone changes no mobile state.
 
 Recent attachment delivery projection uses the private, rebuildable
 `delivery-receipts-v1.sqlite3` locator in the state directory. A refresh reads
@@ -5002,7 +5040,15 @@ request's receipt and never submits, even when no receipt exists. Only a task
 positively without floor or attempt, whose bootstrap gate is positively open
 (a member not yet known current, or the person's hold), keeps the legacy route,
 checked again there; a task that may hold a floor or attempt is never sent
-that way. A reopen of a managed task keeps the person's text as a discussion
+that way.
+
+For `unroutable`, `unverified` and `deadline`, the refusal includes a catalog
+computer label marked diagnostic beside the exact UUID when available,
+explains the offline-writer dependency, and points to
+`hgs task cutover --project P --json`. A catalog label grants no identity or
+route. Desktop Start shows the complete executor reason as its primary notice.
+
+A reopen of a managed task keeps the person's text as a discussion
 note bound to its attempt's ID, saved together with that attempt; the note is
 not queued feedback and is never delivered by itself, and only the receipt
 moves the task back to In progress. Feedback to a task In progress
@@ -5019,6 +5065,14 @@ attempts refuse. Other unknown attempts still hold the task. A later send
 uses a new attempt, and an old request is never replayed.
 The reply contains one task row; read its audit through the bounded task
 history command.
+
+The task inspector's **Saved execution** section shows the saved attempt,
+generation, requirement revisions, executor and recorded events. Submitted does
+not mean begun, and recorded begin does not prove the agent is still working.
+Unknown, conflicting or unexplained evidence remains visible; failed refreshes
+mark the retained record as stale. Missing or unsupported execution details,
+live execution state and the executor queue remain unavailable. The project's
+To do order is separate from an executor queue. This section adds no controls.
 
 The task view shows each unknown attempt with **Abandon attempt…**, followed
 by a separate confirmation. A team-owned task requires the person's command
@@ -8394,7 +8448,12 @@ now (a `queued` user row, a `queued_command` attachment, `remove` or `dequeue`)
 never proves a later send. A new conversation with no transcript yet counts
 its settled composer emptying after Enter (`native: composer`). Both waits
 share one 8-second window from the paste and hold no state lock, so other
-sessions' hooks run meanwhile. The send's `input_typing` marker on the session
+sessions' hooks run meanwhile. Transcript proof reads use regular, no-follow,
+nonblocking sources, pin the original native file object and verify the named
+object again after each bounded read. Appends remain valid; replaced, truncated
+or unreadable sources stay unknown and never fall back to composer-only proof.
+The existing cumulative 16 MiB read budget does not limit earlier transcript
+history. The send's `input_typing` marker on the session
 keeps every other input out until it ends (other sends and session actions,
 Terminal input and Clear input). Its term starts again with the window, after
 the paste, so slow work before the paste never lets it lapse inside the window;
@@ -8779,9 +8838,17 @@ It is false when the service shares its console with another process, such as
 the terminal it was started from, when it had no console, and on Linux and
 macOS. It is diagnostic only; readiness never depends on it.
 
-`lifecycle.mode` reports the running command's `passive` or `background`
-selection independently of worker admission. On all three desktop platforms, `registration --json
---background` renders the explicit background variant without installing it;
+`lifecycle.mode` retains the running command's requested `passive` or `background`
+selection independently of worker admission. `lifecycle.requested_mode` is an
+explicit alias of that legacy field. `lifecycle.effective_mode` is `background`
+only while the existing ownership and presence status show an active
+service-owned writer; otherwise it is `passive`, including a blocked start or a
+settled revoke. A draining writer remains effective until it stops. These are
+diagnostics, not writer authority or proof that every background component is
+ready; use `lifecycle.background` for component readiness.
+
+On all three desktop platforms, `registration --json --background` renders the
+explicit background variant without installing it;
 `registration mode-check --json` checks the actual installer caller ancestry and
 foreground terminal or installed frontend on Linux, macOS and Windows, without
 granting service ownership. Windows requires a retained installed frontend

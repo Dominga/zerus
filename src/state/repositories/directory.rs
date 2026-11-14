@@ -24,6 +24,11 @@ thread_local! { static SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const
 // Its callers are the fence probe (Linux) and the task refusal tests (Unix).
 #[cfg(all(test, unix))]
 pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
+    // Fixtures can use macOS's /var or /tmp aliases; Directory holds canonical paths.
+    // An absent boundary is a fixture error, never a silently unarmed fault.
+    let path = path.map(|path| {
+        crate::platform::canonical(path).expect("fixture sync directory must already exist")
+    });
     SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }
 
@@ -653,6 +658,34 @@ impl Directory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_sync_fault_matches_a_private_directory_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        std::fs::create_dir(path.join("original")).unwrap();
+        std::fs::create_dir(path.join("unrelated")).unwrap();
+        std::os::unix::fs::symlink(path.join("original"), path.join("alias")).unwrap();
+        let original = Directory::open(&path.join("original")).unwrap();
+        let unrelated = Directory::open(&path.join("unrelated")).unwrap();
+
+        fail_publication_sync(Some(path.join("alias")));
+        let other = unrelated.write_new("other", b"unrelated");
+        let published = original.write_new("receipt", b"visible but unconfirmed");
+        let synced = original.sync();
+        fail_publication_sync(None);
+
+        other.unwrap();
+        assert_eq!(published.unwrap_err(), "fixture directory sync failure");
+        assert_eq!(synced.unwrap_err(), "fixture directory sync failure");
+        assert_eq!(
+            std::fs::read(path.join("original/receipt")).unwrap(),
+            b"visible but unconfirmed"
+        );
+        original.sync().unwrap();
+        original.write_new("after", b"confirmed").unwrap();
+    }
 
     #[test]
     fn existing_destination_is_never_replaced() {

@@ -54,6 +54,11 @@ class NativeCodexInput(unittest.TestCase):
     def screen(self):
         return self.tmux('capture-pane', '-p', '-t', self.pane)
 
+    def test_native_refusal_has_an_opted_in_terminal_outcome(self):
+        import native_send_outcome
+        native_send_outcome.refused_draft(self, self.name, self.record, self.screen,
+                                         lambda: len(self.server.raw_requests))
+
     def test_id_pending_settings_then_message_makes_one_model_call_and_keeps_defaults(self):
         self.pending_message(named=True)
 

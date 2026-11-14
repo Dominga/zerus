@@ -16,6 +16,7 @@ use std::time::Duration;
 pub(crate) mod composer;
 mod diagnostic;
 mod refusal;
+pub(in crate::state) mod outcome;
 pub(crate) mod settle;
 pub(crate) mod task_refusal;
 
@@ -1320,7 +1321,8 @@ pub(super) fn safe_filename(name: &str, index: usize) -> String {
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
-    if args.len() != 2 || args[1] != "--json" {
+    let terminal_outcome = args.len() == 3 && args[1] == "--delivery-outcome-v2" && args[2] == "--json";
+    if !terminal_outcome && (args.len() != 2 || args[1] != "--json") {
         return Err("usage: hgs send <session> --json (JSON from stdin)".into());
     }
     let mut input = Vec::new();
@@ -1335,6 +1337,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if let Some(result) = native_send::front(&PublicSend(()), &args[0], &input) {
         println!("{}", result?);
         return Ok(0);
+    }
+    if terminal_outcome {
+        return match submit_core(&args[0], &input, Origin::Person, true, true) {
+            Ok(receipt) => { println!("{receipt}"); Ok(0) }
+            Err(Failure::TerminalRefusal(value)) => {
+                println!("{value}");
+                eprintln!("hgs: Message was not sent: {}", string(&value, "reason"));
+                Ok(1)
+            }
+            Err(Failure::NotOffered(witness)) => Err(witness.reason),
+            Err(Failure::Unknown(error)) => Err(error),
+        };
     }
     let receipt = submit_with(&args[0], &input, Origin::Person, true)?;
     println!("{receipt}");
@@ -1602,10 +1616,11 @@ enum Origin<'a> {
 /// A keep-warm ping (`keep_warm::TEXT`) for ping `id`. Like a task reply it
 /// tells a refusal before any input from a possibly delivered ping.
 pub(super) fn submit_keep_warm(name: &str, input: &[u8], id: &str) -> Submission {
-    match submit_core(name, input, Origin::KeepWarm(id), false) {
+    match submit_core(name, input, Origin::KeepWarm(id), false, false) {
         Ok(receipt) => Submission::Receipt(receipt),
         Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
         Err(Failure::Unknown(error)) => Submission::Unknown(error),
+        Err(Failure::TerminalRefusal(_)) => Submission::Unknown("Terminal refusal is unavailable to internal callers".into()),
     }
 }
 
@@ -1618,9 +1633,10 @@ pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
 }
 
 fn submit_with(name: &str, input: &[u8], origin: Origin, retain_refusal: bool) -> Result<Value> {
-    submit_core(name, input, origin, retain_refusal).map_err(|failure| match failure {
+    submit_core(name, input, origin, retain_refusal, false).map_err(|failure| match failure {
         Failure::NotOffered(witness) => witness.reason.clone(),
         Failure::Unknown(error) => error,
+        Failure::TerminalRefusal(_) => "Terminal refusal is unavailable to internal callers".into(),
     })
 }
 
@@ -1684,10 +1700,11 @@ pub(crate) enum Submission {
 /// `submit` for a task reply that must tell a refusal before any input from
 /// one that may have delivered it.
 pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
-    match submit_core(name, input, Origin::Person, false) {
+    match submit_core(name, input, Origin::Person, false, false) {
         Ok(receipt) => Submission::Receipt(receipt),
         Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
         Err(Failure::Unknown(error)) => Submission::Unknown(error),
+        Err(Failure::TerminalRefusal(_)) => Submission::Unknown("Terminal refusal is unavailable to internal callers".into()),
     }
 }
 
@@ -1695,6 +1712,8 @@ pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
 enum Failure {
     NotOffered(Box<NotOffered>),
     Unknown(String),
+    /// An opted-in, durably spent negative, validated from its original store.
+    TerminalRefusal(Value),
 }
 
 /// What the receipt store already holds for a request ID, read under the
@@ -1765,6 +1784,16 @@ fn remember_before_input(typed: bool, witness: NotOffered, retain: bool) -> Fail
         }
     }
     failure
+}
+
+fn remember_send_refusal(typed: bool, witness: NotOffered, retain: bool, terminal: bool) -> Failure {
+    if terminal && !typed {
+        return match refusal::remember_terminal(&witness) {
+            Ok(value) => Failure::TerminalRefusal(value),
+            Err(error) => Failure::Unknown(format!("could not retain the terminal pre-input refusal: {error}")),
+        };
+    }
+    remember_before_input(typed, witness, retain)
 }
 
 /// zerus-iitw8.5: a Claude send releases the state lock while it waits for its
@@ -1839,6 +1868,7 @@ fn submit_core(
     input: &[u8],
     origin: Origin,
     retain_refusal: bool,
+    terminal_outcome: bool,
 ) -> std::result::Result<Value, Failure> {
     let unknown = Failure::Unknown;
     let request: Request =
@@ -1853,6 +1883,11 @@ fn submit_core(
         .join("input_receipts")
         .join(format!("{request_id}.json"));
     let mut guard = Some(lock(None).map_err(unknown)?);
+    if terminal_outcome {
+        if let Some(value) = outcome::duplicate(&root, name, &request, &digest) {
+            return Err(Failure::TerminalRefusal(value));
+        }
+    }
     match refusal::admit(&receipt_path, &digest, name, &request_id, &request, retain_refusal) {
         Existing::Absent => {}
         Existing::Submitted(receipt) => return Ok(receipt),
@@ -1873,12 +1908,12 @@ fn submit_core(
         waiting,
         dialog,
     };
-    let refused = |typed: bool, reason: String| remember_before_input(typed, witness(reason, false, None), retain_refusal);
+    let refused = |typed: bool, reason: String| remember_send_refusal(typed, witness(reason, false, None), retain_refusal, terminal_outcome);
     // The terminal gate's own refusal keeps its cause.
     let gated = |typed: bool, gate: Gate| {
         let waiting = matches!(gate, Gate::Waiting { .. });
         let dialog = gate.dialog().map(|d| d.name());
-        remember_before_input(typed, witness(gate.reason(), waiting, dialog), retain_refusal)
+        remember_send_refusal(typed, witness(gate.reason(), waiting, dialog), retain_refusal, terminal_outcome)
     };
     let record = checked_record_gate(name, &request).map_err(|gate| gated(typed, gate))?;
     if matches!(origin, Origin::Answer) && effort::pending_applies(&record) {

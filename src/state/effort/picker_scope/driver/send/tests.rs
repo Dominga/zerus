@@ -61,7 +61,7 @@ fn run_at(case: &str, symlinked_tmpdir: bool) {
 }
 #[test]
 fn claude_polling_lends_only_root_and_never_replaces_its_original() {
-    for case in ["poll-progress", "poll-request", "poll-pending-time", "poll-expired-marker",
+    for case in ["poll-progress", "poll-receipt", "poll-request", "poll-pending-time", "poll-expired-marker",
         "poll-replaced-root", "poll-reacquire-deadline", "poll-key", "poll-helper"] { run(case); }
 }
 #[test]
@@ -312,12 +312,14 @@ fn fixture() {
                 held.phase = Phase::Pasted; held.child = None;
                 held.marker = Some((json!(at), version)); Ok(())
             }).unwrap();
+            progress.paste_success.store(true, Ordering::Release);
             if case == "poll-helper" {
                 let charge = owner.charge();
                 assert!(owner.release_send_root().unwrap_err().contains("physically settled"));
                 assert!(root_file.try_lock_exclusive().is_err());
                 drop(charge);
             }
+            let cleanup = send_helpers::Cleanup::reserve(&owner, progress.clone()).unwrap();
             owner.release_send_root().unwrap();
             assert!(sid.try_lock_exclusive().is_err(), "SID must remain held while Root is lent");
             assert!(owner.snapshot().is_err(), "ordinary Scope operations require Root");
@@ -335,6 +337,7 @@ fn fixture() {
                 assert!(owner.retake_send_root(Instant::now() + Duration::from_millis(30)).is_err());
             }
             fs2::FileExt::unlock(&root_file).unwrap();
+            if case == "poll-receipt" { let mut foreign = value.clone(); foreign["opaque"] = json!(true); fs::write(&outer, foreign.to_string()).unwrap(); }
             if case == "poll-replaced-root" {
                 fs::rename(root().join(".lock"), root().join("old-lock")).unwrap();
                 fs::write(root().join(".lock"), "").unwrap();
@@ -358,6 +361,7 @@ fn fixture() {
                 _ => { assert!(owner.retake_send_root(owner.until).is_err()); }
             }
             assert!(sid.try_lock_exclusive().is_err());
+            cleanup.finish().unwrap();
         }
 
         "index-sticky" => {
@@ -764,7 +768,7 @@ fn fixture() {
         }
         _ => panic!("unknown Send fixture"),
     }
-    if case.starts_with("poll-") && !matches!(case.as_str(), "poll-progress" | "poll-helper") {
+    if case.starts_with("poll-") && !matches!(case.as_str(), "poll-progress" | "poll-helper" | "poll-receipt") {
         root_file.try_lock_exclusive().unwrap(); fs2::FileExt::unlock(&root_file).unwrap();
         assert!(sid.try_lock_exclusive().is_err());
     } else { assert!(root_file.try_lock_exclusive().is_err() && sid.try_lock_exclusive().is_err()); }

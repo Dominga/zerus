@@ -4,6 +4,7 @@ import datetime
 import http.server
 import json
 import struct
+import subprocess
 import zlib
 import os
 import re
@@ -465,6 +466,8 @@ class NativeHookedImagesClaude(NativeBusyClaude):
         hook = shlex.quote(str(claude.fixtures.HGS)) + ' __state hook'
         settings.setdefault('hooks', {})['UserPromptSubmit'] = [
             {'hooks': [{'type': 'command', 'command': hook, 'timeout': 60}]}]
+        if '_after_turn' in self._testMethodName:
+            settings['hooks']['Stop'] = [{'hooks': [{'type': 'command', 'command': hook, 'timeout': 60}]}]
         return settings
 
     def pending_images(self, *, after_turn=False, attached=False):
@@ -473,6 +476,10 @@ class NativeHookedImagesClaude(NativeBusyClaude):
             terminal_send(self, 'Complete the private preceding turn.')
             self.wait_for(lambda: self.accepted('Complete the private preceding turn.'))
             self.wait_for(lambda: self.composer() in ('❯', '❯\xa0'))
+            self.wait_for(lambda: json.loads(self.record_path.read_bytes()).get('activity') == 'idle')
+            current = json.loads(self.record_path.read_bytes())
+            self.assertEqual((current['run_id'], current['pid']), (self.run_id, self.record['pid']))
+            self.record = current
         defaults = self.root / '.claude/settings.json'
         before_defaults = defaults.read_bytes()
         text, attachments = image_message(self.root)

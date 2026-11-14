@@ -254,6 +254,7 @@ impl Publication {
     fn after_input(owner: &Arc<owner::Owner>, staged: &publication::Staged,
         directory: PathBuf, name: String) -> Result<Self> {
         let (record, version) = owner.snapshot()?;
+        receipt_current(owner)?;
         claude::owned_marker(owner, &record)?;
         claude::check_publication(owner, staged, &directory, &name, &record)?;
         Ok(Self { record, version, directory, name, sha: staged.content_sha()?,
@@ -339,6 +340,7 @@ impl Publication {
             source.verify()?;
         }
         if self.after_input {
+            receipt_current(owner)?;
             claude::owned_marker(owner, &self.record)?;
             claude::check_publication(owner, staged, &self.directory, &self.name, &self.record)?;
         }
@@ -510,6 +512,16 @@ fn mark_input(owner: &Arc<owner::Owner>, at: f64) -> Result<()> {
         held.phase = Phase::Marked;
         Ok(())
     })
+}
+
+pub(super) fn receipt_current(owner: &owner::Owner) -> Result<()> {
+    with(owner, |held| owner.with_scope(|scope| {
+        if held.receipt.as_ref().ok_or("Send lacks its original receipt")?.record(&scope.receipts)? != held.value
+            || held.value["status"] != "in_progress" {
+            return Err("Original Send receipt changed during polling".into());
+        }
+        Ok(())
+    }))
 }
 
 pub(super) fn parent_ready(owner: &Arc<owner::Owner>, phase: Phase) -> Result<()> {

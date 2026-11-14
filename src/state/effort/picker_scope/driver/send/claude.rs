@@ -12,6 +12,7 @@ pub(in crate::state::effort::picker_scope::driver) fn owned_marker(
             || owner.control.frame().operation != host::frame::Operation::Send
             || !matches!(held.phase, Phase::Pasted | Phase::Entered)
             || held.child.is_some()
+            || !held.progress.paste_success.load(Ordering::Acquire)
             || record["input_pending_request"] != h.request_id
             || held
                 .marker
@@ -190,11 +191,11 @@ pub(in crate::state::effort::picker_scope::driver) fn submit(
     owner.retake_send_root(deadline)?;
     check_marker(owner, &owner.snapshot()?.0)?;
     progress.confirmed.store(true, Ordering::Release);
+    retire(owner, true)?;
     with(owner, |held| {
         held.value["native"] = json!(proof.name());
         Ok(())
-    })?;
-    retire(owner, true)
+    })
 }
 
 /// Preserve the original UUID/payload as uncertain; never retry a paste or key.

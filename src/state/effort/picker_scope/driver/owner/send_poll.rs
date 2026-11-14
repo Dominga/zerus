@@ -44,6 +44,7 @@ impl Owner {
         if self.helpers.load(Ordering::Acquire) != 0 {
             return Err("Original Send helpers have not physically settled".into());
         }
+        send::receipt_current(self)?;
         self.with_scope(|scope| {
             let record = scope.current()?;
             send::claude::check_marker(self, &record)?;
@@ -114,6 +115,8 @@ impl Owner {
         scope.writer = Writer::Owned(writer);
         scope.record = original;
         scope.current()?;
-        send::claude::adopt_version(self, &record, &scope.record.version)
+        send::claude::adopt_version(self, &record, &scope.record.version)?;
+        drop(phase);
+        send::receipt_current(self)
     }
 }

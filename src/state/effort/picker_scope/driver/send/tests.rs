@@ -60,6 +60,11 @@ fn run_at(case: &str, symlinked_tmpdir: bool) {
     }
 }
 #[test]
+fn claude_polling_lends_only_root_and_never_replaces_its_original() {
+    for case in ["poll-progress", "poll-request", "poll-pending-time", "poll-expired-marker",
+        "poll-replaced-root", "poll-reacquire-deadline", "poll-key", "poll-helper"] { run(case); }
+}
+#[test]
 fn pending_child_requires_exact_parent_marker_receipt_and_original_kind() {
     for case in [
         "marker",
@@ -77,7 +82,7 @@ fn pending_child_requires_exact_parent_marker_receipt_and_original_kind() {
 }
 #[test]
 fn submitted_receipt_needs_settled_enter_but_no_native_observation_turn() {
-    for case in ["submitted", "no-enter", "expired-enter", "lost-endpoint"] {
+    for case in ["submitted", "no-enter", "no-proof", "expired-enter", "lost-endpoint"] {
         run(case);
     }
 }
@@ -196,7 +201,7 @@ fn fixture() {
     atomic(&child_path, &child_value.to_string()).unwrap();
     if matches!(
         case.as_str(),
-        "stage-spawn" | "mark-phase" | "cleanup-absent" | "cleanup-foreign"
+        "stage-spawn" | "mark-phase" | "cleanup-absent" | "cleanup-foreign" | "poll-key"
     ) {
         // This is a private, single-test child. Freeze its helper PATH before
         // constructing the frame; never change the keeper's configuration.
@@ -268,6 +273,7 @@ fn fixture() {
         closing: false,
     };
     let progress = Arc::new(Progress::default());
+    progress.confirmed.store(case != "no-proof", Ordering::Release);
     *owner.send.lock().unwrap() = Some(Reservation {
         phase: Phase::Child,
         progress: progress.clone(),
@@ -277,6 +283,7 @@ fn fixture() {
         child: Some(child),
         pasted: b"exact body".to_vec(),
         marker: None,
+        enter_deadline: None,
     });
     let root_file = File::options()
         .read(true)
@@ -286,6 +293,73 @@ fn fixture() {
     let sid = super::super::super::tests::input(&record);
     assert!(root_file.try_lock_exclusive().is_err() && sid.try_lock_exclusive().is_err());
     match case.as_str() {
+        case if case.starts_with("poll-") => {
+            let mut polled = record.clone();
+            polled.as_object_mut().unwrap().remove("pending_settings");
+            polled.as_object_mut().unwrap().remove("settings_unconfirmed_at");
+            let at = now();
+            let request = super::header(&owner).unwrap().request_id.clone();
+            polled["input_pending_at"] = json!(at);
+            polled["input_pending_request"] = json!(request);
+            polled["input_typing"] = json!({"request_id": request, "until": now() + input::TYPING_SECONDS});
+            let path = crate::state::storage::id_record_path(string(&record, "session_id")).unwrap();
+            fs::write(&path, polled.to_string()).unwrap();
+            let version = owner.with_scope(|scope| {
+                scope.record = Original::open(&scope.sessions, scope.record.name.clone())?;
+                Ok(scope.record.version.clone())
+            }).unwrap();
+            with(&owner, |held| {
+                held.phase = Phase::Pasted; held.child = None;
+                held.marker = Some((json!(at), version)); Ok(())
+            }).unwrap();
+            if case == "poll-helper" {
+                let charge = owner.charge();
+                assert!(owner.release_send_root().unwrap_err().contains("physically settled"));
+                assert!(root_file.try_lock_exclusive().is_err());
+                drop(charge);
+            }
+            owner.release_send_root().unwrap();
+            assert!(sid.try_lock_exclusive().is_err(), "SID must remain held while Root is lent");
+            assert!(owner.snapshot().is_err(), "ordinary Scope operations require Root");
+            root_file.try_lock_exclusive().unwrap();
+            assert!(send_helpers::enter(&owner, progress.clone()).is_err());
+            if case == "poll-request" { polled["input_pending_request"] = json!(uuid::Uuid::new_v4().to_string()); }
+            if case == "poll-pending-time" { polled["input_pending_at"] = json!(at + 1.0); }
+            if case == "poll-expired-marker" { polled["input_typing"]["until"] = json!(now() - 1.0); }
+            polled["fixture_hook_progress"] = json!(true);
+            let next = root().join("polled-record.json");
+            fs::write(&next, polled.to_string()).unwrap();
+            std::fs::set_permissions(&next, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+            fs::rename(&next, &path).unwrap();
+            if case == "poll-reacquire-deadline" {
+                assert!(owner.retake_send_root(Instant::now() + Duration::from_millis(30)).is_err());
+            }
+            fs2::FileExt::unlock(&root_file).unwrap();
+            if case == "poll-replaced-root" {
+                fs::rename(root().join(".lock"), root().join("old-lock")).unwrap();
+                fs::write(root().join(".lock"), "").unwrap();
+                fs::set_permissions(root().join(".lock"), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+            }
+            match case {
+                "poll-progress" | "poll-helper" => {
+                    assert_eq!(owner.read_snapshot().unwrap().0["fixture_hook_progress"], true);
+                    owner.retake_send_root(owner.until).unwrap();
+                    assert_eq!(owner.snapshot().unwrap().0["fixture_hook_progress"], true);
+                    assert!(root_file.try_lock_exclusive().is_err());
+                    with(&owner, |held| { held.enter_deadline = Some(Instant::now()); Ok(()) }).unwrap();
+                    assert!(parent_ready(&owner, Phase::Pasted).unwrap_err().contains("window expired"));
+                }
+                "poll-key" => {
+                    let args = ["send-keys", "-t", string(&record,"pane"), "Enter"].map(str::to_owned);
+                    assert!(read::invoke(&owner, read::Call::Keys, &args).is_err());
+                    assert!(!home().join("cleanup-argv").exists());
+                }
+                "poll-reacquire-deadline" => {}
+                _ => { assert!(owner.retake_send_root(owner.until).is_err()); }
+            }
+            assert!(sid.try_lock_exclusive().is_err());
+        }
+
         "index-sticky" => {
             with(&owner, |held| {
                 held.child = None;
@@ -631,7 +705,7 @@ fn fixture() {
                 assert!(owner.send.lock().unwrap().as_ref().unwrap().child.is_some());
             }
         }
-        "submitted" | "no-enter" | "expired-enter" | "lost-endpoint" => {
+        "submitted" | "no-enter" | "no-proof" | "expired-enter" | "lost-endpoint" => {
             with(&owner, |held| {
                 held.child = None;
                 held.phase = Phase::Entered;
@@ -690,7 +764,10 @@ fn fixture() {
         }
         _ => panic!("unknown Send fixture"),
     }
-    assert!(root_file.try_lock_exclusive().is_err() && sid.try_lock_exclusive().is_err());
+    if case.starts_with("poll-") && !matches!(case.as_str(), "poll-progress" | "poll-helper") {
+        root_file.try_lock_exclusive().unwrap(); fs2::FileExt::unlock(&root_file).unwrap();
+        assert!(sid.try_lock_exclusive().is_err());
+    } else { assert!(root_file.try_lock_exclusive().is_err() && sid.try_lock_exclusive().is_err()); }
     drop(entered);
     drop(owner);
     done.recv_timeout(Duration::from_secs(2)).unwrap();

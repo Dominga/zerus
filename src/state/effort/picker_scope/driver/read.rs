@@ -26,7 +26,7 @@ fn digits(text: &str) -> bool {
 fn form(owner: &owner::Owner, call: Call, args: &[String]) -> Result<&'static str> {
     let native = owner.native()?;
     let binding = if native {
-        owner.snapshot()?.0
+        owner.read_snapshot()?.0
     } else {
         owner.control.frame().binding.clone()
     };
@@ -34,6 +34,9 @@ fn form(owner: &owner::Owner, call: Call, args: &[String]) -> Result<&'static st
     let original = terminal_name(&binding);
     let pane = |text: &str| text == target;
     let info = || matches!(args,[verb,p,t,selected,_] if verb=="display-message"&&p=="-p"&&t=="-t"&&(pane(selected)||selected==&format!("={original}:")));
+    if call == Call::Keys && !owner.root_held()? {
+        return Err("Original Send polling cannot choose or send a key".into());
+    }
     let valid = match call {
         Call::Panes => {
             native

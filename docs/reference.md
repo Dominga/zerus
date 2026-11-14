@@ -2480,13 +2480,23 @@ activating the agent's backslash-Enter line continuation. This is verified
 against native history; no second Enter is sent as an automatic retry.
 On Unix, a public send to an existing-ID Claude, Codex or Kimi session can apply
 one exact scheduled Settings change before its message. The same custodian keeps
-the original Root and SID exclusions and one original 25-second deadline across
-both steps. This path keeps the normal 64 KiB text limit and admits at most one attachment
+the original SID exclusion, pinned Root object and one original 25-second deadline
+across both steps. Claude releases only the Root exclusion while its composer
+settles and its native transcript confirms the message. The same pinned Root
+object must be reacquired within the original budget before the single Enter
+and before receipt publication. The request-bound typing marker blocks other
+input and Clear input meanwhile. Both waits share one eight-second window after
+paste, clamped to the original deadline; neither renews it. Only a new typed
+user row or queue enqueue with exactly the significant message lines, stamped
+no earlier than paste, proves submission. Missing proof keeps the original
+receipt uncertain, with a bounded composer preview when its source still permits
+publication. No key or message is replayed. This path keeps the normal 64 KiB text limit and admits at most one attachment
 with at most 1 MiB decoded data. These exact count and byte decisions precede
 selection, receipts and terminal input; larger attachment requests use their
 existing send path, including the normal 20 MiB total attachment limit. Its outer input
 receipt precedes the first Settings key;
-`input_pending_at` still immediately precedes the message paste. After input is
+`input_pending_at` and `input_pending_request` bind the outer request immediately
+before the message paste. After input is
 offered to that custodian, a refusal or lost acknowledgement means delivery is
 uncertain and never authorizes retry. These observations omit the best-effort
 diagnostic screen sample. Zero-pending sends, Background or busy sends and

@@ -1,6 +1,7 @@
 //! One original Root, then one original Scope. Helpers charge this owner;
 //! neither an error nor removal of the caller's context drops their resources.
 use super::*;
+mod send_poll;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -122,18 +123,15 @@ impl Owner {
             return Err(error.clone());
         }
         self.control.check()?;
-        {
-            let phase = self
-                .phase
-                .lock()
-                .map_err(|_| "Original Effort source is unavailable")?;
+        let polled = {
+            let phase = self.phase.lock().map_err(|_| "Original Effort source is unavailable")?;
             match &*phase {
-                Phase::Root(root) => root.check()?,
-                Phase::Native(scope) => {
-                    scope.current()?;
-                }
+                Phase::Root(root) => { root.check()?; None },
+                Phase::Native(scope) if matches!(scope.writer, Writer::Polling) => Some(scope.poll_current()?.1),
+                Phase::Native(scope) => { scope.current()?; None },
             }
-        }
+        };
+        if let Some(record) = polled { send::claude::check_marker(self, &record)?; }
         self.control.check()
     }
 
@@ -147,7 +145,7 @@ impl Owner {
             .lock()
             .map_err(|_| "Original Effort source is unavailable")?;
         match &mut *phase {
-            Phase::Native(scope) => body(scope),
+            Phase::Native(scope) => { scope.writer.get()?; body(scope) },
             Phase::Root(_) => Err("Original Effort SID scope is not yet admitted".into()),
         }
     }

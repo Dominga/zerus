@@ -1688,7 +1688,7 @@ fn remember_before_input(typed: bool, witness: NotOffered, retain: bool) -> Fail
 /// window starts after the paste, and so does the marker's last term
 /// (zerus-iitw8.8): slow work before the paste never lets it lapse inside it.
 const TYPING: &str = "input_typing";
-const TYPING_SECONDS: f64 = settle::WINDOW.as_secs_f64() + 4.0;
+pub(in crate::state) const TYPING_SECONDS: f64 = settle::WINDOW.as_secs_f64() + 4.0;
 
 /// The request ID of the send typing into this session now, if any.
 pub(crate) fn input_typing(record: &Value) -> Option<&str> {

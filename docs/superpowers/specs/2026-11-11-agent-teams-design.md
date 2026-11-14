@@ -547,6 +547,36 @@ When the task's pipeline has stages, they run between steps 1 and 2: the lead
 gets the inbox item after the last stage, or not at all when the pipeline
 accepts on its own.
 
+### A task the person took back
+
+An accepted result belongs to the team only while its task still shows the
+execution the node took in. If the task comes back In review under an execution
+the store never saw running, In review with conflicting attempts, or Done with
+conflicting attempts under a branch integration, the person's own run has
+already ended and replaced the team's accepted result. The store settles the
+acceptance, marks the node's open effects superseded, ends the node without
+merging, closes its integration and held-step cards, and gives the lead one
+item naming the task and saying the person's own run replaced the team's
+accepted result. The task document is not touched; its stage stays as
+observed. A merge that was already admitted keeps its integration fact, and
+the item says it had already been merged, with the commit when known. A task
+whose current attempt is the node's own keeps the ordinary finish and merge
+path.
+
+The integration branch is written only for the node's latest decision, and
+only while the team store has applied the accepted task's current state. Merge
+admission reads the task's current revision through the reader that builds the
+service's observation, before and again at the ref update, and refuses unless
+the node's applied revision is the same. A failed observation, its supersede
+included, therefore holds the merge until an observation applies; a missing,
+unreadable or busy task admits nothing. The admission at the ref update and
+the Git write are one boundary: it takes the task's project lock, reads and
+compares the revision under it, then takes the team store's writer fence, and
+holds both until update-ref has returned, within the ref deadline. Every path
+that takes both locks takes them in that order. A task write in the meantime
+waits for the boundary, or ends busy within its own wait, and is observed
+afterwards.
+
 ## Pipelines
 
 A pipeline says what happens between a member's report and the end of a task.

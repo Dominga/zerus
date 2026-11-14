@@ -8,7 +8,7 @@ mod attempts;
 mod cancel;
 mod terminal;
 pub(super) use answers::{drop_marks, mark_answer};
-pub(super) use attempts::{conflict, person_attempt, remember, take_over};
+pub(super) use attempts::{conflict, person_attempt, remember, supersedes_accepted, take_over};
 pub(super) use cancel::record_cancel;
 pub(super) use terminal::{key_clear, late_session};
 

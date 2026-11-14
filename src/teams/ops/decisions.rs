@@ -197,6 +197,26 @@ pub(super) fn integration(ctx: &mut Context<'_>) -> Result<()> {
         ));
     }
     integration::record(ctx, &permit, *node, Some(commit), &[])?;
+    if permit.late {
+        // The supersede item was written before this late fact; say now that
+        // the accepted result had already been merged, with the commit. Only
+        // the item written for this fact's own acceptance: its generation
+        // (zerus-63rru.37 round 4), while that acceptance is still the node's
+        // latest (round 3). A supersede ends the node and every way back
+        // advances its generation, so no two supersede items share one.
+        ctx.db
+            .execute(
+                "UPDATE inbox SET text=replace(text, 'the person''s own run replaced the team''s accepted result, so nothing further will be merged. The task document was left unchanged.', ?3) WHERE team=?1 AND node=?2 AND kind='accepted_superseded' AND generation=?5 AND EXISTS(SELECT 1 FROM integration_facts f WHERE f.team=?1 AND f.node=?2 AND f.decision=?4 AND f.decision=(SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1))",
+                params![
+                    ctx.team.id,
+                    node,
+                    format!("the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged."),
+                    permit.decision,
+                    permit.generation,
+                ],
+            )
+            .map_err(storage)?;
+    }
     if permit.provenance_only {
         rows::rejected_merge(
             ctx.db,

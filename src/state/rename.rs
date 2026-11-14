@@ -3,6 +3,15 @@ use super::*;
 use std::fs;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod claim;
+pub(super) fn claim_ready(root: &Path, record: &Value, name: &str) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { claim::ready(root, record, name) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (root, record, name); Ok(()) }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod guarded;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use guarded::{

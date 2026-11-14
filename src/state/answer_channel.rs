@@ -146,11 +146,20 @@ pub(super) fn offer(dir: &Path, offer: &Value) -> Result<()> {
 /// therefore take the channel's handover lock first. A scanner or reader
 /// without delete sharing can hold answer.json for a moment there, and the
 /// refused rename moved nothing, so it is tried again for a bounded time.
-fn take(dir: &Path, stage: &str) -> Result<bool> {
+fn take_admitted<G>(
+    dir: &Path,
+    stage: &str,
+    mut admit: impl FnMut() -> Result<Option<G>>,
+) -> Result<bool> {
     let _handover = lock(Some(&dir.join("handover.lock")))?;
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        match fs::rename(dir.join(ANSWER), dir.join(stage)) {
+        // Handover precedes writer admission. Retain that same admission
+        // through the rename, but never through a transient retry sleep.
+        let Some(admission) = admit()? else { return Ok(false); };
+        let moved = fs::rename(dir.join(ANSWER), dir.join(stage));
+        drop(admission);
+        match moved {
             Ok(()) => return Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error)
@@ -164,8 +173,8 @@ fn take(dir: &Path, stage: &str) -> Result<bool> {
 }
 
 /// Take the offered answer; None when there is none or it was retracted.
-fn claim(dir: &Path) -> Result<Option<Value>> {
-    if !take(dir, CLAIMED)? {
+fn claim_admitted<G>(dir: &Path, admit: impl FnMut() -> Result<Option<G>>) -> Result<Option<Value>> {
+    if !take_admitted(dir, CLAIMED, admit)? {
         return Ok(None);
     }
     read(dir, CLAIMED)
@@ -201,7 +210,7 @@ fn withheld(
 /// Take an offered answer to `kind` only when `ready`. An approval waits for
 /// the screen to show its request; until then the offer stays unclaimed, and
 /// `hgs answer` retracts it with nothing sent.
-fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool, admit: impl FnOnce() -> Result<()>) -> Result<Option<Value>> {
+fn take_offer<G>(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool, admit: impl FnMut() -> Result<Option<G>>) -> Result<Option<Value>> {
     // An offer that appears after this look waits for the next poll.
     if kind == Kind::Approval && (!dir.join(ANSWER).exists() || !ready()) {
         return Ok(None);
@@ -209,16 +218,18 @@ fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool, admit: impl 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if !dir.join(ANSWER).exists() { return Ok(None); }
-        admit()?;
+        claim_admitted(dir, admit)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let _ = admit;
-    claim(dir)
+    {
+        let _ = admit;
+        claim_admitted(dir, || Ok(Some(())))
+    }
 }
 
 /// Withdraw the offer; false when the waiting process already claimed it.
 fn retract(dir: &Path) -> Result<bool> {
-    take(dir, RETRACTED)
+    take_admitted(dir, RETRACTED, || Ok(Some(())))
 }
 
 #[derive(Debug, PartialEq)]
@@ -452,6 +463,16 @@ fn should_close(
     bound: &Value,
     card: &Value,
 ) -> Option<&'static str> {
+    should_close_with(kind, current, bound, card, process_alive)
+}
+
+fn should_close_with(
+    kind: Kind,
+    current: Option<&Value>,
+    bound: &Value,
+    card: &Value,
+    alive: impl FnOnce(&Value) -> bool,
+) -> Option<&'static str> {
     let Some(current) = current else {
         return Some("session ended");
     };
@@ -476,10 +497,20 @@ fn should_close(
         }
         Kind::Approval => {}
     }
-    if !process_alive(current) {
+    if !alive(current) {
         return Some("agent exited");
     }
     None
+}
+
+/// The already observed binding's fixed location. No run scan, presentation
+/// repair, special-file wait or normal writer recovery inside claim admission.
+fn claim_record(observed: &Value) -> Result<Value> {
+    let path = storage::own_path(observed)?;
+    let bytes = storage::binding_bytes(&path).map_err(|e| e.to_string())?;
+    let record = storage::verify_metadata_at(&path, string(observed, "name"), &bytes)?;
+    session_id::verify(&record)?;
+    Ok(record)
 }
 
 /// Notices a transcript `tool_result` for the bound tool use: an answer, a
@@ -656,12 +687,36 @@ fn wait() -> Result<()> {
         }
         let ready = || current.as_ref().is_some_and(waits);
         let offered = take_offer(kind, &dir, ready, || {
-            let checked = read_own_run(&name, &token).and_then(|latest| match latest {
-                Some(latest) => caller.recheck(&latest),
-                None => Err("Claude hook caller cannot be proven: the session ended before claim; no hook update or answer was authorized".into()),
-            });
-            if checked.is_err() { close(&dir, "caller proof lost before claim"); }
-            checked
+            // A busy writer leaves the original offer for a later poll or
+            // retraction. Neither this admission nor handover renews the
+            // channel's original lifetime. No writer is held while idle.
+            let remaining = waiting.deadline - now();
+            if remaining <= 0. || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, "deadline or terminated before claim");
+                return Err("answer channel ended before claim".into());
+            }
+            let until = Instant::now() + POLL.min(Duration::from_secs_f64(remaining));
+            // Read-only exclusion, not the normal writer's recovery entry:
+            // a channel must not launch tmux or repair unrelated bindings.
+            let Some(writer) = existing_lock_until(&root.join(".lock"), until)? else { return Ok(None); };
+            let latest = Some(claim_record(current.as_ref().ok_or("session ended before claim")?)?);
+            if let Some(reason) = should_close_with(kind, latest.as_ref(), &record, &card, hook_caller::native_alive) {
+                close(&dir, reason);
+                return Err(reason.into());
+            }
+            if let Err(error) = rename::claim_ready(&root, latest.as_ref().unwrap(), &name) {
+                close(&dir, "session rename unfinished before claim");
+                return Err(error);
+            }
+            if let Err(error) = caller.recheck_for_claim(latest.as_ref().unwrap()) {
+                close(&dir, "caller proof lost before claim");
+                return Err(error);
+            }
+            if now() >= waiting.deadline || TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                close(&dir, "deadline or terminated before claim");
+                return Err("answer channel ended before claim".into());
+            }
+            Ok(Some(writer))
         })?;
         if let Some(offer) = offered {
             // The question must still be the bound one when its answer goes out.
@@ -699,6 +754,67 @@ fn wait() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn take(dir: &Path, stage: &str) -> Result<bool> {
+        take_admitted(dir, stage, || Ok(Some(())))
+    }
+
+    fn claim(dir: &Path) -> Result<Option<Value>> {
+        claim_admitted(dir, || Ok(Some(())))
+    }
+
+    #[test]
+    fn claim_admission_holds_handover_and_the_same_writer_through_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        offer(dir, &json!({"request_id":"original"})).unwrap();
+        let writer = dir.join("fixture-writer.lock");
+        let dropped = std::cell::Cell::new(false);
+        struct Admission<'a> {
+            _writer: Guard,
+            dir: &'a Path,
+            dropped: &'a std::cell::Cell<bool>,
+        }
+        impl Drop for Admission<'_> {
+            fn drop(&mut self) {
+                assert!(self.dir.join(CLAIMED).exists(), "writer released before claim rename");
+                self.dropped.set(true);
+            }
+        }
+        let claimed = claim_admitted(dir, || {
+            assert!(lock_until(&dir.join("handover.lock"), Instant::now())?.is_none(),
+                "writer admission preceded channel handover");
+            Ok(Some(Admission { _writer: lock(Some(&writer))?, dir, dropped: &dropped }))
+        }).unwrap().unwrap();
+        assert_eq!(claimed["request_id"], "original");
+        assert!(dropped.get());
+        assert!(lock_until(&writer, Instant::now()).unwrap().is_some());
+        assert!(lock_until(&dir.join("handover.lock"), Instant::now()).unwrap().is_some());
+    }
+
+    #[test]
+    fn busy_or_refused_admission_keeps_the_exact_offer_unclaimed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        offer(dir, &json!({"request_id":"original"})).unwrap();
+        let original = fs::read(dir.join(ANSWER)).unwrap();
+        for _ in 0..2 {
+            assert!(claim_admitted(dir, || Ok(None::<Guard>)).unwrap().is_none());
+            assert_eq!(fs::read(dir.join(ANSWER)).unwrap(), original);
+            assert!(!dir.join(CLAIMED).exists());
+            assert!(lock_until(&dir.join("handover.lock"), Instant::now()).unwrap().is_some());
+        }
+        assert_eq!(claim_admitted::<Guard>(dir, || Err("session terminating".into())).unwrap_err(),
+            "session terminating");
+        assert_eq!(fs::read(dir.join(ANSWER)).unwrap(), original);
+        assert!(!dir.join(CLAIMED).exists() && !dir.join(EMITTED).exists());
+        // A retraction still has the same mutually exclusive outcome; a
+        // later admission must not recover or replay it as a new offer.
+        assert!(retract(dir).unwrap());
+        assert!(claim_admitted(dir, || Ok(Some(()))).unwrap().is_none());
+        assert!(!dir.join(CLAIMED).exists());
+    }
 
     fn record() -> Value {
         json!({"run_id":"run-1","conversation_id":"conversation-1"})
@@ -1229,7 +1345,7 @@ mod tests {
         let (temp, waiting) = channel(|dir| {
             for _ in 0..40 {
                 let ready = || claude_approval::channel::waits(&json!({}), Err("Session identity changed; open Terminal".into()), |_| unreachable!());
-                assert!(take_offer(Kind::Approval, dir, ready, || Ok(())).unwrap().is_none());
+                assert!(take_offer(Kind::Approval, dir, ready, || Ok(Some(()))).unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1245,7 +1361,7 @@ mod tests {
     fn an_approval_offer_stays_unclaimed_until_its_screen_shows_it() {
         let (temp, waiting) = channel(|dir| {
             for _ in 0..40 {
-                assert!(take_offer(Kind::Approval, dir, || false, || Ok(())).unwrap().is_none());
+                assert!(take_offer(Kind::Approval, dir, || false, || Ok(Some(()))).unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -1261,10 +1377,10 @@ mod tests {
         for (kind, ready) in [(Kind::Approval, true), (Kind::Question, false)] {
             let temp = tempfile::tempdir().unwrap();
             offer(temp.path(), &json!({"request_id":"two"})).unwrap();
-            assert_eq!(take_offer(kind, temp.path(), || ready, || Ok(())).unwrap().unwrap()["request_id"], "two", "{kind:?}");
+            assert_eq!(take_offer(kind, temp.path(), || ready, || Ok(Some(()))).unwrap().unwrap()["request_id"], "two", "{kind:?}");
         }
         let empty = tempfile::tempdir().unwrap();
-        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture"), || Ok(())).unwrap().is_none());
+        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture"), || Ok(Some(()))).unwrap().is_none());
     }
 
     #[test]

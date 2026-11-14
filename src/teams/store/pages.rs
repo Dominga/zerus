@@ -421,9 +421,6 @@ impl Store {
             "seq,node,generation,actor,kind,text,state",
         )
     }
-    /// Discover only Ready accepts among open decisions, in node order.
-    /// The limit bounds examined open rows, so an empty page can have `next`.
-    /// Preserved settled accepts are facts already in flight, never new work.
     /// The node's latest decision's sequence, for the native admission's
     /// authority check (zerus-63rru.37 round 3): a later decision — the
     /// person's review that supersedes the acceptance — revokes an older
@@ -439,6 +436,9 @@ impl Store {
         .map_err(storage)
     }
 
+    /// Discover only Ready accepts among open decisions, in node order.
+    /// The limit bounds examined open rows, so an empty page can have `next`.
+    /// Preserved settled accepts are facts already in flight, never new work.
     pub fn integration_accepts(
         &self,
         team: &str,

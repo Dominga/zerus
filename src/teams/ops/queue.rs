@@ -519,6 +519,10 @@ fn supersede_accepted(
     n: &Node,
     o: &TaskObservation,
 ) -> Result<()> {
+    #[cfg(test)]
+    if std::env::var_os("HGS_TEST_TEAM_SUPERSEDE_FAIL").is_some() {
+        return Err(storage("injected supersede failure"));
+    }
     // Keep the preserved receipt authority of a Ready acceptance: a Git write
     // that was already admitted keeps its late integration fact, while the
     // settled decision can never authorize a second write.
@@ -544,15 +548,24 @@ fn supersede_accepted(
     // The fact of the superseded acceptance only, by its decision, and the
     // conflict's NULL commit read as the Option it is (zerus-63rru.37
     // round 3): never the node's newest fact, never a storage failure.
-    let merged: Option<String> = ctx
+    let decision: Option<u64> = ctx
         .db
         .query_row(
-            "SELECT commit_id FROM integration_facts WHERE team=?1 AND node=?2 AND decision=(SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1)",
+            "SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1",
             params![ctx.team.id, node],
             |r| r.get(0),
         )
         .optional()
         .map_err(storage)?;
+    let merged = match decision {
+        Some(decision) => crate::teams::store::rows::integration_commit(
+            ctx.db,
+            &ctx.team.id,
+            node,
+            decision,
+        )?,
+        None => None,
+    };
     let body = match merged {
         Some(commit) if !commit.is_empty() => format!(
             "Task {node}{name}{task}: the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged."

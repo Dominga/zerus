@@ -12,6 +12,8 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
+mod pins;
+
 struct WriterPorts {
     exit: Fixture,
     config: crate::config::Config,
@@ -22,10 +24,13 @@ struct WriterPorts {
     originals: usize,
     admitted: usize,
     cards: usize,
+    inspection_reply: Option<Value>,
 }
 impl WriterPorts {
     fn new() -> Self {
-        let exit = Fixture::new();
+        Self::with_exit(Fixture::new())
+    }
+    fn with_exit(exit: Fixture) -> Self {
         let config = crate::config::Config::load().unwrap();
         // Unit context, as in ops::tests::Harness. Rows below use store writers.
         crate::platform::private_dir(&config.state.join("teams")).unwrap();
@@ -91,6 +96,7 @@ impl WriterPorts {
             originals: 0,
             admitted: 0,
             cards: 0,
+            inspection_reply: None,
         }
     }
     fn run(&mut self, now: i64) {
@@ -145,12 +151,13 @@ impl Ports for WriterPorts {
         })
     }
     fn observe(&mut self, b: &Binding) -> Result<Snapshot> {
+        let view = self.inspection_reply.clone().unwrap_or_else(|| self.exit.view());
         settled_view(
             &b.machine,
             b,
-            &self.exit.view(),
+            &view,
             &self.exit.raw,
-            Some(self.exit.id.clone()),
+            (!self.exit.id.is_empty()).then(|| self.exit.id.clone()),
         )
     }
     fn ownership(&mut self, b: &Binding) -> Result<Ownership> {
@@ -289,9 +296,13 @@ fn a_deferral_reserves_no_hourly_resume() {
     child("quota");
 }
 #[test]
-#[ignore = "run in a private child by the four settlement controls"]
+#[ignore = "run in a private child by the settlement controls"]
 fn fixture() {
     let case = std::env::var("HGS_SETTLEMENT_FIXTURE").unwrap();
+    if pins::run(&case) {
+        return;
+    }
+    assert!(matches!(case.as_str(), "pane" | "label" | "expiry" | "quota"));
     let mut p = WriterPorts::new();
     if case == "label" {
         p.exit.hold_label();

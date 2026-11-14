@@ -72,3 +72,48 @@ class ProcessCommands(unittest.TestCase):
         path.write_text(json.dumps(self.record))
         self.cli("rename", self.name, "codex/example/renamed", "--archive", archive_id)
         self.check_record(path)
+
+    def test_settled_history_keeps_native_output_or_an_explicit_tail_and_refuses_pruned_jobs(self):
+        root = Path(self.temp.name)
+        self.name = "claude/example/commands"
+        self.record["name"] = self.name
+        self.record["agent"] = "claude"
+        self.record["transcript"] = str(root / "native" / "transcript.jsonl")
+        template = self.record["shell_jobs"]["job-a"]
+        self.record["shell_jobs"] = {
+            f"job-{i}": dict(template, id=f"job-{i}", call_id=f"call-{i}", updated_at=i,
+                               ended_at=i, output="x" * 4096, output_truncated=False)
+            for i in range(128)
+        }
+        native = root / "native" / self.record["conversation_id"] / "tool-results" / "result.txt"
+        native.parent.mkdir(parents=True)
+        native_text = "full native log text\n" * 300
+        native.write_bytes(native_text.encode())
+        self.record["shell_jobs"]["job-127"]["output_path"] = str(native)
+        path = self.state / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
+        path.write_text(json.dumps(self.record))
+        renamed = "claude/example/retained"
+        self.cli("rename", self.name, renamed)
+        path = self.state / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        original = path.read_text()
+        saved = json.loads(original)
+        self.assertLessEqual(len(saved["shell_jobs"]), 16)
+
+        def output(job, ok=True):
+            result = subprocess.run([str(HGS), "processes", renamed, "--output", job,
+                                     "--run", self.record["run_id"], "--conversation", self.record["conversation_id"]],
+                                    env=self.env, text=True, capture_output=True, timeout=15)
+            if ok:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)
+            self.assertNotEqual(result.returncode, 0)
+            return result.stderr
+
+        self.assertEqual(output("job-127")["output"], native_text)
+        tail = output("job-126")
+        self.assertEqual(tail["output"], "x" * 1024)
+        self.assertTrue(tail["truncated"])
+        self.assertIn("no longer", output("job-0", ok=False))
+        native.unlink()
+        self.assertIn("log is no longer available", output("job-127", ok=False))
+        self.assertEqual(path.read_text(), original, "output reads never rewrite the manifest")

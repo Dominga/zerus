@@ -674,7 +674,7 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
     Ok(())
 }
 
-/// Every saved live/archive record write also migrates legacy command text.
+/// Saved live/archive writes compact command previews and settled job history.
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     ensure_session_id(record);
     processes::compact(record);

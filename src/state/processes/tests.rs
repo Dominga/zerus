@@ -1,5 +1,7 @@
 use super::*;
 
+mod retention;
+
 pub(super) fn record(agent: &str) -> Value {
     json!({"agent":agent,"conversation_id":"1a4f09e2-115c-4e49-9fa9-30d184d6ee18","run_id":"run-a","cwd":"/workspace"})
 }

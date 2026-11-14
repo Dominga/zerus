@@ -1773,6 +1773,18 @@ additive `process_work` summary uses current owned OS trees (one process-table
 sample per fleet listing) or the native DeepSeek job registry; it does not scan
 native transcripts on each fleet poll.
 
+Saved session records retain unresolved shell-job identities and at most 16
+explicitly settled jobs within a 64 KiB history budget, with 1 KiB output tails.
+Existing live and archived records are compacted on their next ordinary write;
+reading a record does not rewrite it. Unknown jobs and calls still awaiting hook
+settlement keep their evidence, including prior-run identities. This storage
+limit does not change Background status, reply deferral or process ownership.
+Process output reads use the provider's native log when available. Otherwise
+they return retained text, marking shortened tails as truncated. A pruned job
+or missing native log returns
+an explicit unavailable result. Earlier history can be read from the provider's
+existing logs where available, rather than accumulating in every session record.
+
 Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
 stopped or unverifiable parent sessions. Recorded children contribute no current
 work to the displayed counts; their saved states are retained. A current child's

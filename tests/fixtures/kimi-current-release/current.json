@@ -1,0 +1,31 @@
+{
+  "recorded_on": "2026-11-14",
+  "standalone": {
+    "url": "https://code.kimi.com/kimi-code/latest",
+    "body": "2.5.3\n",
+    "raw_sha256": "8a81c718d7e78b74b27f8ec3313bbcec2a7acd1df926e6e72c71561996726595"
+  },
+  "npm": {
+    "url": "https://registry.npmjs.org/@moonshot-ai/kimi-code/latest",
+    "response": {
+      "name": "@moonshot-ai/kimi-code",
+      "version": "2.6.2"
+    },
+    "raw_sha256": "3375c0deeb23a1912d8549291bed3a6511b4165e78268d1f21d62b9bd443d412"
+  },
+  "github": {
+    "url": "https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest",
+    "response": {
+      "tag_name": "@moonshot-ai/kimi-code@2.6.2",
+      "draft": false,
+      "prerelease": false,
+      "html_url": "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%402.6.2",
+      "published_at": "2026-11-13T17:20:51Z"
+    },
+    "raw_sha256": "9a9dc4800953bfd6358dbd0033c4ee3cdba1287d8ce8d42934597702c6cb3d38"
+  },
+  "linux_image": {
+    "size": 188746944,
+    "sha256": "c2070d77947b000016d1bc9c189f2e258c51f29d5f9eb537388cc44fa61c5856"
+  }
+}

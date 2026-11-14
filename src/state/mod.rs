@@ -52,7 +52,7 @@ pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 // The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
 // platforms only.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use input::{resumed_readiness, Readiness as ResumedReadiness};
+pub(crate) use input::{first_message_ready, resumed_readiness, Readiness as ResumedReadiness};
 mod input_queue;
 mod journal;
 mod keep_warm;

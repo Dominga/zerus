@@ -38,6 +38,7 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::RecordLateSession { .. }
         | Operation::RecordLateReport { .. }
         | Operation::RecordCancel { .. }
+        | Operation::ReconcileLeadQueue
         | Operation::ReconcileUnstaffed
         | Operation::EndStaleUnstaffed
         | Operation::SettleLeftHandout { .. }

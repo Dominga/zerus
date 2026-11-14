@@ -54,7 +54,8 @@ pub(super) fn step(p: &mut impl Ports, b: &Binding, epoch: &str, now: i64) -> Re
         return audit_error.map_or(Ok(()), Err);
     }
     if let Some(brief) = p.pending_brief(b)? {
-        if p.observe(&brief.binding)?.ready {
+        let ready = p.observe(&brief.binding)?;
+        if ready.ready && ready.live && !ready.paused && !ready.ended && ready.questions.is_empty() {
             return execute(p, brief, epoch, now);
         }
     }
@@ -238,7 +239,7 @@ pub(super) fn validate(p: &mut impl Ports, plan: &Plan) -> Result<()> {
             }
         }
         Kind::Brief => {
-            if !facts.team.settings.delegations.resume_exited
+            if !policy::brief_granted(plan, &facts)
                 || !snapshot.ready
                 || !snapshot.live
                 || snapshot.paused
@@ -315,3 +316,22 @@ pub(super) fn synthetic(b: &Binding, s: &Snapshot, text: &str, kind: &str) -> Va
 
 #[cfg(test)]
 mod tests;
+
+/// The lead gets its orientation once per launch run, including before the
+/// first message has assigned a conversation. Identity never uses its name.
+pub(super) fn lead_brief_key(b: &Binding, run: &str) -> String {
+    key(&json!([b.team, b.member, b.launch, run, "lead_launch_brief"]))
+}
+
+pub(super) fn lead_brief(b: &Binding, s: &Snapshot, team: &zerus_team_plan::model::Team) -> Plan {
+    let text = format!("You are the lead of team {}. Read `hgs team current` for your team and `hgs team inbox` for items waiting for you.", team.name);
+    Plan {
+        key: lead_brief_key(b, &s.run),
+        binding: b.clone(),
+        snapshot: s.clone(),
+        kind: Kind::Brief,
+        question: synthetic(b, s, &text, "brief"),
+        text,
+        parent: None,
+    }
+}

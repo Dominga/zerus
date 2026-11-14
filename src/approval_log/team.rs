@@ -1,5 +1,5 @@
 //! Team delegations have their own entry point and categories. The ordinary
-//! automatic-tool admission never admits either of these kinds.
+//! automatic-tool admission never admits these service kinds.
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -7,6 +7,8 @@ use super::*;
 pub(crate) enum TeamKind {
     FolderTrust,
     Resume,
+    /// Launch context through the guarded send, before a conversation exists.
+    Brief,
 }
 
 pub(crate) fn begin_team(db: &mut Connection, payload: &Value, kind: TeamKind) -> Result<Value> {
@@ -19,15 +21,22 @@ pub(crate) fn begin_team(db: &mut Connection, payload: &Value, kind: TeamKind) -
             payload["categories"] = json!(["team_folder_trust"]);
             answers
         }
-        TeamKind::Resume => {
+        TeamKind::Resume | TeamKind::Brief => {
             if payload["question"]["source"] != "team_resume" {
+                return Ok(json!({"eligible":false}));
+            }
+            if kind == TeamKind::Brief
+                && (payload["question"]["can_answer"] != false
+                    || !payload["question"]["question_id"].as_str()
+                        .is_some_and(|id| id.starts_with("brief:")))
+            {
                 return Ok(json!({"eligible":false}));
             }
             payload["categories"] = json!(["team_resume"]);
             json!([])
         }
     };
-    reserve(db, &payload, answers, matches!(kind, TeamKind::FolderTrust))
+    reserve(db, &payload, answers, matches!(kind, TeamKind::FolderTrust | TeamKind::Brief))
 }
 
 fn folder_answers(payload: &Value) -> Option<Value> {

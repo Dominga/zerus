@@ -20,6 +20,7 @@ struct FakeEffects {
     sessions: BTreeMap<String, ObservedSession>,
     accounts: Vec<AccountUsage>,
     exists: bool,
+    empty_conversation: bool,
     unknown: bool,
     not_started: bool,
     mismatch: bool,
@@ -44,6 +45,7 @@ impl Default for FakeEffects {
             sessions: BTreeMap::new(),
             accounts: vec![account("a"), account("b")],
             exists: false,
+            empty_conversation: false,
             unknown: false,
             not_started: false,
             mismatch: false,
@@ -162,7 +164,11 @@ impl Effects for FakeEffects {
             name: format!("claude/example/{}", plan.member),
             session_id: uuid::Uuid::new_v4().to_string(),
             run_id: uuid::Uuid::new_v4().to_string(),
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: if self.empty_conversation {
+                String::new()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            },
         };
         self.sessions.insert(plan.launch_id.clone(), s);
         Effect::Submitted(())
@@ -3099,4 +3105,21 @@ pub(super) fn named_plans_with_integration(
         }
     }
     (h, effects.plans)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound151_fixture() -> Harness {
+    let mut h = Harness::new();
+    let mut e = FakeEffects {
+        exists: true,
+        empty_conversation: true,
+        worktree_unverified: true,
+        ..Default::default()
+    };
+    advance(&mut runtime(&h), &mut h, &mut e, 60);
+    assert!(matches!(
+        row(&h, "lead").state,
+        State::Bound | State::ParentIntent | State::Done
+    ));
+    h
 }

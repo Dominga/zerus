@@ -444,6 +444,17 @@ answer for you:
   conversation, at most three times an hour, with a short brief that points
   it at `hgs team current`.
 
+  An archived exit first waits for the original terminal name to be free.
+  Measured from the recorded exit time, the wait uses the larger of the
+  teardown time budgets plus one service observation interval and the
+  ten-minute cap for cleanup I/O without an overall deadline. With the
+  current budgets, the bound is ten minutes. While waiting, Zerus writes
+  no resume attempt, approval audit or card, and reserves no hourly slot.
+  A later observation resumes once the name is free. If it is still busy
+  at expiry, Zerus writes one "did not settle" card and never automatically
+  resumes that exit. Review the card and Restore manually once the original
+  run has settled.
+
 Each answer is checked against the exact run, conversation and prompt,
 recorded in the approval journal before delivery, and never repeated when its
 delivery is unknown. Any other prompt, a folder Zerus did not create, and a

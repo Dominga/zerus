@@ -12,6 +12,12 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        Self::finish_exit(true)
+    }
+    pub fn unarchived() -> Self {
+        Self::finish_exit(false)
+    }
+    fn finish_exit(archived: bool) -> Self {
         assert!(std::env::var_os("HGS_SETTLEMENT_FIXTURE").is_some());
         fs::create_dir_all(root()).unwrap();
         assert!(Command::new("git")
@@ -26,24 +32,32 @@ impl Fixture {
         let name = "claude/settlement/member".to_owned();
         let run = uuid::Uuid::new_v4().to_string();
         let conversation = uuid::Uuid::new_v4().to_string();
+        let program = if archived { "/bin/true" } else { "/usr/bin/false" };
         let mut raw = json!({"version":1,"name":name,"agent":"claude","run_id":run,
             "session_id":uuid::Uuid::new_v4().to_string(),"launch_id":uuid::Uuid::new_v4().to_string(),
             "conversation_id":conversation,"conversation_state":"ended","account_id":"account-a",
-            "cwd":root(),"launch_dir":root(),"base":["/bin/true"],"transcript":transcript,
+            "cwd":root(),"launch_dir":root(),"base":[program],"transcript":transcript,
             "worktree_owner":{"id":"owner-1"},"session_end":{"run_id":run,"conversation_id":conversation,
             "reason":"prompt_input_exit","at":now()}});
         write(&mut raw).unwrap();
-        let mut spawned = supervisor::spawn(&["/bin/true".into()], &name, &run).unwrap();
+        let mut spawned = supervisor::spawn(&[program.into()], &name, &run).unwrap();
         let pid = spawned.child.id();
         let status = supervisor::wait(&mut spawned.child).unwrap();
         supervisor::finish(&name, &run, pid, status).unwrap();
-        raw = archive::records()
-            .unwrap()
-            .into_iter()
-            .find(|r| r["run_id"] == run)
-            .unwrap();
-        let id = string(&raw, "archive_id").to_owned();
-        assert_eq!(raw["completion_reason"], "clean_exit");
+        let id = if archived {
+            raw = archive::records()
+                .unwrap()
+                .into_iter()
+                .find(|r| r["run_id"] == run)
+                .unwrap();
+            assert_eq!(raw["completion_reason"], "clean_exit");
+            string(&raw, "archive_id").to_owned()
+        } else {
+            raw = read(&name).unwrap();
+            assert_eq!(raw["completion_reason"], "unconfirmed_exit");
+            assert_eq!(raw["exit_code"], 1);
+            String::new()
+        };
         Self {
             raw,
             id,

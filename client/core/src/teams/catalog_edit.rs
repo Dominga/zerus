@@ -198,7 +198,7 @@ pub fn import(value: Value, current: Value, base: Value) -> Result<Value, String
         }
         merge!(roles, bundle.roles);
         merge!(pipelines, bundle.pipelines);
-        merge!(templates, vec![bundle.template]);
+        merge!(templates, [bundle.template]);
         validate(
             serde_json::to_value(current).map_err(|e| e.to_string())?,
             base,

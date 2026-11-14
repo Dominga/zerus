@@ -7,6 +7,7 @@ pub(super) fn run() {
     cancel::run();
     handover();
     empty_execution_handover();
+    superseded();
     refusals::run();
 }
 fn delivery() {
@@ -238,4 +239,162 @@ fn empty_execution_handover() {
         },
     )
     .unwrap();
+}
+
+pub(super) fn superseded() {
+    for shape in ["review", "conflict", "done conflict"] {
+        let mut f = Fixture::new();
+        f.submitted();
+        f.reported();
+        f.h.settings(|s| s.delegations.merge_accepted = false);
+        f.h.run(&person(), Operation::Accept { node: f.node })
+            .unwrap();
+        let decision = f.h.accept_decision(f.node);
+        assert!(f
+            .h
+            .store
+            .cards(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .iter()
+            .any(|c| c.node == Some(f.node) && c.kind == "integration" && c.state == "open"));
+        let task = f.task.clone();
+        let observation = if shape == "review" {
+            let tasks =
+                ProjectStore::open(&f.config.state.join("replica"), &task.project).unwrap();
+            let mut doc = tasks.load(&task.uuid).unwrap();
+            let at = chrono::Utc::now().timestamp_millis();
+            let person = SessionKey {
+                machine: "example-machine".into(),
+                session_id: "launch_id:person".into(),
+                session: "codex/person".into(),
+            };
+            doc.set_stage(Stage::Todo, &TaskActor::Person, at).unwrap();
+            doc.record_start(&TaskActor::Agent(person.clone()), at + 1)
+                .unwrap();
+            let attempt = doc
+                .view()
+                .unwrap()
+                .execution
+                .and_then(|execution| execution.current)
+                .unwrap()
+                .id;
+            let reported = doc
+                .report_attempt(
+                    &attempt,
+                    "The person's own result",
+                    zerus_replica::execution::ReportKind::Ready,
+                    None,
+                    &TaskActor::Agent(person),
+                    at + 2,
+                )
+                .unwrap();
+            assert!(reported.moves, "{shape}: the person's report did not move the task");
+            tasks.save(&mut doc).unwrap();
+            drop(tasks);
+            crate::teams::tasks::observe(&f.config.state, &task).unwrap();
+            None
+        } else {
+            let mut o = f.h.store.task_observation(TEAM, f.node).unwrap().unwrap();
+            o.previous_revision = o.revision.clone();
+            o.revision = uuid::Uuid::new_v4().to_string();
+            o.attempt += 1;
+            o.attempt_id.clear();
+            o.attempt_conflict = true;
+            o.stage = if shape == "conflict" {
+                crate::teams::ops::TaskStage::InReview
+            } else {
+                crate::teams::ops::TaskStage::Done
+            };
+            Some(o)
+        };
+        let tasks = ProjectStore::open(&f.config.state.join("replica"), &task.project).unwrap();
+        let before = tasks.load(&task.uuid).unwrap().revision();
+        let stage = tasks.load(&task.uuid).unwrap().view().unwrap().stage;
+        drop(tasks);
+        if let Some(o) = &observation {
+            f.h.run(
+                &service(),
+                Operation::ObserveTask {
+                    node: f.node,
+                    observation: o.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let tasks = ProjectStore::open(&f.config.state.join("replica"), &task.project).unwrap();
+        let doc = tasks.load(&task.uuid).unwrap();
+        assert_eq!(doc.revision(), before, "{shape}: the task document changed");
+        assert_eq!(doc.view().unwrap().stage, stage, "{shape}: the task stage changed");
+        drop(tasks);
+        assert!(
+            f.h.store.queue(TEAM, 200, None).unwrap().rows.is_empty(),
+            "{shape}: the node is still live"
+        );
+        let items: Vec<_> = f
+            .h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|i| i.node == f.node && i.kind == "accepted_superseded")
+            .collect();
+        assert_eq!(items.len(), 1, "{shape}");
+        assert!(
+            items[0]
+                .text
+                .contains("the person's own run replaced the team's accepted result"),
+            "{shape}"
+        );
+        assert!(
+            !f.h.store
+                .cards(TEAM, 200, None)
+                .unwrap()
+                .rows
+                .iter()
+                .any(|c| c.node == Some(f.node) && c.state == "open"),
+            "{shape}: a card stayed open"
+        );
+        let decided = f
+            .h
+            .store
+            .decisions(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|d| d.seq == decision)
+            .unwrap();
+        assert_eq!(
+            decided.state,
+            crate::teams::store::DecisionState::Settled,
+            "{shape}"
+        );
+        // A replay writes nothing: the same real observation, or the same
+        // direct operation, leaves exactly one item.
+        if let Some(o) = observation {
+            f.h.run(
+                &service(),
+                Operation::ObserveTask {
+                    node: f.node,
+                    observation: o,
+                },
+            )
+            .unwrap();
+        } else {
+            crate::teams::tasks::observe(&f.config.state, &task).unwrap();
+        }
+        assert_eq!(
+            f.h
+                .store
+                .inbox(TEAM, 200, None)
+                .unwrap()
+                .rows
+                .iter()
+                .filter(|i| i.node == f.node && i.kind == "accepted_superseded")
+                .count(),
+            1,
+            "{shape}: replay wrote another item"
+        );
+    }
 }

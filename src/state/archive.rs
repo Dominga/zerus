@@ -134,6 +134,9 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 /// The caller holds the state writer lock. Write the durable copy before
 /// releasing its old name; a crash between the two operations cannot lose it.
 pub(super) fn save(record: &Value) -> Result<String> {
+    if supervisor::owned_pending(record) {
+        return Err("Original descendant owner requires cohort finalization; binding kept".into());
+    }
     if terminating::pending(record) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
@@ -143,7 +146,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
     if storage::current_of(record)?.is_some_and(|current| {
         current["run_id"] == record["run_id"]
             && current["conversation_id"] == record["conversation_id"]
-            && terminating::pending(&current)
+            && (terminating::pending(&current) || supervisor::owned_pending(&current))
     }) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
@@ -221,6 +224,7 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
     // An environment that cannot be read counts as live: never archived.
     !terminating::pending(record)
+        && !supervisor::owned_pending(record)
         && !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()

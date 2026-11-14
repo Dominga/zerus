@@ -81,6 +81,7 @@ pub fn main() {
         match args[1].as_str() {
             "--owner" => owner(&args[2], Path::new(&args[3])),
             "--root" => fixtures::root(&args[2], Path::new(&args[3])),
+            "--original" => original(&args[2], Path::new(&args[3])),
             "--cleanup" => cleanup::probe(&args[2], Path::new(&args[3])),
             _ => panic!("unknown private mode"),
         }
@@ -96,6 +97,7 @@ fn suite(domain: &mut cleanup::Domain) {
         .unwrap();
     for case in [
         "root",
+        "policy-gap",
         "daemon",
         "clone",
         "clone-direct",
@@ -155,6 +157,22 @@ fn suite(domain: &mut cleanup::Domain) {
             "unrelated external child affected"
         );
         println!("PASS {case}");
+    }
+    for case in ["long-life", "live-capacity"] {
+        let home = domain.namespace();
+        let mut child = command("--original", case, &home).spawn().unwrap();
+        let end = Instant::now() + Duration::from_secs(45);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "original {case}");
+                break;
+            }
+            assert!(
+                Instant::now() < end,
+                "original owner control exceeded bound"
+            );
+            tick();
+        }
     }
     drop(unrelated.stdin.take());
     assert_eq!(unrelated.wait().unwrap().code(), Some(17));
@@ -219,6 +237,37 @@ fn owner(case: &str, dir: &Path) {
     assert_eq!(read_frame(&mut stream), "ready");
     assert_eq!(c.poll(), Snapshot::Pending);
     match case {
+        "policy-gap" => {
+            frame(&mut stream, "fork");
+            assert_eq!(read_frame(&mut stream), "forked");
+            let mut child = accept(&descendants);
+            let _pid = read_frame(&mut child);
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) },
+                0
+            );
+            frame(&mut stream, "root-exit");
+            assert_eq!(
+                read_frame(&mut child),
+                format!("adopted {}", unsafe { libc::getppid() })
+            );
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+                0
+            );
+            assert_eq!(
+                until(&mut c, |s| s != Snapshot::Pending),
+                Snapshot::Complete {
+                    root: 23,
+                    adopted: 0
+                }
+            );
+            // This unsupported generic caller deliberately lost continuity.
+            // Its Complete is diagnostic only: no source endpoint or original
+            // owner is created, and it must never supply effect authority.
+            assert!(!dir.join("observe").exists());
+            frame(&mut child, "child-exit");
+        }
         "root" => {
             frame(&mut stream, "exit");
             assert_eq!(
@@ -479,4 +528,54 @@ fn admission(case: &str, dir: &Path) {
         drop(external.stdin.take());
         assert_eq!(external.wait().unwrap().code(), Some(17));
     }
+}
+
+fn original(case: &str, dir: &Path) {
+    let prepared = Custody::prepare_original().unwrap();
+    let mut child = command("--root", "external", dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = child.stdin.take().unwrap();
+    let mut owner = prepared.attach(child);
+    if case == "long-life" {
+        std::thread::sleep(Duration::from_secs(31));
+        assert_eq!(owner.poll(), Snapshot::Pending);
+    } else {
+        assert_eq!(case, "live-capacity");
+        owner.exhaust_test_capacity();
+        // A lifetime tally is not a live-pin limit. The same owner must keep
+        // admitting bounded successive actual children after positive waits.
+        for _ in 0..70 {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                unsafe {
+                    libc::_exit(17);
+                }
+            }
+            let end = deadline();
+            let before = owner.test_exit_count();
+            while owner.test_exit_count() == before {
+                assert_eq!(owner.poll(), Snapshot::Pending);
+                assert!(Instant::now() < end);
+                tick();
+            }
+        }
+        assert_eq!(owner.test_exit_count(), 70);
+    }
+    assert!(!owner.ready_root().unwrap());
+    drop(input);
+    let end = deadline();
+    while !owner.ready_root().unwrap() {
+        assert!(Instant::now() < end);
+        tick();
+    }
+    assert_eq!(owner.consume_root().unwrap(), Some(17));
+    assert_eq!(owner.consume_root().unwrap(), Some(17));
+    assert!(matches!(
+        until(&mut owner, |s| s != Snapshot::Pending),
+        Snapshot::Complete { root: 17, .. }
+    ));
+    println!("PASS original-{case}");
 }

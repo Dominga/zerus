@@ -39,7 +39,7 @@ pub(super) fn root(case: &str, dir: &Path) {
         request = read_frame(&mut stream);
     }
     if request == "fork" {
-        if case == "clone" {
+        if matches!(case, "clone" | "policy-gap") {
             // fork-like clone with no SIGCHLD exit signal; ordinary wait omits it.
             let child =
                 unsafe { libc::syscall(libc::SYS_clone, 0usize, 0usize, 0usize, 0usize, 0usize) };

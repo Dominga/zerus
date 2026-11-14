@@ -2,8 +2,9 @@
 //! Only a fresh dedicated single-threaded executable may use this resource.
 //! Its trusted caller must remain this process's sole spawner/waiter, create
 //! no threads and install no handlers. No attach/adopt/restore constructor.
-//! Do NOT enable it in today's supervisor: the legacy census misses adopted
-//! siblings. Drop sends no signal and cannot reconstruct forfeited ownership.
+//! The original-supervisor adapter remains const-false; its records refuse the
+//! legacy census, which misses adopted siblings. Generic completion is never
+//! source attestation. Drop cannot reconstruct forfeited ownership.
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
@@ -80,7 +81,7 @@ pub struct Custody {
     root_pin: Option<Pin>,
     failure: Option<Failure>,
     complete: bool,
-    until: Instant,
+    until: Option<Instant>,
     _local: PhantomData<Rc<()>>,
 }
 impl Custody {
@@ -126,7 +127,7 @@ impl Custody {
             root_pin: None,
             failure,
             complete: false,
-            until,
+            until: Some(until),
             _local: PhantomData,
         })
     }
@@ -157,11 +158,17 @@ impl Custody {
             Snapshot::Pending
         }
     }
+    fn expired(&self) -> bool {
+        self.until.is_some_and(|until| Instant::now() >= until)
+    }
     fn check(&self) -> Result<(), Failure> {
-        if Instant::now() >= self.until {
+        if self.expired() {
             return Err(Failure::Deadline);
         }
-        if !policy() || subreaper().ok() != Some(1) || single_thread().ok() != Some(true) {
+        if !policy()
+            || subreaper().ok() != Some(1)
+            || (self.until.is_some() && single_thread().ok() != Some(true))
+        {
             return Err(Failure::Policy);
         }
         if self.owner.pid != std::process::id() || self.owner.check().is_err() {
@@ -171,10 +178,15 @@ impl Custody {
     }
     fn remember(&mut self, pid: u32) -> Result<(), Failure> {
         if !self.children.contains_key(&pid) {
-            if Instant::now() >= self.until {
+            if self.expired() {
                 return Err(Failure::Deadline);
             }
-            if self.seen >= IDENTITIES {
+            if (if self.until.is_some() {
+                self.seen
+            } else {
+                self.children.len() + usize::from(self.root_pin.is_some())
+            }) >= IDENTITIES
+            {
                 return Err(Failure::Limit);
             }
             let pin = Pin::new(pid).map_err(|_| Failure::Identity)?;
@@ -182,7 +194,7 @@ impl Custody {
                 return Err(Failure::Identity);
             }
             self.children.insert(pid, pin);
-            self.seen += 1;
+            self.seen = self.seen.saturating_add(1);
         }
         Ok(())
     }
@@ -193,7 +205,7 @@ impl Custody {
         }
         // A missing pinned child without OUR positive wait is lost custody.
         for pin in self.children.values() {
-            if Instant::now() >= self.until {
+            if self.expired() {
                 return Err(Failure::Deadline);
             }
             if pin.check().ok() != Some(self.owner.pid) {
@@ -234,10 +246,67 @@ impl Custody {
                 self.root_exit = Some(status);
                 self.root_pin = pin; // Retain the original handle after reaping.
             } else {
-                self.adopted += 1;
+                self.adopted = self.adopted.saturating_add(1);
             }
         }
         Ok(()) // Fairness cap, not overflow: another bounded poll must drain.
+    }
+    // Only the real supervisor adapter uses an unexpired original lifetime.
+    // This is kernel ownership DATA, never source/continuity attestation.
+    pub(crate) fn prepare_original() -> io::Result<Prepared> {
+        if !policy()
+            || !single_thread()?
+            || subreaper()? != 0
+            || !children()?.is_empty()
+            || USED.swap(true, Ordering::AcqRel)
+        {
+            return Err(io::Error::other("fresh original supervisor unavailable"));
+        }
+        let owner = Pin::new(std::process::id())?;
+        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0
+            || subreaper()? != 1
+        {
+            return Err(io::Error::other("original subreaper unavailable"));
+        }
+        Ok(Prepared { owner })
+    }
+    /// Non-consuming original-root status for the sealed startup observer.
+    /// The host clears its legacy signal registration BEFORE consumption.
+    pub(crate) fn ready_root(&mut self) -> io::Result<bool> {
+        if self.root_exit.is_some() {
+            return Ok(true);
+        }
+        self.check()
+            .map_err(|_| io::Error::other("original policy changed"))?;
+        let pin = self
+            .children
+            .get(&self.root.id())
+            .ok_or_else(|| io::Error::other("lost root pin"))?;
+        pin.check()?;
+        Ok(wait(libc::P_PIDFD, pin.handle.as_raw_fd() as u32, libc::WNOWAIT)?.is_some())
+    }
+    pub(crate) fn consume_root(&mut self) -> io::Result<Option<i32>> {
+        if self.root_exit.is_some() {
+            return Ok(self.root_exit);
+        }
+        if !self.ready_root()? {
+            return Ok(None);
+        }
+        let pin = self
+            .children
+            .get(&self.root.id())
+            .ok_or_else(|| io::Error::other("lost root pin"))?;
+        let info = wait(libc::P_PIDFD, pin.handle.as_raw_fd() as u32, 0)?
+            .ok_or_else(|| io::Error::other("original root wait lost"))?;
+        if unsafe { info.si_pid() } as u32 != self.root.id() {
+            self.failure.get_or_insert(Failure::Wait);
+            return Err(io::Error::other("original root identity changed"));
+        }
+        self.root_exit = exit(&info);
+        self.root_pin = self.children.remove(&self.root.id());
+        self.root_exit
+            .map(Some)
+            .ok_or_else(|| io::Error::other("invalid root status"))
     }
     pub fn root_id(&self) -> u32 {
         self.root.id()
@@ -262,6 +331,37 @@ impl Custody {
         self.adopted
     }
 }
+/// Pre-spawn one-use preparation, never recoverable from records or PIDs.
+/// Kept crate-private; only the reviewed supervisor path supplies its Child.
+pub(crate) struct Prepared {
+    owner: Pin,
+}
+impl Prepared {
+    pub(crate) fn attach(self, root: Child) -> Custody {
+        let mut children = BTreeMap::new();
+        let failure = match Pin::new(root.id()) {
+            Ok(pin) if pin.check().ok() == Some(self.owner.pid) => {
+                children.insert(root.id(), pin);
+                None
+            }
+            _ => Some(Failure::Identity),
+        };
+        Custody {
+            root,
+            owner: self.owner,
+            children,
+            seen: 1,
+            adopted: 0,
+            root_exit: None,
+            root_pin: None,
+            failure,
+            complete: false,
+            until: None,
+            _local: PhantomData,
+        }
+    }
+}
+
 fn wait(kind: libc::idtype_t, id: u32, extra: i32) -> io::Result<Option<libc::siginfo_t>> {
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
     // Include non-SIGCHLD clone children. WNOWAIT reserves status while pinning.

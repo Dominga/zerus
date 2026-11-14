@@ -23,11 +23,23 @@ fn read(path: &Path) -> Result<Option<Connection>> {
         Ok(false) => return Err(refused("The member receipt file is not private.")),
         Err(e) => return Err(storage(e)),
     }
+    let parent = path
+        .parent()
+        .ok_or_else(|| refused("The member receipt directory is missing."))?;
+    if !crate::platform::verify_private(parent, crate::platform::Private::Directory)
+        .map_err(storage)?
+    {
+        return Err(refused("The member receipt directory is not private."));
+    }
+    #[cfg(unix)]
+    let identity = crate::sqlite_file::private(path).map_err(storage)?;
     let db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(storage)?;
+    #[cfg(unix)]
+    crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(storage)?;
     Ok(Some(db))
@@ -86,6 +98,14 @@ pub(crate) fn check(state: &Path, team: &Team, member: &Member) -> Result<()> {
     let state = crate::platform::canonical(state).map_err(storage)?;
     let db = read(&state.join("teams").join(FILE))?
         .ok_or_else(|| refused("The member has no saved launch receipt."))?;
+    let version: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if version != super::ledger::SCHEMA {
+        return Err(refused(
+            "The member launch receipt needs a compatible Teams service.",
+        ));
+    }
     let raw:Option<String>=db.query_row("SELECT CAST(substr(CAST(data AS BLOB),1,262145) AS TEXT) FROM originals WHERE team=?1 AND member=?2",rusqlite::params![team.id,member.id],|r|r.get(0)).optional().map_err(storage)?;
     let raw = raw.ok_or_else(|| refused("The member has no saved launch receipt."))?;
     if raw.len() > 262144 {
@@ -96,6 +116,16 @@ pub(crate) fn check(state: &Path, team: &Team, member: &Member) -> Result<()> {
     let Some(db) = read(&state.join("teams/standing-v1/journal.sqlite3"))? else {
         return Ok(());
     };
+    let version: u32 = db
+        .query_row("SELECT version FROM standing_meta WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .map_err(storage)?;
+    if version != 1 {
+        return Err(refused(
+            "The member delivery receipt needs a compatible Teams service.",
+        ));
+    }
     let indexed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='standing_unresolved')",[],|r|r.get(0)).map_err(storage)?;
     if !indexed {
         return Err(refused(

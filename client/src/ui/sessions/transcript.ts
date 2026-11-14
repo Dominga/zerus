@@ -673,7 +673,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     const toolEvents = group.map(toolEvent);
     const shownTools = tools.slice(0, 3).join(", ") + (tools.length > 3 ? " …" : "");
     // Task 248: the pictures the group's finished tools worked with (Qt toolMedia).
-    const pictures = toolMedia(group.filter((g) => g.type === "PostToolUse").map((g) => g.detail ?? ""));
+    const pictures = toolMedia(group.filter((g) => g.type === "PostToolUse").map((g) => ({ tool: g.tool ?? "", detail: g.detail ?? "" })));
     const shown = pictures.length ? pictures : undefined;
     if (group.length === 1) {
       items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), events: toolEvents, warn: attention(e), media: shown });

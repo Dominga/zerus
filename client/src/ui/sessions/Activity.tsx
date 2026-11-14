@@ -225,7 +225,7 @@ function ReplyMedia(props: { text: string }) {
 /** The pictures a tool group worked with (Qt toolMedia), under the group. */
 function ToolMedia(props: { refs: readonly string[] }) {
   const scope = useMediaScope();
-  return <MediaStrip scope={scope()} refs={props.refs} />;
+  return <MediaStrip scope={scope()} refs={props.refs} quiet />;
 }
 
 // ---------------------------------------------------------------------------

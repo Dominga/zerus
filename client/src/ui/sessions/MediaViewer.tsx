@@ -10,7 +10,7 @@ import { tr } from "../../i18n";
 // up to 1280 x 860, or a player with Pause/Play, a position slider and the
 // time; Open in default app; Close). The viewer is an in-app dialog.
 
-function MediaTile(props: { scope: MediaScope; href: string }) {
+function MediaTile(props: { scope: MediaScope; href: string; quiet?: boolean }) {
   const [broken, setBroken] = createSignal(false);
   createEffect(() => previewMedia(props.scope, props.href));
   const tile = () => mediaTile(props.scope, props.href);
@@ -18,7 +18,11 @@ function MediaTile(props: { scope: MediaScope; href: string }) {
   const url = () => tile()?.state === "ready" && tile()?.token ? mediaUrl(tile()!.token!) : "";
   const note = () => broken() ? tr("This picture cannot be shown.") : mediaNote(tile() as never, props.scope.machine);
   const name = () => tile()?.name || mediaName(props.href);
+  // A guessed picture (a tool group's) that is not on this computer is not
+  // shown: only a picture the agent named says "Not found".
+  const hidden = () => props.quiet && tile()?.state === "error" && (tile() as { code?: string } | undefined)?.code === "missing";
   return (
+    <Show when={!hidden()}>
     <button class="media-tile" classList={{ video: kind() === "video", empty: !url() || broken() }} data-media={props.href}
       style={{ width: `${MEDIA_TILE.width}px`, height: `${MEDIA_TILE.height}px` }} title={props.href}
       aria-label={kind() === "video" ? tr("Play %1", name()) : tr("Open %1", name())} onClick={() => openMedia(props.scope, props.href)}>
@@ -31,14 +35,15 @@ function MediaTile(props: { scope: MediaScope; href: string }) {
       <Show when={note()}><span class="media-note">{note()}</span></Show>
       <span class="media-name ell">{name()}</span>
     </button>
+    </Show>
   );
 }
 
 /** The previews under a message or a tool group. */
-export function MediaStrip(props: { scope: MediaScope | undefined; refs: readonly string[] }) {
+export function MediaStrip(props: { scope: MediaScope | undefined; refs: readonly string[]; quiet?: boolean }) {
   return (
     <Show when={props.scope && props.refs.length}>
-      <div class="media-strip"><For each={props.refs}>{(href) => <MediaTile scope={props.scope!} href={href} />}</For></div>
+      <div class="media-strip"><For each={props.refs}>{(href) => <MediaTile scope={props.scope!} href={href} quiet={props.quiet} />}</For></div>
     </Show>
   );
 }

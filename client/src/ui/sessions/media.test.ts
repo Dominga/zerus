@@ -40,8 +40,20 @@ describe("agent-named media (task 248)", () => {
       "saved /tmp/clip.mp4 and /tmp/a.gif /tmp/b.webp /tmp/c.png",
     ])).toEqual(["/work/out/chart.png", "C:\\work\\out\\diff.jpg", "/tmp/a.gif", "/tmp/b.webp"]);
     expect(toolMedia(["no pictures here", "a.png alone"])).toEqual([]);
-    // Qt's pattern has no word boundary: "/a.png" inside a relative path counts, as there.
-    expect(toolMedia(["relative/a.png"])).toEqual(["/a.png"]);
+    // Owner, 2026-11-15: the tail of a relative path or a URL is no file here.
+    expect(toolMedia(["relative/a.png"])).toEqual([]);
+  });
+
+  it("takes no path from URLs, relative links, web tools or plain listings", () => {
+    expect(toolMedia([
+      "![Logo](../_static/logo.png)",
+      "![](https://mobcitygame.com/wp-content/uploads/2026/03/image-7.png)",
+      "see https://host/d.jpg and //host/e.png",
+    ])).toEqual([]);
+    expect(toolMedia([{ tool: "web_fetch", detail: "Saved /work/shot.png" }])).toEqual([]);
+    expect(toolMedia([{ tool: "pwsh", detail: "Mode  Name\n-a--- C:\\x\\assets\\icon.png" }])).toEqual([]);
+    expect(toolMedia([{ tool: "pwsh", detail: "Saved C:\\x\\shot.png" }])).toEqual(["C:\\x\\shot.png"]);
+    expect(toolMedia([{ tool: "read", detail: "<path>D:\\x\\shot.png</path>\n<type>image</type>" }])).toEqual(["D:\\x\\shot.png"]);
   });
 
   it("puts a tool group's pictures on its item", () => {

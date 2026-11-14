@@ -8394,7 +8394,12 @@ now (a `queued` user row, a `queued_command` attachment, `remove` or `dequeue`)
 never proves a later send. A new conversation with no transcript yet counts
 its settled composer emptying after Enter (`native: composer`). Both waits
 share one 8-second window from the paste and hold no state lock, so other
-sessions' hooks run meanwhile. The send's `input_typing` marker on the session
+sessions' hooks run meanwhile. Transcript proof reads use regular, no-follow,
+nonblocking sources, pin the original native file object and verify the named
+object again after each bounded read. Appends remain valid; replaced, truncated
+or unreadable sources stay unknown and never fall back to composer-only proof.
+The existing cumulative 16 MiB read budget does not limit earlier transcript
+history. The send's `input_typing` marker on the session
 keeps every other input out until it ends (other sends and session actions,
 Terminal input and Clear input). Its term starts again with the window, after
 the paste, so slow work before the paste never lets it lapse inside the window;

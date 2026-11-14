@@ -3543,6 +3543,7 @@
   "The selected project changed. The new task draft was kept.": "Выбранный проект изменился. Черновик новой задачи сохранён.",
   "The selected session is offline.": "Выбранная сессия не в сети.",
   "The selected sessions are no longer listed.": "Выбранных сессий больше нет в списке.",
+  "The selected team changed. Reopen the form.": "Выбрана другая команда. Откройте форму заново.",
   "The selected text is on the clipboard": "Выделенный текст скопирован в буфер обмена",
   "The session ID is on the clipboard": "ID сессии скопирован в буфер обмена",
   "The session changed. Open its actions again.": "Сессия изменилась. Откройте её действия снова.",

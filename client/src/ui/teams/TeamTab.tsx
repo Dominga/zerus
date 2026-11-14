@@ -260,9 +260,11 @@ export function TeamTab() {
     return ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team ? shown : undefined;
   });
   const readFailure = () => target().team ? teams.readFailureFor(`team:${target().team}`) : null;
-  const act: EditAction = (kind: string, fields: Record<string, unknown> = {}, revision?: number) => {
+  const act: EditAction = (kind: string, fields: Record<string, unknown> = {}, revision?: number, team?: string) => {
     const current = view();
-    if (!current) return;
+    if (!current || (team !== undefined && team !== current.bar.id)) return {
+      outcome: "failed", request_id: "", detail: tr("The selected team changed. Reopen the form."),
+    };
     const call: TeamCall = teamCall(current, newRequestId(), kind, fields);
     if (revision !== undefined) call.expected_revision = revision;
     return teams.run(call, source());

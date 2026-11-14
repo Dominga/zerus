@@ -1,5 +1,5 @@
 //! All forms pin the shown revision. Nothing writes on opening a dialog.
-import { Show, createSignal } from "solid-js";
+import { Show, createEffect, createSignal } from "solid-js";
 import { tr } from "../../i18n";
 import type { TeamMember, TeamOutcome, TeamView } from "../../store/teams";
 import { TextInput } from "../lib/TextField";
@@ -9,13 +9,17 @@ import { TeamEditDialog } from "./TeamEditDialog";
 import { activeTeam } from "./actions";
 import "./member-edit.css";
 export type EditSubmit = (kind: string, fields: Record<string, unknown>) => void;
-export type EditAction = (kind: string, fields?: Record<string, unknown>, revision?: number) => unknown;
+export type EditAction = (kind: string, fields?: Record<string, unknown>, revision?: number, team?: string) => unknown;
 type Draft = { kind: string; view: TeamView; member?: TeamMember };
 export function createTeamEditors(view: () => TeamView, action: EditAction) {
   const [draft, setDraft] = createSignal<Draft>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [unknown, setUnknown] = createSignal(false);
+  createEffect(() => {
+    const opened = draft();
+    if (opened && view().bar.id !== opened.view.bar.id) setDraft(undefined);
+  });
   const open = (kind: string, member?: string) => {
     const shown = view();
     if (!activeTeam(shown.bar.status)) return;
@@ -25,7 +29,7 @@ export function createTeamEditors(view: () => TeamView, action: EditAction) {
   const submit: EditSubmit = (kind, fields) => {
     const shown = draft(); if (!shown || busy() || unknown()) return;
     setBusy(true); setError("");
-    void Promise.resolve().then(() => action(kind, fields, shown.view.revision)).then((result) => {
+    void Promise.resolve().then(() => action(kind, fields, shown.view.revision, shown.view.bar.id)).then((result) => {
       const outcome = result && typeof result === "object" && "outcome" in result ? result as TeamOutcome : undefined;
       if (!outcome || outcome.outcome === "done" || outcome.outcome === "confirm") setDraft(undefined);
       else if (outcome.outcome === "failed") setError(outcome.detail);

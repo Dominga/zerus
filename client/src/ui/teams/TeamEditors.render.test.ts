@@ -39,7 +39,7 @@ it("opens without a write and sends rename at the revision shown when opened", a
   input.value = "Readable team"; input.dispatchEvent(new Event("input", { bubbles: true }));
   setView({ ...view(), revision: 21 });
   click(host, "Save"); await flush();
-  expect(action).toHaveBeenCalledExactlyOnceWith("rename_team", { name: "Readable team" }, 20);
+  expect(action).toHaveBeenCalledExactlyOnceWith("rename_team", { name: "Readable team" }, 20, teamView.bar.id);
 });
 it("adds a pinned role with explicit seat choices; changing agent clears incompatible choices", async () => {
   const { host, action } = setup({ outcome: "done", request_id: "example", receipt: {} });
@@ -49,7 +49,7 @@ it("adds a pinned role with explicit seat choices; changing agent clears incompa
   const model = host.querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
   model.value = "example-model"; model.dispatchEvent(new Event("input", { bubbles: true }));
   click(host.querySelector("dialog")!, "Add member"); await flush();
-  expect(action).toHaveBeenCalledExactlyOnceWith("add_member", { role: "developer", agent: "codex", model: "example-model", effort: "", account: { mode: "freest" } }, 20);
+  expect(action).toHaveBeenCalledExactlyOnceWith("add_member", { role: "developer", agent: "codex", model: "example-model", effort: "", account: { mode: "freest" } }, 20, teamView.bar.id);
 });
 it("an unknown result is never submitted again and the form remains closeable", async () => {
   const { host, action } = setup({ outcome: "uncertain", request_id: "example", detail: "Lost answer" });
@@ -57,4 +57,13 @@ it("an unknown result is never submitted again and the form remains closeable", 
   click(host, "Save"); await flush(); expect(action).toHaveBeenCalledTimes(1);
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("use Check");
   click(host, "Cancel"); expect(host.querySelector("dialog")).toBeNull();
+});
+
+it("changing the selected team closes the form without writing to either team", async () => {
+  const { host, action, setView, view } = setup({ outcome: "done", request_id: "example", receipt: {} });
+  click(host, "Rename team");
+  setView({ ...view(), bar: { ...view().bar, id: "another-team" } });
+  await flush();
+  expect(host.querySelector("dialog")).toBeNull();
+  expect(action).not.toHaveBeenCalled();
 });

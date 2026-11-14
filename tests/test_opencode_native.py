@@ -881,6 +881,8 @@ class OpenCodeNative(unittest.TestCase):
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
         self.assertIs(card.get('blocking'), True)
+        bounded = self.hgs(['inspect',name,'--after',str(2**63-1),'--skip-processes'])
+        self.assertEqual(bounded['pending_questions'],data['pending_questions'])
         [item] = card['questions']
         self.assertEqual([o['label'] for o in item['options']], ['Green', 'Blue'])
         green = next(o['id'] for o in item['options'] if o['label'] == 'Green')

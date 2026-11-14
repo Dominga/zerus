@@ -36,15 +36,17 @@ pub fn escalates(state: &str) -> bool {
 /// Claude's own AskUserQuestion from its PreToolUse hook.
 pub const ROUTED_SOURCE: &str = "hook";
 /// Qualified blocking questions only: Claude's hook, Kimi's foreground
-/// AskUserQuestion and OpenCode's native question-tool form. Each uses its
+/// AskUserQuestion, DeepSeek's ordinary request and OpenCode's native
+/// question-tool form. Each uses its
 /// existing exact-identity answer path and durable original request journal.
 /// Approvals, trust, cache choices and other synthetic prompts never route.
-pub const ROUTED_SOURCES: [&str; 3] = [ROUTED_SOURCE, "kimi_wire", "opencode_native"];
+pub const ROUTED_SOURCES: [&str; 4] = [ROUTED_SOURCE, "kimi_wire", "dsh_native", "opencode_native"];
 fn routed_source(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some(ROUTED_SOURCE),
         "kimi" => Some("kimi_wire"),
         "opencode" => Some("opencode_native"),
+        "dsh" => Some("dsh_native"),
         _ => None,
     }
 }
@@ -316,6 +318,8 @@ pub fn routable(card: &Value) -> bool {
     ROUTED_SOURCES.contains(&card["source"].as_str().unwrap_or(""))
         && (card["source"] != "kimi_wire"
             || (card["answer_transport"] == "kimi_tui" && card["blocking"] == true))
+        && (card["source"] != "dsh_native"
+            || (card["answer_transport"] == "native_dsh" && card["blocking"] == true))
         && (card["source"] != "opencode_native"
             || (card["kind"] == "opencode_form"
                 && card["status"] == "pending"

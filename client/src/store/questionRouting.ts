@@ -82,7 +82,7 @@ export function routingOf(s: Session): Routing | undefined {
 }
 
 /** Qualified providers of blocking native questions; the host validates each card. */
-export const routable = (s: Session) => !!s.parent && s.state !== "archived" && ["claude", "kimi", "opencode"].includes(s.cmd);
+export const routable = (s: Session) => !!s.parent && s.state !== "archived" && ["claude", "kimi", "dsh", "opencode"].includes(s.cmd);
 
 /** Whether the person latched it off: the mirror in the child's host record, or this computer's own service. */
 export const latchedOff = (s: Session) => routingOf(s)?.personOff === true || latchOf(s)?.personOff === true;

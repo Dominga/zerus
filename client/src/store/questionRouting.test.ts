@@ -42,14 +42,14 @@ describe("the per-child switch in Session actions", () => {
     expect(routingEntry(child({ cmd: "codex" }))).toBeUndefined();
   });
 
-  it("keeps the person's switch for every qualified provider and excludes DeepSeek", () => {
-    for (const cmd of ["claude", "kimi", "opencode"]) {
+  it("keeps the person's switch for every qualified provider", () => {
+    for (const cmd of ["claude", "kimi", "dsh", "opencode"]) {
       const row = child({ cmd, name: `${cmd}/project/child` } as Partial<Session>);
       expect(routingEntry(row), cmd).toMatchObject({ checked: true, disabled: false });
       expect(routingEntry({ ...row, questionRouting: { sendToParent: false, revision: 1, personOff: false } }), cmd)
         .toMatchObject({ checked: false, hint: SEND_OFF });
     }
-    for (const cmd of ["dsh", "deepseek", "codex", "unknown"]) {
+    for (const cmd of ["deepseek", "codex", "unknown"]) {
       expect(routingEntry(child({ cmd } as Partial<Session>)), cmd).toBeUndefined();
     }
   });

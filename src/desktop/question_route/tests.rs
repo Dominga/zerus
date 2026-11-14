@@ -47,7 +47,7 @@ mod inventory {
         ("kimi_wire", Routes),
         ("kimi_plan_review", NativePrompt),
         ("kimi_tool_approval", NativePrompt),
-        ("dsh_native", OtherProvider),
+        ("dsh_native", Routes),
         ("dsh_native_api", OtherProvider),
         ("opencode_native", Routes),
         ("adopt", NotACard),
@@ -208,7 +208,7 @@ mod inventory {
         // An otherwise routable card routes exactly for the routed class.
         for (literal, class) in CLASSES {
             let card = serde_json::json!({"source": literal, "agent_id": "main",
-                "can_answer": true, "answer_transport": if *literal == "opencode_native" { "native_opencode" } else { "kimi_tui" },
+                "can_answer": true, "answer_transport": if *literal == "opencode_native" { "native_opencode" } else if *literal == "dsh_native" { "native_dsh" } else { "kimi_tui" },
                 "kind": "opencode_form", "status": "pending", "blocking": true, "questions": [{"question": "?"}]});
             assert_eq!(routable(&card), *class == Routes, "{literal}");
         }

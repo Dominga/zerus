@@ -1074,7 +1074,8 @@ service reads the child with one bounded `hgs inspect NAME --after
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
 sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook` and
-Kimi's `kimi_wire`, and OpenCode's `opencode_native` question-tool forms,
+Kimi's `kimi_wire`, DeepSeek's `dsh_native` ordinary requests, and OpenCode's
+`opencode_native` question-tool forms,
 paired with that child's provider. They must name the main
 agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
 Kimi also requires its qualified `kimi_tui` answer transport and positive
@@ -1092,8 +1093,12 @@ Generic forms without that provenance and permissions remain person-only.
 Claude Code's own prompts (`claude_native_question`), every synthetic native
 card, approvals (including Kimi plan and goal approvals), cache choices, trust
 and sign-in never route, even if answerable. Codex async questions are optional,
-so a Codex child has nothing to route. DeepSeek sources remain excluded pending
-a durable answer-UUID admission journal (zerus-sa9qn.34).
+so a Codex child has nothing to route. DeepSeek additionally requires its
+`native_dsh` transport and positive `blocking` evidence from the exact owned
+root's ordinary forever-waiting request. Timed waits, typed approval or plan
+intents and older resident bridges without this proof remain unrouted. Its
+existing durable answer UUID journal, host generation and consume-once request
+checks still govern every answer (zerus-fb9ky).
 
 The parent's own current row on the same computer, matched by the link's
 session ID, must be running a terminal agent (Claude, Codex or Kimi); the send

@@ -469,6 +469,9 @@ class NativeKimiQuestions(NativeKimi):
 
  def test_short_question_exact_identity_and_receipt_prevent_replay(self):
   card=self.card()
+  bounded=subprocess.run([str(questions.HGS),'inspect',self.name,'--after',str(2**63-1),'--skip-processes'],env=self.env,capture_output=True,text=True,timeout=5)
+  self.assertEqual(bounded.returncode,0,bounded.stderr)
+  self.assertEqual(json.loads(bounded.stdout)['pending_questions'],self.inspect()['pending_questions'])
   self.assertEqual(len(self.native_requests),1,'foreground question must block its native tool')
   self.assertEqual((card['source'],card['agent_id'],card['answer_transport']),('kimi_wire','main','kimi_tui'))
   self.assertIs(card.get('blocking'),True)

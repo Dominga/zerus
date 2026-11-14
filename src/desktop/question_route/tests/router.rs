@@ -3208,7 +3208,7 @@ fn a_verified_v2_statement_for_an_absent_child_fences_its_latch_before_restore()
 
 #[test]
 fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replays_after_restart() {
-    for agent in ["kimi", "opencode"] {
+    for agent in ["kimi", "dsh", "opencode"] {
         let mut f = Fixture::new();
         let mut row = child_row();
         row["name"] = json!(format!("{agent}/project/child"));
@@ -3216,11 +3216,15 @@ fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replay
         let mut question = card("native-question-1");
         question["source"] = json!(if agent == "kimi" {
             "kimi_wire"
+        } else if agent == "dsh" {
+            "dsh_native"
         } else {
             "opencode_native"
         });
         question["answer_transport"] = json!(if agent == "kimi" {
             "kimi_tui"
+        } else if agent == "dsh" {
+            "native_dsh"
         } else {
             "native_opencode"
         });

@@ -19,7 +19,7 @@
     {"name": "v2: a mirror and an extra key", "question_routing": {"send_to_parent": true, "revision": 1, "person_off": false, "muted": true}, "routing": null}
   ],
   "availability": [
-    {"name": "a DeepSeek child stays unqualified", "row": {"name": "dsh/project/child", "cmd": "dsh", "state": "running", "parent": {"name": "codex/project/lead"}, "question_routing": {"send_to_parent": true, "revision": 0}}, "shown": false},
+    {"name": "a live DeepSeek child", "row": {"name": "dsh/project/child", "cmd": "dsh", "state": "running", "parent": {"name": "codex/project/lead"}, "question_routing": {"send_to_parent": true, "revision": 0}}, "shown": true, "enabled": true, "parent": "lead"},
     {"name": "a live kimi child", "row": {"name": "kimi/project/child", "cmd": "kimi", "state": "running", "parent": {"name": "codex/project/lead"}, "question_routing": {"send_to_parent": true, "revision": 0}}, "shown": true, "enabled": true, "parent": "lead"},
     {"name": "a live opencode child", "row": {"name": "opencode/project/child", "cmd": "opencode", "state": "running", "parent": {"name": "codex/project/lead"}, "question_routing": {"send_to_parent": true, "revision": 0}}, "shown": true, "enabled": true, "parent": "lead"},
     {"name": "a live Claude child", "row": {"name": "claude/project/child", "cmd": "claude", "state": "running", "parent": {"name": "codex/project/lead"}, "question_routing": {"send_to_parent": true, "revision": 0}}, "shown": true, "enabled": true, "parent": "lead"},

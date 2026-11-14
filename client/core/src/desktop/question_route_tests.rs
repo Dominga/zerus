@@ -862,3 +862,36 @@ fn an_opencode_question_tool_form_routes_but_permissions_and_unbound_forms_do_no
         assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
     }
 }
+
+#[test]
+fn a_deepseek_native_ordinary_question_routes_but_approvals_and_unproven_requests_do_not() {
+    let mut row = row();
+    row["name"] = json!("dsh/project/child");
+    row["cmd"] = json!("dsh");
+    let edge = edge(&row).expect("a supervised DeepSeek child must be eligible");
+    let mut card = card();
+    card["source"] = json!("dsh_native");
+    card["answer_transport"] = json!("native_dsh");
+    card["blocking"] = json!(true);
+    let mut inspected = inspect(vec![card.clone()]);
+    inspected["name"] = row["name"].clone();
+    inspected["agent"] = json!("dsh");
+    assert_eq!(questions(&inspected, &edge, MACHINE).len(), 1);
+    for (key, value) in [
+        ("source", json!("dsh_native_api")),
+        ("source", json!("hook")),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("answer_transport", json!("unknown")),
+        ("optional", json!(true)),
+        ("agent_id", json!("native-subagent")),
+        ("run_id", json!("replacement")),
+    ] {
+        let mut refused = card.clone();
+        refused[key] = value;
+        inspected["pending_questions"] = json!([refused]);
+        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
+    }
+}

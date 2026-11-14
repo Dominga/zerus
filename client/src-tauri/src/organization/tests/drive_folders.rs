@@ -273,6 +273,145 @@ impl Real {
     }
 }
 
+fn real_organization(real: &Real) -> (Organization, folders::Place) {
+    let pump = Pump::default();
+    card(
+        &pump,
+        "",
+        "example-local",
+        real.snapshot["node_id"].as_str().unwrap(),
+        "linux",
+    );
+    card(
+        &pump,
+        "windows-peer",
+        "windows-peer",
+        &real.machine,
+        "windows",
+    );
+    let organization = Organization::new(
+        pump,
+        real.hgs.clone(),
+        true,
+        real.dir.join("layout.json"),
+        real.dir.join("draft.json"),
+        false,
+    );
+    organization.set_source(snapshot_of(&real.snapshot));
+    organization.observe(&state_of(&real.snapshot));
+    let place = folders::Place {
+        computer: "windows-peer".into(),
+        host: "windows-peer".into(),
+        machine_id: Some(real.machine.clone()),
+    };
+    (organization, place)
+}
+
+#[test]
+fn a_known_duplicate_refuses_without_an_unknown_checkpoint_or_graph_write() {
+    let real = Real::new();
+    let (organization, place) = real_organization(&real);
+    let added = folders::change(
+        organization.clone(),
+        "alpha".into(),
+        folders::Change::Add {
+            place: place.clone(),
+            path: "C:/Repo".into(),
+            name: String::new(),
+        },
+        FOLDER.into(),
+    );
+    let added = serde_json::to_value(added).unwrap();
+    if added["outcome"] != "done" {
+        real.finish(organization);
+        assert_eq!(added["outcome"], "done", "{added}");
+        return;
+    }
+    let graph = real.dir.join("config/swarm/drive-folders.json");
+    let checkpoint = real.dir.join("organization-drive-draft.json");
+    let graph_before = std::fs::read(&graph).unwrap();
+    let checkpoint_before = std::fs::read(&checkpoint).unwrap();
+    let duplicate = folders::change(
+        organization.clone(),
+        "alpha".into(),
+        folders::Change::Add {
+            place,
+            path: "c:\\repo\\.".into(),
+            name: "Duplicate".into(),
+        },
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let duplicate = serde_json::to_value(duplicate).unwrap();
+    let graph_after = std::fs::read(&graph).unwrap();
+    let checkpoint_after = std::fs::read(&checkpoint).unwrap();
+    let pending = organization.lock().drive.pending();
+    real.finish(organization);
+    assert_eq!(
+        duplicate["outcome"],
+        "refused",
+        "{duplicate}; pending={pending}, graph_changed={}, checkpoint_changed={}",
+        graph_after != graph_before,
+        checkpoint_after != checkpoint_before
+    );
+    assert!(!pending, "a known duplicate is not an unknown original");
+    assert_eq!(graph_after, graph_before);
+    assert_eq!(checkpoint_after, checkpoint_before);
+}
+
+#[test]
+fn both_unc_spellings_persist_through_the_actual_legacy_writer_without_drive_files() {
+    for raw in [r"\\server\share\Repo\", "//server/share/Repo/"] {
+        let mut real = Real::new();
+        // The legacy editor admits listed projects only. Give this private
+        // project a local accessible folder as well as its remote machine row.
+        let mut desired = real.snapshot["organization"].clone();
+        desired["projects"][0]["folders"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":uuid::Uuid::new_v4().to_string(),"machine":"example-local","path":real.dir,"name":""}));
+        real.snapshot = call(
+            &real.hgs,
+            &["swarm", "apply", "--json"],
+            json!({"base":real.snapshot["organization"],"desired":desired,"versions":real.snapshot["versions"]}),
+        );
+        assert_eq!(
+            real.snapshot["organization"]["projects"][0]["accessible"],
+            true
+        );
+        let (organization, place) = real_organization(&real);
+        let added = folders::change(
+            organization.clone(),
+            "alpha".into(),
+            folders::Change::Add {
+                place: place.clone(),
+                path: raw.into(),
+                name: String::new(),
+            },
+            FOLDER.into(),
+        );
+        let added = serde_json::to_value(added).unwrap();
+        let snapshot = call(&real.hgs, &["swarm", "get"], Value::Null);
+        let graph_exists = real.dir.join("config/swarm/drive-folders.json").exists();
+        let witness_exists = real
+            .dir
+            .join("config/swarm/drive-folders-init.json")
+            .exists();
+        let drive = real.drive_get();
+        real.finish(organization);
+        assert_eq!(added["outcome"], "done", "{raw}: {added}");
+        let saved = snapshot["organization"]["projects"][0]["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == FOLDER)
+            .unwrap();
+        assert_eq!(saved["path"], "//server/share/Repo");
+        assert_eq!(saved["name"], "");
+        assert!(!graph_exists && !witness_exists);
+        assert_eq!(drive["status"], "uninitialized");
+    }
+}
+
 #[test]
 fn held_refresh_rejects_source_and_card_drift_before_durable_admission() {
     #[derive(Clone, Copy)]

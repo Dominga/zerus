@@ -1798,6 +1798,8 @@ Existing live and archived records are compacted on their next ordinary write;
 reading a record does not rewrite it. Unknown jobs and calls still awaiting hook
 settlement keep their evidence, including prior-run identities. This storage
 limit does not change Background status, reply deferral or process ownership.
+Pause/Resume carries this evidence with its original job/run identities and
+retention bounds; it does not make recorded jobs current or grant control of them.
 Process output reads use the provider's native log when available. Otherwise
 they return retained text, marking shortened tails as truncated. A pruned job
 or missing native log returns

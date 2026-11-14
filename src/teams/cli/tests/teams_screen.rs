@@ -1,7 +1,7 @@
 //! The Teams screen's pages come from the product operations and core views.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use zerus_client_core::teams::view;
 
 fn read(h: &Harness, command: &str) -> Value {

@@ -98,6 +98,17 @@ function expectEmpty() {
   expect(bridge.reportDetailInvariant).not.toHaveBeenCalled();
 }
 
+it("offers a keyboard-accessible Show in session list button immediately after the conversation title", async () => {
+  await open(fixtureRow());
+  const title = host.querySelector(".detail-head h1")!;
+  const button = title.nextElementSibling as HTMLButtonElement | null;
+  expect(button?.tagName).toBe("BUTTON");
+  expect(button?.getAttribute("aria-label")).toBe("Show in session list");
+  expect(button?.getAttribute("data-tip")).toBe("Show in session list");
+  expect(button?.disabled).toBe(false);
+  expect(button?.tabIndex).toBe(0);
+});
+
 const routes = (["activity", "processes", "terminal"] as const).flatMap((tab) =>
   (["plan", "details", "worktrees", "tasks"] as const).map((side) => ({ tab, side })));
 it.each(routes)("retires the complete $tab / $side frame together when the catalog row disappears", async ({ tab, side }) => {

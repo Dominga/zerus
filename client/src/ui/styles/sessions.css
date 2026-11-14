@@ -3,6 +3,16 @@
    list keeps today's structure and sizes. Colors come from skin tokens; the
    list.* group carries the Qt badge, edge and frame colours. No hover changes
    layout: only backgrounds and colours change. */
+.sp-reveal-notice { padding: 6px 12px; color: var(--z-color-muted); font-size: 11px; }
+.vrow.locate-pulse-a::after, .vrow.locate-pulse-b::after {
+  content: ""; position: absolute; inset: 3px 5px; border-radius: 9px; pointer-events: none; z-index: 2;
+  background: color-mix(in srgb, var(--z-color-accent) 22%, transparent); border: 2px solid var(--z-color-accent);
+  opacity: 0; animation: locate-session-a 750ms ease-in-out 2;
+}
+.vrow.locate-pulse-b::after { animation-name: locate-session-b; }
+.vrow.locate-static::after { animation: none; opacity: .8; }
+@keyframes locate-session-a { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
+@keyframes locate-session-b { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
 @layer components {
   .sessions-pane { width: var(--pane-w); flex: none; position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--z-color-pane); border-right: 1px solid var(--z-color-divider); }
   .layout-right .sessions-pane { order: 3; border-right: 0; border-left: 1px solid var(--z-color-divider); }

@@ -58,6 +58,7 @@ import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, rangeStep, setAnchor, type RangeKey, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
+import { listReveal, setListReveal, listRevealPulse, setListRevealPulse, listRevealNotice, setListRevealNotice } from "../../store/listReveal";
 
 import { followGitRows } from "../../store/gitInterests";
 import { pageHidden } from "../../store/visibility";
@@ -581,6 +582,35 @@ export function SessionList() {
   let panel: HTMLDivElement | undefined;
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());
+  let locateFrame: number | undefined;
+  let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(on([listReveal, list.rows, selectedKey, subagentOpen], ([request, rows, key, child]) => {
+    if (locateFrame !== undefined) cancelAnimationFrame(locateFrame);
+    locateFrame = undefined;
+    if (!request) return;
+    if (request.key !== key || request.child !== child) { setListReveal(undefined); return; }
+    setPeek(false); setStripMode(false); setPanelVisible(true);
+    if (!rows.some((row) => row.id === request.row)) return;
+    locateFrame = requestAnimationFrame(() => {
+      locateFrame = undefined;
+      if (listReveal()?.serial !== request.serial || selectedKey() !== request.key || subagentOpen() !== request.child) return;
+      const index = list.rows().findIndex((row) => row.id === request.row);
+      if (index < 0) return;
+      list.virtualizer._willUpdate();
+      list.virtualizer.scrollToIndex(index, { align: "center" });
+      setListRevealPulse({ row: request.row, serial: request.serial });
+      setListReveal(undefined);
+      clearTimeout(pulseTimer);
+      pulseTimer = setTimeout(() => setListRevealPulse(undefined), 1500);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => setListRevealNotice(undefined), 5000);
+    });
+  }));
+  onCleanup(() => {
+    if (locateFrame !== undefined) cancelAnimationFrame(locateFrame);
+    clearTimeout(pulseTimer); clearTimeout(noticeTimer); setListRevealPulse(undefined); setListRevealNotice(undefined);
+  });
   const [searchFocused, setSearchFocused] = createSignal(false);
   const [savedOpen, setSavedOpen] = createSignal(false);
   const showSavedDrafts = async (from: HTMLElement) => {
@@ -755,6 +785,7 @@ export function SessionList() {
           <ScopeButton icon="accounts" label="accounts" selected={selectedFilterAccounts().map((a) => a.id)} set={chooseFilterAccounts} choices={accountChoices()} total={[...pickerCounts().account.values()].reduce((n, v) => n + v, 0)} open={refreshAccounts} />
         </div>
         <FilterChips />
+        <Show when={listRevealNotice()}>{(notice) => <div class="sp-reveal-notice" role="status">{notice()}</div>}</Show>
         <Show when={folderFilter()}>{(folder) => <div class="filter-chips"><button class="fchip-sel" title={`${native(folder().path, folder().style)}${tr("\nClear folder filter")}`} onClick={clearFolderScope}>{tr("Folder: %1", leaf(folder().path, folder().style))}<Icon name="x" size={11} /></button></div>}</Show>
 
         <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
@@ -919,9 +950,13 @@ function cardDescription(row: Row | undefined): string | undefined {
 function ListRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
+  const pulse = () => listRevealPulse()?.row === props.id ? listRevealPulse() : undefined;
   return (
     <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
-      role="treeitem" aria-label={sessionRowName(row())} aria-selected={props.id === selectedKey()} aria-level={cardLevel(row())}
+      classList={{ "locate-pulse-a": !!pulse() && pulse()!.serial % 2 === 0, "locate-pulse-b": !!pulse() && pulse()!.serial % 2 !== 0, "locate-static": !!pulse() && motionReduced() }}
+      role="treeitem" aria-label={sessionRowName(row())} aria-selected={row()?.type === "child"
+        ? (row() as Extract<Row, { type: "child" }>).parent.key === selectedKey() && (row() as Extract<Row, { type: "child" }>).child.id === subagentOpen()
+        : props.id === selectedKey() && !subagentOpen()} aria-level={cardLevel(row())}
       aria-expanded={row()?.type === "card" && (row() as Extract<Row, { type: "card" }>).team ? !(row() as Extract<Row, { type: "card" }>).team!.collapsed : undefined}
       aria-description={cardDescription(row())}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>

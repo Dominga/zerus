@@ -89,6 +89,8 @@ pub(super) enum Effect<T> {
 pub(super) trait Effects {
     fn hosted_ready(&mut self, _plan: &Plan, _bound: bool) -> Result<()> { Ok(()) }
     fn placement(&mut self, project: &str, launch: &str) -> Result<Placement>;
+    /// Read-only preflight before a new fixed member plan is saved.
+    fn member_branch_available(&mut self, _placement: &Placement) -> Result<()> { Ok(()) }
     fn branch_exists(&mut self, plan: &super::ledger::BranchPlan) -> Result<bool>;
     fn create_branch(&mut self, plan: &super::ledger::BranchPlan) -> Effect<()>;
     fn accounts(&mut self, agent: &str) -> Result<Vec<AccountUsage>>;

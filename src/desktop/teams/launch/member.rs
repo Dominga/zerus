@@ -133,6 +133,7 @@ impl Runtime {
                 &slug,
                 &member.id,
             )?;
+            effects.member_branch_available(&placement)?;
             row.placement = Some(placement.clone());
             let (choice, model, effort) = role(team, member)?;
             let accounts = self.cached_accounts(effects, &member.agent)?;

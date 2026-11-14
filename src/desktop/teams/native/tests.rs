@@ -1,3 +1,4 @@
+mod refs141;
 mod names132;
 use super::*;
 use crate::desktop::teams::tests::plan_fixture;
@@ -355,6 +356,9 @@ fn a_configured_deepseek_api_key_is_authenticated_without_quota_windows() {
 #[test]
 fn native_created_worktree_with_unavailable_ownership_defers_only_its_read() {
     let mut f = Records::new();
+    // This exact child fixture represents a newly created branch whose
+    // ownership read is unavailable; its proposed ref must still be free.
+    f.p.placement.branch.push_str("-pending");
     let line = std::fs::read_to_string(Path::new(&f.p.placement.destination).join(".git")).unwrap();
     let metadata = Path::new(line.trim().strip_prefix("gitdir: ").unwrap());
     std::fs::remove_file(metadata.join("commondir")).unwrap();

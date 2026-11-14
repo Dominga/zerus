@@ -15,6 +15,15 @@ and exact signed candidate before enrollment. **Resume pairing** reuses that
 saved candidate, including CryptoKit's randomized Ed25519 signature. Refresh
 only checks receipts and signed membership history.
 
+Ordinary message sends acquire their submission and original receipt within one
+45-second deadline, matching Android's acquisition bound. Expiry or a lost
+response keeps the original message and request identity unconfirmed; nothing is
+resent. A refusal during submission stays distinct from an error while reading
+its later receipt. Durable settlement runs after the transport clock ends and
+keeps the delivery flight until the accepted write finishes. This bound covers
+already-prepared attachments' transport; attachment preparation and answers have
+separate campaign work tracked by `zerus-a4mub.7`.
+
 CryptoKit provides RFC 9180 HPKE and Ed25519. A native SQLite journal stores the
 protected identity under a per-connection ThisDeviceOnly Keychain wrapping key,
 commits membership state/history/head indexes together, and reserves exact

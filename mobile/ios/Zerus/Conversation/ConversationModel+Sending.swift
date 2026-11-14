@@ -294,13 +294,16 @@ extension ConversationModel {
                 payload = retained
             }
             attempted = true
-            let initial: JSONObject
-            do { initial = try await app.client.submit(connection, target: target, operation: "send", payload: payload, id: id) }
-            catch let failure as RelayError {
-                if Self.rejectedStatuses.contains(failure.status) { rejected = failure }
-                throw failure
+            let client = app.client, submittedPayload = payload
+            do {
+                try await OutgoingSend.run(
+                    submit: { try await client.submit(connection, target: target, operation: "send", payload: submittedPayload, id: id) },
+                    awaitReceipt: { try await client.waitForReceipt(connection, initial: $0) },
+                    settle: { await self.settleOutgoing(message, $0) })
+            } catch let refusal as OutgoingSend.Rejected {
+                rejected = refusal.response
+                throw refusal.response
             }
-            await settleOutgoing(message, try await app.client.waitForReceipt(connection, initial: initial))
         } catch {
             let failure = rejected?.message ?? (attempted ? "Delivery is unconfirmed. Check its receipt before sending again."
                 : (error as? ZerusError)?.message ?? "The saved message was not sent. Review it before trying again.")

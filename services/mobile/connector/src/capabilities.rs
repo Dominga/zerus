@@ -16,6 +16,8 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+pub const TASK_IDENTITY_HELP_MARKER: &str = "Mobile task identity ABI: task-session-identity-v2";
+pub const TASK_IDENTITY_FEATURE: &str = "task_session_identity_v2";
 /// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
 /// providers absent from the host, speech and voice. Same table drives
 /// advertisement and dispatch refusal, after durable duplicate handling.
@@ -383,6 +385,8 @@ pub struct Flags {
     pub task_exchange: bool,
     /// The phone's Send now, Cancel and Done list, which it never offers either.
     pub task_actions: bool,
+    /// Exact native marker for identity-bound task Send and Done requests.
+    pub task_session_identity: bool,
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
@@ -456,6 +460,9 @@ impl Flags {
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
             task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
+            task_session_identity: help
+                .lines()
+                .any(|line| line.trim() == TASK_IDENTITY_HELP_MARKER),
             watch: help
                 .lines()
                 .any(|line| line.trim() == zerus_watch_protocol::HELP_MARKER),
@@ -623,12 +630,18 @@ impl Flags {
             );
         }
         let mut features = features;
+        if self.task_session_identity
+            && operations.contains(&"task_send")
+            && operations.contains(&"task_done")
+        {
+            features.push(TASK_IDENTITY_FEATURE);
+        }
         // Connector-only: the Python connector never advertises it, so apps
         // do not send an OpenCode effort to it.
         if operations.contains(&"launch") && !self.windows_gateway {
             features.push("opencode_launch_effort");
-            features.sort_unstable();
         }
+        features.sort_unstable();
         if self.windows_gateway {
             features.retain(|feature| {
                 ![

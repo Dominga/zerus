@@ -686,6 +686,14 @@ impl<N: Native + 'static> Connector<N> {
         if ["task_send", "task_cancel", "task_done"].contains(&operation) && !flags.task_actions {
             return Err(Failure::text("native task actions ABI is unavailable"));
         }
+        if ["task_send", "task_done"].contains(&operation)
+            && payload.is_some_and(|p| p["schema"] == 2)
+            && !flags.task_session_identity
+        {
+            return Err(Failure::text(
+                "native task session identity ABI is unavailable",
+            ));
+        }
         Ok(())
     }
 

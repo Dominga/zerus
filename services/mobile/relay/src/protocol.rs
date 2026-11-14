@@ -162,6 +162,7 @@ pub const FEATURES: &[&str] = &[
     "presence_alerts",
     "session_project_assignment_v1",
     "send_agent",
+    "task_session_identity_v2",
     "voice_video",
 ];
 /// The most updates one `task_exchange` carries; a phone sends the rest next.
@@ -1003,8 +1004,15 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
     match op {
         "task_exchange" => task_exchange(p),
         "task_send" => {
-            fields(p, &["schema", "project", "task", "session"], &[])?;
-            task_request(p)?;
+            let required = if p["schema"] == 2 {
+                task_identity(&p["session_id"])?;
+                &["schema", "project", "task", "session", "session_id"][..]
+            } else {
+                &["schema", "project", "task", "session"][..]
+            };
+            fields(p, required, &[])?;
+            task_project_versions(p, &[1, 2])?;
+            uuid(&p["task"], false)?;
             text(&p["session"], 1024, false)?;
             Ok(())
         }
@@ -1026,7 +1034,10 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
         }
         "task_done" => {
             fields(p, &["schema", "project", "limit"], &["before", "session"])?;
-            task_project(p)?;
+            task_project_versions(p, &[1, 2])?;
+            if p["schema"] == 2 && p.get("session").is_none() {
+                return Err(Error::BAD);
+            }
             if p["limit"]
                 .as_u64()
                 .is_none_or(|n| !(1..=TASK_DONE_MAX).contains(&n))
@@ -1040,7 +1051,13 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
             }
             // Only this session: the Done tasks sent to one session.
             if let Some(session) = p.get("session") {
-                fields(session, &["machine", "session"], &[])?;
+                let required = if p["schema"] == 2 {
+                    task_identity(&session["session_id"])?;
+                    &["machine", "session", "session_id"][..]
+                } else {
+                    &["machine", "session"][..]
+                };
+                fields(session, required, &[])?;
                 text(&session["machine"], TASK_PROJECT_MAX, false)?;
                 text(&session["session"], 1024, false)?;
             }
@@ -1051,7 +1068,21 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
 }
 /// The schema and a project ID as the replica stores it.
 fn task_project(p: &Value) -> Result<()> {
-    if p["schema"] != 1 {
+    task_project_versions(p, &[1])
+}
+
+fn task_identity(v: &Value) -> Result<()> {
+    if text(v, 1024, false)?.trim().is_empty() {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
+fn task_project_versions(p: &Value, schemas: &[u64]) -> Result<()> {
+    if p["schema"]
+        .as_u64()
+        .is_none_or(|schema| !schemas.contains(&schema))
+    {
         return Err(Error::BAD);
     }
     let project = text(&p["project"], TASK_PROJECT_MAX, false)?;

@@ -15,6 +15,23 @@ class TaskStoreBindingTest {
     private fun store() = TaskStore(folders.newFolder().path, "project-1", "orchard")
 
     @Test
+    fun immutableSessionIdentitySurvivesGeneratedBindingsAndExchange() {
+        val legacy = SessionRef("fixture-machine", "codex/orchard/original-label")
+        assertEquals("", legacy.sessionId)
+        val original = legacy.copy(sessionId = "92ea863f-833d-4f58-a4a6-b30cb780e14a")
+        val (computer, phone) = store() to store()
+        val task = computer.add("Inspect the fixture", TaskStage.TODO, TaskTarget.Session(original), TaskPosition.End)
+        val page = computer.updatesFor(phone.inventory(), 1_048_576UL)
+        assertFalse(page.more)
+        phone.importUpdates(page.updates)
+        val retained = (phone.get(task.uuid).target as TaskTarget.Session).session
+        assertEquals(original, retained)
+        assertEquals(original.sessionId, retained.sessionId)
+        computer.setTarget(task.uuid, TaskTarget.Session(legacy))
+        assertEquals("", (computer.get(task.uuid).target as TaskTarget.Session).session.sessionId)
+    }
+
+    @Test
     fun tasksAreFiledListedAndChanged() {
         val store = store()
         val later = store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)

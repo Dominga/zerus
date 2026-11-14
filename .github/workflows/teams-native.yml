@@ -32,6 +32,8 @@ on:
       - 'scripts/ci/agent-compatibility.py'
       - 'scripts/ci/native_discovery.py'
       - 'tests/test_native_discovery.py'
+      - 'tests/test_ci_native_discovery_auth.py'
+      - 'tests/fixtures/github-native-discovery.json'
       - 'scripts/ci/agent-compatibility.json'
       - 'scripts/ci/kimi-native.py'
       - 'scripts/ci/kimi-native-manifests/**'
@@ -56,6 +58,8 @@ on:
       - 'scripts/ci/agent-compatibility.py'
       - 'scripts/ci/native_discovery.py'
       - 'tests/test_native_discovery.py'
+      - 'tests/test_ci_native_discovery_auth.py'
+      - 'tests/fixtures/github-native-discovery.json'
       - 'scripts/ci/agent-compatibility.json'
       - 'scripts/ci/kimi-native.py'
       - 'scripts/ci/kimi-native-manifests/**'
@@ -155,6 +159,8 @@ jobs:
           RUSTUP_TOOLCHAIN=1.99.1 cargo build --locked --bin hgs
       - name: One official latest Kimi release, Teams contract in its own child
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python -s -B scripts/ci/kimi-native.py --teams --source-sha "$SOURCE_SHA" \
             --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-tmux/bin/tmux" \

@@ -893,7 +893,7 @@ and agreeing sources. Every case in the run keeps that one selected image.
 Discovery retries only the same official metadata URL and method, through the
 shared `scripts/ci/native_discovery.py` reader used by Kimi, Claude Code, Codex,
 OpenCode and DeepSeek. Each request has at most three attempts, each in a private
-child with a 30-second wall timeout, with 2- and 4-second backoff: a 96-second
+child with a 30-second wall timeout, normally with 2- and 4-second backoff: a 96-second
 request budget, further clamped by any original caller deadline. Kimi resolves
 five metadata requests (the three current pointers, that exact manifest and the
 image HEAD), so its metadata phase has at most 480 seconds; image download keeps
@@ -904,6 +904,15 @@ redirects rejected by the existing caller policy, permanent HTTP errors and
 certificate verification failures fail closed. Exhaustion raises a distinct
 `discovery unavailable` error and fails the job before native execution. A retry never selects a historical release, relaxes
 integrity checks or turns unavailable discovery into a skipped-suite success.
+
+The GitHub current-release read uses the workflow's existing read-only
+`GITHUB_TOKEN` when present, only for HTTPS `api.github.com` requests that refuse
+redirects. The token is absent from native child environments and provenance.
+GitHub HTTP 403/429 may retry only with unambiguous `Retry-After` or exhausted
+quota/reset headers. The reader waits past the reset, within the same original
+96-second budget; a reset outside that budget fails without another request.
+Other GitHub HTTP failures stay closed, and all three source reads and the
+highest-version agreement rule still apply.
 
 Every terminal case uses that same selected image. Historical package records in
 `scripts/ci/agent-compatibility.json` remain evidence for separately selected old

@@ -1,0 +1,23 @@
+{
+  "epoch": 1700000000,
+  "url": "https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest",
+  "rate_limited": {
+    "status": 403,
+    "reason": "rate limit exceeded",
+    "headers": {
+      "X-RateLimit-Limit": "60",
+      "X-RateLimit-Remaining": "0",
+      "X-RateLimit-Reset": "1700000005"
+    },
+    "body": {
+      "message": "API rate limit exceeded",
+      "documentation_url": "https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api"
+    }
+  },
+  "release": {
+    "tag_name": "@moonshot-ai/kimi-code@2.6.2",
+    "draft": false,
+    "prerelease": false,
+    "html_url": "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%402.6.2"
+  }
+}

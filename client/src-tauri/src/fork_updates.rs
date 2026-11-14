@@ -64,9 +64,11 @@ fn changed(app: &AppHandle) {
 /// The fork update replaces only the portable folder, while Zerus runs the
 /// `hgs` in `~/.local/bin` first: after an update the new GUI talked to the old
 /// CLI (Activity did not start, folders were missing). At start, a fork
-/// build's portable `hgs.exe` replaces an older `~/.local/bin/hgs.exe`; the old
-/// file is renamed beside it (running copies keep running), and a newer one,
-/// such as a local build, is left alone.
+/// build's portable `hgs.exe` replaces `~/.local/bin/hgs.exe` when that file
+/// is the one a fork build put there (its SHA-256 is in `hgs.exe.fork`
+/// beside it) or is older than this build's. Another file, such as a local
+/// build installed after it, is left alone. The old file is renamed beside it,
+/// so running copies keep running.
 fn refresh_cli() {
     if !cfg!(windows) || option_env!("ZERUS_FORK_BUILD").is_none_or(str::is_empty) {
         return;
@@ -78,24 +80,75 @@ fn refresh_cli() {
         return;
     };
     let installed = PathBuf::from(home).join(".local").join("bin").join("hgs.exe");
-    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    let (Some(new), Some(old)) = (modified(&bundled), modified(&installed)) else {
+    if zerus_client_core::default_hgs() != installed {
         return;
-    };
-    if new <= old || zerus_client_core::default_hgs() != installed {
-        return;
+    }
+    if let Err(error) = refresh_from(&bundled, &installed) {
+        eprintln!("zerus-client: ~/.local/bin/hgs.exe was not updated from this build: {error}");
+    }
+}
+
+fn file_hash(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// `refresh_cli`'s decision and copy, for any two paths.
+fn refresh_from(bundled: &Path, installed: &Path) -> std::io::Result<()> {
+    let marker = installed.with_file_name("hgs.exe.fork");
+    let new = file_hash(bundled)?;
+    let old = file_hash(installed)?;
+    if new == old {
+        // Already this build's CLI; remember it as the fork's.
+        return std::fs::write(&marker, &new);
+    }
+    let ours = std::fs::read_to_string(&marker).is_ok_and(|text| text.trim() == old);
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified());
+    let older = modified(installed)? < modified(bundled)?;
+    if !ours && !older {
+        return Ok(());
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_secs()).unwrap_or(0);
     let aside = installed.with_file_name(format!("hgs.exe.prev-{stamp}"));
     let partial = installed.with_file_name("hgs.exe.partial");
-    let result = std::fs::copy(&bundled, &partial)
-        .and_then(|_| std::fs::rename(&installed, &aside))
-        .and_then(|_| std::fs::rename(&partial, &installed).inspect_err(|_| {
-            let _ = std::fs::rename(&aside, &installed);
+    let result = std::fs::copy(bundled, &partial)
+        .and_then(|_| std::fs::rename(installed, &aside))
+        .and_then(|_| std::fs::rename(&partial, installed).inspect_err(|_| {
+            let _ = std::fs::rename(&aside, installed);
         }));
-    if let Err(error) = result {
+    if result.is_err() {
         let _ = std::fs::remove_file(&partial);
-        eprintln!("zerus-client: ~/.local/bin/hgs.exe was not updated from this build: {error}");
+    }
+    result?;
+    std::fs::write(&marker, &new)
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::refresh_from;
+
+    #[test]
+    fn the_fork_cli_is_replaced_and_a_local_build_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("portable").join("hgs.exe");
+        let installed = dir.path().join("bin").join("hgs.exe");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        // Owner, 2026-11-15: a copy newer than the portable file was never replaced.
+        std::fs::write(&bundled, b"build 201").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&installed, b"build 200").unwrap();
+        std::fs::write(installed.with_file_name("hgs.exe.fork"), super::file_hash(&installed).unwrap()).unwrap();
+        refresh_from(&bundled, &installed).unwrap();
+        assert_eq!(std::fs::read(&installed).unwrap(), b"build 201");
+        // A local build put there afterwards is newer and not the fork's: kept.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&installed, b"local build").unwrap();
+        refresh_from(&bundled, &installed).unwrap();
+        assert_eq!(std::fs::read(&installed).unwrap(), b"local build");
     }
 }
 

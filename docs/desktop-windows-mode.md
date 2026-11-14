@@ -23,6 +23,15 @@ result never establishes that a manager operation did not happen: `changed`
 and `manager_changed` are null when the original outcome is unknown. Inspect
 the original UUID rather than issuing another logical action.
 
+The service's `hgs desktop status --json` separately exposes
+`lifecycle.requested_mode` and `lifecycle.effective_mode`. The legacy
+`lifecycle.mode` keeps its requested-mode meaning for compatibility. A task
+started with `--background` can report requested `background` but effective
+`passive` when the handoff is blocked or revoke has settled. Effective
+`background` requires the existing status to show an active service-owned
+presence writer, including while that writer drains. These display fields do
+not grant authority or replace the individual component readiness checks.
+
 ## Caller and ownership
 
 The caller must be outside an agent tree and have either the actual selected

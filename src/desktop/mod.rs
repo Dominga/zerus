@@ -987,18 +987,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     )?;
                     value["frontend_read_delivery"] = frontend.status();
                     value["notification_controls"] = notification_controls.projection(&store);
-                    value["lifecycle"]["mode"] = if background_mode {
-                        "background"
-                    } else {
-                        "passive"
-                    }
-                    .into();
                     value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     if let Some(runtime) = &background {
                         runtime.decorate(&mut value);
                     } else if background_blocked {
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
+                    lifecycle::decorate_mode(&mut value, background_mode);
                     upgrade.decorate(&mut value);
                     #[cfg(any(windows, all(test, target_os = "linux")))]
                     if hello.op == "status" && hello.request.is_none() {
@@ -1708,18 +1703,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 )?;
                 value["frontend_read_delivery"] = frontend.status();
                 value["notification_controls"] = notification_controls.projection(&store);
-                value["lifecycle"]["mode"] = if background_mode {
-                    "background"
-                } else {
-                    "passive"
-                }
-                .into();
                 value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 if let Some(runtime) = &background {
                     runtime.decorate(&mut value);
                 } else if background_blocked {
                     value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                 }
+                lifecycle::decorate_mode(&mut value, background_mode);
                 upgrade.decorate(&mut value);
                 fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
                 heartbeat = Instant::now() + HEARTBEAT;

@@ -30,6 +30,25 @@ pub(super) const ABI: &str = "desktop-lifecycle-v1";
 /// false elsewhere: 24H2 and later give the service no console at all.
 pub(super) static CONSOLE_RELEASED: AtomicBool = AtomicBool::new(false);
 
+pub(super) fn decorate_mode(value: &mut Value, background_requested: bool) {
+    let requested = if background_requested {
+        "background"
+    } else {
+        "passive"
+    };
+    let effective =
+        if value["ownership"] == "background_service" && value["writers_enabled"] == true {
+            "background"
+        } else {
+            "passive"
+        };
+    // mode is the original requested-mode field. Add observed state without
+    // changing its meaning for registration helpers or older clients.
+    value["lifecycle"]["mode"] = requested.into();
+    value["lifecycle"]["requested_mode"] = requested.into();
+    value["lifecycle"]["effective_mode"] = effective.into();
+}
+
 pub(super) fn unavailable(configuration: &str) -> Value {
     // A missing endpoint is not proof that every old process has exited.
     json!({"abi":ABI,"phase":"unavailable","ipc_ready":false,
@@ -150,5 +169,48 @@ mod tests {
         assert_eq!(value["environment"]["HGS_STATE_DIR"], "/private/state");
         assert_eq!(value["environment"].as_object().unwrap().len(), 2);
         assert_eq!(value["expected_configuration"], "expected");
+    }
+
+    #[test]
+    fn requested_mode_stays_compatible_and_effective_mode_follows_the_live_writer() {
+        for requested in [false, true] {
+            for (ownership, writer, expected) in [
+                ("passive", false, "passive"),
+                ("revoked", false, "passive"),
+                ("revoked", true, "passive"),
+                ("background_readonly", false, "passive"),
+                ("background_service", false, "passive"),
+                ("background_service", true, "background"),
+                ("unavailable", true, "passive"),
+            ] {
+                let mut value = json!({"ownership":ownership,"writers_enabled":writer,
+                    "lifecycle":{"abi":ABI,"phase":"serving","ipc_ready":true}});
+                if ownership == "passive" {
+                    value["background_start"] =
+                        json!({"admitted":false,"code":"explicit_handoff_required"});
+                }
+                decorate_mode(&mut value, requested);
+                let requested = if requested { "background" } else { "passive" };
+                assert_eq!(
+                    value["lifecycle"]["mode"], requested,
+                    "legacy mode must not change"
+                );
+                assert_eq!(value["lifecycle"]["requested_mode"], requested);
+                assert_eq!(
+                    value["lifecycle"]["effective_mode"], expected,
+                    "ownership={ownership}, writer={writer}"
+                );
+                assert_eq!(value["lifecycle"]["abi"], ABI);
+                assert_eq!(value["lifecycle"]["ipc_ready"], true);
+                assert_eq!(value["ownership"], ownership);
+                assert_eq!(value["writers_enabled"], writer);
+                if ownership == "passive" {
+                    assert_eq!(
+                        value["background_start"]["code"],
+                        "explicit_handoff_required"
+                    );
+                }
+            }
+        }
     }
 }

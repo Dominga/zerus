@@ -200,11 +200,28 @@ mod tests {
     use super::*;
     #[test]
     fn oversized_observation_is_rejected_before_json_parsing() {
+        use std::os::fd::AsRawFd;
         let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        let size = (FRAME * 4) as libc::c_int;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        sender
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
         receiver.set_nonblocking(true).unwrap();
         let mut bytes = vec![b'x'; FRAME + 1];
         bytes.push(b'\n');
         sender.write_all(&bytes).unwrap();
-        assert!(read(&mut receiver, Instant::now() + QUERY).is_err());
+        assert!(read(&mut receiver, Instant::now() + Duration::from_secs(1)).is_err());
     }
 }

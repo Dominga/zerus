@@ -94,6 +94,15 @@ impl Effects for FakeEffects {
             destination: format!("/workspace/zerus-team-{launch}"),
         })
     }
+    fn member_branch_available(&mut self, placement: &Placement) -> Result<()> {
+        if self.placement_override.is_some() {
+            crate::teams::integrate::member_branch_available(
+                &crate::teams::integrate::Repo { git_dir: placement.git_dir.clone().into() },
+                &placement.branch,
+            )?;
+        }
+        Ok(())
+    }
     fn branch_exists(&mut self, _: &super::ledger::BranchPlan) -> Result<bool> {
         Ok(self.exists)
     }
@@ -3045,6 +3054,17 @@ pub(super) fn named_plans_fixture(
     names: &[&str],
     placement: Option<(Placement, String)>,
 ) -> (Harness, Vec<Plan>) {
+    let result = named_plans_with_integration(names, placement, None);
+    assert_eq!(result.1.len(), names.len() * 3);
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn named_plans_with_integration(
+    names: &[&str],
+    placement: Option<(Placement, String)>,
+    integration: Option<&str>,
+) -> (Harness, Vec<Plan>) {
     let mut h = Harness::empty();
     let mut effects = FakeEffects {
         exists: true,
@@ -3069,7 +3089,7 @@ pub(super) fn named_plans_fixture(
             }
             bundle.pipelines[0].stages.clear();
             bundle.template.roster[0].count = 1;
-            *integration_branch = format!("teams/fixture-{index}");
+            *integration_branch = integration.map_or_else(|| format!("teams/fixture-{index}"), str::to_owned);
         }
         h.run_for(&id, &ops::tests::person(), create).unwrap();
         for step in 0..60 {
@@ -3078,6 +3098,5 @@ pub(super) fn named_plans_fixture(
                 .unwrap();
         }
     }
-    assert_eq!(effects.plans.len(), names.len() * 3);
     (h, effects.plans)
 }

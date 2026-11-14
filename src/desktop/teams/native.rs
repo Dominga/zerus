@@ -122,6 +122,12 @@ impl Effects for Native {
                 .into(),
         })
     }
+    fn member_branch_available(&mut self, placement: &Placement) -> Result<()> {
+        integrate::member_branch_available(
+            &integrate::Repo { git_dir: PathBuf::from(&placement.git_dir) },
+            &placement.branch,
+        )
+    }
     fn branch_exists(&mut self, plan: &BranchPlan) -> Result<bool> {
         integrate::branch_exists(
             &integrate::Repo {
@@ -184,6 +190,11 @@ impl Effects for Native {
         Ok(accounts)
     }
     fn worktree(&mut self, plan: &Plan, original: &str) -> Effect<Option<Worktree>> {
+        // Saved pre-upgrade plans retain their branch; diagnose their namespace
+        // before any new worktree command, without replaying an unknown original.
+        if let Err(problem) = self.member_branch_available(&plan.placement) {
+            return Effect::Refused(problem);
+        }
         let args = arguments::worktree(plan);
         match child::run(
             &self.config,
@@ -219,9 +230,16 @@ impl Effects for Native {
                     Err(p) => Effect::Unknown(p),
                 }
             }
-            Ended::Exited { code, .. } => Effect::Refused(invalid(&format!(
-                "Worktree creation refused with exit {code}; retained files require review"
-            ))),
+            Ended::Exited { code, .. } => {
+                if let Err(problem) = self.member_branch_available(&plan.placement) {
+                    if problem.code == integrate::MEMBER_REF_CONFLICT {
+                        return Effect::Refused(problem);
+                    }
+                }
+                Effect::Refused(invalid(&format!(
+                    "Worktree creation refused with exit {code}; retained files require review"
+                )))
+            }
         }
     }
     fn verify_worktree(&mut self, plan: &Plan) -> Result<Worktree> {

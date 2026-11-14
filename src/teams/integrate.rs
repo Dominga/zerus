@@ -33,6 +33,12 @@ pub struct Reported {
     pub dirty: bool,
 }
 
+mod member_refs;
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+pub use member_refs::member_branch_available;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use member_refs::MEMBER_REF_CONFLICT;
+
 /// Read a validated local ref through the same bounded, hook-free Git adapter.
 pub fn branch_exists(repo: &Repo, branch: &str) -> Result<bool, Problem> {
     let git = Git::repo(repo)?;

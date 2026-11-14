@@ -127,15 +127,18 @@ New sessions use readable tags: for a team named **Teams**, the lead is
 `teams-lead`, and members include their ID and role, such as
 `teams-m1-developer` and `teams-m2-reviewer`. Their worktree folders are
 `zerus-team-teams-lead`, `zerus-team-teams-m1` and `zerus-team-teams-m2`;
-the corresponding branches are `zerus/team/teams/lead`,
-`zerus/team/teams/m1` and `zerus/team/teams/m2`.
+the corresponding branches are `zerus/team/teams-lead`,
+`zerus/team/teams-m1` and `zerus/team/teams-m2`.
 
 The team slug uses lowercase ASCII letters, digits and hyphens, at most 48
 characters. If that slug is empty or already reserved for another team on this
 computer, Zerus adds a short suffix from the team ID. The reservation remains
 stable when the service restarts. Names are labels; launch and session IDs
 still identify members. Existing sessions are not renamed, and saved worktree
-paths, branches and bindings remain in use after an upgrade.
+paths, branches and bindings remain in use after an upgrade. New member
+branches are refused before creation if an existing Git ref is equal, an ancestor
+or a descendant; the reason names both refs. A team created before this fix whose
+lead shows "Worktree creation refused" is archived and created again.
 
 With the preview on, Sessions groups a team under its name, with the lead first
 and the other members ordered by role and member ID. Each row shows its role.

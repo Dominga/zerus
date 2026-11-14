@@ -1,0 +1,20 @@
+{
+  "source_sha256": "55c3edd2cea29a51dbbcd7690e4ea4cd2323f2b1751da3a261d766e923de36da",
+  "cases": [
+    {
+      "name": "Teams",
+      "client_slug": "teams",
+      "integration": "zerus/team/teams"
+    },
+    {
+      "name": "Команда",
+      "client_slug": "team",
+      "integration": "zerus/team/team"
+    },
+    {
+      "name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "client_slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "integration": "zerus/team/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

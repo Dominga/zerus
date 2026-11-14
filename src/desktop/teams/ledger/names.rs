@@ -106,6 +106,6 @@ pub(in crate::desktop::teams) fn placement(
         .to_str()
         .ok_or_else(|| super::super::launch::invalid("Worktree path is not UTF-8"))?
         .into();
-    placement.branch = format!("zerus/team/{slug}/{member}");
+    placement.branch = format!("zerus/team/{slug}-{member}");
     Ok(placement)
 }

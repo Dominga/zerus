@@ -30,7 +30,7 @@ fn readable_lead_and_two_roles_keep_exact_launch_identity() {
         );
         assert_eq!(
             plan.placement.branch,
-            format!("zerus/team/teams/{}", plan.member)
+            format!("zerus/team/teams-{}", plan.member)
         );
         let args = arguments::launch(
             plan,

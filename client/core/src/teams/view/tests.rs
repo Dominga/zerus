@@ -1123,7 +1123,7 @@ fn invalid_card_parameters_survive_the_waiting_read_as_the_invalid_state() {
         "waiting".into(),
         update,
     ));
-    let wire = serde_json::to_value(&coalescer.take()).unwrap();
+    let wire = serde_json::to_value(coalescer.take()).unwrap();
     let decoded: crate::Batch = serde_json::from_value(wire.clone()).expect("the batch decodes");
     assert_eq!(decoded.teams.len(), 1);
     let items = wire["teams"][0]["payload"]["items"].as_array().unwrap();

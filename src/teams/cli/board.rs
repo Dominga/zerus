@@ -131,7 +131,9 @@ pub(super) fn members(team: &Team, members: Vec<MemberRow>, work: &std::collecti
                 team.bundle.roles.iter().find(|r|r.id==member.role).map(|r|(r.model.as_str(),r.effort.as_str(),&r.account))
             };
             if let Some((model,effort,account))=choices {
-                value["model"] = json!(model);
+                if !model.trim().is_empty() {
+                    value["model"] = json!(model);
+                }
                 value["effort"] = json!(effort);
                 value["account_choice"] = json!(account);
             }

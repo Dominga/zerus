@@ -379,6 +379,11 @@ pub(crate) fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         text: r.get(4)?,
         state: r.get(5)?,
         decision: r.get(6)?,
+        parameters: r
+            .get::<_, Option<String>>("parameters")?
+            .map(|s| serde_json::from_str(&s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))))
+            .transpose()?
+            .unwrap_or_default(),
         decided_actor: r
             .get::<_, Option<String>>(7)?
             .map(|s| serde_json::from_str(&s))
@@ -415,7 +420,7 @@ pub(crate) fn default_decisions(kind: &str) -> Vec<String> {
 }
 
 /// A single indexed lookup; scope is checked before returning any card data.
-pub(crate) const CARD_BY_SEQ_SQL: &str = "SELECT seq,kind,node,actor,text,state,decision,decided_actor,created_ms,decisions,team FROM cards WHERE seq=?1";
+pub(crate) const CARD_BY_SEQ_SQL: &str = "SELECT seq,kind,node,actor,text,state,decision,decided_actor,created_ms,decisions,team,parameters FROM cards WHERE seq=?1";
 pub(crate) fn card(db: &Connection, team: &str, seq: u64) -> Result<Option<Card>> {
     let row: Option<(String, Card)> = db
         .query_row(CARD_BY_SEQ_SQL, [seq], |r| Ok((r.get(10)?, card_row(r)?)))

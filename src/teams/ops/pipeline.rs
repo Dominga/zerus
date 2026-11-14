@@ -106,6 +106,7 @@ fn step(ctx: &mut Context<'_>, n: &Node, next: kernel::Step, findings: &str) -> 
                 Some(n.id),
                 None,
                 &["approve", "reject"],
+                &[],
             )?);
             Ok(())
         }

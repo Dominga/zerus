@@ -10,6 +10,7 @@ fn card(text: String) -> Request {
             text,
             node: None,
             decisions: None,
+            parameters: Some(vec![("code".into(), "standing_confirmation".into())]),
         },
     }
 }

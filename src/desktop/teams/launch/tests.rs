@@ -193,6 +193,7 @@ fn open_card(h: &mut Harness, n: u32) -> u64 {
             text: format!("card {n}"),
             node: None,
             decisions: Some(vec!["retry".into(), "acknowledged".into()]),
+            parameters: None,
         },
     )
     .unwrap()

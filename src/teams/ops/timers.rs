@@ -47,7 +47,7 @@ pub(super) fn fire(ctx: &mut Context<'_>) -> Result<()> {
     let (target, seq) = match made {
         Made::Item(kind, text) => ("inbox", ctx.inbox(node, kind, &text)?),
         // Nothing reads the decision of a timer's card: acknowledged alone.
-        Made::Card(kind, text) => ("card", talk::card(ctx, kind, &text, Some(node), None, &[])?),
+        Made::Card(kind, text) => ("card", talk::card(ctx, kind, &text, Some(node), None, &[], &[])?),
     };
     ctx.db.execute("UPDATE timer_firings SET target=?6,seq=?7 WHERE team=?1 AND kind=?2 AND node=?3 AND generation=?4 AND item=?5",params![ctx.team.id,kind,node,generation,subject,target,seq]).map_err(storage)?;
     ctx.reply.node = Some(node);

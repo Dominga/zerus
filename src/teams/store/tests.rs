@@ -517,6 +517,7 @@ fn card_lookup_is_scoped_and_reads_the_persons_decision_by_primary_key() {
                 text: "Wait for a person".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .unwrap()
@@ -669,4 +670,24 @@ fn an_oversized_saved_request_is_refused_before_it_is_read() {
         .unwrap();
     let error = h.store.creation_request(&id).unwrap_err();
     assert_eq!(error.code, code::OVER_CAP);
+}
+
+#[test]
+fn an_older_card_row_without_parameters_still_reads() {
+    // The compatibility contract (zerus-63rru.34): a row written before the
+    // parameters field existed deserializes with none.
+    let older = serde_json::json!({
+        "seq": 1,
+        "kind": "note",
+        "node": null,
+        "actor": {"kind": "person", "person": "local"},
+        "text": "Tell the team the release moved to Monday.",
+        "state": "open",
+        "decision": null,
+        "decided_actor": null,
+        "created_ms": 1700000000000i64,
+        "decisions": ["acknowledged"]
+    });
+    let card: crate::teams::store::records::Card = serde_json::from_value(older).unwrap();
+    assert!(card.parameters.is_empty());
 }

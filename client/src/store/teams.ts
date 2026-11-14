@@ -76,6 +76,9 @@ export interface WaitingItem {
   /** The decisions the card takes, in order, as the core read them; absent
    * from an older core: acknowledged alone. */
   decisions?: string[];
+  /** The card's bounded parameters (zerus-63rru.34): at most 8 [a-z_] keys
+   * the service's writer sent; absent from an older store or core. */
+  parameters?: Array<[string, string]>;
 }
 
 /** The open owner cards of every team, oldest first, one bounded page. */

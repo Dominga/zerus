@@ -47,16 +47,30 @@ export function waitingKindLabel(item: Pick<WaitingItem, "kind">): string {
   }
 }
 
-/** One sentence that says what a card of this kind is about. */
-export function waitingKindSentence(item: Pick<WaitingItem, "kind">): string {
+/** One sentence that says what a card of this kind is about. The kinds whose
+ * writer sends bounded parameters substitute them (zerus-63rru.34); a missing
+ * or malformed parameter, or a kind this version does not describe, keeps
+ * today's sentence. */
+export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters">): string {
+  const parameter = (key: string): string | undefined =>
+    item.parameters?.find(([k]) => k === key)?.[1];
+  const member = parameter("member");
   switch (item.kind) {
     case "note": return tr("A note that the lead, the service or you left for the person.");
     case "integration": return tr("The lead accepted a result; merging it into the integration branch waits for your approval.");
     case "pipeline_acceptance": return tr("A task's pipeline finished and asks you to accept its work.");
-    case "launch_blocked": return tr("A team member could not be started; the card says why and whether Zerus tries again.");
-    case "launch_uncertain": return tr("Whether a team member started is not known; Zerus checks before it starts anything again.");
-    case "launch_capacity": return tr("New team members wait until there is room for another session or account.");
-    case "standing_confirmation": return tr("A member's session asks for something Zerus does not confirm on your behalf.");
+    case "launch_blocked": return member
+      ? tr("Member %1 could not be started; the card says why and whether Zerus tries again.", member)
+      : tr("A team member could not be started; the card says why and whether Zerus tries again.");
+    case "launch_uncertain": return member
+      ? tr("Whether member %1 started is not known; Zerus checks before it starts anything again.", member)
+      : tr("Whether a team member started is not known; Zerus checks before it starts anything again.");
+    case "launch_capacity": return member
+      ? tr("Member %1 waits until there is room for another session or account.", member)
+      : tr("New team members wait until there is room for another session or account.");
+    case "standing_confirmation": return member
+      ? tr("Member %1 needs you: the card says what it asks.", member)
+      : tr("A member's session asks for something Zerus does not confirm on your behalf.");
     case "team_actor_blocked": return tr("The team's service could not finish a step and keeps trying.");
     case "report_waiting": return tr("A member's report has waited for the lead's decision longer than the team allows.");
     case "silent_lead": return tr("The lead has not worked for a while although items wait in its inbox.");

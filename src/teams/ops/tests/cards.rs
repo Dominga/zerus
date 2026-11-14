@@ -9,6 +9,7 @@ fn open(h: &mut Harness, actor: &Actor) -> u64 {
             text: "No account available".into(),
             node: None,
             decisions: None,
+                parameters: None,
         },
     )
     .unwrap()
@@ -163,6 +164,7 @@ fn close_card_refuses_unknown_decided_or_foreign_cards() {
                 text: "No account".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .unwrap()
@@ -202,5 +204,83 @@ fn close_card_requires_a_bounded_nonempty_reason() {
             code,
         );
         assert_eq!(h.store.card(TEAM, card).unwrap().unwrap().state, "open");
+    }
+}
+
+#[test]
+fn card_parameters_are_bounded_and_round_trip_through_the_store() {
+    let mut h = Harness::new();
+    // The service's own writer's shape: at most 8 [a-z_] keys, bounded values.
+    let card = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "launch_blocked".into(),
+                text: "Member alice could not be started: no account.".into(),
+                node: None,
+                decisions: None,
+                parameters: Some(vec![
+                    ("member".into(), "alice".into()),
+                    ("code".into(), "no_account".into()),
+                ]),
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    let row = h.store.card(TEAM, card).unwrap().unwrap();
+    assert_eq!(
+        row.parameters,
+        vec![("member".into(), "alice".into()), ("code".into(), "no_account".into())]
+    );
+    // A row from before the field reads as none.
+    let old = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "note".into(),
+                text: "Hello".into(),
+                node: None,
+                decisions: None,
+                parameters: None,
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    assert!(h.store.card(TEAM, old).unwrap().unwrap().parameters.is_empty());
+}
+
+#[test]
+fn card_parameters_refuse_too_many_keys_a_bad_key_and_an_oversized_value() {
+    let mut h = Harness::new();
+    for (parameters, code) in [
+        (
+            vec![("key".into(), "v".into()); 9],
+            code::INVALID_STATE,
+        ),
+        (
+            vec![("bad-key".into(), "v".into())],
+            code::INVALID_STATE,
+        ),
+        (
+            vec![("key".into(), "x".repeat(257))],
+            code::INVALID_STATE,
+        ),
+    ] {
+        refused(
+            h.run(
+                &service(),
+                Operation::OpenCard {
+                    kind: "note".into(),
+                    text: "Bounded".into(),
+                    node: None,
+                    decisions: None,
+                    parameters: Some(parameters),
+                },
+            )
+            .map(|reply| reply.item),
+            code,
+        );
     }
 }

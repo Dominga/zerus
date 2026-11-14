@@ -74,6 +74,7 @@ impl Runtime {
                 team: row.team.clone(),
                 expected_revision: team.revision,
                 operation: Operation::OpenCard {
+                    parameters: Some(vec![("member".into(), row.member.clone()), ("code".into(), problem.code.clone())]),
                     kind: if row.member == crate::desktop::teams::ledger::BUDGET {
                         "launch_capacity"
                     } else if problem.code == code::DELIVERY_UNCERTAIN {

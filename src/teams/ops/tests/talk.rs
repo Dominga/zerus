@@ -72,6 +72,7 @@ fn owner_card_records_proposer_and_person_decision_and_refuses_a_second_decision
                 text: "Add a member?".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .unwrap()
@@ -167,6 +168,7 @@ fn a_person_cannot_make_a_hand_made_integration_card() {
                 text: "Approve a fabricated integration".into(),
                 node: Some(node),
                 decisions: None,
+                parameters: None,
             },
         ),
         code::INVALID_STATE,
@@ -264,6 +266,7 @@ fn ordinary_cards(h: &mut Harness, node: u32) -> u64 {
                     text: "Proposed team change".into(),
                     node: target,
                     decisions: None,
+                parameters: None,
                 },
             )
             .unwrap()

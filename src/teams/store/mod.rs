@@ -320,8 +320,38 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     timers::after_fence()?;
     common_schema(db)?;
     handles_schema(db)?;
+    card_parameters(db)?;
     read_indexes(db)?;
     timers::extend(db)
+}
+
+/// The additive cards column a localized window's parameters live in
+/// (zerus-63rru.34). An older build's explicit column lists ignore it, so a
+/// newer store opens there unchanged; a savepoint keeps the add atomic.
+fn card_parameters(db: &Connection) -> Result<()> {
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cards') WHERE name='parameters')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if present {
+        return Ok(());
+    }
+    if let Err(error) = db.execute_batch(
+        "SAVEPOINT card_parameters; ALTER TABLE cards ADD COLUMN parameters TEXT; RELEASE card_parameters;",
+    ) {
+        return if is_busy(&error) {
+            Err(Problem::new(
+                code::STORE_BUSY,
+                "The Teams store is busy; retry opening the team.",
+            ))
+        } else {
+            Err(storage(error))
+        };
+    }
+    Ok(())
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.

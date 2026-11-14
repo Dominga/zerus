@@ -55,6 +55,7 @@ pub(super) fn open_card(ctx: &mut Context<'_>) -> Result<()> {
         text,
         node,
         decisions,
+        parameters,
     } = ctx.op
     else {
         unreachable!()
@@ -75,9 +76,35 @@ pub(super) fn open_card(ctx: &mut Context<'_>) -> Result<()> {
         }
         None => Vec::new(),
     };
-    ctx.reply.item = Some(card(ctx, kind, text, *node, None, &listed)?);
+    let parameters = parameters.clone().unwrap_or_default();
+    parameters_checked(&parameters)?;
+    ctx.reply.item = Some(card(ctx, kind, text, *node, None, &listed, &parameters)?);
     Ok(())
 }
+/// The bounded parameters a localized window substitutes (zerus-63rru.34):
+/// at most 8 pairs, each key lower-case ASCII letters and underscores, each
+/// value at most 256 bytes after the sentence's forbidden-character rules.
+/// Written only by the service's own card writer.
+pub(super) fn parameters_checked(parameters: &[(String, String)]) -> Result<()> {
+    if parameters.len() > 8 {
+        return Err(invalid("A card takes at most 8 parameters."));
+    }
+    for (key, value) in parameters {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_')
+        {
+            return Err(invalid("A card parameter key must be [a-z_]."));
+        }
+        reason(value)?;
+        if value.len() > 256 {
+            return Err(invalid("A card parameter value is longer than 256 bytes."));
+        }
+    }
+    Ok(())
+}
+
 /// The decisions an opener lists: one to four distinct tokens of at most 32
 /// bytes, lower-case ASCII letters and underscores, starting with a letter.
 /// The internal stale mark is never one of them.
@@ -105,6 +132,7 @@ pub(super) fn card(
     node: Option<u32>,
     decision: Option<u64>,
     decisions: &[&str],
+    parameters: &[(String, String)],
 ) -> Result<u64> {
     reason(kind)?;
     text(kind, 128)?;
@@ -114,7 +142,12 @@ pub(super) fn card(
     } else {
         Some(encode(&decisions)?)
     };
-    ctx.db.execute("INSERT INTO cards(team,kind,node,actor,text,created_ms,decision_seq,decisions) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![ctx.team.id,kind,node,encode(ctx.actor)?,body,ctx.now,decision,listed]).map_err(storage)?;
+    let parameters = if parameters.is_empty() {
+        None
+    } else {
+        Some(encode(&parameters)?)
+    };
+    ctx.db.execute("INSERT INTO cards(team,kind,node,actor,text,created_ms,decision_seq,decisions,parameters) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![ctx.team.id,kind,node,encode(ctx.actor)?,body,ctx.now,decision,listed,parameters]).map_err(storage)?;
     Ok(ctx.db.last_insert_rowid() as u64)
 }
 /// An open card's kind, node, decision sequence and stored decisions.

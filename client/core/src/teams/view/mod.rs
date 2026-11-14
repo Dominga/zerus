@@ -492,6 +492,10 @@ pub struct WaitingItem {
     pub created_ms: i64,
     /// The decisions the card takes, in the row's order (see [`decisions`]).
     pub decisions: Vec<String>,
+    /// The card's bounded parameters the service's writer sent
+    /// (zerus-63rru.34): at most 8 `[a-z_]` keys; an older store has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<(String, String)>,
 }
 
 /// `hgs team waiting`: the open owner cards of every team, oldest first.

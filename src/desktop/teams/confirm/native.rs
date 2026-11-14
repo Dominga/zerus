@@ -176,6 +176,7 @@ impl Native<'_> {
                 expected_revision: team.revision,
                 operation: Operation::OpenCard {
                     kind: "standing_confirmation".into(),
+                    parameters: Some(vec![("member".into(), row.plan.binding.member.clone())]),
                     text: format!(
                         "Member {} needs your attention: {}",
                         row.plan.binding.member,

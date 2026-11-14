@@ -336,7 +336,7 @@ impl Store {
             limit,
             cursor,
             rows::card_row,
-            "seq,kind,node,actor,text,state,decision,decided_actor,created_ms,decisions",
+            "seq,kind,node,actor,text,state,decision,decided_actor,created_ms,decisions,parameters",
         )
     }
     pub fn journal(

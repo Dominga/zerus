@@ -45,6 +45,20 @@ fn waiting_item(row: &Value) -> Option<WaitingItem> {
             .unwrap_or_default(),
         created_ms: row.get("created_ms").and_then(Value::as_i64).unwrap_or(0),
         decisions: decisions(row),
+        parameters: row
+            .get("parameters")
+            .and_then(Value::as_array)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|pair| {
+                        let pair = pair.as_array()?;
+                        Some((pair.first()?.as_str()?.to_owned(),
+                              pair.get(1)?.as_str()?.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 

@@ -383,6 +383,7 @@ fn the_person_decides_a_card() {
                 text: "The release moved.".into(),
                 node: None,
                 decisions: None,
+                parameters: None,
             },
         )
         .item

@@ -53,8 +53,10 @@ fn waiting_item(row: &Value) -> Option<WaitingItem> {
                     .iter()
                     .filter_map(|pair| {
                         let pair = pair.as_array()?;
-                        Some((pair.first()?.as_str()?.to_owned(),
-                              pair.get(1)?.as_str()?.to_owned()))
+                        Some((
+                            pair.first()?.as_str()?.to_owned(),
+                            pair.get(1)?.as_str()?.to_owned(),
+                        ))
                     })
                     .collect()
             })

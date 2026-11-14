@@ -37,7 +37,7 @@ describe("a card's kind", () => {
     for (const kind of KNOWN_KINDS) {
       expect(waitingKindLabel({ kind }), kind).toBe(TABLE[kind].label);
       expect(waitingKindIcon(kind), kind).toBe(TABLE[kind].icon);
-      const sentence = waitingKindSentence({ kind });
+      const sentence = waitingKindSentence({ kind, text: "The stored sentence." });
       expect(sentence, kind).toMatch(/^[A-Z].*\.$/u);
       expect(sentence.split(". ").length, `${kind}: one sentence`).toBe(1);
       labels.add(waitingKindLabel({ kind })); sentences.add(sentence); icons.add(waitingKindIcon(kind));
@@ -66,12 +66,12 @@ describe("a card's kind", () => {
 
   it.each(["phase_acceptance", "unknown_kind", "milestone_review", "owner_word_asked", ""])("an unknown kind %j shows a neutral label with its plain kind", (kind) => {
     const labels = new Set(KNOWN_KINDS.map((known) => waitingKindLabel({ kind: known })));
-    const sentences = new Set(KNOWN_KINDS.map((known) => waitingKindSentence({ kind: known })));
+    const sentences = new Set(KNOWN_KINDS.map((known) => waitingKindSentence({ kind: known, text: "The stored sentence." })));
     const icons = new Set(KNOWN_KINDS.map((known) => waitingKindIcon(known)));
     expect(waitingKindLabel({ kind })).toBe(`Card: ${kind}`);
     expect(labels.has(waitingKindLabel({ kind }))).toBe(false);
-    expect(waitingKindSentence({ kind })).toBe("A card of a kind this version does not describe.");
-    expect(sentences.has(waitingKindSentence({ kind }))).toBe(false);
+    expect(waitingKindSentence({ kind, text: "The store's own sentence." })).toBe("The store's own sentence.");
+    expect(sentences.has(waitingKindSentence({ kind, text: "The store's own sentence." }))).toBe(false);
     expect(waitingKindIcon(kind)).toBe("info");
     expect(icons.has(waitingKindIcon(kind))).toBe(false);
     expect(waitingDecisions({ kind }).map((choice) => choice.decision)).toEqual(["acknowledged"]);

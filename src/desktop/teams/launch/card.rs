@@ -74,7 +74,7 @@ impl Runtime {
                 team: row.team.clone(),
                 expected_revision: team.revision,
                 operation: Operation::OpenCard {
-                    parameters: Some(vec![("member".into(), row.member.clone()), ("code".into(), problem.code.clone())]),
+                    parameters: Some(parameters(row, problem)),
                     kind: if row.member == crate::desktop::teams::ledger::BUDGET {
                         "launch_capacity"
                     } else if problem.code == code::DELIVERY_UNCERTAIN {
@@ -90,12 +90,27 @@ impl Runtime {
             });
             self.save(row, now)?;
         }
-        let request = row.card_request.as_ref().expect("reserved above");
+        // The saved request keeps its pre-change shape: its parameters are
+        // never stored (zerus-63rru.34, F1). They are derived here, at write
+        // time, from the ledger record's own member and code, also when a
+        // request saved before a restart is replayed.
+        let mut request = row.card_request.as_ref().expect("reserved above").clone();
+        if let Operation::OpenCard {
+            parameters: current,
+            ..
+        } = &mut request.operation
+        {
+            if current.is_none() {
+                if let Some(problem) = row.problem.as_ref() {
+                    *current = Some(parameters(row, problem));
+                }
+            }
+        }
         let actor = Actor::Service {
             person: row.person.clone(),
             team: row.team.clone(),
         };
-        match ops::apply(store, &actor, request, now) {
+        match ops::apply(store, &actor, &request, now) {
             Ok(reply) => {
                 row.card_done = true;
                 row.card_id = reply.item;
@@ -104,6 +119,21 @@ impl Runtime {
             Err(p) => return Err(p),
         }
         self.save(row, now)
+    }
+}
+
+/// The parameters a window substitutes for this row's card. The team-wide
+/// capacity notice of the budget marker carries none: it is not a member
+/// (zerus-63rru.34, F5). Derived at write time from the row's saved member and
+/// the blocked launch's code; never stored inside the saved request.
+fn parameters(row: &Row, problem: &Problem) -> Vec<(String, String)> {
+    if row.member == crate::desktop::teams::ledger::BUDGET {
+        Vec::new()
+    } else {
+        vec![
+            ("member".to_owned(), row.member.clone()),
+            ("code".to_owned(), problem.code.clone()),
+        ]
     }
 }
 

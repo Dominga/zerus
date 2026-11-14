@@ -167,7 +167,22 @@ impl Native<'_> {
             .team(&row.plan.binding.team)
             .map_err(|e| e.to_string())?
             .ok_or("Team disappeared")?;
-        let request = if let Some(request) = self.ledger.card_request(&row.plan.key)? {
+        let request = if let Some(mut request) = self.ledger.card_request(&row.plan.key)? {
+            // The saved request keeps its pre-change shape and stores no
+            // parameters (zerus-63rru.34, F1); the member is derived here from
+            // the standing row the request already names.
+            if let Operation::OpenCard {
+                parameters: current,
+                ..
+            } = &mut request.operation
+            {
+                if current.is_none() {
+                    *current = Some(vec![(
+                        "member".into(),
+                        row.plan.binding.member.clone(),
+                    )]);
+                }
+            }
             request
         } else {
             let request = Request {

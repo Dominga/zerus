@@ -862,3 +862,37 @@ fn the_pending_decision_rows_are_the_cores_view() {
         .flat_map(|group| &group.cards)
         .all(|card| !card.pending_replaceable));
 }
+
+/// A card row carries the service's bounded parameters (zerus-63rru.34). The
+/// row here is a synthetic DTO for the projection's own contract; the service
+/// writer bounds the pairs and the CLI sends them as `[[key, value]]`.
+#[test]
+fn a_card_row_carries_the_services_bounded_parameters() {
+    let reply = json!({
+        "rows": [{
+            "seq": 1,
+            "team": TEAM,
+            "kind": "launch_blocked",
+            "node": null,
+            "actor": {"kind": "service", "person": "local"},
+            "text": "Member m1: no_account. Try again later.",
+            "state": "open",
+            "created_ms": 1700000000000i64,
+            "decisions": ["acknowledged"],
+            "parameters": [["member", "m1"], ["code", "no_account"]]
+        }],
+        "next": null
+    });
+    let view = waiting(&reply);
+    assert_eq!(
+        view.items[0].parameters,
+        vec![
+            ("member".to_owned(), "m1".to_owned()),
+            ("code".to_owned(), "no_account".to_owned())
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(&view).unwrap()["items"][0]["parameters"],
+        json!([["member", "m1"], ["code", "no_account"]])
+    );
+}

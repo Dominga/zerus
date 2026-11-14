@@ -47,14 +47,40 @@ export function waitingKindLabel(item: Pick<WaitingItem, "kind">): string {
   }
 }
 
+/** The card's parameters as the service's writer bounds them: at most eight
+ * pairs, each key lower-case ASCII letters and underscores, each value
+ * nonempty, at most 256 characters and free of control characters, line or
+ * paragraph separators and bidirectional marks. Anything else, or a duplicate
+ * key, means the stored sentence stands and no value is interpolated. */
+function cardParameters(raw: WaitingItem["parameters"]): Map<string, string> | null {
+  if (raw === undefined) return new Map();
+  if (!Array.isArray(raw) || raw.length > 8) return null;
+  const values = new Map<string, string>();
+  for (const pair of raw) {
+    if (!Array.isArray(pair) || pair.length !== 2) return null;
+    const [key, value] = pair;
+    if (typeof key !== "string" || typeof value !== "string") return null;
+    if (!/^[a-z_]+$/.test(key) || values.has(key)) return null;
+    if (value.trim().length === 0) return null;
+    if ([...value].length > 256) return null;
+    if (/[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/u.test(value)) return null;
+    values.set(key, value);
+  }
+  return values;
+}
+
 /** One sentence that says what a card of this kind is about. The kinds whose
- * writer sends bounded parameters substitute them (zerus-63rru.34); a missing
- * or malformed parameter, or a kind this version does not describe, keeps
- * today's sentence. */
-export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters">): string {
-  const parameter = (key: string): string | undefined =>
-    item.parameters?.find(([k]) => k === key)?.[1];
-  const member = parameter("member");
+ * writer sends bounded parameters substitute them (zerus-63rru.34); an
+ * invalid parameter, or a kind this version does not describe, keeps the
+ * stored sentence itself, never a generic description. The capacity notice is
+ * team-wide: the budget marker is not a member (F5). */
+export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters" | "text">): string {
+  const parameters = cardParameters(item.parameters);
+  if (parameters === null) return item.text;
+  // The ledger's internal markers (@budget, @branch) are not member names:
+  // a card that still carries one reads as a team-wide sentence.
+  const written = parameters.get("member");
+  const member = written !== undefined && !written.startsWith("@") ? written : undefined;
   switch (item.kind) {
     case "note": return tr("A note that the lead, the service or you left for the person.");
     case "integration": return tr("The lead accepted a result; merging it into the integration branch waits for your approval.");
@@ -76,7 +102,7 @@ export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters
     case "silent_lead": return tr("The lead has not worked for a while although items wait in its inbox.");
     case "late_session": return tr("A member's session started after the team stopped or the member was removed; Zerus does not stop it.");
     case "rejected_merge": return tr("The rejection did not undo the merge; only a revert on the integration branch removes it.");
-    default: return tr("A card of a kind this version does not describe.");
+    default: return item.text;
   }
 }
 

@@ -101,6 +101,14 @@ pub(crate) fn path(name: &str, limit: usize) -> String {
     shown
 }
 
+/// True when a value holds a character the service's sentences refuse: a
+/// control character (a line break or a tab among them), a line or paragraph
+/// separator, or a bidirectional embedding, override or isolate. The value is
+/// refused, never stripped.
+pub(crate) fn forbidden(text: &str) -> bool {
+    text.chars().any(breaks)
+}
+
 /// A character that would end a line, act on a terminal or reorder what is
 /// displayed.
 fn breaks(c: char) -> bool {

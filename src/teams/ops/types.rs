@@ -332,8 +332,12 @@ pub enum Operation {
         decisions: Option<Vec<String>>,
         /// The bounded parameters a localized window substitutes: at most 8
         /// keys of [a-z_], each value at most 256 characters after the
-        /// sentence's rules (zerus-63rru.34). Left out when absent.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// sentence's rules (zerus-63rru.34). In memory only: a saved
+        /// Request/OpenCard keeps the pre-change shape exactly, because the
+        /// writer derives the values at write time from the ledger record it
+        /// already carries. An older service reader must read every row a
+        /// newer build writes.
+        #[serde(default, skip_serializing)]
         parameters: Option<Vec<(String, String)>>,
     },
     CloseCard {

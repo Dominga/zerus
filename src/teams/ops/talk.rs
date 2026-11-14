@@ -83,8 +83,9 @@ pub(super) fn open_card(ctx: &mut Context<'_>) -> Result<()> {
 }
 /// The bounded parameters a localized window substitutes (zerus-63rru.34):
 /// at most 8 pairs, each key lower-case ASCII letters and underscores, each
-/// value at most 256 bytes after the sentence's forbidden-character rules.
-/// Written only by the service's own card writer.
+/// value nonempty, at most 256 characters, and free of control characters,
+/// line or paragraph separators and bidirectional marks. An invalid value is
+/// refused, never stripped. Written only by the service's own card writer.
 pub(super) fn parameters_checked(parameters: &[(String, String)]) -> Result<()> {
     if parameters.len() > 8 {
         return Err(invalid("A card takes at most 8 parameters."));
@@ -98,8 +99,15 @@ pub(super) fn parameters_checked(parameters: &[(String, String)]) -> Result<()> 
             return Err(invalid("A card parameter key must be [a-z_]."));
         }
         reason(value)?;
-        if value.len() > 256 {
-            return Err(invalid("A card parameter value is longer than 256 bytes."));
+        if value.chars().count() > 256 {
+            return Err(invalid(
+                "A card parameter value is longer than 256 characters.",
+            ));
+        }
+        if crate::teams::clean::forbidden(value) {
+            return Err(invalid(
+                "A card parameter value holds a control character, a line separator or a bidirectional mark.",
+            ));
         }
     }
     Ok(())

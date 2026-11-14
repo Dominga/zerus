@@ -220,7 +220,7 @@ fn reserve(
         string(question, key, 1024)?;
     }
     // One reading of the question's conversation (zerus-63rru.60). A team
-    // startup card has none yet, null or "" alike; every other reservation,
+    // startup card or launch brief has none yet, null or "" alike; every other reservation,
     // the ordinary admission's always, needs a conversation string.
     let conversation = crate::state::native_identity(question, "conversation_id");
     if !(empty_conversation && conversation == Some("")) {

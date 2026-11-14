@@ -237,6 +237,14 @@ sent by a member or by another agent waits until the lead admits it. The queue
 is taken in the order of the board's To do column, and each member works on
 one task at a time.
 
+### Routing
+
+On a `routing: lead` team, admitted tasks wait until the lead chooses their
+role and pipeline with `hgs team route`. Admission waits and routing waits
+each have one count-only inbox item pointing to `hgs team queue`, so the
+existing doorbell brings an idle lead back to the queue. Each item closes
+when no tasks wait in that category.
+
 When the team refuses a new task, for example because its queue is full, the
 task is still created but not queued: it stays on the board as an ordinary
 task, and its team key is left as it was before the send. The desktop says
@@ -338,6 +346,12 @@ lead. Every reopen counts as a round, whoever caused it.
 
 ## Doorbells and timers
 
+After its launch and after a delegated resume, a Claude, Codex or Kimi lead gets
+one short brief naming its team, `hgs team current` and `hgs team inbox`.
+The brief is launch context, not a task or an attempt. Unknown delivery is never
+replayed. DeepSeek leads do not get this brief yet; their hosted delivery path
+needs the same guarded first-send support (tracked in zerus-3tq9r).
+
 The inbox is where the lead's work waits; a doorbell only tells a session to
 look. When items wait, the service sends the lead one message that says how
 many wait and names `hgs team inbox`. When answers to its questions wait, a
@@ -353,6 +367,13 @@ read. A doorbell whose delivery is not known is never sent again; the next new
 item rings a new one, and a resumed session gets a new doorbell, never the old
 one. A member's doorbell is dropped once the member no longer holds that
 attempt: after an accept, a return, a reassignment, a cancel or a stop.
+
+The lead also gets one aggregate inbox item while tasks wait for its admission,
+and, on a `routing: lead` team, one while admitted tasks wait for routing.
+Each item names the current count and `hgs team queue`, never task text.
+More waiting tasks update that item without another doorbell. Each item closes
+when its category has no waiting tasks; a later arrival starts a new episode
+and can ring a new doorbell. The episodes survive a service restart.
 
 Timers turn waiting into an inbox item for the lead or a card for you:
 

@@ -234,7 +234,7 @@ pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) 
 
 /// A new session waiting at its first prompt with no work remaining, as the
 /// listing reports it; its settings may change before the first message.
-pub(super) fn first_message_ready(record: &Value) -> bool {
+pub(crate) fn first_message_ready(record: &Value) -> bool {
     first_message_candidate(record) && !telemetry::work_remains(record)
 }
 

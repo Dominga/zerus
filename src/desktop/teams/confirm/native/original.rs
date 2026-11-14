@@ -94,6 +94,8 @@ impl Native<'_> {
         super::super::policy::stored(b, &facts)?;
         let delegated = if plan.kind == Kind::Trust {
             facts.team.settings.delegations.confirm_trust
+        } else if plan.kind == Kind::Brief {
+            super::super::policy::brief_granted(plan, &facts)
         } else {
             facts.team.settings.delegations.resume_exited
         };

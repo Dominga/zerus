@@ -21,3 +21,6 @@ pub(super) use scan::{step, Scan};
 mod resumed;
 #[allow(unused_imports)] // The agreed package-8 availability port consumes this seam.
 pub(super) use resumed::{resumed_binding, ResumedBinding};
+
+#[cfg(test)]
+mod lead151;

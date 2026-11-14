@@ -59,7 +59,18 @@ impl Native<'_> {
         let mut s = settled_view(self.machine, b, v, &raw, archive)?;
         s.ready = s.live
             && crate::state::resumed_readiness(&raw) == crate::state::ResumedReadiness::Ready;
-        if s.live && s.agent == "codex" && !s.conversation.is_empty() && s.questions.is_empty() {
+        // Before a lead's first message there is no conversation to classify
+        // as resumed. Reuse the send's existing first-message observation;
+        // the original send still checks the terminal and exact run itself.
+        let first_lead = s.conversation.is_empty()
+            && self.store.team(&b.team).map_err(|e| e.to_string())?
+                .is_some_and(|team| team.lead == b.member);
+        if first_lead {
+            s.ready = s.live && crate::state::first_message_ready(&raw);
+        }
+        // Only Codex has the reviewed --observe CLI. Keep that agent scope.
+        if s.live && s.agent == "codex" && (!s.conversation.is_empty() || first_lead)
+            && s.questions.is_empty() {
             let request =
                 json!({"expected_run_id":s.run,"expected_conversation_id":s.conversation})
                     .to_string();
@@ -278,6 +289,8 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    mod lead151;
 
     /// A resumed Codex member's readiness is asked with an argv the CLI's own
     /// observe gate admits (zerus-63rru.54): the argv the service spawns runs

@@ -210,6 +210,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::RecordLateSession { .. } => timers::late_session(ctx),
         Operation::RecordLateReport { .. } => handout::late_report(ctx),
         Operation::RecordCancel { .. } => timers::record_cancel(ctx),
+        Operation::ReconcileLeadQueue => lead_queue::reconcile(ctx),
         Operation::ReconcileUnstaffed => unstaffed::reconcile(ctx),
         Operation::EndStaleUnstaffed => unstaffed::end_stale(ctx),
         Operation::SettleLeftHandout { .. } => members::settle_left(ctx),

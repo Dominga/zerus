@@ -488,12 +488,12 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
+        self.assertIn("needs: [source, quick, client-core, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
                       "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        base = {"source": "success", "quick": "success", "client-frontend": "success", "relay": "success", "connector": "success",
+        base = {"source": "success", "quick": "success", "client-core": "success", "client-frontend": "success", "relay": "success", "connector": "success",
                 "android": "success", "client-native-linux": "success", "client-native-macos-core": "success",
                 "client-native-macos-tauri": "success", "cli": "success", "cli-macos-debug": "success", "cli-macos-core": "success",
                 "cli-macos-native": "success", "cli-macos": "success", "clippy-macos": "success", "arch": "success", "arch-package": "success",
@@ -675,8 +675,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         budget = datetime.timedelta(minutes=int(field(quick, "timeout-minutes")))
         # Main regression 43598533548/job132458211523: all 6058 root tests and
         # the earlier crates passed; client-core only started after 19m07s.
-        # Its compile/tests, the desktop crates, notifications, notices and
-        # cache settlement must still have a bounded ten-minute work envelope.
+        # The core sequence now runs in parallel, but the desktop crates, notifications,
+        # notices and cache settlement retain the reviewed finite headroom.
         started = datetime.datetime.fromisoformat("2026-11-14T13:12:11+00:00")
         client_started = datetime.datetime.fromisoformat("2026-11-14T13:31:18+00:00")
         self.assertGreaterEqual(budget - (client_started - started), datetime.timedelta(minutes=10))
@@ -704,7 +704,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target",
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
+        for name in ("quick", "client-core", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
                      "client-native-macos-tauri", "client-native-windows", "cli", "cli-macos-debug", "arch-package", "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
@@ -863,7 +863,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+        names = ("source", "quick", "client-core", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
@@ -907,7 +907,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+        names = ("source", "quick", "client-core", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
@@ -980,7 +980,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # Restore-only consumers never save: two jobs saving one key would race.
-        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"},
+        read_only = {"client-core": {"rust-cache"}, "windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"},
                      "clippy-macos": {"rust-cache"}}
         saves = 0
         for name in names:
@@ -1037,6 +1037,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertTrue(first == second or not first.startswith(second))
         identity = "${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-"
         rust = {"quick": ("msrv-v2-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
+                "client-core": ("msrv-v2-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "cli-macos-debug": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "cli-macos-core": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
@@ -1051,6 +1052,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                 restore = self.checks_step(name, "rust-cache")
                 # Each cache follows the lock of what it builds.
                 lock = "services/mobile/connector/Cargo.lock" if name == "connector" else "Cargo.lock"
+                if name == "client-core":
+                    lock = "client/core/Cargo.lock"
                 if name in ("windows-desktop", "windows-host"):
                     lock = "Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock"
                 if name in ('cli-macos-debug', 'cli-macos-core'):
@@ -1078,7 +1081,7 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_hosted_ubuntu_jobs_bound_disk_overlap_without_changing_cache_trust(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         quick, relay = job(checks, "quick"), job(checks, "relay")
-        for text in (quick, relay):
+        for text in (quick, job(checks, "client-core"), relay):
             self.assertIn('runs-on: ubuntu-24.04', text)
             self.assertIn('CARGO_INCREMENTAL: "0"', text)
             self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', text)

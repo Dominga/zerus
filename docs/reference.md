@@ -1805,6 +1805,8 @@ they return retained text, marking shortened tails as truncated. A pruned job
 or missing native log returns
 an explicit unavailable result. Earlier history can be read from the provider's
 existing logs where available, rather than accumulating in every session record.
+Native completion metadata alone does not establish an empty output. A native
+result that explicitly records empty text remains a valid empty result.
 
 Subagent rows and the Inspector use **Recorded** for offline, archived, paused,
 stopped or unverifiable parent sessions. Recorded children contribute no current

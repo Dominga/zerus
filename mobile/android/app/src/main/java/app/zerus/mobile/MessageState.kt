@@ -8,8 +8,9 @@ import kotlin.math.abs
 data class OutgoingMessage(val requestId: String, val target: Target, val text: String,
     val attachments: List<Attachment>, val createdAt: Double, val status: String = "sending",
     val submittedAt: Double = 0.0, val submittedText: String = "", val error: String = "",
-    val deliveryDismissed: Boolean = false, val sendIntent: SendIntent? = null, val sendReceiptProof: SendReceiptProof? = null, val sendCorrelation: SendCorrelation? = null, val coverage: OutgoingCoverage? = null) {
-    fun recover() = if (status == "sending") copy(status = "uncertain", error = "Delivery was interrupted. Check its receipt before sending again.", deliveryDismissed = false) else this
+    val deliveryDismissed: Boolean = false, val sendIntent: SendIntent? = null, val sendReceiptProof: SendReceiptProof? = null, val sendCorrelation: SendCorrelation? = null, val coverage: OutgoingCoverage? = null,
+    val nativeSendIntent: NativeSendIntent? = null, val nativeSendProof: NativeSendProof? = null) {
+    fun recover() = if (status == "sending" || nativeSendIntent!=null && status in setOf("submitted","recorded") && !NativeSendOutcome.confirmed(this)) copy(status = "uncertain", error = "Delivery was interrupted. Check its receipt before sending again.", deliveryDismissed = false) else this
     fun belongsTo(current: Target): Boolean = target == current || target.resolvesTo(current)
     val blocksSending get() = status == "sending" || status == "uncertain" && !deliveryDismissed
 }
@@ -33,7 +34,7 @@ data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: Lis
         val next = contextOperations.filterNot { it.requestId == operation.requestId } + operation
         return copy(contextOperations = next.filter { it.blocksSending } + next.filterNot { it.blocksSending }.takeLast(50))
     }
-    fun enqueue(draft: Draft, requestId: String, at: Double, sendIntent: SendIntent? = null): MessageState {
+    fun enqueue(draft: Draft, requestId: String, at: Double, sendIntent: SendIntent? = null, nativeSendIntent: NativeSendIntent? = null): MessageState {
         require(draft.target.archiveId.isBlank()) { "Archived conversations are read-only." }
         require(draft.detachedId.isBlank() && draft.questionId.isBlank() && draft.status == "editing") { "Review this draft before sending." }
         require(draft.text.isNotBlank() || draft.attachments.isNotEmpty()) { "Write a message or attach a file." }
@@ -46,8 +47,9 @@ data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: Lis
         val current = drafts.find { it.key == draft.key }
         require(current == null || current.revision == draft.revision) { "The draft changed. Review it before sending." }
         AttachmentPolicy.selection(draft.attachments)
-        val message = OutgoingMessage(requestId, draft.target, draft.text, draft.attachments.toList(), at, sendIntent=sendIntent)
+        val message = OutgoingMessage(requestId, draft.target, draft.text, draft.attachments.toList(), at, sendIntent=sendIntent, nativeSendIntent=nativeSendIntent)
         require(sendIntent==null || SendReceiptRecovery.matches(message,sendIntent)) { "The saved message intent changed before transport." }
+        require(nativeSendIntent==null || sendIntent==null && nativeSendIntent.matches(message)) { "The saved message intent changed before transport." }
         val cleared = draft.copy(text = "", attachments = emptyList(), revision = UUID.randomUUID().toString(), generation = UUID.randomUUID().toString(), updatedAt = (at * 1000).toLong())
         return copy(drafts = drafts.filterNot { it.key == draft.key } + cleared, outgoing = outgoing + message)
     }
@@ -89,7 +91,9 @@ object MessageCodec {
         if(value.has("send_intent")) SendIntent.decode(value.getJSONObject("send_intent")) else null,
         if(value.has("send_receipt_proof")) SendReceiptProof.decode(value.getJSONObject("send_receipt_proof")) else null,
         if(value.has("send_correlation")) SendCorrelation(value.getJSONObject("send_correlation").toString()) else null,
-        if(value.has("coverage")) OutgoingCoverage.decode(value.getJSONObject("coverage")) else null).recover()
+        if(value.has("coverage")) OutgoingCoverage.decode(value.getJSONObject("coverage")) else null,
+        if(value.has("native_send_intent")) NativeSendIntent.decode(value.getJSONObject("native_send_intent")) else null,
+        if(value.has("native_send_proof")) NativeSendProof(value.getString("native_send_proof")) else null).recover()
     fun outgoingJson(message: OutgoingMessage) = targetJson(message.target).put("request", message.requestId).put("text", message.text)
         .put("attachments", JSONArray(message.attachments.map(Attachment::toJson))).put("created", message.createdAt).put("status", message.status)
         .put("submitted", message.submittedAt).put("submitted_text", message.submittedText).put("error", message.error)
@@ -98,6 +102,8 @@ object MessageCodec {
             message.sendReceiptProof?.let { value.put("send_receipt_proof",it.json()) }
             message.sendCorrelation?.let { value.put("send_correlation",it.json()) }
             message.coverage?.let { value.put("coverage",it.json()) }
+            message.nativeSendIntent?.let { value.put("native_send_intent",it.json()) }
+            message.nativeSendProof?.let { value.put("native_send_proof",it.canonical) }
         }
     private fun contextOperation(value: JSONObject): ContextOperation {
         val operation = value.getString("operation")
@@ -141,10 +147,10 @@ object ConversationMerge {
             // Exact receipt-backed read evidence reconciles its own request.
             // OpenCode dates queued prompts by delivery, outside the time window.
             // Text/time matching below is only presentation deduplication.
-            val confirmed=message.status in listOf("submitted","recorded")
+            val confirmed=message.status in listOf("submitted","recorded") && (message.nativeSendIntent==null || NativeSendOutcome.confirmed(message))
             fun named(source: String) = result.indices.firstOrNull { index -> index !in used && result[index].role == "You" &&
                 result[index].source == source && result[index].requestId.isNotBlank() && result[index].requestId == message.requestId }
-            var match = named("hgs_delivery") ?: named("opencode_native")
+            var match = if(message.nativeSendIntent!=null && !confirmed) null else named("hgs_delivery") ?: named("opencode_native")
             val nativeId=SendReceiptRecovery.exactNativeId(message)
             if(match==null && nativeId.isNotEmpty()) match=result.indices.singleOrNull { index -> index !in used && result[index].role=="You" &&
                 result[index].inheritedFrom.isEmpty() && result[index].source==message.originalSendIntent()?.value()?.string("provider")+"_native" && result[index].nativeMessageId==nativeId }

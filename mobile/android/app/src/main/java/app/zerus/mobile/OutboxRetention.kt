@@ -97,6 +97,8 @@ object OutboxRetention {
             (proof.nativeMessageId.isEmpty() && value.string("provider") != "opencode" || SendReceiptRecovery.exactNativeId(row).isNotEmpty())
     }
     fun evictable(row: OutgoingMessage, pinned: Set<String> = emptySet()): Boolean {
+        if(row.nativeSendIntent?.matches(row)==false) return false
+        if(row.nativeSendIntent!=null && row.status=="recorded" && !NativeSendOutcome.confirmed(row)) return false
         if (row.requestId in pinned || row.status !in setOf("recorded", "reviewed")) return false
         val coverage = row.coverage ?: return false
         if (!coverage.valid(row) || (row.status == "reviewed") != (coverage.kind == "draft")) return false
@@ -153,7 +155,7 @@ object OutboxRetention {
     /** Called only after the caller has verified this fresh frame's scope. */
     fun recorded(state: MessageState, ids: Set<String>, exact: Map<String, OutgoingCoverage>): MessageState =
         state.copy(outgoing = state.outgoing.map { row ->
-            if (row.requestId !in ids || row.status == "reviewed") row
+            if (row.requestId !in ids || row.status == "reviewed" || row.nativeSendIntent!=null && !NativeSendOutcome.confirmed(row)) row
             else row.copy(status = "recorded", error = "", coverage = exact[row.requestId]?.takeIf { it.valid(row) } ?: row.coverage)
         })
 }

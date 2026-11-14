@@ -210,7 +210,7 @@ public struct RelayClient: Sendable {
     }
 
     /// One campaign, including the original journal read, fallback and durable settlement.
-    public func checkDelivery(_ connection: Connection, message: OutgoingMessage, intent: SendIntent?, limit: Duration = .seconds(45)) async throws -> SendReceiptCheck {
+    public func checkDelivery(_ connection: Connection, message: OutgoingMessage, intent: SendIntent?, limit: Duration = .seconds(45), nativeOutcomeSupported: Bool = false) async throws -> SendReceiptCheck {
         guard limit > .zero, limit <= .seconds(45) else { throw ZerusError.invalid("Invalid receipt deadline.") }
         let parts = limit.components
         let deadline = SendReceiptRecovery.now + Double(parts.seconds) + Double(parts.attoseconds) / 1e18
@@ -219,6 +219,19 @@ public struct RelayClient: Sendable {
             do { original = try await self.waitForReceipt(connection, initial: try await self.receipt(connection, id: message.requestId)) }
             catch is CancellationError { throw CancellationError() }
             catch { original = nil }
+            if let saved = message.nativeSendIntent {
+                guard saved.matches(message) else { return .unconfirmed }
+                if let original, let proof = NativeSendOutcome.fromReceipt(message.requestId, intent: saved, receipt: original) {
+                    return .outcome(proof, deadline: deadline)
+                }
+                guard nativeOutcomeSupported, SendReceiptRecovery.now < deadline else { return .unconfirmed }
+                let id = UUID().uuidString.lowercased()
+                let payload = try NativeSendOutcome.request(id, intent: saved)
+                let initial = try await self.submit(connection, target: message.target, operation: NativeSendOutcome.read, payload: payload, id: id)
+                let receipt = try await self.waitForReceipt(connection, initial: initial, pollDelay: .milliseconds(100))
+                guard let proof = NativeSendOutcome.fromReceipt(id, intent: saved, receipt: receipt, lookup: true), SendReceiptRecovery.now < deadline else { return .unconfirmed }
+                return .outcome(proof, deadline: deadline)
+            }
             if let original, original.string("state") == "failed" { return .original(original, deadline: deadline) }
             if let original, original.string("state") == "completed", let result = original.object("result"), ["submitted", "queued"].contains(result.string("status")) {
                 if !message.hasOriginalSendIdentity { return .original(original, deadline: deadline) }

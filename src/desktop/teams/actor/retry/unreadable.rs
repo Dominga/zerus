@@ -12,6 +12,20 @@ use crate::desktop::teams::actor::schedule::Needs;
 const ROWS: &str = "gate:unreadable:";
 
 impl Runtime {
+    /// A reservation can discover the first-send gate after selection. Keep
+    /// that first observation on the same named row the next pass carries.
+    pub(in crate::desktop::teams::actor) fn first_message_wait(
+        &mut self,
+        store: &mut Store,
+        team: &Team,
+        member: &Member,
+        node: u32,
+        now: i64,
+    ) -> Result<()> {
+        let key = format!("unreadable:{}", member.id);
+        let reason = sentence(&member.id, &member.role, node, Fact::FirstMessage, true);
+        self.for_row(|a| a.hold_write(store, team, (&key, 0, 0), &reason, now))
+    }
     /// Ends the rows of the members nobody needs now, except a member whose
     /// read was not due this pass, then holds the needed ones. With no
     /// needs (no ready task or hand-out, or a paused team) every row ends.
@@ -64,6 +78,7 @@ pub(in crate::desktop::teams::actor) fn sentence(
 ) -> String {
     if holding {
         let what = match fact {
+            Fact::FirstMessage => return format!("Member {member} ({role}) holds an open hand-out of task {node} but is waiting for its first-message readiness. Finish startup in the member's terminal. The service checks readiness again. This card closes when the member can take its hand-out or no longer holds it."),
             Fact::NoHandle => "no durable handle or launch evidence identifies its session",
             Fact::Unavailable => "its session record cannot be read",
             _ => "its binding cannot be resolved",
@@ -72,6 +87,10 @@ pub(in crate::desktop::teams::actor) fn sentence(
     }
     const FINAL: &str = "This seat cannot be bound again; archive the member.";
     let (what, next) = match fact {
+        Fact::FirstMessage => (
+            "waiting for its first-message readiness",
+            "Finish startup in the member's terminal. The service checks readiness again.",
+        ),
         // The member can be read; its terminal is what is not free
         // (zerus-63rru.79). The sentence names the dialog the gate knew
         // (zerus-63rru.83).

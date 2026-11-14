@@ -149,6 +149,14 @@ when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
 An unknown job count does not establish work; only a positive count prevents
 that waiting label.
+
+Before its first conversation, a member the team launched can take its first task
+when the native first-message gate verifies its empty composer. A pending question
+or known background or subagent work keeps it from taking that task. If its
+terminal cannot be verified as ready, the usual three-minute service card names
+the member as "waiting for its first-message readiness". Members with a
+conversation keep the usual idle and known-zero work checks.
+
 The lead's strip shows accepted/total tasks, its team status (highlighting
 **Stuck** when an explicit blocker remains), unanswered member questions as
 **?N**, and live members including the lead. Accepted tasks include archived

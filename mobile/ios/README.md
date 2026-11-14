@@ -1,5 +1,14 @@
 # Zerus iOS
 
+Main Claude, Codex and Kimi sends opt into `send_outcome` only when the relay and
+computer advertise both outcome operations. The encrypted outbox saves the exact
+bounded original binding before the first POST, including the digest of text and
+attachment bytes. A matching closed `native_input_lock` negative becomes **Not
+sent**; Review prepares an editable draft whose next explicit send gets a new
+UUID. Missing, legacy, malformed or foreign proof stays unknown with the original
+UUID. Recovery uses a fresh read UUID and never reposts the message. The existing
+Not sent actions and translations are reused.
+
 Native Swift and SwiftUI companion for the Zerus gateway protocol in
 [the mobile architecture](../../docs/mobile-architecture.md). It targets full
 feature parity with the [Android client](../android/README.md) and keeps the same

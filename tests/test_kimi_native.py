@@ -1339,6 +1339,10 @@ class NativeKimi(lifecycle.Harness):
         self.assertNotEqual(repeated.returncode, 0)
         self.assertEqual(len(self.requests), 3, 'the same request must never type or compact again')
 
+    def test_fork_requires_a_closed_source_instance_and_preserves_saved_context(self):
+        from kimi_fork_capability import check
+        check(self)
+
     def test_pause_and_resume_keep_the_conversation(self):
         name = self.launch()
         text = 'Start the fixture conversation'

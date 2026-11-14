@@ -266,7 +266,7 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
-        self.assertEqual(len(ci.METHODS), 23)
+        self.assertEqual(len(ci.METHODS), 24)
         self.assertIn('test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_hint_reaches_model_through_real_hgs_hook',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message', ci.METHODS)

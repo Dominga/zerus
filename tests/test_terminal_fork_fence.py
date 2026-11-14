@@ -228,7 +228,8 @@ class TerminalForkSource(fork.Base):
 
     def test_unchanged_canonical_sources_keep_parent_and_fork_context(self):
         for agent in ("claude", "codex", "kimi"):
-            for live in (False, True):
+            # Kimi's external Fork cannot open an instance already in use.
+            for live in ((False,) if agent == "kimi" else (False, True)):
                 for layout in ("legacy", "id"):
                     with self.subTest(agent=agent, live=live, layout=layout):
                         name = self.start(agent, str(live).lower() + "-" + layout)

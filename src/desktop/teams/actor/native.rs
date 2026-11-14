@@ -10,6 +10,8 @@ mod tasks;
 pub(super) use tasks::{clear_request, stage_arguments, stage_request, task_reply};
 mod admission;
 mod fresh;
+#[cfg(test)]
+mod fresh_fixture;
 mod cancels;
 use super::*;
 use crate::{

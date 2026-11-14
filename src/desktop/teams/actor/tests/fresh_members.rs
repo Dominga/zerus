@@ -102,6 +102,27 @@ fn a_held_fresh_member_gets_one_readiness_card_and_no_generic_card() {
     child("held-unready");
 }
 
+#[test]
+fn final_admission_rejects_a_stale_first_message_witness() {
+    child("admission-match");
+}
+#[test]
+fn a_first_message_witness_requires_the_members_agent() {
+    child("member-agent");
+}
+#[test]
+fn a_first_message_witness_requires_the_members_launch() {
+    child("member-launch");
+}
+#[test]
+fn a_first_message_witness_refuses_an_empty_identity() {
+    child("empty-identity");
+}
+#[test]
+fn unsettled_children_keep_a_fresh_member_from_being_free() {
+    child("unsettled-children");
+}
+
 struct World {
     h: Harness,
     n: Native,
@@ -604,6 +625,98 @@ fn fixture() {
                 assert_eq!(history.len(), 1);
                 assert_ne!(history[0].state, "open");
                 assert_eq!(w.terminal.submissions.lock().unwrap().len(), 1);
+            });
+        }
+        "admission-match" => {
+            let mut w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                // Reserve through the actual actor, without offering input.
+                w.transport(Some(("after-reservation", json!(false))));
+                let mut runtime = Runtime::open(w.h.temp.path(), &w.n.machine).unwrap();
+                w.pass(&mut runtime, 10_000_000);
+                let effect =
+                    w.h.store
+                        .effects(TEAM, 200, None)
+                        .unwrap()
+                        .rows
+                        .into_iter()
+                        .find(|e| e.kind == "handout" && e.state == "reserved")
+                        .expect("the actor reserved a hand-out");
+                let team = w.h.store.team(TEAM).unwrap().unwrap();
+                let member = w.member.clone();
+                let node = w.h.store.node(TEAM, effect.node).unwrap().unwrap();
+                let row = w.row.clone();
+                let n = Native {
+                    config: w.n.config.clone(),
+                    machine: w.n.machine.clone(),
+                    epoch: w.n.epoch.clone(),
+                    stop: Arc::clone(&w.n.stop),
+                };
+                w.transport(None);
+                let target = (&team, &node, &member, effect.request_id.as_str(), &row);
+                n.fixture_first_admission(target, || {}).unwrap();
+                assert!(
+                    n.fixture_first_admission(target, || {
+                        // A catalog change after the proof, before the real final
+                        // admission. The binding/run stay readable; the proof's
+                        // exact name no longer matches the current producer row.
+                        w.row["name"] = json!("codex/fresh/renamed");
+                        w.publish(false);
+                    })
+                    .is_err(),
+                    "a stale proof cannot admit the reserved child"
+                );
+                assert!(w.terminal.submissions.lock().unwrap().is_empty());
+            });
+        }
+        "member-agent" => {
+            let w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                w.transport(None);
+                assert!(w.n.fixture_first_ready(&w.member, &w.row));
+                let mut member = w.member.clone();
+                member.agent = "kimi".into();
+                assert!(!w.n.fixture_first_ready(&member, &w.row));
+            });
+        }
+        "member-launch" => {
+            let w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                w.transport(None);
+                assert!(w.n.fixture_first_ready(&w.member, &w.row));
+                let mut row = w.row.clone();
+                row["launch_id"] = json!("another-launch");
+                w.transport(Some(("launch_id", json!("another-launch"))));
+                assert!(!w.n.fixture_first_ready(&w.member, &row));
+            });
+        }
+        "empty-identity" => {
+            for key in ["name", "run_id", "launch_id", "agent"] {
+                let w = World::new("codex", "ready", false);
+                w.terminal.with(|| {
+                    w.transport(None);
+                    assert!(w.n.fixture_first_ready(&w.member, &w.row));
+                    let mut row = w.row.clone();
+                    row[key] = json!("");
+                    w.transport(Some((key, json!(""))));
+                    assert!(!w.n.fixture_first_ready(&w.member, &row), "empty {key}");
+                });
+            }
+        }
+        "unsettled-children" => {
+            let mut w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                w.transport(None);
+                assert_eq!(w.availability(), Availability::Free);
+                w.row["subagent_active_count"] = json!(0);
+                w.row["subagent_source"] = json!("hook_profiles");
+                w.row["subagent_groups_complete"] = json!(false);
+                w.publish(false);
+                assert!(super::super::fleet::Facts::of(&w.row).children_unsettled);
+                assert_eq!(
+                    w.availability(),
+                    Availability::Unreadable(Fact::FirstMessage)
+                );
             });
         }
         _ => panic!("unknown fresh-member case"),

@@ -109,6 +109,9 @@ impl Ports for World {
         self.ledger.unsettled(b)
     }
     fn pending_brief(&mut self, b: &Binding) -> Result<Option<Plan>> {
+        if !self.ledger.lead_brief_needed(b)? {
+            return Ok(None);
+        }
         self.ledger
             .pending_lead_brief(b, &self.s, &self.h.store.team(TEAM).unwrap().unwrap())
     }

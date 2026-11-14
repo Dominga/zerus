@@ -5066,6 +5066,14 @@ uses a new attempt, and an old request is never replayed.
 The reply contains one task row; read its audit through the bounded task
 history command.
 
+The task inspector's **Saved execution** section shows the saved attempt,
+generation, requirement revisions, executor and recorded events. Submitted does
+not mean begun, and recorded begin does not prove the agent is still working.
+Unknown, conflicting or unexplained evidence remains visible; failed refreshes
+mark the retained record as stale. Missing or unsupported execution details,
+live execution state and the executor queue remain unavailable. The project's
+To do order is separate from an executor queue. This section adds no controls.
+
 The task view shows each unknown attempt with **Abandon attempt…**, followed
 by a separate confirmation. A team-owned task requires the person's command
 on the team's home computer. Running, Paused, Draft and Planning teams refuse;

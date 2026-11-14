@@ -130,6 +130,12 @@ export function SavedDraftsDialog() {
   let el: HTMLDialogElement | undefined;
   let list: HTMLDivElement | undefined;
   let restoreButton: HTMLButtonElement | undefined;
+  let opening = 0;
+  const returnFocus = () => {
+    const back = opener;
+    opener = undefined;
+    if (back?.isConnected) back.focus();
+  };
   const [replacing, setReplacing] = createSignal<string>();
   /** The list takes the focus once its first draft is selected after opening. */
   let focusList = false;
@@ -154,15 +160,23 @@ export function SavedDraftsDialog() {
   });
   createEffect(() => {
     if (!el) return;
+    const at = ++opening;
     if (!savedDrafts.open()) {
       setReplacing(undefined);
-      if (el.open) el.close();
+      if (el.open) {
+        el.close();
+        // close queues a native event. Return focus now, before a busy event
+        // loop can delay it or a subsequent opening replaces the opener.
+        returnFocus();
+      }
       return;
     }
     focusList = true;
     readCapture();
     if (!el.open) el.showModal();
-    queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
+    queueMicrotask(() => {
+      if (at === opening && el?.open) el.querySelector<HTMLElement>("[data-initial]")?.focus();
+    });
   });
 
   const all = () => SECTIONS.flatMap(({ id }) => savedDrafts.sections[id].items);
@@ -226,10 +240,7 @@ export function SavedDraftsDialog() {
         // A delayed close from the previous opening must not consume this opener.
         if (el?.open) return;
         if (savedDrafts.open()) savedDrafts.close();
-        // The focus returns to what opened the dialog.
-        const back = opener;
-        opener = undefined;
-        if (back?.isConnected) back.focus();
+        returnFocus();
       }}>
       <div class="dlg-head"><Icon name="drafts" size={18} class="accent" /><h2 id="saved-drafts-title">{tr(TEXTS.title)}</h2></div>
       <div class="dlg-body saved-drafts-body">

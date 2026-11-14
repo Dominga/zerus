@@ -10,7 +10,8 @@ final class NativeSendOutcomeTests: XCTestCase {
     private func fixture(_ v: JSONObject) throws -> (OutgoingMessage, JSONObject, NativeSendIntent) {
         let send = try XCTUnwrap(v.object("send")?.object("payload")), binding = try XCTUnwrap(send.object("binding")), p = try XCTUnwrap(send.object("payload"))
         let target = Target(computerId: binding.string("computer_id"), session: binding.string("session"), run: binding.string("run_id"), conversation: binding.string("conversation_id"), connectionId: "gateway")
-        let files: [Attachment] = p.array("attachments").isEmpty ? [] : [Attachment(id: "55555555-5555-4555-8555-555555555555", name: "note.txt", mime: "text/plain", bytes: 5, sha256: SendReceiptRecovery.hash("hello"))]
+        let payloadFiles = try XCTUnwrap(p.array("attachments"))
+        let files: [Attachment] = payloadFiles.isEmpty ? [] : [Attachment(id: "55555555-5555-4555-8555-555555555555", name: "note.txt", mime: "text/plain", bytes: 5, sha256: SendReceiptRecovery.hash("hello"))]
         var row = OutgoingMessage(requestId: binding.string("message_request_id"), target: target, text: p.string("text"), attachments: files, createdAt: 1, status: "uncertain")
         let intent = try XCTUnwrap(NativeSendOutcome.freeze(row, payload: p, provider: binding.string("provider"), machineId: binding.string("machine_id"), sessionId: binding.string("session_id"), encoding: binding.string("native_encoding")))
         row.nativeSendIntent = intent

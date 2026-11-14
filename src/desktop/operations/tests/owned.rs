@@ -34,6 +34,22 @@ fn wait(mut done: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(5));
     }
 }
+#[track_caller]
+fn wait_observed<T: std::fmt::Debug>(
+    label: &str,
+    mut observe: impl FnMut() -> T,
+    ready: impl Fn(&T) -> bool,
+) {
+    let end = Instant::now() + Duration::from_secs(8);
+    loop {
+        let observed = observe();
+        if ready(&observed) {
+            return;
+        }
+        assert!(Instant::now() < end, "{label}: {observed:?}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
 fn environment(command: &mut Command, root: &Path) {
     command
         .env_clear()
@@ -380,12 +396,16 @@ impl Host {
     }
     fn recover(&self) {
         // The existing kernel probe -> actor commit is the ONLY release path.
-        wait(|| {
-            let mut store = self.store.lock().unwrap();
-            store.retry_operation_custody();
-            store.recover_operation_custody(&self.location);
-            ledger::totals(&store.db).unwrap().undrained == 0
-        });
+        wait_observed(
+            "SQL custody still charged",
+            || {
+                let mut store = self.store.lock().unwrap();
+                store.retry_operation_custody();
+                store.recover_operation_custody(&self.location);
+                ledger::totals(&store.db).unwrap().undrained
+            },
+            |undrained| *undrained == 0,
+        );
     }
     fn descendant(&self) -> ledger::custody::Birth {
         let pid = fs::read_to_string(self.root.join("descendant"))
@@ -396,32 +416,53 @@ impl Host {
         ledger::custody::Birth { pid, birth }
     }
     fn release(&self, birth: &ledger::custody::Birth) {
+        self.release_original(birth);
+        self.finish_release();
+    }
+    fn release_original(&self, birth: &ledger::custody::Birth) {
         fs::write(
             self.root.join("release"),
             b"release this exact synthetic descendant",
         )
         .unwrap();
-        wait(|| {
-            matches!(
-                platform::process_state(birth.pid, Some(&birth.birth)),
-                Ok(platform::ProcessState::Exited)
-            )
-        });
+        wait_observed(
+            &format!("released descendant {birth:?}"),
+            || platform::process_state(birth.pid, Some(&birth.birth)),
+            |observed| matches!(observed, Ok(platform::ProcessState::Exited)),
+        );
         assert_eq!(
             fs::read_to_string(self.root.join("released")).unwrap(),
             "explicit descendant gate"
         );
-        wait(|| self.weak.upgrade().is_none());
+        wait_observed(
+            &format!("original resource guard after descendant {birth:?}"),
+            || (self.weak.upgrade().is_none(), self.weak.strong_count()),
+            |observed| observed.0,
+        );
+    }
+    fn finish_release(&self) {
+        // A previously dispatched recovery worker can acquire the released
+        // lock and keep it in its queued proof. Let the actor consume that
+        // proof and commit the exact SQL drain before trying another probe.
+        self.recover();
         self.wait_for_kernel_release(|_| ());
     }
     fn wait_for_kernel_release(&self, mut observe: impl FnMut(&custody::Observation)) {
         // Weak::upgrade can fail before the last Arc's File destructor closes
         // its descriptor. Only the exact existing kernel lock proves release.
-        wait(|| {
-            let observation = custody::probe(&self.location, &self.record());
-            observe(&observation);
-            matches!(observation, custody::Observation::Released { .. })
-        });
+        wait_observed(
+            &format!("kernel custody for {:?}", self.record().helper),
+            || {
+                let observation = custody::probe(&self.location, &self.record());
+                observe(&observation);
+                match observation {
+                    custody::Observation::Released { .. } => (true, "Released"),
+                    custody::Observation::Held => (false, "Held"),
+                    custody::Observation::Unavailable => (false, "Unavailable"),
+                }
+            },
+            |observed| observed.0,
+        );
     }
 }
 
@@ -559,6 +600,51 @@ fn each_real_last_pipe_keeps_custody_and_sql_after_the_runner_returns() {
         assert_eq!(attempt(&host.store.lock().unwrap().db).0, "unknown");
         println!("OWNED PIPE {mode}: actual last resource, exact descendant exit and kernel/SQL release; Unknown unchanged");
     }
+}
+
+#[test]
+fn a_queued_recovery_proof_is_consumed_before_rechecking_kernel_release() {
+    if !isolated("a_queued_recovery_proof_is_consumed_before_rechecking_kernel_release") {
+        return;
+    }
+    let mut host = Host::new(false);
+    assert!(host.run("stdout", false, false).unwrap().is_err());
+    let descendant = host.descendant();
+    host.held();
+    host.release_original(&descendant);
+    host.wait_for_kernel_release(|_| ());
+    // Start the real recovery worker AFTER the original descriptors closed.
+    // Do not poll its actor yet: its queued Released proof owns the same
+    // kernel lock until the actor commits this exact ticket's SQL drain.
+    {
+        let mut store = host.store.lock().unwrap();
+        store.retry_operation_custody();
+        store.recover_operation_custody(&host.location);
+    }
+    wait_observed(
+        "queued recovery proof owns the kernel lock",
+        || match custody::probe(&host.location, &host.record()) {
+            custody::Observation::Held => "Held",
+            custody::Observation::Released { .. } => "Released",
+            custody::Observation::Unavailable => "Unavailable",
+        },
+        |observed| *observed == "Held",
+    );
+    held(&host.store.lock().unwrap().db);
+    assert_eq!(
+        host.store.lock().unwrap().operation_status()["resource_custody"]["state"],
+        "probing"
+    );
+    assert_eq!(attempt(&host.store.lock().unwrap().db).0, "unknown");
+    host.finish_release();
+    host.unchanged();
+    assert_eq!(
+        ledger::totals(&host.store.lock().unwrap().db)
+            .unwrap()
+            .undrained,
+        0
+    );
+    assert_eq!(attempt(&host.store.lock().unwrap().db).0, "unknown");
 }
 
 #[test]

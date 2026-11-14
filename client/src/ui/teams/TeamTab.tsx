@@ -16,6 +16,8 @@ import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
 import { followTeamScope, type TeamScope } from "./team-tab-scope";
 import { TeamTaskCard } from "./TeamTaskCard";
+import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
+import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
@@ -55,6 +57,7 @@ export function TeamWorkspace(props: {
   onAddTask: () => void;
 }) {
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
+  const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
   const [openNotice, setOpenNotice] = createSignal("");
@@ -66,6 +69,7 @@ export function TeamWorkspace(props: {
   // Only another team resets the selection: a refreshed view of the same team
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
+  createEffect(on(teamId, () => setDrawer(null), { defer: true }));
   createEffect(on(teamId, () => { setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
@@ -101,7 +105,8 @@ export function TeamWorkspace(props: {
   const send = (kind: string, fields: Record<string, unknown> = {}) => { props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
-      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)} />
+      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)} drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
+      <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>

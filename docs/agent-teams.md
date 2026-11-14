@@ -207,6 +207,25 @@ active members, open inbox items and open cards, and the team's actions:
 **Pause** or **Resume**, **Stop**, and **Archive** after a stop. Destructive
 actions ask for confirmation first.
 
+The bar also opens **Feed**, **Inbox**, **Reports**, **Cards** and **Lead chat**.
+The first four read one page at a time, at most 200 rows. **Next page** keeps
+the original page cursor, so later inserts do not move that snapshot;
+**First page** starts a fresh snapshot, and **Refresh** rereads the selected
+page. The feed follows the journal's oldest-first order. Reports are the
+report items on the selected inbox page, not an exhaustive report search.
+Only one page is retained, and closing the drawer drops it.
+
+Reports offer **Accept** or **Reject** (return with a reason), open questions
+offer **Answer**, and cards offer the decisions their writer recorded. A
+changed team revision or an unreadable page blocks these actions until a
+fresh read. An uncertain action remains in the existing Check/Dismiss flow;
+opening or refreshing a drawer never repeats it.
+
+**Lead chat** uses the selected lead's ordinary composer and its saved draft,
+shared with Activity. The bound computer and session must match, and its run
+and conversation must be available. Sends keep the normal guarded delivery
+and durable request identity; an uncertain delivery is never replayed.
+
 **Members** lists each member with its role, what it works on ("Working on
 #%1", "Reviewing #%1", "Testing #%1") and whether its session is linked. A
 member's actions are **Pause**, **Resume**, **Stop** and **Remove**; the lead

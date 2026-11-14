@@ -156,6 +156,23 @@ or known background or subagent work keeps it from taking that task. If its
 terminal cannot be verified as ready, the usual three-minute service card names
 the member as "waiting for its first-message readiness". Members with a
 conversation keep the usual idle and known-zero work checks.
+
+The lead's strip shows accepted/total tasks, its team status (highlighting
+**Stuck** when an explicit blocker remains), unanswered member questions as
+**?N**, and live members including the lead. Accepted tasks include archived
+work; internal review/test stage tasks are excluded. Counts stop at 1000 and
+show **+** when more exist; an approximate count does not draw a percentage.
+The open queue is a single phase, so it has no phase bar. A team with multiple
+phases also shows completed/total phases. Click the strip or its chevron to
+fold the same member rows; the saved choice also survives a restart.
+
+Questions count only the open member-question inbox items, not cards for the
+person. Stuck comes from explicit launch/hand-out/unreadable-member blockers,
+a silent lead, a blocked service card, or a team project-limit service item.
+Ordinary work/integration approvals, questions and uncertain-delivery inbox
+items do not establish Stuck by themselves. These summaries arrive with the
+bounded team list; drawing a strip does not load each team's view.
+
 Ordinary sessions and the Sessions list with the preview off keep their usual
 status and grouping rules.
 
@@ -243,6 +260,14 @@ home computer. A task you send, or the lead sends, is admitted at once. A task
 sent by a member or by another agent waits until the lead admits it. The queue
 is taken in the order of the board's To do column, and each member works on
 one task at a time.
+
+### Routing
+
+On a `routing: lead` team, admitted tasks wait until the lead chooses their
+role and pipeline with `hgs team route`. Admission waits and routing waits
+each have one count-only inbox item pointing to `hgs team queue`, so the
+existing doorbell brings an idle lead back to the queue. Each item closes
+when no tasks wait in that category.
 
 When the team refuses a new task, for example because its queue is full, the
 task is still created but not queued: it stays on the board as an ordinary
@@ -345,6 +370,12 @@ lead. Every reopen counts as a round, whoever caused it.
 
 ## Doorbells and timers
 
+After its launch and after a delegated resume, a Claude, Codex or Kimi lead gets
+one short brief naming its team, `hgs team current` and `hgs team inbox`.
+The brief is launch context, not a task or an attempt. Unknown delivery is never
+replayed. DeepSeek leads do not get this brief yet; their hosted delivery path
+needs the same guarded first-send support (tracked in zerus-3tq9r).
+
 The inbox is where the lead's work waits; a doorbell only tells a session to
 look. When items wait, the service sends the lead one message that says how
 many wait and names `hgs team inbox`. When answers to its questions wait, a
@@ -360,6 +391,13 @@ read. A doorbell whose delivery is not known is never sent again; the next new
 item rings a new one, and a resumed session gets a new doorbell, never the old
 one. A member's doorbell is dropped once the member no longer holds that
 attempt: after an accept, a return, a reassignment, a cancel or a stop.
+
+The lead also gets one aggregate inbox item while tasks wait for its admission,
+and, on a `routing: lead` team, one while admitted tasks wait for routing.
+Each item names the current count and `hgs team queue`, never task text.
+More waiting tasks update that item without another doorbell. Each item closes
+when its category has no waiting tasks; a later arrival starts a new episode
+and can ring a new doorbell. The episodes survive a service restart.
 
 Timers turn waiting into an inbox item for the lead or a card for you:
 

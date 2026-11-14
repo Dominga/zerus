@@ -24,6 +24,10 @@ pub fn list(reply: &Value) -> TeamList {
             revision: count(row, "revision"),
             lead_session: lead_session(row),
             member_sessions: member_sessions(row),
+            progress: row
+                .get("progress")
+                .filter(|value| value.is_object())
+                .map(progress),
         })
         .collect();
     TeamList {
@@ -118,5 +122,24 @@ pub fn waiting(reply: &Value) -> WaitingView {
         items: rows.iter().take(PAGE).filter_map(waiting_item).collect(),
         next: next_cursor(reply),
         after: None,
+    }
+}
+
+fn progress(row: &Value) -> TeamProgress {
+    let flag = |key: &str| row.get(key).and_then(Value::as_bool).unwrap_or(false);
+    TeamProgress {
+        tasks: count(row, "tasks").min(1000),
+        accepted: count(row, "accepted").min(1000),
+        questions: count(row, "questions").min(1000),
+        members: count(row, "members").min(1000),
+        phases: count(row, "phases").min(1000),
+        phases_done: count(row, "phases_done").min(1000),
+        stuck: flag("stuck"),
+        tasks_more: flag("tasks_more"),
+        accepted_more: flag("accepted_more"),
+        questions_more: flag("questions_more"),
+        members_more: flag("members_more"),
+        phases_more: flag("phases_more"),
+        phases_done_more: flag("phases_done_more"),
     }
 }

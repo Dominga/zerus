@@ -343,6 +343,42 @@ pub(crate) fn clear_at(state: &Path, team: &str, kind: &str, subject: &str) -> R
 /// table does not exist (a service that does not write items), or the
 /// ledger cannot be read safely.
 pub(crate) fn read(state: &Path, team: &str, running: Option<bool>, now: i64) -> Option<Items> {
+    page(&read_connection(state)?, team, running, now).ok()
+}
+
+/// A page's team-scoped blocking service items, using one read-only open and
+/// one bounded statement, never a status call for each listed team.
+pub(crate) fn blocked_teams(
+    state: &Path,
+    teams: &[&str],
+    kinds: &[&str],
+) -> Option<std::collections::BTreeSet<String>> {
+    if teams.is_empty()
+        || teams.len() > crate::teams::store::MAX_PAGE as usize
+        || kinds.is_empty()
+        || kinds.len() > 16
+    {
+        return Some(std::collections::BTreeSet::new());
+    }
+    let db = read_connection(state)?;
+    let slots = |n| std::iter::repeat_n("?", n).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT DISTINCT team FROM service_items WHERE team IN ({}) AND kind IN ({}) LIMIT {}",
+        slots(teams.len()),
+        slots(kinds.len()),
+        crate::teams::store::MAX_PAGE
+    );
+    let mut statement = db.prepare(&sql).ok()?;
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(teams.iter().chain(kinds.iter()).copied()),
+            |row| row.get(0),
+        )
+        .ok()?;
+    rows.collect::<std::result::Result<_, _>>().ok()
+}
+
+fn read_connection(state: &Path) -> Option<Connection> {
     use rusqlite::OpenFlags;
     if !crate::teams::enabled(state) {
         return None;
@@ -378,7 +414,7 @@ pub(crate) fn read(state: &Path, team: &str, running: Option<bool>, now: i64) ->
     if !present {
         return None;
     }
-    page(&db, team, running, now).ok()
+    Some(db)
 }
 
 #[cfg(test)]

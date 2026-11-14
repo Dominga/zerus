@@ -37,6 +37,21 @@
           }
         ],
         "name": "Fixes",
+        "progress": {
+          "accepted": 0,
+          "accepted_more": false,
+          "members": 4,
+          "members_more": false,
+          "phases": 1,
+          "phases_done": 0,
+          "phases_done_more": false,
+          "phases_more": false,
+          "questions": 0,
+          "questions_more": false,
+          "stuck": false,
+          "tasks": 2,
+          "tasks_more": false
+        },
         "project": "example-project",
         "revision": 18,
         "status": "running"

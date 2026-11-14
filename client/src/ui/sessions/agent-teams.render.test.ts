@@ -42,8 +42,8 @@ function show(rows: Row[] | (() => Row[]), compact = false, toggle?: () => void)
   const host = document.createElement("div"); document.body.append(host);
   dispose = render(() => createComponent(For, { get each() { return typeof rows === "function" ? rows() : rows; }, children: (row: Row) => {
     if (row.type !== "card") return null;
-    return compact ? createComponent(CompactCard, { session: row.session, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, onExpand() {} })
-      : createComponent(SessionCard, { session: row.session, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, expandable: false, expanded: false, onToggleChildren() {} });
+    return compact ? createComponent(CompactCard, { session: row.session, agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, onExpand() {} })
+      : createComponent(SessionCard, { session: row.session, agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, expandable: false, expanded: false, onToggleChildren() {} });
   } }), host);
   return host;
 }
@@ -77,7 +77,7 @@ describe("Agent Teams in Sessions", () => {
     expect(host.textContent).toContain("Waiting for a task");
     expect(host.textContent).not.toContain("Status unknown");
     expect(sessionRowName(result[0])).toContain("Team: Fixes");
-    expect(rowHeight(result[0])).toBe(94);
+    expect(rowHeight(result[0])).toBe(122);
   });
 
   it("shows the role and waiting caption in compact rows too", () => {
@@ -122,6 +122,7 @@ describe("Agent Teams in Sessions", () => {
     const host = show(result);
     expect(host.querySelector('[role="heading"]')).toBeNull();
     expect(host.querySelector(".sc-team-role")).toBeNull();
+    expect(host.querySelector("[data-team-strip]")).toBeNull();
     expect(host.textContent).toContain("Status unknown");
     expect(host.textContent).not.toContain("Waiting for a task");
   });

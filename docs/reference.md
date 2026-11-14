@@ -351,6 +351,10 @@ termination of other programs. Already orphaned processes whose session ownershi
 cannot be verified stay untouched; a surviving process using the checkout still
 prevents its removal. Run Terminate from outside the target's own process tree.
 
+The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
+qualified separately. It has no installed caller and does not enable graceful
+Terminate or change the verified tree and cleanup rules above.
+
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
 and project wrapper. There is no fallback to the latest conversation or a new
@@ -494,6 +498,13 @@ starts nothing. A new launch, fork, rename or restore still refuses a label
 that any tmux session holds. A build older than this one finds no pane for a
 session whose terminal is named otherwise, shows it as not live and drops
 `terminal_name` when it rewrites the record.
+
+New session tags (launch, rename and fork) refuse shell metacharacters, curly
+quotes U+2018–U+201E and invisible Unicode formatting characters (category Cf).
+Letters and digits from any script and internal spaces remain valid. This is
+an additional check on newly chosen tags: existing labels remain valid selectors,
+and an old label can be renamed to a safe tag. Always quote names in shell
+commands; older peers and retained labels may still contain shell syntax.
 
 When several sessions share a label (zerus-ucck P3c), a command picks one by
 the identities it carries. These come from its command line
@@ -6671,6 +6682,18 @@ A versioned adapter connects its Session Controller through a private Unix socke
 The official web host uses a separate `hgs` profile through `--patch`; sign-in and
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
+
+Person answers reserve their original UUID and exact payload digest durably in
+`question_receipts` before native delivery, as Claude/Kimi answers do. An exact
+duplicate returns its recorded outcome even after the question or run changes;
+changed content cannot reuse that UUID. Interrupted, unconfirmed or unknown
+attempts are never replayed. The live session, question hash and host generation
+still authorize a new answer; a UUID grants no authority. The optional native
+`requestId` field works with an older resident bridge unchanged. This contract
+does not restart or reload a running host.
+An uncertain native result retains the canonical `in_progress` receipt status,
+with `outcome: unknown` and its error; existing desktop and phone readers keep
+that original pending.
 
 If the adapter endpoint disappears while the recorded original host is still
 alive, Zerus refuses another launch and leaves the original running. New

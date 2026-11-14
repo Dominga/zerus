@@ -65,6 +65,8 @@ public enum SessionActionPolicies {
             let name = try string(raw, rename ? "new_name" : "tag")
             try require(!blank(name) && name.utf8.count <= (rename ? 512 : 120) && !control(name) && !name.contains("\\") && (rename || !name.contains("/")),
                         "Enter a valid session name.")
+            let tag = rename ? name.components(separatedBy: "/").last! : name
+            try require(!SessionNames.hasUnsafeSyntax(tag), SessionNames.unsafeReason)
         case "recovery_action":
             try require(AttachmentPolicy.validId(try string(raw, "job_id")))
             try require(["now", "cancel"].contains(try string(raw, "action")))
@@ -99,6 +101,7 @@ public enum SessionActionPolicies {
             let directory = try string(raw, "directory")
             try require(directory.hasPrefix("/") && directory.utf16.count <= 4096 && !control(directory))
             let tag = try string(raw, "tag")
+            try require(!SessionNames.hasUnsafeSyntax(tag), SessionNames.unsafeReason)
             try require(!blank(tag) && tag.trimmingCharacters(in: .whitespacesAndNewlines) == tag && tag.utf8.count <= 120 &&
                         !tag.unicodeScalars.contains(where: { "/\\:.".unicodeScalars.contains($0) || PairingInvite.isISOControl($0) }))
             if raw.has("account_id") {

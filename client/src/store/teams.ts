@@ -14,6 +14,10 @@ import type { TeamsOut } from "../types";
 export interface TeamSession { machine: string; session_id: string }
 /** A member's bound session on a live team's list row. */
 export interface TeamMemberSession { member: string; role?: string; machine: string; session_id: string }
+export interface TeamProgress {
+  tasks: number; accepted: number; questions: number; members: number; phases: number; phases_done: number; stuck: boolean;
+  tasks_more: boolean; accepted_more: boolean; questions_more: boolean; members_more: boolean; phases_more: boolean; phases_done_more: boolean;
+}
 export interface TeamSummary {
   id: string; project: string; name: string; status: string; lead: string; home: string; revision: number;
   /** The lead's bound session: how a session finds its team (package 5's list). */
@@ -21,6 +25,8 @@ export interface TeamSummary {
   /** The bound sessions of a planning, running or paused team's members;
    * absent when none is bound or the command line does not send them. */
   member_sessions?: TeamMemberSession[] | null;
+  /** Bounded metadata supplied by the same followed list read. */
+  progress?: TeamProgress | null;
 }
 export interface TeamList {
   teams: TeamSummary[]; truncated: boolean; next: string | null;

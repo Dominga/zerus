@@ -1,6 +1,8 @@
 //! Production effects use the native CLI, the original child custodian and
 //! receipts read through the original held store. Reads confer no authority.
 mod binding;
+#[cfg(test)]
+pub(super) use binding::launch_binding;
 mod observation;
 mod original;
 mod ownership;
@@ -55,7 +57,8 @@ impl<'a> Native<'a> {
         scoped.extend(args);
         self.run(&scoped, input)
     }
-    /// The send's effect-free observation of a resumed Codex member, run as
+    /// The send's effect-free observation of a resumed Codex member or a
+    /// lead waiting for its first message, run as
     /// exactly the argv the CLI's own gate admits ([`observation`]).
     fn observe_send(&self, name: &str, input: &[u8]) -> Result<Value> {
         self.run(&observation(name), Some(input))
@@ -105,7 +108,16 @@ impl Ports for Native<'_> {
         self.ledger.unsettled(b)
     }
     fn pending_brief(&mut self, b: &Binding) -> Result<Option<Plan>> {
-        self.ledger.pending_brief(b)
+        let team = self.store.team(&b.team)
+            .map_err(|e| e.to_string())?.ok_or("Team disappeared")?;
+        if team.lead != b.member {
+            return self.ledger.pending_brief(b);
+        }
+        if !self.ledger.lead_brief_needed(b)? {
+            return Ok(None);
+        }
+        let snapshot = self.snapshot(b)?;
+        self.ledger.pending_lead_brief(b, &snapshot, &team)
     }
     fn claim(&mut self, p: &Plan, epoch: &str, now: i64) -> Result<Claim> {
         self.ledger.claim(p, epoch, now)
@@ -116,6 +128,8 @@ impl Ports for Native<'_> {
     fn audit_begin(&mut self, plan: &Plan) -> Result<Audit> {
         let kind = if plan.kind == Kind::Trust {
             crate::approval_log::TeamKind::FolderTrust
+        } else if plan.kind == Kind::Brief {
+            crate::approval_log::TeamKind::Brief
         } else {
             crate::approval_log::TeamKind::Resume
         };

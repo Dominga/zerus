@@ -431,7 +431,7 @@ import org.json.JSONObject
                 "rename" -> OutlinedTextField(tag,{ tag = it },label = { Text("Session tag") },singleLine = true)
                 "fork" -> { Text("Create a separate native conversation. Your current draft is kept without sending."); OutlinedTextField(tag,{ tag = it },label = { Text("New session tag") },singleLine = true) }
             }
-            if(reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
+            if(reason.isNotBlank()) Text(localizedSessionNameError(reason), style = MaterialTheme.typography.bodySmall)
         } },
         confirmButton = { TextButton(onClick = { model.flushDrafts(); model.sessionAction(target,operation,args); onDismiss() }, enabled = reason.isBlank()) { Text(label) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })

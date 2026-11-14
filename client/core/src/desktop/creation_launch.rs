@@ -510,13 +510,15 @@ pub enum Observation {
     },
 }
 /// A session name as the launch records hold it: two or three parts, each
-/// passing the shared `tag_problem` rule of a launch's own tag, new sessions,
-/// rename and fork. Internal spaces are valid.
+/// passing the recorded tag shape. Existing labels may contain punctuation
+/// that is refused for new tags. Internal spaces are valid.
 pub fn session_name(value: &str) -> bool {
     let parts: Vec<_> = value.split('/').collect();
     value.len() <= NAME_BYTES
         && (2..=3).contains(&parts.len())
-        && parts.iter().all(|part| tag_problem(part).is_none())
+        && parts
+            .iter()
+            .all(|part| crate::actions::recorded_tag_problem(part).is_none())
 }
 impl Observation {
     pub fn valid(&self) -> bool {
@@ -1186,5 +1188,14 @@ mod tests {
             assert!(changed.result(&verified.plan).is_none());
             assert!(!changed.not_started(&verified.plan));
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_name_tests {
+    #[test]
+    fn recorded_names_keep_shell_punctuation() {
+        assert!(super::session_name("codex/project/old$tag"));
+        assert!(crate::actions::tag_problem("old$tag").is_some());
     }
 }

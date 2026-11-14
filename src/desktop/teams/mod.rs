@@ -33,6 +33,7 @@ pub(in crate::desktop::teams) fn reason_text(raw: &str) -> String {
 mod confirm;
 mod health;
 mod items;
+pub(crate) use items::blocked_teams as blocked_service_teams;
 #[cfg(test)]
 pub(crate) use items::Item as ServiceItem;
 pub(crate) use items::Items as ServiceItems;

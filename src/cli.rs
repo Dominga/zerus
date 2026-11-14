@@ -104,6 +104,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
         Desktop catalog changes ABI: desktop-catalog-changes-v1
         Desktop catalog relay ABI: desktop-catalog-relay-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       mobile-peer-send-outcome-v2
        mobile-peer-session-id-v1
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
@@ -268,6 +269,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task begin-attempt REF --attempt UUID [--json]   inactive task-scoped acknowledgement
        hgs task control plan|execute|status --json   inactive task controls (JSON stdin)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
+       Mobile task identity ABI: task-session-identity-v2
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
@@ -3200,6 +3202,9 @@ impl LaunchOptions {
                     "new session name cannot contain '/', ':', '.', control characters or surrounding whitespace",
                 ));
             }
+            if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+                return Err(Error::new(1, problem));
+            }
         }
         Ok(options)
     }
@@ -3443,6 +3448,11 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if !options.tag.is_empty() && !existing && !binding_exists(config, &session)? {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+            return Err(Error::new(1, problem));
+        }
+    }
     if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
         return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
     }
@@ -3767,6 +3777,15 @@ mod parent_scan_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            let args = ["project", "--new", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&args, true).is_err(), "{tag:?}");
+            let old = ["project", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&old, true).is_ok(), "old names are selectors");
+        }
+    }
     /// zerus-sa9qn.39: a pasted peer dry-run line reads the alias back as one
     /// word and runs nothing, in sh (run) and fish (`fish_words`, modelled).
     #[cfg(unix)]

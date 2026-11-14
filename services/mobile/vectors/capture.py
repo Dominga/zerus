@@ -191,6 +191,7 @@ def connector_log(handler: logging.Handler):
 # Operation tables and the help-marker capability map.
 
 HELP_LINES = (
+    ("send_outcome", "native-send-outcome-v2\ndelivery-receipt-v1\nmobile-peer-send-outcome-v2\nsession-id-selector-v1\nmobile-peer-session-id-v1"),
     ("analytics", analytics.HELP_MARKER),
     ("lifecycle", "hgs session-action <session> --json"),
     ("terminal", "hgs terminal <session> --json"),

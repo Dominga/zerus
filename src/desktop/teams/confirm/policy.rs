@@ -353,3 +353,17 @@ pub(super) fn resume(s: &Snapshot) -> Result<(), String> {
         None => Ok(()),
     }
 }
+
+/// A lead's initial brief is routine launch context; resumed briefs retain
+/// their existing resume grant. Frozen provenance and ownership still apply.
+pub(super) fn brief_granted(plan: &Plan, facts: &Facts) -> bool {
+    if plan.parent.is_none() && facts.team.lead == plan.binding.member {
+        let expected = super::engine::lead_brief(&plan.binding, &plan.snapshot, &facts.team);
+        return plan.kind == Kind::Brief
+            && plan.key == expected.key
+            && plan.text == expected.text
+            && plan.question == expected.question
+            && matches!(plan.binding.agent.as_str(), "claude" | "codex" | "kimi");
+    }
+    facts.team.settings.delegations.resume_exited
+}

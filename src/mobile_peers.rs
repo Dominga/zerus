@@ -389,6 +389,31 @@ fn validate(request: &LocalRequest) -> Result<()> {
         request.payload.as_ref().is_none_or(Value::is_object),
         "native payload must be an object"
     );
+    // The negotiated mode changes receipt semantics only. Validate its exact
+    // argv after removing this one flag using the existing scoped send ABI.
+    if let [command, tail @ ..] = args.as_slice() {
+        if command == "send" && tail.iter().any(|arg| arg == "--delivery-outcome-v2") {
+            ensure!(
+                matches!(tail,
+                [name, mode, json] if session(name) && mode == "--delivery-outcome-v2" && json == "--json")
+                    || matches!(tail, [name, flag, id, mode, json] if session(name) && flag == "--session-id"
+                    && crate::state::session_id::canonical(id) && mode == "--delivery-outcome-v2" && json == "--json"),
+                "invalid negotiated send outcome argv"
+            );
+            let legacy = LocalRequest {
+                schema: request.schema,
+                target_machine_id: request.target_machine_id.clone(),
+                argv: request
+                    .argv
+                    .iter()
+                    .filter(|arg| *arg != "--delivery-outcome-v2")
+                    .cloned()
+                    .collect(),
+                payload: request.payload.clone(),
+            };
+            return validate(&legacy);
+        }
+    }
     if let Some(original_shape) = selected_auxiliary(request)? {
         return validate(&original_shape);
     }
@@ -1484,6 +1509,41 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> cli::Result<i32> {
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn negotiated_send_preserves_scoped_and_selected_abis_only() {
+        for selector in [false, true] {
+            let mut argv = vec!["send".to_owned(), "codex/example/send".into()];
+            if selector {
+                argv.extend(["--session-id".into(), ID.into()]);
+            }
+            argv.extend(["--delivery-outcome-v2".into(), "--json".into()]);
+            let request = LocalRequest {
+                schema: 1,
+                target_machine_id: ID.into(),
+                argv,
+                payload: Some(
+                    json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation","text":"original"}),
+                ),
+            };
+            assert!(validate(&request).is_ok());
+            for extra in [
+                "--archive",
+                "--delivery-outcome-v2",
+                "--new",
+                "--session-id",
+            ] {
+                let mut changed = LocalRequest {
+                    schema: 1,
+                    target_machine_id: ID.into(),
+                    argv: request.argv.clone(),
+                    payload: request.payload.clone(),
+                };
+                changed.argv.insert(2, extra.into());
+                assert!(validate(&changed).is_err(), "{extra}");
+            }
+        }
+    }
 
     #[test]
     fn repository_acquisition_only_admits_exact_native_actions() {

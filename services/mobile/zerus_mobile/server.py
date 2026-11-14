@@ -18,6 +18,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
+from . import send_outcome
 from . import analytics, archives, speech, speech_config, voice, session_notifications
 from .recovery import validate_recovery
 from .history import validate_history, validate_history_projection
@@ -286,6 +287,9 @@ def validate_request(value):
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
+    if op in send_outcome.OPERATIONS:
+        send_outcome.validate(op,payload,request_id,value["computer_id"],value["session"])
+        return
     if op in analytics.OPERATIONS:
         if value["session"] != "": raise ValueError("analytics reads use no session target")
         analytics.validate(payload)
@@ -377,7 +381,9 @@ async def submit(request):
     small_response(request)
     value = await body(request, ("request_id", "computer_id", "operation", "session", "payload"), maximum=MAX_REQUEST_BYTES, timeout=60)
     await blocking(validate_request, value)
-    if value["operation"] == "send":
+    if value["operation"] == send_outcome.SEND:
+        await blocking(send_outcome.validate,value["operation"],value["payload"],value["request_id"],value["computer_id"],value["session"])
+    elif value["operation"] == "send":
         await blocking(validate_send, value["payload"])
     elif value["operation"] == "voice_submit" and "video" in value["payload"]:
         maximum = voice.video.MAX_REQUEST_BYTES

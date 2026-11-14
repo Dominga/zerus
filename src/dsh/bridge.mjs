@@ -1104,6 +1104,12 @@ export function apply(ctx, config) {
         });
       }
       case 'answer': {
+        // Optional correlation for durable CLI receipts. Older CLIs omit it;
+        // older resident bridges ignore it and keep their original response.
+        const requestId = p.requestId;
+        if (requestId !== undefined && (typeof requestId !== 'string'
+            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestId)))
+          throw new Error('Invalid answer request ID');
         const q = questions.get(p.id);
         if (p.generation !== generation || !q || q.sessionId !== p.sessionId) throw new Error('This question is no longer pending');
         if (!Array.isArray(p.answers) || p.answers.length !== q.items.length) throw new Error('Answer every question');
@@ -1118,7 +1124,8 @@ export function apply(ctx, config) {
               || (answer.custom !== undefined && typeof answer.custom !== 'string')) throw new Error('Invalid question answer');
           seen.add(answer.id);
         }
-        q.settle({ answers: p.answers }); return { accepted: true };
+        q.settle({ answers: p.answers });
+        return { accepted: true, ...(requestId === undefined ? {} : { requestId }) };
       }
       // Which conversation's live tool call holds this token; nothing else.
       case 'call-token': {

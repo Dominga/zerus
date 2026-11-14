@@ -3,6 +3,15 @@ use super::*;
 use std::fs;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod claim;
+pub(super) fn claim_ready(root: &Path, record: &Value, name: &str) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { claim::ready(root, record, name) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (root, record, name); Ok(()) }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod guarded;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use guarded::{
@@ -55,6 +64,21 @@ fn validate(old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
+// New requests only: recovery above/below keeps the recorded-name shape.
+pub(super) fn validate_new(old: &str, new: &str) -> Result<()> {
+    validate(old, new)?;
+    validate_new_tag(new)
+}
+
+// Provider adapters keep their existing selector/prefix checks. Only the
+// proposed tag gets the new policy; never revalidate a legacy source label.
+pub(super) fn validate_new_tag(new: &str) -> Result<()> {
+    if let Some(problem) = zerus_client_core::actions::tag_problem(new.rsplit('/').next().unwrap()) {
+        return Err(problem.into());
+    }
+    Ok(())
+}
+
 fn session_id(name: &str) -> Result<String> {
     let id = backend::current()
         .pane_info(
@@ -86,7 +110,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     };
     let old = &args[0];
     let new = &args[1];
-    validate(old, new)?;
+    validate_new(old, new)?;
     let _guard = lock(None)?;
     let snapshot = live()?;
     if archive_id.is_none()
@@ -479,6 +503,14 @@ pub(super) fn remove_legacy(record: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        assert!(validate_new("claude/project/old$tag", "claude/project/safe").is_ok());
+        assert!(validate("claude/project/old", "claude/project/old$tag").is_ok(), "recorded recovery stays compatible");
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag", "bad\u{2019}tag"] {
+            assert!(validate_new("claude/project/old", &format!("claude/project/{tag}")).is_err());
+        }
+    }
     /// A rename pins the history it leaves: the label as the journal of a
     /// record that had none, and the label it leaves as `launch_label` when an
     /// older hgs rebuilt the record without one. Existing values are kept.

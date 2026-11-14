@@ -97,6 +97,11 @@ fn first_send_readiness_is_checked_again_before_admission() {
     child("race");
 }
 
+#[test]
+fn a_held_fresh_member_gets_one_readiness_card_and_no_generic_card() {
+    child("held-unready");
+}
+
 struct World {
     h: Harness,
     n: Native,
@@ -388,7 +393,7 @@ impl Drop for World {
 }
 
 #[test]
-#[ignore = "executed by the nine isolated controls"]
+#[ignore = "executed by the isolated controls"]
 fn fixture() {
     let case = std::env::var("HGS_FRESH_MEMBER_FIXTURE").unwrap();
     match case.as_str() {
@@ -565,6 +570,40 @@ fn fixture() {
                     assert!(doc.attempt(&effect.request_id).unwrap().is_none());
                 }
                 assert!(w.terminal.submissions.lock().unwrap().is_empty());
+            });
+        }
+        "held-unready" => {
+            let mut w = World::new("codex", "ready", false);
+            w.terminal.with(|| {
+                w.transport(Some(("after-reservation", json!(false))));
+                let mut runtime = Runtime::open(w.h.temp.path(), &w.n.machine).unwrap();
+                for i in 0..=3 {
+                    w.pass(&mut runtime, 10_000_000 + i * 60_000);
+                    println!("HELD_READINESS_CARDS[{i}]={:?}", w.cards());
+                }
+                let cards = w.cards();
+                assert_eq!(
+                    cards.len(),
+                    1,
+                    "one named card, no generic handout card: {cards:?}"
+                );
+                assert!(
+                    cards[0].contains("Member m1")
+                        && cards[0].contains("waiting for its first-message readiness"),
+                    "{cards:?}"
+                );
+                assert!(!cards[0].contains("Delivery did not start"), "{cards:?}");
+                assert!(w.terminal.submissions.lock().unwrap().is_empty());
+                w.pass(&mut runtime, 10_240_000);
+                assert_eq!(w.cards(), cards, "the named card is deduplicated");
+                assert_eq!(w.h.store.cards(TEAM, 200, None).unwrap().rows.len(), 1);
+                w.transport(None);
+                w.pass(&mut runtime, 10_300_000);
+                assert!(w.cards().is_empty(), "readiness recovery closes the card");
+                let history = w.h.store.cards(TEAM, 200, None).unwrap().rows;
+                assert_eq!(history.len(), 1);
+                assert_ne!(history[0].state, "open");
+                assert_eq!(w.terminal.submissions.lock().unwrap().len(), 1);
             });
         }
         _ => panic!("unknown fresh-member case"),

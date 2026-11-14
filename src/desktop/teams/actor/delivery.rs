@@ -211,6 +211,17 @@ impl Runtime {
             ports::DeliveryResult::NotStarted { reason } => {
                 d.command = true;
                 d.not_started = true;
+                // A first-send gate is a waiting member, not a failed child.
+                // Classify only this proven non-start; unknown results retain
+                // their original no-replay path. Start the named wait in this
+                // pass, even when the hand-out was reserved after selection.
+                if matches!(ports.availability(team, assignment.1),
+                    Ok(Availability::Unreadable(Fact::FirstMessage))) {
+                    self.put(&team.id, key, &d)?;
+                    boundary("not_started");
+                    self.recovered(store, team, key, now)?;
+                    return self.first_message_wait(store, team, assignment.1, d.node, now);
+                }
                 d.nonstarts = d.nonstarts.saturating_add(1);
                 if d.nonstarts >= 5 {
                     // Five non-starts reach the retry table's fifteen-minute

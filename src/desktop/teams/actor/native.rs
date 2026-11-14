@@ -327,6 +327,14 @@ impl Ports for Native {
             Ok(Ended::NotStarted) if member.agent == "dsh" => ports::DeliveryResult::NotStarted {
                 reason: "The hosted delivery child did not start".into(),
             },
+            // Admission proved that no child started. A fresh member's
+            // first-send gate keeps that proof pending under its named wait;
+            // a final or unknown child result never enters this branch.
+            Ok(Ended::NotStarted) if matches!(self.availability(team, member),
+                Ok(ports::Availability::Unreadable(ports::Fact::FirstMessage))) =>
+                ports::DeliveryResult::NotStarted {
+                    reason: "The member is waiting for its first-message readiness".into(),
+                },
             Ok(ended) if member.agent == "dsh" => {
                 let confirmed = match &ended {
                     Ended::Exited { code: 0, output } => serde_json::from_slice::<Value>(output).is_ok_and(|v|

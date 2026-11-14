@@ -11,6 +11,7 @@ pub(super) fn references(request: &Request) -> Result<Vec<String>, Problem> {
     let mut refs = vec![format!("team:{}", request.team)];
     for (field, prefix) in [
         ("node", "node"),
+        ("phase", "phase"),
         ("member", "member"),
         ("effect_request_id", "effect"),
         ("item", "inbox"),

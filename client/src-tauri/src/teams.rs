@@ -150,6 +150,15 @@ pub fn teams_page(
     }
 }
 
+/// Selects the optional phase pane on the existing watched-team reader.
+/// Its epoch lets the window refuse a late pane from an earlier selection.
+#[tauri::command]
+pub fn teams_phases(teams: State<'_, Teams>, team: String, phase: Option<u32>, enabled: bool) -> Result<u64, String> {
+    if !valid_team(&team) { return Err("Not a team id.".into()); }
+    teams.poller().as_ref().and_then(|poller| poller.phases(&team, phase, enabled))
+        .ok_or_else(|| "This team is not followed.".into())
+}
+
 /// Runs one team action through `hgs team <op> --json`: exactly once, off the
 /// main thread, with the request id the person's action made. The followed
 /// view is read again after it.

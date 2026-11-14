@@ -166,7 +166,8 @@ pub(super) fn check_capacity(ctx: &Context<'_>, admitted: bool) -> Result<()> {
     } else {
         100
     };
-    if ctx.count(admitted)? >= limit {
+    let drafts = if admitted { store::drafts::count(ctx.db, &ctx.team.id)? } else { 0 };
+    if ctx.count(admitted)?.saturating_add(drafts) >= limit {
         return Err(over(if admitted {
             "Admitted task cap reached."
         } else {

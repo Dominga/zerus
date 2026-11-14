@@ -167,6 +167,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
+        Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::Create { .. } => team::create(ctx),
         Operation::Pause => team::pause(ctx),
         Operation::Resume => team::resume(ctx),

@@ -10,6 +10,7 @@ mod catalog_cmd;
 mod commands;
 mod create;
 mod input;
+mod phases;
 mod reads;
 #[cfg(test)]
 mod tests;
@@ -54,6 +55,7 @@ fn execute(
         "catalog" | "template" => catalog_cmd::run(config, caller, command, rest, provided),
         "create" => commands::create(config, caller, rest, provided),
         "status" => reads::status(config, caller, rest),
+        "phases" | "phase" => phases::read(config, caller, command, rest),
         "list" => reads::list_teams(config, caller, rest),
         "waiting" => reads::waiting(config, caller, rest),
         "inbox" | "queue" | "cards" | "journal" => reads::list(config, caller, command, rest),
@@ -120,7 +122,7 @@ fn problem_reply(mut problem: Problem, read: bool) -> (Value, i32) {
 fn is_read(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some(
-            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current",
+            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current" | "phases" | "phase",
         ) => true,
         Some("catalog" | "template") => matches!(
             args.get(1).map(String::as_str),

@@ -17,6 +17,7 @@
 //! shown page, and the projected view names the next page's cursor.
 use super::read::{TeamError, TeamRead};
 use super::view::{self, TeamList, TeamView, WaitingView};
+mod phases;
 use crate::ComputerId;
 use serde::Serialize;
 use serde_json::Value;
@@ -97,6 +98,8 @@ pub fn team_key(kind: &str, team: &str) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Slot {
+    Phases,
+    Draft,
     Status,
     Queue,
     List,
@@ -110,6 +113,8 @@ impl Slot {
             Self::Queue => 1,
             Self::List => 2,
             Self::Waiting => 3,
+            Self::Phases => 4,
+            Self::Draft => 5,
         }
     }
 
@@ -119,6 +124,8 @@ impl Slot {
             TeamRead::Waiting { .. } => Self::Waiting,
             TeamRead::Status { .. } => Self::Status,
             TeamRead::Queue { .. } => Self::Queue,
+            TeamRead::Phases { .. } => Self::Phases,
+            TeamRead::Draft { .. } => Self::Draft,
         }
     }
 }
@@ -127,6 +134,10 @@ impl Slot {
 /// its members) and one page of its queue.
 #[derive(Clone, Debug, Default)]
 struct Parts {
+    phases: Option<view::phases::PhaseList>,
+    draft: Option<view::phases::PhaseDraft>,
+    phases_failure: Option<view::phases::PhaseFailure>,
+    draft_failure: Option<view::phases::PhaseFailure>,
     status: Option<Value>,
     queue: Option<Value>,
     /// The cursor the queue reply was read from; none for the first page.
@@ -136,6 +147,10 @@ struct Parts {
 /// The Teams read model of this computer.
 #[derive(Debug, Default)]
 pub struct TeamsModel {
+    phases_enabled: bool,
+    phase_selected: Option<u32>,
+    phase_epoch: u64,
+    phase_issued: BTreeMap<Slot, u64>,
     follow: TeamsFollow,
     due: BTreeMap<Slot, Instant>,
     /// The digest of the last update sent per key.
@@ -202,11 +217,15 @@ impl TeamsModel {
             self.retire("waiting", &mut out);
         }
         if previous.team != self.follow.team {
+            self.phases_enabled = false;
+            self.phase_selected = None;
+            self.phase_epoch = self.phase_epoch.saturating_add(1);
             if let Some(old) = &previous.team {
+                self.selected.remove(&team_key("phases", old));
                 self.retire(&team_key("team", old), &mut out);
             }
             self.parts = None;
-            for slot in [Slot::Status, Slot::Queue] {
+            for slot in [Slot::Status, Slot::Queue, Slot::Phases, Slot::Draft] {
                 self.due.remove(&slot);
                 self.dirty.remove(&slot);
             }
@@ -227,6 +246,8 @@ impl TeamsModel {
             (Slot::Waiting, self.follow.waiting),
             (Slot::Status, self.follow.team.is_some()),
             (Slot::Queue, self.follow.team.is_some()),
+            (Slot::Phases, self.phases_enabled),
+            (Slot::Draft, self.phases_enabled && self.phase_selected.is_some()),
         ];
         for (slot, on) in wanted {
             if !on {
@@ -290,7 +311,7 @@ impl TeamsModel {
     /// A slot whose read is in flight is marked and read again at once when
     /// that reply lands, so the action never loses its reread.
     pub fn refresh(&mut self, now: Instant) {
-        for slot in [Slot::Status, Slot::Queue, Slot::List, Slot::Waiting] {
+        for slot in [Slot::Status, Slot::Queue, Slot::List, Slot::Waiting, Slot::Phases, Slot::Draft] {
             if self.due.contains_key(&slot) {
                 self.mark(slot, now);
             }
@@ -307,7 +328,7 @@ impl TeamsModel {
     /// The project's tasks topic changed: the watched team's status and queue
     /// are read again (a report moves a node's state).
     pub fn tasks_changed(&mut self, now: Instant) {
-        for slot in [Slot::Status, Slot::Queue] {
+        for slot in [Slot::Status, Slot::Queue, Slot::Phases, Slot::Draft] {
             if self.due.contains_key(&slot) {
                 self.mark(slot, now);
             }
@@ -347,6 +368,7 @@ impl TeamsModel {
         let read = match key {
             "list" => TeamRead::List { after },
             "waiting" => TeamRead::Waiting { after },
+            _ if key.starts_with("phases:") => TeamRead::Phases { team: key[7..].to_owned(), after },
             _ => {
                 let Some(team) = key.strip_prefix("team:") else {
                     return false;
@@ -369,6 +391,7 @@ impl TeamsModel {
         match key {
             "list" if self.follow.list => Some("list"),
             "waiting" if self.follow.waiting => Some("waiting"),
+            _ if self.phases_enabled && key.strip_prefix("phases:") == self.watched() => Some(key),
             _ => {
                 let team = key.strip_prefix("team:")?;
                 (self.follow.team.as_deref() == Some(team)).then_some(key)
@@ -385,11 +408,15 @@ impl TeamsModel {
         }
         let follow = self.follow.clone();
         let in_flight = self.in_flight.clone();
+        let phases_enabled = self.phases_enabled;
+        let phase_selected = self.phase_selected;
         let wanted = |read: &TeamRead| {
             !in_flight.contains(&Slot::of(read))
                 && match read {
                     TeamRead::List { .. } => follow.list,
                     TeamRead::Waiting { .. } => follow.waiting,
+                    TeamRead::Phases { team, .. } => phases_enabled && follow.team.as_deref() == Some(team.as_str()),
+                    TeamRead::Draft { team, phase } => phases_enabled && phase_selected == Some(*phase) && follow.team.as_deref() == Some(team.as_str()),
                     TeamRead::Status { team } | TeamRead::Queue { team, .. } => {
                         follow.team.as_deref() == Some(team.as_str())
                     }
@@ -398,6 +425,7 @@ impl TeamsModel {
         if let Some(read) = self.queued.pop_front_if(|read| wanted(read)) {
             let slot = Slot::of(&read);
             self.in_flight.insert(slot);
+            self.issue_phase(slot);
             self.issued.insert(slot, self.generation_of(&key_of(&read)));
             self.due.insert(slot, now + POLL);
             return Some(read);
@@ -410,6 +438,11 @@ impl TeamsModel {
             .min_by_key(|(slot, due)| (slot.rank(), **due))
             .map(|(slot, _)| *slot)?;
         let read = match slot {
+            Slot::Phases => {
+                let team = watched?;
+                TeamRead::Phases { after: self.selected.get(&team_key("phases", &team)).cloned(), team }
+            }
+            Slot::Draft => TeamRead::Draft { team: watched?, phase: self.phase_selected? },
             Slot::List => TeamRead::List {
                 after: self.selected.get("list").cloned(),
             },
@@ -426,6 +459,7 @@ impl TeamsModel {
             }
         };
         self.in_flight.insert(slot);
+        self.issue_phase(slot);
         self.issued.insert(slot, self.generation_of(&key_of(&read)));
         self.due.insert(slot, now + POLL);
         Some(read)
@@ -480,6 +514,11 @@ impl TeamsModel {
         let status = parts.status.as_ref().unwrap_or(&empty);
         let queue = parts.queue.as_ref().unwrap_or(&empty);
         Some(TeamView {
+            plan: self.phases_enabled.then(|| view::phases::PhasePane {
+                epoch: self.phase_epoch,
+                list: parts.phases.clone(), draft: parts.draft.clone(), selected: self.phase_selected,
+                list_failure: parts.phases_failure.clone(), draft_failure: parts.draft_failure.clone(),
+            }),
             after: parts.queue_after.clone(),
             ..view::team(status, queue)
         })
@@ -515,6 +554,9 @@ impl TeamsModel {
             // touches the scope followed now.
             return out;
         }
+        if matches!(read, TeamRead::Phases { .. } | TeamRead::Draft { .. }) {
+            return self.apply_phase_read(read, reply, now);
+        }
         if let (Some(after), Err(TeamError::Refused { code, message })) = (read.after(), &reply) {
             // Only the selected page of a still-followed key, in the generation
             // that issued the request, may reset. Any other refusal is
@@ -539,6 +581,7 @@ impl TeamsModel {
         }
         let after = read.after().map(str::to_owned);
         match read {
+            TeamRead::Phases { .. } | TeamRead::Draft { .. } => {},
             TeamRead::List { .. } => self.apply_list(slot, after, reply, now, &mut out),
             TeamRead::Waiting { .. } => self.apply_waiting(slot, after, reply, now, &mut out),
             TeamRead::Status { team } | TeamRead::Queue { team, .. } => {
@@ -690,7 +733,7 @@ fn key_of(read: &TeamRead) -> String {
     match read {
         TeamRead::List { .. } => "list".to_owned(),
         TeamRead::Waiting { .. } => "waiting".to_owned(),
-        TeamRead::Status { team } | TeamRead::Queue { team, .. } => team_key("team", team),
+        TeamRead::Status { team } | TeamRead::Queue { team, .. } | TeamRead::Phases { team, .. } | TeamRead::Draft { team, .. } => team_key("team", team),
     }
 }
 

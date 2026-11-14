@@ -1,8 +1,18 @@
 import Foundation
 
-/// One ordinary send's receipt acquisition, followed by its durable settlement.
+/// One send or answer's receipt acquisition, followed by its durable settlement.
 /// The caller keeps its original request and delivery flight until this returns.
 public enum OutgoingSend {
+    /// Uses one captured mutation request; settlement belongs to its original owner.
+    @MainActor
+    public static func run(client: RelayClient, connection: Connection, target: Target, operation: String,
+                           payload: JSONObject, id: String, limit: Duration = .seconds(45),
+                           settle: @escaping @MainActor @Sendable (JSONObject) async -> Void) async throws {
+        try await run(limit: limit,
+            submit: { try await client.submit(connection, target: target, operation: operation, payload: payload, id: id) },
+            awaitReceipt: { try await client.waitForReceipt(connection, initial: $0) }, settle: settle)
+    }
+
     /// Only a refusal during submission proves this attempt was not accepted.
     /// An error while reading its later receipt never creates this proof.
     public struct Rejected: Error, Sendable {

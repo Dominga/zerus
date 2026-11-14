@@ -619,14 +619,7 @@ impl Runtime {
                 let outcome = if d.outcome.is_some() {
                     d.outcome.clone()
                 } else {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    {
-                        self.retained_outcome(team, &d)?
-                    }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    {
-                        None
-                    }
+                    self.retained_outcome(team, &d)?
                 };
                 if let Some(outcome) = outcome {
                     d.outcome = Some(outcome);
@@ -659,7 +652,6 @@ impl Runtime {
     /// uncertain reply is the accepted limit (round 3): the delivery stays
     /// unknown, the row and its retained task text stay, and the open effect
     /// keeps the terminal prune blocked for that team. It is never replayed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn retained_outcome(&self, team: &Team, d: &Delivery) -> Result<Option<HandoutOutcome>> {
         let Some(row) = self
             .ledger
@@ -672,12 +664,12 @@ impl Runtime {
         }
         let raw =
             serde_json::to_vec(&row.data["reply"]).map_err(crate::teams::store::storage)?;
-        Ok(match super::native::decode_delivery(&raw, &d.id) {
+        Ok(match super::reply::decode_delivery(&raw, &d.id) {
             HandoutOutcome::Submitted { .. }
             | HandoutOutcome::Refused { .. }
             | HandoutOutcome::HandedBack { .. }
             | HandoutOutcome::CuttingOver { .. } => {
-                Some(super::native::decode_delivery(&raw, &d.id))
+                Some(super::reply::decode_delivery(&raw, &d.id))
             }
             HandoutOutcome::Uncertain { .. } => None,
         })

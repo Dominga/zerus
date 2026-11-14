@@ -353,9 +353,14 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
         }
         return Ok(());
     }
+    let active = matches!(ctx.team.status, TeamStatus::Running | TeamStatus::Paused);
+    // An accepted node whose task came back under the person's own ended run
+    // is superseded, not restored: the person's result replaced the team's.
+    let superseded = active && table == "nodes" && timers::supersedes_accepted(ctx, &n, o)?;
     // A conflict of attempts of a task that runs or waits decides nothing: it
-    // is recorded as it came. An ended task's conflict is applied below.
-    if timers::conflict(o) {
+    // is recorded as it came. An ended task's conflict is applied below, and a
+    // conflict over an accepted result is superseded below.
+    if timers::conflict(o) && !superseded {
         return rows::record_observation(ctx.db, &ctx.team.id, *node, o, false);
     }
     // The node's own end counts as well as the stored observation's: a
@@ -364,17 +369,17 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
     // the end its node keeps.
     let ended = node_ended(ctx, table, *node)?;
     let was_terminal = observed_end || ended;
-    let active = matches!(ctx.team.status, TeamStatus::Running | TeamStatus::Paused);
     // A finished node takes today's restore below; a live one a person sent
     // again between two observations ends its attempt and is restored here.
-    if active && table == "nodes" && !was_terminal && timers::person_attempt(ctx, *node, o)? {
+    if !superseded && active && table == "nodes" && !was_terminal && timers::person_attempt(ctx, *node, o)? {
         timers::take_over(ctx, *node, &mut n)?;
     }
     pipeline::before_observation(ctx, &mut n, o, table == "nodes" && !was_terminal)?;
     if !active && table == "nodes" {
         archive_inactive(ctx, *node)?;
     }
-    if n.kind != NodeKind::Stage
+    if !superseded
+        && n.kind != NodeKind::Stage
         && (table == "node_archive" || was_terminal)
         && !o.cancelled
         && o.stage != TaskStage::Done
@@ -415,6 +420,9 @@ pub(super) fn observe(ctx: &mut Context<'_>) -> Result<()> {
         n.kind == NodeKind::Stage && (o.cancelled || o.stage == TaskStage::Done),
     )?;
     timers::remember(ctx, *node, o)?;
+    if superseded {
+        supersede_accepted(ctx, *node, &n, o)?;
+    }
     // A task back in To do without a reopen of its generation (a person's
     // run has no pipeline run to reopen), or a settled conflict: a waiting
     // Return or Reassign that lost its reason is settled here.
@@ -519,6 +527,76 @@ fn restore_row(ctx: &Context<'_>, node: u32) -> Result<()> {
         .map_err(storage)?;
     Ok(())
 }
+/// End an accepted node whose task the person took back in an execution the
+/// store never saw: the accepted result is superseded, nothing merges, the
+/// node leaves the plan and the lead gets one item. The task itself is not
+/// touched: its stage stays as observed.
+fn supersede_accepted(
+    ctx: &mut Context<'_>,
+    node: u32,
+    n: &Node,
+    o: &TaskObservation,
+) -> Result<()> {
+    #[cfg(test)]
+    if injected::supersede_fails(ctx.db) {
+        return Err(storage("injected supersede failure"));
+    }
+    // Keep the preserved receipt authority of a Ready acceptance: a Git write
+    // that was already admitted keeps its late integration fact, while the
+    // settled decision can never authorize a second write.
+    ctx.settle_override(node)?;
+    ctx.db.execute(&format!("UPDATE effects SET state='superseded' WHERE team=?1 AND node=?2 AND state IN {OPEN_EFFECT_STATES}"),params![ctx.team.id,node]).map_err(storage)?;
+    ctx.close_inbox(node)?;
+    timers::drop_marks(ctx, node)?;
+    pipeline::task_ended(ctx, n, true)?;
+    ctx.db
+        .execute(
+            "DELETE FROM live_tasks WHERE team=?1 AND node=?2",
+            params![ctx.team.id, node],
+        )
+        .map_err(storage)?;
+    archive_inactive(ctx, node)?;
+    let title = if o.title.is_empty() { n.title.clone() } else { o.title.clone() };
+    let name = if title.is_empty() { String::new() } else { format!(" \"{title}\"") };
+    let task = n
+        .task
+        .as_ref()
+        .map(|t| format!(" {}/{}", t.project, t.uuid))
+        .unwrap_or_default();
+    // The fact of the superseded acceptance only, by its decision, and the
+    // conflict's NULL commit read as the Option it is (zerus-63rru.37
+    // round 3): never the node's newest fact, never a storage failure.
+    let decision: Option<u64> = ctx
+        .db
+        .query_row(
+            "SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1",
+            params![ctx.team.id, node],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let merged = match decision {
+        Some(decision) => crate::teams::store::rows::integration_commit(
+            ctx.db,
+            &ctx.team.id,
+            node,
+            decision,
+        )?,
+        None => None,
+    };
+    let body = match merged {
+        Some(commit) if !commit.is_empty() => format!(
+            "Task {node}{name}{task}: the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged."
+        ),
+        _ => format!(
+            "Task {node}{name}{task}: the person's own run replaced the team's accepted result, so nothing further will be merged. The task document was left unchanged."
+        ),
+    };
+    ctx.reply.item = Some(ctx.inbox(node, "accepted_superseded", &body)?);
+    ctx.event = Some("accepted_superseded");
+    Ok(())
+}
+
 pub(super) fn finish_observation(ctx: &Context<'_>, node: u32, cancelled: bool) -> Result<()> {
     ctx.db.execute(&format!("UPDATE effects SET state='observed_done' WHERE team=?1 AND node=?2 AND state IN {OPEN_EFFECT_STATES}"),params![ctx.team.id,node]).map_err(storage)?;
     ctx.close_inbox(node)?;
@@ -579,4 +657,46 @@ fn leave_team(ctx: &mut Context<'_>, node: u32) -> Result<()> {
     archive_inactive(ctx, node)?;
     ctx.event = Some("person_override");
     Ok(())
+}
+
+/// A test's supersede failure, scoped to that test's own Teams store
+/// (zerus-63rru.37 round 4): the armed set holds store database files, so a
+/// test that runs in parallel against another store never sees it. Nothing
+/// here reads the process environment.
+#[cfg(test)]
+pub(crate) mod injected {
+    use std::{
+        path::PathBuf,
+        sync::{Mutex, PoisonError},
+    };
+    static ARMED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    fn file(db: &rusqlite::Connection) -> Option<PathBuf> {
+        std::fs::canonicalize(db.path().filter(|path| !path.is_empty())?).ok()
+    }
+    /// Every supersede of this one store fails as storage until it drops.
+    pub(crate) struct FailSupersede(PathBuf);
+    pub(crate) fn fail_supersede(store: &crate::teams::store::Store) -> FailSupersede {
+        let path = file(store.db.as_ref().expect("an open store")).expect("a file store");
+        ARMED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.clone());
+        FailSupersede(path)
+    }
+    impl Drop for FailSupersede {
+        fn drop(&mut self) {
+            let mut armed = ARMED.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(at) = armed.iter().position(|path| path == &self.0) {
+                armed.remove(at);
+            }
+        }
+    }
+    pub(super) fn supersede_fails(db: &rusqlite::Connection) -> bool {
+        file(db).is_some_and(|path| {
+            ARMED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&path)
+        })
+    }
 }

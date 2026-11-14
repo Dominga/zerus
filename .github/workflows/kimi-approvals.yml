@@ -10,6 +10,8 @@ on:
       - 'scripts/ci/kimi-native.py'
       - 'scripts/ci/native_discovery.py'
       - 'tests/test_native_discovery.py'
+      - 'tests/test_ci_native_discovery_auth.py'
+      - 'tests/fixtures/github-native-discovery.json'
       - 'scripts/ci/kimi-native-pins.json'
       - 'scripts/ci/kimi-native-manifests/**'
       - 'scripts/ci/outside-job.py'
@@ -71,6 +73,7 @@ jobs:
         shell: bash
         run: |
           python -B -m unittest discover -s tests -p test_native_discovery.py -v
+          python -B -m unittest discover -s tests -p test_ci_native_discovery_auth.py -v
           python -B -m unittest discover -s tests -p test_kimi_approvals_ci.py -v
           python -B -m unittest discover -s tests -p test_kimi_release.py -v
       - name: Keep compiler state in this disposable runner
@@ -105,6 +108,8 @@ jobs:
       - name: macOS seven Bash, eight CreateGoal and one ExitPlanMode approval cases on one official latest release
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python -s -B scripts/ci/kimi-approvals.py --source-sha "$SOURCE_SHA" \
             --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-approvals-tmux/bin/tmux" \
@@ -112,6 +117,8 @@ jobs:
       - name: Windows layout preflight, then seven Bash, eight CreateGoal and one ExitPlanMode approval cases on one official latest release
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python -s -B scripts/ci/kimi-approvals.py --source-sha $env:SOURCE_SHA `
             --hgs "$env:CARGO_TARGET_DIR/debug/hgs.exe" `

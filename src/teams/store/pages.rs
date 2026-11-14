@@ -448,6 +448,38 @@ impl Store {
             "seq,node,generation,actor,kind,text,state",
         )
     }
+    /// The node's latest decision's sequence, for the native admission's
+    /// authority check (zerus-63rru.37 round 3): a later decision — the
+    /// person's review that supersedes the acceptance — revokes an older
+    /// Ready acceptance's Git write authority by its own durable row,
+    /// whether or not the supersede has run.
+    pub fn latest_decision(&self, team: &str, node: u32) -> Result<Option<u64>> {
+        let db = self.db.as_ref().ok_or_else(|| storage("Teams storage is closed."))?;
+        db.query_row(
+            "SELECT MAX(seq) FROM decisions WHERE team=?1 AND node=?2",
+            params![team, node],
+            |r| r.get(0),
+        )
+        .map_err(storage)
+    }
+
+    /// The node's bound task and the task revision that its last applied
+    /// ObserveTask wrote, from the live or the archived row; None without the
+    /// node (zerus-63rru.37 round 4). Native merge admission compares this
+    /// revision with the task's current one in the replica: a Git write needs
+    /// a store that has applied the accepted task's current state.
+    pub fn applied_task(&self, team: &str, node: u32) -> Result<Option<(Option<TaskRef>, String)>> {
+        self.active()?;
+        let db = self.db.as_ref().ok_or_else(|| storage("Teams storage is closed."))?;
+        db.query_row(
+            "SELECT data,task_revision FROM nodes WHERE team=?1 AND id=?2 UNION ALL SELECT data,task_revision FROM node_archive WHERE team=?1 AND id=?2 LIMIT 1",
+            params![team, node],
+            |r| Ok((sql_json::<Node>(r, 0)?.task, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)
+    }
+
     /// Discover only Ready accepts among open decisions, in node order.
     /// The limit bounds examined open rows, so an empty page can have `next`.
     /// Preserved settled accepts are facts already in flight, never new work.

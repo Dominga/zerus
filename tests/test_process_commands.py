@@ -73,6 +73,69 @@ class ProcessCommands(unittest.TestCase):
         self.cli("rename", self.name, "codex/example/renamed", "--archive", archive_id)
         self.check_record(path)
 
+    def test_pruned_codex_completion_requires_output_evidence_and_preserves_explicit_empty_output(self):
+        def key(call):
+            identity = json.dumps([self.record["conversation_id"], "main", call], separators=(",", ":"))
+            return hashlib.sha256(identity.encode()).hexdigest()[:32]
+
+        template = self.record["shell_jobs"]["job-a"]
+        self.record["shell_jobs"] = {
+            key(f"call-{i}"): dict(template, id=key(f"call-{i}"), call_id=f"call-{i}",
+                                    command="synthetic completed command", updated_at=i, ended_at=i,
+                                    background=False, output="x" * 3100, output_truncated=False)
+            for i in range(17)
+        }
+        native = Path(self.temp.name) / (self.record["conversation_id"] + ".jsonl")
+        self.record["transcript"] = str(native)
+        item = dict(type="CommandExecution", id="call-0", command="synthetic completed command",
+                    status="completed", exit_code=0)
+
+        def write_native(output_field=None, output=None):
+            completed = dict(item)
+            if output_field is not None:
+                completed[output_field] = output
+            rows = [dict(type="session_meta", payload=dict(id=self.record["conversation_id"])),
+                    dict(timestamp="2026-11-14T00:00:00Z",
+                         payload=dict(type="item_completed", item=completed))]
+            native.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        def output(name):
+            return subprocess.run([str(HGS), "processes", name, "--output", key("call-0"),
+                                   "--run", self.record["run_id"], "--conversation", self.record["conversation_id"]],
+                                  env=self.env, text=True, capture_output=True, timeout=15)
+
+        write_native()  # Supported completion metadata, without aggregated_output.
+        path = self.state / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
+        path.write_text(json.dumps(self.record))
+        before = output(self.name)
+        self.assertEqual(before.returncode, 0, before.stderr)
+        self.assertEqual(json.loads(before.stdout)["output"], "x" * 3100)
+        renamed = "codex/example/pruned-output"
+        self.cli("rename", self.name, renamed)
+        path = self.state / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        saved = path.read_text()
+        jobs = json.loads(saved)["shell_jobs"]
+        self.assertEqual(len(jobs), 16)
+        self.assertNotIn(key("call-0"), jobs)
+        projected = json.loads(self.cli("processes", renamed, "--json"))
+        recreated = next(job for job in projected["items"] if job["id"] == key("call-0"))
+        self.assertEqual(recreated["status"], "completed")
+        missing = output(renamed)
+        self.assertNotEqual(missing.returncode, 0, "metadata-only reconstruction must never report empty success")
+        self.assertIn("output is unavailable", missing.stderr)
+        for field in ("aggregated_output", "aggregatedOutput"):
+            for text in ("", "full native evidence\n" * 200):
+                with self.subTest(field=field, empty=not text):
+                    write_native(field, text)
+                    available = output(renamed)
+                    self.assertEqual(available.returncode, 0, available.stderr)
+                    response = json.loads(available.stdout)
+                    self.assertEqual(response["output"], text)
+                    self.assertFalse(response["truncated"])
+                    self.assertEqual(response["status"], "completed")
+                    self.assertEqual(set(response), {"id", "run_id", "conversation_id", "output", "truncated", "status"})
+        self.assertEqual(path.read_text(), saved, "native output reads never rewrite the record")
+
     def test_settled_history_keeps_native_output_or_an_explicit_tail_and_refuses_pruned_jobs(self):
         root = Path(self.temp.name)
         self.name = "claude/example/commands"

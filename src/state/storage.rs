@@ -129,6 +129,18 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
 pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
+    lock_open_until(file, deadline)
+}
+
+/// Read-only channel admission: the state writer already exists. Never
+/// create it, follow a link, wait on a FIFO or invoke normal writer recovery.
+pub(super) fn existing_lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
+    let parent = repositories::directory::Directory::open(path.parent().ok_or("invalid lock path")?)?;
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or("invalid lock name")?;
+    lock_open_until(parent.existing_private_lock(name)?, deadline)
+}
+
+fn lock_open_until(file: fs::File, deadline: std::time::Instant) -> Result<Option<Guard>> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(Some(Guard::held(file))),
@@ -339,6 +351,12 @@ pub(super) fn read_metadata(name: &str) -> Result<Value> {
         }
     };
     read_metadata_at(&path, name)
+}
+
+/// One already-selected native slot, without telemetry repairs or observations.
+/// The returned bytes add no launch/input authority.
+pub(super) fn read_selected_metadata(name: &str) -> Result<Value> {
+    read_metadata_at(&record_path(name), name)
 }
 
 fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {

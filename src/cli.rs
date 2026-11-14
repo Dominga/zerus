@@ -130,6 +130,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
+       hgs [@host] send <session> --delivery-outcome-v2 --json   opt in to an exact terminal not-offered outcome
        hgs send <codex session> --observe --json   read whether a send to this computer's Codex session would be taken now, changing nothing
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
@@ -237,6 +238,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        session-notifications-v1
        session-keep-warm-v1
        delivery-receipt-v1
+       native-send-outcome-v2
        session-question-routing-v1
        session-question-routing-v2
        question-route-person-v1
@@ -328,7 +330,12 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
     crate::mobile_peers::dispatch(config, args)
 }
 #[cfg(not(unix))]
-fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
+fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
+    #[cfg(windows)]
+    if args.first().is_some_and(|op| matches!(op.as_str(), "__mobile-peer-identity" | "__mobile-peer-local")) {
+        return crate::mobile_peers::dispatch(config, args);
+    }
+    let _ = (config, args);
     Err(Error::new(
         2,
         "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
@@ -3193,6 +3200,9 @@ impl LaunchOptions {
                     "new session name cannot contain '/', ':', '.', control characters or surrounding whitespace",
                 ));
             }
+            if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+                return Err(Error::new(1, problem));
+            }
         }
         Ok(options)
     }
@@ -3436,6 +3446,11 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if !options.tag.is_empty() && !existing && !binding_exists(config, &session)? {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+            return Err(Error::new(1, problem));
+        }
+    }
     if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
         return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
     }
@@ -3760,6 +3775,15 @@ mod parent_scan_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            let args = ["project", "--new", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&args, true).is_err(), "{tag:?}");
+            let old = ["project", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&old, true).is_ok(), "old names are selectors");
+        }
+    }
     /// zerus-sa9qn.39: a pasted peer dry-run line reads the alias back as one
     /// word and runs nothing, in sh (run) and fish (`fish_words`, modelled).
     #[cfg(unix)]

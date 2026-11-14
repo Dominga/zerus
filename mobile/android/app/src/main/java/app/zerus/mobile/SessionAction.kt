@@ -57,6 +57,7 @@ object SessionActionPolicies {
                 val field = if(operation == "rename") "new_name" else "tag"
                 val name = args.getString(field)
                 require(name.isNotBlank() && name.toByteArray(Charsets.UTF_8).size <= (if(operation == "rename") 512 else 120) && name.none(Char::isISOControl) && !name.contains('\\') && (operation == "rename" || !name.contains('/'))) { "Enter a valid session name." }
+                require(!SessionNames.hasUnsafeSyntax(if(operation == "rename") name.substringAfterLast('/') else name)) { SessionNames.unsafeReason }
             }
             "recovery_action" -> { require(uuid(args.getString("job_id")));require(args.getString("action") in setOf("now","cancel")) }
             "send_now" -> require(args.getString("queue_id").matches(Regex("[0-9a-f]{64}"))) { "The queued message identity changed." }
@@ -77,6 +78,7 @@ object SessionActionPolicies {
                 if(args.has("effort")) require(args.getString("agent")=="opencode" && args.has("model") && LaunchPresentation.validEffort(args.getString("effort"))) { "Choose an offered OpenCode effort." }
                 require(args.getString("directory").let { it.startsWith('/') && it.length <= 4096 && it.none(Char::isISOControl) })
                 require(args.getString("tag").let { it.isNotBlank() && it.trim() == it && it.toByteArray(Charsets.UTF_8).size <= 120 && it.none { c -> c == '/' || c == '\\' || c == ':' || c == '.' || c.isISOControl() } })
+                require(!SessionNames.hasUnsafeSyntax(args.getString("tag"))) { SessionNames.unsafeReason }
                 if(args.has("account_id")) require(args.getString("account_id").let { it.isNotBlank() && it.length <= 256 && it.none(Char::isISOControl) })
                 if(listOf("swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir").any(args::has)) {
                     require(args.getString("swarm_id").isNotBlank() && args.getString("project_id").isNotBlank())

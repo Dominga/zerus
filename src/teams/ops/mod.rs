@@ -10,9 +10,12 @@ pub(super) mod handout;
 pub(crate) use handout::handout_admissible;
 mod integration;
 mod journal;
+pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
 mod queue;
+#[cfg(test)]
+pub(crate) use queue::injected;
 mod readiness;
 mod stage_task;
 mod talk;

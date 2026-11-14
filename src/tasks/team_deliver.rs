@@ -944,7 +944,7 @@ fn run(
             recover(config, body, &task, &reference, &kind, &here, &store, deadline)
         }
         Ok(Admission::Refused(closed)) => {
-            let (state, error) = attempts::refusal(&closed, &detail.borrow());
+            let (state, error) = attempts::refusal(config, &reference.project, &closed, &detail.borrow());
             Ok(body.reply(state, &error, None))
         }
         Ok(Admission::Legacy(closed)) => Ok(body.reply(

@@ -62,6 +62,15 @@ before-effect refusal. No provider, acknowledgement, slot mutation, native
 input, task history, floor or controller is called. Plan and Begin stay explicitly
 unqualified. Person over the CLI bridge still refuses.
 
+The refusal-only native-turn seam now names that missing association precisely:
+`task_control_native_turn_association_unqualified`, with `attempted: false` and
+`read_only: true`. No current adapter or fixture constructs positive turn
+authority. Existing peer/command/Person guards run first; this route adds no
+task/Teams lookup, write or acknowledgement. Future positive Begin still needs
+independent ordinary own-ack/Teams admission and an exact input-generation/tool
+association, including revocation before downstream use. See the
+[writer/adapter census](../../../docs/task-control-native-turn-census.md).
+
 Exactly matching durable requests, including Reserved and Unknown, are lookup
 only, never another worker or import. In-flight duplicates consult bounded
 memory; changed immutable admissions refuse. A crash before durable admission
@@ -432,6 +441,16 @@ labels and resolution metadata remain saved references, not native peer or
 Person proof. It supplies no live runtime freshness or executor queue position;
 the existing project To do order keeps its separate meaning. There is no new
 renderer action, mobile binding, dispatch admission or activation in this leaf.
+
+The desktop inspector reuses that decoder in its selected-task presentation and
+renders a **Saved execution** section. Submission stays begin-unconfirmed;
+recorded begin, pause and ready facts never claim current native work. It shows
+the saved attempt/generation, requirement revisions, executor reference and
+timestamps, retaining conflict and unknown/unexplained warnings. Failed reads
+mark retained evidence as stale. Absent or unsupported data stays unavailable;
+JavaScript-unsafe integers are refused rather than rounded. Live state and the
+executor queue remain explicitly unavailable. No controls, polling, mobile ABI
+or executor-queue storage are added by this renderer leaf.
 
 ### Native and activation controls
 

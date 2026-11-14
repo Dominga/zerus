@@ -44,6 +44,7 @@ class Host:
         self.hold = None
         self.unknown = set()
         self.replies = {}
+        self.refusals = {}
         self.entered, self.release, self.writer_entered = threading.Event(), threading.Event(), threading.Event()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.serve)
@@ -91,12 +92,16 @@ class Host:
                          'projections': {'values': values}, 'selection': selection}]}
                 elif method == 'settings':
                     value = {'selected': selection}
+                elif method == 'answer':
+                    value = {'accepted': True}
                 else:
                     value = {}
                 if method in self.replies:
                     value = self.replies[method](params, value)
                 if method in self.unknown:
                     client.sendall(b'{lost acknowledgement\n')
+                elif method in self.refusals:
+                    client.sendall((json.dumps({'ok': False, 'error': self.refusals[method]}) + '\n').encode())
                 else:
                     client.sendall((json.dumps({'ok': True, 'value': value}) + '\n').encode())
         except BaseException as error:

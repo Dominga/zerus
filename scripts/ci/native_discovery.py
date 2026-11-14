@@ -7,6 +7,7 @@ request thread alive in the caller. Package bytes/integrity are handled elsewher
 import base64
 import http.client
 import json
+import os
 from pathlib import Path
 import ssl
 import subprocess
@@ -29,7 +30,39 @@ class DiscoveryUnavailable(ValueError):
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError('Official npm discovery must not redirect')
+        raise ValueError('Official metadata discovery must not redirect')
+
+
+def github_api(url):
+    parsed = urllib.parse.urlsplit(url)
+    return parsed.scheme == 'https' and parsed.netloc == 'api.github.com'
+
+
+def github_rate_wait(error):
+    """Only explicit rate-limit reset evidence authorizes another GitHub read.
+
+    Follow Retry-After and exhausted primary-quota reset headers, without ever
+    shortening either wait. The parent admits it only within its original budget.
+    https://docs.github.com/rest/using-the-rest-api/best-practices-for-using-the-rest-api
+    """
+    if error.code not in (403, 429) or error.headers is None:
+        return None
+    waits = []
+    for name, values in [('Retry-After', error.headers.get_all('Retry-After', [])),
+                         ('X-RateLimit-Remaining', error.headers.get_all('X-RateLimit-Remaining', [])),
+                         ('X-RateLimit-Reset', error.headers.get_all('X-RateLimit-Reset', []))]:
+        if len(values) > 1 or (values and (not values[0].isascii() or not values[0].isdigit()
+                                         or len(values[0]) > 20)):
+            return None
+        if values and name == 'Retry-After':
+            waits.append(int(values[0]))
+    if error.headers.get('X-RateLimit-Remaining') == '0':
+        reset = error.headers.get('X-RateLimit-Reset')
+        if reset is None:
+            return None
+        # Epoch seconds have only whole-second precision; wait past that second.
+        waits.append(max(0, int(reset) - time.time() + 1))
+    return max(waits) if waits else None
 
 
 class OfficialRedirect(urllib.request.HTTPRedirectHandler):
@@ -53,6 +86,10 @@ class OfficialRedirect(urllib.request.HTTPRedirectHandler):
 
 def read_metadata(url, limit, method='GET', policy='npm'):
     """One child request, retaining each caller's redirect and byte validation."""
+    if github_api(url) and policy != 'no-redirect':
+        raise ValueError('GitHub discovery must not redirect')
+    if github_api(url) and method not in ('GET', 'HEAD'):
+        raise ValueError('GitHub metadata requires a read-only method')
     redirects = OfficialRedirect(method)
     headers = {'Accept-Encoding': 'identity'}
     if policy == 'npm':
@@ -60,6 +97,9 @@ def read_metadata(url, limit, method='GET', policy='npm'):
     elif policy == 'no-redirect':
         headers.update({'User-Agent': 'Zerus-DeepSeek-CI', 'Accept': 'application/json'})
     request = urllib.request.Request(url, headers=headers, method=method)
+    if github_api(url) and (token := os.environ.get('GITHUB_TOKEN')):
+        # Never put credentials in argv, URLs, records or redirected headers.
+        request.add_unredirected_header('Authorization', 'Bearer ' + token)
     if policy == 'kimi':
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirects)
     elif policy == 'no-redirect':
@@ -95,10 +135,11 @@ def diagnostic(**fields):
 
 
 def fetch_metadata(url, limit, *, method='GET', policy='npm', deadline=None, stage='official metadata'):
-    """At most 3 x 30s plus 2s/4s backoff (96s), clamped to an original deadline.
+    """At most three attempts within 96s, clamped to an original deadline.
 
     A retry uses the identical URL/method/policy. Version and integrity validation
     happen once after success; neither retained versions nor native tests run here.
+    Ordinary backoff is 2s/4s; explicit rate-limit waits share the same budget.
     """
     if (method not in ('GET', 'HEAD') or policy not in ('npm', 'no-redirect', 'kimi')
             or not 0 < limit <= (512 * 1024**2 if method == 'HEAD' else MAX_METADATA)):
@@ -148,7 +189,15 @@ def fetch_metadata(url, limit, *, method='GET', policy='npm', deadline=None, sta
             raise ValueError('discovery invalid: ' + stage + ': ' + url + ': ' + last)
         diagnostic(**common, attempt=attempt, event='failed', error=last)
         if attempt < ATTEMPTS:
-            delay = min(BACKOFF_SECONDS[attempt - 1], max(0, end - time.monotonic()))
+            remaining = max(0, end - time.monotonic())
+            delay = BACKOFF_SECONDS[attempt - 1]
+            if 'retry_after' in failure:
+                delay = max(delay, failure['retry_after'])
+                if delay >= remaining:
+                    last += '; rate limit reset exceeds original discovery deadline'
+                    break
+            else:
+                delay = min(delay, remaining)
             diagnostic(**common, attempt=attempt, event='backoff', seconds=delay)
             time.sleep(delay)
     diagnostic(**common, attempt=attempts, event='unavailable', error=last)
@@ -167,13 +216,24 @@ def worker():
         return 0
     except Exception as error:
         retryable = isinstance(error, (OSError, http.client.HTTPException))
+        retry_after = None
         if isinstance(error, urllib.error.HTTPError):
-            retryable = error.code in (408, 429) or 500 <= error.code < 600
+            if github_api(url):
+                retry_after = github_rate_wait(error)
+                retryable = retry_after is not None
+            else:
+                retryable = error.code in (408, 429) or 500 <= error.code < 600
             error.close()
         reason = error.reason if isinstance(error, urllib.error.URLError) else error
         if isinstance(reason, (ssl.SSLCertVerificationError, ValueError)):
             retryable = False
-        print(json.dumps(dict(error_type=type(error).__name__, error=str(error)[:512], retryable=retryable)))
+        detail = str(error)
+        if token := os.environ.get('GITHUB_TOKEN'):
+            detail = detail.replace(token, '<redacted>')
+        failure = dict(error_type=type(error).__name__, error=detail[:512], retryable=retryable)
+        if retry_after is not None:
+            failure['retry_after'] = retry_after
+        print(json.dumps(failure))
         return 1
 
 

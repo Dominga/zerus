@@ -6,6 +6,7 @@ mod args_macos;
 mod authority;
 mod client;
 mod guard;
+mod native_turn;
 #[cfg(target_os = "linux")]
 mod peer_linux;
 #[cfg(target_os = "macos")]

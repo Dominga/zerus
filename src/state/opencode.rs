@@ -449,6 +449,13 @@ pub(crate) fn launch(
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }
+    if !present {
+        if let Some(tag) = name.split('/').nth(2) {
+            if let Some(problem) = zerus_client_core::actions::tag_problem(tag) {
+                return Err(problem.into());
+            }
+        }
+    }
     let cwd = if present {
         None
     } else {
@@ -1982,6 +1989,7 @@ fn validate_rename(old: &str, new: &str) -> Result<()> {
     {
         return Err("Rename must preserve provider and project".into());
     }
+    rename::validate_new_tag(new)?;
     Ok(())
 }
 
@@ -2288,6 +2296,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        assert!(validate_rename("opencode/project/old$tag", "opencode/project/safe name").is_ok());
+        assert!(validate_rename("opencode/project/old.tag", "opencode/project/safe name").is_ok());
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            assert!(validate_rename("opencode/project/old", &format!("opencode/project/{tag}")).is_err());
+        }
+    }
     #[test]
     fn a_claim_check_never_waits_past_its_bound_or_counts_silence_as_live() {
         // zerus-p24ce: a service that accepts and never answers is busy.

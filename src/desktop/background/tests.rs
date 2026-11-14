@@ -153,6 +153,21 @@ impl Fixture {
 }
 
 #[test]
+fn cached_readiness_matches_the_published_components_including_drain() {
+    let mut f = Fixture::new();
+    for stopping in [false, true] {
+        if stopping {
+            f.runtime.drain(&mut f.store, Duration::ZERO).unwrap();
+        }
+        let mut value = json!({});
+        f.runtime.decorate(&mut value);
+        let published = ["fleet", "presence", "reads", "attention", "approvals"]
+            .map(|component| value["lifecycle"]["background"][component]["ready"] == true);
+        assert_eq!(f.runtime.readiness(), published, "stopping={stopping}");
+    }
+}
+
+#[test]
 fn uncaptured_notification_writer_revokes_the_durable_epoch_and_can_hold_the_same_receipt() {
     let mut f = Fixture::new();
     let service: String = f

@@ -1571,6 +1571,11 @@ jobs:
           path: artifacts/membership-hosted-timing
           if-no-files-found: warn
           retention-days: 1
+      - name: Windows mobile target contracts
+        run: |
+          mkdir -p artifacts/test-results
+          cargo test --locked --test mobile_target_contract </dev/null 2>&1 \
+            | tee artifacts/test-results/windows-mobile-target.log
       - name: Root unit tests and pinned lints
         id: root-tests
         run: |

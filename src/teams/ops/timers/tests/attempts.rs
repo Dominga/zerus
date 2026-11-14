@@ -1097,14 +1097,17 @@ fn a_late_merge_under_a_conflict_keeps_the_node_for_the_next_observation() {
     }
 }
 
-/// The same with a conflict of a task that is Done: the end is applied, but
-/// the attempts conflict, so the newest observation does not agree yet.
+/// Done under a conflict on an accepted node is the person's own ended run:
+/// the accepted result is superseded and the node ends without merging, while
+/// the receipt authority of the already-admitted write still records its late
+/// fact. It authorizes no second write and does not restore the node.
 #[test]
-fn a_merge_under_a_conflict_of_a_done_task_keeps_the_node() {
-    let (mut h, lead, node, id) = handed();
+fn a_merge_under_a_conflict_of_a_done_task_is_superseded_but_keeps_its_fact() {
+    let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
+    assert!(!in_queue(&h, node));
     let decision = h.accept_decision(node);
     h.run(
         &service(),
@@ -1115,10 +1118,19 @@ fn a_merge_under_a_conflict_of_a_done_task_keeps_the_node() {
         },
     )
     .unwrap();
-    assert_eq!(h.node(node).state, NodeState::Accepted);
-    assert!(in_queue(&h, node), "the attempts still conflict");
-    seen(&mut h, node, TaskStage::Done, 2, &id).unwrap();
-    assert!(!in_queue(&h, node), "the observation agrees");
+    assert!(h.store.integration_fact(TEAM, node).unwrap().is_some());
+    assert!(!in_queue(&h, node), "the node is not restored");
+    let second = h
+        .run(
+            &service(),
+            Operation::RecordIntegration {
+                decision,
+                node,
+                commit: COMMIT.into(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(second.code, code::INVALID_STATE);
 }
 
 fn outcome(h: &Harness, decision: u64) -> Option<String> {
@@ -1487,12 +1499,14 @@ fn an_accepted_task_is_current_in_review_or_done() {
 
 #[test]
 fn an_accepted_task_is_not_current_otherwise() {
-    // Done with the conflict flag.
+    // Done with the conflict flag: the person's own run supersedes the
+    // accepted result, so the node leaves the live plan.
     let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
-    assert!(bound(&h, node));
+    assert!(!bound(&h, node), "Done with a conflict");
+    assert!(!in_queue(&h, node), "Done with a conflict");
     assert!(!accepted(&h, node, 1), "Done with a conflict");
     // Running, and To do.
     let (mut h, _, node, id) = handed();
@@ -1586,12 +1600,13 @@ fn an_own_task_is_current_at_any_stage_under_the_attempt_the_node_took_in() {
         seen(&mut h, node, TaskStage::InReview, 1, "another-attempt").unwrap();
         assert!(!own(&h, node, 1), "another current attempt");
     }
-    // A Done task under a conflict: applied as an end, still a conflict.
+    // A Done task under a conflict on an accepted node is superseded and the
+    // node ends; the read has no live node left to keep.
     let (mut h, lead, node, _) = handed();
     h.report(node, "m1");
     h.run(&lead, Operation::Accept { node }).unwrap();
     conflicted(&mut h, node, TaskStage::Done, 2).unwrap();
-    assert!(bound(&h, node));
+    assert!(!bound(&h, node));
     assert!(!own(&h, node, 1), "Done under a conflict");
     // No current attempt and no conflict: a refused first hand-out.
     let (mut h, _, node) = refused_hand_out();
@@ -1653,4 +1668,353 @@ fn an_own_task_is_not_current_otherwise() {
     )
     .unwrap();
     assert!(!own(&h, node, 1), "no observation");
+}
+
+#[test]
+fn a_prior_conflict_does_not_block_the_later_acceptance() {
+    let (mut h, lead, node, _) = handed();
+    h.report(node, "m1");
+    h.run(&lead, Operation::Accept { node }).unwrap();
+    let first = h.accept_decision(node);
+    h.run(
+        &service(),
+        Operation::RecordIntegrationConflict {
+            node,
+            decision: first,
+            conflicts: vec!["src/example.rs".into()],
+        },
+    )
+    .unwrap();
+    let reopen = h.reopen(node, "m1");
+    h.reopen_outcome(
+        &reopen,
+        HandoutOutcome::Submitted {
+            receipt: "again".into(),
+        },
+    );
+    seen(&mut h, node, TaskStage::InProgress, 2, &reopen).unwrap();
+    h.report(node, "m1");
+    h.run(&person(), Operation::Accept { node }).unwrap();
+    let second = h.accept_decision(node);
+    assert!(second > first, "{first} {second}");
+    let mut o = h.observation(node, TaskStage::InReview);
+    o.attempt = 2;
+    o.attempt_id = "person-current".into();
+    let revision = h.store.team(TEAM).unwrap().unwrap().revision;
+    let request = request(
+        revision,
+        Operation::ObserveTask {
+            node,
+            observation: o.clone(),
+        },
+    );
+    let reply = super::super::super::apply(&mut h.store, &service(), &request, 1234).unwrap();
+    let replay = super::super::super::apply(&mut h.store, &service(), &request, 1234).unwrap();
+    assert_eq!(replay, reply, "an exact retry keeps the first answer");
+    let items = h.store.inbox(TEAM, 200, None).unwrap().rows;
+    eprintln!("PRIOR items={items:?}");
+    assert!(!in_queue(&h, node));
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .count(),
+        1
+    );
+    let text = &items
+        .iter()
+        .find(|item| item.kind == "accepted_superseded")
+        .unwrap()
+        .text;
+    assert!(!text.contains("0123456789abcdef0123456789abcdef01234567"));
+    assert!(!text.contains("already been merged"));
+    let replay = super::super::super::apply(&mut h.store, &service(), &request, 1234).unwrap();
+    assert_eq!(replay, reply, "the second retry still keeps the first answer");
+    assert_eq!(
+        h.store.inbox(TEAM, 200, None).unwrap().rows
+            .iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .count(),
+        1
+    );
+    let fact = h.store.integration_fact(TEAM, node).unwrap().unwrap();
+    assert_eq!(fact.decision, first);
+    assert!(fact.commit.is_none());
+    assert!(
+        crate::teams::store::rows::integration_commit(
+            h.store.db.as_ref().unwrap(),
+            TEAM,
+            node,
+            first
+        )
+        .unwrap()
+        .is_none(),
+        "a conflict fact's NULL commit reads as no commit"
+    );
+    let cancel = h.run(&lead, Operation::Cancel { node, reason: "Ended".into() }).unwrap_err();
+    assert_eq!(cancel.code, code::INVALID_STATE);
+    assert_eq!(cancel.message, "Task has left the live plan.");
+    assert_eq!(
+        h.store.inbox(TEAM, 200, None).unwrap().rows
+            .iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .count(),
+        1
+    );
+}
+
+fn person_review(h: &mut Harness, node: u32, attempt: u64, id: &str) -> Result<Reply> {
+    let mut o = h.observation(node, TaskStage::InReview);
+    o.attempt = attempt;
+    o.attempt_id = id.into();
+    h.run(&service(), Operation::ObserveTask { node, observation: o })
+}
+
+fn restore_and_accept(h: &mut Harness, node: u32, attempt: u64) -> u64 {
+    let mut running = h.observation(node, TaskStage::InProgress);
+    running.attempt = attempt;
+    running.attempt_id = format!("person-restore-{attempt}");
+    h.run(&service(), Operation::ObserveTask { node, observation: running }).unwrap();
+    h.observe(node, TaskStage::InReview);
+    h.run(&person(), Operation::Accept { node }).unwrap();
+    h.accept_decision(node)
+}
+
+#[test]
+fn a_later_acceptance_never_borrows_a_prior_acceptances_merge_commit() {
+    for fact_first in [true, false] {
+        let (mut h, lead, node, _) = handed();
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        let first = h.accept_decision(node);
+        const OLD: &str = "0123456789abcdef0123456789abcdef01234567";
+        if fact_first {
+            h.run(
+                &service(),
+                Operation::RecordIntegration {
+                    node,
+                    decision: first,
+                    commit: OLD.into(),
+                },
+            )
+            .unwrap();
+        }
+        person_review(&mut h, node, 2, "person-first").unwrap();
+        let second = restore_and_accept(&mut h, node, 3);
+        assert!(second > first);
+        person_review(&mut h, node, 4, "person-second").unwrap();
+        if !fact_first {
+            // The old fact arrives after the later item exists: its late
+            // update must not claim this item for the old decision.
+            h.run(
+                &service(),
+                Operation::RecordIntegration {
+                    node,
+                    decision: first,
+                    commit: OLD.into(),
+                },
+            )
+            .unwrap();
+        }
+        let items: Vec<_> = h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .collect();
+        assert!(!items.is_empty(), "fact_first={fact_first}");
+        let later = items.iter().max_by_key(|item| item.generation).unwrap();
+        assert_eq!(later.generation, 2, "fact_first={fact_first}");
+        assert!(!later.text.contains(OLD), "fact_first={fact_first}: {}", later.text);
+        assert!(!later.text.contains("already been merged"), "fact_first={fact_first}: {}", later.text);
+        assert_eq!(h.store.integration_fact(TEAM, node).unwrap().unwrap().decision, first);
+    }
+}
+
+/// The test-only supersede failure belongs to the store it was armed for
+/// (zerus-63rru.37 round 4): another store's supersede in the same process
+/// applies while it is armed, and the armed store's own supersede fails as
+/// storage, writing nothing, until the guard drops.
+#[test]
+fn an_injected_supersede_failure_reaches_only_its_own_store() {
+    let accepted = || {
+        let (mut h, lead, node, _) = handed();
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        (h, node)
+    };
+    let (mut armed, armed_node) = accepted();
+    let (mut other, other_node) = accepted();
+    let failure = crate::teams::ops::injected::fail_supersede(&armed.store);
+    person_review(&mut other, other_node, 2, "person-other").unwrap();
+    assert!(!in_queue(&other, other_node), "another store's supersede applies");
+    let refused = person_review(&mut armed, armed_node, 2, "person-armed").unwrap_err();
+    assert_eq!(refused.code, code::STORAGE_FAILED);
+    assert_eq!(
+        refused.message,
+        "Teams storage is unavailable: injected supersede failure"
+    );
+    assert!(in_queue(&armed, armed_node), "the failed supersede wrote nothing");
+    drop(failure);
+    person_review(&mut armed, armed_node, 2, "person-armed").unwrap();
+    assert!(!in_queue(&armed, armed_node), "the store's own supersede applies again");
+}
+
+/// A late merge fact rewrites only the supersede item written for its own
+/// acceptance (zerus-63rru.37 round 4): acceptance 1 superseded with no fact,
+/// acceptance 2 superseded, then acceptance 2's late merge fact. Only the
+/// generation-2 item says it was merged; the generation-1 item keeps its
+/// text, also when the person's run went on (a restore) before the fact.
+#[test]
+fn a_late_fact_rewrites_only_its_own_acceptances_item() {
+    const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    let superseded = |h: &Harness| -> Vec<(u32, String)> {
+        h.store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .map(|item| (item.generation, item.text))
+            .collect()
+    };
+    for restored in [false, true] {
+        let (mut h, lead, node, _) = handed();
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        let first = h.accept_decision(node);
+        let first_generation = h.store.generation(TEAM, node).unwrap().unwrap();
+        person_review(&mut h, node, 2, "person-first").unwrap();
+        let second = restore_and_accept(&mut h, node, 3);
+        let second_generation = h.store.generation(TEAM, node).unwrap().unwrap();
+        assert!(second > first && second_generation > first_generation);
+        person_review(&mut h, node, 4, "person-second").unwrap();
+        if restored {
+            let mut running = h.observation(node, TaskStage::InProgress);
+            running.attempt = 5;
+            running.attempt_id = "person-later".into();
+            h.run(
+                &service(),
+                Operation::ObserveTask {
+                    node,
+                    observation: running,
+                },
+            )
+            .unwrap();
+            assert!(h.store.generation(TEAM, node).unwrap().unwrap() > second_generation);
+        }
+        let before = superseded(&h);
+        assert_eq!(
+            before.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+            [first_generation, second_generation],
+            "restored={restored}"
+        );
+        assert!(before.iter().all(|(_, text)| text.contains("nothing further will be merged")));
+        h.run(
+            &service(),
+            Operation::RecordIntegration {
+                node,
+                decision: second,
+                commit: NEW.into(),
+            },
+        )
+        .unwrap();
+        let after = superseded(&h);
+        assert_eq!(after[0], before[0], "restored={restored}: the first item changed");
+        assert_eq!(after[1].0, second_generation);
+        assert!(
+            after[1]
+                .1
+                .contains(&format!("the accepted result had already been merged as {NEW}")),
+            "restored={restored}: {}",
+            after[1].1
+        );
+    }
+}
+
+/// Two acceptances of one generation (the round-4 confirmation's probe,
+/// committed in round 5): a lead's Ready acceptance, the person's reject on
+/// the Integration card while merges need the owner, and a second accept of
+/// the same report keep the node's generation. After the person's own run
+/// supersedes the latest acceptance, the older acceptance's late merge fact
+/// leaves the one supersede item unchanged; only the latest acceptance's
+/// fact rewrites it.
+#[test]
+fn two_acceptances_of_one_generation_leave_the_item_to_the_latest() {
+    const OLD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    let (mut h, lead, node, _) = handed();
+    h.report(node, "m1");
+    let generation = h.store.generation(TEAM, node).unwrap().unwrap();
+    h.run(&lead, Operation::Accept { node }).unwrap();
+    let first = h.accept_decision(node);
+    h.settings(|s| s.delegations.merge_accepted = false);
+    let card = h
+        .store
+        .waiting(200, None)
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.card)
+        .find(|card| card.kind == "integration" && card.node == Some(node))
+        .unwrap();
+    h.run(
+        &person(),
+        Operation::DecideCard {
+            card: card.seq,
+            decision: "reject".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.store.generation(TEAM, node).unwrap(), Some(generation));
+    h.settings(|s| s.delegations.merge_accepted = true);
+    h.run(&lead, Operation::Accept { node }).unwrap();
+    let second = h.accept_decision(node);
+    assert!(second > first);
+    let decisions = h.store.decisions(TEAM, 200, None).unwrap().rows;
+    for decision in [first, second] {
+        let row = decisions.iter().find(|row| row.seq == decision).unwrap();
+        assert_eq!(row.generation, generation);
+    }
+    person_review(&mut h, node, 2, "person-same-generation").unwrap();
+    let item = |h: &Harness| {
+        let items: Vec<_> = h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .collect();
+        assert_eq!(items.len(), 1);
+        (items[0].generation, items[0].text.clone())
+    };
+    let original = item(&h);
+    assert_eq!(original.0, generation);
+    assert!(original.1.contains("nothing further will be merged"));
+    h.run(
+        &service(),
+        Operation::RecordIntegration {
+            node,
+            decision: first,
+            commit: OLD.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(item(&h), original, "the older acceptance rewrote the item");
+    h.run(
+        &service(),
+        Operation::RecordIntegration {
+            node,
+            decision: second,
+            commit: NEW.into(),
+        },
+    )
+    .unwrap();
+    let latest = item(&h);
+    assert_eq!(latest.0, generation);
+    assert!(latest.1.contains(&format!("already been merged as {NEW}")));
+    assert!(!latest.1.contains(OLD), "{}", latest.1);
 }

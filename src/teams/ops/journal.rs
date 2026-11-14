@@ -46,6 +46,9 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         {
             format!("Task {node} left the team.")
         }
+        Operation::ObserveTask { node, .. } if ctx.event == Some("accepted_superseded") => {
+            format!("The person's own run replaced the accepted result of task {node}; the accepted decision was superseded and nothing was merged.")
+        }
         // What the hand-out came to, and a refusal's reason, in the row's
         // own text (zerus-63rru.79): an intent that typed nothing must not
         // read like a hand-out that happened.

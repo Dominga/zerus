@@ -373,6 +373,9 @@ fn merge_git<T>(
         #[cfg(unix)]
         Some(turn),
     );
+    // The admission and every lock it holds (the store's writer fence, and
+    // for a team merge the accepted task's project lock) end only after
+    // update-ref has returned, within the ref deadline.
     drop(admission);
     let output = output?;
     if output.status.success() {

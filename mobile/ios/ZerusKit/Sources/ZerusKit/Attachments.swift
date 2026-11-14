@@ -377,16 +377,33 @@ public final class AttachmentStore: Sendable {
     }
 
     /// Authenticated plaintext of a saved draft or outbox file.
-    public func decrypt(_ attachment: Attachment) throws -> Data {
-        lock.lock()
+    public func decrypt(_ attachment: Attachment, checkCancellation: () throws -> Void = {}) throws -> Data {
+        try checkCancellation()
+        while !lock.try() {
+            try checkCancellation()
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         defer { lock.unlock() }
+        try checkCancellation()
         try AttachmentPolicy.validate(attachment)
         let source = try file(attachment.id)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: source.path), attributes[.type] as? FileAttributeType == .typeRegular,
               let size = (attributes[.size] as? NSNumber)?.int64Value, (33...(AttachmentPolicy.maxFileBytes + 32)).contains(size) else {
             throw ZerusError.invalid("Saved attachment is missing or changed. Select the file again.")
         }
-        let stored = try Data(contentsOf: source)
+        let handle = try FileHandle(forReadingFrom: source)
+        defer { try? handle.close() }
+        var stored = Data()
+        while true {
+            try checkCancellation()
+            let chunk = try handle.read(upToCount: 64 * 1024) ?? Data()
+            if chunk.isEmpty { break }
+            guard stored.count + chunk.count <= Int(AttachmentPolicy.maxFileBytes + 32) else {
+                throw ZerusError.invalid("Saved attachment is missing or changed. Select the file again.")
+            }
+            stored.append(chunk)
+        }
+        try checkCancellation()
         guard stored.prefix(4) == Self.magic else { throw ZerusError.invalid("Saved attachment is invalid.") }
         let plain: Data
         do {
@@ -395,6 +412,7 @@ public final class AttachmentStore: Sendable {
         } catch {
             throw ZerusError.invalid("Saved attachment could not be verified. Select the file again.")
         }
+        try checkCancellation()
         let sha = SHA256.hash(data: plain).map { String(format: "%02x", $0) }.joined()
         guard Int64(plain.count) == attachment.bytes, sha == attachment.sha256 else {
             throw ZerusError.invalid("Saved attachment content changed. Select the file again.")
@@ -402,11 +420,36 @@ public final class AttachmentStore: Sendable {
         return plain
     }
 
+    /// Local preparation has its own budget, before any mutation can be submitted.
+    /// Forward cancellation to the detached file worker and wait for it to stop.
+    public func preparedPayload(_ attachments: [Attachment], limit: Duration = .seconds(45)) async throws -> JSON {
+        guard limit > .zero, limit <= .seconds(45) else { throw ZerusError.invalid("Invalid attachment preparation deadline.") }
+        do {
+            return try await Deadline.within(limit) {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try self.payload(attachments, checkCancellation: { try Task.checkCancellation() })
+                }
+                return try await withTaskCancellationHandler {
+                    let payload = try await worker.value
+                    try Task.checkCancellation()
+                    return payload
+                } onCancel: { worker.cancel() }
+            }
+        } catch let error as ZerusError where error == Deadline.expired {
+            throw ZerusError(.unavailable, "Attachments could not be prepared in time. The saved message was not sent. Try again.")
+        }
+    }
+
     /// The wire form of a message's files: exact names, types and verified bytes.
-    public func payload(_ attachments: [Attachment]) throws -> JSON {
+    public func payload(_ attachments: [Attachment], checkCancellation: () throws -> Void = {}) throws -> JSON {
+        try checkCancellation()
         try AttachmentPolicy.selection(attachments)
         return .array(try attachments.map { attachment in
-            .object(["name": .string(attachment.name), "mime": .string(attachment.mime), "data_base64": .string(try decrypt(attachment).base64EncodedString())])
+            let plain = try decrypt(attachment, checkCancellation: checkCancellation)
+            try checkCancellation()
+            let encoded = plain.base64EncodedString()
+            try checkCancellation()
+            return .object(["name": .string(attachment.name), "mime": .string(attachment.mime), "data_base64": .string(encoded)])
         })
     }
 

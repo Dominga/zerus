@@ -194,9 +194,10 @@ impl Runtime {
             self.recovered(store, team, key, now)?;
             return Ok(());
         }
-        if store
-            .node(&team.id, node)?
-            .is_none_or(|n| matches!(n.state, NodeState::Accepted | NodeState::Cancelled))
+        if !store.node_live(&team.id, node)?
+            || store
+                .node(&team.id, node)?
+                .is_none_or(|n| matches!(n.state, NodeState::Accepted | NodeState::Cancelled))
         {
             self.recovered(store, team, key, now)?;
         }

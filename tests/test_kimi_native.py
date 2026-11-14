@@ -886,6 +886,12 @@ class NativeKimi(lifecycle.Harness):
         self.assertEqual(len(self.requests), requests, 'settings submitted a first model turn')
         self.assertFalse(legacy.exists())
 
+    def test_native_refusal_has_an_opted_in_terminal_outcome(self):
+        import native_send_outcome
+        name = self.launch()
+        native_send_outcome.refused_draft(self, name, self.binding(name), lambda: self.screen(name),
+                                         lambda: len(self.requests))
+
     def test_id_unprimed_pending_settings_then_message_makes_one_model_call_and_keeps_defaults(self):
         import native_effort_id as identity
         config = self.home / 'config.toml'

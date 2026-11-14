@@ -15,6 +15,22 @@ and exact signed candidate before enrollment. **Resume pairing** reuses that
 saved candidate, including CryptoKit's randomized Ed25519 signature. Refresh
 only checks receipts and signed membership history.
 
+Ordinary message and answer sends acquire their submission and original receipt within one
+45-second deadline, matching Android's acquisition bound. Expiry or a lost
+response keeps the original message and request identity unconfirmed; nothing is
+resent. A refusal during submission stays distinct from an error while reading
+its later receipt. Durable settlement runs after the transport clock ends and
+keeps the delivery flight until the accepted write finishes. Attachment preparation
+has a separate 45-second budget before transport, forwarding cancellation to the
+file worker while it waits for the store or reads and encodes the bounded sealed
+files. Preparation failure keeps the saved original as Not sent; transport expiry
+keeps it unconfirmed. Preparation performs no submission. Android uses the same
+answer acquisition bound and cancellation checks during attachment reads; its
+ordinary-send clock also includes preparation, while iOS bounds these phases
+separately. Neither phone times out an accepted durable settlement.
+Answer receipt checks also use one 45-second read deadline and retain the
+original saved answer on failure; repeated checks never submit it again.
+
 CryptoKit provides RFC 9180 HPKE and Ed25519. A native SQLite journal stores the
 protected identity under a per-connection ThisDeviceOnly Keychain wrapping key,
 commits membership state/history/head indexes together, and reserves exact

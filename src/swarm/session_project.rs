@@ -458,7 +458,6 @@ fn assign(store: &mut Store, request: &Request, snapshot: &Snapshot) -> Result<(
     super::session_ids::write(&store.catalog, &mut store.twins, &store.node_id, &local)?;
     store.catalog.validate()
 }
-#[cfg(unix)]
 pub(crate) fn validate_payload(value: &Value, mutation: bool) -> Result<()> {
     Request::parse(value, mutation).map(|_| ())
 }

@@ -12,6 +12,7 @@ mod finish;
 mod fleet;
 mod integration;
 mod ledger;
+mod lead_queue;
 mod maintenance;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) mod native;
@@ -23,6 +24,7 @@ mod presence;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sweep_items;
 pub(crate) use presence::presence;
+mod reply;
 mod reports;
 mod retry;
 mod schedule;
@@ -124,6 +126,7 @@ impl Runtime {
             .team(id)?
             .is_some_and(|t| t.status == TeamStatus::Running)
         {
+            self.lead_queue(store, &team, now)?;
             self.integrations(store, ports, &team, now)?;
             if ports.stopped() {
                 return Ok(());

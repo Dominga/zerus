@@ -125,11 +125,9 @@ impl Runtime {
                 "Person task controls require a separately verified native GUI action"
             );
             match &incoming.envelope.command {
-                Command::Begin(_) | Command::Plan(_) => Ok(Decision::Read(server::refused(
-                    &incoming.envelope.request_id,
-                    "task_control_effect_path_unqualified",
-                    CLOSED,
-                ))),
+                Command::Begin(_) | Command::Plan(_) => Ok(Decision::Read(
+                    unqualified_association(&incoming.envelope.request_id),
+                )),
                 Command::Status(status) => {
                     let guard = guard::Store::capture(config, location, &store.db)?;
                     let value = lookup(&mut store.db, &status.target)?;
@@ -443,4 +441,37 @@ fn unknown(id: &str) -> Value {
     json!({"schema":1,"request_id":id,"ok":false,"attempted":false,
         "pending":true,"code":"task_control_outcome_unknown",
         "error":"The original durable result is unverified. Use status; do not resubmit."})
+}
+
+fn unqualified_association(id: &str) -> Value {
+    super::native_turn::consume(id, super::native_turn::probe())
+}
+
+#[cfg(test)]
+mod association_tests {
+    use super::*;
+
+    #[test]
+    fn missing_native_association_is_a_precise_non_effect_refusal() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let reply = unqualified_association(id);
+        assert_eq!(reply["request_id"], id);
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["attempted"], false);
+        assert_eq!(
+            reply["code"],
+            "task_control_native_turn_association_unqualified"
+        );
+        assert_eq!(reply["read_only"], true);
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("input generation"));
+        assert!(
+            reply.get("refusal").is_none(),
+            "not a durable Start-refusal proof"
+        );
+        assert!(reply.get("plan").is_none());
+        assert!(reply.get("binding").is_none());
+    }
 }

@@ -98,6 +98,31 @@ function expectEmpty() {
   expect(bridge.reportDetailInvariant).not.toHaveBeenCalled();
 }
 
+it("offers a keyboard-accessible Show in session list button immediately after the conversation title", async () => {
+  await open(fixtureRow());
+  const title = host.querySelector(".detail-head h1")!;
+  const button = title.nextElementSibling as HTMLButtonElement | null;
+  expect(button?.tagName).toBe("BUTTON");
+  expect(button?.getAttribute("aria-label")).toBe("Show in session list");
+  expect(button?.getAttribute("data-tip")).toBe("Show in session list");
+  expect(button?.disabled).toBe(false);
+  expect(button?.tabIndex).toBe(0);
+});
+
+it("shows a new-name error in Rename and keeps valid inner spaces", async () => {
+  await open(fixtureRow());
+  const { actionEntries } = await import("./ActionDialogs");
+  actionEntries(selected()!).rename.action(); await flush();
+  const input = host.querySelector<HTMLInputElement>("#rename-tag")!;
+  const submit = host.querySelector<HTMLButtonElement>("dialog form button[type=submit]")!;
+  input.value = "bad$tag"; input.dispatchEvent(new Event("input", { bubbles: true })); await flush();
+  expect(host.querySelector(".dlg-error")?.textContent).toBe("Names cannot contain shell syntax or invisible formatting characters.");
+  expect(submit.disabled).toBe(true);
+  input.value = "safe name"; input.dispatchEvent(new Event("input", { bubbles: true })); await flush();
+  expect(host.querySelector(".dlg-error")).toBeNull();
+  expect(submit.disabled).toBe(false);
+});
+
 const routes = (["activity", "processes", "terminal"] as const).flatMap((tab) =>
   (["plan", "details", "worktrees", "tasks"] as const).map((side) => ({ tab, side })));
 it.each(routes)("retires the complete $tab / $side frame together when the catalog row disappears", async ({ tab, side }) => {

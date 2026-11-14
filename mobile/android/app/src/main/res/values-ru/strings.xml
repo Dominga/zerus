@@ -3,4 +3,5 @@
     <string name="activity_next_own">Ваше следующее сообщение</string>
     <string name="activity_reading_previous_own">Поиск ваших предыдущих сообщений…</string>
     <string name="activity_reading_next_own">Поиск ваших следующих сообщений…</string>
+    <string name="session_name_unsafe">Имена не могут содержать синтаксис командной оболочки или невидимые символы форматирования.</string>
 </resources>

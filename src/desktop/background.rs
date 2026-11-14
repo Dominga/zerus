@@ -505,6 +505,19 @@ impl Runtime {
         )
     }
 
+    /// Cached presentation only: no status IPC, SQL projection or writer action.
+    pub(super) fn readiness(&self) -> [bool; 5] {
+        [
+            self.fleet.transport_ready(),
+            self.presence
+                .as_ref()
+                .is_some_and(|p| p.status()["ready"] == true),
+            self.delivery.reads_ready(),
+            self.notifications.ready(),
+            self.delivery.approvals_ready(),
+        ]
+    }
+
     pub fn decorate(&self, value: &mut Value) {
         #[cfg(windows)]
         {

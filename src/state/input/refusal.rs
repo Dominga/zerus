@@ -103,6 +103,11 @@ pub(super) fn prepare(witness: &NotOffered) -> Result<()> {
 }
 
 pub(super) fn remember(witness: &NotOffered) -> Result<()> {
+    let value = value(witness)?;
+    publish(witness, &value)
+}
+
+fn value(witness: &NotOffered) -> Result<Value> {
     let value = Refusal::new(
         &witness.request_id,
         &witness.name,
@@ -113,7 +118,22 @@ pub(super) fn remember(witness: &NotOffered) -> Result<()> {
     )
     .and_then(|value| value.cli_record())
     .ok_or("Invalid pre-input refusal binding")?;
-    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
+/// Only the original live, untyped witness may mint the opted-in terminal form.
+/// Missing identity still spends the UUID, but never yields a positive proof.
+pub(super) fn remember_terminal(witness: &NotOffered) -> Result<Value> {
+    let mut value = value(witness)?;
+    value["refusal_schema"] = json!(2);
+    value["status"] = json!("not_offered");
+    if let Some(binding) = outcome::binding(witness) { value["delivery_binding"] = binding; }
+    publish(witness, &value)?;
+    outcome::decode(&serde_json::to_vec(&value).map_err(|e| e.to_string())?)
+}
+
+fn publish(witness: &NotOffered, value: &Value) -> Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     if bytes.len() > refusal::BYTES {
         return Err("Pre-input refusal exceeds its bound".into());
     }

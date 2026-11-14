@@ -21,7 +21,7 @@ mod pin;
 mod point;
 mod question;
 pub(super) use admission::Wait as QuestionAdmission;
-pub(super) use point::{delivery_binding, delivery_receipt, DeliveryQuery};
+pub(super) use point::{delivery_binding, delivery_receipt, DeliveryBinding, DeliveryQuery};
 // The independently developed recovery consumer stacks on this interface.
 #[allow(unused_imports)]
 pub(crate) use question::{question_page, Coverage, QuestionReceiptPage, QuestionReceiptRow};

@@ -676,8 +676,10 @@ mod tests {
             ("// From here no possible-input receipt existed for this ID.", "// From here no receipt existed for this ID."),
             ("    if retain_refusal && typed { refusal::prepare(&witness(String::new(), false, None)).map_err(unknown)?; }\n", ""),
             ("    origin: Origin,\n    retain_refusal: bool,\n", "    origin: Origin,\n"),
-            ("remember_before_input(typed, witness(reason, false, None), retain_refusal)", "before_input(typed, witness(reason, false, None))"),
-            ("remember_before_input(typed, witness(gate.reason(), waiting, dialog), retain_refusal)", "before_input(typed, witness(gate.reason(), waiting, dialog))"),
+            ("remember_send_refusal(typed, witness(reason, false, None), retain_refusal, terminal_outcome)", "before_input(typed, witness(reason, false, None))"),
+            ("remember_send_refusal(typed, witness(gate.reason(), waiting, dialog), retain_refusal, terminal_outcome)", "before_input(typed, witness(gate.reason(), waiting, dialog))"),
+            ("    terminal_outcome: bool,\n", ""),
+            ("    if terminal_outcome {\n        if let Some(value) = outcome::duplicate(&root, name, &request, &digest) {\n            return Err(Failure::TerminalRefusal(value));\n        }\n    }\n", ""),
         ] {
             assert_eq!(original.matches(retained).count(), 1, "refusal retention projection changed");
             original = original.replacen(retained, previous, 1);

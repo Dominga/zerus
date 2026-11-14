@@ -275,6 +275,7 @@ object LaunchPresentation {
         tag.isBlank() -> "Enter a session name."
         tag != tag.trim() -> "Remove spaces at the beginning and end."
         tag.toByteArray(Charsets.UTF_8).size > 120 -> "Session name exceeds 120 UTF-8 bytes."
+        SessionNames.hasUnsafeSyntax(tag) -> SessionNames.unsafeReason
         tag.any { it == '/' || it == '\\' || it == ':' || it == '.' || it.isISOControl() } -> "Use a name without path separators, dots, colons, or control characters."
         else -> ""
     }

@@ -378,7 +378,7 @@ private val Amber = Color(0xFFFFCB7D)
                     LaunchSection("Session name") {
                         OutlinedTextField(tag,{ tag = it },Modifier.fillMaxWidth(),singleLine = true,readOnly = busy,shape = RoundedCornerShape(12.dp),
                             isError = tag.isNotEmpty() && nameError.isNotBlank(),
-                            supportingText = if(tag.isNotEmpty() && nameError.isNotBlank()) { { Text(nameError) } } else null,
+                            supportingText = if(tag.isNotEmpty() && nameError.isNotBlank()) { { Text(localizedSessionNameError(nameError)) } } else null,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }))
                     }
                 }

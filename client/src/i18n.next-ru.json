@@ -790,6 +790,7 @@
   "Mute notifications": "Отключить уведомления",
   "Name the project.": "Назовите проект.",
   "Name the team.": "Назовите команду.",
+  "Names cannot contain shell syntax or invisible formatting characters.": "Имена не могут содержать синтаксис командной оболочки или невидимые символы форматирования.",
   "Native renderer diagnostics unavailable": "Диагностика нативной отрисовки недоступна",
   "Navigation": "Навигация",
   "Needs review": "Требуется проверка",

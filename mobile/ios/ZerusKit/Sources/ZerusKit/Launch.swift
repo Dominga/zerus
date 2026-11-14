@@ -495,6 +495,7 @@ public enum LaunchPresentation {
         if tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a session name." }
         if tag != tag.trimmingCharacters(in: .whitespacesAndNewlines) { return "Remove spaces at the beginning and end." }
         if tag.utf8.count > 120 { return "Session name exceeds 120 UTF-8 bytes." }
+        if SessionNames.hasUnsafeSyntax(tag) { return SessionNames.unsafeReason }
         if tag.unicodeScalars.contains(where: { "/\\:.".unicodeScalars.contains($0) || PairingInvite.isISOControl($0) }) {
             return "Use a name without path separators, dots, colons, or control characters."
         }

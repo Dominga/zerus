@@ -1941,6 +1941,7 @@
   "Name the team.": "Назовите команду.",
   "Name: %1": "Имя: %1",
   "Names cannot contain /, : or . or control characters.": "Имена не могут содержать /, : или . или управляющие символы.",
+  "Names cannot contain shell syntax or invisible formatting characters.": "Имена не могут содержать синтаксис командной оболочки или невидимые символы форматирования.",
   "Native UI": "Интерфейс агента",
   "Native UI could not load. Use Reload to reconnect, or open it in your browser.": "Не удалось загрузить собственный пользовательский интерфейс. Используйте «Обновить», чтобы повторно подключиться, или откройте его в браузере.",
   "Native UI is unavailable while this machine is offline.": "Собственный пользовательский интерфейс недоступен, пока этот компьютер находится в автономном режиме.",

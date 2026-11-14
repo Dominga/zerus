@@ -100,6 +100,19 @@ class NativeSendOutcome(unittest.TestCase):
         self.assertEqual(self.lookup(schema=1)['status'], 'unknown')
         self.assertEqual((self.receipt.read_bytes(), self.receipt.stat().st_mtime_ns), original)
         self.assertEqual(self.fixture.received(), before)
+        # A separate explicit new UUID can send; the old negative stays spent.
+        next_request = {**self.request, 'request_id': str(uuid.uuid4()), 'text': 'Explicit new message'}
+        next_raw = json.dumps(next_request)
+        sent = self.send(next_raw)
+        self.assertEqual(sent.returncode, 0, sent.stdout + sent.stderr)
+        self.assertEqual(json.loads(sent.stdout)['status'], 'submitted')
+        self.fixture.wait_for(lambda: self.fixture.received().endswith(b'\r'))
+        sent_keys = self.fixture.received()
+        repeated = self.send(next_raw)
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertEqual(json.loads(repeated.stdout), json.loads(sent.stdout))
+        self.assertEqual(self.fixture.received(), sent_keys)
+        self.assertEqual((self.receipt.read_bytes(), self.receipt.stat().st_mtime_ns), original)
 
     def test_legacy_negative_stays_retryable_and_is_never_v2_lookup_proof(self):
         p = self.send(versioned=False)
@@ -163,13 +176,19 @@ class NativeSendOutcome(unittest.TestCase):
     def test_missing_binding_spends_the_opted_in_uuid_without_claiming_not_offered(self):
         del self.fixture.record['session_id']
         self.fixture.write_record()
-        # An invalid selected record must not be upgraded using a guessed ID.
-        self.fixture.record['session_id'] = 'not-a-session-id'
-        self.fixture.write_record()
+        # A legacy record without a durable ID must not get a guessed binding.
         p = self.send()
         self.assertNotEqual(p.returncode, 0)
         self.assertNotIn('"not_offered"', p.stdout)
+        original = self.receipt.read_bytes()
+        self.assertEqual(json.loads(original)['status'], 'not_offered')
+        self.assertNotIn('delivery_binding', json.loads(original))
         self.assertEqual(self.lookup()['status'], 'unknown')
+        self.fixture.record.update(session_id=SESSION, phase='idle')
+        self.fixture.write_record()
+        self.assertNotEqual(self.send().returncode, 0)
+        self.assertNotEqual(self.send(versioned=False).returncode, 0)
+        self.assertEqual(self.receipt.read_bytes(), original)
         self.assertEqual(self.fixture.received(), b'')
 
     def test_post_marker_failure_is_unknown_even_when_stderr_claims_not_offered(self):

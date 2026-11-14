@@ -5004,7 +5004,15 @@ request's receipt and never submits, even when no receipt exists. Only a task
 positively without floor or attempt, whose bootstrap gate is positively open
 (a member not yet known current, or the person's hold), keeps the legacy route,
 checked again there; a task that may hold a floor or attempt is never sent
-that way. A reopen of a managed task keeps the person's text as a discussion
+that way.
+
+For `unroutable`, `unverified` and `deadline`, the refusal includes a catalog
+computer label marked diagnostic beside the exact UUID when available,
+explains the offline-writer dependency, and points to
+`hgs task cutover --project P --json`. A catalog label grants no identity or
+route. Desktop Start shows the complete executor reason as its primary notice.
+
+A reopen of a managed task keeps the person's text as a discussion
 note bound to its attempt's ID, saved together with that attempt; the note is
 not queued feedback and is never delivered by itself, and only the receipt
 moves the task back to In progress. Feedback to a task In progress

@@ -6,6 +6,8 @@
 mod adoption;
 mod bootstrap;
 mod catalog;
+mod diagnostics;
+pub(crate) use diagnostics::diagnostic_machine_label;
 pub(crate) mod drive_folders;
 pub(crate) mod fence;
 pub(crate) mod drive_footprint;

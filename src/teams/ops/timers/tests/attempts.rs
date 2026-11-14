@@ -1933,3 +1933,88 @@ fn a_late_fact_rewrites_only_its_own_acceptances_item() {
         );
     }
 }
+
+/// Two acceptances of one generation (the round-4 confirmation's probe,
+/// committed in round 5): a lead's Ready acceptance, the person's reject on
+/// the Integration card while merges need the owner, and a second accept of
+/// the same report keep the node's generation. After the person's own run
+/// supersedes the latest acceptance, the older acceptance's late merge fact
+/// leaves the one supersede item unchanged; only the latest acceptance's
+/// fact rewrites it.
+#[test]
+fn two_acceptances_of_one_generation_leave_the_item_to_the_latest() {
+    const OLD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    let (mut h, lead, node, _) = handed();
+    h.report(node, "m1");
+    let generation = h.store.generation(TEAM, node).unwrap().unwrap();
+    h.run(&lead, Operation::Accept { node }).unwrap();
+    let first = h.accept_decision(node);
+    h.settings(|s| s.delegations.merge_accepted = false);
+    let card = h
+        .store
+        .waiting(200, None)
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.card)
+        .find(|card| card.kind == "integration" && card.node == Some(node))
+        .unwrap();
+    h.run(
+        &person(),
+        Operation::DecideCard {
+            card: card.seq,
+            decision: "reject".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.store.generation(TEAM, node).unwrap(), Some(generation));
+    h.settings(|s| s.delegations.merge_accepted = true);
+    h.run(&lead, Operation::Accept { node }).unwrap();
+    let second = h.accept_decision(node);
+    assert!(second > first);
+    let decisions = h.store.decisions(TEAM, 200, None).unwrap().rows;
+    for decision in [first, second] {
+        let row = decisions.iter().find(|row| row.seq == decision).unwrap();
+        assert_eq!(row.generation, generation);
+    }
+    person_review(&mut h, node, 2, "person-same-generation").unwrap();
+    let item = |h: &Harness| {
+        let items: Vec<_> = h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .collect();
+        assert_eq!(items.len(), 1);
+        (items[0].generation, items[0].text.clone())
+    };
+    let original = item(&h);
+    assert_eq!(original.0, generation);
+    assert!(original.1.contains("nothing further will be merged"));
+    h.run(
+        &service(),
+        Operation::RecordIntegration {
+            node,
+            decision: first,
+            commit: OLD.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(item(&h), original, "the older acceptance rewrote the item");
+    h.run(
+        &service(),
+        Operation::RecordIntegration {
+            node,
+            decision: second,
+            commit: NEW.into(),
+        },
+    )
+    .unwrap();
+    let latest = item(&h);
+    assert_eq!(latest.0, generation);
+    assert!(latest.1.contains(&format!("already been merged as {NEW}")));
+    assert!(!latest.1.contains(OLD), "{}", latest.1);
+}

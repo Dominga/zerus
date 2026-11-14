@@ -750,3 +750,41 @@ fn the_commands_own_other_refusal_ends_the_fact() {
     assert!(open_cards(&h).is_empty(), "the card stayed after the fact ended");
     let _ = node;
 }
+
+#[test]
+fn the_real_project_limit_card_and_item_keep_list_stuck_after_acknowledgement() {
+    let mut h = Harness::new();
+    h.bind("m1");
+    h.bind("m2");
+    h.add(&person(), 1);
+    let machine = team(&h).home;
+    let mut a = Runtime::open(h.temp.path(), &machine).unwrap();
+    let mut p = ProjectRefused {
+        reason: "project_agents_other: This project allows agents to start tasks only in their own session.".into(),
+        calls: 0, submit_now: false, uncertain: false, not_started: false,
+    };
+    a.tick(&mut h.store, &mut p, TEAM, 1000, false).unwrap();
+    let rows = h.store.teams(1, None).unwrap().rows;
+    assert!(h.store.team_progress(&rows).unwrap()[TEAM].stuck);
+    let state = h.temp.path().to_path_buf();
+    let item = || {
+        crate::desktop::teams::blocked_service_teams(&state, &[TEAM], &["project_limit"])
+            .unwrap()
+            .contains(TEAM)
+    };
+    assert!(item());
+    let seq = open_cards(&h)[0].seq;
+    h.run(
+        &person(),
+        Operation::DecideCard {
+            card: seq,
+            decision: "acknowledged".into(),
+        },
+    )
+    .unwrap();
+    assert!(!h.store.team_progress(&rows).unwrap()[TEAM].stuck);
+    assert!(
+        item(),
+        "the actual service fact remains after its card is acknowledged"
+    );
+}

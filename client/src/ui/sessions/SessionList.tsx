@@ -359,6 +359,12 @@ function selectSession(key: string, e?: MouseEvent) {
 }
 
 
+/** The lead strip opens its existing session directly on the Team tab. */
+export function openSessionTeam(key: string) {
+  selectSession(key);
+  setDetailTab("team");
+}
+
 type ScopeChoice = { id: string; label: string; count: number; provider?: string; bindings?: string[] };
 type ScopeLabel = "machines" | "projects" | "accounts";
 const SCOPE_TEXT: Record<ScopeLabel, { choose: string; all: string; filter: string; selected: string; any: string }> = {
@@ -998,9 +1004,9 @@ function ListRow(props: { id: string; list: RowSource }) {
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
-            <Show when={!v().compactRow} fallback={<CompactCard agentTeamCollapsed={v().agentTeamCollapsed} agentTeamSummary={v().agentTeamSummary} agentTeamName={v().agentTeamName} agentTeamRole={v().agentTeamRole} session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
+            <Show when={!v().compactRow} fallback={<CompactCard onOpenTeam={() => openSessionTeam(v().session.key)} agentTeamSummary={v().agentTeamSummary} agentTeamName={v().agentTeamName} agentTeamRole={v().agentTeamRole} session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
               team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
-              <SessionCard agentTeamCollapsed={v().agentTeamCollapsed} agentTeamSummary={v().agentTeamSummary} agentTeamName={v().agentTeamName} agentTeamRole={v().agentTeamRole} session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
+              <SessionCard onOpenTeam={() => openSessionTeam(v().session.key)} agentTeamSummary={v().agentTeamSummary} agentTeamName={v().agentTeamName} agentTeamRole={v().agentTeamRole} session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
                 team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />

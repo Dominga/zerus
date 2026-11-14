@@ -111,7 +111,7 @@ fn list_progress_is_written_by_real_queue_archive_and_question_operations() {
 }
 
 #[test]
-fn ordinary_owner_cards_do_not_establish_stuck_and_closing_a_blocker_clears_it() {
+fn ordinary_and_unemitted_owner_cards_do_not_establish_stuck() {
     let h = queue();
     for kind in [
         "note",
@@ -136,26 +136,25 @@ fn ordinary_owner_cards_do_not_establish_stuck_and_closing_a_blocker_clears_it()
         );
     }
     assert_eq!(summary(&h)["stuck"], false);
-    for kind in crate::teams::store::STUCK_KINDS {
-        let opened = h.apply(
+    // The actual blocking card writers are pinned in desktop::teams tests.
+    // Unemitted historical names must not manufacture a blocker.
+    for kind in [
+        "member_unreadable",
+        "handout_uncertain",
+        "launch_capacity",
+        "project_limit",
+    ] {
+        h.apply(
             &service(),
             Operation::OpenCard {
-                kind: (*kind).into(),
-                text: "An explicit blocker.".into(),
+                kind: kind.into(),
+                text: "A non-blocking card.".into(),
                 node: None,
                 decisions: None,
                 parameters: None,
             },
         );
-        assert_eq!(summary(&h)["stuck"], true, "{kind}");
-        h.apply(
-            &person(),
-            Operation::DecideCard {
-                card: opened.item.unwrap(),
-                decision: "acknowledged".into(),
-            },
-        );
-        assert_eq!(summary(&h)["stuck"], false, "closed {kind}");
+        assert_eq!(summary(&h)["stuck"], false, "{kind}");
     }
 }
 
@@ -173,7 +172,7 @@ fn regenerate_progress_fixture() {
 #[test]
 fn archived_task_counts_are_capped_without_losing_the_lower_bound() {
     let h = queue();
-    for n in 1..=1001 {
+    for n in 1..=1000 {
         let node = h.add(n);
         h.observe(node, TaskStage::Done);
     }
@@ -198,6 +197,13 @@ fn archived_task_counts_are_capped_without_losing_the_lower_bound() {
         db.progress_handler(0, None::<fn() -> bool>);
         (serde_json::to_value(p).unwrap(), steps.load(Relaxed))
     };
+    let (exact, _) = measure();
+    assert_eq!(exact["tasks"], 1000);
+    assert_eq!(exact["accepted"], 1000);
+    assert_eq!(exact["tasks_more"], false);
+    assert_eq!(exact["accepted_more"], false);
+    let node = h.add(1001);
+    h.observe(node, TaskStage::Done);
     let (p, before) = measure();
     assert_eq!(p["tasks"], 1000);
     assert_eq!(p["accepted"], 1000);

@@ -5970,7 +5970,19 @@ the template as the catalog holds it.
 
 **Replies.** The read shapes are pinned in `crates/team-plan/fixtures/`:
 `cli-list.json` (`list`: `{ok, actor, rows, next}`, each row
-`{id, project, name, status, lead, home, revision, lead_session}`),
+`{id, project, name, status, lead, home, revision, lead_session, members, progress}`),
+where `progress` is a bounded list-page projection: `tasks` (non-cancelled task
+nodes, live and archived), `accepted` (live and archived accepted tasks),
+`questions` (open `question:*` member inbox items), `members` (active/paused
+members plus the lead, counted once even before launch), `phases`,
+`phases_done`, and `stuck`. Internal stage nodes count in neither task count.
+Each count stops at 1000 and has a corresponding `<field>_more` boolean; true
+means a lower bound, displayed as `1000+` without a percentage. Exactly 1000
+keeps the flag false. `stuck` means an open `launch_blocked`, `launch_uncertain`,
+`silent_lead` or `team_actor_blocked` card, or a `project_limit` service item.
+Questions, ordinary approvals, `launch_capacity` cards and delivery-uncertain
+inbox items alone do not establish Stuck. The fields arrive with the bounded
+list read, without extra per-team reads; an older CLI may omit `progress`.
 `cli-waiting.json` (`waiting`: open cards of every team, oldest first, each
 with its `team`), `cli-status.json` (`status`: `{ok, actor, team, members,
 counts, service_running, health, service_items}`; the team without its

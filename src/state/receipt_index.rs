@@ -1905,11 +1905,28 @@ pub(in crate::state) fn request_committed_reconciliation() {
 /// Preserve the authoritative atomic write and its error exactly. Index failure
 /// never turns a possibly delivered send into a refusal or allows its replay.
 pub(super) fn persist(path: &Path, value: &Value) -> Result<()> {
+    persist_using(path, value, || atomic(path, &value.to_string()))
+}
+
+/// Replace a receipt through the caller's original pinned directory. Windows
+/// cannot reopen that directory for MoveFileEx write access while its custody
+/// handles deny write/delete sharing. Keep the existing index observation.
+pub(super) fn persist_pinned(
+    directory: &repositories::directory::Directory,
+    filename: &str,
+    value: &Value,
+) -> Result<()> {
+    persist_using(&directory.path.join(filename), value, || {
+        directory.replace_file(filename, value.to_string().as_bytes())
+    })
+}
+
+fn persist_using(path: &Path, value: &Value, publish: impl FnOnce() -> Result<()>) -> Result<()> {
     let source = receipt_source(path);
     let before = source
         .and_then(|_| path.parent())
         .and_then(|p| migration::stamp(p).ok());
-    atomic(path, &value.to_string())?;
+    publish()?;
     if let Some(source) = source {
         let remember = (|| -> Result<()> {
             let parent = path.parent().ok_or("Invalid receipt path")?;

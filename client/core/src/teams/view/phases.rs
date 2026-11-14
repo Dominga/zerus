@@ -109,6 +109,19 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
     let (out, unknown): (DraftRead, Vec<String>) =
         crate::teams::tolerant::read_noting(data.clone()).map_err(|e| e.to_string())?;
     let ids: BTreeSet<_> = out.nodes.iter().map(|n| n.id).collect();
+    if out.nodes.iter().any(|n| {
+        n.title.len() > 200
+            || n.text.len() > 16_384
+            || n.criteria.is_empty()
+            || n.criteria.len() > 32
+            || n.criteria.iter().any(|c| c.len() > 2048)
+            || n.deps.len() > 200
+            || n.writes.len() > 200
+            || n.writes.iter().any(|p| p.len() > 4096)
+            || n.kind == zerus_team_plan::NodeKind::Stage
+    }) {
+        return Err("A draft task exceeds its field bounds or carries runtime state.".into());
+    }
     if out.phase.n != wanted
         || ids.len() != out.nodes.len()
         || ids.contains(&0)
@@ -134,3 +147,6 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
         unknown_fields: !unknown.is_empty(),
     })
 }
+
+#[cfg(test)]
+mod tests;

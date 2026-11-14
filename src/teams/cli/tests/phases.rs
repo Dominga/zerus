@@ -13,7 +13,7 @@ fn input() -> Value {
         {"id":2,"title":"Use the foundation","text":"Use the new contract.","criteria":["The feature tests pass"],"role":"developer","pipeline":"reviewed","deps":[{"node":1,"kind":"hard"}],"writes":["src/feature.rs"]}
     ]})
 }
-fn produced() -> (Value, Value) {
+fn produced() -> (Value, Value, Value) {
     let h = seed();
     let (v,exit)=h.cli(&Caller::Person,"submit-draft-phase",&json!({"request_id":uid(700),"team":TEAM,"expected_revision":h.revision(),"phase":1,"draft":input()}).to_string());
     assert_eq!(exit, 0, "{v}");
@@ -25,7 +25,12 @@ fn produced() -> (Value, Value) {
         "",
     );
     assert_eq!(e, 0, "{detail}");
-    (list, detail)
+    let (status, e) = h.cli(&Caller::Person, &format!("status --team {TEAM}"), "");
+    assert_eq!(e, 0, "{status}");
+    let (queue, e) = h.cli(&Caller::Person, &format!("queue --team {TEAM}"), "");
+    assert_eq!(e, 0, "{queue}");
+    let context = json!({"phases":list,"draft":detail,"status":status,"queue":queue});
+    (list, detail, context)
 }
 
 #[test]
@@ -86,7 +91,7 @@ fn phase_reads_and_edits_use_the_real_writer_and_refuse_members() {
 
 #[test]
 fn phase_fixtures_equal_the_cli_output_of_the_product_writers() {
-    let (list, detail) = produced();
+    let (list, detail, context) = produced();
     assert_eq!(
         list,
         serde_json::from_str::<Value>(include_str!(
@@ -101,13 +106,24 @@ fn phase_fixtures_equal_the_cli_output_of_the_product_writers() {
         ))
         .unwrap()
     );
+    assert_eq!(
+        context,
+        serde_json::from_str::<Value>(include_str!(
+            "../../../../crates/team-plan/fixtures/cli-phase-context.json"
+        ))
+        .unwrap()
+    );
 }
 
 #[test]
 #[ignore = "writes only the new phase fixtures from the real writers"]
 fn regenerate_phase_draft_fixtures() {
-    let (list, detail) = produced();
-    for (name, v) in [("cli-phases.json", list), ("cli-phase-draft.json", detail)] {
+    let (list, detail, context) = produced();
+    for (name, v) in [
+        ("cli-phases.json", list),
+        ("cli-phase-draft.json", detail),
+        ("cli-phase-context.json", context),
+    ] {
         std::fs::write(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("crates/team-plan/fixtures")

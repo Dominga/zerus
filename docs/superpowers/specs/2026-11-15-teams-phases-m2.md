@@ -1,7 +1,8 @@
 # Teams M2: planned phases on the existing engine
 
-Design note for `zerus-63rru.161`, 2026-11-15. Proposed slices await the Teams
-coordinator's decision; this note does not authorize their implementation.
+Design note for `zerus-63rru.161`, 2026-11-15. The Teams coordinator accepted
+the design at `54178e5a9` and authorized slices 1 through 5 in order, each in
+its own PR and review. Slices 6 and 7 are deferred.
 The governing design is [Agent Teams](2026-11-11-agent-teams-design.md), M2;
 the authority and request contract is [the reference](../../reference.md#agent-teams).
 
@@ -68,7 +69,9 @@ re-reading the schema under the writer lock. Because an older actor does not
 advance M2 phase gates, executable planned work needs a private Teams schema
 fence, not merely extra columns that an older actor ignores. Pin old/new
 opens, an already-open older handle and spawn-admission races before enabling
-publication. A newer Teams store must be refused by an older engine before
+publication. Slice 1's additive draft companions have no executable effect;
+the fence belongs to the first executable slice, not the draft-only slice.
+A newer Teams store must be refused by an older engine before
 it can cause a planned effect; no desktop/task-document schema bump is needed.
 
 ## Operations and authority
@@ -165,8 +168,8 @@ for each copied file from `git log -1 --format='%an <%ae>'` on the pinned ref.
 
 ## Smallest safe slices, proposed order
 
-Each row is independently reviewable. Only slice 1 should be implemented
-after the coordinator chooses it; this list is specification, not a task queue.
+Each row is independently reviewable. The chosen sequence is slices 1 through
+5, one PR per slice; slices 6 and 7 remain deferred follow-up work.
 
 | Slice | Ops and authority | Tests through product writers | UI delivered |
 |---|---|---|---|
@@ -175,7 +178,7 @@ after the coordinator chooses it; this list is specification, not a task queue.
 | 3. Approval and review | `ApprovePhase`, `RejectPhase`, `UndoRejectPhase`; service publication facts and Auto path, as above. | Real named-task writer, crash before/after every reserve/save/bind, lost reply, duplicate recovery, reject/undo/rework races, stale approvals, project limits/cutover; no partial hand-out and no duplicate task UUID. Initial approval releases members only after publication. | Review diff/counts/criteria and member confirmation, Approve, Reject with comment, Undo, publication progress and Waiting for you links. |
 | 4. Acceptance and rework | `ReconcilePhase`, `AcceptPhase`, `SendBackPhase`; service/person/delegated lead roles as above. | Archived accepted nodes, unfinished stages/merge, Crit, cancellation, empty queue, repeated passes, lost reply and hard/soft authority matrix. Send-back alone never releases an acceptance gate. | Awaiting acceptance header, Accept phase, Send back with comment; corrections visible separately from already accepted work. |
 | 5. Phase controls | Barrier, pause/resume, move and acceptance-policy ops with the authorities above. | Kernel + real hand-out admission after reorder/pause/barrier races; no hand-out after pause wins; started work untouched; lead cannot remove person's pause or hard gate; stable IDs and stale moves. | Header More menu, pause owner/reason, real blocked explanation, Move earlier/later and gate choice. |
-| 6. Logged approved-plan edits | Person/lead propose bounded unstarted edits; person/authorized lead commits within goal, reversible until start. Any task-document edit goes through its product writer and recorded effect. | Writer-produced before/after generations, task edits, start/reservation versus edit/undo races, lost reply and supersession. No SQLite-only task rewrite or edit of work already started. | Extend draft editor to explicit change review/undo for eligible approved work. Keep busy/started fields read-only. |
+| 6. Logged approved-plan edits — **DEFERRED** | Person/lead propose bounded unstarted edits; person/authorized lead commits within goal, reversible until start. Any task-document edit goes through its product writer and recorded effect. | Writer-produced before/after generations, task edits, start/reservation versus edit/undo races, lost reply and supersession. No SQLite-only task rewrite or edit of work already started. | Extend draft editor to explicit change review/undo for eligible approved work. Keep busy/started fields read-only. |
 | 7. Dynamic mode and intake — **DEFERRED** | Person-only `SetIntakePhase` changes one authoritative intake target; `SetPhaseMode` shares that transaction. Lead may propose a card, never switch it. Requires a separately approved mapping of `kind`, identity and queue routing. | Two phases can never be open intake simultaneously; all CLI/GUI/remote intake writers use the same target, replay/reorder/concurrent switches/old readers and empty-Free-phase lifetime covered. | Standard/Free control with confirmation and truthful capability/blocked reason. Until this slice, planned phases are Standard and phase 0 is the Free queue. |
 
 For each implementation slice, run the scoped root/store/actor and team-plan

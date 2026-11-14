@@ -35,6 +35,7 @@
 //! uncertain intents are never evicted, and the table refuses a new intent
 //! when every entry is unresolved.
 pub mod input;
+mod drafts;
 pub mod intents;
 pub mod types;
 pub mod wire;

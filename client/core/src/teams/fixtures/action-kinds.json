@@ -7,6 +7,7 @@
   "cancel",
   "create",
   "decide",
+  "edit_draft_phase",
   "hold",
   "pause",
   "pause_member",
@@ -20,5 +21,6 @@
   "set_deps",
   "settings",
   "stop",
-  "stop_member"
+  "stop_member",
+  "submit_draft_phase"
 ]

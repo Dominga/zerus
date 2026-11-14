@@ -3,6 +3,21 @@ use super::*;
 use crate::teams::view::phases::{self, PhaseFailure};
 
 impl TeamsModel {
+    /// An old pane's delayed cleanup cannot close its successor.
+    pub fn close_phases(
+        &mut self,
+        team: &str,
+        expected: Option<u64>,
+        now: Instant,
+    ) -> Option<(u64, Vec<(String, TeamsUpdate)>)> {
+        if self.watched() != Some(team) {
+            return None;
+        }
+        if expected != Some(self.phase_epoch) {
+            return Some((self.phase_epoch, Vec::new()));
+        }
+        self.follow_phases(team, None, false, now)
+    }
     /// Each explicit follow has an epoch, so a closed/reopened pane cannot
     /// accept an old read even when it selects the same team and phase again.
     pub fn follow_phases(

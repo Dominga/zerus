@@ -57,6 +57,8 @@ impl TeamAction {
     /// The operation: `hgs team <op> --json`.
     pub fn op(&self) -> &'static str {
         match self {
+            Self::SubmitDraftPhase { .. } => "submit-draft-phase",
+            Self::EditDraftPhase { .. } => "edit-draft-phase",
             Self::Create { .. } => "create",
             Self::Pause {} => "pause",
             Self::Resume {} => "resume",
@@ -90,6 +92,12 @@ impl TeamAction {
     /// The fields the operation sends besides the envelope's.
     pub fn input(&self) -> Map<String, Value> {
         let value = match self {
+            Self::SubmitDraftPhase { phase, draft } => json!({"phase":phase,"draft":draft}),
+            Self::EditDraftPhase {
+                phase,
+                generation,
+                draft,
+            } => json!({"phase":phase,"generation":generation,"draft":draft}),
             Self::Create {
                 project,
                 name,
@@ -158,6 +166,17 @@ impl TeamAction {
     /// Checks what the call sends before anything runs.
     pub fn check(&self) -> Result<(), String> {
         match self {
+            Self::SubmitDraftPhase { phase, draft } => super::drafts::check(*phase, draft),
+            Self::EditDraftPhase {
+                phase,
+                generation,
+                draft,
+            } => {
+                if *generation == 0 {
+                    return Err("The draft's generation is not known; read it again.".into());
+                }
+                super::drafts::check(*phase, draft)
+            }
             Self::Create { .. } => check_create(self),
             Self::Pause {}
             | Self::Resume {}

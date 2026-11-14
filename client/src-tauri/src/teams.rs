@@ -153,9 +153,20 @@ pub fn teams_page(
 /// Selects the optional phase pane on the existing watched-team reader.
 /// Its epoch lets the window refuse a late pane from an earlier selection.
 #[tauri::command]
-pub fn teams_phases(teams: State<'_, Teams>, team: String, phase: Option<u32>, enabled: bool) -> Result<u64, String> {
-    if !valid_team(&team) { return Err("Not a team id.".into()); }
-    teams.poller().as_ref().and_then(|poller| poller.phases(&team, phase, enabled))
+pub fn teams_phases(
+    teams: State<'_, Teams>,
+    team: String,
+    phase: Option<u32>,
+    enabled: bool,
+    expected_epoch: Option<u64>,
+) -> Result<u64, String> {
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    teams
+        .poller()
+        .as_ref()
+        .and_then(|poller| poller.phases(&team, phase, enabled, expected_epoch))
         .ok_or_else(|| "This team is not followed.".into())
 }
 

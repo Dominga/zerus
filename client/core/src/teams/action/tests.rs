@@ -1373,8 +1373,12 @@ fn the_action_kinds_are_the_shared_list() {
             effort: String::new(),
             account: Default::default(),
         },
-        TeamAction::RenameTeam { name: "Team".into() },
-        TeamAction::SetGoal { goal: String::new() },
+        TeamAction::RenameTeam {
+            name: "Team".into(),
+        },
+        TeamAction::SetGoal {
+            goal: String::new(),
+        },
         create(None, Integration::Branch).action,
         TeamAction::Pause {},
         TeamAction::Resume {},

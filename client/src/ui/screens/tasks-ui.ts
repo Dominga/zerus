@@ -1,5 +1,6 @@
 import type { Session } from "../sessions/types";
 import { tr, trNoop } from "../../i18n";
+import { savedExecution, type SavedExecution } from "./task-execution";
 
 export const STAGES = ["review", "active", "todo", "backlog", "done"] as const;
 export type Stage = typeof STAGES[number];
@@ -17,6 +18,7 @@ export interface Task {
   uuid: string; id: string; ref: string; title: string; text: string; stage: string; summary: string; cancelReason: string; historyRevision: string; dispatchId: string;
   createdAt: number; stageAt: number; cancelledAt: number; queue: number; writable: boolean;
   target: TaskRef; executor: TaskRef; author: TaskRef; targetKind: string; worker: string; attachments: number;
+  execution?: SavedExecution;
 }
 const reference = (v: unknown): TaskRef => {
   const o = object(v);
@@ -24,12 +26,13 @@ const reference = (v: unknown): TaskRef => {
 };
 export function taskItem(value: unknown, queue = 0): Task {
   const t = object(value), target = object(t.target), author = object(t.author);
+  const execution = savedExecution(t.execution);
   return { uuid: text(t.uuid), id: text(t.id), ref: text(t.ref), title: text(t.title) || text(t.text).split("\n", 1)[0],
     text: text(t.text), stage: text(t.stage), summary: text(t.summary), cancelReason: text(t.cancel_reason), historyRevision: text(t.history_revision), dispatchId: text(t.dispatch_id),
     createdAt: number(t.created_at), stageAt: number(t.stage_at), cancelledAt: number(t.cancelled_at), queue, writable: t.writable !== false,
     target: reference(target.kind === "any" ? undefined : target.parent ?? target), executor: reference(t.session),
     author: reference(author.kind === "agent" ? author : undefined), targetKind: text(target.kind), worker: text(object(t.worker).name),
-    attachments: Array.isArray(t.attachments) ? t.attachments.length : 0 };
+    attachments: Array.isArray(t.attachments) ? t.attachments.length : 0, ...(execution ? { execution } : {}) };
 }
 export const sessionIdentity = (s: Session) => s.launchId ? `launch_id:${s.launchId}` : s.runId ? `run_id:${s.runId}` : "";
 export const sessionLabel = (r: TaskRef) => {

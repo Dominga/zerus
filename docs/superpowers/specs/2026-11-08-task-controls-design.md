@@ -442,6 +442,16 @@ Person proof. It supplies no live runtime freshness or executor queue position;
 the existing project To do order keeps its separate meaning. There is no new
 renderer action, mobile binding, dispatch admission or activation in this leaf.
 
+The desktop inspector reuses that decoder in its selected-task presentation and
+renders a **Saved execution** section. Submission stays begin-unconfirmed;
+recorded begin, pause and ready facts never claim current native work. It shows
+the saved attempt/generation, requirement revisions, executor reference and
+timestamps, retaining conflict and unknown/unexplained warnings. Failed reads
+mark retained evidence as stale. Absent or unsupported data stays unavailable;
+JavaScript-unsafe integers are refused rather than rounded. Live state and the
+executor queue remain explicitly unavailable. No controls, polling, mobile ABI
+or executor-queue storage are added by this renderer leaf.
+
 ### Native and activation controls
 
 Record controls cover lazy/no-op storage, exact identities and slot CAS,

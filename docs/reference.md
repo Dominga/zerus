@@ -2011,6 +2011,20 @@ activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
 reasoning and system instructions are excluded.
 
+The unindexed `hgs search --query TEXT` scan and the indexed search's fallback
+bound discovery before loading histories: at most 2,000 directory entries,
+500 record reads and 4 MiB of raw record bytes, with a 500 ms discovery deadline.
+Large shell-job payloads count against that byte budget but are discarded while
+decoding search metadata. Directory enumeration rotates across current bindings,
+ID-layout sessions, archives and DeepSeek bindings instead of collecting an
+entire inventory. Results prefer recent records within the admitted subset;
+they do not imply the globally newest matches when discovery is incomplete.
+The reply then has `truncated: true` and `discovery.complete: false`, so the UI
+keeps **Limited history searched**. `--indexed` retains its separate paged index
+coverage and cursor contract. Discovery bytes also reduce the existing total
+history-read budget. This display-only scan never replaces a complete canonical
+inventory used for lifecycle, cleanup, caller proof or other authority decisions.
+
 **New reply** stays unread until its latest result is visible in an active window
 or an attached Terminal at the bottom. Background windows and old search results
 do not clear it. Read state is kept on the session's host: a reply or request

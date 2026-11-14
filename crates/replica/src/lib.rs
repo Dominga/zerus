@@ -16,7 +16,8 @@ mod sync;
 mod task;
 
 pub use attachment::{
-    TaskAttachment, MAX_ATTACHMENT, MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL, TASK_SCHEMA,
+    check_attachments as validate_attachments, TaskAttachment, MAX_ATTACHMENT, MAX_ATTACHMENTS,
+    MAX_ATTACHMENT_TOTAL, TASK_SCHEMA,
 };
 
 /// The largest serialized task document the phone can assemble: one current

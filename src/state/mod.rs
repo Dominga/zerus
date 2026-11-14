@@ -47,6 +47,8 @@ pub(crate) use input::dialog_clause;
 // Its only callers are the Teams actor's tests, which run on Linux and macOS.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) mod listing_fixture;
+#[cfg(all(test, unix))]
+pub(crate) mod fresh_member_fixture;
 pub(crate) use input::task_refusal;
 pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 // The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its

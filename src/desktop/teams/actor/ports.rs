@@ -179,6 +179,8 @@ pub(in crate::desktop::teams) enum Availability {
 /// while it is otherwise free, or why its binding names no current run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop::teams) enum Fact {
+    /// A bound launch has not yet passed its native first-send gate.
+    FirstMessage,
     /// `process_work.count`: the process table could not be verified.
     Background,
     /// `subagent_active_count`: no hook event has reported it yet.

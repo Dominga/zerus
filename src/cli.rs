@@ -130,6 +130,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
+       hgs [@host] send <session> --delivery-outcome-v2 --json   opt in to an exact terminal not-offered outcome
        hgs send <codex session> --observe --json   read whether a send to this computer's Codex session would be taken now, changing nothing
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
@@ -237,6 +238,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        session-notifications-v1
        session-keep-warm-v1
        delivery-receipt-v1
+       native-send-outcome-v2
        session-question-routing-v1
        session-question-routing-v2
        question-route-person-v1

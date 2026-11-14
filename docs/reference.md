@@ -2261,7 +2261,7 @@ malformed or unsupported native IDs remain unknown and are never exposed as deli
 A verified submitted original returns body-free metadata, its submission time,
 queue flag and an exact native message ID only when the original records one.
 This proves admission to the original input path, not completion of agent work.
-Every other readable outcome is `status: unknown` with a bounded reason. Missing,
+In the default schema 1, every other readable outcome is `status: unknown` with a bounded reason. Missing,
 corrupt, oversized, pending, unbound or mismatched evidence never means Not sent
 and never authorizes replay. New sends record their immutable machine/session
 binding before delivery; older receipts without that binding stay unknown even
@@ -2275,6 +2275,35 @@ state stays missing. Its existing computer-identity check is read-only too.
 The `delivery-receipt-v1` capability marker gates remote forwarding to prevent an
 older CLI from treating the command as a launch. This CLI operation is the first
 part of mobile ordinary-send recovery; connector and phone support ship separately.
+
+The `native-send-outcome-v2` capability advertises an opt-in terminal refusal for
+ordinary Claude, Codex and Kimi sends:
+`hgs send SESSION --delivery-outcome-v2 --json`. A live `NotOffered` witness under
+the original native input lock, before any settings key, input marker or payload,
+can publish `refusal_schema: 2`, `status: not_offered` in the same private input
+receipt store. Its machine, durable session and provider binding comes from the
+exact selected record under that lock. A missing binding leaves an unknown
+outcome and a spent UUID. No other error or receipt absence establishes this proof.
+
+An exact positively bound refusal prints a schema-2 JSON outcome on stdout while
+retaining exit status 1. It carries `proof: native_input_lock`, `request_id`,
+`name`, `machine_id`, `session_id`, `run_id`, `conversation_id`, `provider`, the
+unchanged raw-stdin SHA-256 as `native_digest`, and a bounded `reason`. Submitted
+sends retain their existing successful receipt shape. Exit codes and stderr
+sentences carry no negative proof. This opt-in terminal negative spends its UUID:
+an exact opt-in duplicate returns the original outcome without keys or writes,
+and an ordinary legacy send cannot re-admit it. A person can edit or discard the
+kept message and make a separate explicit send with a new UUID. Ordinary sends
+without the option retain today's retryable `refused_before_input` schema.
+
+The same read-only delivery lookup accepts optional `schema: 2`. An exact
+terminal negative returns schema 2 and `status: not_offered` with its closed
+proof and original bindings; `request_id` identifies the read and
+`message_request_id` identifies the send. It reads at most 8 KiB for the negative
+form and never upgrades an old retryable refusal. Unsupported, corrupt, missing,
+unbound, changed or possibly offered evidence stays unknown. The default schema-1
+lookup remains unchanged. Connector and phone adoption of this mode ships in
+separate compatible slices; this CLI contract alone changes no mobile state.
 
 Recent attachment delivery projection uses the private, rebuildable
 `delivery-receipts-v1.sqlite3` locator in the state directory. A refresh reads

@@ -117,14 +117,14 @@ pub(super) fn binding(name: &str) -> Result<Value> { PROVIDER.read(name) }
 pub(super) fn read_id(id: &str) -> Result<Value> { PROVIDER.read_id(id) }
 /// Saves the binding, then the identity its hosted tool calls carry
 /// (`shell_identity`). Every path that starts a run ends here, so the file
-/// names the run this save established. A file that cannot be written
-/// leaves that session's tool calls without session markers, never with
-/// another session's, and is reported without undoing the saved binding.
+/// normally names the run this save established. A failed refresh is reported
+/// without undoing the binding. Cleanup may also fail, leaving stale session
+/// markers that the hosted caller proof checks against the saved binding.
 pub(super) fn save(record: &mut Value) -> Result<()> {
     PROVIDER.save(record)?;
     #[cfg(unix)]
     if let Err(error) = shell_identity::write(record) {
-        eprintln!("hgs: {}'s tool calls carry no session markers until its identity can be written: {error}", string(record, "name"));
+        eprintln!("hgs: {}'s identity could not be refreshed; tool calls may carry stale or missing session markers: {error}", string(record, "name"));
     }
     Ok(())
 }

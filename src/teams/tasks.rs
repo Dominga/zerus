@@ -47,6 +47,17 @@ fn request(store: &Store, team: &str, operation: Operation) -> Result<Request> {
         operation,
     })
 }
+/// The task's project store, as the service's observation opens it: `observe`
+/// waits for the project lock; a bounded reader gives up after `wait`.
+fn project(state: &Path, task: &TaskRef, wait: Option<std::time::Duration>) -> Result<ProjectStore> {
+    let root = state.join("replica");
+    match wait {
+        None => ProjectStore::open(&root, &task.project).map_err(storage),
+        Some(wait) => ProjectStore::open_within(&root, &task.project, wait)
+            .map_err(storage)?
+            .ok_or_else(|| storage("Task store is busy.")),
+    }
+}
 fn load(store: &ProjectStore, uuid: &str) -> Result<TaskDoc> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     store
@@ -150,7 +161,7 @@ pub(crate) fn observe(state: &Path, task: &TaskRef) -> Result<()> {
     if !super::enabled(state) {
         return Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."));
     }
-    let tasks = ProjectStore::open(&state.join("replica"), &task.project).map_err(storage)?;
+    let tasks = project(state, task, None)?;
     let document = load(&tasks, &task.uuid)?;
     #[cfg(test)]
     observe_pause();
@@ -159,6 +170,26 @@ pub(crate) fn observe(state: &Path, task: &TaskRef) -> Result<()> {
         record(&mut store, &team, node, &document)?;
     }
     Ok(())
+}
+
+/// The revision that the service's ObserveTask would carry for the task now
+/// (zerus-63rru.37 round 4): the same project store, complete load and
+/// observation as `observe`, recording nothing. Native merge admission
+/// compares it with the revision the Teams store applied for the node. The
+/// project lock is waited for no longer than `wait`; a busy, missing or
+/// unreadable task is an error, never a revision. Its one caller, the
+/// desktop Teams actor, runs only on Linux and macOS.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) fn current_revision(
+    state: &Path,
+    task: &TaskRef,
+    team: &str,
+    home: &str,
+    wait: std::time::Duration,
+) -> Result<String> {
+    let tasks = project(state, task, Some(wait))?;
+    let document = load(&tasks, &task.uuid)?;
+    Ok(observation(&document, team, home)?.revision)
 }
 
 #[cfg(test)]

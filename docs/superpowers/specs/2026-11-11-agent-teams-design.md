@@ -559,6 +559,14 @@ the item says it had already been merged, with the commit when known. A task
 whose current attempt is the node's own keeps the ordinary finish and merge
 path.
 
+The integration branch is written only for the node's latest decision, and
+only while the team store has applied the accepted task's current state. Merge
+admission reads the task's current revision through the reader that builds the
+service's observation, before and again at the ref update, and refuses unless
+the node's applied revision is the same. A failed observation, its supersede
+included, therefore holds the merge until an observation applies; a missing,
+unreadable or busy task admits nothing.
+
 ## Pipelines
 
 A pipeline says what happens between a member's report and the end of a task.

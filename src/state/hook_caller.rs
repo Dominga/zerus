@@ -214,6 +214,7 @@ impl Caller {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn recheck(&mut self, record: &Value) -> Result<()> {
         self.recheck_with(record, process_alive)
     }

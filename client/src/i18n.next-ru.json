@@ -1319,6 +1319,7 @@
   "Team": "Команда",
   "Team name": "Название команды",
   "Team service blocked": "Сервис команды заблокирован",
+  "Team: %1": "Команда: %1",
   "Teams are off on this computer.": "Команды на этом компьютере выключены.",
   "Teams on this computer stop being served. Nothing is deleted.": "Команды на этом компьютере перестают обслуживаться. Ничего не удаляется.",
   "Teams read failed: %1": "Не удалось прочитать команды: %1",

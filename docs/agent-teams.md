@@ -140,11 +140,15 @@ branches are refused before creation if an existing Git ref is equal, an ancesto
 or a descendant; the reason names both refs. A team created before this fix whose
 lead shows "Worktree creation refused" is archived and created again.
 
-With the preview on, Sessions groups a team under its name, with the lead first
-and the other members ordered by role and member ID. Each row shows its role.
+With the preview on, a team's members appear as ordinary child sessions beneath
+the lead, ordered by role and member ID. The usual children chip folds or expands
+them, with the same saved fold choice as other child sessions. The lead has a
+**Team: name** tag instead of a separate heading, and each row shows its role.
 Membership uses the team roster's computer and launch/run bindings, including
 when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
+An unknown job count does not establish work; only a positive count prevents
+that waiting label.
 Ordinary sessions and the Sessions list with the preview off keep their usual
 status and grouping rules.
 
@@ -218,9 +222,11 @@ invented outcome.
 ## Sending a task to a team
 
 - On the task board, a task in Backlog or To do has **Send to team: %1** in
-  its menu, one entry per team of its project.
+  its menu, one entry per running or paused team of its project.
 - The New task form has a **Team** chooser ("Send the new task to a team's
-  queue").
+  queue"), with the same running/paused choices. Stopped, archived, finished
+  and not-yet-running teams are not offered. Identically named live teams
+  include an identifying suffix in both menus.
 - From a terminal: `hgs task add --project PROJECT --team TEAM < prompt.txt`
   for a new task, `hgs task target REF team TEAM` for an existing one.
   `--role` and `--pipeline` route the task as you send it.

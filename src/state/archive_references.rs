@@ -16,7 +16,7 @@ mod updates;
 
 const FILES: usize = 5000;
 const BYTES: usize = 32 * 1024 * 1024;
-const RECORD: usize = 1024 * 1024;
+const RECORD: usize = super::storage::ID_RECORD_BYTES as usize;
 const META: usize = 64 * 1024;
 const INVALID: &str = "Archive reference coverage is unavailable; keep the folder for review";
 
@@ -523,8 +523,8 @@ pub(super) fn visit_metadata(
 }
 /// Select through the folder index, then verify the authoritative relevant
 /// bodies before the first callback. Caller retains repository -> state locks
-/// through durable restore preparation; this function never raises the old
-/// count, body-size, aggregate byte or deadline bounds.
+/// through durable restore preparation. The per-record bound matches live
+/// records; the count, aggregate byte and deadline bounds remain unchanged.
 pub(super) fn visit_related(
     until: Instant,
     target: &Path,

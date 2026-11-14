@@ -133,6 +133,11 @@ fn a_changed_relevant_body_is_never_overwritten_by_a_preloaded_record() {
 }
 
 #[test]
+fn an_unreadable_cached_archive_cannot_authorize_binding_removal() {
+    run("cached-copy-unreadable");
+}
+
+#[test]
 fn all_archive_metadata_entry_points_enforce_the_reference_byte_bound() {
     for case in [
         "archive-metadata-normalization",
@@ -260,6 +265,50 @@ fn isolated_reference_probe() {
     }
     reconcile();
     assert_eq!(related(&target).unwrap(), vec![original.clone()]);
+    if case == "cached-copy-unreadable" {
+        let mut current = original.clone();
+        for key in ["archive_id", "archived_at", "state"] {
+            current.as_object_mut().unwrap().remove(key);
+        }
+        super::super::storage::write(&mut current).unwrap();
+        let binding = super::super::storage::record_path(string(&current, "name"));
+        let binding_before = fs::read(&binding).unwrap();
+        let mut changed_run = original.clone();
+        changed_run["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        let mut changed_conversation = original.clone();
+        changed_conversation["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
+        for bad in [
+            b"{unreadable cached archive".to_vec(),
+            changed_run.to_string().into_bytes(),
+            changed_conversation.to_string().into_bytes(),
+        ] {
+            // In-place changes do not invalidate the directory-generation
+            // fast path: the index cannot stand in for the authoritative body.
+            fs::write(&path, &bad).unwrap();
+            assert!(super::super::archive::save(&current).is_err());
+            assert_eq!(fs::read(&binding).unwrap(), binding_before);
+            assert_eq!(fs::read(&path).unwrap(), bad);
+            assert!(metadata().is_err());
+            let kept =
+                super::super::archive::reconcile_active_locked(&super::super::Snapshot::new())
+                    .unwrap();
+            assert_eq!(
+                kept.len(),
+                1,
+                "an unavailable selected copy must not block other rows"
+            );
+            assert_eq!(kept[0]["name"], current["name"]);
+            assert_eq!(fs::read(&binding).unwrap(), binding_before);
+        }
+        put(&original);
+        reconcile();
+        assert_eq!(super::super::archive::save(&current).unwrap(), id);
+        assert!(
+            !binding.exists(),
+            "a verified archive copy still admits reconciliation"
+        );
+        return;
+    }
     if case.starts_with("archive-metadata-") {
         let name = string(&original, "name");
         if case == "archive-metadata-normalization" {
@@ -294,7 +343,7 @@ fn isolated_reference_probe() {
             fs::rename(&path, &retained).unwrap();
             std::os::unix::fs::symlink(&retained, &path).unwrap();
             assert!(super::super::archive::read_archive(name, id).is_err());
-            assert!(super::super::archive::records().is_err());
+            assert!(super::super::archive::complete_records().is_err());
             reconcile();
             assert!(metadata().is_err());
             assert_eq!(
@@ -327,9 +376,10 @@ fn isolated_reference_probe() {
             }
             "archive-metadata-records-oversize" => {
                 assert!(
-                    super::super::archive::records().is_err(),
-                    "unreadable evidence is not an empty inventory"
+                    super::super::archive::complete_records().is_err(),
+                    "unreadable evidence is not a complete inventory"
                 );
+                assert!(super::super::archive::records().unwrap().is_empty());
             }
             "archive-metadata-catalog-oversize" => {
                 reconcile();
@@ -404,7 +454,7 @@ fn isolated_reference_probe() {
             assert!(super::super::archive::read_archive(string(&original, "name"), id).is_err());
         } else {
             assert_eq!(case, "native-archive-records-fifo");
-            assert!(super::super::archive::records().is_err());
+            assert!(super::super::archive::complete_records().is_err());
         }
         assert!(metadata().is_err());
         return;
@@ -734,11 +784,11 @@ fn isolated_reference_probe() {
             fs::rename(root().join("archives"), root().join("old")).unwrap();
             symlink(root().join("missing"), root().join("archives")).unwrap();
             assert!(metadata().is_err());
-            assert!(super::super::archive::records().is_err());
+            assert!(super::super::archive::complete_records().is_err());
             fs::remove_file(root().join("archives")).unwrap();
             symlink(root().join("old"), root().join("archives")).unwrap();
             assert!(metadata().is_err());
-            assert!(super::super::archive::records().is_err());
+            assert!(super::super::archive::complete_records().is_err());
         }
         _ => panic!("unknown reference fixture"),
     }

@@ -24,9 +24,33 @@ pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
 }
 
 pub(super) fn records() -> Result<Vec<Value>> {
+    Ok(inventory()?.records)
+}
+
+/// Complete collection for decisions that must not infer archive absence.
+/// Ordinary reads may omit an unreadable unrelated archive with a warning.
+pub(super) fn complete_records() -> Result<Vec<Value>> {
+    let inventory = inventory()?;
+    if let Some(error) = inventory.unavailable {
+        return Err(error);
+    }
+    Ok(inventory.records)
+}
+
+struct Inventory {
+    records: Vec<Value>,
+    unavailable: Option<String>,
+}
+
+fn inventory() -> Result<Inventory> {
     let directory = root().join("archives");
     match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Inventory {
+                records: Vec::new(),
+                unavailable: None,
+            });
+        }
         Err(error) => return Err(error.to_string()),
         Ok(metadata) if !metadata.is_dir() => {
             return Err("archive directory is not a directory".into());
@@ -47,6 +71,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
         .map_err(|error| error.to_string())?;
     paths.sort();
     let mut result = Vec::new();
+    let mut unavailable = None;
     for path in paths {
         let loaded = (|| {
             let mut value = archive_references::read_metadata(&path)?;
@@ -58,7 +83,13 @@ pub(super) fn records() -> Result<Vec<Value>> {
         })();
         match loaded {
             Ok(record) => result.push(record),
-            Err(error) => return Err(format!("cannot read archive {}: {error}", path.display())),
+            Err(error) => {
+                let error = format!("cannot read archive {}: {error}", path.display());
+                eprintln!("hgs: {error}");
+                if unavailable.is_none() {
+                    unavailable = Some(error);
+                }
+            }
         }
     }
     result.sort_by(|a, b| {
@@ -67,7 +98,23 @@ pub(super) fn records() -> Result<Vec<Value>> {
             .unwrap_or_default()
             .total_cmp(&a["archived_at"].as_f64().unwrap_or_default())
     });
-    Ok(result)
+    Ok(Inventory {
+        records: result,
+        unavailable,
+    })
+}
+
+/// A search-index match is not proof that the retained archive is readable.
+/// Verify the exact body before using it instead of the current binding.
+fn verified_existing(db: &rusqlite::Connection, record: &Value) -> Result<Option<String>> {
+    let Some(id) = archive_catalog::find(db, record)? else {
+        return Ok(None);
+    };
+    let archived = read_archive(string(record, "name"), &id)?;
+    if !equivalent(record, std::slice::from_ref(&archived)) {
+        return Err("Archive identity changed; retain the saved binding for review".into());
+    }
+    Ok(Some(id))
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
@@ -101,10 +148,12 @@ pub(super) fn save(record: &Value) -> Result<String> {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
     if clear_context::cleanup_pending(record) {
-        return Err("Restored Clear archive cleanup is unfinished; retain the binding for review".into());
+        return Err(
+            "Restored Clear archive cleanup is unfinished; retain the binding for review".into(),
+        );
     }
-    let db=archive_catalog::catalog()?;
-    let existing=archive_catalog::find(&db,record)?;
+    let db = archive_catalog::catalog()?;
+    let existing = verified_existing(&db, record)?;
     let id = if let Some(existing) = existing {
         existing
     } else {
@@ -213,8 +262,14 @@ pub(super) fn reconcile_selected(name: &str) -> Result<()> {
 /// `reconcile` for a caller that holds the state lock and read `snapshot`
 /// under it. Returns the archives and the bindings as it leaves them.
 pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<Value>)> {
-    let archived = records()?;
+    let inventory = inventory()?;
+    let archived = inventory.records;
     let bindings = super::storage::records()?;
+    if inventory.unavailable.is_some() {
+        // Keep every binding on an incomplete global reconciliation. This is
+        // not a reason to block an ordinary operation on another exact name.
+        return Ok((archived, bindings));
+    }
     let mut saved = false;
     for record in &bindings {
         if terminating::pending(record)
@@ -263,7 +318,20 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
         // A live exact binding cannot be the crash-left copy of a completed run.
         if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
         if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
-        if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
+        match verified_existing(catalog.as_ref().unwrap(), &record) {
+            Ok(Some(_)) => {
+                save(&record)?;
+                continue;
+            }
+            Err(error) => {
+                // This read-only proof failed before any save. Keep this
+                // binding while allowing unrelated rows to remain available.
+                eprintln!("hgs: cannot reconcile {}: {error}", string(&record, "name"));
+                result.push(record);
+                continue;
+            }
+            Ok(None) => (),
+        }
         if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
             || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
             || !string(&record, "expected_id").is_empty() {

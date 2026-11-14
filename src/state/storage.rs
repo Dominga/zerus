@@ -308,8 +308,8 @@ pub(super) fn read_id(id: &str) -> Result<Value> {
     verify_at(&path, &name, &bytes)
 }
 
-/// The largest record read from the ID layout (#1437 review). Real records
-/// stay well under a megabyte; a larger file is not one of ours.
+/// Shared byte bound for live ID records and their archived copies. Retained
+/// job metadata can make a valid record larger than a megabyte.
 pub(super) const ID_RECORD_BYTES: u64 = 16 << 20;
 
 /// Bounded authoritative metadata only. No native telemetry, transcript cache,

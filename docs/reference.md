@@ -1469,15 +1469,23 @@ view and need an updated CLI/connector/relay for paging. Archive IDs are admitte
 from validated pages for one hour (bounded to 2,000 recently paged instances),
 while native inspection and lifecycle actions still verify name/archive/run.
 
-Archive metadata decoding accepts only regular files of at most 1 MiB, opened
-without following a final symbolic link or waiting on a FIFO. The opened file's
-native version and the object still named by its path must agree after the bounded
-read. Selected reads, legacy enumeration and preliminary catalog decoding share
-these checks without changing normalized archive identities or label selection.
-Unreadable legacy enumeration is an error, never an empty inventory. The search
-catalog may omit invalid rows, but missing or stale reference coverage remains
-unknown and cannot authorize folder cleanup. These checks add no archive scans;
-unchanged catalog pages retain their existing indexed path.
+Archive metadata decoding uses the same 16 MiB byte bound as live session
+records. Inputs must be regular files, opened without following a final symbolic
+link or waiting on a FIFO. The opened file's native version and the object still
+named by its path must agree after the bounded read. Selected reads, legacy
+enumeration and preliminary catalog decoding share these checks without changing
+normalized archive identities or label selection.
+
+Ordinary legacy enumeration warns and skips unreadable unrelated archives, so
+resume, search and reference lookup can still use other exact names. A partial
+list never authorizes removal or replacement. Termination checks require a
+complete inventory. Global reconciliation retains every binding if the
+inventory is incomplete. An indexed
+archive match must also pass a fresh body/identity check before it can replace
+the current binding; a failed read keeps that binding available for review.
+Catalog search omission never makes missing or stale cleanup-reference coverage
+empty. Warm catalog pages retain their indexed path without new full scans;
+reference count, aggregate byte and deadline bounds remain unchanged.
 
 An already-open older archive also survives a connector restart or cache expiry:
 `hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one

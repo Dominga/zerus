@@ -29,6 +29,7 @@ import { projectsPage } from "../store/projects";
 import { createProject, defaultProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
 import { activityCandidates, activitySource, type ScenarioResult } from "../perf/scenarios";
 import { observeSelection } from "../perf/selectionReadback";
+import type { RendererDiagnostics } from "../perf/RendererState";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
 // URL (ZERUS_CLIENT_QUERY=perf=1) or Ctrl+Shift+D. It drives the live session
@@ -46,6 +47,7 @@ import { observeSelection } from "../perf/selectionReadback";
 // with what it has, so a hidden or occluded window never hangs it.
 
 const Diagnostics = lazy(() => import("../perf/Diagnostics"));
+const rendererDiagnostics = () => invoke<RendererDiagnostics | null>("renderer_diagnostics");
 
 interface PerfConfig {
   acceptance_selection?: boolean;
@@ -1108,6 +1110,7 @@ export function PerfHost() {
         <Suspense>
           {/* The unattended run samples resources itself, after its own 10 s idle pause. */}
           <Diagnostics scrollList={scrollList} scrollActivity={scrollActivity} activityEvents={() => activity.events().length} openSession={openSession} displayHz={displayHz}
+            renderer={inTauri() ? rendererDiagnostics : undefined}
             metrics={auto() ? undefined : metrics} label={config().label ?? undefined} representative={config().representative}
             onScenarioStart={auto() ? onScenarioStart : undefined} onScenarioEnd={auto() ? onScenarioEnd : undefined} />
         </Suspense>

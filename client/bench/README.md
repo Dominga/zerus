@@ -123,6 +123,22 @@ engine's cost, not a display.
    (a window capture of at least 117.6 changed frames per second) needs a screen
    recording and is outside this panel.
 
+## Native renderer startup evidence
+
+On Linux the client records one `renderer observed` JSON entry in its startup
+stderr (captured by the installed launcher's tray log). Diagnostics shows the
+same snapshot. `requested` is the existing renderer decision; `overrides` lists
+the relevant process environment after that decision, with unrecognized values
+redacted to `other`. `observed.hardware_acceleration_policy` comes from the main
+webview's public WebKitGTK settings API when the page reports startup readiness
+(or Diagnostics first requests the snapshot). Reloading the
+page keeps the original snapshot and does not write another entry.
+
+The public API does not expose the composited layer tree or the selected backing
+buffer transport, so both observations remain explicitly `unavailable`. An
+`always` policy does not establish either observation. The diagnostic changes
+no renderer policy, environment, Inspector configuration or permission.
+
 ## WebKitGTK display rate on Linux
 
 Beads `zerus-5wmh.14`. On arch (KDE Plasma 6.7.5 on Wayland, NVIDIA RTX 3090 Ti

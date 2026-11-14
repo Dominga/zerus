@@ -25,6 +25,7 @@ class ReachableTaskWriters(unittest.TestCase):
                        env=dict(self.swarm.env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull),
                        check=True, capture_output=True, timeout=20)
         self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "--show-toplevel"],
+                                                env=dict(self.swarm.env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull),
                                                 text=True).strip(), str(self.repo))
         # Use direct verified a/b and a/c routes. The absent b must not hide c.
         (self.swarm.root / "c/config").write_text('HGS_SELF="c"\nHGS_PEERS="a"\n')

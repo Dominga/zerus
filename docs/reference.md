@@ -6672,6 +6672,18 @@ The official web host uses a separate `hgs` profile through `--patch`; sign-in a
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
 
+Person answers reserve their original UUID and exact payload digest durably in
+`question_receipts` before native delivery, as Claude/Kimi answers do. An exact
+duplicate returns its recorded outcome even after the question or run changes;
+changed content cannot reuse that UUID. Interrupted, unconfirmed or unknown
+attempts are never replayed. The live session, question hash and host generation
+still authorize a new answer; a UUID grants no authority. The optional native
+`requestId` field works with an older resident bridge unchanged. This contract
+does not restart or reload a running host.
+An uncertain native result retains the canonical `in_progress` receipt status,
+with `outcome: unknown` and its error; existing desktop and phone readers keep
+that original pending.
+
 If the adapter endpoint disappears while the recorded original host is still
 alive, Zerus refuses another launch and leaves the original running. New
 launches record the kernel boot identity along with the native PID and birth,

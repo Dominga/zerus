@@ -19,6 +19,7 @@ pub(in crate::state) mod host_identity;
 #[cfg(unix)]
 mod shell_identity;
 pub(crate) mod witness;
+mod answer;
 pub(in crate::state) mod dispatch_lock;
 #[cfg(all(test, unix))]
 pub(super) use host_identity::record_running_for_test;
@@ -2514,58 +2515,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             println!("{receipt}");
         }
         "answer" => {
-            let request = checked_request(&record)?;
-            let inspected = rpc(
-                &record,
-                "inspect",
-                json!({"sessionId":record["conversation_id"]}),
-            )?;
-            let cards = question_cards(&record, &inspected);
-            let card = cards
-                .iter()
-                .find(|q| {
-                    q["question_id"] == request["question_id"]
-                        && q["question_hash"] == request["expected_question_hash"]
-                })
-                .ok_or("This question changed or is no longer pending")?;
-            let mut answers = Vec::new();
-            for answer in request["answers"]
-                .as_array()
-                .ok_or("Answers are required")?
-            {
-                let item = card["questions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|q| q["id"] == answer["question_id"])
-                    .ok_or("Unknown question")?;
-                let mut labels = Vec::new();
-                for id in answer["selected_option_ids"]
-                    .as_array()
-                    .ok_or("Invalid selected options")?
-                {
-                    let option = item["options"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|o| o["id"] == *id)
-                        .ok_or("Unknown answer option")?;
-                    labels.push(option["label"].clone());
-                }
-                if item["allow_other"] != true && !string(answer, "text").is_empty() {
-                    return Err("Choose an approval outcome".into());
-                }
-                answers.push(json!({"id":answer["question_id"],"selected":labels,"custom":string(answer,"text")}));
-            }
-            rpc(
-                &record,
-                "answer",
-                json!({"sessionId":record["conversation_id"],"id":request["question_id"],"generation":inspected["generation"],"answers":answers}),
-            )?;
-            println!(
-                "{}",
-                json!({"status":"answered","request_id":request["request_id"],"name":name,"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]})
-            );
+            let (request, digest) = answer::read()?;
+            println!("{}", answer::run(name, &record, &request, &digest)?);
         }
         "pause" | "resume" => {
             if args.iter().any(|v| v == "--dry-run") {

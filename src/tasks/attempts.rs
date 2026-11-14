@@ -298,16 +298,17 @@ pub(super) fn admitted_starts(
         })
 }
 
-/// Debug builds only, never compiled into a release image: a test holds a
-/// frozen request between its freeze and its admission, for a bounded time,
+/// Test/debug builds only, never compiled into a product release image. The
+/// CLI fixtures re-execute the test image, including with `cargo test --release`.
+/// A test holds a frozen request between its freeze and admission for a bounded time,
 /// to change the task in that window (#1519 review). It only waits: no lock
 /// is held, nothing is skipped, and the one budget keeps running.
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 pub(super) fn pause(id: &str) {
     pause_at(id, "admission");
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 pub(super) fn pause_at(id: &str, phase: &str) {
     if std::env::var("HGS_TEST_ATTEMPT_PAUSE_AT").unwrap_or_else(|_| "admission".into()) != phase {
         return;
@@ -325,10 +326,10 @@ pub(super) fn pause_at(id: &str, phase: &str) {
     }
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(test, debug_assertions)))]
 pub(super) fn pause(_: &str) {}
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(test, debug_assertions)))]
 pub(super) fn pause_at(_: &str, _: &str) {}
 
 /// Freezes the request a `task send` or `task handoff` would submit to `to`,

@@ -59,7 +59,7 @@ it("edits all numeric groups and workflow choices together", async () => {
   for (const key of TIMERS) f.change(key, "11");
   for (const [key, value] of [["routing", "lead"], ["plan_approval", "auto"], ["phase_acceptance", "person"], ["integration", "none"]]) f.change(key, value);
   await f.submit();
-  expect(f.calls[0].action.settings).toEqual({ ...written(), caps: Object.fromEntries(CAPS.map((key) => [key, 7])), timers: Object.fromEntries(TIMERS.map((key) => [key, 11])), routing: "lead", plan_approval: "auto", phase_acceptance: "person", integration: "none" });
+  expect(f.calls[0].action.settings).toEqual({ ...written(), caps: Object.fromEntries(CAPS.map((key) => [key, 7])), timers: Object.fromEntries(TIMERS.map((key) => [key, key === "resume_limit_per_hour" ? written().timers[key] : 11])), routing: "lead", plan_approval: "auto", phase_acceptance: "person", integration: "none" });
 });
 
 it.each(["", "-1", "1.5", "501", "4294967296"])("refuses invalid open-task cap %s without sending", async (text) => {
@@ -122,4 +122,18 @@ it("never fills unknown or incomplete settings with defaults", async () => {
   const future = { ...written(), future_power: true }; expect(completeSettings(future)).toBe(false);
   const f = setup(undefined, { ...view(), settings: undefined }); await f.submit(); expect(f.calls).toHaveLength(0);
   expect(f.host.textContent).toContain("This version cannot show all team settings.");
+});
+
+it("keeps the fixed resume rule read-only and preserves its stored value", async () => {
+  const f = setup(); expect(f.input("resume_limit_per_hour").disabled).toBe(true);
+  expect(f.host.textContent).toContain("Fixed at 3 per hour");
+  f.change("resume_limit_per_hour", "11"); f.change("routing", "lead"); await f.submit();
+  expect((f.calls[0].action.settings as ReturnType<typeof written>).timers.resume_limit_per_hour).toBe(written().timers.resume_limit_per_hour);
+});
+
+it("preserves a legacy stored resume value without presenting it as editable authority", async () => {
+  const old = view(); old.settings!.timers.resume_limit_per_hour = 7;
+  const f = setup(undefined, old); f.change("routing", "lead"); await f.submit();
+  expect((f.calls[0].action.settings as ReturnType<typeof written>).timers.resume_limit_per_hour).toBe(7);
+  expect(f.input("resume_limit_per_hour").disabled).toBe(true);
 });

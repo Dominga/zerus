@@ -38,7 +38,7 @@ function numberLabel(key: string): string {
 }
 
 export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element {
-  const current = props.view;
+  const current = { ...props.view, bar: { ...props.view.bar } };
   const initial = completeSettings(current.settings) ? structuredClone(current.settings) : undefined;
   const [settings, setSettings] = createSignal(initial);
   const [numbers, setNumbers] = createSignal<Record<string, string>>(initial ? Object.fromEntries([...Object.entries(initial.caps), ...Object.entries(initial.timers)].map(([key, value]) => [key, String(value)])) : {});
@@ -64,6 +64,8 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       caps[key] = number;
     }
     for (const key of TIMERS) {
+      // The fixed standing-resume rule has no configurable reader (.158.1).
+      if (key === "resume_limit_per_hour") { timers[key] = initial!.timers[key]; continue; }
       const number = wholeNumber(numbers()[key], 0, 0xffffffff);
       if (number === undefined) return undefined;
       timers[key] = number;
@@ -109,8 +111,8 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
             <small class="hint">{tr("From %1 to %2", 1, capMax(key))}</small>
           </label>}</For></div></section>
           <section><h3>{tr("Timers")}</h3><div class="team-settings-grid"><For each={TIMERS}>{(key) => <label>
-            <span>{numberLabel(key)}</span><TextInput type="number" min={0} max={0xffffffff} step={1} aria-invalid={wholeNumber(numbers()[key], 0, 0xffffffff) === undefined} data-setting={key} value={numbers()[key]} onInput={(event) => setNumbers({ ...numbers(), [key]: event.currentTarget.value })} />
-            <small class="hint">{tr("From %1 to %2", 0, 0xffffffff)}</small>
+            <span>{numberLabel(key)}</span><TextInput type="number" min={0} max={0xffffffff} step={1} disabled={key === "resume_limit_per_hour"} aria-invalid={wholeNumber(numbers()[key], 0, 0xffffffff) === undefined} data-setting={key} value={numbers()[key]} onInput={(event) => setNumbers({ ...numbers(), [key]: event.currentTarget.value })} />
+            <small class="hint">{key === "resume_limit_per_hour" ? tr("Fixed at 3 per hour") : tr("From %1 to %2", 0, 0xffffffff)}</small>
           </label>}</For></div></section>
           <section><h3>{tr("Workflow")}</h3>
             <label class="check"><input type="checkbox" checked={settings()!.queue} disabled />{tr("The team takes tasks as they come")}</label>

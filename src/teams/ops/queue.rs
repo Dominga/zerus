@@ -541,10 +541,13 @@ fn supersede_accepted(
         .as_ref()
         .map(|t| format!(" {}/{}", t.project, t.uuid))
         .unwrap_or_default();
+    // The fact of the superseded acceptance only, by its decision, and the
+    // conflict's NULL commit read as the Option it is (zerus-63rru.37
+    // round 3): never the node's newest fact, never a storage failure.
     let merged: Option<String> = ctx
         .db
         .query_row(
-            "SELECT commit_id FROM integration_facts WHERE team=?1 AND node=?2 ORDER BY created_ms DESC LIMIT 1",
+            "SELECT commit_id FROM integration_facts WHERE team=?1 AND node=?2 AND decision=(SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1)",
             params![ctx.team.id, node],
             |r| r.get(0),
         )

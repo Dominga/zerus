@@ -424,6 +424,21 @@ impl Store {
     /// Discover only Ready accepts among open decisions, in node order.
     /// The limit bounds examined open rows, so an empty page can have `next`.
     /// Preserved settled accepts are facts already in flight, never new work.
+    /// The node's latest decision's sequence, for the native admission's
+    /// authority check (zerus-63rru.37 round 3): a later decision — the
+    /// person's review that supersedes the acceptance — revokes an older
+    /// Ready acceptance's Git write authority by its own durable row,
+    /// whether or not the supersede has run.
+    pub fn latest_decision(&self, team: &str, node: u32) -> Result<Option<u64>> {
+        let db = self.db.as_ref().ok_or_else(|| storage("Teams storage is closed."))?;
+        db.query_row(
+            "SELECT MAX(seq) FROM decisions WHERE team=?1 AND node=?2",
+            params![team, node],
+            |r| r.get(0),
+        )
+        .map_err(storage)
+    }
+
     pub fn integration_accepts(
         &self,
         team: &str,

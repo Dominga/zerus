@@ -182,11 +182,12 @@ pub(super) fn integration(ctx: &mut Context<'_>) -> Result<()> {
         // the accepted result had already been merged, with the commit.
         ctx.db
             .execute(
-                "UPDATE inbox SET text=replace(text, 'the person''s own run replaced the team''s accepted result, so nothing further will be merged. The task document was left unchanged.', ?3) WHERE team=?1 AND node=?2 AND kind='accepted_superseded'",
+                "UPDATE inbox SET text=replace(text, 'the person''s own run replaced the team''s accepted result, so nothing further will be merged. The task document was left unchanged.', ?3) WHERE team=?1 AND node=?2 AND kind='accepted_superseded' AND EXISTS(SELECT 1 FROM integration_facts f WHERE f.team=?1 AND f.node=?2 AND f.decision=?4 AND f.decision=(SELECT seq FROM decisions WHERE team=?1 AND node=?2 AND kind='accept' ORDER BY seq DESC LIMIT 1))",
                 params![
                     ctx.team.id,
                     node,
-                    format!("the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged.")
+                    format!("the accepted result had already been merged as {commit}; the person's own run continues the task. The task document was left unchanged."),
+                    permit.decision,
                 ],
             )
             .map_err(storage)?;

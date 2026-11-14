@@ -176,6 +176,15 @@ impl Native {
         if !store.accepted_task_current(&plan.team, plan.node, plan.generation)? {
             return Err(problem("The accepted task's reviewed attempt changed"));
         }
+        // Git write authority belongs only to the node's latest decision
+        // (zerus-63rru.37 round 3): the person's review's own durable row
+        // revokes the older Ready acceptance, independent of the supersede.
+        if store
+            .latest_decision(&plan.team, plan.node)?
+            .is_some_and(|latest| latest > plan.decision)
+        {
+            return Err(problem("A later decision owns this node's integration"));
+        }
         let report = store
             .report(&plan.team, plan.node, plan.generation)?
             .ok_or_else(|| problem("Pinned report disappeared"))?;

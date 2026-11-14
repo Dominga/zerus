@@ -43,6 +43,8 @@ pub(crate) use team_deliver::{blocked_handout, waiting_handout, Blocked, RealHan
 #[cfg(test)]
 #[allow(unused_imports)] // The Teams actor's isolated CLI fixture supplies native input.
 pub(crate) use team_deliver::FIXTURE_NATIVE_INPUT;
+#[cfg(all(test, unix))]
+pub(crate) use team_deliver::fixture_delivery;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.

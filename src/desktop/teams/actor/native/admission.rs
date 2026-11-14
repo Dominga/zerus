@@ -1,6 +1,7 @@
 use super::*;
 use crate::teams::store::{actor_reads::Admission, Decision};
 impl Native {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn admit(
         &self,
         expected: &Team,
@@ -8,6 +9,7 @@ impl Native {
         member: Option<&Member>,
         id: &str,
         decision: Option<&Decision>,
+        first: Option<&super::fresh::FirstReady>,
     ) -> Result<Admission> {
         let store = Store::open(&self.config.state)?.admission()?;
         let team = store
@@ -37,13 +39,14 @@ impl Native {
             )?;
         }
         if let Some(member) = member {
-            if !super::super::availability::free(
+            if super::super::availability::with_first(
                 &self.config,
                 &self.epoch,
                 &team.id,
                 member,
                 false,
-            )? {
+                |row| first.is_some_and(|proof| proof.matches(row)),
+            )? != ports::Availability::Free {
                 return Err(problem(
                     "Member is no longer live and idle in the exact current run",
                 ));

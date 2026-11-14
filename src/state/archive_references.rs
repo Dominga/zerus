@@ -465,7 +465,30 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
         namespace: Some(prior),
     })
 }
-fn read_record(file: &fs::File, id: &str, expected: &Version) -> Result<Value> {
+#[cfg(all(test, unix))]
+std::thread_local! {
+    static AFTER_METADATA_READ: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Shared physical reader for archive JSON, independent of the reference cache.
+/// Preserve the raw label: callers retain their own normalization/selection rules.
+pub(super) fn read_metadata(path: &Path) -> Result<Value> {
+    let file = open(path)?;
+    let expected = version(&file)?;
+    let value = read_value(&file, &expected)?;
+    #[cfg(all(test, unix))]
+    AFTER_METADATA_READ.with(|slot| {
+        if let Some(hook) = slot.take() {
+            hook(path);
+        }
+    });
+    if file_version(path)? != expected {
+        return Err(INVALID.into());
+    }
+    Ok(value)
+}
+
+fn read_value(file: &fs::File, expected: &Version) -> Result<Value> {
     if version(file)? != *expected || expected.bytes > RECORD as u64 {
         return Err(INVALID.into());
     }
@@ -476,7 +499,11 @@ fn read_record(file: &fs::File, id: &str, expected: &Version) -> Result<Value> {
     if data.len() > RECORD || version(file)? != *expected {
         return Err(INVALID.into());
     }
-    let mut record: Value = serde_json::from_slice(&data).map_err(fail)?;
+    serde_json::from_slice(&data).map_err(fail)
+}
+
+fn read_record(file: &fs::File, id: &str, expected: &Version) -> Result<Value> {
+    let mut record = read_value(file, expected)?;
     super::rename::normalize_archive(&mut record)?;
     Metadata::from_record(id, &record)?;
     Ok(record)

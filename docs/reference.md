@@ -1468,6 +1468,17 @@ agent or changes read marks. New archive pages use the additive mobile
 view and need an updated CLI/connector/relay for paging. Archive IDs are admitted
 from validated pages for one hour (bounded to 2,000 recently paged instances),
 while native inspection and lifecycle actions still verify name/archive/run.
+
+Archive metadata decoding accepts only regular files of at most 1 MiB, opened
+without following a final symbolic link or waiting on a FIFO. The opened file's
+native version and the object still named by its path must agree after the bounded
+read. Selected reads, legacy enumeration and preliminary catalog decoding share
+these checks without changing normalized archive identities or label selection.
+Unreadable legacy enumeration is an error, never an empty inventory. The search
+catalog may omit invalid rows, but missing or stale reference coverage remains
+unknown and cannot authorize folder cleanup. These checks add no archive scans;
+unchanged catalog pages retain their existing indexed path.
+
 An already-open older archive also survives a connector restart or cache expiry:
 `hgs archives lookup --json` accepts only `name` and `archive_id`, reads that one
 authoritative record without scanning the catalog or transcript, and returns its

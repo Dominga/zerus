@@ -8,11 +8,8 @@ pub(super) fn path(id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
-    let mut record: Value = serde_json::from_str(
-        &fs::read_to_string(path(id)?)
-            .map_err(|error| format!("{name}: cannot read archive {id}: {error}"))?,
-    )
-    .map_err(|error| error.to_string())?;
+    let mut record = archive_references::read_metadata(&path(id)?)
+        .map_err(|error| format!("{name}: cannot read archive {id}: {error}"))?;
     rename::normalize_archive(&mut record)?;
     if !record.is_object()
         || record["version"] != 1
@@ -28,21 +25,31 @@ pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
 
 pub(super) fn records() -> Result<Vec<Value>> {
     let directory = root().join("archives");
-    if !directory.exists() {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err("archive directory is not a directory".into());
+        }
+        Ok(_) => (),
     }
     let mut paths: Vec<_> = fs::read_dir(directory)
         .map_err(|e| e.to_string())?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .collect();
+        .filter_map(|entry| match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+                    .then_some(Ok(path))
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
     paths.sort();
     let mut result = Vec::new();
     for path in paths {
         let loaded = (|| {
-            let mut value: Value =
-                serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+            let mut value = archive_references::read_metadata(&path)?;
             rename::normalize_archive(&mut value)?;
             read_archive(
                 string(&value, "name"),
@@ -51,7 +58,7 @@ pub(super) fn records() -> Result<Vec<Value>> {
         })();
         match loaded {
             Ok(record) => result.push(record),
-            Err(error) => eprintln!("hgs: cannot read {}: {error}", path.display()),
+            Err(error) => return Err(format!("cannot read archive {}: {error}", path.display())),
         }
     }
     result.sort_by(|a, b| {

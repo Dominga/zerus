@@ -141,6 +141,7 @@ mod shown_path;
 mod startup_choice;
 mod claude_theme;
 mod terminal;
+pub(crate) use terminal::acknowledgment as input_acknowledgment;
 mod conversation_history;
 mod usage;
 mod workspace;

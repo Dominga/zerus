@@ -1155,6 +1155,7 @@ fn invalid_card_parameters_survive_the_waiting_read_as_the_invalid_state() {
 #[ignore = "regenerates the board view from the product CLI status and the existing pending-decision cases"]
 fn regenerate_pending_board_view() {
     let view = team(&current("status"), &pending_rows());
+    let view = serde_json::to_value(&view).unwrap();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/teams/fixtures/board-pending.json");
     std::fs::write(

@@ -10,6 +10,29 @@ pub(crate) struct Fixture {
     server_process: Option<(u32, String)>,
     label: Option<Value>,
 }
+
+/// An explicit exit helper for both Unix layouts, resolved within a bounded
+/// fixture PATH and saved as an absolute executable for Restore admission.
+fn exit_program(archived: bool) -> String {
+    let name = if archived { "true" } else { "false" };
+    let path = std::env::var_os("PATH").expect("the fixture PATH");
+    assert!(
+        path.as_encoded_bytes().len() <= 16 * 1024,
+        "fixture PATH is too large"
+    );
+    assert!(
+        std::env::split_paths(&path).take(129).count() <= 128,
+        "too many fixture PATH entries"
+    );
+    crate::platform::which(name)
+        .unwrap_or_else(|| panic!("{name} is not executable on the fixture PATH"))
+        .canonicalize()
+        .unwrap()
+        .to_str()
+        .expect("a UTF-8 fixture executable")
+        .to_owned()
+}
+
 impl Fixture {
     pub fn new() -> Self {
         Self::finish_exit(true)
@@ -32,7 +55,7 @@ impl Fixture {
         let name = "claude/settlement/member".to_owned();
         let run = uuid::Uuid::new_v4().to_string();
         let conversation = uuid::Uuid::new_v4().to_string();
-        let program = if archived { "/bin/true" } else { "/usr/bin/false" };
+        let program = exit_program(archived);
         let mut raw = json!({"version":1,"name":name,"agent":"claude","run_id":run,
             "session_id":uuid::Uuid::new_v4().to_string(),"launch_id":uuid::Uuid::new_v4().to_string(),
             "conversation_id":conversation,"conversation_state":"ended","account_id":"account-a",
@@ -40,7 +63,7 @@ impl Fixture {
             "worktree_owner":{"id":"owner-1"},"session_end":{"run_id":run,"conversation_id":conversation,
             "reason":"prompt_input_exit","at":now()}});
         write(&mut raw).unwrap();
-        let mut spawned = supervisor::spawn(&[program.into()], &name, &run).unwrap();
+        let mut spawned = supervisor::spawn(&[program], &name, &run).unwrap();
         let pid = spawned.child.id();
         let status = supervisor::wait(&mut spawned.child).unwrap();
         supervisor::finish(&name, &run, pid, status).unwrap();

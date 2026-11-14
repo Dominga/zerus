@@ -194,3 +194,13 @@ fn owned_mac_facade_waits_for_and_caches_its_actual_original_child() {
     assert_eq!(ChildStatus::try_wait(&mut original).unwrap(), Some(status));
     assert_eq!(ChildStatus::wait(&mut original).unwrap(), status);
 }
+
+#[test]
+fn native_conversation_confirmation_does_not_release_a_runs_owned_reservation() {
+    let old = json!({"run_id":"original","conversation_id":null});
+    let mut current =
+        json!({"run_id":"original","conversation_id":"confirmed","original_owner":{}});
+    assert!(archive::retirement_fenced(&old, &current));
+    current["run_id"] = json!("later");
+    assert!(!archive::retirement_fenced(&old, &current));
+}

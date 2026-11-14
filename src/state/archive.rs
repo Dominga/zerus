@@ -131,6 +131,13 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
     }
 }
 
+/// Native SessionStart may confirm a conversation during an original launch.
+/// That confirmation cannot release the same run's pending owner reservation.
+pub(super) fn retirement_fenced(record:&Value,current:&Value) -> bool {
+    current["run_id"]==record["run_id"] && (supervisor::owned_pending(current)
+        || (current["conversation_id"]==record["conversation_id"] && terminating::pending(current)))
+}
+
 /// The caller holds the state writer lock. Write the durable copy before
 /// releasing its old name; a crash between the two operations cannot lose it.
 pub(super) fn save(record: &Value) -> Result<String> {
@@ -143,11 +150,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
     // A caller's older copy must not retire the same binding after Terminate
     // fenced it. The caller holds the writer lock across both reads and save.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if storage::current_of(record)?.is_some_and(|current| {
-        current["run_id"] == record["run_id"]
-            && current["conversation_id"] == record["conversation_id"]
-            && (terminating::pending(&current) || supervisor::owned_pending(&current))
-    }) {
+    if storage::current_of(record)?.is_some_and(|current| retirement_fenced(record,&current)) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
     if clear_context::cleanup_pending(record) {

@@ -237,6 +237,7 @@ pub(super) fn image_of(pid: u32) -> Option<FileIdentity> {
             .vnode
             .vip_path
             .iter()
+            .flatten()
             .map(|b| *b as u8)
             .take_while(|b| *b != 0)
             .collect();

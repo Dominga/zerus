@@ -35,7 +35,7 @@ pub(super) fn choice(member: &Value) -> Option<AccountChoice> {
     account(member.get("account_choice")?)
 }
 fn account(value: &Value) -> Option<AccountChoice> {
-    let choice: AccountChoice = serde_json::from_value(value.clone()).ok()?;
+    let choice: AccountChoice = crate::teams::tolerant::read(value.clone()).ok()?;
     if let AccountChoice::Named { account } = &choice {
         if account.trim().is_empty()
             || zerus_team_plan::name_problem(account, "account", 256).is_some()

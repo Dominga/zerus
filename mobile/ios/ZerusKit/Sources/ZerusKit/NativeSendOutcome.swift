@@ -119,7 +119,8 @@ public enum NativeSendOutcome {
         if result.string("status") == "not_offered" {
             row.status = "failed"; row.error = "The computer rejected this message. Review it before trying again."
         } else {
-            row.status = "submitted"; row.submittedAt = result.number("submitted_at"); row.submittedText = row.text; row.error = ""
+            guard let at = result["submitted_at"]?.numberValue, at.isFinite, at >= 0 else { return state }
+            row.status = "submitted"; row.submittedAt = at; row.submittedText = row.text; row.error = ""
         }
         var next = state; next.outgoing[index] = row; return next
     }

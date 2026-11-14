@@ -6,6 +6,7 @@
 
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { frameBudget } from "./pacing";
+import { RendererState, type RendererDiagnostics } from "./RendererState";
 import {
   DEFAULT_PLAN,
   SCENARIOS,
@@ -28,6 +29,8 @@ export interface DiagnosticsProps extends DiagnosticsTargets {
   displayHz?: () => Promise<number | null>;
   /** Resource sample of the process tree (the Tauri `metrics` command). */
   metrics?: () => Promise<unknown>;
+  /** One native startup snapshot, separate from requested renderer settings. */
+  renderer?: () => Promise<RendererDiagnostics | null>;
   /** Saves the report (for example in the app data directory) and resolves to where it went. */
   save?: (json: string, name: string) => Promise<string>;
   /** Platform label in the report, for example "mac-promotion" or "arch-kde-125". */
@@ -181,6 +184,8 @@ export default function Diagnostics(props: DiagnosticsProps) {
           T {frameBudget(hz()).toFixed(2)} ms at {hz()} Hz ({hzSource()})
         </span>
       </header>
+
+      <Show when={props.renderer}>{read => <RendererState read={read()} />}</Show>
 
       <div style={{ display: "flex", gap: "14px", "flex-wrap": "wrap", "align-items": "center" }}>
         {numberInput(hz, (v) => (setHz(v), setHzSource("manual")), "Display Hz", 24)}

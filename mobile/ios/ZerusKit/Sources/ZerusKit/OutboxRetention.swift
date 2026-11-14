@@ -97,6 +97,8 @@ public enum OutboxRetention {
             (proof.nativeMessageId.isEmpty && value.string("provider") != "opencode" || SendReceiptRecovery.exactNativeId(row) != nil)
     }
     public static func evictable(_ row: OutgoingMessage, pinned: Set<String> = []) -> Bool {
+        if let intent = row.nativeSendIntent, !intent.matches(row) { return false }
+        if row.nativeSendIntent != nil, row.status == "recorded", !NativeSendOutcome.confirmed(row) { return false }
         guard !pinned.contains(row.requestId), ["recorded", "reviewed"].contains(row.status), let coverage = row.coverage,
               coverage.valid(row), (row.status == "reviewed") == (coverage.kind == "draft") else { return false }
         if let metadata = row.sendCorrelation, metadata.intent(row) == nil { return false }
@@ -123,6 +125,7 @@ public enum OutboxRetention {
             guard zip([l.id, l.name, l.mime, l.sha256], [r.id, r.name, r.mime, r.sha256]).allSatisfy({ SendReceiptRecovery.exact($0, $1) }) else { return false }
         }
         if let l = a.sendIntent, let r = b.sendIntent, !SendReceiptRecovery.exact(l.intentSha256, r.intentSha256) { return false }
+        if let l = a.nativeSendProof, let r = b.nativeSendProof, !SendReceiptRecovery.exact(l.canonical, r.canonical) { return false }
         if let l = a.sendCorrelation, let r = b.sendCorrelation,
            !SendReceiptRecovery.exact(JSON.object(l.json()).compact, JSON.object(r.json()).compact) { return false }
         if let l = a.sendReceiptProof, let r = b.sendReceiptProof {
@@ -199,7 +202,7 @@ public enum OutboxRetention {
     public static func recorded(_ state: MessageState, _ ids: Set<String>, exact: [String: OutgoingCoverage]) -> MessageState {
         var copy = state
         copy.outgoing = state.outgoing.map { row in
-            guard ids.contains(row.requestId), row.status != "reviewed" else { return row }
+            guard ids.contains(row.requestId), row.status != "reviewed", row.nativeSendIntent == nil || NativeSendOutcome.confirmed(row) else { return row }
             var updated = row; updated.status = "recorded"; updated.error = ""
             if let coverage = exact[row.requestId], coverage.valid(row) { updated.coverage = coverage }
             return updated

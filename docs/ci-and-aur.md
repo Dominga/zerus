@@ -872,13 +872,26 @@ All selected packages must resolve before any native execution. The report saves
 their exact versions, URLs and digests before the first test; a missing release,
 platform package or valid digest fails without falling back to historical pins.
 
+Kimi's standalone image selection reads three official current-release pointers
+once: the standalone `code.kimi.com/kimi-code/latest`, npm's
+`@moonshot-ai/kimi-code` latest metadata and the published stable release at
+`MoonshotAI/kimi-code` on GitHub. The highest stable numeric version must be named
+by at least two sources. An unavailable or invalid source, three-way disagreement,
+or an uncorroborated higher version fails before execution; an older agreeing pair
+never supplies a fallback. This handles a lagging standalone pointer without
+qualifying an older native agent. The exact selected version's official manifest
+and image HEAD bind the platform filename, manifest digest, image size and SHA-256;
+the download must match them. Selection provenance retains all three observations
+and agreeing sources. Every case in the run keeps that one selected image.
+
 Discovery retries only the same official metadata URL and method, through the
 shared `scripts/ci/native_discovery.py` reader used by Kimi, Claude Code, Codex,
 OpenCode and DeepSeek. Each request has at most three attempts, each in a private
 child with a 30-second wall timeout, with 2- and 4-second backoff: a 96-second
 request budget, further clamped by any original caller deadline. Kimi resolves
-three metadata requests (latest, that exact manifest and the image HEAD), so its
-metadata phase has at most 288 seconds; image download keeps its separate bound.
+five metadata requests (the three current pointers, that exact manifest and the
+image HEAD), so its metadata phase has at most 480 seconds; image download keeps
+its separate bound.
 Each attempt logs URL, stage, attempt and outcome as `ZERUS_DISCOVERY` JSON.
 Transient network errors and HTTP 408/429/5xx may retry; invalid metadata,
 redirects rejected by the existing caller policy, permanent HTTP errors and

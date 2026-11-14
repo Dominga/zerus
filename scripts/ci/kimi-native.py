@@ -114,15 +114,60 @@ discovery_spec.loader.exec_module(discovery)
 OfficialRedirect = discovery.OfficialRedirect
 
 
-def metadata(url, limit, method='GET'):
-    return discovery.fetch_metadata(url, limit, method=method, policy='kimi', stage='official Kimi metadata')
+def metadata(url, limit, method='GET', *, policy='kimi'):
+    return discovery.fetch_metadata(url, limit, method=method, policy=policy, stage='official Kimi metadata')
+
+
+PACKAGE = '@moonshot-ai/kimi-code'
+NPM_LATEST = 'https://registry.npmjs.org/' + PACKAGE + '/latest'
+GITHUB_LATEST = 'https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest'
+STABLE_VERSION = r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+
+
+def stable_version(value):
+    if not isinstance(value, str) or re.fullmatch(STABLE_VERSION, value) is None:
+        raise ValueError('official current release is not one bounded stable version')
+    return value
+
+
+def current_release():
+    raw, standalone_fetch = metadata('https://code.kimi.com/kimi-code/latest', 64)
+    standalone = stable_version(raw.decode('ascii').strip())
+    raw, npm_fetch = metadata(NPM_LATEST, 65536, policy='no-redirect')
+    npm = strict(raw)
+    if not isinstance(npm, dict) or npm.get('name') != PACKAGE:
+        raise ValueError('official npm current release names another package')
+    npm_version = stable_version(npm.get('version'))
+    raw, github_fetch = metadata(GITHUB_LATEST, 262144, policy='no-redirect')
+    github = strict(raw)
+    if (not isinstance(github, dict) or github.get('draft') is not False
+            or github.get('prerelease') is not False):
+        raise ValueError('official GitHub current release is not published stable metadata')
+    tag = github.get('tag_name')
+    if not isinstance(tag, str) or not tag.startswith(PACKAGE + '@'):
+        raise ValueError('official GitHub current release names another package')
+    github_version = stable_version(tag[len(PACKAGE) + 1:])
+    location = github.get('html_url')
+    if not isinstance(location, str):
+        raise ValueError('official GitHub current release has no text page URL')
+    page = urllib.parse.urlsplit(location)
+    if (page.scheme != 'https' or page.netloc != 'github.com' or page.query or page.fragment
+            or urllib.parse.unquote(page.path) != '/MoonshotAI/kimi-code/releases/tag/' + tag):
+        raise ValueError('official GitHub current release page differs from its tag')
+    versions = dict(standalone=standalone, npm=npm_version, github=github_version)
+    version = max(versions.values(), key=lambda value: tuple(map(int, value.split('.'))))
+    agreeing = [name for name, observed in versions.items() if observed == version]
+    if len(agreeing) < 2:
+        raise ValueError('official current-release disagreement: the highest version is not corroborated')
+    # Never drop a failed source or fall back to an older agreeing pair. Each
+    # source is read once; every later artifact URL uses this one exact decision.
+    sources = {name: dict(version=versions[name], fetch=fetch) for name, fetch in
+               [('standalone', standalone_fetch), ('npm', npm_fetch), ('github', github_fetch)]}
+    return version, dict(version=version, agreeing_sources=agreeing, sources=sources)
 
 
 def resolve_latest(platform_id):
-    raw, latest = metadata('https://code.kimi.com/kimi-code/latest', 64)
-    version = raw.decode('ascii').strip()
-    if re.fullmatch(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', version) is None:
-        raise ValueError('official latest is not one stable version')
+    version, selection = current_release()
     prefix = 'https://code.kimi.com/kimi-code/binaries/' + version + '/'
     raw, manifest_fetch = metadata(prefix + 'manifest.json', 65536)
     manifest = strict(raw)
@@ -136,7 +181,8 @@ def resolve_latest(platform_id):
     record = dict(schema=1, version=version, target=platform_id,
                   manifest_sha256=hashlib.sha256(raw).hexdigest(), image_sha256=entry['checksum'],
                   image_size=image_head['size'])
-    return record, raw, dict(latest=latest, manifest=manifest_fetch, image_head=image_head)
+    return record, raw, dict(latest=selection['sources']['standalone']['fetch'], selection=selection,
+                           manifest=manifest_fetch, image_head=image_head)
 
 
 def stage_latest(images, evidence, platform_id):

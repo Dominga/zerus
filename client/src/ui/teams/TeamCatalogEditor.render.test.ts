@@ -51,5 +51,5 @@ it("reveals a newly added role even when the catalog list was filtered", async()
   const host=document.createElement("div");document.body.append(host);dispose=render(()=>createComponent(TeamCatalogEditor,{editor}),host);await tick();
   const search=host.querySelector('.cat-list input') as HTMLInputElement;search.value="Developer";search.dispatchEvent(new Event("input",{bubbles:true}));
   (host.querySelector('.cat-add') as HTMLButtonElement).click();await tick();
-  expect(host.querySelector('.cat-item-head b')?.textContent).toBe("New item");expect(search.value).toBe("");
+  expect(host.querySelector('.cat-item-head b')?.textContent).toBe("New item");expect((host.querySelector(".cat-list input") as HTMLInputElement).value).toBe("");
 });

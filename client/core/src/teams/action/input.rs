@@ -70,6 +70,7 @@ impl TeamAction {
             Self::Decide { .. } => "decide",
             Self::Admit { .. } => "admit",
             Self::Route { .. } => "route",
+            Self::SetDeps { .. } => "set-deps",
             Self::Accept { .. } => "accept",
             Self::Return { .. } => "return",
             Self::Reassign { .. } => "reassign",
@@ -131,6 +132,7 @@ impl TeamAction {
                 }
                 input
             }
+            Self::SetDeps { node, deps } => json!({"node": node, "deps": deps}),
             Self::Accept { node } => json!({"node": node}),
             Self::Return { node, reason } => json!({"node": node, "reason": reason}),
             Self::Reassign {
@@ -171,6 +173,16 @@ impl TeamAction {
             | Self::Accept { node: id }
             | Self::Hold { node: id }
             | Self::Release { node: id } => node(*id),
+            Self::SetDeps { node: id, deps } => {
+                node(*id)?;
+                if deps.len() > 200 {
+                    return Err("Too many dependencies.".into());
+                }
+                for dep in deps {
+                    node(dep.node)?;
+                }
+                Ok(())
+            }
             Self::Route {
                 node: id,
                 role,

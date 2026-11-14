@@ -17,6 +17,7 @@
   "resume_member",
   "return",
   "route",
+  "set_deps",
   "settings",
   "stop",
   "stop_member"

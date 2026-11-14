@@ -1,0 +1,27 @@
+.team-plan { padding: 12px; min-width: 0; outline-offset: -2px; }
+.team-plan-help { color: var(--z-color-muted); max-width: 72ch; }
+.team-plan-phase h3 { margin: 12px 0 6px; }
+.team-plan-scroll { overflow: auto; max-width: 100%; border: 1px solid var(--z-color-border); border-radius: 8px; }
+.team-plan-canvas { position: relative; min-width: 100%; }
+.team-plan-layer { position: absolute; top: 6px; display: flex; justify-content: center; gap: 12px; color: var(--z-color-muted); font-size: 11px; }
+.team-plan-edges { position: absolute; inset: 0; overflow: visible; }
+.team-plan-edges marker path { fill: var(--z-color-muted, #7d8797); }
+.team-plan-edge { fill: none; stroke: var(--z-color-muted, #7d8797); stroke-width: 3px; pointer-events: none; }
+.team-plan-edge-hit { fill: none; stroke: transparent; stroke-width: 14px; cursor: pointer; pointer-events: stroke; }
+.team-plan-edge-hit:focus-visible { stroke: var(--z-color-accent); stroke-opacity: 0.25; outline: none; }
+.team-plan-edge.soft { stroke-dasharray: 5 4; }
+.team-plan-edge.selected, .team-plan-edge:focus { stroke: var(--z-color-accent); stroke-width: 5px; outline: none; }
+.team-plan-node { position: absolute; display: flex; border: 1px solid var(--z-color-border); border-radius: 6px; background: var(--z-color-tile); }
+.team-plan-node.selected { border-color: var(--z-color-accent); }
+.team-plan-node.dim { opacity: 0.45; }
+.team-plan-node[data-state="accepted"] { border-left: 4px solid #64a981; }
+.team-plan-node[data-state="in_progress"] { border-left: 4px solid #75b8dd; }
+.team-plan-node[data-state="reported"] { border-left: 4px solid #688bd5; }
+.team-plan-node[data-state="cancelled"] { opacity: 0.6; }
+.team-plan-card { flex: 1; min-width: 0; background: transparent; border: 0; text-align: left; color: inherit; cursor: pointer; padding: 7px; }
+.team-plan-card b, .team-plan-card span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-plan-card b { font-size: 12px; }
+.team-plan-card span { font-size: 10px; margin-top: 4px; }
+.team-plan-port { width: 16px; flex: 0 0 16px; padding: 0; border: 0; color: inherit; background: transparent; cursor: crosshair; touch-action: none; }
+.team-plan-port:disabled { opacity: 0.2; cursor: default; }
+.team-plan-port:focus-visible { outline: 2px solid var(--z-color-accent); }

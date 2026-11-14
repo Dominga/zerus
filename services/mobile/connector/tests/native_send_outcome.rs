@@ -4,6 +4,49 @@ use serde_json::json;
 use zerus_mobile_connector::native::{interpret, Call};
 
 #[test]
+fn shared_native_read_frames_pin_the_closed_field_policy() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../vectors/send_outcome/outcomes.json")).unwrap();
+    let call =
+        zerus_mobile_connector::send_outcome::call(&data["vectors"][0]["read"]["payload"]).unwrap();
+    for frame in data["native_frames"].as_array().unwrap() {
+        assert_eq!(
+            interpret(
+                &call,
+                true,
+                frame["json"].as_str().unwrap().as_bytes().to_vec()
+            )
+            .is_ok(),
+            frame["frame_accepted"].as_bool().unwrap(),
+            "{}",
+            frame["name"]
+        );
+    }
+    for legacy in [
+        Call::new(["send", "codex/example/send", "--json"]),
+        Call::new([
+            "__state",
+            "delivery",
+            "receipt",
+            "codex/example/send",
+            "--json",
+        ])
+        .payload(json!({"schema":1})),
+    ] {
+        assert_eq!(
+            interpret(
+                &legacy,
+                true,
+                br#"{"ok":true,"ok":false,"unreviewed_extension":true}"#.to_vec()
+            )
+            .unwrap()
+            .json(),
+            json!({"ok":false,"unreviewed_extension":true})
+        );
+    }
+}
+
+#[test]
 fn opted_in_native_refusal_json_survives_the_native_exit_boundary() {
     let call = Call::new([
         "send",

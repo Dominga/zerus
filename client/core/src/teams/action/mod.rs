@@ -41,6 +41,8 @@ pub mod wire;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod dependencies;
 
 pub use intents::{Admission, IntentState, Intents, Pending};
 pub use types::{canonical_uuid, Confirmation, TeamAction, TeamCall, TeamOutcome};

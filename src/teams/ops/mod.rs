@@ -5,6 +5,7 @@ mod apply;
 mod authority;
 mod common;
 mod decisions;
+mod dependencies;
 mod delegation;
 mod drafts;
 pub(super) mod handout;

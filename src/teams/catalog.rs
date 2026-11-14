@@ -7,6 +7,7 @@
 
 mod digest;
 mod roster;
+pub(crate) use roster::validate_member_agent;
 pub(crate) use digest::template_digest;
 pub(crate) use roster::{validate_catalog_roles, validate_roster};
 

@@ -37,6 +37,9 @@ export interface TeamMember {
   id: string; role: string; agent: string; account: string; state: string; lead: boolean; session: TeamSession | null; model?: string | null;
   /** The person stopped this member (the store refuses a second Stop). */
   person_stopped?: boolean;
+  effort?: string | null;
+  account_choice?: { mode: string; account?: string } | null;
+  open_work?: number | null;
 }
 export interface TeamMemberCounts { total: number; not_created: number; active: number; paused: number; removed: number }
 export interface TeamNodeCounts { waiting: number; pending: number; in_progress: number; reported: number; accepted: number; cancelled: number }
@@ -67,6 +70,7 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */
   after?: string | null;

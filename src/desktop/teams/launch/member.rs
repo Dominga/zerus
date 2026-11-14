@@ -19,6 +19,9 @@ impl Runtime {
             return self.prepare(store, effects, team, member, parent, now);
         };
         self.selected = Some((team.id.clone(), member.id.clone()));
+        if row.member_generation.unwrap_or(0) != member.launch.as_ref().map_or(0, |l| l.generation) {
+            return self.edited_member(team, member, &row, now);
+        }
         if member.state == MemberState::Paused {
             if self.owns(&row) {
                 self.admitted = None;
@@ -104,6 +107,7 @@ impl Runtime {
         now: i64,
     ) -> Result<bool> {
         let mut row = Row::new(team, &member.id, &self.epoch, State::Retry);
+        row.member_generation = member.launch.as_ref().map(|l| l.generation);
         if !self.reserve_row(store, team, &row, now)? {
             return Ok(false);
         }
@@ -128,14 +132,21 @@ impl Runtime {
                 }
             }
             let slug = self.ledger().team_slug(team)?;
-            let placement = super::super::ledger::names::placement(
-                effects.placement(&team.project, &row.original)?,
-                &slug,
-                &member.id,
-            )?;
-            effects.member_branch_available(&placement)?;
+            let placement = if let Some(reuse) = &row.reuse {
+                reuse.placement.clone()
+            } else {
+                let placement = super::super::ledger::names::placement(
+                    effects.placement(&team.project, &row.original)?, &slug, &member.id,
+                )?;
+                effects.member_branch_available(&placement)?;
+                placement
+            };
             row.placement = Some(placement.clone());
-            let (choice, model, effort) = role(team, member)?;
+            let (choice, model, effort) = if let Some(launch) = &member.launch {
+                (&launch.account, launch.model.as_str(), launch.effort.as_str())
+            } else {
+                role(team, member)?
+            };
             let accounts = self.cached_accounts(effects, &member.agent)?;
             if accounts.len() > 200 {
                 return Err(invalid("Account read exceeds its bound"));
@@ -158,16 +169,23 @@ impl Runtime {
                 placement,
                 parent,
                 launch_id: row.original.clone(),
-                session_name: super::super::ledger::names::session(&slug, team, member),
+                session_name: {
+                    let name = super::super::ledger::names::session(&slug, team, member);
+                    match row.member_generation.filter(|g| *g > 0) {
+                        Some(g) => format!("{name}-r{g}"),
+                        None => name,
+                    }
+                },
+                member_generation: row.member_generation,
             })
         })();
         match selection {
             Ok(plan) => {
                 self.close_stale(store, team, row, now)?;
                 row.plan = Some(plan);
-                row.state = State::WorktreeIntent;
+                row.state = if row.reuse.is_some() { State::WorktreeVerify } else { State::WorktreeIntent };
                 self.save(row, now)?;
-                self.admitted = Some((row.team.clone(), row.original.clone()));
+                if row.reuse.is_none() { self.admitted = Some((row.team.clone(), row.original.clone())); }
                 Ok(true)
             }
             Err(p) => {

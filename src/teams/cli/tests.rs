@@ -4,6 +4,7 @@ mod board;
 mod catalog;
 mod create_binding;
 mod dispatch;
+mod editing;
 mod fixtures;
 mod guides;
 mod harness;

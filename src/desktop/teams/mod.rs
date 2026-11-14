@@ -59,6 +59,7 @@ pub(crate) use actor::failing_service_passes;
 #[cfg(test)]
 pub(crate) use items::{put as put_service_item, Failure as ServiceFailure};
 mod kept;
+pub(crate) mod member_swap;
 mod launch;
 mod ledger;
 pub(crate) use health::Health;

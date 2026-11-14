@@ -1861,3 +1861,75 @@ fn an_injected_supersede_failure_reaches_only_its_own_store() {
     person_review(&mut armed, armed_node, 2, "person-armed").unwrap();
     assert!(!in_queue(&armed, armed_node), "the store's own supersede applies again");
 }
+
+/// A late merge fact rewrites only the supersede item written for its own
+/// acceptance (zerus-63rru.37 round 4): acceptance 1 superseded with no fact,
+/// acceptance 2 superseded, then acceptance 2's late merge fact. Only the
+/// generation-2 item says it was merged; the generation-1 item keeps its
+/// text, also when the person's run went on (a restore) before the fact.
+#[test]
+fn a_late_fact_rewrites_only_its_own_acceptances_item() {
+    const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+    let superseded = |h: &Harness| -> Vec<(u32, String)> {
+        h.store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .map(|item| (item.generation, item.text))
+            .collect()
+    };
+    for restored in [false, true] {
+        let (mut h, lead, node, _) = handed();
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        let first = h.accept_decision(node);
+        let first_generation = h.store.generation(TEAM, node).unwrap().unwrap();
+        person_review(&mut h, node, 2, "person-first").unwrap();
+        let second = restore_and_accept(&mut h, node, 3);
+        let second_generation = h.store.generation(TEAM, node).unwrap().unwrap();
+        assert!(second > first && second_generation > first_generation);
+        person_review(&mut h, node, 4, "person-second").unwrap();
+        if restored {
+            let mut running = h.observation(node, TaskStage::InProgress);
+            running.attempt = 5;
+            running.attempt_id = "person-later".into();
+            h.run(
+                &service(),
+                Operation::ObserveTask {
+                    node,
+                    observation: running,
+                },
+            )
+            .unwrap();
+            assert!(h.store.generation(TEAM, node).unwrap().unwrap() > second_generation);
+        }
+        let before = superseded(&h);
+        assert_eq!(
+            before.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+            [first_generation, second_generation],
+            "restored={restored}"
+        );
+        assert!(before.iter().all(|(_, text)| text.contains("nothing further will be merged")));
+        h.run(
+            &service(),
+            Operation::RecordIntegration {
+                node,
+                decision: second,
+                commit: NEW.into(),
+            },
+        )
+        .unwrap();
+        let after = superseded(&h);
+        assert_eq!(after[0], before[0], "restored={restored}: the first item changed");
+        assert_eq!(after[1].0, second_generation);
+        assert!(
+            after[1]
+                .1
+                .contains(&format!("the accepted result had already been merged as {NEW}")),
+            "restored={restored}: {}",
+            after[1].1
+        );
+    }
+}

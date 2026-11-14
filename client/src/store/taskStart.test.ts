@@ -53,7 +53,7 @@ it("sends one explicit Start with exact task, assignment and executor identities
 it("names a cutover or an unconfirmed Start and never claims it started", async () => {
   vi.mocked(taskStart).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "cutting_over", error: "Cutting over (busy). Nothing was sent." }));
   await startTask("example", task);
-  expect(notify).toHaveBeenCalledExactlyOnceWith("error", "Cutting over (busy). Nothing was sent.", true, undefined, "Not started: this task is moving to execution records. Nothing was sent; try again later.");
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", "Cutting over (busy). Nothing was sent.", true);
   vi.mocked(notify).mockClear();
   vi.mocked(taskStart).mockResolvedValueOnce(view({ outcome: "uncertain", error: "No confirmed receipt." }));
   await startTask("example", task);
@@ -125,4 +125,17 @@ it("an earlier unsent check can be discarded without offering or releasing the c
   expect(taskStartCheck).not.toHaveBeenCalled(); expect(taskStart).not.toHaveBeenCalled(); expect(taskStartRelease).not.toHaveBeenCalled();
   expect(await discardTaskStartCheck({ task, view: view({ unsent_check: true }) })).toBe(false);
   expect(taskStartDiscardCheck).toHaveBeenCalledTimes(1);
+});
+
+it("shows the complete native diagnostic as the primary notice without masking its computer or command", async () => {
+  const reason = 'This task is cutting over (unroutable at 11111111-1111-4111-8111-111111111111). Nothing was sent. Computer 11111111-1111-4111-8111-111111111111 (catalog label, diagnostic only: "example-laptop"). An offline computer that once wrote this project\'s tasks blocks new starts until it is reachable again. For details: hgs task cutover --project example --json';
+  vi.mocked(taskStart).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "cutting_over", error: reason }));
+  await startTask("example", task);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", reason, true);
+  expect(taskStart).toHaveBeenCalledTimes(1);expect(taskStartRelease).not.toHaveBeenCalled();
+});
+it("offers local cutover details when an older executor returns an empty reason", async () => {
+  vi.mocked(taskStart).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "cutting_over", error: "" }));
+  await startTask("example", task);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", "Task was not started. For details, run hgs task cutover --project example --json", true);
 });

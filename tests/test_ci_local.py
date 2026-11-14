@@ -57,7 +57,7 @@ class WorkflowBodies(unittest.TestCase):
                 "bash scripts/ci/native-compatibility.sh '${{ needs.source.outputs.commit }}'",
         }
         found = {step.get('name'): step.get('run', '').strip()
-                 for key in ('quick', 'cli') for step in workflow['jobs'][key].get('steps', [])}
+                 for key in ('quick', 'client-core', 'cli') for step in workflow['jobs'][key].get('steps', [])}
         for name, body in expected.items():
             with self.subTest(check=name):
                 self.assertEqual(found[name], body)

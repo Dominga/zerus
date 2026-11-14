@@ -25,7 +25,7 @@ from local_container import Container
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/checks.yml"
 RUST = "1.99.1"
-SUPPORTED = {"quick", "client-frontend", "cli", "client-native-linux", "connector", "relay", "arch-package", "android"}
+SUPPORTED = {"quick", "client-core", "client-frontend", "cli", "client-native-linux", "connector", "relay", "arch-package", "android"}
 RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
               'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"')
 APT_PREREQUISITES = {

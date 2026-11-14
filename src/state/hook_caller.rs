@@ -128,7 +128,7 @@ fn admit_with(record: &Value, alive: fn(&Value) -> bool) -> Result<Caller> {
             ));
         }
         // A held background job has its own process, not the window's PID.
-        let job = continuations::caller_job(record);
+        let job = continuations::caller_job(record, alive);
         let pid = job.unwrap_or(pinned.0);
         let birth = ancestor(pid)?;
         if !alive(record) {
@@ -248,7 +248,7 @@ impl Caller {
                 {
                     return Err(refused("the admitted Claude run or process changed"));
                 }
-                if *background && !continuations::holds_job(record, *pid) {
+                if *background && !continuations::holds_job_with(record, *pid, alive) {
                     return Err(refused(
                         "the background job is no longer held by this Claude window",
                     ));
@@ -278,5 +278,22 @@ mod tests {
         assert!(!native_alive_with(&record, |_| None), "unreadable kernel evidence must refuse without ps");
         assert!(!native_alive_with(&record, |_| Some("another start".into())));
         assert!(!native_alive_with(&json!({"pid":0,"process_start":"start"}), |_| panic!("zero PID")));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn claim_background_hold_uses_the_same_native_only_liveness_policy() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let entries = temp.path().join("sessions");
+        fs::create_dir(&entries).unwrap();
+        let pid = std::process::id();
+        let job = u32::MAX - 1; // A private registry filename, never a process query.
+        fs::write(entries.join(format!("{pid}.json")), json!({"pid":pid,"parkedJobId":"fixture-job"}).to_string()).unwrap();
+        fs::write(entries.join(format!("{job}.json")), json!({"pid":job,"kind":"bg","jobId":"fixture-job"}).to_string()).unwrap();
+        let record = json!({"pid":pid,"process_start":process_start(pid),"claude_registry_home":temp.path()});
+        assert!(continuations::holds_job(&record, job), "ordinary liveness still permits the held job");
+        assert!(!continuations::holds_job_with(&record, job, |_| false),
+            "a second liveness read must keep the claim's native-only policy");
     }
 }

@@ -94,7 +94,11 @@ fn registry_for(record: &Value, pid: u32) -> Option<Value> {
 
 /// The background job the session's live agent window holds.
 fn parked(record: &Value) -> Option<String> {
-    if !process_alive(record) {
+    parked_with(record, process_alive)
+}
+
+fn parked_with(record: &Value, alive: fn(&Value) -> bool) -> Option<String> {
+    if !alive(record) {
         return None;
     }
     let entry = registry_for(record, u32::try_from(record["pid"].as_u64()?).ok()?)?;
@@ -103,17 +107,22 @@ fn parked(record: &Value) -> Option<String> {
 
 /// Read-only correlation for a hook already bound to this window's run.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn caller_job(record: &Value) -> Option<u32> {
+pub(super) fn caller_job(record: &Value, alive: fn(&Value) -> bool) -> Option<u32> {
     let pid = claude_process(string(record, "conversation_id"))?;
     if record["pid"].as_u64() == Some(u64::from(pid)) { return None; }
-    holds_job(record, pid).then_some(pid)
+    holds_job_with(record, pid, alive).then_some(pid)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn holds_job(record: &Value, pid: u32) -> bool {
+    holds_job_with(record, pid, process_alive)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn holds_job_with(record: &Value, pid: u32, alive: fn(&Value) -> bool) -> bool {
     let Some(entry) = registry_for(record, pid).filter(|entry| entry["kind"] == "bg") else { return false; };
     let job = string(&entry, "jobId");
-    !job.is_empty() && parked(record).as_deref() == Some(job)
+    !job.is_empty() && parked_with(record, alive).as_deref() == Some(job)
 }
 
 /// The live session whose agent window holds the Claude background job that this

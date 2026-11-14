@@ -3,6 +3,25 @@
 //! passive kernel must never advertise workers which have not been started.
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+/// Reuse the existing heartbeat frame when cached component readiness changes.
+#[derive(Default)]
+pub(super) struct ReadinessPublication(Option<[bool; 5]>);
+
+impl ReadinessPublication {
+    pub(super) fn refresh(
+        &mut self,
+        readiness: Option<[bool; 5]>,
+        now: Instant,
+        heartbeat: &mut Instant,
+    ) {
+        if self.0 != readiness {
+            self.0 = readiness;
+            *heartbeat = now;
+        }
+    }
+}
 
 pub(super) const ABI: &str = "desktop-lifecycle-v1";
 
@@ -56,6 +75,36 @@ pub(super) fn probe(binary: &str, config: &str, state: &str, configuration: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_changes_publish_before_the_heartbeat_without_steady_state_polling() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut heartbeat = now + Duration::from_secs(10);
+        let mut publication = ReadinessPublication::default();
+        publication.refresh(None, now, &mut heartbeat);
+        assert_eq!(heartbeat, now + Duration::from_secs(10));
+        let mut ready = [false; 5];
+        publication.refresh(Some(ready), now, &mut heartbeat);
+        assert_eq!(heartbeat, now, "starting background must publish promptly");
+        for component in 0..5 {
+            let changed = now + Duration::from_millis(200 * (component + 1) as u64);
+            heartbeat = changed + Duration::from_secs(10);
+            publication.refresh(Some(ready), changed, &mut heartbeat);
+            assert_eq!(heartbeat, changed + Duration::from_secs(10));
+            ready[component] = true;
+            publication.refresh(Some(ready), changed, &mut heartbeat);
+            assert_eq!(heartbeat, changed, "component {component} became ready");
+        }
+        let failed = now + Duration::from_secs(2);
+        heartbeat = failed + Duration::from_secs(10);
+        ready[0] = false;
+        publication.refresh(Some(ready), failed, &mut heartbeat);
+        assert_eq!(heartbeat, failed, "failures must also publish promptly");
+        heartbeat = failed + Duration::from_secs(10);
+        publication.refresh(None, failed, &mut heartbeat);
+        assert_eq!(heartbeat, failed, "revocation must publish promptly");
+    }
 
     #[test]
     fn endpoint_readiness_does_not_claim_background_ownership() {

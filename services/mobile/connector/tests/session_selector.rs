@@ -51,7 +51,13 @@ fn base_help() -> String {
     document("operations.json")["capabilities"]["help_text_all"]
         .as_str()
         .unwrap()
-        .to_owned()
+        // The newer outcome ABI's full-help fixture also declares selectors.
+        // These legacy selector controls add/remove those exact markers below;
+        // keep their unmarked baseline explicit as the help inventory grows.
+        .lines()
+        .filter(|line| ![SELECTOR_MARKER, PEER_MARKER].contains(&line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn flags(markers: &[&str]) -> Flags {

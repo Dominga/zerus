@@ -141,3 +141,4 @@ CREATE INDEX IF NOT EXISTS encrypted_read_cache_pressure ON encrypted_requests(w
 CREATE INDEX IF NOT EXISTS send_receipt_reads_v1 ON requests(updated,id) WHERE operation='send_receipt' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS question_route_person_status_reads_v1 ON requests(updated,id) WHERE operation='session_question_route_person_status' AND state IN ('completed','failed','uncertain');
+CREATE INDEX IF NOT EXISTS send_outcome_reads_v2 ON requests(updated,id) WHERE operation='send_outcome_receipt' AND state IN ('completed','failed','uncertain');

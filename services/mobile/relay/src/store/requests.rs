@@ -64,7 +64,11 @@ impl Submission {
             video: body["operation"] == "voice_submit" && body["payload"].get("video").is_some(),
             dismiss_prompt_present: body["operation"] == "clear_context"
                 && body["payload"].get("dismiss_prompt").is_some(),
-            attachments: body["payload"]["attachments"]
+            attachments: (if body["operation"] == "send_outcome" {
+                &body["payload"]["payload"]
+            } else {
+                &body["payload"]
+            })["attachments"]
                 .as_array()
                 .is_some_and(|v| !v.is_empty()),
             speech_job: if ["speech_status", "speech_cancel"].contains(&s(&body, "operation")) {

@@ -607,3 +607,12 @@ definition when needed and establishes a new verified process/generation.
 Profiles, phone identity, native receipts, request IDs and the journal stay in
 place. Storage failure or incomplete recovery requires reconciliation; it never
 authorizes another automatic attempt.
+
+
+The negotiated `send_outcome` and `send_outcome_receipt` pair preserves the
+native terminal-negative ABI without changing ordinary `send`. Both the Rust
+and retained Python connectors verify the native help markers, exact original
+payload digest and full frozen identity. The Rust connector also requires its
+peer gateway to advertise the same capability. No negative is inferred from a
+native diagnostic or exit code. See the relay README and shared outcome vectors
+for the API-v1 wrappers, original-only proof read and journal retention.

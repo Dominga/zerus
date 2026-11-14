@@ -25,6 +25,8 @@ pub fn windows_provider(provider: &Value) -> bool {
     matches!(provider.as_str(), Some("codex" | "claude" | "kimi"))
 }
 pub const WINDOWS_OPERATIONS: &[&str] = &[
+    "send_outcome",
+    "send_outcome_receipt",
     "send_receipt",
     "inspect",
     "history",
@@ -61,6 +63,8 @@ pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: d
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "send_outcome",
+    "send_outcome_receipt",
     "send_receipt",
     "analytics_read",
     "archive_list",
@@ -345,6 +349,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub send_outcome: bool,
     pub send_receipt: bool,
     pub windows_gateway: bool,
     pub analytics: bool,
@@ -404,6 +409,15 @@ impl Flags {
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
         let flags = Flags {
+            send_outcome: [
+                zerus_relay::send_outcome::HELP_MARKER,
+                "mobile-peer-send-outcome-v2",
+                crate::send_receipt::HELP_MARKER,
+                crate::session_selector::SELECTOR_MARKER,
+                crate::session_selector::PEER_MARKER,
+            ]
+            .iter()
+            .all(|marker| help.lines().any(|line| line.trim() == *marker)),
             send_receipt: help
                 .lines()
                 .any(|line| line.trim() == crate::send_receipt::HELP_MARKER),
@@ -519,6 +533,7 @@ impl Flags {
                 removed.extend(operations.iter().copied());
             }
         };
+        remove(self.send_outcome, zerus_relay::send_outcome::OPERATIONS);
         remove(self.worktree, WORKTREES);
         remove(self.analytics, &["analytics_read"]);
         remove(self.archive, &["archive_list"]);

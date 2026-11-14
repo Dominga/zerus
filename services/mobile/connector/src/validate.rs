@@ -366,6 +366,32 @@ pub fn validate(
         .and_then(Value::as_str)
         .filter(|operation| crate::capabilities::implemented(operation))
         .ok_or_else(|| error(UNSUPPORTED))?;
+    if zerus_relay::send_outcome::OPERATIONS.contains(&operation) {
+        let payload = request.get("payload").unwrap_or(&Value::Null);
+        zerus_relay::send_outcome::validate(
+            operation,
+            payload,
+            request_id,
+            request.get("computer_id").unwrap_or(&Value::Null),
+            request
+                .get("session")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .map_err(|_| error("invalid negotiated send binding"))?;
+        let session = request["session"].as_str().expect("validated");
+        if operation == "send_outcome" {
+            let mut original = request.clone();
+            original.insert("operation".into(), Value::String("send".into()));
+            original.insert("payload".into(), payload["payload"].clone());
+            validate(&original, request_id, context)?;
+        }
+        return Ok(Validated {
+            operation: operation.into(),
+            session: session.into(),
+            payload: Some(payload.clone()),
+        });
+    }
     if operation == "send_receipt" {
         crate::send_receipt::validate(request, request_id)?;
         return Ok(Validated {

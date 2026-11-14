@@ -113,7 +113,7 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (53, 22, 31, 24))  # + HGS_SESSION_ID (zerus-ucck P1)
+                         (55, 23, 32, 24))  # Negotiated send outcome + original-only READ; context keys unchanged.
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
         self.assertTrue({"hooks_status", "analytics_read", "history_projection", "project_assignment", "project_assign"} <= operations)
         self.assertNotIn("remove_queued", operations)  # Rust-only table, never Python's.
@@ -134,8 +134,20 @@ class GoldenVectorTests(unittest.TestCase):
         projection = json.loads((VECTORS / "history_projection" / "envelope.json").read_text())
         self.assertEqual(projection["operation"], "history_projection")
         self.assertEqual(relay_oracle.decision(projection), {"decision": "accept"})
-        self.assertEqual(valid | {projection["operation"]}, operations)
-        self.assertEqual(envelopes | {projection["operation"]}, operations)
+        # Like history_projection, the negotiated outcome ABI has its own
+        # strict shared corpus and native/connector/phone parity controls.
+        outcomes=json.loads((VECTORS / "send_outcome" / "outcomes.json").read_text())["vectors"]
+        outcome_operations=set()
+        self.assertEqual(len(outcomes),4)  # both encodings, text and attachment
+        for vector in outcomes:
+            for kind in ("send","read"):
+                envelope=vector[kind]
+                self.assertEqual(relay_oracle.decision(envelope), {"decision":"accept"})
+                outcome_operations.add(envelope["operation"])
+        self.assertEqual(outcome_operations,{"send_outcome","send_outcome_receipt"})
+        extensions={projection["operation"]} | outcome_operations
+        self.assertEqual(valid | extensions, operations)
+        self.assertEqual(envelopes | extensions, operations)
 
     def test_a_changed_submission_never_reuses_its_frozen_oracle_decision(self):
         frozen = self.capture.frozen_oracle(VECTORS)

@@ -2,13 +2,12 @@ import { countedHeaderAttention, isWorking, needsAttention, quietAttention, visi
 import type { CreationCard, GroupingOut } from "../../types";
 import type { AgentKind, Session, Subagent } from "./types";
 import { currentChildren } from "./subagents";
-import { agentTeamSession, type AgentTeamMember } from "./agent-teams";
+import { agentTeamParents, agentTeamSession, orderTeamSessions, type AgentTeamMember } from "./agent-teams";
 
 export type Row =
-  | { type: "agent-team"; id: string; name: string; project: string }
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean; agentTeamRole?: string;
+  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean; agentTeamRole?: string; agentTeamName?: string;
       /** Nesting under parent sessions (zerus-sa9qn.2): 0 at top level. */
       depth?: number;
       /** The nested card's parent row key and whether it is its parent's last shown child. */
@@ -175,6 +174,8 @@ export function withContainers(listed: readonly Session[], all: readonly Session
 }
 
 export function groupRows(input: ListInput): Row[] {
+  const teamParents = agentTeamParents(input.agentTeams ?? new Map());
+  const parentKey = teamParents.size ? (s: Session) => teamParents.get(s.key) ?? input.parentKey?.(s) : input.parentKey;
   const out: Row[] = [];
   const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
       const current = currentChildren(s, input.online(s));
@@ -191,28 +192,30 @@ export function groupRows(input: ListInput): Row[] {
       const team = withSubagents(extra.team, kids, !!input.teamCollapsed?.(s.key));
       const expanded = kids.length > 0 && !team?.collapsed;
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
-      const shown = changed ? { ...s, subagents: kids } : s;
-      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), ...extra, team });
+      const member = input.agentTeams?.get(s.key);
+      const presentation = agentTeamSession(s, member, input.online(s));
+      const shown = changed ? { ...presentation, subagents: kids } : presentation;
+      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, ...extra, team });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
   };
   // One project group's visible cards in rank order, child sessions nested
   // under a parent shown in the same list. Nesting never hides a row: a loop
   // or a parent elsewhere leaves the card at top level.
   const ordinaryCards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
-    const resolved = input.containers ? withContainers(listed, all, input) : undefined;
+    const resolved = input.containers ? withContainers(listed, all, { ...input, parentKey }) : undefined;
     const list = resolved?.ordered ?? listed;
     const containers = resolved?.containers;
     const parentOf = new Map<string, string>();
-    if (input.parentKey) {
+    if (parentKey) {
       const shown = new Set(list.map((s) => s.key));
       for (const s of list) {
-        const parent = resolved?.ghostOf.get(s.key) ?? input.parentKey(s);
+        const parent = resolved?.ghostOf.get(s.key) ?? parentKey(s);
         if (parent && parent !== s.key && shown.has(parent)) parentOf.set(s.key, parent);
       }
     }
     if (!parentOf.size) {
       for (const s of list) {
-        const from = s.parent && input.parentKey ? input.parentKey(s) : undefined;
+        const from = s.parent && parentKey ? parentKey(s) : undefined;
         card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {});
       }
       return;
@@ -281,7 +284,7 @@ export function groupRows(input: ListInput): Row[] {
       const counts = teams.get(s.key);
       const collapsed = !!counts && !!input.teamCollapsed?.(s.key);
       if (collapsed) hidden.add(s.key);
-      const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: input.parentKey?.(s) } } : {};
+      const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: parentKey?.(s) } } : {};
       const container = containers?.get(s.key);
       if (container) {
         out.push({ type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
@@ -291,28 +294,8 @@ export function groupRows(input: ListInput): Row[] {
       card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
     }
   };
-  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
-    const teams = new Map<string, Session[]>();
-    for (const s of listed) {
-      const member = input.agentTeams?.get(s.key);
-      if (!member) continue;
-      const list = teams.get(member.team) ?? [];
-      list.push(s);
-      teams.set(member.team, list);
-    }
-    for (const [id, members] of teams) {
-      members.sort((a, b) => {
-        const x = input.agentTeams!.get(a.key)!, y = input.agentTeams!.get(b.key)!;
-        return Number(y.lead) - Number(x.lead) || x.role.localeCompare(y.role) || x.member.localeCompare(y.member);
-      });
-      out.push({ type: "agent-team", project, id: `agent-team:${id}`, name: input.agentTeams!.get(members[0].key)!.name });
-      for (const s of members) {
-        const member = input.agentTeams!.get(s.key)!;
-        card(agentTeamSession(s, member, input.online(s)), { agentTeamRole: member.role });
-      }
-    }
-    ordinaryCards(listed.filter((s) => !input.agentTeams?.has(s.key)), project, all);
-  };
+  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) =>
+    ordinaryCards(orderTeamSessions(listed, input.agentTeams), project, all);
   const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
   const headers = input.grouping.loaded ? input.grouping.headers : [];
   if (headers.length <= 1) {

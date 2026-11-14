@@ -351,6 +351,10 @@ termination of other programs. Already orphaned processes whose session ownershi
 cannot be verified stay untouched; a surviving process using the checkout still
 prevents its removal. Run Terminate from outside the target's own process tree.
 
+The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
+qualified separately. It has no installed caller and does not enable graceful
+Terminate or change the verified tree and cleanup rules above.
+
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
 and project wrapper. There is no fallback to the latest conversation or a new

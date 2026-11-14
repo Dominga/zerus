@@ -520,7 +520,7 @@ fn supersede_accepted(
     o: &TaskObservation,
 ) -> Result<()> {
     #[cfg(test)]
-    if std::env::var_os("HGS_TEST_TEAM_SUPERSEDE_FAIL").is_some() {
+    if injected::supersede_fails(ctx.db) {
         return Err(storage("injected supersede failure"));
     }
     // Keep the preserved receipt authority of a Ready acceptance: a Git write
@@ -639,4 +639,46 @@ fn leave_team(ctx: &mut Context<'_>, node: u32) -> Result<()> {
     archive_inactive(ctx, node)?;
     ctx.event = Some("person_override");
     Ok(())
+}
+
+/// A test's supersede failure, scoped to that test's own Teams store
+/// (zerus-63rru.37 round 4): the armed set holds store database files, so a
+/// test that runs in parallel against another store never sees it. Nothing
+/// here reads the process environment.
+#[cfg(test)]
+pub(crate) mod injected {
+    use std::{
+        path::PathBuf,
+        sync::{Mutex, PoisonError},
+    };
+    static ARMED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    fn file(db: &rusqlite::Connection) -> Option<PathBuf> {
+        std::fs::canonicalize(db.path().filter(|path| !path.is_empty())?).ok()
+    }
+    /// Every supersede of this one store fails as storage until it drops.
+    pub(crate) struct FailSupersede(PathBuf);
+    pub(crate) fn fail_supersede(store: &crate::teams::store::Store) -> FailSupersede {
+        let path = file(store.db.as_ref().expect("an open store")).expect("a file store");
+        ARMED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.clone());
+        FailSupersede(path)
+    }
+    impl Drop for FailSupersede {
+        fn drop(&mut self) {
+            let mut armed = ARMED.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(at) = armed.iter().position(|path| path == &self.0) {
+                armed.remove(at);
+            }
+        }
+    }
+    pub(super) fn supersede_fails(db: &rusqlite::Connection) -> bool {
+        file(db).is_some_and(|path| {
+            ARMED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&path)
+        })
+    }
 }

@@ -1832,3 +1832,32 @@ fn a_later_acceptance_never_borrows_a_prior_acceptances_merge_commit() {
         assert_eq!(h.store.integration_fact(TEAM, node).unwrap().unwrap().decision, first);
     }
 }
+
+/// The test-only supersede failure belongs to the store it was armed for
+/// (zerus-63rru.37 round 4): another store's supersede in the same process
+/// applies while it is armed, and the armed store's own supersede fails as
+/// storage, writing nothing, until the guard drops.
+#[test]
+fn an_injected_supersede_failure_reaches_only_its_own_store() {
+    let accepted = || {
+        let (mut h, lead, node, _) = handed();
+        h.report(node, "m1");
+        h.run(&lead, Operation::Accept { node }).unwrap();
+        (h, node)
+    };
+    let (mut armed, armed_node) = accepted();
+    let (mut other, other_node) = accepted();
+    let failure = crate::teams::ops::injected::fail_supersede(&armed.store);
+    person_review(&mut other, other_node, 2, "person-other").unwrap();
+    assert!(!in_queue(&other, other_node), "another store's supersede applies");
+    let refused = person_review(&mut armed, armed_node, 2, "person-armed").unwrap_err();
+    assert_eq!(refused.code, code::STORAGE_FAILED);
+    assert_eq!(
+        refused.message,
+        "Teams storage is unavailable: injected supersede failure"
+    );
+    assert!(in_queue(&armed, armed_node), "the failed supersede wrote nothing");
+    drop(failure);
+    person_review(&mut armed, armed_node, 2, "person-armed").unwrap();
+    assert!(!in_queue(&armed, armed_node), "the store's own supersede applies again");
+}

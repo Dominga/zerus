@@ -357,21 +357,6 @@ mod round3_tests {
         }
     }
 
-    struct FailNextSupersede;
-
-    impl FailNextSupersede {
-        fn set() -> Self {
-            std::env::set_var("HGS_TEST_TEAM_SUPERSEDE_FAIL", "1");
-            Self
-        }
-    }
-
-    impl Drop for FailNextSupersede {
-        fn drop(&mut self) {
-            std::env::remove_var("HGS_TEST_TEAM_SUPERSEDE_FAIL");
-        }
-    }
-
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(args)
@@ -471,7 +456,7 @@ mod round3_tests {
         review.attempt = 2;
         review.attempt_id = "person-current".into();
         let failure = {
-            let _injected = FailNextSupersede::set();
+            let _injected = crate::teams::ops::injected::fail_supersede(&h.store);
             h.run(
                 &service(),
                 Operation::ObserveTask {

@@ -13,6 +13,8 @@ mod journal;
 mod members;
 mod pipeline;
 mod queue;
+#[cfg(test)]
+pub(crate) use queue::injected;
 mod readiness;
 mod stage_task;
 mod talk;

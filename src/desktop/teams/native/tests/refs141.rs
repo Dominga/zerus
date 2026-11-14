@@ -147,7 +147,7 @@ fn proposals() -> Value {
         serde_json::from_str(include_str!("fixtures141/client-proposals.json")).unwrap();
     use sha2::{Digest, Sha256};
     assert_eq!(
-        format!("{:x}", Sha256::digest(source[start..end].as_bytes())),
+        format!("{:x}", Sha256::digest(&source.as_bytes()[start..end])),
         fixture["source_sha256"].as_str().unwrap(),
         "Regenerate proposals from the client's actual slug function"
     );

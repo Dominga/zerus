@@ -12,6 +12,10 @@ use commands::{compact_job, set_command};
 pub(super) use commands::compact;
 mod history;
 mod native;
+// Unconnected support resource; no installed caller or signal authority.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod termination;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

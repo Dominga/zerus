@@ -1094,9 +1094,13 @@ single goal-creation checks.
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through
 guarded input and preserving the conversation across pause/resume without
-replaying that message. The former send-after-start-only coverage missed the
-unsupported positional launch prompt. Help snapshots from native 2.1.1, 2.2.0
-and 2.3.3 cover argument construction without running historical releases in CI.
+replaying that message. Fork coverage independently checks the native utility's
+live-instance refusal, the disabled live offer and CLI refusal, then real paused
+and archived forks with distinct CIDs. The paused fork also verifies inherited
+model context. The former send-after-start-only coverage missed the unsupported
+positional launch prompt.
+Help snapshots from native 2.1.1, 2.2.0 and 2.3.3 cover argument construction
+without running historical releases in CI.
 Declining trust also verifies cancellation without delivery and bounds the
 retained inspection preview independently of the full initial message size.
 

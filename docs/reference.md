@@ -3246,6 +3246,11 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
+Kimi's external Fork requires its source instance to be closed, even when the
+session is Ready. Live Kimi sessions show Fork disabled with a reason to pause
+or close the source first. Pause is a separate explicit action; Fork never
+pauses the source automatically. Confirmed paused, saved and archived Kimi
+sources can still fork their saved context.
 DeepSeek uses the native fork of a supported resident host
 ([DeepSeek](#deepseek)). A session name is a label: an archived session never
 blocks a new session or a fork from its name. Without `-n` the fork is named

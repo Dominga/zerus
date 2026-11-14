@@ -2276,8 +2276,15 @@ mod attention_regressions {
     fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {
         // A Ready saved record; the summary shows a chooser only the terminal
         // reports. Dispatch refuses it, so inspect and the listing agree.
-        let mut record = telemetry::stale_hook_child();
-        record["base"] = json!(["kimi"]);
+        let record = json!({
+            "agent": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "base": ["codex"],
+            "activity": "idle",
+            "phase": "idle",
+            "main_done": true
+        });
         let shown = |phase: &str| {
             let mut output = fork::summary(&record, true);
             for part in [session_action::summary(&record, true, &None),

@@ -19,6 +19,11 @@ fn unavailable(record: &Value, live_pane: bool) -> Option<&'static str> {
     if live_pane && (!telemetry::settled(record) || pause_active(record)) {
         return Some("Wait for Ready before forking the saved context");
     }
+    // Kimi's external fork utility requires the source instance lock closed;
+    // Ready only means the turn finished. Pause remains a separate user action.
+    if live_pane && string(record, "agent") == "kimi" {
+        return Some("Pause or close this Kimi session before forking its saved context");
+    }
     if record["base"].as_array().is_none() {
         return Some("Saved launch arguments are unavailable");
     }
@@ -377,10 +382,13 @@ mod tests {
         assert_eq!(&fork[7..], ["fork", "parent", "--model", "model-name"]);
     }
     #[test]
-    fn live_forks_wait_for_the_ready_state_the_listing_reports() {
+    fn live_forks_keep_ready_and_provider_instance_requirements() {
         let mut stale = telemetry::stale_hook_child();
         stale["base"] = json!(["kimi"]);
-        assert_eq!(unavailable(&stale, true), None);
+        assert_eq!(
+            unavailable(&stale, true),
+            Some("Pause or close this Kimi session before forking its saved context")
+        );
         for (case, mut record) in telemetry::remaining_work() {
             record["base"] = json!(["kimi"]);
             assert_eq!(unavailable(&record, true), Some("Wait for Ready before forking the saved context"), "{case}");
@@ -393,6 +401,19 @@ mod tests {
         let reason = "Wait until the agent's question is answered";
         let mut stale = telemetry::stale_hook_child();
         stale["base"] = json!(["kimi"]);
+        // A supported live provider exercises chooser suppression. Kimi's
+        // earlier closed-instance requirement must keep its own reason.
+        let mut kimi = summary(&stale, true);
+        wait_for_chooser(&mut kimi, reason);
+        assert_eq!(kimi, summary(&stale, true));
+        stale = json!({
+            "agent": "codex",
+            "conversation_id": "conversation",
+            "base": ["codex"],
+            "activity": "idle",
+            "phase": "idle",
+            "main_done": true
+        });
         let mut output = summary(&stale, true);
         output["allowed_actions"] = json!(["rename", "fork"]);
         output["action_reasons"] = json!({});

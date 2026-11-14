@@ -41,6 +41,7 @@ METHODS = (
     'test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message',
     'test_kimi_native.NativeKimi.test_manual_compaction_reaches_native_hooks',
     'test_kimi_native.NativeKimi.test_pause_and_resume_keep_the_conversation',
+    'test_kimi_native.NativeKimi.test_fork_requires_a_closed_source_instance_and_preserves_saved_context',
     'test_kimi_native.NativeKimi.test_rolling_window_429_recovers_in_the_same_conversation',
     'test_kimi_questions_native.NativeKimiTrust.test_a_short_unviewed_pane_grows_until_the_whole_prompt_shows_then_trusts_once',
     'test_kimi_questions_native.NativeKimiTrust.test_declining_trust_exits_kimi',

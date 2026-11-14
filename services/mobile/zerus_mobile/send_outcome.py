@@ -12,6 +12,8 @@ OPERATIONS = frozenset({SEND, READ})
 MARKERS = frozenset({"native-send-outcome-v2", "delivery-receipt-v1", "mobile-peer-send-outcome-v2", "session-id-selector-v1", "mobile-peer-session-id-v1"})
 BINDING_FIELDS = frozenset({"schema", "message_request_id", "computer_id", "machine_id", "session_id", "session", "provider", "run_id", "conversation_id", "native_encoding", "native_digest"})
 NEGATIVE_FIELDS = frozenset({"schema", "status", "proof", "request_id", "name", "machine_id", "session_id", "provider", "run_id", "conversation_id", "native_digest", "reason"})
+FRAME_REQUIRED = NEGATIVE_FIELDS - {"proof", "reason"}
+FRAME_FIELDS = NEGATIVE_FIELDS | {"message_request_id", "agent_id", "submitted_at", "queued"}
 MISMATCH = "native send outcome identity did not match; delivery remains unknown"
 UNAVAILABLE = "native terminal send outcome ABI is unavailable"
 
@@ -106,6 +108,11 @@ def receipt_read(argv, payload=None):
         argv,payload=payload.get('argv',[]),payload.get('payload')
     if len(argv)>=2 and argv[0]=='--expect-machine': argv=argv[2:]
     return len(argv)==5 and argv[:3]==['__state','delivery','receipt'] and argv[-1]=='--json' and isinstance(payload,dict) and payload.get('schema')==2
+
+
+def closed_frame(answer):
+    """Rust NativeProofFrame's key policy; project() checks values and identity."""
+    return isinstance(answer,dict) and FRAME_REQUIRED <= answer.keys() <= FRAME_FIELDS
 
 
 def unique_members(pairs):

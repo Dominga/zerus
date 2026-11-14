@@ -9,7 +9,8 @@ from zerus_mobile import send_outcome as c
 from zerus_mobile.connector import Connector, ConnectorError
 from zerus_mobile.server import validate_request
 
-VECTORS=json.loads((Path(__file__).resolve().parents[1]/'vectors/send_outcome/outcomes.json').read_text())['vectors']
+DATA=json.loads((Path(__file__).resolve().parents[1]/'vectors/send_outcome/outcomes.json').read_text())
+VECTORS=DATA['vectors']
 
 class OutcomeContract(unittest.TestCase):
     def test_shared_binding_and_native_proof_vectors(self):
@@ -31,6 +32,36 @@ class OutcomeContract(unittest.TestCase):
             with self.assertRaises(ValueError):validate_request(bad)
 
 class ConnectorJournal(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_native_read_frames_have_the_closed_rust_field_policy(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-outcome-frames-') as temp:
+            root=Path(temp);hgs=root/'hgs'
+            n=Connector(dict(server_url='https://relay.example.invalid',node_token='fixture-token',hgs_path=str(hgs),state_dir=str(root/'journal')))
+            wrapper=VECTORS[0]['read']['payload']
+            try:
+                for frame in DATA['native_frames']:
+                    with self.subTest(frame=frame['name']):
+                        hgs.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nsys.stdout.write('+repr(frame['json'])+')\n');hgs.chmod(0o700)
+                        async def read():
+                            return await n._native(['__state','delivery','receipt',VECTORS[0]['read']['session'],'--json'],c.query(wrapper),max_output_bytes=8192)
+                        if frame['frame_accepted']:
+                            self.assertEqual(await read(),json.loads(frame['json']))
+                        else:
+                            with self.assertRaisesRegex(ConnectorError,'invalid JSON'):
+                                await read()
+            finally:n.journal.close()
+
+    async def test_legacy_native_decoders_keep_unknown_fields_and_last_member_behavior(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-outcome-legacy-frame-') as temp:
+            root=Path(temp);hgs=root/'hgs'
+            raw='{"ok":true,"ok":false,"unreviewed_extension":true}'
+            hgs.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nsys.stdout.write('+repr(raw)+')\n');hgs.chmod(0o700)
+            n=Connector(dict(server_url='https://relay.example.invalid',node_token='fixture-token',hgs_path=str(hgs),state_dir=str(root/'journal')))
+            try:
+                for argv,payload in [(['send','codex/example/send','--json'],{}),
+                                     (['__state','delivery','receipt','codex/example/send','--json'],{'schema':1})]:
+                    self.assertEqual(await n._native(argv,payload),{'ok':False,'unreviewed_extension':True})
+            finally:n.journal.close()
+
     async def test_duplicate_native_fields_never_form_a_not_sent_proof(self):
         vector=VECTORS[0];packet=json.dumps(vector['negative'])
         with tempfile.TemporaryDirectory(prefix='zerus-outcome-duplicate-') as temp:

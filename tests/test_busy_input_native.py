@@ -620,10 +620,15 @@ class NativeHookedImagesClaude(NativeBusyClaude):
         observer.write_text(source)
         self.tmux('set-buffer', '-b', 'person-kept-message', receipt['submitted_text'])
         self.tmux('paste-buffer', '-p', '-r', '-d', '-b', 'person-kept-message', '-t', self.pane)
-        self.wait_for(lambda: '[Image #1]' in self.screen() and 'Pasting…' not in self.screen())
+        # Native attachment IDs advance across Clear; they do not restart at 1.
+        prior = max(map(int, re.findall(r'\[(?:Image|Pasted text) #(\d+)', receipt['composer'])))
+        expected = f'[Image #{prior + 1}] [Image #{prior + 2}][Pasted text #{prior + 3} '
+        self.wait_for(lambda: expected in self.screen() and 'Pasting…' not in self.screen())
         time.sleep(.3)
         self.tmux('send-keys', '-t', self.pane, 'Enter')
         self.wait_for(lambda: len(self.carrying(self.rows())) == 1)
+        rows = self.carrying(self.rows())
+        self.assertEqual(sum(b.get('type') == 'image' for b in rows[0]['message']['content']), 2)
         self.assertEqual(len(self.native_requests), calls + 1)
         self.assertEqual(json.loads(receipt_path.read_bytes()), receipt)
 

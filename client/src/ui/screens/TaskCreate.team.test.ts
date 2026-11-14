@@ -8,6 +8,7 @@ import { render } from "solid-js/web";
 const f = vi.hoisted(() => ({
   create: vi.fn(async () => true),
   follow: vi.fn(), edit: vi.fn(), flush: vi.fn(async () => {}),
+  rows: [] as { id: string; project: string; name: string; status: string }[],
   teams: (() => true) as () => boolean,
 }));
 const TEAM = "33333333-3333-4333-8333-333333333333";
@@ -24,16 +25,17 @@ vi.mock("../../store/taskNavigation", () => ({ requestTaskDescription: vi.fn() }
 vi.mock("../../store/teams", () => ({
   teams: {
     available: () => f.teams(),
-    list: () => ({ teams: [{ id: TEAM, project: "example-project", name: "Fixes" }], truncated: false, next: null }),
+    list: () => ({ teams: f.rows, truncated: false, next: null }),
   },
 }));
 import TaskCreate from "./TaskCreate";
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.clearAllMocks(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.clearAllMocks(); f.rows = []; });
 
 function setup(teamsOn = true) {
   f.teams = () => teamsOn;
+  if (!f.rows.length) f.rows = [{ id: TEAM, project: "example-project", name: "Fixes", status: "running" }];
   const host = document.createElement("div");
   document.body.append(host);
   dispose = render(() => createComponent(TaskCreate, {
@@ -74,4 +76,21 @@ it("creates an ordinary card without a team", async () => {
 it("shows no chooser while the preview is off", () => {
   const host = setup(false);
   expect(chooser(host)).toBeNull();
+});
+
+
+it("offers only live teams and disambiguates identical names", () => {
+  f.rows = [
+    { id: TEAM, project: "example-project", name: "Fixes", status: "running" },
+    { id: "44444444-4444-4444-8444-444444444444", project: "example-project", name: "Fixes", status: "paused" },
+    ...["stopped", "archived", "finished"].map((status) => ({ id: status, project: "example-project", name: status, status })),
+  ];
+  const host = setup();
+  const button = chooser(host)!;
+  button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  expect(button.textContent).toContain("Fixes (33333333)");
+  button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  expect(button.textContent).toContain("Fixes (44444444)");
+  button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  expect(button.textContent).toContain("Fixes (44444444)");
 });

@@ -218,9 +218,11 @@ invented outcome.
 ## Sending a task to a team
 
 - On the task board, a task in Backlog or To do has **Send to team: %1** in
-  its menu, one entry per team of its project.
+  its menu, one entry per running or paused team of its project.
 - The New task form has a **Team** chooser ("Send the new task to a team's
-  queue").
+  queue"), with the same running/paused choices. Stopped, archived, finished
+  and not-yet-running teams are not offered. Identically named live teams
+  include an identifying suffix in both menus.
 - From a terminal: `hgs task add --project PROJECT --team TEAM < prompt.txt`
   for a new task, `hgs task target REF team TEAM` for an existing one.
   `--role` and `--pipeline` route the task as you send it.

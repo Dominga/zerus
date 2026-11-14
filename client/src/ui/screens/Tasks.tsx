@@ -1,3 +1,4 @@
+import { taskTeamChoices } from "../teams/task-choices";
 import { supportsTaskStart, taskStartBlocker, startTask } from "../../store/taskStart";
 import { taskSettings } from "../../store/taskSettings";
 import { TaskStartButton } from "./TaskStartButton";
@@ -154,16 +155,14 @@ export function TasksPanel() {
     e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; endDrag(); return true;
   };
   /** The teams of this project that a card in Backlog or To do can join. */
-  const teamChoices = (projectId: string) => teams.available() === true
-    ? (teams.list()?.teams ?? []).filter((team) => team.project === projectId).slice(0, 8)
-    : [];
+  const teamChoices = (projectId: string) => taskTeamChoices(teams.available(), teams.list()?.teams ?? [], projectId);
   const menu = (e: MouseEvent | KeyboardEvent, t: Task) => { e.preventDefault(); e.stopPropagation(); const anchor = e.currentTarget as HTMLElement, el = anchor.getBoundingClientRect(), projectId = project()!.id; setMenu({ x: el.left, y: el.bottom, items: [
     { label: tr("Task details"), icon: "file-text", action: () => openTask(projectId, t.uuid) },
     { label: tr("Rename…"), icon: "pencil", disabled: !t.writable || !!writingTask(), action: () => requestTaskRename(projectId, t.uuid) },
     ...boardActions(t.stage).map((action) => ({ label: actionLabel(action), icon: ACTION_ICON[action], disabled: !t.writable || !!writingTask(), action: () => void actOnTask(projectId, t, { kind: action }) })),
     ...(["todo", "backlog"].includes(t.stage) ? teamChoices(projectId).map((team) => ({
-      label: tr("Send to team: %1", team.name), icon: "users", disabled: !t.writable || !!writingTask(),
-      action: () => void sendToTeam(projectId, t, team.id, team.name),
+      label: tr("Send to team: %1", team.label), icon: "users", disabled: !t.writable || !!writingTask(),
+      action: () => void sendToTeam(projectId, t, team.id, team.label),
     })) : []),
     ...(["todo", "backlog"].includes(t.stage) && supportsTaskStart(t) ? [{ label: tr("Start task"), icon: "play", disabled: !!taskStartBlocker(projectId, t) || !!writingTask(), hint: taskStartBlocker(projectId, t), action: () => void startTask(projectId, t) }] : []),
     ...(t.stage === "active" ? [{ label: tr("Cancel task…"), icon: "x", danger: true, disabled: !canCancel(t) || !!writingTask(), action: () => requestTaskCancellation(projectId, t, anchor) }] : []),

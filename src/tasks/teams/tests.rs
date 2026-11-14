@@ -6,6 +6,7 @@ use crate::teams::ops::{
 use std::process::{Command, Stdio};
 
 mod waits;
+mod cancel_attempt;
 
 /// Run the real command entry with private configuration, stdin and caller
 /// ancestry, without changing this test process's environment or sessions.

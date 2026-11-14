@@ -11,6 +11,7 @@ mod harness;
 mod hosted;
 mod member_sessions;
 mod reads;
+mod session_groups;
 mod status_items;
 mod storage_failure;
 mod verdict;

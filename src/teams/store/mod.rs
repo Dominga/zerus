@@ -10,6 +10,7 @@ mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
 mod holder;
+mod disposition;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 pub use decision_state::DecisionState;
@@ -212,6 +213,12 @@ impl Store {
 }
 
 fn connect(path: &Path, create: bool) -> Result<Connection> {
+    connect_mode(path, create, true)
+}
+
+/// The disposition reader uses the same native path/privacy binding but
+/// never initializes, migrates or changes a persistent pragma.
+fn connect_mode(path: &Path, create: bool, migrate: bool) -> Result<Connection> {
     let dir = path
         .parent()
         .ok_or_else(|| Guard::MissingDirectory.problem())?;
@@ -261,9 +268,11 @@ fn connect(path: &Path, create: bool) -> Result<Connection> {
     #[cfg(unix)]
     crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
     db.busy_timeout(Duration::from_secs(8)).map_err(storage)?;
-    initialize(&mut db)?;
-    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        .map_err(storage)?;
+    if migrate {
+        initialize(&mut db)?;
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .map_err(storage)?;
+    }
     Ok(db)
 }
 

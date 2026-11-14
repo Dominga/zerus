@@ -1,7 +1,7 @@
-//! A member that a ready task needs and that cannot be read
+//! A member that a ready task or an open hand-out needs and cannot be read
 //! (zerus-63rru.55), or whose terminal holds input (zerus-63rru.79). Unknown is never free, but it is not silent: the held
 //! steps' row and timing, under `unreadable:<member>`. The row lasts while a
-//! ready task needs the member and it cannot be read; it ends, with its
+//! task needs the member and it cannot be read; it ends, with its
 //! card, when either stops. A changed fact or task replaces the kept card
 //! only once it has stood for the period, and a dismissal lasts while the
 //! sentence is the same.
@@ -14,7 +14,7 @@ const ROWS: &str = "gate:unreadable:";
 impl Runtime {
     /// Ends the rows of the members nobody needs now, except a member whose
     /// read was not due this pass, then holds the needed ones. With no
-    /// needs (no ready task, or a paused team) every row ends.
+    /// needs (no ready task or hand-out, or a paused team) every row ends.
     pub(in crate::desktop::teams::actor) fn unreadable_members(
         &mut self,
         store: &mut Store,
@@ -40,7 +40,13 @@ impl Runtime {
         }
         for (member, (node, role, fact)) in &needs.needed {
             let key = format!("unreadable:{member}");
-            let reason = sentence(member, role, *node, fact.clone());
+            let reason = sentence(
+                member,
+                role,
+                *node,
+                fact.clone(),
+                needs.holders.contains(member),
+            );
             self.for_row(|a| a.hold_write(store, team, (&key, 0, 0), &reason, now))?;
         }
         Ok(())
@@ -54,7 +60,16 @@ pub(in crate::desktop::teams::actor) fn sentence(
     role: &str,
     node: u32,
     fact: Fact,
+    holding: bool,
 ) -> String {
+    if holding {
+        let what = match fact {
+            Fact::NoHandle => "no durable handle or launch evidence identifies its session",
+            Fact::Unavailable => "its session record cannot be read",
+            _ => "its binding cannot be resolved",
+        };
+        return format!("Member {member} ({role}) holds an open hand-out of task {node} but its binding cannot be read: {what}. The service checks this binding again. This card closes when the member can be read or it no longer holds an open hand-out.");
+    }
     const FINAL: &str = "This seat cannot be bound again; archive the member.";
     let (what, next) = match fact {
         // The member can be read; its terminal is what is not free

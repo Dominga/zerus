@@ -47,6 +47,7 @@ fn plan(team: &Team, path: &Path) -> Plan {
         base_commit: team.base_commit.clone(),
         parent: None,
         launch_id: uuid::Uuid::new_v4().to_string(),
+        session_name: String::new(),
         placement: p::Placement {
             source: path.to_str().unwrap().into(),
             git_dir: path.join("common").to_str().unwrap().into(),

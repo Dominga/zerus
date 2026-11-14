@@ -28,6 +28,14 @@ def headers(**values):
     return result
 
 
+def current_metadata(version):
+    """Synthetic agreeing current pointers for independent artifact controls."""
+    return [(version.encode(), {}),
+            (json.dumps(dict(name='@moonshot-ai/kimi-code', version=version)).encode(), {}),
+            (json.dumps(dict(tag_name='@moonshot-ai/kimi-code@' + version, draft=False, prerelease=False,
+                             html_url='https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%40' + version)).encode(), {})]
+
+
 class Response:
     def __init__(self, body, declared=None):
         self.body, self.status, self.url, self.reads = body, 200, 'https://cdn.kimi.com/kimi-code/binaries/2.2.0/fixture', 0
@@ -65,12 +73,14 @@ class KimiNativeCI(unittest.TestCase):
         manifest = dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
                         platforms={'linux-x64': dict(filename='kimi-code-linux-x64', checksum=sha)})
         raw = json.dumps(manifest).encode()
-        with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1\n', {}), (raw, {}), (b'', {'size': 5})]) as get:
+        with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(raw, {}), (b'', {'size': 5})]) as get:
             record, observed, _ = ci.resolve_latest('linux-x64')
         self.assertEqual(record, dict(schema=1, version='2.3.1', target='linux-x64', image_size=5,
                                      manifest_sha256=hashlib.sha256(raw).hexdigest(), image_sha256=sha))
         self.assertEqual(observed, raw)
         self.assertEqual(get.call_args_list, [mock.call('https://code.kimi.com/kimi-code/latest', 64),
+            mock.call('https://registry.npmjs.org/@moonshot-ai/kimi-code/latest', 65536, policy='no-redirect'),
+            mock.call('https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest', 262144, policy='no-redirect'),
             mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/manifest.json', 65536),
             mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64', ci.IMAGE_LIMIT, method='HEAD')])
         for body in (b'', b'latest', b'2.3.1-beta', b'2.3.1/../2.2.0', b'2.3.1\n2.2.0'):
@@ -80,10 +90,10 @@ class KimiNativeCI(unittest.TestCase):
                 get.assert_called_once()
         for key, value in (('version', '2.2.0'), ('tag', '@other/code@2.3.1')):
             changed = json.dumps(dict(manifest, **{key: value})).encode()
-            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (changed, {})]) as get:
+            with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(changed, {})]) as get:
                 with self.assertRaises(ValueError):
                     ci.resolve_latest('linux-x64')
-                self.assertEqual(get.call_count, 2)
+                self.assertEqual(get.call_count, 4)
 
     def test_latest_metadata_refuses_bad_lengths_encoding_and_redirects(self):
         for body, declared in ((b'2.3.1', 5), (b'2.3.1', 4), (b'2.3', 5)):
@@ -137,10 +147,10 @@ class KimiNativeCI(unittest.TestCase):
                       dict(good, checksum=True), dict(good, checksum='')):
             raw = json.dumps(dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
                                   platforms={'linux-x64': entry})).encode()
-            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (raw, {})]) as get:
+            with mock.patch.object(ci, 'metadata', side_effect=current_metadata('2.3.1') + [(raw, {})]) as get:
                 with self.assertRaises(ValueError):
                     ci.resolve_latest('linux-x64')
-                self.assertEqual(get.call_count, 2)
+                self.assertEqual(get.call_count, 4)
 
     def test_one_release_is_staged_nonexecutable_before_its_record_is_admitted(self):
         root = self.root(); images, evidence = root / 'images', root / 'evidence'
@@ -256,7 +266,7 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
-        self.assertEqual(len(ci.METHODS), 23)
+        self.assertEqual(len(ci.METHODS), 24)
         self.assertIn('test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_hint_reaches_model_through_real_hgs_hook',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message', ci.METHODS)

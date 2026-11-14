@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
-// Read-only selected-slot source fences for saved Resume and Start fresh.
+// Read-only selected-slot source fences for saved Resume, Start fresh and terminal Fork.
 pub(super) mod selected_source;
 #[cfg(test)]
 mod selected_source_tests;

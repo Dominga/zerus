@@ -20,16 +20,16 @@ export default function TaskCancelDialog() {
   onMount(() => { el.showModal(); queueMicrotask(() => keep?.focus()); });
   onCleanup(() => { if (el.open) el.close(); queueMicrotask(() => { if (!taskCancellation() && pending.origin?.isConnected) pending.origin.focus(); }); });
   return <dialog ref={el} class="dlg" role="alertdialog" aria-labelledby="task-cancel-title" aria-describedby="task-cancel-body" style={{ width: "500px" }} onCancel={close} onClose={close}>
-    <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="task-cancel-title">{tr("Cancel %1?", pending.task.id)}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={close}><Icon name="x" size={16} /></button></div>
+    <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="task-cancel-title">{pending.attempt ? tr("Abandon attempt?") : tr("Cancel %1?", pending.task.id)}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={close}><Icon name="x" size={16} /></button></div>
     <div class="dlg-body td-form" id="task-cancel-body">
       <p class="td-cancel-text">{pending.task.text || pending.task.title}</p>
-      <p><b>{pending.task.id}</b> {tr("moves to In review, and")} <b>{worker()}</b> {tr("gets the cancel message.")}
+      <Show when={pending.attempt} fallback={<p><b>{pending.task.id}</b> {tr("moves to In review, and")} <b>{worker()}</b> {tr("gets the cancel message.")}
         <Show when={!running()}> {tr("The agent is not running, so hgs will refuse the message; the task is cancelled all the same.")}</Show>
         <Show when={running() && working()}> {worker()} {tr("is working; it reads the message when its turn ends.")}</Show>
-      </p>
+      </p>}>{(attempt) => <><p class="mono">{attempt()}</p><p>{tr("Delivery remains unknown. The agent may still be working.")}</p><p>{tr("Abandoning this attempt releases its hold. The task stays in its current stage, and a later send creates a new attempt.")}</p></>}</Show>
       <label class="td-label" for="td-reason">{tr("Reason (optional) — saved as a comment on the task, not sent to the agent")}</label>
       <TextInput id="td-reason" class="field" placeholder={tr("Why it is cancelled")} value={reason()} onInput={(e) => setReason(e.currentTarget.value)} />
     </div>
-    <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn solid-danger" onClick={() => void confirmTaskCancellation(reason())}><Icon name="x" size={13} />{tr("Cancel task")}</button><button ref={keep} type="button" class="btn primary" autofocus onClick={close}>{tr("Keep running")}</button></div>
+    <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn solid-danger" onClick={() => void confirmTaskCancellation(reason())}><Icon name="x" size={13} />{pending.attempt ? tr("Abandon attempt") : tr("Cancel task")}</button><button ref={keep} type="button" class="btn primary" autofocus onClick={close}>{pending.attempt ? tr("Keep attempt") : tr("Keep running")}</button></div>
   </dialog>;
 }

@@ -687,11 +687,13 @@ fn a_list_row_passes_its_member_sessions_through() {
         &vec![
             MemberSession {
                 member: "lead".into(),
+                role: "lead".into(),
                 machine: "00000000-0000-4000-8000-0000000000aa".into(),
                 session_id: "launch_id:00000000-0000-4000-8000-000000000064".into(),
             },
             MemberSession {
                 member: "m1".into(),
+                role: "developer".into(),
                 machine: "00000000-0000-4000-8000-0000000000aa".into(),
                 session_id: "launch_id:00000000-0000-4000-8000-000000000031".into(),
             },

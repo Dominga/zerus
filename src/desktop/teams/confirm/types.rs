@@ -24,6 +24,13 @@ pub(super) struct Binding {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ResumeWait {
+    pub until: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Snapshot {
     pub machine: String,
     pub launch: String,
@@ -47,6 +54,8 @@ pub(super) struct Snapshot {
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_refusal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_wait: Option<ResumeWait>,
     pub questions: Vec<Value>,
 }
 

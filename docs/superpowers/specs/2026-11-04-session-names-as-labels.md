@@ -332,6 +332,7 @@ The lock keeps worktree maintenance below the floor from removing the checkout o
 2. **Lock before publication.** The lock is acquired and durably verified before the canonical record is published in, or moved into, the ID layout. A lock that fails, is uncertain or is interrupted never leaves an ID-layout record exposed. A protective lock left over by an interrupted publication stays for review, with no cleanup by age or name.
 3. **Verify at every mutation.** The ownership nonce, object and common-dir binding, and the current lock, are verified at every mutation. A foreign or user lock is never overridden, and `--force` is never used. The exact `zerus:<session_id>` text is necessary for a release, but it is not by itself ownership or permission to remove anything.
 4. **Shared checkouts.** A release considers all live or saved sessions that use the same checkout: forks share the checkout and its `worktree_owner`. Archiving or forgetting one must not remove another's protection. The reason is transferred under the writer and exclusion scope without a gap, or the unsupported shared case refuses. One session per worktree is never assumed, and protection stays when the evidence is unavailable.
+   Provider binding commits also hold shared advisory folder-reference guards through publication. Each absolute `cwd`/`launch_dir` contributes its canonical ancestor keys, and a recorded ownership ID contributes its own key. Final release tries only the exact checkout and ownership keys exclusively before its strict census and retains them through the take and proof result. Every acquisition is nonblocking; contention retains the Git veto or refuses that binding commit before publication. Unrelated folder references can publish concurrently, including through the same provider. Known shared holders drop this census guard before the existing reason handoff, which retains its original repository and selected-provider exclusions. Guard directories/files are original-object checked, bounded per operation, and retained rather than replaced or pruned. They grant no cleanup, native-input or signal authority; they never recreate a retired Git veto. Non-string folder metadata cannot publish as a new unreadable binding.
 5. **A veto, not consent.** The lock never consents to a deletion. A confirmed removal keeps every existing check: ownership, source, files, other occupants, processes, drain and fingerprint. Releasing the lock never authorises deleting a branch or data, stopping an agent or archiving automatically.
 6. **Release at the floor, and the person's choices.**
    - The floor honours `zerus:` locks, and P3c releases them on archive and forget, so none lingers after a rollback to the floor. That release applies rules 3 and 4: it verifies ownership and the current lock, never forces, and keeps the protection while another live or saved session uses the checkout.
@@ -384,6 +385,17 @@ preparation; each already-prepared batch recipe retains only the small fence.
 A later refusal does not roll back, restart or replay earlier batch entries
 that already started. This neither adopts a changed recipe nor grants native
 custody or duplicate-label admission.
+
+Non-archived terminal Fork (zerus-ucck.4.17) prepares from one selected raw
+legacy/ID frame while keeping its existing state-writer scope and current
+readiness checks. The original fixed-slot proof and independent namespace/
+identity check precede Kimi's native fork and the final terminal start. Only
+fixed digests and locators remain after preparation; conversion never reads or
+refreshes the source. A source refusal after a confirmed distinct native Kimi
+fork keeps that history and reports its exact CID for review, without starting,
+deleting, retrying or replaying it. Unknown native outcomes remain unknown and
+the same scoped UUID never forks again. This adds no physical/native custody,
+archive/provider transaction or duplicate-label authority.
 
 P3e's controls for the lock:
 - a lock that fails or is interrupted before publication;

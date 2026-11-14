@@ -26,7 +26,7 @@ base=Path(sys.argv[1]); mode=sys.argv[2]; exe=sys.argv[3]
 while not (base/'go').exists(): time.sleep(.01)
 if mode=='unreadable':
     assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0
-keep=mode in ('marked','orphan-marked','withheld-middle','member-shell') or mode.startswith('id-marked') or mode.startswith('hosted-')
+keep=mode in ('marked','orphan-marked','withheld-middle','readable-middle','member-shell') or mode.startswith('id-marked') or mode.startswith('hosted-')
 child=dict(os.environ)
 for key in list(child):
     if (not keep and key in ['HGS_SESSION','HGS_RUN_ID','HGS_SESSION_ID']) or key.startswith('PAD_'): child.pop(key,None)
@@ -37,6 +37,19 @@ if mode in ('withheld-middle','withheld-person','member-shell'):
     strip='env -u HGS_SESSION -u HGS_RUN_ID -u HGS_SESSION_ID ' if mode=='withheld-middle' else ''
     hold='while [ ! -f "$1/recorded" ]; do sleep 0.01; done; ' if mode=='withheld-middle' else ''
     cmd=['/bin/sh','-c','echo $$ > "$1/shell"; '+hold+strip+'"$0" --exact teams::caller::tests::probe --nocapture; exit $?',exe,str(base)]
+if mode in ('readable-middle','readable-person'):
+    code="""
+import os,sys,time,subprocess
+from pathlib import Path
+base,exe,mode=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
+(base/'shell').write_text(str(os.getpid()))
+if mode=='readable-middle':
+    while not (base/'recorded').exists(): time.sleep(.01)
+leaf=dict(os.environ)
+for key in ('HGS_SESSION','HGS_RUN_ID','HGS_SESSION_ID'): leaf.pop(key,None)
+sys.exit(subprocess.call([exe,'--exact','teams::caller::tests::probe','--nocapture'],env=leaf))
+"""
+    cmd=[sys.executable,'-c',code,str(base),exe,mode]
 if mode=='intermediate':
     code="import os,sys,subprocess; e=dict(os.environ); [e.pop(k,None) for k in ['HGS_SESSION','HGS_RUN_ID','HGS_SESSION_ID']]; p=subprocess.run([sys.argv[1],'--exact','teams::caller::tests::probe','--nocapture'],env=e,capture_output=True,text=True,timeout=10); print(p.stdout+p.stderr)"
     cmd=[sys.executable,'-c',code,exe]
@@ -132,6 +145,7 @@ impl Tree {
             "partial",
             "empty",
             "withheld-person",
+            "readable-person",
         ]
         .contains(&mode)
         {
@@ -488,33 +502,38 @@ fn shell(tree: &Tree) -> u32 {
     })
 }
 
-/// A system shell between a person's command and the top. On macOS the
-/// system withholds the shell's environment, so the walk cannot tell whether
+/// A system shell between a person's command and the top. When the
+/// system withholds the shell's environment, the walk cannot tell whether
 /// it is an agent and refuses with the sentence that names the cause and the
 /// Zerus window: when that shell is a recorded live agent, and when nothing in
 /// the tree is marked (a person typing into a system shell below the top).
-/// Elsewhere the shell is readable: the agent is found, and the unmarked tree
+/// When the shell is readable, the agent is found, and the unmarked tree
 /// is the person.
 #[test]
 fn a_withheld_shell_below_the_top_refuses_a_persons_command() {
-    for mode in ["withheld-middle", "withheld-person"] {
+    for mode in [
+        "withheld-middle",
+        "withheld-person",
+        "readable-middle",
+        "readable-person",
+    ] {
         let tree = Tree::start(mode, None);
         std::fs::write(tree.temp.path().join("go"), b"go").unwrap();
         let shell = shell(&tree);
-        if mode == "withheld-middle" {
+        if mode.ends_with("-middle") {
             let start = crate::platform::process_start_time(shell).unwrap();
             tree.record(shell, &start);
             std::fs::write(tree.temp.path().join("recorded"), b"").unwrap();
         }
         let text = tree.answer();
         assert!(text.contains(&format!("PARENT {shell}")), "{text}");
-        if cfg!(target_os = "macos") {
+        if !environment_readable(&text, shell) {
             assert!(text.contains("PROBE refused:not_allowed"), "{text}");
             assert!(
                 text.contains("below a program that hides its environment, usually a system shell; run it from the Zerus window"),
                 "{text}"
             );
-        } else if mode == "withheld-middle" {
+        } else if mode.ends_with("-middle") {
             assert!(text.contains("PROBE refused:not_allowed"), "{text}");
             assert!(
                 text.contains("A live agent session runs this command"),
@@ -574,19 +593,21 @@ fn an_unmarked_command_below_a_recorded_host_is_refused() {
     assert!(text.contains(INSIDE_HOST), "{text}");
 }
 
-/// A recorded host with an unmarked shell below it. On macOS the system
-/// shell's environment is withheld below the top, which refuses first.
+/// A recorded host with an unmarked shell below it. A withheld shell
+/// environment below the top refuses before the recorded-host check.
 #[test]
 fn an_unmarked_shell_below_a_recorded_host_is_refused() {
-    let tree = Tree::start("withheld-person", None);
-    tree.host(HOST, tree.pid, &tree.birth);
-    let text = tree.answer();
-    assert!(text.contains(&format!("PARENT {}", shell(&tree))), "{text}");
-    assert!(text.contains("PROBE refused:not_allowed"), "{text}");
-    if cfg!(target_os = "macos") {
-        assert!(text.contains("hides its environment"), "{text}");
-    } else {
-        assert!(text.contains(INSIDE_HOST), "{text}");
+    for mode in ["withheld-person", "readable-person"] {
+        let tree = Tree::start(mode, None);
+        tree.host(HOST, tree.pid, &tree.birth);
+        let text = tree.answer();
+        assert!(text.contains(&format!("PARENT {}", shell(&tree))), "{text}");
+        assert!(text.contains("PROBE refused:not_allowed"), "{text}");
+        if !environment_readable(&text, shell(&tree)) {
+            assert!(text.contains("hides its environment"), "{text}");
+        } else {
+            assert!(text.contains(INSIDE_HOST), "{text}");
+        }
     }
 }
 
@@ -608,18 +629,18 @@ fn a_host_holding_another_sessions_markers_refuses_both_shells() {
     refused(&text);
     assert!(text.contains(CLAIM_BELOW_HOST), "{text}");
     assert!(!text.contains("verify the claimed agent"), "{text}");
-    for mode in ["normal", "withheld-middle"] {
+    for mode in ["normal", "withheld-middle", "readable-middle"] {
         let dropped = Tree::start(mode, None);
         dropped.record(other.0.id(), &start);
         dropped.host(HOST, dropped.pid, &dropped.birth);
-        if mode == "withheld-middle" {
+        if mode.ends_with("-middle") {
             std::fs::write(dropped.temp.path().join("go"), b"go").unwrap();
             shell(&dropped);
             std::fs::write(dropped.temp.path().join("recorded"), b"").unwrap();
         }
         let text = dropped.answer();
         assert!(text.contains("PROBE refused:not_allowed"), "{mode}: {text}");
-        if mode == "withheld-middle" && cfg!(target_os = "macos") {
+        if mode.ends_with("-middle") && !environment_readable(&text, shell(&dropped)) {
             assert!(text.contains("hides its environment"), "{mode}: {text}");
         } else {
             assert!(text.contains(INSIDE_HOST), "{mode}: {text}");

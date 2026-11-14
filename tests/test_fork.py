@@ -52,8 +52,10 @@ class Forks(Base):
         self.wait(lambda:self.binding(target).get('conversation_id'))
         return target
 
-    def test_live_native_fork_preserves_original_and_context_for_all_providers(self):
-        for agent in ['codex','claude','kimi']:
+    def test_live_native_fork_preserves_original_and_context_for_capable_providers(self):
+        # Kimi's external utility needs the source instance closed; its saved
+        # positive and live refusal have separate capability controls.
+        for agent in ['codex','claude']:
             source=self.start(agent)
             record=self.binding(source);path=self.root/'state'/(hashlib.sha256(source.encode()).hexdigest()+'.json')
             transcript=Path(record['transcript']);body=json.loads(transcript.read_text());body['context']=['user request','agent reply'];transcript.write_text(json.dumps(body)+'\n')

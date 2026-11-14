@@ -245,6 +245,16 @@ pub(in crate::teams::store) fn after_fence() -> Result<()> {
 pub(in crate::teams::store) fn fence(db: &Connection) -> Result<()> {
     marked(db).map(|_| ())
 }
+/// The preview-off disposition reader cannot migrate an earlier layout.
+pub(in crate::teams::store) fn as_is(db: &Connection) -> Result<()> {
+    if marked(db)? != Mark::Current {
+        return Err(Problem::new(
+            code::INVALID_STATE,
+            "Teams store needs migration; no team data was changed",
+        ));
+    }
+    Ok(())
+}
 pub(in crate::teams::store) fn extend(db: &Connection) -> Result<()> {
     if marked(db)? == Mark::Current {
         // The current layout's idempotent index, kept here instead of a

@@ -448,6 +448,6 @@ pub use cancels::PendingCancel;
 pub(super) use schema::{after_fence, EXTENSION};
 #[cfg(test)]
 pub(super) use schema::AFTER_FENCE;
-pub(super) use schema::{extend, fence};
+pub(super) use schema::{as_is, extend, fence};
 #[cfg(test)]
 mod tests;

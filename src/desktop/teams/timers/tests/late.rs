@@ -31,6 +31,7 @@ pub(super) fn row(w: &mut World, member: &str, state: State, unknown_until: i64)
         },
         parent: None,
         launch_id: LAUNCH.into(),
+        session_name: String::new(),
     });
     row.late_after_stop = true;
     row.unknown_until = unknown_until;

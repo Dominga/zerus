@@ -6,15 +6,17 @@ use crate::teams::store::EffectIntent;
 use std::collections::{BTreeMap, BTreeSet};
 use zerus_team_plan::ready::{self, MemberView, PlanView};
 
-/// The members a ready task needs and that cannot be read (zerus-63rru.55).
+/// Unreadable members needed by ready tasks or their open hand-outs.
 #[derive(Default)]
 pub(super) struct Needs {
     /// Members whose read this pass named a fact, with role and fact.
     unreadable: BTreeMap<String, (String, Fact)>,
     /// Members whose read was not due or failed: their rows stay as they are.
     unread: BTreeSet<String>,
-    /// The needed ones: member, the ready task it would take, role and fact.
+    /// The needed ones: member, its waiting or held task, role and fact.
     pub needed: BTreeMap<String, (u32, String, Fact)>,
+    /// An open hand-out needs its holder even when no task is ready.
+    pub holders: BTreeSet<String>,
 }
 impl Needs {
     /// "Needs" is the kernel's own selection run once more with the
@@ -154,8 +156,9 @@ impl Runtime {
             return Ok(());
         }
         // One readiness read: uncooled for the unstaffed comparison, then
-        // cooled for the hand-outs. Members and open effects are read once,
-        // and only when a node is ready.
+        // cooled for the hand-outs. The bounded effects read also finds
+        // holders whose task has started; members are read once when either
+        // ready work or an open hand-out needs them.
         let raw = ops::readiness(store, &team.id)?;
         let any_ready = !ready::ready(&PlanView {
             phases: &raw.phases,
@@ -165,13 +168,11 @@ impl Runtime {
             integration: team.settings.integration,
         })
         .is_empty();
-        let (effects, all_members) = if any_ready {
-            (
-                self.open_effects(store, &team.id)?,
-                self.members(store, &team.id)?,
-            )
+        let effects = self.open_effects(store, &team.id)?;
+        let all_members = if any_ready || !effects.is_empty() {
+            self.members(store, &team.id)?
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
         };
         // The unstaffed comparison (and its stale-episode page) runs on every
         // pass of a running team, a pass with no ready task included: it ends
@@ -186,10 +187,7 @@ impl Runtime {
             integration: team.settings.integration,
         };
         let ready = ready::ready(&initial);
-        if ready.is_empty() {
-            // No ready task: nobody needs a member that cannot be read.
-            return self.unreadable_members(store, team, &Needs::default(), now);
-        }
+        let ready_work = !ready.is_empty();
         // A task already handed out stays ready in the kernel's view until
         // its observation moves, and the store refuses a second intent for
         // it (zerus-63rru.71). Held here like a cooling task, it takes no
@@ -209,16 +207,27 @@ impl Runtime {
         let mut members = Vec::new();
         let mut needs = Needs::default();
         for m in all_members {
+            let held = effects.iter().find(|e| e.member == m.id);
             // The member is in the active set: a later leave tells the lead
             // again (zerus-63rru.86).
-            if m.state == MemberState::Active && m.session.is_some() {
+            if ready_work && m.state == MemberState::Active && m.session.is_some() {
                 self.forget_paused_started(store, team, &m.id, now)?;
             }
             let answer = if m.id != team.lead
                 && m.state == MemberState::Active
                 && m.session.is_some()
+                && held.is_some()
+            {
+                // An occupied seat remains unavailable for new work. Only
+                // an undecidable binding needs this card: decisive ends are
+                // handled by delivery recovery (.85).
+                self.member_free(store, ports, team, &m, now)?
+            } else if ready_work
+                && m.id != team.lead
+                && m.state == MemberState::Active
+                && m.session.is_some()
                 && !self.ledger.pending_member(&team.id, &m.id)?
-                && !effects.iter().any(|e| e.member == m.id)
+                && held.is_none()
             {
                 match self.terminal_state(ports, team, &m, now)? {
                     // Its terminal holds input (zerus-63rru.79): not free, and
@@ -238,16 +247,26 @@ impl Runtime {
             } else {
                 // A member out of the active set that holds started work is
                 // told to the lead once (zerus-63rru.86).
-                if m.state != MemberState::Active || m.session.is_none() {
+                if ready_work && (m.state != MemberState::Active || m.session.is_none()) {
                     self.tell_paused_started(store, team, &m, now)?;
                 }
                 Some(Availability::Busy)
             };
             match &answer {
                 Some(Availability::Unreadable(fact)) => {
-                    needs
-                        .unreadable
-                        .insert(m.id.clone(), (m.role.clone(), fact.clone()));
+                    if let Some(effect) = held {
+                        if matches!(fact, Fact::NoHandle | Fact::Unavailable) {
+                            needs.holders.insert(m.id.clone());
+                            needs.needed.insert(
+                                m.id.clone(),
+                                (effect.node, m.role.clone(), fact.clone()),
+                            );
+                        }
+                    } else {
+                        needs
+                            .unreadable
+                            .insert(m.id.clone(), (m.role.clone(), fact.clone()));
+                    }
                 }
                 None => {
                     needs.unread.insert(m.id.clone());
@@ -258,7 +277,7 @@ impl Runtime {
                 id: m.id,
                 role: m.role,
                 state: m.state,
-                free: answer == Some(Availability::Free),
+                free: held.is_none() && answer == Some(Availability::Free),
             });
         }
         let view = PlanView {

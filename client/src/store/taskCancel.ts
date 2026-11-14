@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { cancelTaskExecution } from "../bridge";
+import { cancelTaskAttempt, cancelTaskExecution } from "../bridge";
 import { notify } from "./actions";
 import { tasks } from "./tasks";
 import { setWritingTask, writingTask } from "./taskBoard";
@@ -7,7 +7,7 @@ import type { Task } from "../ui/screens/tasks-ui";
 import { tr, trNoop } from "../i18n";
 
 export interface Execution { dispatch_id: string; stage_at: number; machine: string; session_id: string }
-export interface Cancellation { project: string; task: Task; execution: Execution; origin?: HTMLElement }
+export interface Cancellation { project: string; task: Task; execution: Execution; attempt?: string; origin?: HTMLElement }
 export const PAUSE_REASON = trNoop("Pausing an individual task is not available yet");
 const CHANGED = trNoop("The task execution changed. Nothing was cancelled. Refresh the task.");
 export const [taskCancellation, setTaskCancellation] = createSignal<Cancellation>();
@@ -24,10 +24,27 @@ export function requestTaskCancellation(project: string, task: Task, origin?: HT
   setTaskCancellation({ project, task: { ...current, executor: { ...current.executor } }, execution, origin });
 }
 
+/** A separate decision for one unknown attempt; its task stage stays as shown. */
+export function requestAttemptCancellation(project: string, task: Task & { unknownAttempts: readonly string[] }, attempt: string, origin?: HTMLElement) {
+  if (writingTask() || taskCancellation()) return;
+  if (tasks.project() !== project || !task.writable || !task.unknownAttempts.includes(attempt)) { notify("error", tr(CHANGED)); return; }
+  setTaskCancellation({ project, task: { ...task, executor: { ...task.executor } }, execution: executionOf(task), attempt, origin });
+}
+
 export async function confirmTaskCancellation(reason: string) {
   const pending = taskCancellation();
   if (!pending || writingTask()) return;
   setTaskCancellation(undefined);
+  if (pending.attempt) {
+    if (tasks.project() !== pending.project) { notify("error", tr(CHANGED)); return; }
+    setWritingTask(pending.task.uuid);
+    try {
+      await cancelTaskAttempt(pending.project, pending.task.uuid, pending.attempt, reason.trim());
+      notify("info", tr("Attempt abandoned. Delivery remains unknown."));
+    } catch (error) { notify("error", String(error)); }
+    finally { setWritingTask(undefined); }
+    return;
+  }
   if (!matches(fresh(pending.project, pending.task.uuid), pending.execution)) { notify("error", tr(CHANGED)); return; }
   setWritingTask(pending.task.uuid);
   try {

@@ -415,15 +415,24 @@ class NativeCodexStartup(test_pause.Harness):
                   'activity changed while checking; retry pause')
 
         def run(argv, *args, **kwargs):
-            if argv == [str(test_pause.HGS), 'pause', getattr(self, 'name', None)]:
-                run_id = self.binding(self.name)['run_id']
+            if argv == [str(test_pause.HGS), 'session-action', getattr(self, 'name', None), '--json']:
+                request = json.loads(kwargs['input'])
+                if request.get('action') != 'pause':
+                    return real_run(argv, *args, **kwargs)
+                original = self.binding(self.name)
+                run_id = original['run_id']
+                self.assertEqual(request['expected_run_id'], run_id)
+                self.assertEqual(request['expected_conversation_id'], original['conversation_id'])
                 count = refused.get(run_id, 0)
                 if count < len(errors):
                     refused[run_id] = count + 1
-                    # A fixture preflight refusal: no native pause call occurred.
-                    return subprocess.CompletedProcess(argv, 1, '', f'hgs: {self.name}: {errors[count]}\n')
+                    # A scoped fixture preflight refusal: no native pause occurred.
+                    receipt = dict(request_id=request['request_id'], name=self.name, run_id=run_id,
+                                   conversation_id=original['conversation_id'], status='failed',
+                                   error=f'{self.name}: {errors[count]}')
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(receipt), '')
                 result = real_run(argv, *args, **kwargs)
-                if result.returncode == 0:
+                if result.returncode == 0 and json.loads(result.stdout).get('status') == 'completed':
                     paused.append(run_id)
                 return result
             return real_run(argv, *args, **kwargs)

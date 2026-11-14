@@ -3,6 +3,11 @@ import { changeRequest, deliveryError, deliveryText, historyAction } from "./tas
 import type { TaskEntry } from "../../store/taskDetails";
 const entry = (state: string, mode = "send"): TaskEntry => ({ kind: "message", text: "Context", at: 1, actor: "You", session: "", requestId: "request", files: [], delivery: { state, mode, error: "" } });
 describe("Qt task journal labels", () => {
+  it("names an abandoned unknown attempt without claiming task cancellation or delivery", () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    expect(historyAction({ ...entry("uncertain"), kind: "attempt_cancelled", requestId: id }))
+      .toBe("abandoned attempt " + id + "; delivery remains unknown");
+  });
   it("distinguishes saved notes, queued context, submitted feedback and unknown delivery", () => {
     expect(deliveryText(entry("note"), "")).toBe("Saved note — not sent");
     expect(deliveryText(entry("queued"), "")).toBe("Waiting for Start");

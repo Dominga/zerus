@@ -16,7 +16,8 @@ import time
 import uuid
 
 
-def run(test, event, env, timeout=12):
+def run(test, event, env, timeout=12, *, command='hook'):
+    """Return the actual child command/result from the fixture's agent tree."""
     selected = getattr(test, 'native_hook_socket', None) or scripted_socket(test.root, env)
     if selected:
         with socket.socket(socket.AF_UNIX) as client:
@@ -28,7 +29,7 @@ def run(test, event, env, timeout=12):
                 except (FileNotFoundError, ConnectionRefusedError):
                     if time.monotonic() >= until: raise
                     time.sleep(.01)
-            client.sendall(json.dumps(dict(event=event, env=env)).encode() + b'\n')
+            client.sendall(json.dumps(dict(event=event, env=env, command=command)).encode() + b'\n')
             client.shutdown(socket.SHUT_WR)
             data = b''
             while chunk := client.recv(65536):
@@ -38,7 +39,7 @@ def run(test, event, env, timeout=12):
         token = uuid.uuid4().hex
         request = test.root / (token + '-hook.json')
         result = test.root / (token + '-hook-result.json')
-        request.write_text(json.dumps(dict(event=event, env=env, result=str(result))))
+        request.write_text(json.dumps(dict(event=event, env=env, result=str(result), command=command)))
         program = Path(__file__).resolve()
         launch = dict(argv=[sys.executable, str(program), 'once', str(request)], env=env)
         temporary = test.root / 'hook-launch.tmp'
@@ -52,18 +53,22 @@ def run(test, event, env, timeout=12):
             time.sleep(.01)
         reply = json.loads(result.read_text())
         request.unlink(); result.unlink()
-    return subprocess.CompletedProcess(['hgs', '__state', 'hook'], reply['returncode'], reply['stdout'], reply['stderr'])
+    return subprocess.CompletedProcess(reply['args'], reply['returncode'], reply['stdout'], reply['stderr'])
 
 
 def invoke(request):
     import test_input
     selected = request['env'].get('HGS_TEST_BIN') or str(test_input.HGS)
+    command = request.get('command', 'hook')
+    if command not in ('hook', 'answer-channel'):
+        return dict(args=[], returncode=1, stdout='', stderr='unsupported fixture hook operation')
+    argv = [selected, '__state', command]
     try:
-        result = subprocess.run([selected, '__state', 'hook'],
+        result = subprocess.run(argv,
             input=json.dumps(request['event']), env=request['env'], text=True, capture_output=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return dict(returncode=1, stdout='', stderr='fixture hook invocation failed: ' + str(error))
-    return dict(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+        return dict(args=argv, returncode=1, stdout='', stderr='fixture hook invocation failed: ' + str(error))
+    return dict(args=result.args, returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
 
 
 def install_native(config, root):

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const MAX_SCREEN: usize = 128 * 1024;
+#[cfg(test)]
+mod wrapped_tests;
 const KEYS: &[&str] = &[
     "Enter", "Escape", "Tab", "BTab", "BSpace", "Up", "Down", "Left", "Right", "Home", "End",
     "PPage", "NPage", "DC", "C-c", "C-d", "C-l", "C-a", "C-e", "C-u", "C-w",
@@ -276,7 +278,17 @@ fn claim(record: &Value) -> backend::InputClaim<'_> {
 /// The composer in one stable frame (the same cursor around the capture).
 fn composer_now(terminal: &dyn backend::TerminalBackend, record: &Value) -> Option<input::composer::Composer> {
     let (screen, x, y) = input::settle::frame(terminal, &claim(record))?;
-    Some(input::composer::read(record, &screen, x, y))
+    let composer = input::composer::read(record, &screen, x, y);
+    if composer != input::composer::Composer::Empty && input::codex_wrapped_columns(record, &screen, x, y).is_some() {
+        if let Ok(info) = terminal.pane_info(backend::Target::Pane(string(record, "pane")), &[backend::PaneField::Width]) {
+            if info.fields().first().and_then(|field| field.parse().ok())
+                .is_some_and(|columns| input::codex_wrapped_empty(record, &screen, x, y, columns))
+            {
+                return Some(input::composer::Composer::Empty);
+            }
+        }
+    }
+    Some(composer)
 }
 
 /// The Terminal tab's read for Clear input (zerus-wkj9l): the composer's text

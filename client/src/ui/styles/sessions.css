@@ -412,3 +412,16 @@
   .warn-text { color: var(--z-list-tone-attention); }
 }
 
+
+.agent-team-heading {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 14px;
+  font-weight: 600;
+  color: var(--z-list-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-team-role { flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; color: var(--z-list-muted); }

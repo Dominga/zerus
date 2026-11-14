@@ -1,3 +1,4 @@
+mod names132;
 use super::*;
 use crate::desktop::teams::tests::plan_fixture;
 #[test]
@@ -364,3 +365,5 @@ fn native_created_worktree_with_unavailable_ownership_defers_only_its_read() {
     assert!(matches!(outcome, Effect::Submitted(None)));
     assert!(child::FIXTURE_EXIT.with(|slot| slot.borrow().is_none()));
 }
+
+mod parent;

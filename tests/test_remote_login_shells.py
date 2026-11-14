@@ -416,6 +416,45 @@ class RemoteLoginShells(unittest.TestCase):
                 (self.peer / 'shell-pwd').unlink()
 
 
+    def test_stripped_readable_agent_ancestors_stop_person_routes_before_ssh(self):
+        # The child loses its own markers, but its private launching Python
+        # process remains a readable marked ancestor. No real peer is used.
+        import uuid
+        strip = r'''import os,subprocess,sys
+env=dict(os.environ)
+for key in ('HGS_SESSION','HGS_RUN_ID','HGS_SESSION_ID'):env.pop(key,None)
+result=subprocess.run(sys.argv[1:],input=sys.stdin.read(),env=env,text=True,capture_output=True,timeout=30)
+sys.stdout.write(result.stdout);sys.stderr.write(result.stderr);sys.exit(result.returncode)
+'''
+        marked = dict(self.env, REMOTE_LOGIN_SHELL=login_shells()['sh'],
+                      HGS_SESSION='codex/private-ancestor', HGS_RUN_ID=str(uuid.uuid4()),
+                      HGS_SESSION_ID=str(uuid.uuid4()))
+        machine = '55555555-5555-4555-8555-555555555555'
+        for command in ('task', 'team', 'question-routing'):
+            forms = (['@peer', command, 'x', '--json'],
+                     ['--dry-run', '@peer', command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, '--client', 'other', command, 'x', '--json'],
+                     ['@peer', '__state', command, 'x', '--json'],
+                     ['@peer', '--expect-machine', machine, '__state', command, 'x', '--json'])
+            for form in forms:
+                with self.subTest(form=form):
+                    (self.root / 'ssh-args.json').unlink(missing_ok=True)
+                    result = subprocess.run([sys.executable, '-c', strip, str(HGS), *form],
+                                            env=marked, input='', text=True, capture_output=True, timeout=40)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("outside the agent's process tree", result.stderr)
+                    self.assertFalse((self.root / 'ssh-args.json').exists(), 'no capability probe or SSH')
+                    self.assertFalse(result.stdout.startswith('ssh '), 'dry run refuses too')
+        for form in (['@peer', 'inspect', 'x'], ['@peer', 'interrupt', 'x'],
+                     ['@peer', 'wait', 'ack', '--json'], ['@peer', 'answer', 'x', '--json']):
+            with self.subTest(agent_safe=form):
+                (self.root / 'ssh-args.json').unlink(missing_ok=True)
+                result = subprocess.run([sys.executable, '-c', strip, str(HGS), *form],
+                                        env=marked, input='', text=True, capture_output=True, timeout=40)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((self.root / 'ssh-args.json').exists())
+
     def test_a_person_only_command_never_reaches_another_computer_from_an_agent(self):
         # zerus-ppd26.9: another computer's hgs sees no marker of the agent that
         # calls it and takes it for the person. So an agent's call of a command

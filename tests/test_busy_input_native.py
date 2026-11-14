@@ -193,6 +193,8 @@ class NativeBusyCodex(codex.NativeCodexInput):
 @unittest.skipUnless(claude.native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for the private busy Claude contract')
 class NativeBusyClaude(claude.NativeClaudeInput):
     native_permission_mode = 'bypassPermissions'
+    assert_refusal = claude.fixtures.InputTransport.assert_refusal
+    input_events = claude.native.NativeClaudeQuestions.events
     test_trailing_backslash_starts_one_turn_with_the_exact_message = None
     test_multiline_message_ending_in_backslashes_is_preserved = None
     test_leading_absolute_path_is_literal_message_text = None
@@ -201,6 +203,8 @@ class NativeBusyClaude(claude.NativeClaudeInput):
         if self._testMethodName.startswith('test_no_color_'):
             self.native_env = (*self.native_env, 'NO_COLOR=1')
         super().setUp()
+        if self._testMethodName.startswith(('test_busy_long_hgs_reports', 'test_no_color_')):
+            claude.native.NativeClaudeQuestions.enable_gutter_capture(self, False)
 
     def queued_messages(self):
         # Claude steers queued inputs into the original Bash tool result, not
@@ -282,8 +286,10 @@ class NativeBusyClaude(claude.NativeClaudeInput):
             self.tmux('send-keys', '-t', self.pane, '-l', draft)
             self.wait_for(lambda: draft in self.screen())
             refused = self.payload(text='must not be typed')
+            offered = self.input_events()
             self.assertIn('agent busy:', self.send(refused, success=False))
-            self.assertFalse((self.state / 'input_receipts' / (refused['request_id'] + '.json')).exists())
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(refused)
             self.assertIn(draft, self.screen())
             self.tmux('send-keys', '-t', self.pane, 'C-u')
             self.wait_for(lambda: draft not in self.screen())
@@ -314,20 +320,26 @@ class NativeBusyClaude(claude.NativeClaudeInput):
             hint = 'Press up to edit queued messages'
             self.wait_for(lambda: hint in self.screen())
             payload = self.payload(text='must not be typed')
+            offered = self.input_events()
             self.assertIn(reason, self.send(payload, success=False))
-            self.assertFalse((self.state / 'input_receipts' / (payload['request_id'] + '.json')).exists())
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(payload)
             # The same hint as a real draft with its caret at Home must refuse too.
             self.tmux('send-keys', '-t', self.pane, '-l', hint)
             self.wait_for(lambda: self.tmux('display-message', '-p', '-t', self.pane, '#{cursor_x}').strip() == str(2 + len(hint)))
             self.tmux('send-keys', '-t', self.pane, 'C-a')
             self.wait_for(lambda: self.tmux('display-message', '-p', '-t', self.pane, '#{cursor_x}').strip() == '2')
             payload = self.payload(text='also must not be typed')
+            offered = self.input_events()
             self.assertIn(reason, self.send(payload, success=False))
-            self.assertFalse((self.state / 'input_receipts' / (payload['request_id'] + '.json')).exists())
+            self.assertEqual(self.input_events(), offered, "a pre-input refusal must offer no terminal bytes")
+            self.assert_refusal(payload)
             self.assertIn(hint, self.screen())
             release.touch()
             self.wait_for(lambda: 'Short terminal queue' in self.queued_messages())
             self.assertEqual(self.queued_messages(), ['Short terminal queue'])
+            self.assertEqual(self.accepted('must not be typed'), 0)
+            self.assertEqual(self.accepted('also must not be typed'), 0)
         finally:
             release.touch()
 

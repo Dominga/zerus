@@ -84,6 +84,33 @@ fn a_withheld_environment_refuses_below_the_top_and_is_tolerated_at_it() {
     assert_eq!(walk(4, table, denied).unwrap_err(), unreadable());
 }
 
+/// Native identities and edges, with controlled environment evidence: both
+/// branches run even on Macs that expose their system shells' environments.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_processes_follow_readable_and_withheld_evidence() {
+    let me = std::process::id();
+    let chain = walk(me, inspect, empty).expect("the native process-only walk");
+    assert!(chain.len() > 1, "the test has a same-user parent");
+    let top = chain.last().unwrap();
+    assert!(top.top);
+    let readable = walk(top.pid, inspect, |_| {
+        Ok(b"HGS_SESSION=agent\0HGS_RUN_ID=run\0".to_vec())
+    })
+    .unwrap();
+    assert_eq!(readable.len(), 1);
+    let claim = readable[0].claim.as_ref().unwrap();
+    assert_eq!((claim.name.as_str(), claim.run.as_str()), ("agent", "run"));
+    let hidden = |_| Err(super::super::withheld());
+    let withheld_top = walk(top.pid, inspect, hidden).unwrap();
+    assert_eq!(withheld_top.len(), 1);
+    assert!(withheld_top[0].top && withheld_top[0].claim.is_none());
+    assert_eq!(
+        walk(me, inspect, hidden).unwrap_err(),
+        super::super::withheld_below_top()
+    );
+}
+
 /// The caller's own markers come from the process itself, never from the
 /// system's read of it, which macOS may withhold for a signed release `hgs`.
 /// The system's read starts at the parent.

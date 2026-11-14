@@ -12,6 +12,8 @@ pub const LIVE_JOURNAL_CAP: u64 = 10_000;
 #[serde(deny_unknown_fields)]
 pub struct MemberSession {
     pub member: String,
+    #[serde(default)]
+    pub role: String,
     pub machine: String,
     pub session_id: String,
 }

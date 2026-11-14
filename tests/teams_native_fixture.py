@@ -214,6 +214,37 @@ def pinned(prompt, verb):
     return (match.group(1) or match.group(2), match.group(3)) if match else None
 
 
+def acknowledgement(prompt):
+    """Use the managed pin when present, otherwise the explicit legacy Start pin.
+    The report origin alone never acknowledges a delivery.
+    """
+    begin = pinned(prompt, 'begin-attempt')
+    if begin:
+        return ('begin-attempt', *begin)
+    match = re.search(r"\[Zerus task start\]\nAcknowledge this task with `hgs task start (?:'([^'`]+)'|([^\s'`]+))`", prompt)
+    return ('start', match.group(1) or match.group(2), '') if match else None
+
+
+def wait_for_held_task(hgs, reference, bound):
+    """Wait for the service's own delivery outcome before the fast stand-in acts.
+    The model request can arrive before the CLI records its submitted receipt.
+    Read the original task's UUID only; never select a report origin from a lookup.
+    Called in the member's own shell, preserving its caller proof.
+    """
+    task = json.loads(subprocess.check_output([hgs, 'task', 'get', reference, '--json'], text=True, timeout=30))
+    task = task.get('task') or task
+    uuid = task['uuid']
+    end = now() + bound
+    while True:
+        current = json.loads(subprocess.check_output([hgs, 'team', 'current', '--json'], text=True, timeout=30))
+        nodes = TeamFixture.listed(current, 'nodes', 'team current')
+        if any((node.get('task') or {}).get('uuid') == uuid for node in nodes):
+            return current
+        if now() >= end:
+            raise AssertionError('the service did not record the original task delivery before the member acknowledgement')
+        time.sleep(0.1)
+
+
 class Model(api.Handler):
     """The shared loopback fixture plus the Teams steps: a delivered task prompt and a
     typed `ZT-RUN <step>` each answer with one shell call that runs a fixture script."""
@@ -316,14 +347,14 @@ class ModelServer(api.Server):
         if step and (self.scripts / (step.group(1) + '.sh')).is_file():
             return self.shell(offered, '/bin/bash ' + shlex.quote(str(self.scripts / (step.group(1) + '.sh'))))
         if prompt.startswith('[Zerus task ') and not prompt.split('\n', 1)[0].rstrip().endswith('cancelled]'):
-            begin = pinned(prompt, 'begin-attempt')
+            begin = acknowledgement(prompt)
             report = pinned(prompt, 'report-attempt')
             if report:
-                # Only the commands the prompt supplies: a prompt without a pinned
-                # begin-attempt gets no acknowledgement (empty arguments).
+                # Follow the original prompt's acknowledgement, including legacy Start.
                 script = self.scripts / 'delivered.sh'
                 return self.shell(offered, ' '.join(shlex.quote(x) for x in (
-                    '/bin/bash', str(script), *(begin or ('', '')), *report)))
+                    '/bin/bash', str(script), *(begin[1:] if begin else ('', '')), *report,
+                    begin[0] if begin else '')))
             return ('text', 'Fixture: the delivered prompt has no pinned commands')
         # Anything else is the shared fixture's own plan (a reply, or its questions).
         return api.plan(body, '')
@@ -739,8 +770,8 @@ class TeamFixture:
     def create_team(self):
         preview = self.json('team', 'preview', 'on', '--json', ok=False)
         if preview.get('ok') is not True:
-            raise AssertionError('The Teams preview was refused; run the suite outside any agent session '
-                                 '(for example in a systemd-run --user unit): ' + json.dumps(preview)[:800])
+            raise AssertionError('The Teams preview was refused; run the suite from a person terminal or hosted CI, '
+                                 'outside live-agent ancestry: ' + json.dumps(preview)[:800])
         self.json('team', 'template', 'import', '--json', stdin=json.dumps(self.bundle()))
         self.team = str(uuid.uuid4())
         reply = self.json('team', 'create', '--template', 'zt-' + self.agent, '--json', stdin=json.dumps({
@@ -972,7 +1003,7 @@ class TeamFixture:
             rows.append(dict(id=entry['id'], at=entry.get('at'), session=entry['session'], provider=entry.get('provider'),
                              prompt=entry.get('prompt'), status=entry['status'], detail=detail.get('detail'),
                              source=fields['source'], question_id=fields['question_id'], run=fields['run_id'],
-                             categories=categories, saved_question=question))
+                             categories=categories, saved_question=question, scope=detail.get('scope')))
         return rows
 
     def audit_rows(self, session_name):
@@ -1115,15 +1146,29 @@ class TeamFixture:
 
     def worked(self, member_id, text):
         """The person sends one message and the member answers it: the model sees the
-        message and the member's turn ends (a Stop event after it) with a conversation,
-        which the agent has then persisted."""
+        message and the member's turn ends with a persisted conversation. Stop can
+        precede the TUI accepting its next input, so also read the empty composer
+        through the product before a native quit key is sent."""
         last = max([event.get('seq', 0) for event in self.inspect(member_id).get('events') or []] or [0])
         self.send(member_id, text)
         self.wait(f'{member_id} model received the person\'s message',
                   lambda: self.requests_with(lambda r: r.get('prompt') == text), BOUND['turn'], 1)
-        return self.wait(f'{member_id} answered the person\'s message', lambda: (lambda v: v if v.get('conversation_id') and any(
-            event.get('type') == 'Stop' and event.get('seq', 0) > last for event in v.get('events') or []) else None)(
-            self.inspect(member_id)), BOUND['turn'], 2)
+        def answered():
+            view = self.inspect(member_id)
+            if not view.get('conversation_id') or not any(event.get('type') == 'Stop' and event.get('seq', 0) > last
+                                                         for event in view.get('events') or []):
+                return None
+            read = self.hgs('terminal', self.sessions[member_id]['name'], '--json', ok=False, stdin=json.dumps(dict(
+                request_id=str(uuid.uuid4()), action='composer', expected_run_id=view['run_id'],
+                expected_conversation_id=view['conversation_id'])))
+            if read.returncode != 0:
+                return None
+            composer = json.loads(read.stdout)
+            if composer['composer']['state'] != 'empty' or view.get('activity') != 'idle':
+                return None
+            self.evidence.write('before-native-exit-composer.json', composer)
+            return view
+        return self.wait(f'{member_id} answered the person\'s message', answered, BOUND['turn'], 2)
 
     def add_task(self, title, text):
         reply = self.json('task', 'add', '--project', 'teams-fixture', '--team', self.team, '--title', title, '--json',
@@ -1202,6 +1247,12 @@ class TeamFixture:
         """Bounded reads that explain a failed step: owner cards, waiting rows, members."""
         if not self.team:
             return
+        for member, session in self.sessions.items():
+            target = '=' + session['name'] + ':'
+            for suffix, args in (('pane', ['capture-pane', '-p', '-e', '-t', target]),
+                                 ('cursor', ['display-message', '-p', '-t', target, '#{cursor_x},#{cursor_y}'])):
+                run = subprocess.run(['tmux', *args], env=self.env, capture_output=True, text=True, timeout=10)
+                self.evidence.write(f'diagnose-{member}-{suffix}.txt', run.stdout)
         for name, argv in (('cards', ('team', 'cards', '--team', self.team, '--limit', '50', '--json')),
                            ('waiting', ('team', 'waiting', '--limit', '50', '--json')),
                            ('status', ('team', 'status', '--team', self.team, '--json')),
@@ -1212,7 +1263,7 @@ class TeamFixture:
                 self.evidence.write(f'diagnose-{name}.json', str(error)[:500])
 
     VIEW_FIELDS = ('tracked', 'name', 'agent', 'cwd', 'run_id', 'session_id', 'launch_id', 'conversation_id', 'state',
-                   'archive_id', 'pending_questions_error', 'runtime_state', 'process_state')
+                   'archive_id', 'pending_questions_error', 'runtime_state', 'process_state', 'allowed_actions', 'action_reasons')
     RECORD_FIELDS = ('archive_id', 'name', 'agent', 'cwd', 'run_id', 'session_id', 'launch_id', 'conversation_id',
                      'account_id', 'state', 'conversation_state', 'completion_source', 'completion_reason', 'exited_at',
                      'exit_code', 'termination_signal', 'session_end', 'error', 'expected_id', 'paused', 'pausing',

@@ -3246,6 +3246,11 @@ tracking evidence without changing reply/read identities or restarting agents.
 **Fork session…** creates an independent native conversation in the same folder,
 next to the original session in its group. Files remain shared. The CLI is
 `hgs [@host] fork SESSION [-n NAME] [-d] [--archive ID]`; support depends on the agent.
+Kimi's external Fork requires its source instance to be closed, even when the
+session is Ready. Live Kimi sessions show Fork disabled with a reason to pause
+or close the source first. Pause is a separate explicit action; Fork never
+pauses the source automatically. Confirmed paused, saved and archived Kimi
+sources can still fork their saved context.
 DeepSeek uses the native fork of a supported resident host
 ([DeepSeek](#deepseek)). A session name is a label: an archived session never
 blocks a new session or a fork from its name. Without `-n` the fork is named
@@ -4435,6 +4440,12 @@ The shared directory-removal wrapper also refuses both nested and root removals
 on macOS. A future authorized native window must run the ignored
 `state::worktree_cleanup::tests::macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names`
 probe with `--exact --ignored` before re-enablement is considered.
+It is a containment probe: it requires an `Unsupported` refusal and intact
+payloads, and does not call raw XNU directory removal. The separate ignored
+`state::worktree_cleanup::tests::macos_raw_appledouble_observations_do_not_qualify_deletion`
+probe observes raw syscalls on fresh synthetic directories; its passing result
+does not authorize deletion. The [native qualification](native-macos-leftover-qualification.md)
+records the verified late-swap data loss and the unsuccessful held-fd candidates.
 
 On Linux, deleting the remaining files needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
@@ -4941,6 +4952,27 @@ not queued feedback and is never delivered by itself, and only the receipt
 moves the task back to In progress. Feedback to a task In progress
 (`--mode send`) stays an ordinary message.
 
+When recovery cannot settle an unknown delivery, the person can use
+`hgs task cancel-attempt REF --attempt UUID [--reason TEXT]`. This abandons
+only that exact unknown attempt, records a `Cancelled` fact and an
+`attempt_cancelled` audit entry, and releases its hold. Delivery remains
+unknown: the original request and evidence stay, the task keeps its stage,
+and no cancel notice or other native input is sent. An exact repeat observes
+the original disposition without another write; wrong or already-settled
+attempts refuse. Other unknown attempts still hold the task. A later send
+uses a new attempt, and an old request is never replayed.
+The reply contains one task row; read its audit through the bounded task
+history command.
+
+The task view shows each unknown attempt with **Abandon attempt…**, followed
+by a separate confirmation. A team-owned task requires the person's command
+on the team's home computer. Running, Paused, Draft and Planning teams refuse;
+Stopped, Finished, Archived or a missing home team allow the disposition.
+The team writer admission is retained across the task save. With preview off,
+an existing store is read without migration or Team data writes under the same
+admission; an absent store stays absent, and a schema needing migration refuses.
+The team key and its facts stay intact.
+
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
 with the same rows, except that a prompt longer than 2 KiB is cut at a
@@ -5077,10 +5109,14 @@ never forwards a command whose handler tells the person from an agent that way
 - **Who counts as an agent:** a process that claims a session (`HGS_SESSION`
   and `HGS_RUN_ID`, proven or not), a resident DeepSeek tool call
   (`HGS_AGENT=dsh`), or a process a live session proves as its caller, a
-  Claude background job included.
+  Claude background job included. On Linux and macOS, the same readable
+  marked-ancestor refusal as local task commands runs before forwarding:
+  clearing the child's own session markers does not hide that ancestor.
+  This keeps the local interim ancestry check's bounds and limitations;
+  reparenting can sever the chain and grants no verified Person authority.
 - **What the agent does instead:** it runs `hgs task` on its own computer,
-  which reaches every computer's copy. A person's shell that inherited an
-  agent's variables can unset them.
+  which reaches every computer's copy. A person's shell outside the agent's
+  process tree can unset inherited agent variables.
 - **Unchanged:** tasks' own forwarding of `send` and `cancel` to the
   executor's computer (`--agent NODE/SESSION`).
 - **Still forwarded for an agent:** ordinary `answer` payloads, `interrupt`

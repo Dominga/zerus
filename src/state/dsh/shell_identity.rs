@@ -79,8 +79,8 @@ pub(super) fn write(record: &Value) -> Result<()> {
     if current.as_deref() == Some(text.as_bytes()) {
         return Ok(());
     }
-    // A write that fails leaves no older file naming a previous run
-    // (zerus-ppd26.3): that session's calls then carry no markers at all.
+    // Try to remove an older run after a failed write (zerus-ppd26.3).
+    // Cleanup may also fail; the caller reports stale or missing markers.
     atomic(&path, &text).inspect_err(|_| {
         let _ = fs::remove_file(&path);
     })
@@ -132,6 +132,71 @@ mod tests {
     #[test]
     fn only_a_native_conversation_id_and_plain_markers_are_written() {
         isolated("refusals_fixture");
+    }
+
+    #[test]
+    fn a_failed_refresh_reports_that_stale_markers_can_remain() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::dsh::shell_identity::tests::readonly_refresh_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", state.path())
+            .env("HGS_STATE_DIR", state.path().join("state"))
+            .env("HGS_CONFIG_DIR", state.path().join("config"))
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{error}");
+        assert!(
+            error.contains("may carry stale or missing session markers"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run by its isolated wrapper"]
+    fn readonly_refresh_fixture() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "permission control needs an unprivileged user"
+        );
+        let mut binding = record(
+            &root().join("native"),
+            "session-91250d76-ca68-48b6-87f8-3a0e4400c314",
+        );
+        super::super::save(&mut binding).unwrap();
+        let directory = folder(&binding);
+        let file = path(&binding).unwrap();
+        let original = fs::read(&file).unwrap();
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+        let _restore = Restore(directory.clone());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        binding["run_id"] = json!("run-2");
+        super::super::save(&mut binding).unwrap();
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "write and unlink both refused"
+        );
+        assert_eq!(
+            super::super::PROVIDER
+                .read_label(string(&binding, "name"))
+                .unwrap()["run_id"],
+            "run-2"
+        );
     }
 
     #[test]

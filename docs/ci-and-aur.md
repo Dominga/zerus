@@ -28,6 +28,7 @@ conservative change selection, including both sides of renames.
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
 | Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
+| Desktop client core | Always | The unchanged `client-core.sh` format, strict Clippy and test sequence on Ubuntu, in parallel with Quick and bound to the same resolved commit; required by Suite results |
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
@@ -61,8 +62,12 @@ command has its own named workflow step and calls
 shared registry cache, so the two jobs cannot race to save one key. Linux keeps
 45 minutes and Windows 60.
 
-Quick checks and the full suites start together once the commit is resolved, so
-a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
+Quick, the client-core job and the full suites start together once the commit is
+resolved. Client-core restores the compiler/month Rust cache read-only and adds
+no cache writer or cache family. Suite results requires client-core success for
+every platform selection, so its failure, cancellation or skip reaches the
+calling CI, regression, Nightly and stable-candidate gates. A Quick failure does
+not hold back the other suites. New PR/manual runs cancel
 obsolete runs for the same branch/PR and workflow. Every `pull_request` workflow has
 such a per-PR group: a new head cancels that PR's older run, and the other workflows'
 manual runs keep their earlier concurrency. Closing or merging a PR cancels its
@@ -867,13 +872,26 @@ All selected packages must resolve before any native execution. The report saves
 their exact versions, URLs and digests before the first test; a missing release,
 platform package or valid digest fails without falling back to historical pins.
 
+Kimi's standalone image selection reads three official current-release pointers
+once: the standalone `code.kimi.com/kimi-code/latest`, npm's
+`@moonshot-ai/kimi-code` latest metadata and the published stable release at
+`MoonshotAI/kimi-code` on GitHub. The highest stable numeric version must be named
+by at least two sources. An unavailable or invalid source, three-way disagreement,
+or an uncorroborated higher version fails before execution; an older agreeing pair
+never supplies a fallback. This handles a lagging standalone pointer without
+qualifying an older native agent. The exact selected version's official manifest
+and image HEAD bind the platform filename, manifest digest, image size and SHA-256;
+the download must match them. Selection provenance retains all three observations
+and agreeing sources. Every case in the run keeps that one selected image.
+
 Discovery retries only the same official metadata URL and method, through the
 shared `scripts/ci/native_discovery.py` reader used by Kimi, Claude Code, Codex,
 OpenCode and DeepSeek. Each request has at most three attempts, each in a private
 child with a 30-second wall timeout, with 2- and 4-second backoff: a 96-second
 request budget, further clamped by any original caller deadline. Kimi resolves
-three metadata requests (latest, that exact manifest and the image HEAD), so its
-metadata phase has at most 288 seconds; image download keeps its separate bound.
+five metadata requests (the three current pointers, that exact manifest and the
+image HEAD), so its metadata phase has at most 480 seconds; image download keeps
+its separate bound.
 Each attempt logs URL, stage, attempt and outcome as `ZERUS_DISCOVERY` JSON.
 Transient network errors and HTTP 408/429/5xx may retry; invalid metadata,
 redirects rejected by the existing caller policy, permanent HTTP errors and
@@ -1094,9 +1112,13 @@ single goal-creation checks.
 The Kimi native inventory includes launching with an initial message, waiting
 at folder trust without sending it, then delivering it exactly once through
 guarded input and preserving the conversation across pause/resume without
-replaying that message. The former send-after-start-only coverage missed the
-unsupported positional launch prompt. Help snapshots from native 2.1.1, 2.2.0
-and 2.3.3 cover argument construction without running historical releases in CI.
+replaying that message. Fork coverage independently checks the native utility's
+live-instance refusal, the disabled live offer and CLI refusal, then real paused
+and archived forks with distinct CIDs. The paused fork also verifies inherited
+model context. The former send-after-start-only coverage missed the unsupported
+positional launch prompt.
+Help snapshots from native 2.1.1, 2.2.0 and 2.3.3 cover argument construction
+without running historical releases in CI.
 Declining trust also verifies cancellation without delivery and bounds the
 retained inspection preview independently of the full initial message size.
 
@@ -1478,15 +1500,19 @@ Further classes repeat the same bring-up with one of the team's delegations on:
 - **Codex folder trust by the standing confirmation** (`NativeTeamsTrustCodex`,
   `confirm_trust`, selected). Every member worktree is a linked worktree, so Codex's
   Folder access panel carries its Git-root note and asks "Trust this Git
-  repository?". The standing confirmation refuses that scope: it records no grant
-  and leaves a card naming the member, and the person then answers the panel through
-  `hgs answer`. The case reads which panel the pane showed (a folder of up to 76
+  repository?". The standing confirmation answers that startup card, as owner
+  decision D9 permits, with one audited grant per member naming the exact main
+  checkout scope, category and original run. The person supplies no folder answer;
+  the native account records only the main checkout as trusted. The ordinary Codex
+  startup case, where the person answers, retains which panel the pane showed (a folder of up to 76
   columns fills one row): a hosted runner, whose root in `/tmp` is short, must show
   the one-row panel and a local run the wrapped one.
 - **Resume of an exited member** (`NativeTeamsResumeClaude` and
   `NativeTeamsResumeCodex`, `resume_exited`, selected; the person answers folder
   trust). The member works once
-  (the person's message and its answer), so its conversation is persisted. When its
+  (the person's message and its answer), so its conversation is persisted. The existing
+  turn wait requires both Stop and the product Terminal reader's empty composer before
+  sending quit keys; Stop can precede native input readiness. When its
   agent then exits by itself (`/exit`; Codex `/quit`), the service resumes it in a new run of the same
   launch and conversation, it gets its brief once, and the audit records `team_resume`. A member
   the person terminates is refused with a card and no audit row, and no run of its
@@ -1494,9 +1520,9 @@ Further classes repeat the same bring-up with one of the team's delegations on:
 - **A Claude Code member that exits before any message**
   (`NativeTeamsResumeUnworkedClaude`, `resume_exited`, selected). It has no persisted
   conversation, so the service's restore is refused before launch. Nothing of its
-  launch starts, and the person's card carries the command's own reason ("persisted
-  conversation is missing or empty"). The person's own Restore of that archive is
-  recorded beside it.
+  launch starts, and the person's card carries the exact refusal reason from the
+  archive's own inspection. The separate explicit Restore must fail too; its receipt
+  is recorded beside the inspection, and no member run starts afterward.
 
 Written and waiting: `WAITING` in the module lists these, and the contract does not
 select them until their fixes land.

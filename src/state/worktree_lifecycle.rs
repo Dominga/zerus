@@ -7,6 +7,13 @@ use fs2::FileExt;
 use std::fs::{self, OpenOptions};
 use std::time::{Duration, Instant};
 
+const AFTER_ARCHIVE_GIT_TIME: Duration = Duration::from_secs(5);
+pub(super) const OWNERSHIP_GIT_TIME: Duration = Duration::from_secs(3);
+pub(super) const PREPARE_ARCHIVES_TIME: Duration = Duration::from_secs(2);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const AFTER_ARCHIVE_FIXED_TIME: Duration = AFTER_ARCHIVE_GIT_TIME
+    .saturating_add(super::worktree_cleanup::AUTOMATIC_REMOVE_FIXED_TIME);
+
 pub(super) fn receipt_path(common: &Path, path: &Path) -> PathBuf {
     receipt_path_in(&root(), common, path)
 }
@@ -84,7 +91,7 @@ fn owned_receipt(receipt: &Path, common: &Path, path: &Path) -> Verification<Opt
         git(
             path,
             &["rev-parse", "--absolute-git-dir"],
-            Instant::now() + Duration::from_secs(3),
+            Instant::now() + OWNERSHIP_GIT_TIME,
         )
         .map_err(|_| OwnershipUnavailable)
     })
@@ -172,7 +179,7 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
     if ownership["branch"] != row["branch"] {
         return Err("The managed worktree branch changed; review it manually".into());
     }
-    super::archive_references::visit_related(Instant::now()+Duration::from_secs(2), path, string(&ownership,"id"), |mut record| {
+    super::archive_references::visit_related(Instant::now()+PREPARE_ARCHIVES_TIME, path, string(&ownership,"id"), |mut record| {
         let refers = ["cwd", "launch_dir"]
             .iter()
             .any(|key| Path::new(string(&record, key)).starts_with(path));
@@ -320,7 +327,7 @@ pub(super) fn after_archive(record: &Value, archive_id: &str) {
     let mut attempted = false;
     let mut launch_owned = false;
     let result = (|| -> Result<Value> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + AFTER_ARCHIVE_GIT_TIME;
         let info = git(
             folder,
             &[

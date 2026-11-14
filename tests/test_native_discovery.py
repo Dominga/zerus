@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 from pathlib import Path
+import socketserver
 import threading
 import time
 import unittest
@@ -62,7 +63,14 @@ def server(actions):
         def log_message(self, *args):
             pass
 
-    httpd = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    class LoopbackServer(ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer.server_bind reverse-resolves its host. This fixture
+            # needs only a numeric loopback bind, with no resolver dependency.
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    httpd = LoopbackServer(('127.0.0.1', 0), Handler)
     httpd.daemon_threads = True
     thread = threading.Thread(target=lambda: httpd.serve_forever(poll_interval=0.01))
     thread.start()
@@ -87,6 +95,13 @@ class NativeDiscovery(unittest.TestCase):
     def diagnostics(text):
         return [json.loads(line.removeprefix('ZERUS_DISCOVERY=')) for line in text.splitlines()
                 if line.startswith('ZERUS_DISCOVERY=')]
+
+    def test_loopback_fixture_binds_without_reverse_dns(self):
+        with patch('socket.getfqdn', side_effect=AssertionError('loopback fixture must not resolve names')) as reverse:
+            with self.budget(), server([(200, b'{"version":"9.8.7"}')]) as (url, calls):
+                self.assertEqual(compat.fetch_json(url), {'version': '9.8.7'})
+            self.assertEqual(calls, ['/latest'])
+        reverse.assert_not_called()
 
     def test_metadata_retry_resolves_one_response_from_the_same_endpoint(self):
         with self.budget(), server([(503, b'transient'), (200, b'{"version":"9.8.7"}')]) as (url, calls):
@@ -114,10 +129,14 @@ class NativeDiscovery(unittest.TestCase):
         error = io.StringIO()
         started = time.monotonic()
         with self.budget(), contextlib.redirect_stderr(error), server(['stall_headers']) as (url, calls):
+            ready = time.monotonic()
             with self.assertRaisesRegex(discovery.DiscoveryUnavailable, 'discovery unavailable:.*3 attempt'):
                 compat.fetch_json(url)
+            exhausted = time.monotonic()
+        finished = time.monotonic()
         self.assertEqual(calls, ['/latest'] * 3)
-        self.assertLess(time.monotonic() - started, 11)
+        self.assertLess(finished - started, 11, 'phase seconds: ' + json.dumps(dict(
+            fixture_setup=ready - started, discovery=exhausted - ready, fixture_cleanup=finished - exhausted)))
         rows = self.diagnostics(error.getvalue())
         self.assertEqual([r['attempt'] for r in rows if r['event'] == 'failed'], [1, 2, 3])
         self.assertEqual(rows[-1]['event'], 'unavailable')

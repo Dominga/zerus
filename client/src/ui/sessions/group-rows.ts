@@ -2,11 +2,13 @@ import { countedHeaderAttention, isWorking, needsAttention, quietAttention, visi
 import type { CreationCard, GroupingOut } from "../../types";
 import type { AgentKind, Session, Subagent } from "./types";
 import { currentChildren } from "./subagents";
+import { agentTeamSession, type AgentTeamMember } from "./agent-teams";
 
 export type Row =
+  | { type: "agent-team"; id: string; name: string; project: string }
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean;
+  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean; agentTeamRole?: string;
       /** Nesting under parent sessions (zerus-sa9qn.2): 0 at top level. */
       depth?: number;
       /** The nested card's parent row key and whether it is its parent's last shown child. */
@@ -53,6 +55,7 @@ export interface Team { total: number; working: number; collapsed: boolean; aski
 export const MAX_DEPTH = 8;
 
 export interface ListInput {
+  agentTeams?: ReadonlyMap<string, AgentTeamMember>;
   grouping: GroupingOut;
   /** Each project's rows in list order (groupMembers). */
   members: Map<string, Session[]>;
@@ -195,7 +198,7 @@ export function groupRows(input: ListInput): Row[] {
   // One project group's visible cards in rank order, child sessions nested
   // under a parent shown in the same list. Nesting never hides a row: a loop
   // or a parent elsewhere leaves the card at top level.
-  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
+  const ordinaryCards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
     const resolved = input.containers ? withContainers(listed, all, input) : undefined;
     const list = resolved?.ordered ?? listed;
     const containers = resolved?.containers;
@@ -287,6 +290,28 @@ export function groupRows(input: ListInput): Row[] {
       }
       card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
     }
+  };
+  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
+    const teams = new Map<string, Session[]>();
+    for (const s of listed) {
+      const member = input.agentTeams?.get(s.key);
+      if (!member) continue;
+      const list = teams.get(member.team) ?? [];
+      list.push(s);
+      teams.set(member.team, list);
+    }
+    for (const [id, members] of teams) {
+      members.sort((a, b) => {
+        const x = input.agentTeams!.get(a.key)!, y = input.agentTeams!.get(b.key)!;
+        return Number(y.lead) - Number(x.lead) || x.role.localeCompare(y.role) || x.member.localeCompare(y.member);
+      });
+      out.push({ type: "agent-team", project, id: `agent-team:${id}`, name: input.agentTeams!.get(members[0].key)!.name });
+      for (const s of members) {
+        const member = input.agentTeams!.get(s.key)!;
+        card(agentTeamSession(s, member, input.online(s)), { agentTeamRole: member.role });
+      }
+    }
+    ordinaryCards(listed.filter((s) => !input.agentTeams?.has(s.key)), project, all);
   };
   const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
   const headers = input.grouping.loaded ? input.grouping.headers : [];

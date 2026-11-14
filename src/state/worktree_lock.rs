@@ -87,8 +87,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Releases the lock of `record`, a session that has just left, by archive
-/// or forget. The caller holds the state writer lock, so no session starts
-/// using the checkout meanwhile. It never fails the caller. A lock that
+/// or forget. The state writer excludes terminal publication; a checkout's
+/// reference scope also excludes provider commits through the final take.
+/// It never fails the caller. A lock that
 /// cannot be released stays, and the result says why (L4).
 pub(super) fn release_locked(record: &Value) -> Release {
     let id = string(record, "session_id");
@@ -119,6 +120,12 @@ pub(super) fn release_locked(record: &Value) -> Release {
         Ok(protection) => protection,
         Err(error) => return kept(error),
     };
+    let reference_scope = match worktree_references::Scope::releasing(&checkout, string(owner, "id")) {
+        Ok(references) => references,
+        Err(error) => return kept(error),
+    };
+    #[cfg(all(test, unix))]
+    crate::platform::lock_tests::reached("reference-before-census");
     // L3: another live or saved session that uses the checkout keeps it, and
     // so does evidence that cannot be read.
     match worktree_cleanup::bindings() {
@@ -136,6 +143,9 @@ pub(super) fn release_locked(record: &Value) -> Release {
                         .any(|folder| folder.starts_with(&checkout))
             }).collect();
             if let Some(other) = users.first() {
+                // A shared handoff retains its original writer/repository and
+                // selected-provider exclusions. It does not remove the veto.
+                drop(reference_scope);
                 if let Some(protection) = protection {
                     // Never transfer to a guessed label or an unbound folder
                     // occupant. Unavailable identity keeps the original veto.
@@ -153,6 +163,9 @@ pub(super) fn release_locked(record: &Value) -> Release {
             }
         }
     }
+    #[cfg(all(test, unix))]
+    crate::platform::lock_tests::reached("reference-after-census");
+    if let Err(error) = reference_scope.verify() { return kept(error); }
     if let Some(protection) = &protection {
         if let Err(error) = protection.verify() {return kept(error);}
     }
@@ -160,11 +173,15 @@ pub(super) fn release_locked(record: &Value) -> Release {
         Ok(original) => original,
         Err(error) => return kept(error),
     };
-    match take_original(&lock, id, original.as_ref()) {
+    match take_original(&lock, id, original.as_ref(), Some(&reference_scope)) {
         Ok(true) => {
+            #[cfg(all(test, unix))]
+            crate::platform::lock_tests::reached("reference-before-proof");
             if let Some(protection) = &protection {
                 if let Err(error) = protection.released() {return kept(error);}
             }
+            #[cfg(all(test, unix))]
+            crate::platform::lock_tests::reached("reference-after-proof");
             Release::Released(checkout)
         }
         Ok(false) => Release::None,
@@ -199,7 +216,7 @@ pub(super) fn left(record: &Value) {
 /// `recover_locked`.
 #[cfg(all(test, unix))]
 fn take(lock: &Path, id: &str) -> Result<bool> {
-    take_original(lock,id,None)
+    take_original(lock,id,None,None)
 }
 
 fn same_object(path: &Path, original: &Value) -> bool {
@@ -208,15 +225,24 @@ fn same_object(path: &Path, original: &Value) -> bool {
         && crate::platform::FileIdentity::of(&file).is_ok_and(|id| json!([id.device,id.inode]) == *original)
 }
 
-fn take_original(lock: &Path, id: &str, original: Option<&Value>) -> Result<bool> {
+fn take_original(lock: &Path, id: &str, original: Option<&Value>, references: Option<&worktree_references::Scope>) -> Result<bool> {
     let dir = lock.parent().ok_or("invalid lock path")?;
     let nonce = uuid::Uuid::new_v4();
     let taken = dir.join(format!("{TAKEN}{nonce}"));
     let intent = intents().join(format!("{nonce}.json"));
     let value = json!({"version":1,"lock":lock,"taken":taken,"session_id":id,"original_object":original});
+    if let Some(references) = references { references.verify()?; }
+    #[cfg(all(test, unix))]
+    crate::platform::lock_tests::reached("reference-before-intent");
     atomic(&intent, &format!("{value}\n"))?;
+    #[cfg(all(test, unix))]
+    crate::platform::lock_tests::reached("reference-after-intent");
     let taking =
-        storage::cut_write().and_then(|()| fs::rename(lock, &taken).map_err(|e| e.to_string()));
+        (|| {
+            if let Some(references) = references { references.verify()?; }
+            storage::cut_write()?;
+            fs::rename(lock, &taken).map_err(|e| e.to_string())
+        })();
     if let Err(error) = taking {
         // Nothing was taken: the lock is where it was, or already gone.
         let absent = |path: &Path| {
@@ -231,6 +257,9 @@ fn take_original(lock: &Path, id: &str, original: Option<&Value>) -> Result<bool
         };
     }
     let checked = (|| -> Result<()> {
+        #[cfg(all(test, unix))]
+        crate::platform::lock_tests::reached("reference-after-take");
+        if let Some(references) = references { references.verify()?; }
         crate::platform::sync_dir(dir).map_err(|e| e.to_string())?;
         match lock_text(&taken) {
             Ok(Some(text)) if exact(&text, id) => {}
@@ -239,8 +268,14 @@ fn take_original(lock: &Path, id: &str, original: Option<&Value>) -> Result<bool
         if original.is_some_and(|original| !same_object(&taken,original)) {
             return Err("the original protective lock was replaced before release; it was put back".into());
         }
+        #[cfg(all(test, unix))]
+        crate::platform::lock_tests::reached("reference-before-delete");
+        if let Some(references) = references { references.verify()?; }
         storage::cut_write()?;
-        fs::remove_file(&taken).map_err(|e| e.to_string())
+        fs::remove_file(&taken).map_err(|e| e.to_string())?;
+        #[cfg(all(test, unix))]
+        crate::platform::lock_tests::reached("reference-after-delete");
+        Ok(())
     })();
     if let Err(error) = checked {
         return Err(match restore_original(lock, &taken, id, original) {
@@ -731,6 +766,9 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            case if case.starts_with("reference_") => {
+                provider_release_tests::run(case, &main, &checkout, &record, &lock);
+            }
             case if case.starts_with("v2_shared") => {
                 legacy_handoff_tests::run(case, &main, &checkout, &record, &lock);
             }
@@ -1154,7 +1192,7 @@ mod tests {
                 atomic(&lock,&format!("{own}\n")).unwrap();
                 let replaced = fs::read(&lock).unwrap();
                 assert!(held.verify().is_err()); drop(held);
-                assert!(take_original(&lock,&id,Some(&original_object)).is_err());
+                assert!(take_original(&lock,&id,Some(&original_object),None).is_err());
                 assert!(matches!(release_locked(&record),Release::Kept(..)));
                 assert_eq!(fs::read(&lock).unwrap(),replaced);
                 assert!(original.is_file());
@@ -1524,3 +1562,6 @@ mod scoped_tests;
 
 #[cfg(all(test, unix))]
 mod legacy_handoff_tests;
+
+#[cfg(all(test, unix))]
+mod provider_release_tests;

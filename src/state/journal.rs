@@ -1076,6 +1076,10 @@ pub(super) fn inspection_with(
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");
+        // The same locked predicate as Restore admission. Standing resume
+        // reads this through its bounded own-CLI observation, never by an
+        // unbounded backend call on the desktop worker (zerus-63rru.129).
+        output["restore_name_busy"] = json!(lifecycle::restore_name_busy(name)?);
     }
     drop(_guard);
     // Before the listed questions and the provider messages below.
@@ -2276,8 +2280,15 @@ mod attention_regressions {
     fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {
         // A Ready saved record; the summary shows a chooser only the terminal
         // reports. Dispatch refuses it, so inspect and the listing agree.
-        let mut record = telemetry::stale_hook_child();
-        record["base"] = json!(["kimi"]);
+        let record = json!({
+            "agent": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "base": ["codex"],
+            "activity": "idle",
+            "phase": "idle",
+            "main_done": true
+        });
         let shown = |phase: &str| {
             let mut output = fork::summary(&record, true);
             for part in [session_action::summary(&record, true, &None),

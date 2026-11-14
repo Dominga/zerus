@@ -15,9 +15,9 @@ fn bound_member_sessions_are_ordered_metadata_for_every_proved_caller() {
     h.bind("m1", M1_SESSION);
     h.bind("lead", LEAD_SESSION);
     let expected = json!([
-        {"member":"lead","machine":MACHINE,"session_id":LEAD_SESSION},
-        {"member":"m1","machine":MACHINE,"session_id":M1_SESSION},
-        {"member":"m3","machine":MACHINE,"session_id":"run_id:review-example"}
+        {"member":"lead","role":"lead","machine":MACHINE,"session_id":LEAD_SESSION},
+        {"member":"m1","role":"developer","machine":MACHINE,"session_id":M1_SESSION},
+        {"member":"m3","role":"reviewer","machine":MACHINE,"session_id":"run_id:review-example"}
     ]);
     for caller in [
         Caller::Person,
@@ -93,7 +93,7 @@ fn only_planning_running_and_paused_rows_expose_member_sessions() {
             assert_eq!(
                 row["member_sessions"],
                 json!([
-                    {"member":"m1","machine":MACHINE,"session_id":M1_SESSION}
+                    {"member":"m1","role":"developer","machine":MACHINE,"session_id":M1_SESSION}
                 ])
             );
         }
@@ -114,7 +114,7 @@ fn member_sessions_follow_the_existing_team_page_and_cursor() {
     assert_eq!(
         first["rows"][0]["member_sessions"],
         json!([
-            {"member":"m3","machine":MACHINE,"session_id":"run_id:docs-review-example"}
+            {"member":"m3","role":"reviewer","machine":MACHINE,"session_id":"run_id:docs-review-example"}
         ])
     );
     let cursor = first["next"].as_str().unwrap();
@@ -131,7 +131,7 @@ fn member_sessions_follow_the_existing_team_page_and_cursor() {
     assert_eq!(
         second["rows"][0]["member_sessions"],
         json!([
-            {"member":"m1","machine":MACHINE,"session_id":M1_SESSION}
+            {"member":"m1","role":"developer","machine":MACHINE,"session_id":M1_SESSION}
         ])
     );
     let next = second["next"].as_str().unwrap();

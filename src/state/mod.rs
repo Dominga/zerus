@@ -66,6 +66,8 @@ mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;
+#[cfg(all(test, unix))]
+pub(crate) mod resume_settlement_fixture;
 mod kimi_launch;
 mod provider_errors;
 mod recovery;
@@ -188,6 +190,10 @@ pub(crate) use {
     worktrees::{Control as WorktreeControl, Step as WorktreeStep},
 };
 mod worktree_cleanup;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_cleanup::LEFTOVER_DELETE_TIME;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_lifecycle::AFTER_ARCHIVE_FIXED_TIME;
 mod worktree_caches;
 mod worktree_inspection;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -196,6 +202,7 @@ mod worktree_programs;
 pub(crate) use worktree_programs::{ProgramRemovalClaim, ProgramStopClaim};
 mod worktree_lifecycle;
 mod worktree_lock;
+mod worktree_references;
 mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.

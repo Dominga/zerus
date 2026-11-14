@@ -39,7 +39,7 @@ const CAPTIONS = new Set<string>([
   trNoop("Agent exited"), trNoop("Archived"), trNoop("Background"), trNoop("Compacting"), trNoop("Connecting"), trNoop("Error"),
   trNoop("Interrupted"), trNoop("Model unavailable"), trNoop("Needs approval"), trNoop("Needs attention"), trNoop("Needs input"),
   trNoop("Not tracked"), trNoop("Paused"), trNoop("Provider error"), trNoop("Ready"), trNoop("Retrying"), trNoop("Scheduled"),
-  trNoop("Sign in"), trNoop("Sign in required"), trNoop("Starting"), trNoop("Status unknown"), trNoop("Stopped"),
+  trNoop("Sign in"), trNoop("Sign in required"), trNoop("Starting"), trNoop("Status unknown"), trNoop("Waiting for a task"), trNoop("Stopped"),
   trNoop("Using a tool"), trNoop("Waiting for acceptance"), trNoop("Waiting for result"), trNoop("Waiting to retry"), trNoop("Warming cache"), trNoop("Working"),
 ]);
 export const captionText = (caption: string) => (CAPTIONS.has(caption) ? tr(caption) : caption);
@@ -390,6 +390,7 @@ function OptionalQuestionsChip(props: { session: Session }) {
 
 export function SessionCard(props: {
   session: Session;
+  agentTeamRole?: string;
   selected: boolean;
   expandable: boolean;
   expanded: boolean;
@@ -425,6 +426,7 @@ export function SessionCard(props: {
         <MachineBadge alias={s().machine} computer={s().computer} offline={statusOf(s()) === "offline"} />
       </div>
       <div class="sc-l3">
+        <Show when={props.agentTeamRole}>{(role) => <span class="sc-team-role">{role()}</span>}</Show>
         <Show when={props.fromParent}>{(parent) => <FromParent parent={parent()} onOpen={props.onOpenParent} />}</Show>
         <Show when={s().reviewLater}><Icon name="attention" size={14} class="sc-review" /></Show>
         <span class="ell">{detailText(s())}</span>
@@ -602,7 +604,7 @@ export function ContainerCard(props: { container: Container; selected: boolean; 
   );
 }
 
-export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
+export function CompactCard(props: { session: Session; agentTeamRole?: string; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
   const s = () => props.session;
   // Tooltips hold still under the pointer (zerus-5ryrx).
   const described = steadyTitle(() => compactDescription(s()));
@@ -616,6 +618,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+      <Show when={props.agentTeamRole}>{(role) => <span class="sc-team-role">{role()}</span>}</Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
       <button class="cc-expand" title={expand.title()} onPointerEnter={expand.enter} onPointerLeave={expand.leave} aria-description={compactDescription(s())}

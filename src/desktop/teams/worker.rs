@@ -18,6 +18,8 @@ use std::{
 };
 use zerus_watch_protocol::Body;
 
+pub(super) const SAFETY_OBSERVATION_INTERVAL: Duration = Duration::from_secs(60);
+
 pub(in crate::desktop) struct Worker {
     config: Config,
     epoch: String,
@@ -201,7 +203,7 @@ impl Passes {
         while !stop.load(Ordering::Acquire) && crate::teams::enabled(&config.state) {
             let safety = Instant::now() >= next_safety;
             if safety {
-                next_safety = Instant::now() + Duration::from_secs(60);
+                next_safety = Instant::now() + SAFETY_OBSERVATION_INTERVAL;
             }
             if ready || safety || cursor.is_some() {
                 if let Err(error) = self.cycle(&mut cursor, &mut cycle_fault, stop, safety) {

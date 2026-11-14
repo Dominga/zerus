@@ -22,7 +22,9 @@ class NativeClearContext(unittest.TestCase):
             command = 'env ' + ' '.join(shlex.quote(k+'='+v) for k,v in env.items()) + ' ' + shlex.quote(str(test_input.HGS)) + ' __state hook'
             path = self.root / '.claude/settings.json'
             config = json.loads(path.read_text())
-            config['hooks'] = {event: [{'hooks': [{'type':'command', 'command':command}]}] for event in getattr(self,'hook_events',['SessionStart'])}
+            # Retain common setup's async caller alongside the native hooks.
+            for event in getattr(self,'hook_events',['SessionStart']):
+                config.setdefault('hooks', {}).setdefault(event, []).append({'hooks': [{'type':'command', 'command':command}]})
             path.write_text(json.dumps(config))
         return test_input.InputTransport.tmux(self, *args, **kwargs)
 
@@ -55,7 +57,7 @@ class NativeInterruptedClear(unittest.TestCase):
     import test_claude_approval_native as approval
     import test_questions as questions
     tool_name = 'Bash'
-    tool_input = {'command': 'sleep 30; printf done > slept.txt', 'description': 'Wait for the fixture'}
+    native_tool_input = approval.NativeClaudeInterrupt.native_tool_input
     setUp = native.NativeClaudeQuestions.setUp
     tmux = NativeClearContext.tmux
     script = native.NativeClaudeQuestions.script

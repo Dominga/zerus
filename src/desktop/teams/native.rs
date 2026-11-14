@@ -284,10 +284,7 @@ impl Effects for Native {
                 LaunchRead::Session(s) => *s,
                 _ => return Ok("identity_pending".into()),
             };
-            if current.run_id.is_empty()
-                || current.conversation_id.is_empty()
-                || current.session_id.is_empty()
-            {
+            if current.run_id.is_empty() || current.session_id.is_empty() {
                 return Ok("identity_pending".into());
             }
             let team = store

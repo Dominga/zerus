@@ -11,14 +11,17 @@ export interface TaskEntry {
   /** The attempt the entry's request names: its origin and its own phase (A4). */
   attempt?: { origin: string; phase: string };
 }
-export interface TaskDetail extends Task { files: Fetched[]; log: TaskEntry[]; total: number; next?: string; started: boolean; dispatch: string }
+export interface TaskDetail extends Task { files: Fetched[]; log: TaskEntry[]; total: number; next?: string; started: boolean; dispatch: string; unknownAttempts: string[] }
 const actor = (v: unknown) => { const a = object(v); return a.kind === "agent" ? text(a.session) + (a.host ? ` @${text(a.host)}` : "") : "You"; };
 const files = (v: unknown): Fetched[] => Array.isArray(v) ? v.slice(0, 8) as Fetched[] : [];
 export function taskDetail(raw: unknown, project: string, uuid: string): TaskDetail {
   const d = object(raw);
   if (d.uuid !== uuid || d.project !== project) throw new Error("The task reply did not match the selected task.");
   if (d.history_schema !== 1 || !Array.isArray(d.log) || d.log.length > 80) throw new Error("Update hgs to read bounded task history.");
+  const unknown = d.unknown_attempts ?? [];
+  if (!Array.isArray(unknown) || unknown.length > 256 || !unknown.every((id) => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id))) throw new Error("Invalid unknown task attempts.");
   return { ...taskItem(d), files: files(d.attachments), total: typeof d.log_total === "number" ? d.log_total : d.log.length,
+    unknownAttempts: [...unknown],
     next: text(d.history_next) || undefined, started: d.start_confirmed === true, dispatch: text(d.dispatch_id),
     log: d.log.map((value) => {
       const e = object(value), delivery = object(e.delivery);

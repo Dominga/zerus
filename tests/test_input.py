@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hook_caller_fixtures
+import codex_refusal_artifacts
 import json
 import os
 from pathlib import Path
@@ -186,6 +187,7 @@ class InputTransport(unittest.TestCase):
                 break
             time.sleep(.02)
         self.assertFalse(pids, 'owned fixture panes survived tmux shutdown')
+        codex_refusal_artifacts.preserve(self.root, self.id(), REPO / "artifacts/test-results/python")
         self.temp.cleanup()
         if hook_error: raise hook_error
 

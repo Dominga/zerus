@@ -56,7 +56,7 @@ impl Native<'_> {
         raw: Value,
         archive: Option<String>,
     ) -> Result<(Snapshot, Value)> {
-        let mut s = parse_view(self.machine, b, v, &raw, archive)?;
+        let mut s = settled_view(self.machine, b, v, &raw, archive)?;
         s.ready = s.live
             && crate::state::resumed_readiness(&raw) == crate::state::ResumedReadiness::Ready;
         if s.live && s.agent == "codex" && !s.conversation.is_empty() && s.questions.is_empty() {
@@ -147,6 +147,7 @@ pub(super) fn parse_view(
         archive,
         receipt_at: None,
         restore_refusal,
+        resume_wait: None,
         questions,
     };
     super::super::policy::session(b, &s)?;
@@ -177,6 +178,30 @@ pub(super) fn self_exit(v: &Value, archived: bool) -> bool {
         _ => false,
     }
 }
+fn settled_view(machine: &str, b: &Binding, v: &Value, raw: &Value, archive: Option<String>) -> Result<Snapshot> {
+    let mut s = parse_view(machine, b, v, raw, archive)?;
+    s.resume_wait = resume_wait(&s, v, raw)?;
+    Ok(s)
+}
+fn resume_wait(s: &Snapshot, view: &Value, raw: &Value) -> Result<Option<ResumeWait>> {
+    if !s.self_exit || s.archive.is_none() {
+        return Ok(None);
+    }
+    if !view["restore_name_busy"].as_bool().ok_or("Restore name readiness is unavailable")? {
+        return Ok(None);
+    }
+    let exited = raw["exited_at"].as_f64().ok_or("The original exit time is unavailable")? * 1000.0;
+    let bound = super::super::engine::RESUME_SETTLE_MS;
+    if !exited.is_finite() || exited <= 0.0 || exited >= (i64::MAX - bound) as f64 {
+        return Err("The original exit time is invalid".into());
+    }
+    Ok(Some(ResumeWait {
+        until: (exited.ceil() as i64).saturating_add(bound),
+        reason: "waiting for the original run to settle".into(),
+    }))
+}
+#[cfg(all(test, unix))]
+mod settlement;
 fn archive(state: &Path, roots: &Roots, b: &Binding, name: &str) -> Result<(String, Value)> {
     let state = crate::platform::canonical(state).map_err(|e| e.to_string())?;
     let db = Connection::open_with_flags(

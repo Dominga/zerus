@@ -47,7 +47,7 @@ class NativeClaudeAutoModeOffer(unittest.TestCase):
                 question_id='permission_mode', selected_option_ids=[option['id']], text='')])
 
     def account(self):
-        claude = json.loads((self.root / '.claude.json').read_text())
+        claude = json.loads((self.root / '.claude/.claude.json').read_text())
         settings = json.loads((self.root / '.claude/settings.json').read_text())
         return claude.get('hasSeenAutoDefaultNudge'), settings['permissions']['defaultMode']
 

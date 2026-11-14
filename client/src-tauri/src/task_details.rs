@@ -586,6 +586,29 @@ mod assignment_tests {
     }
 }
 
+/// The person confirmed the disposition of this exact unknown attempt.
+#[tauri::command]
+pub async fn task_cancel_attempt(
+    state: State<'_, TaskWrites>,
+    project: String,
+    task: String,
+    attempt: String,
+    reason: String,
+) -> Result<(), String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let permit = state.begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        zerus_client_core::task_cancel::abandon(&project, &task, &attempt, &reason, |call| {
+            tasks_write::run(&zerus_client_core::default_hgs(), call)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The UI has already shown the cancel dialog for this exact execution.
 #[tauri::command]
 pub async fn task_cancel_execution(

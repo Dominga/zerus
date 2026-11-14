@@ -5,6 +5,7 @@ import hook_command_fixtures as shell_probes
 import receipt_locator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import codex_refusal_artifacts
 import json
 import tomllib
 import os
@@ -733,6 +734,7 @@ class Harness(unittest.TestCase):
         self.remove_fixture_root()
 
     def remove_fixture_root(self):
+        codex_refusal_artifacts.preserve(self.root, self.id(), REPO / "artifacts/test-results/python")
         wal = self.root / "state" / "delivery-receipts-v1.sqlite3-wal"
 
         def failed(function, path, exception):

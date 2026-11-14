@@ -1,3 +1,4 @@
+import { AgentTeamHeading } from "./AgentTeamHeading";
 import { TextInput } from "../lib/TextField";
 import { steadyTitle } from "../lib/steady-title";
 import { inspectSession, windowVisibility } from "../../bridge";
@@ -644,7 +645,7 @@ export function SessionList() {
     if ((e.target as Element).closest?.("input,textarea,[contenteditable]")) return;
     const rows = list.rows();
     // An ended parent's container (zerus-sa9qn.17) is not a session: never a keyboard target.
-    const nav = rows.filter((r) => r.type !== "header" && r.type !== "container");
+    const nav = rows.filter((r) => r.type !== "header" && r.type !== "agent-team" && r.type !== "container");
     const i = nav.findIndex((r) => r.id === selectedKey());
     const scrollTo = (row: Row) => list.virtualizer.scrollToIndex(rows.indexOf(row), { align: "auto" });
     // The project header of a session whose collapsed project hides its row.
@@ -677,7 +678,7 @@ export function SessionList() {
       if (header) {
         // From a row its collapsed project hides: the next row past the project, as Qt's hidden current item.
         const at = rows.indexOf(header);
-        move(down ? rows.slice(at + 1).find((r) => r.type !== "header" && r.type !== "container") : rows.slice(0, at).reverse().find((r) => r.type !== "header" && r.type !== "container"));
+        move(down ? rows.slice(at + 1).find((r) => r.type !== "header" && r.type !== "agent-team" && r.type !== "container") : rows.slice(0, at).reverse().find((r) => r.type !== "header" && r.type !== "agent-team" && r.type !== "container"));
       } else move(nav[Math.max(0, Math.min(nav.length - 1, i + (down ? 1 : -1)))]);
     } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       const right = e.key === "ArrowRight";
@@ -890,7 +891,7 @@ const cardLevel = (row: Row | undefined) => row?.type === "card" && row.depth ? 
  * Keep the working clock out so every timer tick does not rename the focused item. */
 export function sessionRowName(row: Row | undefined): string | undefined {
   if (!row) return undefined;
-  if (row.type === "header") return row.name;
+  if (row.type === "header" || row.type === "agent-team") return row.name;
   if (row.type === "creation") return [creationText(row.creation), row.creation.target].filter(Boolean).join(", ");
   if (row.type === "child") return [row.child.name,
     childStatus(row.child, currentChildren(row.parent, !computerOffline(row.parent.computer))).caption,
@@ -925,6 +926,7 @@ function ListRow(props: { id: string; list: RowSource }) {
       aria-expanded={row()?.type === "card" && (row() as Extract<Row, { type: "card" }>).team ? !(row() as Extract<Row, { type: "card" }>).team!.collapsed : undefined}
       aria-description={cardDescription(row())}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>
+      <Show when={row()?.type === "agent-team" ? (row() as Extract<Row, { type: "agent-team" }>) : undefined}>{(t) => <AgentTeamHeading name={t().name} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
           <div class="rowhit" onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); }}>
@@ -963,9 +965,9 @@ function ListRow(props: { id: string; list: RowSource }) {
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
-            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
+            <Show when={!v().compactRow} fallback={<CompactCard agentTeamRole={v().agentTeamRole} session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
               team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
-              <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
+              <SessionCard agentTeamRole={v().agentTeamRole} session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
                 team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
@@ -1078,6 +1080,7 @@ function StripRow(props: { id: string; list: RowSource }) {
   return (
     <div class="vrow" style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <StripBand row={h()} />}</Show>
+      <Show when={row()?.type === "agent-team" ? (row() as Extract<Row, { type: "agent-team" }>) : undefined}>{(t) => <AgentTeamHeading name={t().name} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
           <button class="strip-child" title={`${c().child.name}\n${stripChildStatus(c()).caption}`}
@@ -1114,7 +1117,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
   // A tooltip: no live seconds, and it holds still under the pointer (zerus-5ryrx).
-  const tip = steadyTitle(() => [`${s().name}: ${statusCaption(s(), false)}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n"));
+  const tip = steadyTitle(() => [`${s().name}: ${statusCaption(s(), false)}`, props.row.agentTeamRole, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n"));
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>

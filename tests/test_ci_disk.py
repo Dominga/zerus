@@ -180,8 +180,8 @@ class HostedDiskTests(unittest.TestCase):
             usage.assert_not_called()
             self.assertEqual(output.getvalue(), "")
 
-    def test_quick_and_relay_cleanup_have_no_native_minimum(self):
-        for job in ("quick", "relay"):
+    def test_quick_core_and_relay_cleanup_have_no_native_minimum(self):
+        for job in ("quick", "client-core", "relay"):
             with self.subTest(job=job), patch.dict(os.environ, {"GITHUB_JOB": job}), \
                     patch.object(DISK, "report") as report, patch.object(DISK.subprocess, "run") as run, \
                     patch.object(DISK.shutil, "disk_usage") as usage:

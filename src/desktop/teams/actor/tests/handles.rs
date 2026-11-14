@@ -420,6 +420,7 @@ fn parent_after_the_leads_first_run_child() {
             },
             parent: (id == "m1").then(|| member(&w, "lead").session.unwrap()),
             launch_id: launch,
+            session_name: String::new(),
         };
         let mut row = Row::new(&t, id, "epoch", State::Done);
         row.plan = Some(plan.clone());

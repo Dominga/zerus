@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, io};
 
 pub(super) const REFUSED: &str = "an agent session runs this command; run person actions from a terminal outside the agent's process tree";
 
-pub(super) fn check() -> Result<()> {
+pub(crate) fn check() -> Result<()> {
     if marked_ancestor(
         std::process::id(),
         |pid| crate::platform::process_identity(pid).map(|identity| identity.parent),

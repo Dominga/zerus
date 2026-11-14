@@ -117,7 +117,8 @@ class NativeClaudeInterrupt(NativeClaudeReadApproval):
 
     def test_escape_interrupt_is_recorded_without_a_hook(self):
         import json, time, uuid
-        self.assertNotIn('hooks', json.loads((self.root/'.claude/settings.json').read_text()))
+        # The auxiliary SessionStart producer supplies ancestry, not Stop evidence.
+        self.assertEqual(set(json.loads((self.root/'.claude/settings.json').read_text()).get('hooks', {})), {'SessionStart'})
         self.answer(self.choose('Yes'))
         self.wait_for(lambda: 'Do you want to proceed?' not in self.screen())
         self.wait_for(lambda: (self.root/'work/interrupt-started.txt').exists())

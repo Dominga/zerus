@@ -21,6 +21,39 @@ mod policy;
 pub(crate) use intake::{preflight, send};
 pub(crate) use policy::{clear, clear_named, guard, guarded, meet};
 
+/// The person's exact unknown-attempt disposition is separate from ordinary
+/// task cancellation. A live team owns its retained reply; a terminal team
+/// cannot recover it. Retain this guard through the task-document save.
+pub(crate) fn abandon_admission(
+    state: &Path,
+    machine: &str,
+    task: &TaskDoc,
+) -> Result<Option<super::store::actor_reads::Admission>> {
+    if task.team_invalid() {
+        return Err(Problem::new(code::INVALID_STATE, "The task's team key is invalid."));
+    }
+    let Some(key) = task.team().map_err(storage)? else { return Ok(None) };
+    if key.home != machine {
+        return Err(Problem::new(code::NOT_ALLOWED,
+            format!("Abandon this attempt on the team's home computer {}.", key.home)));
+    }
+    let admission = Store::disposition_admission(state)?;
+    if let Some(held) = &admission {
+        if let Some(team) = header::read(held, &key.team)? {
+            if team.home != machine || team.project != task.view().map_err(storage)?.project {
+                return Err(Problem::new(code::NOT_ALLOWED,
+                    format!("The stored team belongs to home computer {} and project {}; the task's team key does not match.", team.home, team.project)));
+            }
+            use zerus_team_plan::model::TeamStatus;
+            if !matches!(team.status, TeamStatus::Stopped | TeamStatus::Finished | TeamStatus::Archived) {
+                return Err(Problem::new(code::NOT_ALLOWED,
+                    format!("The team is {:?}; stop or archive it before abandoning this attempt. Its service owns delivery recovery.", team.status)));
+            }
+        }
+    }
+    Ok(admission)
+}
+
 pub(crate) mod context;
 mod report;
 #[allow(unused_imports)] // Consumed by the service package.

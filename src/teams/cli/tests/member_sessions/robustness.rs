@@ -110,8 +110,8 @@ fn l1_an_oversized_roster_omits_only_its_memberships_and_keeps_the_page_usable()
     assert_eq!(
         rows[1]["member_sessions"],
         json!([
-            {"member":"lead","machine":MACHINE,"session_id":LEAD_SESSION},
-            {"member":"m1","machine":MACHINE,"session_id":M1_SESSION}
+            {"member":"lead","role":"lead","machine":MACHINE,"session_id":LEAD_SESSION},
+            {"member":"m1","role":"developer","machine":MACHINE,"session_id":M1_SESSION}
         ])
     );
     let (first, exit) = h.cli(&Caller::Person, "list --limit 1", "");

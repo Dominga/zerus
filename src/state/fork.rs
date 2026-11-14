@@ -4,6 +4,8 @@ use super::*;
 use std::process::Command;
 use std::time::Duration;
 
+mod source;
+
 fn unavailable(record: &Value, live_pane: bool) -> Option<&'static str> {
     if !AGENTS.contains(&string(record, "agent")) {
         return Some("This provider does not support session forks");
@@ -202,6 +204,7 @@ pub(super) fn start_scoped(
         Some(launch_identity::helper::Observed::probe(&executable))
     };
     let _guard = lock(None)?;
+    let source = if archive_id.is_none() { Some(source::Selected::capture(name)?) } else { None };
     let record = if let Some(id) = archive_id {
         archive::read_archive(name, id)?
     } else {
@@ -229,8 +232,12 @@ pub(super) fn start_scoped(
             string(&record, "conversation_id"),
         )?;
     }
-    recipes::verify_history(&record, archive_id.is_some())?;
-    if !Path::new(string(&record, "launch_dir")).is_dir() {
+    // Availability keeps its ordinary current projections. Prepare only from
+    // the original raw frame; never fingerprint those derived observations.
+    let archived = if source.is_none() { Some(record) } else { drop(record); None };
+    let record = source.as_ref().map(source::Selected::record).or(archived.as_ref()).unwrap();
+    recipes::verify_history(record, archive_id.is_some())?;
+    if !Path::new(string(record, "launch_dir")).is_dir() {
         return Err("the source working directory is missing".into());
     }
     // Live and saved sessions keep unique names; an archived session's name
@@ -247,34 +254,36 @@ pub(super) fn start_scoped(
         Some(helper) => helper.count(allocation.session(), allocation.run(), 0)?,
         None => "0".into(),
     };
-    let agent = string(&record, "agent");
+    let agent = string(record, "agent").to_owned();
     // Check the saved recipe before the only operation that can create history.
-    fork_argv(&record, None)?;
+    fork_argv(record, None)?;
     let new_id = if agent == "kimi" {
         if dry {
             Some("NEW_KIMI_FORK_ID".to_owned())
         } else {
+            if let Some(source) = &source { source.check(name)?; }
             if let Some(scope)=scope {scope.changing();}
-            Some(kimi_fork(&record)?)
+            Some(kimi_fork(record)?)
         }
     } else {
         None
     };
-    let argv = fork_argv(&record, new_id.as_deref())?;
-    let hint_environment = crate::config::agent_hint_environment(agent);
+    let kept = |error| source::kept(error, new_id.as_deref().filter(|_| !dry));
+    let argv = fork_argv(record, new_id.as_deref()).map_err(kept)?;
+    let hint_environment = crate::config::agent_hint_environment(&agent);
     let launch = storage::supervisor_command_with_count(
-        &record, &executable, argv, &hint_environment, &count,
+        record, &executable, argv, &hint_environment, &count,
     );
     let new_run=allocation.run().to_owned();
-    let lineage = journal::fork_lineage(&record);
+    let lineage = journal::fork_lineage(record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
         // A fork's terminal is its own new label (zerus-ucck P3b).
         ("HGS_TERMINAL_NAME", target.clone()),
-        ("HGS_AGENT", agent.into()),
+        ("HGS_AGENT", agent.clone()),
         (
             "HGS_STATE_DIR",
-            absolute_root()?.to_string_lossy().into_owned(),
+            absolute_root().map_err(kept)?.to_string_lossy().into_owned(),
         ),
         ("HGS_EXECUTABLE", executable),
         ("HGS_RUN_ID", new_run.clone()),
@@ -286,7 +295,7 @@ pub(super) fn start_scoped(
         ("HGS_FRESH_REPLACES", String::new()),
         (
             "HGS_FORK_PARENT_ID",
-            string(&record, "conversation_id").into(),
+            string(record, "conversation_id").into(),
         ),
         ("HGS_FORK_SOURCE_NAME", name.into()),
         // The archived source's own identity, so the fork can inherit its project.
@@ -296,11 +305,11 @@ pub(super) fn start_scoped(
         // The labels its sources had, where a journal is not one (P2b).
         (
             "HGS_FORK_LINEAGE_LABELS",
-            journal::fork_lineage_labels(&record, &lineage),
+            journal::fork_lineage_labels(record, &lineage),
         ),
-        (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
+        (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(record)),
         // A fork an agent runs is also that agent's child (zerus-sa9qn.2).
-        (parent_link::ENV, parent_link::launcher_value()?),
+        (parent_link::ENV, parent_link::launcher_value().map_err(kept)?),
         ("HGS_TRACKING", "1".into()),
         (
             "HGS_CLIENT",
@@ -314,19 +323,24 @@ pub(super) fn start_scoped(
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         environment.insert(key, String::new());
     }
-    environment.insert(home_var(agent)?, string(&record, "agent_home").into());
+    environment.insert(home_var(&agent).map_err(kept)?, string(record, "agent_home").into());
     let spec = backend::LaunchSpec {
         name: target.clone(),
-        cwd: string(&record, "launch_dir").into(),
+        cwd: string(record, "launch_dir").into(),
         env: environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
-            .chain(account_variables(&record))
+            .chain(account_variables(record))
             .chain(hint_environment)
             .collect(),
         command: launch,
         detached: true,
     };
+    let parent_conversation = string(record, "conversation_id").to_owned();
+    let source = source.map(source::Selected::into_fence);
+    if let Some(source) = &source {
+        source.check(name).map_err(kept)?;
+    }
     if dry {
         if agent == "kimi" {
             println!(
@@ -334,7 +348,7 @@ pub(super) fn start_scoped(
                 join_command(&[
                     "kimi".into(),
                     "fork".into(),
-                    string(&record, "conversation_id").into(),
+                    parent_conversation,
                     "--yes".into()
                 ])
             );
@@ -343,11 +357,7 @@ pub(super) fn start_scoped(
     } else {
         if let Some(scope)=scope {scope.changing();}
         if let Err(error) = backend::current().start(&spec) {
-        return Err(if let Some(id) = &new_id {
-            format!("{error}; Kimi fork {id} is saved and can be opened explicitly")
-        } else {
-            error
-        });
+        return Err(kept(error));
         } else if scope.is_none() {println!("hgs: forked {name} as {target}");}
         if let (Some(scope),Some(id))=(scope,new_id.as_deref()) {scope.result(&target,&new_run,id,None);}
     }

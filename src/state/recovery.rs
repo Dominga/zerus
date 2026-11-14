@@ -995,12 +995,33 @@ fn worker() -> Result<i32> {
     super::worktree_maintenance::worker();
     // Keep-warm rounds run beside recovery, whatever its policy says.
     let mut keep_warm_at: Option<std::time::Instant> = None;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let (mut process_index_work, mut process_index_at) = (None, std::time::Instant::now());
     loop {
         if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
             eprintln!("hgs recovery: {e}");
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if std::time::Instant::now() >= process_index_at {
+            match super::process_index_writer::background_at(&root(), &mut process_index_work) {
+                Ok(step) => {
+                    debug_assert!(
+                        step.entries <= 256 && step.bytes <= 2 * 1024 * 1024 && step.rows <= 128
+                    );
+                    process_index_at = std::time::Instant::now()
+                        + Duration::from_secs(if step.done && step.gaps == 0 { 60 } else { 2 });
+                    if step.done {
+                        process_index_work = None;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("hgs advisory process index: {error}");
+                    process_index_at = std::time::Instant::now() + Duration::from_secs(15);
+                }
+            }
         }
         if keep_warm_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(15)) {
             keep_warm_at = Some(std::time::Instant::now());

@@ -177,6 +177,11 @@ QUESTION_ROUTE_OUTCOME_FILES = ("MainActivity.kt",)
 QUESTION_ROUTE_PERSON_REVISION_UPDATES = ROOT / "tests/fixtures/question-availability-question-route-person-revision-updates.patch"
 QUESTION_ROUTE_PERSON_REVISION_UPDATES_SHA = "ded1ccce465e08f7839bc8bbd47aeca7554e44bb72b7543e18aa3845d496a5d9"
 QUESTION_ROUTE_PERSON_REVISION_FILES = ("ZerusViewModel.kt",)
+# Exact own-message navigation delta after desktop parity #2306 (zerus-obfqe).
+# This changes display scrolling and page-job return values only; retain every
+# question-eligibility, verification-writer and historical reconstruction pin.
+OWN_MESSAGE_NAVIGATION_UPDATES = ROOT / "tests/fixtures/question-availability-own-message-navigation-updates.patch"
+OWN_MESSAGE_NAVIGATION_UPDATES_SHA = "87314c128a991071a27ae0387d61f327792f478d0c15f0a621dde3bffd96e21c"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -185,6 +190,7 @@ BOTH_FILES = ("ZerusViewModel.kt", "MainActivity.kt")
 # Every reviewed update, newest first: reverse_reviewed_updates reverses them in
 # this order, and each fixture's duplicated-hunk check reverses the newer ones.
 REVIEWED_CHAIN = (
+    (OWN_MESSAGE_NAVIGATION_UPDATES, OWN_MESSAGE_NAVIGATION_UPDATES_SHA, BOTH_FILES),
     (QUESTION_ROUTE_PERSON_REVISION_UPDATES, QUESTION_ROUTE_PERSON_REVISION_UPDATES_SHA, QUESTION_ROUTE_PERSON_REVISION_FILES),
     (QUESTION_ROUTE_OUTCOME_UPDATES, QUESTION_ROUTE_OUTCOME_UPDATES_SHA, QUESTION_ROUTE_OUTCOME_FILES),
     (QUESTION_ROUTE_PERSON_UPDATES, QUESTION_ROUTE_PERSON_UPDATES_SHA, QUESTION_ROUTE_PERSON_FILES),
@@ -321,6 +327,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                OWN_MESSAGE_NAVIGATION_UPDATES, OWN_MESSAGE_NAVIGATION_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 QUESTION_ROUTE_PERSON_REVISION_UPDATES, QUESTION_ROUTE_PERSON_REVISION_UPDATES_SHA,
                                                 QUESTION_ROUTE_PERSON_REVISION_FILES)
                 current = reverse_reviewed_patch(name, current,

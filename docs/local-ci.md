@@ -57,9 +57,9 @@ are rebuilt before Python integration; failure refuses reuse of an older binary.
 The CLI's debug, shell smoke, Python and release-build bodies are read from its
 own script. Shell failure does not conceal the later Python failures. An unknown
 script layout refuses rather than guessing how to split it.
-Replica (including `test-without-team`), client-core format/lint/test and latest-agent
-steps call the same scripts as GitHub. The runner substitutes only the resolved
-source commit in that native step; unknown workflow expressions remain not run.
+Replica (including `test-without-team`), the parallel `client-core` format/lint/test
+job and latest-agent steps call the same scripts as GitHub. The runner substitutes
+only the resolved source commit in that native step; unknown workflow expressions remain not run.
 
 `report.json` is saved after checks, with the commit, workflow/runner hashes,
 step bodies and hashes, tool versions, exit codes and raw-log SHA256 values.
@@ -92,7 +92,7 @@ a release candidate builder or a substitute for GitHub's final clean matrix.
 
 Exit 1 means a failed check; exit 2 means incomplete coverage or a refused local
 prerequisite. An incomplete plan cannot report a fully green matrix. `--plan`
-writes the exact job inventory without starting checks. `--jobs quick,cli` and
+writes the exact job inventory without starting checks. `--jobs quick,client-core,cli` and
 `--match REGEX` narrow a diagnostic run; exclusions remain visible in the report.
 
 For the original 0.48.3 regression control, use commit

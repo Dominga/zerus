@@ -1953,14 +1953,19 @@ fn person_only_forwarding(command: &str, args: &[String]) -> Result<()> {
         return Ok(());
     };
     if !agent_caller() {
+        // A peer loses readable local ancestry as well as session markers.
+        // Apply the same refusal as a local person action before any SSH,
+        // including when a marked ancestor's child clears its own markers.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        crate::tasks::person::check()?;
         return Ok(());
     }
     Err(Error::new(
         1,
         format!(
             "hgs {verb} on another computer would act as the person there, which cannot see which agent calls it. \
-             An agent runs hgs {verb} on its own computer; a person's shell that inherited an agent's HGS_SESSION \
-             and HGS_RUN_ID can unset them"
+             An agent runs hgs {verb} on its own computer; a person's shell outside the agent's process tree \
+             can unset inherited HGS_SESSION and HGS_RUN_ID"
         ),
     ))
 }

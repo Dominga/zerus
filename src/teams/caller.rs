@@ -81,7 +81,9 @@
 //! is never restarted or reloaded for it. A marked caller whose binding says
 //! OpenCode's shared service serves its session is refused plainly: such a
 //! session cannot be a team lead or member in this milestone, and
-//! `host_served_agent` lets team creation and member launch refuse it too.
+//! `host_served_agent` lets team creation's bundle validation (and catalog
+//! export or save) refuse it too; no member-launch code calls it, because an
+//! agent kind cannot change after creation.
 //! Any other marked claim below a recorded resident agent host is refused
 //! with a sentence of its own: a command there can only be a session that
 //! host serves, and only a DeepSeek claim's token proves one. The person path
@@ -224,7 +226,9 @@ fn hosted_session(config: &Config, name: &str, run: &str, session: Option<&str>)
 /// OpenCode's commands cannot be bound to their own session at all. A
 /// DeepSeek session's commands are proven by its host's per-call token;
 /// its seat also requires witnessed inputs and hosted lifecycle observations.
-/// Creating a team with such a member and launching one call this.
+/// Team creation's roster validation and the catalog's export/save call this;
+/// no member-launch code does, because an agent kind cannot change after
+/// creation.
 pub(crate) fn host_served_agent(agent: &str) -> bool {
     matches!(agent, "dsh" | "opencode")
 }

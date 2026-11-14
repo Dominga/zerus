@@ -369,6 +369,10 @@ process.stdout.write(JSON.stringify(result));
         }
 
         fn run_with_error_name(url: &str, timeout_ms: u64, error_name: bool) -> Value {
+            // The Kimi inspection tests replace `node` on PATH while they run.
+            let _lock = crate::accounts::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut command = Command::new("node");
             command.args([
                 "--input-type=module",

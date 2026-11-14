@@ -1049,6 +1049,12 @@ fn journal_identity(record: &mut Value, name: &str, retried: Option<&Value>) {
     }
 }
 
+// Both Restore admission and standing-resume observation use this predicate.
+// The caller holds the state writer lock across a final admission check.
+pub(super) fn restore_name_busy(name: &str) -> Result<bool> {
+    Ok(live()?.contains_key(name) || storage::label_taken(name))
+}
+
 fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     // A restore never creates the ID layout in P3a: it is written at its
     // label's path and needs a free label, whatever its archive says.
@@ -1063,14 +1069,14 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     if let Some(scope)=scope {scope.check(&archived)?;}
     {
         let _guard = lock(None)?;
-        if live()?.contains_key(name) || storage::label_taken(name) { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
+        if restore_name_busy(name)? { return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring")); }
         source.check(name, id)?;
     }
     if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
     let spec = resume_spec(&archived, &run_id, Some(id), dry)?;
     let _guard = lock(None)?;
-    if live()?.contains_key(name) || storage::label_taken(name) {
+    if restore_name_busy(name)? {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
     }
     let current_archive = source.check(name, id)?;
@@ -1127,7 +1133,7 @@ pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped
 // A legacy-to-ID move or rename can preserve both run and conversation.
 // Keep the prepared recipe bound to the same selected storage and terminal,
 // including opaque negative transition evidence. Missing and null differ.
-fn saved_binding(record: &Value) -> Value {
+pub(super) fn saved_binding(record: &Value) -> Value {
     json!([
         record["run_id"],
         record["conversation_id"],

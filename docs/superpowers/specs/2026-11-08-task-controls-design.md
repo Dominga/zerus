@@ -111,6 +111,35 @@ The exact-main CLI reader is qualified before adding this writer. Windows
 namespace durability is not yet qualified (`zerus-cg5h.4.8.2`), so its new
 writer returns Unknown; successful ordinary previews do not qualify that path.
 
+The opt-in `qualify_start_refusal` manual Windows check runs the maintained
+native publisher and refusal controls as a fresh ordinary user on NTFS. It
+checks original-file flush, no-replace preservation, the pinned root and native
+input exclusion, retained Unknown after publication and restart, and the old
+reader's present/Unknown result. Runtime mutants remove namespace completion,
+read-back completion, no-replace, and the caller's uncertain result separately.
+The restart helper must execute exactly one test; a zero-match helper mutation
+must fail too.
+The final control restores the original source and the const-false gate.
+These controls qualify the conservative Unknown response; they do not establish
+namespace durability or authorize queue activation.
+
+These filesystem controls use a real new logon token without loading a user
+profile hive, with explicit private home/app-data/temp directories. The kernel
+user SID must match the created ordinary account and its token must contain no
+Administrators SID. Hosted profile loading has a separately recorded pre-handle
+stall (`zerus-5wmh.66.3.27.4.1`); this control neither retries an unknown launch
+nor qualifies cold-profile, registry or installed-GUI behavior.
+
+The retained Windows directory handles are read-only and deny write/delete
+sharing to keep the original ancestry pinned. `FILE_FLAG_BACKUP_SEMANTICS`
+permits opening a directory but does not establish successful namespace flush.
+[`FlushFileBuffers`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires a handle with `GENERIC_WRITE`; a volume-wide flush requires privileged
+access. This path neither weakens the original sharing pins nor introduces a
+privileged volume flush. The compatibility `platform::sync_dir` no-op continues
+to provide no durability evidence. A separately reviewed native namespace
+completion mechanism remains an activation prerequisite.
+
 Only a complete synced retained read-back can construct the local Start reply's
 `refusal` proof: exactly `schema: 1`, `request_id`, `plan_digest`, and the closed
 reason `acknowledgement_mode_changed`. Core recomputes the digest from its own

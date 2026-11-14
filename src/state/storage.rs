@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
-// Read-only selected-slot source fences for saved Resume and Start fresh.
+// Read-only selected-slot source fences for saved Resume, Start fresh and terminal Fork.
 pub(super) mod selected_source;
 #[cfg(test)]
 mod selected_source_tests;
@@ -540,17 +540,31 @@ pub(super) fn remove_record(record: &Value) -> Result<()> {
     let path = own_path(record)?;
     if in_id_layout(record) {
         if path.exists() {
-            archive::remove_synced(&path)?;
+            remove_record_file(&path, record)?;
         }
         session_index::retire(record);
         return labels::remove(string(record, "name"), string(record, "session_id"));
     }
     rename::remove_legacy(record)?;
     if path.exists() {
-        archive::remove_synced(&path)?;
+        remove_record_file(&path, record)?;
     }
     session_index::retire(record);
     Ok(())
+}
+
+fn remove_record_file(path: &Path, record: &Value) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        super::process_index_writer::remove_at(&root(), path, record, || {
+            archive::remove_synced(path)
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = record;
+        archive::remove_synced(path)
+    }
 }
 
 /// The file `record` lives in: its own `sessions/<id>.json` in the ID layout,
@@ -664,6 +678,11 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     ensure_session_id(record);
     processes::compact(record);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    super::process_index_writer::write_at(&root(), path, record, |record| {
+        atomic(path, &format!("{record}\n"))
+    })?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     atomic(path, &format!("{record}\n"))?;
     super::archive_references::note(path, record);
     Ok(())

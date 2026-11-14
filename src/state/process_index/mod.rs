@@ -1,12 +1,15 @@
-//! Inactive process-index data foundation. No production caller or state path.
+//! Advisory process-index model/store. Production publishers grant no authority.
 //! The future owner must qualify/retain the SQLite namespace and verify the
 //! canonical records and native processes. No result here proves Person.
 #![allow(dead_code)]
-use anyhow::{ensure, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 mod model;
+pub(crate) mod pins;
+pub(crate) mod publishing;
+pub(crate) mod scanning;
 mod schema;
 pub(crate) use model::*;
 use schema::{ANCHOR, CHANGES, EDGES};
@@ -400,6 +403,64 @@ impl Store {
     }
     pub(crate) fn work(&self) -> &Work {
         &self.work
+    }
+    /// Bounded indexed metadata for an advisory writer, never source authority.
+    pub(crate) fn current_source(&mut self, src: &Source) -> Result<Option<Snapshot>> {
+        ensure!(
+            verify(&self.db, &self.scope)? == self.epoch,
+            "Process-index epoch changed"
+        );
+        self.work.source_reads += 1;
+        source(&self.db, &src.encoded()?)?
+            .map(|(revision, _, body)| {
+                let publication: Publication = serde_json::from_str(&body)?;
+                publication.validate(src, revision)?;
+                Ok(Snapshot {
+                    source: src.clone(),
+                    revision,
+                    publication,
+                })
+            })
+            .transpose()
+    }
+    pub(crate) fn pending_source(&self, src: &Source) -> Result<Option<ChangeRow>> {
+        ensure!(
+            verify(&self.db, &self.scope)? == self.epoch,
+            "Process-index epoch changed"
+        );
+        let row: Option<(u64, Option<String>)> = self.db.query_row(
+            "SELECT seq,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body ELSE NULL END FROM process_changes INDEXED BY process_pending_source WHERE source=?1 AND settled=0 LIMIT 1",
+            [src.encoded()?], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        row.map(|(seq, body)| {
+            let change: Change = serde_json::from_str(&bounded(body)?)?;
+            change.validate()?;
+            ensure!(change.source == *src, "Pending source changed");
+            Ok(ChangeRow {
+                seq,
+                change,
+                settled: false,
+            })
+        })
+        .transpose()
+    }
+    pub(crate) fn incomplete(&mut self) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure!(
+            verify(&tx, &self.scope)? == self.epoch,
+            "Process-index epoch changed"
+        );
+        if tx.execute(
+            "UPDATE process_meta SET complete=0 WHERE id=1 AND complete<>0",
+            [],
+        )? != 0
+        {
+            bump(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
     pub(crate) fn progress(&self) -> Result<Progress> {
         let before = self.stamp()?;

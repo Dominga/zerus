@@ -100,7 +100,7 @@ impl TaskDoc {
             .collect();
         Err(Error::new(format!(
             "delivery of attempt {} is unknown; nothing is sent or started again. \
-             Recover each with --recover-only, or the person cancels that exact attempt",
+             Recover each with --recover-only, or the person uses hgs task cancel-attempt REF --attempt UUID for that exact attempt",
             named.join(", ")
         )))
     }
@@ -547,7 +547,7 @@ impl TaskDoc {
         Ok(())
     }
 
-    /// The person cancels the current attempt whose delivery is unknown. The
+    /// The person abandons one exact attempt whose delivery is unknown. The
     /// stage and history stay; this is a disposition, not proof that the
     /// input never arrived or that its executor stopped. Any later delivery
     /// is a new attempt.
@@ -564,6 +564,30 @@ impl TaskDoc {
                 "only the person cancels an attempt whose delivery is unknown",
             ));
         }
+        if !canonical_uuid(id) {
+            return Err(Error::new("an attempt ID is a canonical UUID"));
+        }
+        if !reason.trim().is_empty() {
+            crate::schema::check_text(reason, "reason")?;
+        }
+        // An exact replay only observes this original person's disposition.
+        // A normal task cancellation or another attempt's fact is no exit.
+        if let Some(attempt) = self.attempt(id)? {
+            let (_, events) = self.execution_records()?;
+            let fingerprint = attempt.fingerprint();
+            if events.iter().any(|event| {
+                event.attempt == id
+                    && event.kind == EventKind::Cancelled
+                    && event.actor == Actor::Person
+                    && event.of == fingerprint
+            }) && self.view()?.log.iter().any(|entry| {
+                entry.kind == "attempt_cancelled"
+                    && entry.actor == Actor::Person
+                    && entry.request_id.as_deref() == Some(id)
+            }) {
+                return Ok(());
+            }
+        }
         let current = self
             .unknown_deliveries()?
             .into_iter()
@@ -573,12 +597,15 @@ impl TaskDoc {
                     "attempt {id} is not an attempt of this task with an unknown delivery"
                 ))
             })?;
-        if !reason.trim().is_empty() {
-            crate::schema::check_text(reason, "reason")?;
-        }
         self.push_event(&current.id, EventKind::Cancelled, actor, now)?;
-        self.log("cancelled", actor, now, "", Some(&current.executor))?
-            .insert("request_id", current.request_id.as_str())?;
+        self.log(
+            "attempt_cancelled",
+            actor,
+            now,
+            "Abandoned an attempt whose delivery remains unknown",
+            Some(&current.executor),
+        )?
+        .insert("request_id", current.request_id.as_str())?;
         if !reason.trim().is_empty() {
             self.log("comment", actor, now, reason.trim(), None)?;
         }
@@ -1399,6 +1426,35 @@ mod tests {
     }
 
     #[test]
+    fn exact_unknown_disposition_is_idempotent_but_never_becomes_not_started() {
+        let mut task = task();
+        let original = send(&mut task, ONE, "api");
+        let before = task.revision();
+        assert!(task.cancel_attempt(TWO, "", &Actor::Person, 11).is_err());
+        assert_eq!(task.revision(), before);
+        task.cancel_attempt(ONE, "Delivery remains unknown", &Actor::Person, 12)
+            .unwrap();
+        assert_eq!(task.attempt(ONE).unwrap(), Some(original));
+        assert_eq!(
+            task.attempt_facts(ONE).unwrap().unwrap(),
+            vec![EventKind::Unknown, EventKind::Cancelled]
+        );
+        send(&mut task, TWO, "api");
+        let cancelled = task.revision();
+        task.cancel_attempt(ONE, "Do not duplicate this comment", &Actor::Person, 13)
+            .unwrap();
+        assert_eq!(task.revision(), cancelled);
+        assert_eq!(task.held().unwrap().unwrap().id, TWO);
+        assert!(task.check_attempt_send().is_err());
+        assert!(task.cancel_attempt(ONE, "", &agent("api"), 14).is_err());
+        assert!(task.cancel_attempt(THREE, "", &Actor::Person, 14).is_err());
+        settle(&mut task, TWO);
+        let settled = task.revision();
+        assert!(task.cancel_attempt(TWO, "", &Actor::Person, 15).is_err());
+        assert_eq!(task.revision(), settled);
+    }
+
+    #[test]
     fn the_person_alone_cancels_the_exact_unknown_attempt_and_the_stage_stays() {
         let mut task = task();
         send(&mut task, ONE, "api");
@@ -1408,14 +1464,20 @@ mod tests {
             .unwrap();
         let view = task.view().unwrap();
         assert_eq!(view.stage, Stage::Todo);
-        let cancelled = view.log.iter().find(|e| e.kind == "cancelled").unwrap();
+        let cancelled = view
+            .log
+            .iter()
+            .find(|e| e.kind == "attempt_cancelled")
+            .unwrap();
         assert_eq!(
             (cancelled.request_id.as_deref(), cancelled.session.clone()),
             (Some(ONE), Some(run("api")))
         );
         assert_eq!(current(&task).phase, Phase::Cancelled);
         // Only an unknown delivery is cancelled this way; a new send is a new attempt.
-        assert!(task.cancel_attempt(ONE, "", &Actor::Person, 13).is_err());
+        let revision = task.revision();
+        task.cancel_attempt(ONE, "", &Actor::Person, 13).unwrap();
+        assert_eq!(task.revision(), revision);
         assert_eq!(send(&mut task, TWO, "api").generation, 2);
     }
 

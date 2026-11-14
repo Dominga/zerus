@@ -239,6 +239,22 @@ fn proven_result(mut reply: Value, proof: Option<task_refusal::Proof>) -> Result
     Ok(reply)
 }
 
+fn mode_refusal_result(
+    observed: std::result::Result<Observed, String>,
+    reply: impl FnOnce(&str, &str) -> Result<Value>,
+) -> Result<Value> {
+    match observed {
+        Ok(Observed::Refused { same_plan, proof }) => proven_result(
+            reply("refused", if same_plan { MODE_CHANGED } else { ANOTHER })?,
+            proof,
+        ),
+        _ => reply("uncertain", UNCERTAIN),
+    }
+}
+
+#[cfg(test)]
+mod mode_refusal_tests;
+
 pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     // The attempt's one budget counts from here (desktop-u's condition 1).
     let deadline = std::time::Instant::now() + super::attempts::BUDGET;
@@ -465,7 +481,9 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                 };
                 super::attempts::pause_at(&plan.id, "start_managed");
                 let mut meeting = crate::teams::tasks::Meeting::Admitted(&mut *admitted);
-                if let Err(error) = super::teams::guard(config, &machines, task, "send", args, &mut meeting) {
+                if let Err(error) =
+                    super::teams::guard(config, &machines, task, "send", args, &mut meeting)
+                {
                     return refuse("not_sendable", error.message);
                 }
                 // The frozen plan's business binding, against the task as
@@ -559,17 +577,9 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                         ),
                         _ => Err("Missing frozen Start mode".into()),
                     };
-                    return match observed {
-                        Ok(Observed::Refused { same_plan, proof }) => proven_result(
-                            result(
-                                "refused",
-                                if same_plan { MODE_CHANGED } else { ANOTHER },
-                                &reload()?,
-                            )?,
-                            proof,
-                        ),
-                        _ => result("uncertain", UNCERTAIN, &reload()?),
-                    };
+                    return mode_refusal_result(observed, |state, text| {
+                        result(state, text, &reload()?)
+                    });
                 }
                 let (state, text) = super::attempts::refusal(&closed, &detail.borrow());
                 return result(state, &text, &reload()?);

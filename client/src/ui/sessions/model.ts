@@ -1,4 +1,6 @@
 import { groupRows, type Row } from "./group-rows";
+import { teams } from "../../store/teams";
+import { agentTeamIndex, agentTeamProjects } from "./agent-teams";
 export { groupRows, withContainers, endedParent, type Row, type ListInput, type Container } from "./group-rows";
 import { createMemo } from "solid-js";
 import { archive, archiveRows, fleetComputers } from "../../store/archive";
@@ -25,7 +27,7 @@ export const ROW_HEIGHT = { header: 40, card: 94, child: 40, collapsedRow: 40, c
 
 /** In the strip every row keeps its height except compact rows, which show as tiles. */
 export function rowHeight(row: Row, strip = false): number {
-  if (row.type === "header") return ROW_HEIGHT.header;
+  if (row.type === "header" || row.type === "agent-team") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
   if (row.type === "creation") return ROW_HEIGHT.card;
   // An ended parent's container is a dimmed compact row with its children's line (zerus-sa9qn.17).
@@ -122,15 +124,16 @@ function listScope() {
   const q = search().trim();
   const hosts = machineFilter();
   const visible = (s: Session) => matchesLiveFilters(s, f, q);
+  const agentTeams = agentTeamIndex(teams.available(), teams.listed(), teams.team(), orderedRows(), (s) => machineCards[s.computer]?.machine_id);
   return {
-    grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
+    agentTeams, grouping: grouping(), members: agentTeamProjects(membersByGroup(), agentTeams, visible, projectFilter()), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
     accounts: accountFilter(), folder: folderFilter(),
     includeCompleted: flag("workspace/showCompletedSubagents"),
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
-    parentKey: parentKeyOf(), teamCollapsed,
+    parentKey: (s: Session) => agentTeams.has(s.key) ? undefined : parentKeyOf()(s), teamCollapsed,
     containers: true, machineOf: (s: Session) => machineCards[s.computer]?.machine_id,
   };
 }

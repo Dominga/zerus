@@ -131,11 +131,15 @@ acceptance; this document grants none of them.
 offers an explicit exact-commit manual run. It has read-only repository access,
 no secrets, publication environment or caches, and uses SHA-pinned actions on a
 standard disposable GitHub-hosted Ubuntu VM. The finite reviewed image list is
-`20261012.334.1` and `20261018.339.1`, which GitHub currently assigns during its
-rolling update. Both official image releases list the same required Java and
-SDK tool versions; all individual guards still apply. Other images or JDKs are
-refused pending review. Manual package inputs must equal the checked-in pins;
-there is no latest-version fallback.
+`20261012.334.1`, `20261018.339.1`, `20261023.334.3` and `20261111.370.1`.
+The last image's official release and README identities are recorded in
+`android-project-ui-pins.json`. It bundles Java 17.0.21+9, so both UI workflows
+explicitly install the original Temurin 17.0.20.1+1 with SHA-pinned `setup-java`
+on that exact hosted image, without caching. The subsequent admission still
+checks the actual Java release before checkout. The observed `20261111.127.1`
+has no available matching official release metadata and remains refused.
+Other images or JDKs require review. Manual package inputs must equal the
+checked-in pins; there is no latest-version fallback.
 
 Admission retains the bounded actual JDK `release` file and names the failing
 guard before checkout. The exact Temurin Java 17.0.20.1 build 1 must be proved by the
@@ -150,11 +154,24 @@ The stable package selection in `scripts/ci/android-project-ui-pins.json` is
 Emulator 37.2.12 and API 35 Google APIs x86_64 revision 9. Google repository XML
 URLs, SHA-256 identities and selected archive sizes/official SHA-1 checksums are
 recorded there. Source preparation read only those two XML documents. The job
-uses the official stable-channel `sdkmanager`, refuses different installed
-revisions, and records the actual installed tool/image hashes. Archive bytes are
-not independently re-hashed by this helper; the metadata receipt and installed
-hashes are different evidence. This selection does not map a development host's
-older platform-tools binary to an upstream source revision.
+uses the official stable-channel `sdkmanager` for the platform, build tools and
+system image, refusing different installed revisions. It downloads the exact
+reviewed emulator archive separately, checks its published SHA-1, recorded
+SHA-256 and byte count before extraction, and stages it in the fixture's private
+directory. Its own `source.properties` must report revision 37.2.12 and build
+16428233; the selected binary's runtime version must agree before any app build.
+No package-manager metadata is synthesized and no unversioned emulator is
+requested or used as a fallback. The system-image 9.0.0 assertion remains.
+The Ubuntu runtime-library versions are also recorded in the pin file. Before
+fixture execution, both workflows check every offered apt version, install the
+exact batch without recommendations, then verify and retain the installed
+versions. A changed candidate is a refusal, even if the older version is still
+available. The driver verifies the package receipt and runs `ldd` on the staged
+qemu with its bundled-library paths; `libpulse.so.0` and every other dependency
+must resolve before the emulator's version command.
+Installed tool/image hashes are retained separately; system-image archive bytes
+are not independently re-hashed by this helper. This selection does not map a
+development host's older platform-tools binary to an upstream source revision.
 
 The helper creates private HOME/XDG/Gradle/Android/AVD state, uses an absent
 signing-properties path and a new synthetic debug signer, and checks the actual

@@ -10,6 +10,24 @@ use super::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+// The exiting supervisor can still own its name during post-archive cleanup.
+// Include its sequential automatic deadlines and conservatively the separate
+// manual leftover-delete budget, plus a standing safety observation interval.
+// Filesystem/receipt I/O has no end-to-end deadline: allow the reviewed ten-minute
+// outer wait cap instead when it is larger. This never bounds teardown itself.
+const UNBOUNDED_TEARDOWN_WAIT_CAP_MS: i64 = 10 * 60 * 1000;
+pub(super) const RESUME_SETTLE_MS: i64 = {
+    let bounded = crate::state::AFTER_ARCHIVE_FIXED_TIME
+        .saturating_add(crate::state::LEFTOVER_DELETE_TIME)
+        .saturating_add(super::super::worker::SAFETY_OBSERVATION_INTERVAL)
+        .as_millis() as i64;
+    if bounded > UNBOUNDED_TEARDOWN_WAIT_CAP_MS {
+        bounded
+    } else {
+        UNBOUNDED_TEARDOWN_WAIT_CAP_MS
+    }
+};
+
 pub(super) fn key(parts: &Value) -> String {
     format!("{:x}", Sha256::digest(parts.to_string()))
 }
@@ -53,6 +71,16 @@ pub(super) fn step(p: &mut impl Ports, b: &Binding, epoch: &str, now: i64) -> Re
         // no card and no audit reservation here.
         return Ok(());
     } else if snapshot.ended {
+        if let Some(wait) = &snapshot.resume_wait {
+            if now < wait.until {
+                return Ok(());
+            }
+            let plan = candidate(b, &snapshot, Kind::Resume, Value::Null);
+            let refusal = validate(p, &plan).err().unwrap_or_else(|| format!(
+                "The original run did not settle: its terminal name is still held. {}", policy::SEAT,
+            ));
+            return execute_refusal(p, plan, epoch, now, Some(refusal));
+        }
         (Kind::Resume, Value::Null)
     } else {
         return Ok(());
@@ -61,8 +89,11 @@ pub(super) fn step(p: &mut impl Ports, b: &Binding, epoch: &str, now: i64) -> Re
     execute(p, plan, epoch, now)
 }
 
-fn execute(p: &mut impl Ports, mut plan: Plan, epoch: &str, now: i64) -> Result<()> {
+fn execute(p: &mut impl Ports, plan: Plan, epoch: &str, now: i64) -> Result<()> {
     let refusal = validate(p, &plan).err();
+    execute_refusal(p, plan, epoch, now, refusal)
+}
+fn execute_refusal(p: &mut impl Ports, mut plan: Plan, epoch: &str, now: i64, refusal: Option<String>) -> Result<()> {
     if refusal.is_some() {
         plan.kind = Kind::Notice;
     }

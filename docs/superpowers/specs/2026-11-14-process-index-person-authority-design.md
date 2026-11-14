@@ -88,6 +88,20 @@ durability fails, refuse the new binding mutation/launch before publication. Pre
 source-lock order; never acquire source locks inside an index transaction. A crash
 at either publication cut leaves unaccounted coverage until exact reconciliation;
 an index failure cannot certify a miss, undo the source or discard prior claims.
+**Advisory rollout clarification, coordinator decision 2026-11-14:** the
+pre-publication refusal above applies only to a later, separately reviewed slice
+in which a production decision relies on this index. During advisory publishing,
+an unavailable, full or failing index never blocks or fails a canonical write,
+launch, spawn or lifecycle outcome. Reserve the immutable intent before source
+publication when possible. If it fails, continue the original source operation
+and mark that source's coverage lost; persist a lost-since epoch/time marker when
+possible. Otherwise a missing/mismatched canonical publication witness or an
+indexed source whose file has disappeared must make the next bounded bootstrap
+report an unaccounted gap. Post-file settlement failure retains pending/incomplete
+coverage and preserves the original source result. No index error permits an
+undo or replay of canonical I/O. The enforcement outage contract is not activated
+by this advisory slice.
+
 JSON and SQLite are not one atomic transaction. Deletion uses binding-version CAS.
 Busy/corrupt/moved/future-schema indexes return unavailable without foreground
 repair. Capacity cannot evict live or uncertain claims.

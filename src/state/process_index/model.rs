@@ -81,6 +81,10 @@ pub(crate) struct Change {
     pub id: String,
     pub source: Source,
     pub before: u64,
+    /// Immutable descriptive locator. Its owner must qualify the native path;
+    /// the string itself never grants filesystem or caller authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
     pub publication: Publication,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +306,9 @@ impl Change {
             "Invalid change UUID"
         );
         ensure!(self.before < i64::MAX as u64, "Change revision overflow");
+        if let Some(locator) = &self.locator {
+            text(locator, 1024)?;
+        }
         self.publication.validate(&self.source, self.before + 1)?;
         ensure!(
             serde_json::to_vec(self)?.len() <= CHANGE_BYTES,

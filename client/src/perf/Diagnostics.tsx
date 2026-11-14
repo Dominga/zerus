@@ -71,6 +71,7 @@ export default function Diagnostics(props: DiagnosticsProps) {
   const [status, setStatus] = createSignal("");
   const [report, setReport] = createSignal<PerfReport | null>(null);
   let stageRef: HTMLDivElement | undefined;
+  let initialized: Promise<void> | undefined;
 
   const plan = (overrides: Partial<Plan> = {}): Plan => ({
     ...DEFAULT_PLAN,
@@ -100,6 +101,13 @@ export default function Diagnostics(props: DiagnosticsProps) {
       onScenarioEnd: (...args) => props.onScenarioEnd?.(...args),
     };
     try {
+      await initialized;
+      // The panel can mount before its window belongs to a monitor. Retry at
+      // measurement time: a 60 Hz rAF estimate must not redefine a 144 Hz budget.
+      if (overrides.hz === undefined && hzSource() !== "manual") {
+        const native = await props.displayHz?.().catch(() => null);
+        if (native && Number.isFinite(native) && native > 0) { setHz(native); setHzSource("native"); }
+      }
       const result = await runAll(props, { root: stageRef }, plan(overrides), options);
       setReport(result);
       setStatus(`Finished at ${new Date(result.created_at).toLocaleTimeString()}`);
@@ -112,16 +120,17 @@ export default function Diagnostics(props: DiagnosticsProps) {
     }
   };
 
-  onMount(async () => {
+  onMount(() => {
+    initialized = (async () => {
+      const native = await props.displayHz?.().catch(() => null);
+      if (native && Number.isFinite(native) && native > 0) {
+        if (hzSource() !== "manual") { setHz(native); setHzSource("native"); }
+      } else {
+        const estimated = await estimateHz();
+        if (hzSource() !== "manual") { setHz(estimated); setHzSource("estimated"); }
+      }
+    })();
     globalThis.zerusPerf = { run: ({ ids, ...overrides } = {}) => start(ids, overrides) };
-    const native = await props.displayHz?.().catch(() => null);
-    if (native && native > 0) {
-      setHz(native);
-      setHzSource("native");
-    } else {
-      setHz(await estimateHz());
-      setHzSource("estimated");
-    }
   });
   onCleanup(() => {
     if (globalThis.zerusPerf) globalThis.zerusPerf = undefined;

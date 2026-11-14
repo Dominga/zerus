@@ -271,6 +271,9 @@ pub struct TeamSummary {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct MemberSession {
     pub member: String,
+    /// Empty for an older command line that did not include the role.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub role: String,
     pub machine: String,
     pub session_id: String,
 }
@@ -324,6 +327,7 @@ pub(crate) fn member_sessions(row: &Value) -> Option<Vec<MemberSession>> {
             .filter_map(|entry| {
                 let session = MemberSession {
                     member: name(entry, "member"),
+                    role: name(entry, "role"),
                     machine: name(entry, "machine"),
                     session_id: name(entry, "session_id"),
                 };
@@ -568,3 +572,6 @@ pub struct WaitingView {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod session_groups;

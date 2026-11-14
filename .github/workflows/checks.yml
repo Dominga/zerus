@@ -261,13 +261,8 @@ jobs:
           cargo +1.99.1 fmt --check --manifest-path crates/team-plan/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path crates/team-plan/Cargo.toml --target-dir target --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path crates/team-plan/Cargo.toml --target-dir target
-      - name: Desktop client core crate (format, lints, tests)
-        run: bash scripts/ci/client-core.sh
       # hgs and client/core take these by path, which builds them but never runs their tests.
       # Every Quick Cargo check shares target: compatible dependencies are built once.
-      - name: Disk usage after client core tests
-        if: ${{ !cancelled() }}
-        run: python3 scripts/ci/ubuntu-disk.py report after-client-core-tests
       - name: Desktop crates (format, lints, tests)
         run: |
           cargo +1.99.1 fmt --check --manifest-path crates/content-search/Cargo.toml
@@ -315,6 +310,50 @@ jobs:
       - name: Disk usage after cache save
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/ubuntu-disk.py report after-cache-save
+
+  client-core:
+    name: Desktop client core checks (format, lints, tests)
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: Reclaim unused hosted Ubuntu tools
+        run: python3 scripts/ci/ubuntu-disk.py prepare
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      # Reuse Quick's compatible compiler/month cache without a second writer
+      # or another target-cache family within the existing shared cache limit.
+      - name: Restore Rust 1.99 cache (read only)
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock') }}
+          restore-keys: msrv-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Disk usage after cache restore
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-cache-restore
+      - name: Desktop client core crate (format, lints, tests)
+        run: bash scripts/ci/client-core.sh
+      - name: Disk usage after client core tests
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-client-core-tests
 
   relay:
     name: Rust relay (v1, PostgreSQL and connector contracts)
@@ -1840,7 +1879,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
+    needs: [source, quick, client-core, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1858,6 +1897,7 @@ jobs:
           selected = {
               'source': True,
               'quick': True,
+              'client-core': True,
               'client-frontend': True,
               'relay': True,
               'connector': True,

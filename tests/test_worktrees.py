@@ -1091,7 +1091,22 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS fail-closed leftover contract')
     def test_macos_leftover_refusal_preserves_files_permissions_record_and_keep_folder(self):
         import sqlite3
-        tree,row,_=self.partial('macos-refused');left=self.leftover(tree)
+        # This contract starts with a leftover. Seed its private legacy record
+        # without depending on a separate removal attempt passing native review.
+        tree=self.root/'macos-refused';readonly=tree/'target'/'readonly';readonly.mkdir(parents=True)
+        (readonly/'out').write_text('build');readonly.chmod(0o555)
+        self.addCleanup(lambda:readonly.exists() and readonly.chmod(0o755))
+        branch='feature/macos-refused';self.git('-C',str(self.repo),'branch',branch)
+        head=self.git('-C',str(self.repo),'rev-parse','HEAD')
+        database=self.root/'state'/'worktree-maintenance'/'queue.sqlite3';database.parent.mkdir(parents=True)
+        with contextlib.closing(sqlite3.connect(database)) as db,db:
+            db.executescript('CREATE TABLE removals (path TEXT PRIMARY KEY, common_dir TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL, '
+                             'fingerprint TEXT NOT NULL, request_id TEXT NOT NULL, reserved_at REAL NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);'
+                             'CREATE TABLE removal_volumes (path TEXT PRIMARY KEY, folder TEXT NOT NULL, repository TEXT NOT NULL);')
+            db.execute('INSERT INTO removals VALUES (?,?,?,?,?,?,?,?,?)',
+                (str(tree.resolve()),str((self.repo/'.git').resolve()),branch,head,'f'*64,'fixture-partial',time.time(),'partial','synthetic partial removal'))
+        database.chmod(0o600)
+        left=self.leftover(tree);self.assertIsNotNone(left,'the private leftover must be present before testing platform refusal')
         self.assertIn('macos_appledouble_safety',codes(left['reasons']))
         self.assertFalse(left['deletable']);self.assertNotIn('process_fingerprint',left)
         payload=tree/'target'/'readonly'/'out';mode=payload.parent.stat().st_mode
@@ -1106,7 +1121,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         with contextlib.closing(sqlite3.connect(database)) as db:
             self.assertEqual(db.execute('SELECT * FROM removals').fetchall(),before,'no attempt marker may be written')
         self.assertEqual(self.leftover(tree)['fingerprint'],left['fingerprint'])
-        self.assertIn(row['branch'],self.git('-C',str(self.repo),'branch','--list',row['branch']))
+        self.assertIn(branch,self.git('-C',str(self.repo),'branch','--list',branch))
         kept=self.keep(tree,left['fingerprint']);self.assertEqual(kept.returncode,0,kept.stderr)
         self.assertEqual(payload.read_text(),'build');self.assertEqual(self.records(),[])
 

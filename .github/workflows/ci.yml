@@ -48,6 +48,10 @@ on:
         description: Retain the exact Windows test executable for private read-only membership qualification
         type: boolean
         default: false
+      qualify_start_refusal:
+        description: Qualify Windows Start-refusal Unknown handling as a disposable standard user on NTFS
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
@@ -108,6 +112,7 @@ jobs:
   review:
     name: PR and manual checks
     if: >-
+      !(github.event_name == 'workflow_dispatch' && inputs.qualify_start_refusal) &&
       !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (!inputs.ref || inputs.ref == github.sha))
     cache-mode: read
     uses: ./.github/workflows/checks.yml
@@ -123,6 +128,13 @@ jobs:
       run_ios: ${{ inputs.run_ios || false }}
       filter_pr_platforms: ${{ github.event_name == 'pull_request' }}
       arch_check_in_source: ${{ inputs.release_rehearsal || false }}
+  windows-start-refusal:
+    name: Windows Start-refusal qualification
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify_start_refusal
+    cache-mode: read
+    uses: ./.github/workflows/windows-start-refusal.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
   qualification:
     name: Credential-free Dev builds
     if: >-
@@ -191,7 +203,7 @@ jobs:
   gate:
     name: CI gate
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [automatic, review, qualification]
+    needs: [automatic, review, qualification, windows-start-refusal]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     cache-mode: none
@@ -203,7 +215,7 @@ jobs:
           import json, os
           results = json.loads(os.environ['RESULTS'])
           conclusions = sorted(job['result'] for job in results.values())
-          if conclusions != ['skipped', 'skipped', 'success']:
+          if conclusions != ['skipped'] * (len(results) - 1) + ['success']:
               raise SystemExit(f'Exactly one selected check workflow must succeed: {conclusions}')
           PY
   dev-tail:

@@ -118,7 +118,8 @@ Once the team is created, the desktop service:
 
 - creates the integration branch at the base commit, without checking it out;
 - launches the lead, then each member in its own generated worktree, linked
-  as a child session of the lead where its agent allows that;
+  as a child session of the lead where its agent allows that. A member with a
+  durable session and run can be linked before its first conversation;
 - picks each session's account at launch: by default the signed-in account of
   the role's agent with the most room left in its usage windows.
 
@@ -135,6 +136,14 @@ computer, Zerus adds a short suffix from the team ID. The reservation remains
 stable when the service restarts. Names are labels; launch and session IDs
 still identify members. Existing sessions are not renamed, and saved worktree
 paths, branches and bindings remain in use after an upgrade.
+
+With the preview on, Sessions groups a team under its name, with the lead first
+and the other members ordered by role and member ID. Each row shows its role.
+Membership uses the team roster's computer and launch/run bindings, including
+when a parent link is pending; session names do not establish membership. A
+live, quiet member without its first conversation shows **Waiting for a task**.
+Ordinary sessions and the Sessions list with the preview off keep their usual
+status and grouping rules.
 
 A member that cannot be started becomes a card in Waiting for you that says
 why and whether Zerus tries again. When Zerus does not know whether a member
@@ -249,7 +258,7 @@ changes nothing else.
 | **Start not confirmed** | Whether a member started is not known; Zerus checks before it starts anything again |
 | **No room for members** | New members wait until there is room for another session or account |
 | **Member needs you** | A member's session asks for something Zerus does not confirm on your behalf |
-| **Team service blocked** | A step of the service failed three times, for example a merge that cannot run, and is tried again; the same card names a member a ready task needs that cannot be read. It is also the card for the project limit: when the project's own settings refuse every hand-out, one such card per team appears at the first refusal, its text names the limit, and the queue waits until the project allows it |
+| **Team service blocked** | A step of the service failed three times, for example a merge that cannot run, and is tried again; the same card names a member a ready task needs that cannot be read. It also names the cause when an open hand-out's holder has no durable session handle or its session record cannot be read: after the same three-minute period, with the same deduplication and close on recovery or settlement. An undecidable binding never counts as a departure; decisively ended bindings keep the existing left-member settlement. It is also the card for the project limit: when the project's own settings refuse every hand-out, one such card per team appears at the first refusal, its text names the limit, and the queue waits until the project allows it |
 | **Report waiting** | A member's report has waited for the lead's decision longer than the team allows, an hour by default |
 | **Lead not working** | The lead has not worked for a while, 20 minutes by default, although items wait in its inbox |
 | **Late session** | A member's session started after the team stopped or the member was removed; Zerus does not stop it |

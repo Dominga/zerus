@@ -22,6 +22,7 @@ Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: tas
   hgs task send REF [--session SESSION [--host ALIAS]]
   hgs task handoff REF --session SESSION [--host ALIAS]
   hgs task cancel REF [--reason TEXT]
+  hgs task cancel-attempt REF --attempt UUID [--reason TEXT]   person only
 
 Add queues; --start/start records work, no resend. Only the person accepts Done.
 Use the prompt's one acknowledgement. After queue activation, begin-attempt
@@ -32,6 +33,8 @@ Legacy start prints its ordinary report command, no UUID.
 History-only means saved, not moved; do not retry. Without a pinned command,
 ask the person to accept or resend. You cannot cancel your dispatched task;
 report or hand it off. Messages do not transfer ownership; submitted handoff does.
+An unknown delivery is recovered without replay. If recovery cannot settle it,
+ask the person to abandon that exact attempt; agents cannot use cancel-attempt.
 
 Plans create none. Use Start dialog or ask the parent for a child.
 Bind its live ID to the receipt. Parent reports; children never use its identity.

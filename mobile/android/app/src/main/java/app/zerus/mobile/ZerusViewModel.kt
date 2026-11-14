@@ -578,11 +578,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         return olderJob
     }
-    fun loadOlder(target:Target) {
+    fun loadOlder(target:Target):Job? {
         val window=historyWindows[target.key]
-        if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before)
+        return if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before) else null
     }
-    fun loadNewer(target:Target) { historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) } }
+    fun loadNewer(target:Target):Job? = historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) }
+    /** Navigation reads the displayed rows and the existing window's opaque page cursors. */
+    fun ownMessagePage(target:Target,displayed:List<Event>):OwnMessageNavigation.Page? {
+        if(selected?.target!=target) return null
+        val window=historyWindows[target.key]
+        return OwnMessageNavigation.Page(target,displayed,historyEpoch,window?.before,window?.after,hasOlder,hasNewer)
+    }
     /** The recent native inspection is independent of historical indexing and exact unread totals. */
     fun jumpToLatest(target:Target):Job? {
         if(selected?.target!=target) return null

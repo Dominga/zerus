@@ -355,6 +355,7 @@ pub fn present(
     mut detail: Value,
     mut files: impl FnMut(&Value, Option<&str>) -> Result<Value, String>,
 ) -> Result<Value, String> {
+    let unknown = detail.pointer("/execution/unknown").cloned();
     const FIELDS: &[&str] = &[
         "uuid",
         "id",
@@ -380,11 +381,26 @@ pub fn present(
         "log_total",
         "history_next",
         "history_schema",
+        "unknown_attempts",
     ];
     detail
         .as_object_mut()
         .ok_or("Invalid task response")?
         .retain(|key, _| FIELDS.contains(&key.as_str()));
+    // Only original UUIDs, never frozen native requests or arbitrary replica
+    // fields. The protocol bounds one task to 256 attempts.
+    detail.as_object_mut().unwrap().remove("unknown_attempts");
+    if let Some(unknown) = unknown {
+        let ids = unknown.as_array().ok_or("Invalid unknown task attempts")?;
+        if ids.len() > 256
+            || ids
+                .iter()
+                .any(|id| !id.as_str().is_some_and(crate::creation::canonical_uuid))
+        {
+            return Err("Invalid unknown task attempts".into());
+        }
+        detail["unknown_attempts"] = unknown;
+    }
     detail["attachments"] = files(&detail["attachments"], None)?;
     for entry in detail["log"]
         .as_array_mut()
@@ -425,6 +441,28 @@ mod tests {
     use super::*;
     use serde_json::json;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+    #[test]
+    fn unknown_attempt_presentation_is_bounded_uuids_only_and_cannot_be_spoofed() {
+        let raw = json!({"uuid":ID,"attachments":[],"log":[],
+            "execution":{"unknown":[ID],"current":{"native":"private request"}},
+            "unknown_attempts":["spoofed"]});
+        let shown = present(raw, |_, _| Ok(json!([]))).unwrap();
+        assert_eq!(shown["unknown_attempts"], json!([ID]));
+        assert!(shown.get("execution").is_none());
+        for bad in [json!("wrong type"), json!(["latest"]), json!(vec![ID; 257])] {
+            assert!(present(
+                json!({"attachments":[],"log":[],"execution":{"unknown":bad}}),
+                |_, _| Ok(json!([]))
+            )
+            .is_err());
+        }
+        let shown = present(
+            json!({"attachments":[],"log":[],"unknown_attempts":[ID]}),
+            |_, _| Ok(json!([])),
+        )
+        .unwrap();
+        assert!(shown.get("unknown_attempts").is_none());
+    }
     fn reply() -> Map<String, Value> {
         json!({"project":{"id":"example"},"task":{"uuid":ID,"project":"example",
         "history_schema":1,"history_next":null,"log":[]}})

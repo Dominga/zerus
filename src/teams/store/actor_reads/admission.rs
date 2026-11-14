@@ -20,6 +20,10 @@ impl Store {
     /// its immediate transaction, including on refusal or a failed spawn.
     pub fn admission(self) -> Result<Admission> {
         self.active()?;
+        self.begin_admission()
+    }
+
+    fn begin_admission(self) -> Result<Admission> {
         let db = self
             .db
             .as_ref()
@@ -38,6 +42,24 @@ impl Store {
             } else {storage(e)}
         })?;
         Ok(Admission(self))
+    }
+
+    /// No CREATE or data write, including while preview is off. BEGIN
+    /// IMMEDIATE owns the same writer fence as the ordinary admission;
+    /// query_only and the guard's ROLLBACK prevent a Team fact commit.
+    pub(crate) fn disposition_admission(state: &std::path::Path) -> Result<Option<Admission>> {
+        let preview = crate::teams::enabled(state);
+        let store = if preview { Self::open(state)? } else { Self::existing_unmigrated(state)? };
+        if store.db.is_none() {
+            return Ok(None);
+        }
+        let admitted = store.begin_admission()?;
+        let db = admitted.0.db.as_ref().expect("admitted existing store");
+        if !preview {
+            super::super::disposition::as_is(db)?;
+        }
+        db.execute_batch("PRAGMA query_only=ON").map_err(storage)?;
+        Ok(Some(admitted))
     }
 }
 impl Admission {

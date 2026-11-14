@@ -3,7 +3,7 @@ use super::*;
 // Settings admit at most 200 members, plus the separate lead roster row.
 pub(super) const MAX_ROSTER: usize = 201;
 pub(super) const MEMBER_SESSIONS_SQL: &str =
-    "SELECT id,machine,session_id,state FROM members WHERE team=?1 ORDER BY id LIMIT ?2";
+    "SELECT id,machine,session_id,state,data FROM members WHERE team=?1 ORDER BY id LIMIT ?2";
 pub(super) const MEMBER_SESSION_SQL: &str =
     "SELECT machine,session_id FROM members WHERE team=?1 AND id=?2";
 pub(super) const MEMBER_HANDLE_SQL: &str =
@@ -64,6 +64,7 @@ impl Store {
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })
             .map_err(storage)?
@@ -77,7 +78,7 @@ impl Store {
         }
         roster
             .into_iter()
-            .map(|(member, machine, session, state)| {
+            .map(|(member, machine, session, state, data)| {
                 let state: MemberState = serde_json::from_str(&state).map_err(|_| {
                     Problem::new(
                         code::INVALID_STATE,
@@ -88,10 +89,15 @@ impl Store {
                 if state == MemberState::Removed {
                     return Ok(None);
                 }
+                let role = serde_json::from_str::<serde_json::Value>(&data)
+                    .ok()
+                    .and_then(|value| value["role"].as_str().map(str::to_owned))
+                    .unwrap_or_default();
                 Ok(machine
                     .zip(session)
                     .map(|(machine, session_id)| MemberSession {
                         member,
+                        role,
                         machine,
                         session_id,
                     }))

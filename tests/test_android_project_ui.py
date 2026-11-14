@@ -1,4 +1,4 @@
-"""Offline result/admission controls; no SDK, child, device or network is used."""
+"""Offline result/admission controls; no SDK, device or network is used."""
 import copy
 import ast
 import importlib.util
@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import textwrap
 from types import SimpleNamespace
@@ -252,7 +253,10 @@ class HostedJavaAdmissionTests(unittest.TestCase):
     def test_precheckout_retains_actual_release_and_names_refused_guard(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
-        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), (None, "20261023.334.3"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
+        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), (None, "20261023.334.3"),
+                               (None, "20261111.370.1"), ("hosted_image", "20261111.127.1"),
+                               ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1"),
+                               ("java_base_build", "20261111.370.1")):
             with self.subTest(refused=refused, image=image), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 java = root / "jdk"
@@ -444,7 +448,7 @@ class NativeToolEnvironmentTests(unittest.TestCase):
 
 class WorkflowBoundaryTests(unittest.TestCase):
     def test_only_reviewed_images_are_allowed_with_the_same_version_guards(self):
-        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1", "20261023.334.3"})
+        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1", "20261023.334.3", "20261111.370.1"})
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
         assignment = next(node for node in ast.parse(block).body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HOSTED_IMAGES")
@@ -456,7 +460,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         for image in pins["hosted_images"]:
             self.assertEqual(image["jdk"], "17.0.20.1+1")
             self.assertEqual(image["sdk"], {"command_line_tools": "12.0", "platform_tools": "37.0.1", "build_tools": "36.0.0", "platform": "android-36"})
-        for unknown in ("20261019.340.1", "20261018.339.2", "ubuntu-latest", "", None):
+        for unknown in ("20261019.340.1", "20261018.339.2", "20261111.127.1", "20261111.370.2", "ubuntu-latest", "", None):
             with self.subTest(image=unknown):
                 self.assertNotIn(unknown, UI.HOSTED_IMAGES)
 
@@ -467,7 +471,51 @@ class WorkflowBoundaryTests(unittest.TestCase):
         for forbidden in ("pull_request_target", "secrets.", "environment:", "self-hosted", "actions/cache", "permissions: write-all", "contents: write"):
             self.assertNotIn(forbidden, workflow)
         import re
-        self.assertEqual(len(re.findall(r"uses: [\w/-]+@[0-9a-f]{40}", workflow)), 2)
+        self.assertEqual(len(re.findall(r"uses: [\w/-]+@[0-9a-f]{40}", workflow)), 3)
+
+    def test_current_image_provides_the_original_exact_jdk_before_admission(self):
+        blocks = []
+        for name in ("android-project-ui.yml", "android-approval-ui.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text()
+            marker = "      - name: Provide the reviewed Java build on the new hosted image\n"
+            self.assertIn(marker, workflow)
+            block = workflow.split(marker, 1)[1].split("      - name: Validate immutable input", 1)[0]
+            blocks.append(block)
+            for literal in (
+                "if: steps.java-image.outputs.provision == 'true'",
+                "uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880",
+                "distribution: temurin", "java-version: '17.0.20.1+1'", "architecture: x64",
+                "check-latest: false", "cache-jdk: false", "overwrite-settings: false",
+            ):
+                self.assertIn(literal, block)
+            self.assertLess(workflow.index(marker), workflow.index("      - name: Validate immutable input"))
+            self.assertLess(workflow.index("require('java_base_build', True)"), workflow.index("uses: actions/checkout@"))
+            selector = workflow.split("      - name: Select reviewed Java provisioning\n", 1)[1].split(marker, 1)[0]
+            self.assertIn("id: java-image", selector)
+            shell = textwrap.dedent(selector.split("        run: |\n", 1)[1])
+            for environment, image, expected in (
+                ("github-hosted", "20261111.370.1", "provision=true\n"),
+                ("github-hosted", "20261023.334.3", ""),
+                ("github-hosted", "20261111.127.1", ""),
+                ("github-hosted", "unknown", ""), ("self-hosted", "20261111.370.1", ""),
+            ):
+                with self.subTest(workflow=name, environment=environment, image=image), tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "output"
+                    result = subprocess.run(["bash", "-c", shell], env={"PATH": "/usr/bin:/bin", "RUNNER_ENVIRONMENT": environment,
+                        "ImageVersion": image, "GITHUB_OUTPUT": str(output)}, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text() if output.exists() else "", expected)
+        self.assertEqual(blocks[0], blocks[1])
+        pins = json.loads((ROOT / "scripts/ci/android-project-ui-pins.json").read_text())
+        image = next(row for row in pins["hosted_images"] if row["version"] == "20261111.370.1")
+        self.assertEqual(image["release_target_commit"], "fb099341ddaf44a428fb17495341cb7c2300faf2")
+        self.assertEqual(image["readme_git_blob"], "cc509401857a95cfe09c44b3668825e37389e7e3")
+        self.assertEqual(image["readme_sha256"], "f9350ee9bbcd295a82e5914511a688c1b30d3efb37d655e865d590048f1518b0")
+        self.assertEqual(image["runner_summary_jdk"], "17.0.21+9")
+        self.assertEqual(image["java_provisioning"], {
+            "action": "actions/setup-java", "commit": "d1374f8ac74474200d16ef8ecee22c7ae7a51880",
+            "version": "v6.3.0", "java_version": "17.0.20.1+1",
+        })
 
 
 if __name__ == "__main__":

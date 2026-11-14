@@ -1076,6 +1076,10 @@ pub(super) fn inspection_with(
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");
+        // The same locked predicate as Restore admission. Standing resume
+        // reads this through its bounded own-CLI observation, never by an
+        // unbounded backend call on the desktop worker (zerus-63rru.129).
+        output["restore_name_busy"] = json!(lifecycle::restore_name_busy(name)?);
     }
     drop(_guard);
     // Before the listed questions and the provider messages below.

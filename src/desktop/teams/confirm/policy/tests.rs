@@ -59,6 +59,7 @@ pub(in crate::desktop::teams::confirm) fn sample() -> (Binding, Facts, Snapshot)
         archive: None,
         receipt_at: None,
         restore_refusal: None,
+        resume_wait: None,
         questions: vec![question],
     };
     (binding, facts, snapshot)

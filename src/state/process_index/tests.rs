@@ -49,6 +49,7 @@ fn change(n: u32, before: u64) -> Change {
         id: uuid::Uuid::new_v4().to_string(),
         source: source(n),
         before,
+        locator: None,
         publication: publication(n, before + 1),
     }
 }
@@ -128,18 +129,20 @@ fn immutable_requests_and_source_revision_cas_preserve_the_original() {
     altered.publication.anchors[0].published_at += 1;
     assert!(s.reserve(&altered).is_err());
     assert!(s.reserve(&change(1, 0)).is_err());
-    assert!(s
-        .settle(&Ticket {
+    assert!(
+        s.settle(&Ticket {
             epoch: t.epoch.clone(),
             id: t.id.clone(),
             seq: t.seq + 1
         })
-        .is_err());
+        .is_err()
+    );
     assert_eq!(s.stamp().unwrap(), before);
     let retire = Change {
         id: uuid::Uuid::new_v4().to_string(),
         source: source(1),
         before: 1,
+        locator: None,
         publication: Publication::default(),
     };
     publish(&mut s, &retire);
@@ -168,11 +171,13 @@ fn precise_birth_and_scope_prevent_pid_reuse_and_cross_namespace_adoption() {
             1 => other.configuration.push('x'),
             _ => other.boot.push('x'),
         };
-        assert!(Store::open(
-            Connection::open(t.path().join("index.sqlite3")).unwrap(),
-            other
-        )
-        .is_err());
+        assert!(
+            Store::open(
+                Connection::open(t.path().join("index.sqlite3")).unwrap(),
+                other
+            )
+            .is_err()
+        );
     }
     for birth in [
         Birth::Linux(0),
@@ -459,6 +464,7 @@ fn scan_catchup_and_preexisting_revision_guards_each_preserve_newer_bindings() {
         id: uuid::Uuid::new_v4().to_string(),
         source: source(1),
         before: 1,
+        locator: None,
         publication: Publication::default(),
     };
     publish(&mut s, &retired);
@@ -527,13 +533,14 @@ fn exact_production_queries_use_pinned_point_and_keyset_indexes() {
 #[test]
 fn progress_is_bounded_and_repeated_finish_does_not_change_the_snapshot() {
     let (_t, mut s) = fixture();
-    assert!(s
-        .scan_done(&Build {
+    assert!(
+        s.scan_done(&Build {
             epoch: s.stamp().unwrap().epoch,
             generation: 0,
             high_water: 0
         })
-        .is_err());
+        .is_err()
+    );
     let b = s.rebuild().unwrap();
     s.seed(&b, "a", &[]).unwrap();
     let progress = s.progress().unwrap();

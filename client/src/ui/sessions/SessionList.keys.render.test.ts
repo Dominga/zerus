@@ -64,6 +64,16 @@ afterEach(async () => {
 });
 
 describe("the session list's keys", () => {
+  it("skips an Agent Team's informational heading during keyboard selection", () => {
+    fixture.rows = () => [card("a0"), { type: "agent-team", id: "agent-team:fixture", name: "Team", project: "alpha" }, card("a1")];
+    press("ArrowDown");
+    expect(selectedKey()).toBe(key("a1"));
+    press("ArrowUp");
+    expect(selectedKey()).toBe(key("a0"));
+    press("End");
+    expect(selectedKey()).toBe(key("a1"));
+  });
+
   it("Shift+Down, Up, End and Home extend the range from the open conversation, which stays open", () => {
     press("ArrowDown", { shiftKey: true });
     expect(selected()).toEqual(["a0", "a1"]);

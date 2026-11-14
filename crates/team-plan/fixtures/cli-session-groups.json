@@ -1,0 +1,255 @@
+{
+  "list": {
+    "actor": {
+      "interim": true,
+      "kind": "person",
+      "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+      "origin": "cli_interim",
+      "person": "local"
+    },
+    "next": null,
+    "ok": true,
+    "rows": [
+      {
+        "home": "00000000-0000-4000-8000-0000000000aa",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "lead": "lead",
+        "lead_session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "member_sessions": [
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "lead",
+            "role": "lead",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m1",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m2",
+            "role": "developer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000032"
+          },
+          {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "member": "m3",
+            "role": "reviewer",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000033"
+          }
+        ],
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 18,
+        "status": "running"
+      }
+    ]
+  },
+  "queue": {
+    "actor": {
+      "interim": true,
+      "kind": "person",
+      "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+      "origin": "cli_interim",
+      "person": "local"
+    },
+    "next": null,
+    "ok": true,
+    "rows": [
+      {
+        "admitted": true,
+        "holder": null,
+        "id": 1,
+        "kind": "task",
+        "pending_decision": null,
+        "pending_replaceable": false,
+        "phase": 0,
+        "pipeline": "reviewed",
+        "rank": "a01",
+        "role": "developer",
+        "round": 1,
+        "rounds": 3,
+        "source": "sent",
+        "state": "pending",
+        "task": {
+          "project": "example-project",
+          "uuid": "00000000-0000-4000-8000-000000000001"
+        },
+        "title": "Task 1",
+        "unstaffed": null
+      },
+      {
+        "admitted": true,
+        "holder": "m1",
+        "id": 2,
+        "implementer": "m1",
+        "kind": "task",
+        "pending_decision": null,
+        "pending_replaceable": false,
+        "phase": 0,
+        "pipeline": "reviewed",
+        "rank": "a02",
+        "role": "developer",
+        "round": 1,
+        "rounds": 3,
+        "source": "sent",
+        "state": "reported",
+        "task": {
+          "project": "example-project",
+          "uuid": "00000000-0000-4000-8000-000000000002"
+        },
+        "title": "Task 2",
+        "unstaffed": null
+      }
+    ],
+    "team": "00000000-0000-4000-8000-00000000beef"
+  },
+  "status": {
+    "actor": {
+      "interim": true,
+      "kind": "person",
+      "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+      "origin": "cli_interim",
+      "person": "local"
+    },
+    "cancel_refusals": null,
+    "counts": {
+      "cards": {
+        "open": 1
+      },
+      "inbox": {
+        "open": 1
+      },
+      "members": {
+        "active": 4,
+        "not_created": 0,
+        "paused": 0,
+        "removed": 0,
+        "total": 4
+      },
+      "nodes": {
+        "accepted": 0,
+        "cancelled": 0,
+        "in_progress": 0,
+        "pending": 1,
+        "reported": 1,
+        "waiting": 0
+      }
+    },
+    "health": null,
+    "key_refusals": {
+      "items": [],
+      "more": 0
+    },
+    "members": [
+      {
+        "account": "account-example",
+        "agent": "claude",
+        "id": "lead",
+        "ownership_nonce": "nonce-lead",
+        "person_stopped": false,
+        "role": "lead",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "state": "active",
+        "worktree": "/workspace/example-team-lead"
+      },
+      {
+        "account": "account-example",
+        "agent": "claude",
+        "id": "m1",
+        "ownership_nonce": "nonce-m1",
+        "person_stopped": false,
+        "role": "developer",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+        },
+        "state": "active",
+        "worktree": "/workspace/example-team-m1"
+      },
+      {
+        "account": "account-example",
+        "agent": "claude",
+        "id": "m2",
+        "ownership_nonce": "nonce-m2",
+        "person_stopped": false,
+        "role": "developer",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000032"
+        },
+        "state": "active",
+        "worktree": "/workspace/example-team-m2"
+      },
+      {
+        "account": "account-example",
+        "agent": "claude",
+        "id": "m3",
+        "ownership_nonce": "nonce-m3",
+        "person_stopped": false,
+        "role": "reviewer",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000033"
+        },
+        "state": "active",
+        "worktree": "/workspace/example-team-m3"
+      }
+    ],
+    "ok": true,
+    "service_items": null,
+    "service_running": false,
+    "team": {
+      "base_commit": "0123456789abcdef0123456789abcdef01234567",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "id": "00000000-0000-4000-8000-00000000beef",
+      "integration_branch": "zerus/team/fixes",
+      "lead": "lead",
+      "name": "Fixes",
+      "owner": "local",
+      "project": "example-project",
+      "revision": 18,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "branch",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "status": "running"
+    }
+  }
+}

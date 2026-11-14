@@ -66,6 +66,8 @@ mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;
+#[cfg(all(test, unix))]
+pub(crate) mod resume_settlement_fixture;
 mod kimi_launch;
 mod provider_errors;
 mod recovery;
@@ -73,8 +75,10 @@ mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
-// Inactive data foundation; no publisher, caller policy or startup wiring.
+// Process projection data. The advisory writer never grants caller authority.
 mod process_index;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_index_writer;
 mod labels;
 /// How every reader decides what the label index proves (zerus-ucck P3a);
 /// the native readers that need it outside this module run on Unix.
@@ -186,6 +190,10 @@ pub(crate) use {
     worktrees::{Control as WorktreeControl, Step as WorktreeStep},
 };
 mod worktree_cleanup;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_cleanup::LEFTOVER_DELETE_TIME;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_lifecycle::AFTER_ARCHIVE_FIXED_TIME;
 mod worktree_caches;
 mod worktree_inspection;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -194,6 +202,7 @@ mod worktree_programs;
 pub(crate) use worktree_programs::{ProgramRemovalClaim, ProgramStopClaim};
 mod worktree_lifecycle;
 mod worktree_lock;
+mod worktree_references;
 mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.

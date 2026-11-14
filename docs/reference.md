@@ -4435,6 +4435,12 @@ The shared directory-removal wrapper also refuses both nested and root removals
 on macOS. A future authorized native window must run the ignored
 `state::worktree_cleanup::tests::macos_late_swap_preserves_appledouble_payload_at_root_and_nested_names`
 probe with `--exact --ignored` before re-enablement is considered.
+It is a containment probe: it requires an `Unsupported` refusal and intact
+payloads, and does not call raw XNU directory removal. The separate ignored
+`state::worktree_cleanup::tests::macos_raw_appledouble_observations_do_not_qualify_deletion`
+probe observes raw syscalls on fresh synthetic directories; its passing result
+does not authorize deletion. The [native qualification](native-macos-leftover-qualification.md)
+records the verified late-swap data loss and the unsuccessful held-fd candidates.
 
 On Linux, deleting the remaining files needs an
 explicit confirmation and the fingerprint of the fresh review the owner saw. It
@@ -4941,6 +4947,27 @@ not queued feedback and is never delivered by itself, and only the receipt
 moves the task back to In progress. Feedback to a task In progress
 (`--mode send`) stays an ordinary message.
 
+When recovery cannot settle an unknown delivery, the person can use
+`hgs task cancel-attempt REF --attempt UUID [--reason TEXT]`. This abandons
+only that exact unknown attempt, records a `Cancelled` fact and an
+`attempt_cancelled` audit entry, and releases its hold. Delivery remains
+unknown: the original request and evidence stay, the task keeps its stage,
+and no cancel notice or other native input is sent. An exact repeat observes
+the original disposition without another write; wrong or already-settled
+attempts refuse. Other unknown attempts still hold the task. A later send
+uses a new attempt, and an old request is never replayed.
+The reply contains one task row; read its audit through the bounded task
+history command.
+
+The task view shows each unknown attempt with **Abandon attempt…**, followed
+by a separate confirmation. A team-owned task requires the person's command
+on the team's home computer. Running, Paused, Draft and Planning teams refuse;
+Stopped, Finished, Archived or a missing home team allow the disposition.
+The team writer admission is retained across the task save. With preview off,
+an existing store is read without migration or Team data writes under the same
+admission; an absent store stays absent, and a schema needing migration refuses.
+The team key and its facts stay intact.
+
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
 with the same rows, except that a prompt longer than 2 KiB is cut at a
@@ -5077,10 +5104,14 @@ never forwards a command whose handler tells the person from an agent that way
 - **Who counts as an agent:** a process that claims a session (`HGS_SESSION`
   and `HGS_RUN_ID`, proven or not), a resident DeepSeek tool call
   (`HGS_AGENT=dsh`), or a process a live session proves as its caller, a
-  Claude background job included.
+  Claude background job included. On Linux and macOS, the same readable
+  marked-ancestor refusal as local task commands runs before forwarding:
+  clearing the child's own session markers does not hide that ancestor.
+  This keeps the local interim ancestry check's bounds and limitations;
+  reparenting can sever the chain and grants no verified Person authority.
 - **What the agent does instead:** it runs `hgs task` on its own computer,
-  which reaches every computer's copy. A person's shell that inherited an
-  agent's variables can unset them.
+  which reaches every computer's copy. A person's shell outside the agent's
+  process tree can unset inherited agent variables.
 - **Unchanged:** tasks' own forwarding of `send` and `cancel` to the
   executor's computer (`--agent NODE/SESSION`).
 - **Still forwarded for an agent:** ordinary `answer` payloads, `interrupt`
@@ -6240,6 +6271,28 @@ not mean the native account is signed out. Explicit native sign-in status takes
 precedence; older authentication problems are labelled **Last reported** when
 their report is stale or offline. Viewing accounts never refreshes Claude's
 credentials on Zerus's behalf.
+
+Kimi Code's quota inspection calls the provider's endpoints with the native
+token. The Zerus test seam `HGS_TEST_KIMI_API_BASE` points a test build at a
+private stand-in only when the value is an `http` or `https` URL whose host is
+`127.0.0.1`, `::1` or `localhost` and whose port, when present, is a number in
+curl's range; the token is sent there exactly as to the provider, and curl runs
+without any config file or proxy (no `~/.curlrc`, `$CURL_HOME`, ambient proxy
+variable or `HTTP_PROXY`). A valid test value takes precedence over
+`KIMI_CODE_BASE_URL`. An empty test value is treated as unset. Any other test
+value is ignored; the `detail` names the variable, and the rule below then
+applies. The seam is read only by the
+inspection. Zerus removes it from the native children it starts for login and
+inspection, and sets it empty (which the inspection treats as unset) in account
+sessions; a launch without an account has no account environment, so it
+inherits whatever the launching environment holds. `KIMI_CODE_BASE_URL`
+keeps the Kimi CLI's own meaning: with a live token, any non-default value,
+including an empty one and a loopback address, makes the inspection send no
+request and no token, and names it in `detail`. An expiring token still runs
+the native CLI's refresh first, as before, so the person keeps that answer; the
+refresh no longer depends on the base. Unset, the value
+`https://api.kimi.com/coding/v1` and that value with a trailing slash use the
+provider as before.
 
 Claude usage refreshes share a cache on the account's owning computer. Account
 views and the selected session footer normally request usage every five minutes;

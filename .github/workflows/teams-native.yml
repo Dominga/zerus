@@ -5,8 +5,8 @@ name: Agent Teams real agents
 # service, against the latest official Claude Code, Codex and Kimi Code releases and
 # a keyless loopback model. A green run covers member launch and identity, delivery
 # into a free member and its own shell, the lead's doorbell, the cancel notice, team
-# stop and Terminate, and the resume of an exited member; for Codex also the refused
-# repository-scope folder trust that the person then answers, and for Claude Code the
+# stop and Terminate, and the resume of an exited member; for Codex also the audited
+# repository-scope folder trust by the standing confirmation, and for Claude Code the
 # refused restore of a member that never worked. Written and waiting: Claude Code
 # folder trust by the standing confirmation, for the owner's decision zerus-63rru.66 and
 # for zerus-63rru.73; an ordinary question after no startup card, for zerus-63rru.73;

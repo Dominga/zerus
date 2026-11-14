@@ -87,6 +87,9 @@ pub(super) fn native_command(provider: &str, home: &Path, native: bool) -> Comma
     // command shim (`codex.cmd`) runs what it would run, never through cmd.exe.
     let mut cmd = crate::platform::agent_command(&[provider.to_owned()])
         .unwrap_or_else(|_| Command::new(provider));
+    // The inspection's test seam belongs to the inspection: no native agent
+    // child (login included) inherits it.
+    cmd.env_remove(KIMI_TEST_BASE_ENV);
     if let Ok(key) = home_var(provider) {
         // Preserve native Claude's keychain service name when its directory was implicit.
         if !native || env::var(key).is_ok_and(|v| !v.is_empty()) {
@@ -105,7 +108,22 @@ pub(super) fn native_command(provider: &str, home: &Path, native: bool) -> Comma
     }
     cmd
 }
-fn http_json(url: &str, token: &str, extra: &[&str]) -> std::result::Result<Value, String> {
+/// How curl is run for one Kimi request. `isolated` is true only for the
+/// Zerus test seam: `-q` (which curl honours only as its first argument) and
+/// `--noproxy '*'` keep `~/.curlrc`, `$CURL_HOME`, `$XDG_CONFIG_HOME` and every
+/// proxy variable from routing the token anywhere but the validated endpoint.
+#[derive(Clone, Copy)]
+struct CurlPolicy {
+    allow_http: bool,
+    isolated: bool,
+}
+
+fn http_json(
+    url: &str,
+    token: &str,
+    extra: &[&str],
+    policy: CurlPolicy,
+) -> std::result::Result<Value, String> {
     if token.is_empty() || token.chars().any(char::is_control) {
         return Err("Sign in with the native agent to read usage.".into());
     }
@@ -118,11 +136,14 @@ fn http_json(url: &str, token: &str, extra: &[&str]) -> std::result::Result<Valu
         config.push_str(&format!("header = {}\n", json!(header)));
     }
     let mut cmd = Command::new("curl");
+    if policy.isolated {
+        cmd.args(["-q", "--noproxy", "*"]);
+    }
     cmd.args([
         "--silent",
         "--fail",
         "--proto",
-        "=https",
+        if policy.allow_http { "=http,https" } else { "=https" },
         "--connect-timeout",
         "3",
         "--max-time",
@@ -401,6 +422,122 @@ fn claude(config: &Config, home: &Path, native: bool, seed: &Value) -> Result<Va
     }
     Ok(result)
 }
+const KIMI_API_BASE: &str = "https://api.kimi.com/coding/v1";
+const KIMI_API_BASE_SLASH: &str = "https://api.kimi.com/coding/v1/";
+/// Zerus's test seam; a person's Kimi CLI never reads it.
+pub(super) const KIMI_TEST_BASE_ENV: &str = "HGS_TEST_KIMI_API_BASE";
+/// The Kimi CLI's own platform variable. The inspection reads it only to stay
+/// on the provider; the person's custom platform never receives this token.
+const KIMI_CLI_BASE_ENV: &str = "KIMI_CODE_BASE_URL";
+
+/// A test endpoint is accepted only when its host is a loopback address. Any
+/// other value is ignored and named in the inspection's detail; it never
+/// receives the token.
+fn ignored_kimi_base(result: &mut Value, variable: &str) {
+    let reason = if variable == KIMI_TEST_BASE_ENV {
+        "Kimi account inspection uses only a loopback http or https address."
+    } else {
+        "Kimi account inspection sends its token only to the default platform."
+    };
+    let sentence = format!("Ignored {variable}: {reason}");
+    // An invalid seam and a non-default CLI value can both apply; the later
+    // rule adds its own sentence instead of hiding the seam's.
+    result["detail"] = match result["detail"].as_str().filter(|text| !text.is_empty()) {
+        Some(earlier) => json!(format!("{earlier} {sentence}")),
+        None => json!(sentence),
+    };
+}
+
+/// A `[::1]` or literal loopback host, then the end, a `/`, or `:PORT` with 1
+/// to 5 digits inside curl's range. Anything curl would refuse, and anything
+/// that would move the host out of the authority, is refused here instead.
+fn loopback_authority(rest: &str) -> Option<()> {
+    let (host, tail) = match rest.strip_prefix('[') {
+        Some(after) => after.split_once(']')?,
+        None => {
+            let end = rest.find([':', '/']).unwrap_or(rest.len());
+            rest.split_at(end)
+        }
+    };
+    if !(host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1") {
+        return None;
+    }
+    if tail.is_empty() || tail.starts_with('/') {
+        return Some(());
+    }
+    let port = tail.strip_prefix(':')?;
+    let digits = port.split('/').next().unwrap_or("");
+    if digits.is_empty() || digits.len() > 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if digits.parse::<u32>().ok()? > 65535 {
+        return None;
+    }
+    let after = &port[digits.len()..];
+    (after.is_empty() || after.starts_with('/')).then_some(())
+}
+
+fn loopback_test_base(value: &str) -> Option<(String, bool)> {
+    let (scheme, rest) = value.split_once("://")?;
+    let allow_http = match scheme.to_ascii_lowercase().as_str() {
+        "https" => false,
+        "http" => true,
+        _ => return None,
+    };
+    if rest.contains('?') || rest.contains('#') || rest.contains('@') {
+        return None;
+    }
+    loopback_authority(rest)?;
+    Some((value.trim_end_matches('/').to_owned(), allow_http))
+}
+
+/// A valid Zerus test endpoint takes precedence over the Kimi CLI's platform
+/// variable; an invalid one is named in the detail, then that variable's rule
+/// applies. Any non-default `KIMI_CODE_BASE_URL` means the person's Kimi CLI
+/// uses another platform, so the inspection makes no request and sends no
+/// token. Only unset or the provider's own address (with or without its
+/// trailing slash) reaches the provider.
+fn kimi_base(result: &mut Value) -> Option<(String, CurlPolicy)> {
+    match env::var(KIMI_TEST_BASE_ENV) {
+        // Every account session's environment carries the seam as an empty
+        // value; that is unset, never an ignored endpoint.
+        Ok(value) if value.is_empty() => {}
+        Ok(value) => {
+            if let Some((base, allow_http)) = loopback_test_base(&value) {
+                return Some((
+                    base,
+                    CurlPolicy {
+                        allow_http,
+                        isolated: true,
+                    },
+                ));
+            }
+            ignored_kimi_base(result, KIMI_TEST_BASE_ENV);
+        }
+        Err(env::VarError::NotPresent) => {}
+        Err(env::VarError::NotUnicode(_)) => {
+            ignored_kimi_base(result, KIMI_TEST_BASE_ENV);
+        }
+    }
+    match env::var(KIMI_CLI_BASE_ENV) {
+        Ok(value) if value != KIMI_API_BASE && value != KIMI_API_BASE_SLASH => {
+            ignored_kimi_base(result, KIMI_CLI_BASE_ENV);
+            None
+        }
+        Ok(_) | Err(env::VarError::NotPresent) => Some((
+            KIMI_API_BASE.to_owned(),
+            CurlPolicy {
+                allow_http: false,
+                isolated: false,
+            },
+        )),
+        Err(env::VarError::NotUnicode(_)) => {
+            ignored_kimi_base(result, KIMI_CLI_BASE_ENV);
+            None
+        }
+    }
+}
+
 fn kimi(home: &Path) -> Value {
     let mut result =
         json!({"identity":{},"windows":[],"source":"Kimi Code","status":"unavailable"});
@@ -417,7 +554,10 @@ fn kimi(home: &Path) -> Value {
         // Let the native server refresh/persist its own OAuth grant under its own lock.
         let mut cmd = Command::new("node");
         cmd.args(["--input-type=module", "-e", include_str!("kimi-read.mjs")])
-            .env("KIMI_CODE_HOME", home);
+            .env("KIMI_CODE_HOME", home)
+            // The test seam is the inspection's alone: `node` starts the real
+            // `kimi web`, which must never inherit it.
+            .env_remove(KIMI_TEST_BASE_ENV);
         for key in AUTH_ENV {
             cmd.env_remove(key);
         }
@@ -430,22 +570,18 @@ fn kimi(home: &Path) -> Value {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or(result);
     }
-    // Match the native managed provider's default endpoint. Custom gateways do not receive this token.
-    let base =
-        env::var("KIMI_CODE_BASE_URL").unwrap_or_else(|_| "https://api.kimi.com/coding/v1".into());
-    if ![
-        "https://api.kimi.com/coding/v1",
-        "https://api.kimi.com/coding/v1/",
-    ]
-    .contains(&base.as_str())
-    {
+    // The live-token path resolves the base only after the refresh, as on main:
+    // an expiring token still gets the native server's own answer.
+    let Some((base, policy)) = kimi_base(&mut result) else {
         return result;
-    }
-    if let Ok(a) = http_json("https://api.kimi.com/coding/v1/me", token, &[]) {
+    };
+    // The same token goes to the default provider or to a validated loopback
+    // test endpoint; the path below the base stays the provider's.
+    if let Ok(a) = http_json(&format!("{base}/me"), token, &[], policy) {
         let a = a.get("user").or_else(|| a.get("data")).unwrap_or(&a);
         result["identity"] = json!({"name":text(a,"nickname"),"email":text(a,"email"),"plan":text(a,"user_level_name"),"auth_method":"Kimi Code"});
     }
-    if let Ok(usage) = http_json("https://api.kimi.com/coding/v1/usages", token, &[]) {
+    if let Ok(usage) = http_json(&format!("{base}/usages"), token, &[], policy) {
         let mut windows = Vec::new();
         for (key, label, minutes) in [
             ("limit_5h", "", Some(300)),
@@ -768,9 +904,861 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    // The variable names are spelled out here: a mutant that changes the name
+    // the inspection reads must fail these tests.
+    const TEST_BASE_VAR: &str = "HGS_TEST_KIMI_API_BASE";
+    const CLI_BASE_VAR: &str = "KIMI_CODE_BASE_URL";
+
+    fn curl_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test must not turn every later curl/environment test red.
+        crate::accounts::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Restores every named variable on drop, including a previously unset one.
+    struct EnvVars(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvVars {
+        fn set(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = pairs
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect();
+            for (key, value) in pairs {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for EnvVars {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct PathEnv(Option<String>);
+
+    #[cfg(unix)]
+    impl PathEnv {
+        fn prepend(path: &Path) -> Self {
+            let old = env::var("PATH").ok();
+            let current = old.clone().unwrap_or_default();
+            env::set_var("PATH", format!("{}:{current}", path.display()));
+            Self(old)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PathEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => env::set_var("PATH", value),
+                None => env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn kimi_home(token: &str, expires_at: u64) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("credentials")).unwrap();
+        fs::write(
+            home.path().join("credentials/kimi-code.json"),
+            json!({"access_token": token, "expires_at": expires_at}).to_string(),
+        )
+        .unwrap();
+        home
+    }
+
+    fn accept_with_timeout(server: &std::net::TcpListener) -> std::net::TcpStream {
+        let start = Instant::now();
+        loop {
+            match server.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(3),
+                        "the loopback server received no request"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("loopback accept failed: {error}"),
+            }
+        }
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            if stream.read_exact(&mut byte).is_err() {
+                break;
+            }
+            request.push(byte[0]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn respond(stream: &mut std::net::TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    }
+
+    /// The stand-in's own writer: `/me` and `/usages` must arrive with the
+    /// native bearer token.
+    fn identity_worker(server: std::net::TcpListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            for (path, body) in [
+                (
+                    "/me",
+                    r#"{"user":{"nickname":"Loop","email":"loop@example.test","user_level_name":"Pro"}}"#,
+                ),
+                (
+                    "/usages",
+                    r#"{"usages":{"limit_5h":{"used_ratio":0.5,"reset_time":123}}}"#,
+                ),
+            ] {
+                let mut stream = accept_with_timeout(&server);
+                let request = read_request(&mut stream);
+                assert!(request.starts_with(&format!("GET {path} ")), "{request}");
+                assert!(
+                    request.contains("Authorization: Bearer synthetic-token"),
+                    "{request}"
+                );
+                respond(&mut stream, body);
+            }
+        })
+    }
+
+    /// The `https` row's stand-in: curl must reach it directly, so it sends a
+    /// TLS handshake and never a proxy `CONNECT`.
+    #[cfg(unix)]
+    fn tls_worker(server: std::net::TcpListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&server);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut record = [0u8; 1];
+            stream.read_exact(&mut record).unwrap();
+            assert_eq!(record[0], 0x16, "curl did not send a TLS handshake");
+        })
+    }
+
+    #[cfg(unix)]
+    fn no_connection(server: &std::net::TcpListener, who: &str) {
+        match server.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("{who} accept failed: {error}"),
+            Ok((_, peer)) => panic!("{who} received a connection from {peer}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn recording_curl(dir: &Path) -> PathEnv {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("curl");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+i=0
+while [ -e "$CURL_RECORD_DIR/argv.$i" ]; do i=$((i+1)); done
+printf '%s\n' "$@" > "$CURL_RECORD_DIR/argv.$i"
+cat > "$CURL_RECORD_DIR/stdin.$i"
+if grep -q '/me' "$CURL_RECORD_DIR/stdin.$i"; then
+  printf '{"user":{"nickname":"Provider","email":"provider@example.test","user_level_name":"Pro"}}'
+else
+  printf '{"usages":{"limit_5h":{"used_ratio":0.5,"reset_time":123}}}'
+fi
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        PathEnv::prepend(dir)
+    }
+
+    #[cfg(unix)]
+    const KIMI_DEFAULT_ARGV: &str = "--silent\n--fail\n--proto\n=https\n--connect-timeout\n3\n--max-time\n6\n--max-filesize\n1048576\n--config\n-\n";
+
+    #[test]
+    fn kimi_inspection_uses_a_loopback_test_base_and_sends_the_token() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let worker = identity_worker(server);
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some(&base)),
+            (CLI_BASE_VAR, None),
+        ]);
+        let result = kimi(home.path());
+        worker.join().unwrap();
+        assert_eq!(result["status"], "ok", "{result}");
+        assert_eq!(result["identity"]["name"], "Loop");
+        assert_eq!(result["identity"]["email"], "loop@example.test");
+        assert_eq!(result["identity"]["plan"], "Pro");
+        assert_eq!(result["windows"][0]["used_percent"], 50.0);
+        assert!(result.get("detail").is_none());
+    }
+
+    #[test]
+    fn loopback_test_base_forms_reach_the_stand_in() {
+        let _lock = curl_lock();
+        for (pattern, v6) in [
+            ("http://127.0.0.1:{port}", false),
+            ("http://LOCALHOST:{port}", false),
+            ("http://localhost:{port}/", false),
+            ("http://[::1]:{port}", true),
+        ] {
+            let server = if v6 {
+                std::net::TcpListener::bind("[::1]:0")
+            } else {
+                std::net::TcpListener::bind("127.0.0.1:0")
+            };
+            let Ok(server) = server else {
+                continue; // No IPv6 loopback on this machine.
+            };
+            server.set_nonblocking(true).unwrap();
+            let port = server.local_addr().unwrap().port();
+            let base = pattern.replace("{port}", &port.to_string());
+            let worker = identity_worker(server);
+            let home = kimi_home("synthetic-token", now() + 3600);
+            let _env = EnvVars::set(&[
+                (TEST_BASE_VAR, Some(&base)),
+                (CLI_BASE_VAR, None),
+            ]);
+            let result = kimi(home.path());
+            worker.join().unwrap();
+            assert_eq!(result["status"], "ok", "{base}: {result}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expired_kimi_token_does_not_use_the_test_base_or_leak_it_to_the_refresh_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let home = kimi_home("synthetic-token", now().saturating_sub(120));
+        let bin = tempfile::tempdir().unwrap();
+        let marker = bin.path().join("leaked");
+        let fake = bin.path().join("kimi");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nif [ -n \"${HGS_TEST_KIMI_API_BASE+x}\" ]; then printf leaked > \"$KIMI_REFRESH_MARKER\"; fi\nexit 97\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        let _path = PathEnv::prepend(bin.path());
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some(&base)),
+            (CLI_BASE_VAR, None),
+            ("KIMI_REFRESH_MARKER", Some(marker.to_str().unwrap())),
+        ]);
+        let result = kimi(home.path());
+        assert_ne!(result["status"], "ok", "{result}");
+        assert!(
+            server.accept().is_err(),
+            "the expired token reached the loopback base"
+        );
+        assert!(
+            !marker.exists(),
+            "the refresh child inherited HGS_TEST_KIMI_API_BASE"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expired_token_with_a_custom_kimi_cli_base_refreshes_without_a_platform_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = curl_lock();
+        let platform = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        platform.set_nonblocking(true).unwrap();
+        let platform_url = format!(
+            "http://{}/kimi-platform",
+            platform.local_addr().unwrap()
+        );
+        let bin = tempfile::tempdir().unwrap();
+        let record = tempfile::tempdir().unwrap();
+        let marker = record.path().join("node-called");
+        let child_env = record.path().join("node-env");
+        let node = bin.path().join("node");
+        fs::write(
+            &node,
+            format!(
+                "#!/bin/sh\nprintf 'called\\n' > '{}'\nenv > '{}'\nprintf '%s\\n' '{{\"identity\":{{\"name\":\"Fixture\",\"email\":\"fixture@example.test\",\"plan\":\"Pro\",\"auth_method\":\"Kimi Code\"}},\"windows\":[],\"source\":\"Kimi Code\",\"status\":\"ok\"}}'\n",
+                marker.display(),
+                child_env.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).unwrap();
+        let _path = PathEnv::prepend(bin.path());
+        let home = kimi_home("synthetic-token", now().saturating_sub(120));
+        let _env = EnvVars::set(&[
+            // An invalid seam: a base-first order would refuse before the refresh.
+            (TEST_BASE_VAR, Some("http://127.0.0.2:9")),
+            (CLI_BASE_VAR, Some(&platform_url)),
+            ("NODE_RECORD_DIR", Some(record.path().to_str().unwrap())),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "ok", "{result}");
+        assert_eq!(result["identity"]["auth_method"], "Kimi Code", "{result}");
+        assert_eq!(result["identity"]["name"], "Fixture", "{result}");
+        assert!(result.get("detail").is_none(), "{result}");
+        assert!(marker.exists(), "the expired token did not reach the refresh node");
+        let seen = fs::read_to_string(&child_env).unwrap();
+        assert!(
+            !seen.lines().any(|line| line.starts_with(&format!("{TEST_BASE_VAR}="))),
+            "the refresh child inherited {TEST_BASE_VAR}",
+        );
+        assert!(
+            platform.accept().is_err(),
+            "the inspection requested the custom platform"
+        );
+    }
+
+    #[test]
+    fn a_non_loopback_test_base_is_ignored_without_a_request() {
+        let _lock = curl_lock();
+        // Bind all interfaces and use 127.0.0.2 as the override host: the
+        // listener would see a request if the non-loopback value were used.
+        let server = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some(&format!("http://127.0.0.2:{port}"))),
+            (CLI_BASE_VAR, None),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "unavailable", "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Ignored HGS_TEST_KIMI_API_BASE"),
+            "{result}"
+        );
+        assert!(
+            server.accept().is_err(),
+            "a non-loopback base received the token"
+        );
+    }
+
+    #[test]
+    fn a_custom_kimi_cli_base_is_ignored_even_when_it_is_loopback() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, None),
+            (CLI_BASE_VAR, Some(&base)),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "unavailable", "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Ignored KIMI_CODE_BASE_URL"),
+            "{result}"
+        );
+        assert!(
+            server.accept().is_err(),
+            "a KIMI_CODE_BASE_URL loopback value received the token"
+        );
+    }
+
+    #[test]
+    fn a_non_default_kimi_cli_base_is_ignored_without_a_request() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("https://{}", server.local_addr().unwrap());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, None),
+            (CLI_BASE_VAR, Some(&base)),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "unavailable", "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Ignored KIMI_CODE_BASE_URL"),
+            "{result}"
+        );
+        assert!(
+            server.accept().is_err(),
+            "a non-default KIMI_CODE_BASE_URL received the token"
+        );
+    }
+
+    #[test]
+    fn empty_and_doubled_kimi_cli_bases_keep_their_no_request_meaning() {
+        let _lock = curl_lock();
+        let home = kimi_home("synthetic-token", now() + 3600);
+        for value in ["", "https://api.kimi.com/coding/v1//"] {
+            let _env = EnvVars::set(&[
+                (TEST_BASE_VAR, None),
+                (CLI_BASE_VAR, Some(value)),
+            ]);
+            let result = kimi(home.path());
+            assert_eq!(result["status"], "unavailable", "{value}: {result}");
+            assert!(
+                result["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Ignored KIMI_CODE_BASE_URL"),
+                "{value}: {result}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_test_base_is_unset_without_a_detail() {
+        let _lock = curl_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let _path = recording_curl(bin.path());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some("")),
+            (CLI_BASE_VAR, None),
+            ("CURL_RECORD_DIR", Some(bin.path().to_str().unwrap())),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "ok", "{result}");
+        assert!(
+            result.get("detail").is_none(),
+            "an empty seam was reported as ignored: {result}"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.path().join("argv.0")).unwrap(),
+            KIMI_DEFAULT_ARGV
+        );
+    }
+
+    #[test]
+    fn an_invalid_test_base_detail_survives_the_cli_base_detail() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some("http://127.0.0.2:9")),
+            (CLI_BASE_VAR, Some(&base)),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "unavailable", "{result}");
+        let detail = result["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("Ignored HGS_TEST_KIMI_API_BASE"),
+            "the seam's own detail was lost: {detail}"
+        );
+        assert!(
+            detail.contains("Ignored KIMI_CODE_BASE_URL"),
+            "the CLI base detail is missing: {detail}"
+        );
+        assert!(
+            server.accept().is_err(),
+            "a refused base received the token"
+        );
+    }
+
+    #[test]
+    fn a_valid_test_base_wins_over_the_kimi_cli_base() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", server.local_addr().unwrap());
+        let worker = identity_worker(server);
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some(&base)),
+            (CLI_BASE_VAR, Some("https://example.invalid/")),
+        ]);
+        let result = kimi(home.path());
+        worker.join().unwrap();
+        assert_eq!(result["status"], "ok", "{result}");
+        assert!(result.get("detail").is_none(), "{result}");
+    }
+
+    #[test]
+    fn an_invalid_test_base_leaves_the_kimi_cli_base_rule_in_charge() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some(&format!("http://127.0.0.2:{port}"))),
+            (CLI_BASE_VAR, Some(&format!("https://127.0.0.1:{port}"))),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "unavailable", "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Ignored KIMI_CODE_BASE_URL"),
+            "{result}"
+        );
+        assert!(
+            server.accept().is_err(),
+            "the invalid test base or the CLI base received the token"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_default_kimi_path_keeps_its_curl_arguments_and_stdin() {
+        let _lock = curl_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let _path = recording_curl(bin.path());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, None),
+            (CLI_BASE_VAR, None),
+            ("CURL_RECORD_DIR", Some(bin.path().to_str().unwrap())),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "ok", "{result}");
+        let argv = fs::read_to_string(bin.path().join("argv.0")).unwrap();
+        assert_eq!(argv, KIMI_DEFAULT_ARGV);
+        assert!(!argv.contains("synthetic-token"));
+        assert_eq!(fs::read_to_string(bin.path().join("argv.1")).unwrap(), KIMI_DEFAULT_ARGV);
+        assert_eq!(
+            fs::read_to_string(bin.path().join("stdin.0")).unwrap(),
+            "url = \"https://api.kimi.com/coding/v1/me\"\nheader = \"Authorization: Bearer synthetic-token\"\nheader = \"Accept: application/json\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.path().join("stdin.1")).unwrap(),
+            "url = \"https://api.kimi.com/coding/v1/usages\"\nheader = \"Authorization: Bearer synthetic-token\"\nheader = \"Accept: application/json\"\n"
+        );
+        assert_eq!(result["identity"]["name"], "Provider");
+        assert_eq!(result["windows"][0]["used_percent"], 50.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_invalid_test_base_falls_through_to_the_provider_rule() {
+        let _lock = curl_lock();
+        let bin = tempfile::tempdir().unwrap();
+        let _path = recording_curl(bin.path());
+        let home = kimi_home("synthetic-token", now() + 3600);
+        let _env = EnvVars::set(&[
+            (TEST_BASE_VAR, Some("http://127.0.0.2:9")),
+            (CLI_BASE_VAR, None),
+            ("CURL_RECORD_DIR", Some(bin.path().to_str().unwrap())),
+        ]);
+        let result = kimi(home.path());
+        assert_eq!(result["status"], "ok", "{result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Ignored HGS_TEST_KIMI_API_BASE"),
+            "{result}"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.path().join("argv.0")).unwrap(),
+            KIMI_DEFAULT_ARGV
+        );
+    }
+
+    #[test]
+    fn native_kimi_children_and_sessions_never_inherit_the_test_base() {
+        let _lock = curl_lock();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvVars::set(&[(TEST_BASE_VAR, Some("http://127.0.0.1:9"))]);
+        for native in [true, false] {
+            let command = native_command("kimi", home.path(), native);
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == std::ffi::OsStr::new(TEST_BASE_VAR)
+                        && value.is_none()),
+                "native_command({native}) passes the test base"
+            );
+        }
+        let environment = crate::accounts::run_environment(
+            "work-account",
+            "kimi",
+            "/private/profile",
+        );
+        assert!(
+            environment.contains(&format!("{TEST_BASE_VAR}=")),
+            "{environment:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum CurlrcProbe {
+        None,
+        Proxy,
+        ConnectTo,
+        Resolve,
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum Decoy {
+        Ephemeral,
+        EchoPort,
+    }
+
+    /// One report row: the stand-in must receive `/me` and `/usages` with the
+    /// token directly, and the second listener must receive nothing.
+    #[cfg(unix)]
+    fn direct_request(
+        label: &str,
+        host: &str,
+        https: bool,
+        proxy_var: Option<&'static str>,
+        curlrc: CurlrcProbe,
+        decoy: Decoy,
+    ) {
+        let echo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        echo.set_nonblocking(true).unwrap();
+        let echo_port = echo.local_addr().unwrap().port();
+        let decoy = match decoy {
+            Decoy::Ephemeral => std::net::TcpListener::bind(("127.0.0.2", 0)).unwrap(),
+            Decoy::EchoPort => std::net::TcpListener::bind(("127.0.0.2", echo_port)).unwrap(),
+        };
+        decoy.set_nonblocking(true).unwrap();
+        let decoy_port = decoy.local_addr().unwrap().port();
+        let proxy = format!("http://127.0.0.2:{decoy_port}");
+        let base = format!(
+            "{}://{host}:{echo_port}",
+            if https { "https" } else { "http" }
+        );
+        let config = match curlrc {
+            CurlrcProbe::None => String::new(),
+            CurlrcProbe::Proxy => format!("proxy = \"{proxy}\"\n"),
+            CurlrcProbe::ConnectTo => format!("connect-to = \"::127.0.0.2:{decoy_port}\"\n"),
+            CurlrcProbe::Resolve => {
+                format!("resolve = \"localhost:{echo_port}:127.0.0.2\"\n")
+            }
+        };
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join(".curlrc"), &config).unwrap();
+        let config_path = home.path().to_str().unwrap().to_owned();
+        let account = kimi_home("synthetic-token", now() + 3600);
+        let worker = if https {
+            tls_worker(echo)
+        } else {
+            identity_worker(echo)
+        };
+        // CURL_HOME rather than HOME: curl prefers it for `.curlrc`, and the
+        // suite's other tests read the real HOME. XDG has no config file here.
+        let mut vars: Vec<(&'static str, Option<&str>)> = vec![
+            ("CURL_HOME", Some(&config_path)),
+            ("XDG_CONFIG_HOME", Some(&config_path)),
+            ("http_proxy", None),
+            ("HTTP_PROXY", None),
+            ("https_proxy", None),
+            ("HTTPS_PROXY", None),
+            ("all_proxy", None),
+            ("ALL_PROXY", None),
+            ("no_proxy", None),
+            ("NO_PROXY", None),
+            (TEST_BASE_VAR, Some(&base)),
+            (CLI_BASE_VAR, None),
+        ];
+        if let Some(var) = proxy_var {
+            vars.push((var, Some(&proxy)));
+        }
+        let _env = EnvVars::set(&vars);
+        let result = kimi(account.path());
+        drop(_env);
+        worker.join().unwrap();
+        if https {
+            assert_ne!(result["status"], "ok", "{label}: {result}");
+        } else {
+            assert_eq!(result["status"], "ok", "{label}: {result}");
+            assert_eq!(result["identity"]["name"], "Loop", "{label}: {result}");
+        }
+        no_connection(&decoy, label);
+    }
+
+    #[cfg(unix)]
+    mod proxy_rows {
+        use super::*;
+
+        // The six ambient settings from the review. Each must reach the
+        // stand-in directly and leave the 127.0.0.2 listener empty; a row that
+        // passes without exercising its setting would be no test at all.
+
+        #[test]
+        fn http_proxy_cannot_route_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "http_proxy",
+                "127.0.0.1",
+                false,
+                Some("http_proxy"),
+                CurlrcProbe::None,
+                Decoy::Ephemeral,
+            );
+        }
+
+        #[test]
+        fn all_proxy_cannot_route_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "ALL_PROXY with localhost",
+                "localhost",
+                false,
+                Some("ALL_PROXY"),
+                CurlrcProbe::None,
+                Decoy::Ephemeral,
+            );
+        }
+
+        #[test]
+        fn https_proxy_cannot_tunnel_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "HTTPS_PROXY with https localhost",
+                "localhost",
+                true,
+                Some("HTTPS_PROXY"),
+                CurlrcProbe::None,
+                Decoy::Ephemeral,
+            );
+        }
+
+        #[test]
+        fn a_curlrc_proxy_cannot_route_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "curlrc proxy",
+                "127.0.0.1",
+                false,
+                None,
+                CurlrcProbe::Proxy,
+                Decoy::Ephemeral,
+            );
+        }
+
+        #[test]
+        fn a_curlrc_connect_to_cannot_move_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "curlrc connect-to",
+                "localhost",
+                false,
+                None,
+                CurlrcProbe::ConnectTo,
+                Decoy::Ephemeral,
+            );
+        }
+
+        #[test]
+        fn a_curlrc_resolve_cannot_move_the_test_base() {
+            let _lock = curl_lock();
+            direct_request(
+                "curlrc resolve",
+                "localhost",
+                false,
+                None,
+                CurlrcProbe::Resolve,
+                Decoy::EchoPort,
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_test_bases_are_ignored_without_a_request() {
+        let _lock = curl_lock();
+        let server = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let home = kimi_home("synthetic-token", now() + 3600);
+        for value in [
+            // Userinfo, which curl would read as `localhost:1` and send the
+            // token to `127.0.0.2`. M1 in the review.
+            format!("http://localhost:1@127.0.0.2:{port}"),
+            // Only the `@` check refuses this one: without it the authority
+            // parses as loopback and curl would send `/@` with the token.
+            format!("http://127.0.0.1:{port}/@"),
+            // A trailing dot and a longer name curl would resolve. M3.
+            format!("http://localhost.:{port}"),
+            "http://localhost.evil.example".to_string(),
+            // A global IPv6 address that ends with `::1`. M5.
+            "http://[2001:db8::1]".to_string(),
+            // Malformed after the host or the bracket, all refused by curl.
+            format!("http://127.0.0.1:{port}:{port}"),
+            "http://[::1]evil.example".to_string(),
+            "http://127.0.0.1:1evil.example".to_string(),
+            "http://[::1]:1evil".to_string(),
+            "http://127.0.0.1:".to_string(),
+            "http://[::1]:".to_string(),
+            "http://127.0.0.1:65536".to_string(),
+            "http://127.0.0.1:99999".to_string(),
+            "http://[::1]:65536".to_string(),
+            "http://127.0.0.1:+80".to_string(),
+            "ftp://127.0.0.1/".to_string(),
+            "https://user@127.0.0.1/".to_string(),
+            "http://127.0.0.1/me?x=1".to_string(),
+            "http://127.0.0.1/#x".to_string(),
+            " http://127.0.0.1/".to_string(),
+        ] {
+            let _env = EnvVars::set(&[
+                (TEST_BASE_VAR, Some(&value)),
+                (CLI_BASE_VAR, None),
+            ]);
+            let result = kimi(home.path());
+            assert_eq!(result["status"], "unavailable", "{value}: {result}");
+            assert!(
+                result["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Ignored HGS_TEST_KIMI_API_BASE"),
+                "{value}: {result}"
+            );
+        }
+        assert!(
+            server.accept().is_err(),
+            "a hostile test base sent the token"
+        );
+    }
 
     #[test]
     fn claude_429_headers_survive_curl_refusing_an_oversized_error_body() {
+        // The Kimi tests below replace PATH, CURL_HOME and the proxy
+        // variables to record and redirect curl; every test that starts curl
+        // shares this lock.
+        let _lock = curl_lock();
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/usage", server.local_addr().unwrap());
         let worker = std::thread::spawn(move || {
@@ -791,6 +1779,7 @@ mod tests {
     #[test]
     fn claude_http_fixture_preserves_429_cooldown_without_repeating_the_request() {
         use std::net::TcpListener;
+        let _lock = curl_lock();
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/usage", server.local_addr().unwrap());
         let worker = std::thread::spawn(move || {

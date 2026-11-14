@@ -659,7 +659,10 @@ impl Protection {
     /// Partial/error writes leave a lock for review, never an unlocked gap.
     pub(super) fn transfer(mut self, holder: &worktree_cleanup::Reference) -> Result<()> {
         if self.before["version"] == legacy_veto::VERSION {
-            return Err("The original legacy advisory veto is retained unchanged; shared retirement needs review".into());
+            #[cfg(unix)]
+            return self.transfer_legacy(holder);
+            #[cfg(not(unix))]
+            return Err("Legacy advisory-veto handoff is unavailable on this computer".into());
         }
         let id = holder.session_id.as_str();
         if !session_id::canonical(id) {

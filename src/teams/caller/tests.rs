@@ -85,6 +85,18 @@ fn probe() {
     if std::env::var_os("HGS_TEAMS_BIRTH_PROBE").is_some() {
         birth_probe();
     }
+    // Read the native process-only walk as well: the environment-reading
+    // walk below refuses before producing a chain when a middle is withheld.
+    if let Ok(chain) = ancestry::processes() {
+        for row in chain {
+            println!(
+                "ENVIRONMENT pid={} top={} readable={}",
+                row.pid,
+                row.top,
+                environment(row.pid).is_ok()
+            );
+        }
+    }
     if let Ok(chain) = ancestors() {
         for row in chain {
             println!(
@@ -160,6 +172,22 @@ fn later_birth(birth: &str) -> String {
     }
 }
 
+/// The probe's native environment read, including when the caller's walk
+/// refused below the top. Missing evidence is a fixture failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn environment_readable(text: &str, pid: u32) -> bool {
+    let prefix = format!("ENVIRONMENT pid={pid} ");
+    let row = text
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no environment evidence for {pid}: {text}"));
+    match row.rsplit_once(" readable=").map(|(_, value)| value) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => panic!("invalid environment evidence for {pid}: {text}"),
+    }
+}
+
 // The macOS parser and the claim it feeds, on every platform.
 mod environment;
 
@@ -204,7 +232,7 @@ mod process {
     enum Agent {
         /// Python, whose environment every supported platform shows.
         Visible,
-        /// `/bin/sh`, whose environment macOS withholds.
+        /// `/bin/sh`, whose environment some macOS hosts withhold.
         Shell,
     }
 
@@ -445,20 +473,19 @@ with open(out,'w') as sink:
     /// its environment is readable, the command below it is refused.
     #[test]
     fn a_withheld_agent_at_the_top_is_the_stated_macos_limit() {
-        let probe = Probe::start(false, Agent::Shell);
-        probe.record(&probe.born());
-        let answer = probe.answer();
-        let text = probe.text();
-        assert!(text.contains(&format!("PARENT {}", probe.pid)), "{text}");
-        if cfg!(target_os = "macos") {
-            assert_eq!(answer, "person", "{text}");
-            let top = format!(
-                "ANCESTOR pid={} parent=1 top=true environment_readable=false",
-                probe.pid
-            );
-            assert!(text.contains(&top), "{text}");
-        } else {
-            assert_eq!(answer, "refused:not_allowed", "{text}");
+        for agent in [Agent::Shell, Agent::Visible] {
+            let probe = Probe::start(false, agent);
+            probe.record(&probe.born());
+            let answer = probe.answer();
+            let text = probe.text();
+            assert!(text.contains(&format!("PARENT {}", probe.pid)), "{text}");
+            if !environment_readable(&text, probe.pid) {
+                assert_eq!(answer, "person", "{text}");
+                let top = format!("ENVIRONMENT pid={} top=true readable=false", probe.pid);
+                assert!(text.contains(&top), "{text}");
+            } else {
+                assert_eq!(answer, "refused:not_allowed", "{text}");
+            }
         }
     }
 }

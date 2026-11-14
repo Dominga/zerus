@@ -118,7 +118,7 @@ struct Record {
     admitted_mode: Mode,
 }
 impl Record {
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     fn new(scope: &Scope, planned: Mode, admitted: Mode) -> Result<Self> {
         if planned == admitted {
             return Err("A Start refusal requires a proven mode mismatch".into());
@@ -279,7 +279,9 @@ fn lookup_locked(writer: &writer::Writer, scope: &Scope) -> Result<Observed> {
     Ok(Observed::Refused { same_plan, proof })
 }
 
-#[cfg(unix)]
+// Windows tests exercise retained publication/read-back without enabling the
+// unqualified production writer or the task-control gate.
+#[cfg(any(unix, test))]
 fn remember_locked(
     writer: &writer::Writer,
     scope: &Scope,
@@ -331,14 +333,4 @@ fn bounded(s: &str, limit: usize) -> Result<()> {
 mod tests;
 
 #[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-    use serde_json::json;
-    #[test]
-    fn unqualified_windows_namespace_durability_emits_no_proof() {
-        let request = json!({"request_id":"00000000-0000-4000-8000-000000000001",
-            "text":"Original","expected_run_id":"r","expected_conversation_id":"c"});
-        let scope = Scope::new("codex/example/worker", &request, &"b".repeat(64)).unwrap();
-        assert!(remember_enabled(&scope, Mode::Managed, Mode::Legacy, Instant::now()).is_err());
-    }
-}
+mod windows_tests;

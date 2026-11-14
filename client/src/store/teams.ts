@@ -13,7 +13,7 @@ import type { TeamsOut } from "../types";
 /** A member's session: the computer UUID and the session identity. */
 export interface TeamSession { machine: string; session_id: string }
 /** A member's bound session on a live team's list row. */
-export interface TeamMemberSession { member: string; machine: string; session_id: string }
+export interface TeamMemberSession { member: string; role?: string; machine: string; session_id: string }
 export interface TeamSummary {
   id: string; project: string; name: string; status: string; lead: string; home: string; revision: number;
   /** The lead's bound session: how a session finds its team (package 5's list). */

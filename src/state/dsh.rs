@@ -117,14 +117,14 @@ pub(super) fn binding(name: &str) -> Result<Value> { PROVIDER.read(name) }
 pub(super) fn read_id(id: &str) -> Result<Value> { PROVIDER.read_id(id) }
 /// Saves the binding, then the identity its hosted tool calls carry
 /// (`shell_identity`). Every path that starts a run ends here, so the file
-/// names the run this save established. A file that cannot be written
-/// leaves that session's tool calls without session markers, never with
-/// another session's, and is reported without undoing the saved binding.
+/// normally names the run this save established. A failed refresh is reported
+/// without undoing the binding. Cleanup may also fail, leaving stale session
+/// markers that the hosted caller proof checks against the saved binding.
 pub(super) fn save(record: &mut Value) -> Result<()> {
     PROVIDER.save(record)?;
     #[cfg(unix)]
     if let Err(error) = shell_identity::write(record) {
-        eprintln!("hgs: {}'s tool calls carry no session markers until its identity can be written: {error}", string(record, "name"));
+        eprintln!("hgs: {}'s identity could not be refreshed; tool calls may carry stale or missing session markers: {error}", string(record, "name"));
     }
     Ok(())
 }
@@ -234,7 +234,6 @@ fn host_request(
     method: &str,
     params: Value,
 ) -> std::result::Result<Value, Unanswered> {
-    use std::io::Read;
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
@@ -266,12 +265,32 @@ fn host_request(
             Err(_) => return Err(Unanswered::NoAnswer),
         }
     }
+    host_response(&mut stream, deadline)
+}
+
+/// Read one complete, bounded host reply. XNU may already have shut the
+/// socket down after the peer sent it: options then fail, but queued bytes
+/// remain readable. That case drains nonblocking and still needs a valid
+/// complete reply before the original absolute deadline.
+#[cfg(unix)]
+fn host_response(stream: &mut UnixStream, deadline: Instant) -> std::result::Result<Value, Unanswered> {
+    use std::io::Read;
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(Unanswered::NoAnswer)
+    };
     let mut response = Vec::new();
     let mut chunk = [0u8; 4096];
     let line = loop {
-        stream
-            .set_read_timeout(Some(remaining()?))
+        let timeout = stream.set_read_timeout(Some(remaining()?));
+        let closed = timeout.is_err();
+        crate::platform::receive_timeout_result(timeout, cfg!(target_vendor = "apple"))
             .map_err(|_| Unanswered::NoAnswer)?;
+        if closed {
+            stream.set_nonblocking(true).map_err(|_| Unanswered::NoAnswer)?;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => return Err(Unanswered::NoAnswer),
             Ok(count) => response.extend_from_slice(&chunk[..count]),
@@ -285,6 +304,7 @@ fn host_request(
             return Err(Unanswered::NoAnswer);
         }
     };
+    remaining()?;
     let reply: Value = serde_json::from_slice(line).map_err(|_| Unanswered::NoAnswer)?;
     if reply["ok"] != true {
         return Err(Unanswered::NoAnswer);
@@ -3533,8 +3553,11 @@ mod tests {
     fn a_lifecycle_end_other_than_the_hosts_disposal_reads_not_ended() {
         let ended = json!({"state": "ended", "end": {"source": "agent/disposed", "at": 100}});
         assert!(!lifecycle_state(&ended).unwrap());
+        // A source the host never writes. It is bound to a variable, so the
+        // question-route inventory of real `source` literals does not count it.
+        let foreign = "agent/exit";
         for bad in [
-            json!({"state": "ended", "end": {"source": "agent/exit", "at": 100}}),
+            json!({"state": "ended", "end": {"source": foreign, "at": 100}}),
             json!({"state": "ended", "end": {"source": "agent/disposed", "at": 0}}),
             json!({"state": "ended", "end": {"source": "agent/disposed"}}),
         ] {
@@ -3557,3 +3580,6 @@ mod tests {
         assert_eq!(off["socket"], on["socket"]);
     }
 }
+
+#[cfg(all(test, unix))]
+mod host_exchange_tests;

@@ -232,3 +232,18 @@ variant later; the coordinator owns that follow-up. Manual review loads only on
 its explicit action, so importing the action menus does not initialize its
 native event subscription. The original computer/path are copied before the
 asynchronous import and checked independently by the existing native review.
+
+## Reserved Unix mutation fence
+
+The shared Unix mutation-admission check treats the presence of a session's
+reserved `terminating` field as unfinished termination, even when its value is
+null, false or malformed. Native Terminal input and Clear input check the fresh
+record under the state writer before staging
+or claiming input and before later key handoffs. Screen/composer reads and
+original receipt lookups remain available; an old or unknown terminal UUID
+never delivers input again when the marker disappears.
+
+This is refusal-only support. It does not create a marker, request graceful
+exit or establish descendant custody. Graceful Terminate remains gated on the
+original writer, marker, custody and finalization prerequisites. Pause, native
+Stop and Windows retain their existing behavior.

@@ -243,6 +243,9 @@ fn check_handoff(name: &str, request: &Request) -> Result<Value> {
         return Err("Terminal input expired before native handoff".into());
     }
     let record = checked(name, request)?;
+    // Input and Clear input retain the writer through their native handoffs.
+    // Fence the fresh record before staging/claiming and before later keys.
+    terminating::check_mutation(&record)?;
     // zerus-iitw8.5: a Claude send between its paste and its proof holds no
     // lock; nothing else may type into that composer meanwhile.
     if input::input_typing(&record).is_some() {

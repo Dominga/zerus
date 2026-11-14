@@ -44,6 +44,12 @@ pub(super) fn check(action: &TeamAction) -> Result<(), String> {
             if !["claude", "codex", "kimi", "dsh"].contains(&agent.as_str()) {
                 return Err("Choose a supported team agent.".into());
             }
+            if agent == "dsh" && !model.is_empty() {
+                return Err("DeepSeek model is managed in its native account.".into());
+            }
+            if !matches!(agent.as_str(), "claude" | "codex") && !effort.is_empty() {
+                return Err("This agent has no supported launch effort argument.".into());
+            }
             field(model, "The member model", 256)?;
             field(effort, "The member effort", 64)?;
             if let AccountChoice::Named { account } = account {

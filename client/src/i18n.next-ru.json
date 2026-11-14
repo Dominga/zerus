@@ -531,6 +531,7 @@
   "Decisions that only you can make appear here.": "Здесь появляются решения, которые можете принять только вы.",
   "DeepSeek keeps its context cache for hours without pings.": "DeepSeek хранит кэш контекста часами без пингов.",
   "DeepSeek may not have applied the account's model and effort when this session started. Check the model and effort above.": "DeepSeek, возможно, не применил модель и глубину рассуждений учётной записи при запуске этой сессии. Проверьте модель и глубину рассуждений выше.",
+  "DeepSeek model is managed in its native account.": "Модель DeepSeek настраивается в его учётной записи.",
   "DeepSeek reports the balance is too low for API calls.": "DeepSeek сообщает, что баланса не хватает для вызовов API.",
   "Default Overview width": "Ширина обзора по умолчанию",
   "Default for new %1 sessions on %2 when no account is chosen": "По умолчанию для новых сессий %1 на %2, если учётная запись не выбрана",

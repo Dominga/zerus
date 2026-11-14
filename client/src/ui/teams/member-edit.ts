@@ -23,3 +23,9 @@ export function swapBlocked(member: TeamMember): string | undefined {
   if (!member.session) return tr("This member has no confirmed session to replace.");
   return undefined;
 }
+
+/** Only fields the maintained native launch builders can deliver. */
+export function supportedChoice(choice: MemberChoice): MemberChoice {
+  return { ...choice, model: choice.agent === "dsh" ? "" : choice.model,
+    effort: choice.agent === "claude" || choice.agent === "codex" ? choice.effort : "" };
+}

@@ -43,6 +43,14 @@ pub(super) fn goal(ctx: &mut Context<'_>) -> Result<()> {
 }
 fn choices(agent: &str, model: &str, effort: &str, account: &AccountChoice) -> Result<()> {
     crate::teams::catalog::validate_member_agent(agent)?;
+    if agent == "dsh" && !model.is_empty() {
+        return Err(invalid("DeepSeek model is managed in its native account."));
+    }
+    if !matches!(agent, "claude" | "codex") && !effort.is_empty() {
+        return Err(invalid(
+            "This agent has no supported launch effort argument.",
+        ));
+    }
     for (field, value, limit) in [
         ("The member model", model, 256),
         ("The member effort", effort, 64),

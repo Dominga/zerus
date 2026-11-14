@@ -5,14 +5,14 @@ import { tr } from "../../i18n";
 import type { TeamView } from "../../store/teams";
 import { MemberChoices } from "./MemberChoices";
 import { TeamEditDialog } from "./TeamEditDialog";
-import type { MemberChoice } from "./member-edit";
+import { supportedChoice, type MemberChoice } from "./member-edit";
 import type { EditSubmit } from "./TeamEditors";
 export function AddMemberDialog(props: { view: TeamView; busy: boolean; locked?: boolean; error: string; close: () => void; submit: EditSubmit }) {
   const roles = props.view.member_roles ?? [];
   const [role, setRole] = createSignal<typeof roles[number] | undefined>(roles[0]);
   const initial = (): MemberChoice => {
     const r = role();
-    return { agent: r?.agent || "claude", model: r?.model || "", effort: r?.effort || "", account: r?.account.mode === "named" && r.account.account ? { mode: "named", account: r.account.account } : { mode: "freest" } };
+    return supportedChoice({ agent: r?.agent || "claude", model: r?.model || "", effort: r?.effort || "", account: r?.account.mode === "named" && r.account.account ? { mode: "named", account: r.account.account } : { mode: "freest" } });
   };
   const [choice, setChoice] = createSignal(initial());
   return <TeamEditDialog title={tr("Add member")} action={tr("Add member")} busy={props.busy} disabled={!role() || props.locked} error={props.error} close={props.close}

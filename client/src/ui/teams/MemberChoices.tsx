@@ -18,15 +18,16 @@ export function MemberChoices(props: { initial: MemberChoice; disabled: boolean;
     <label>{tr("Agent")}<select class="field" aria-label={tr("Agent")} value={agent()} disabled={props.disabled} onChange={(e) => { setAgent(e.currentTarget.value); setAccount(""); setModel(""); setEffort(""); changed(); }}>
       <For each={MEMBER_AGENTS}>{(a) => <option value={a}>{a === "dsh" ? "DeepSeek" : a}</option>}</For>
     </select></label>
-    <label>{tr("Model")}<TextInput class="field mono" aria-label={tr("Model")} value={model()} maxlength={256} placeholder={tr("default model")} disabled={props.disabled}
+    <label>{tr("Model")}<TextInput class="field mono" aria-label={tr("Model")} value={model()} maxlength={256} placeholder={tr("default model")} disabled={props.disabled || agent() === "dsh"}
       onInput={(e) => { setModel(e.currentTarget.value); changed(); }} /></label>
-    <label>{tr("Effort")}<TextInput class="field" aria-label={tr("Effort")} value={effort()} maxlength={64} placeholder={tr("default effort")} disabled={props.disabled}
+    <label>{tr("Effort")}<TextInput class="field" aria-label={tr("Effort")} value={effort()} maxlength={64} placeholder={tr("default effort")} disabled={props.disabled || !(agent() === "claude" || agent() === "codex")}
       onInput={(e) => { setEffort(e.currentTarget.value); changed(); }} /></label>
     <label>{tr("Account")}<select class="field" aria-label={tr("Account")} value={account()} disabled={props.disabled} onChange={(e) => { setAccount(e.currentTarget.value); setModel(""); setEffort(""); changed(); }}>
       <option value="">{tr("The freest account")}</option>
       <Show when={account() && !accounts().some((a) => a.id === account())}><option value={account()}>{tr("%1 (not in the current catalog)", account())}</option></Show>
       <For each={accounts()}>{(a) => <option value={a.id} disabled={!a.signedIn}>{a.signedIn ? a.label : tr("%1 (signed out)", a.label)}</option>}</For>
     </select></label>
+    <Show when={agent() === "dsh"}><p class="dim">{tr("DeepSeek model is managed in its native account.")}</p></Show>
     <p class="dim" id={id}>{tr("Leave model and effort empty to use the selected account's defaults.")}</p>
   </div>;
 }

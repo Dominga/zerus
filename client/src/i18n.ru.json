@@ -1196,6 +1196,7 @@
   "DeepSeek account is signed out. API-key connections are configured separately in the native settings.": "Вход в учётную запись DeepSeek не выполнен. Подключения по API-ключу настраиваются отдельно в настройках агента.",
   "DeepSeek keeps its context cache for hours without pings.": "DeepSeek хранит кэш контекста часами без пингов.",
   "DeepSeek may not have applied the account's model and effort when this session started. Check the model and effort above.": "DeepSeek, возможно, не применил модель и глубину рассуждений учётной записи при запуске этой сессии. Проверьте модель и глубину рассуждений выше.",
+  "DeepSeek model is managed in its native account.": "Модель DeepSeek настраивается в его учётной записи.",
   "DeepSeek native workspace": "Рабочее пространство DeepSeek",
   "DeepSeek opens in the workspace's Native UI.": "DeepSeek открывается в собственном пользовательском интерфейсе рабочей области.",
   "DeepSeek reports the balance is too low for API calls.": "DeepSeek сообщает, что баланса не хватает для вызовов API.",

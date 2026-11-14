@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { emptyAccounts, type Profile } from "../../types";
-import { memberAccounts, swapBlocked } from "./member-edit";
+import { memberAccounts, supportedChoice, swapBlocked } from "./member-edit";
 import { memberActions } from "./actions";
 import { memberMenu } from "./members";
 import { teamView } from "./fixtures";
@@ -17,4 +17,11 @@ it("swap requires the full writer's zero-work fact, a person stop and a binding"
   expect(memberMenu(stopped).find((a) => a.id === "swap")?.enabled).toBe(true);
   for (const change of [{ state: "active" }, { person_stopped: false }, { open_work: 1 }, { open_work: undefined }, { session: null }])
     expect(swapBlocked({ ...stopped, ...change })).toBeTruthy();
+});
+
+it("keeps only choices the native launch path supports", () => {
+  const choice = { agent: "dsh", model: "example-model", effort: "high", account: { mode: "freest" as const } };
+  expect(supportedChoice(choice)).toEqual({ ...choice, model: "", effort: "" });
+  expect(supportedChoice({ ...choice, agent: "kimi" })).toEqual({ ...choice, agent: "kimi", effort: "" });
+  expect(supportedChoice({ ...choice, agent: "codex" })).toEqual({ ...choice, agent: "codex" });
 });

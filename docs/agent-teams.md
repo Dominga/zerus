@@ -266,7 +266,8 @@ one task at a time.
 In the **Team** tab, **Add member** chooses a role from this team's pinned
 catalog, an agent, model, effort and account. The account can be named or
 **The freest account**; empty model and effort use that account's defaults.
-The member gets its own readable session and worktree through the usual launch
+Launch effort is available for Claude and Codex; DeepSeek keeps its model in
+its native account. The member gets its own readable session and worktree through the usual launch
 service. Existing members keep their sessions and work.
 
 **Rename team** and **Edit goal** change the team's name and goal. Clearing the

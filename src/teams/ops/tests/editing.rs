@@ -137,3 +137,27 @@ fn additions_enforce_role_agent_and_roster_limits_without_reusing_ids() {
     h.settings(|s| s.caps.max_members = 3);
     refused(h.run(&person(), add()), code::OVER_CAP);
 }
+
+#[test]
+fn unsupported_native_choices_refuse_before_creating_a_member() {
+    let mut h = Harness::new();
+    let before = h.store.members(TEAM, 200, None).unwrap().rows;
+    for (agent, model, effort) in [
+        ("dsh", "example-model", ""),
+        ("dsh", "", "high"),
+        ("kimi", "", "high"),
+    ] {
+        let result = h.run(
+            &person(),
+            Operation::AddMember {
+                role: "developer".into(),
+                agent: agent.into(),
+                model: model.into(),
+                effort: effort.into(),
+                account: AccountChoice::Freest,
+            },
+        );
+        assert_eq!(result.unwrap_err().code, code::INVALID_STATE);
+        assert_eq!(h.store.members(TEAM, 200, None).unwrap().rows, before);
+    }
+}

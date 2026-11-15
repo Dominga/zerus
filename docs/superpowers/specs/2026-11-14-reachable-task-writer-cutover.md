@@ -175,3 +175,14 @@ Once durable attempt saving begins, its existing uncertain-result handling
 still retains the original request and hold. Busy does not settle it or grant
 native replay. Only the pre-reservation delivery path retains the ordinary
 busy/non-start cause.
+
+The natural-clock older-build intake failure also exposed a separate producer
+bug: clearing the stale cancellation fields of an unchanged team binding
+returned with two pending Loro operations. Change lookup reads committed Change
+metadata, while changed-container inspection implicitly commits. Depending on
+peer traversal order, the historical reader could meet the pending peer first
+and correctly refuse its missing Change. The mutator now commits its intended
+field deletion before returning, adds no team history entry, and leaves an
+unchanged binding with no mark a no-op. Root inspection remains strict and does
+not accept pending or missing history. This cause is distinct from scan-resource
+exhaustion; the natural-clock and injected-pause controls stay separate.

@@ -186,3 +186,38 @@ fn team_key_fixture_and_history_are_readable_in_older_clients() {
         "Removed from team Example team"
     );
 }
+
+#[cfg(not(feature = "test-without-team"))]
+#[test]
+fn clearing_a_stale_mark_on_the_same_binding_finishes_its_transaction() {
+    let mut task = task();
+    let team = crate::TaskTeam {
+        team: TEAM.into(),
+        home: HOME.into(),
+    };
+    task.set_team_named(Some(&team), "Example team", &Actor::Person, 2)
+        .unwrap();
+    task.floor().unwrap();
+    task.set_cancelled_for_test(3, "old build");
+    let log = task.view().unwrap().log.len();
+    task.set_team_named(Some(&team), "Example team", &Actor::Person, 4)
+        .unwrap();
+    assert_eq!(
+        task.doc.get_pending_txn_len(),
+        0,
+        "a successful binding returned with uncommitted operations"
+    );
+    assert_eq!(task.view().unwrap().cancelled_at, None);
+    assert_eq!(
+        task.view().unwrap().log.len(),
+        log,
+        "clearing the stale mark is not another team handoff"
+    );
+    for (&peer, &end) in task.doc.oplog_vv().iter() {
+        assert!(
+            task.doc.get_change(loro::ID::new(peer, end - 1)).is_some(),
+            "a successful binding returned with uncommitted operations"
+        );
+    }
+    task.validate_cutover_history().unwrap();
+}

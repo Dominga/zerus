@@ -102,6 +102,20 @@ it("keeps a known validation refusal editable for an explicit corrected save", a
   expect(submit.mock.calls[1][1].nodes[0].writes).toEqual(["src/base.rs", "src/base-tests.rs"]);
 });
 
+it("never saves an open editor into a newly selected team", async () => {
+  const { h, submit, setRead } = await pane();
+  button(h, "Edit draft").click();
+  input(h, "[data-phase-title]", "Keep this team's draft");
+  const other = view(); other.bar.id = "another-team";
+  setRead(other);
+  const save = h.querySelector<HTMLButtonElement>("[data-save-phase]")!;
+  save.click();
+  await vi.waitFor(() => expect(save.disabled).toBe(true));
+  expect(submit).not.toHaveBeenCalled();
+  expect(h.querySelector<HTMLInputElement>("[data-phase-title]")!.value).toBe("Keep this team's draft");
+  expect(h.textContent).toContain("your text stays here to copy");
+});
+
 it.each(["pending", "uncertain", "stale_revision"])("preserves text and blocks a second save after %s", async (state) => {
   const h = host(), d = view().plan!.draft!;
   const submit = vi.fn().mockResolvedValue(state === "stale_revision"

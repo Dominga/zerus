@@ -1,8 +1,8 @@
 # Agent Teams
 
 Agent Teams are a preview. They are off on every computer until a person turns
-them on, and this guide describes the first milestone: a team that takes tasks
-from a queue. The commands, their replies and their codes are in the
+them on. A team takes tasks from a queue; the Team tab also shows dependencies
+and lets you prepare phase drafts. The commands, their replies and their codes are in the
 [Agent Teams reference](reference.md#agent-teams).
 
 ## What a team is
@@ -277,6 +277,33 @@ On a stopped or archived team's board, a task also shows what the current
 stop recorded: cancellation, release, key clearing, a refusal and its reason,
 or work not yet reached. An older stop without a recorded identity shows no
 invented outcome.
+
+## Preparing phase drafts
+
+Open **Layers** in the Team tab to read planned phases. **New phase draft**
+creates a proposed phase; **Edit draft** changes its title, barrier and tasks.
+Each task has a description, acceptance criteria, pipeline, optional assignee,
+dependencies, write paths and estimate. Layers uses the shared dependency
+projection; opening a task shows its original description and criteria.
+
+A person or the team's bound lead may save a draft. Drafts reserve task IDs
+and count against the team's planned-work cap, including when a pipeline
+creates a stage. They create no task documents, launches or hand-outs.
+**Approve phase** is unavailable in this slice. Phase 0 remains the only
+intake queue; planned startup and phase publication are still to come.
+
+The CLI reads are `hgs team phases --team TEAM` and
+`hgs team phase --team TEAM --phase N`. Use the returned revision, next phase
+and node IDs for `submit-draft-phase`; an `edit-draft-phase` also carries the
+generation read from the draft. Both accept the complete draft as JSON on
+stdin, with `request_id`, `team` and `expected_revision`; see the
+[draft input contract](reference.md#agent-teams) for its fields and bounds.
+Saved IDs stay attached to their tasks, and removed IDs are never reused.
+
+A failed read shows its reason and **Read again**, never an editable empty
+plan. A stale save retains the editor text for copying. An unconfirmed save
+locks saving and points to **Check** in the team's unresolved actions; it is
+never automatically sent again under a new request identity.
 
 ## Sending a task to a team
 
@@ -584,7 +611,9 @@ tool approvals.
   shell; run it from the Zerus window." Commands that a lead or a member runs
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
-- Only a queue: no planning from a goal, no phases and no Graph yet.
+- Queue execution, a dependency Graph and draft phases in Layers are available.
+  Planning from a goal, phase approval/publication and phase acceptance are
+  not yet available.
 - DeepSeek can be a lead or member with a host that proves each tool call
   with its per-call token, witnesses task input and reports its lifecycle.
   A host lacking those capabilities stays unavailable; Zerus never reloads

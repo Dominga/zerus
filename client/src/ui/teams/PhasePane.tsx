@@ -33,11 +33,12 @@ export function PhasePane(props: {
   view: TeamView; busy: boolean; follow?: PhaseFollow;
   submit?: (snapshot: DraftSnapshot, input: DraftInput) => Promise<TeamOutcome>;
 }) {
-  const follower = phaseFollower(props.view.bar.id, props.follow);
+  const team = { id: props.view.bar.id, name: props.view.bar.name };
+  const follower = phaseFollower(team.id, props.follow);
   const [selected, setSelected] = createSignal<number | null>(null);
   const [editor, setEditor] = createSignal<DraftSnapshot | null>(null);
   const [pageError, setPageError] = createSignal("");
-  const pane = createMemo(() => props.view.plan?.epoch === follower.epoch() ? props.view.plan : undefined);
+  const pane = createMemo(() => props.view.bar.id === team.id && props.view.plan?.epoch === follower.epoch() ? props.view.plan : undefined);
   const list = () => pane()?.list;
   const failed = () => follower.error() || pane()?.list_failure?.message || pane()?.draft_failure?.message || pageError();
   const draft = () => pane()?.draft?.phase.n === selected() ? pane()?.draft : null;
@@ -64,7 +65,8 @@ export function PhasePane(props: {
       input: { title: "", barrier: true, nodes: [{ id: l.next_node, title: "", text: "", criteria: [""], role: route?.role ?? "", pipeline: route?.pipeline ?? "", assignee: null, deps: [], writes: [], estimate_minutes: 0, kind: "task" }] } });
   };
   const submit = async (snapshot: DraftSnapshot, input: DraftInput): Promise<TeamOutcome> => {
-    const result = props.submit ? await props.submit(snapshot, input) : await teams.run({ team: props.view.bar.id, team_name: props.view.bar.name,
+    if (props.view.bar.id !== team.id) return { outcome: "failed", code: "stale_revision", detail: tr("The draft changed. Close this editor and read again; your text stays here to copy."), request_id: "" };
+    const result = props.submit ? await props.submit(snapshot, input) : await teams.run({ team: team.id, team_name: team.name,
       expected_revision: snapshot.revision, request_id: newRequestId(), action: { kind: snapshot.generation === null ? "submit_draft_phase" : "edit_draft_phase", phase: snapshot.phase, draft: input,
         ...(snapshot.generation === null ? {} : { generation: snapshot.generation }) } }, "phase");
     if (result.outcome === "done") choose(snapshot.phase);
@@ -72,7 +74,7 @@ export function PhasePane(props: {
   };
   const next = async () => {
     const cursor = list()?.next; if (!cursor) return;
-    try { await invoke("teams_page", { key: `phases:${props.view.bar.id}`, cursor }); setPageError(""); }
+    try { await invoke("teams_page", { key: `phases:${team.id}`, cursor }); setPageError(""); }
     catch (cause) { setPageError(String(cause)); }
   };
   return <section class="phase-pane" data-phase-pane>

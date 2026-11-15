@@ -2010,3 +2010,5 @@ fn the_cutover_cursor_is_bounded_and_passes_held_rows_before_wrapping() {
     index.db.execute("UPDATE tasks SET files='-|-|-|-|pending' WHERE uuid=?1",[&ids[0]]).unwrap();
     assert_eq!(index.cutover_candidate().unwrap().as_deref(),Some(ids[0].as_str()));
 }
+
+mod legacy_candidates;

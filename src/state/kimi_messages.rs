@@ -261,7 +261,11 @@ fn wire_messages(bytes: &[u8], clipped_start: bool) -> Vec<Value> {
     let (mut bodies, mut replies) = (0, 0);
     messages.reverse();
     messages.retain(|message| {
-        let count = if message["type"] == "UserMessageBody" { &mut bodies } else { &mut replies };
+        let count = if message["type"] == "UserMessageBody" {
+            &mut bodies
+        } else {
+            &mut replies
+        };
         *count += 1;
         *count <= 50
     });

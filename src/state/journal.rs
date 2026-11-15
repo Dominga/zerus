@@ -1201,7 +1201,8 @@ pub(super) fn inspection_with(
         Ok(messages) => {
             // Display-only body candidates never become extra user rows in
             // clients that consume the existing assistant-message window.
-            let (bodies, messages): (Vec<_>, Vec<_>) = messages.into_iter()
+            let (bodies, messages): (Vec<_>, Vec<_>) = messages
+                .into_iter()
                 .partition(|message| message["type"] == "UserMessageBody");
             output["user_message_bodies"] = json!(bodies);
             output["provider_messages"] = json!(messages);

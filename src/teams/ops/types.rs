@@ -202,6 +202,15 @@ pub enum CancelState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    SubmitDraftPhase {
+        phase: u32,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditDraftPhase {
+        phase: u32,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
     Create {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_template: Option<String>,

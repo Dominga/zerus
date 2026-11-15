@@ -21,14 +21,16 @@ import { followTeamScope, type TeamScope } from "./team-tab-scope";
 import { TaskDependencies } from "./TaskDependencies";
 import { PlanView } from "./PlanView";
 import { TeamTaskCard } from "./TeamTaskCard";
+import { PhasePane } from "./PhasePane";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
-// The Team workspace combines the paged Board and dependency Graph with
-// bounded Feed, Inbox, Reports and Cards drawers. Lead chat uses the bound
-// lead's guarded composer. Views follow the store; actions use its intents.
+// The Team workspace adapts the fork's team bar, members, paged Board, task
+// detail and decisions. Graph and Layers share the core's projection. Feed,
+// Inbox, Reports and Cards read bounded pages; Lead chat uses the bound lead's
+// ordinary guarded composer. Team actions use the store's existing intents.
 
 function columnLabel(column: BoardColumn): string {
   switch (column.key) {
@@ -60,7 +62,7 @@ export function TeamWorkspace(props: {
   onSettingsSave?: (call: TeamCall) => Promise<TeamOutcome>;
   settingsBlocked?: boolean;
 }) {
-  const [planMode, setPlanMode] = createSignal<"board" | "graph">("board");
+  const [planMode, setPlanMode] = createSignal<"board" | "graph" | "layers">("board");
   const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
@@ -76,7 +78,7 @@ export function TeamWorkspace(props: {
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
-  createEffect(on(teamId, () => { setSettingsView(undefined); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
+  createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
   // Waiting for you's Open task: the node it names, or the card a stage of that
@@ -132,8 +134,9 @@ export function TeamWorkspace(props: {
       </Show>
       <div class="team-body">
         <section class="team-main">
-          <header class="team-board-head"><Icon name="columns-3" size={14} /><button type="button" class="btn small" aria-pressed={planMode() === "board"} onClick={() => setPlanMode("board")}>{tr("Board")}</button><button type="button" class="btn small" data-team-graph-mode aria-pressed={planMode() === "graph"} onClick={() => setPlanMode("graph")}>{tr("Graph")}</button><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
+          <header class="team-board-head"><Icon name="columns-3" size={14} /><button type="button" class="btn small" aria-pressed={planMode() === "board"} onClick={() => setPlanMode("board")}>{tr("Board")}</button><button type="button" class="btn small" data-team-graph-mode aria-pressed={planMode() === "graph"} onClick={() => setPlanMode("graph")}>{tr("Graph")}</button><button type="button" class="btn small" data-team-layers-mode aria-pressed={planMode() === "layers"} onClick={() => { setSelectedNode(null); setPlanMode("layers"); }}>{tr("Layers")}</button><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
           <div class="team-canvas">
+            <Show when={planMode() === "layers"} fallback={
             <Show when={all().length} fallback={
               <div class="empty team-empty"><Icon name="list-todo" size={24} /><h3>{tr("The queue is empty.")}</h3><p>{tr("Send a task to the team from the task board.")}</p></div>
             }>
@@ -153,6 +156,7 @@ export function TeamWorkspace(props: {
                 <PlanView view={props.view} busy={props.busy} selected={selectedNode()} onSelect={select} onSetDeps={(node, deps) => send("set_deps", { node, deps })} />
               </Show>
             </Show>
+            }><PhasePane view={props.view} busy={props.busy} /></Show>
             <Show when={card()}>
               {(shown) => (
                 <div class="team-task-detail" data-team-detail>

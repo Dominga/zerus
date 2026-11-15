@@ -73,6 +73,52 @@ fn stdin_of(invocation: &Invocation) -> Value {
 const TEAM: &str = "00000000-0000-4000-8000-00000000beef";
 const ID: &str = "11111111-2222-4333-8444-555555555555";
 
+#[test]
+fn draft_actions_keep_the_original_revision_generation_and_node_input() {
+    let row: Value = serde_json::from_str(include_str!(
+        "../../../../../crates/team-plan/fixtures/cli-phase-draft.json"
+    ))
+    .unwrap();
+    let draft = zerus_team_plan::draft::DraftInput {
+        title: row["draft"]["phase"]["title"].as_str().unwrap().into(),
+        barrier: true,
+        nodes: serde_json::from_value(row["draft"]["nodes"].clone()).unwrap(),
+    };
+    for (action, op, generation) in [
+        (
+            TeamAction::SubmitDraftPhase {
+                phase: 1,
+                draft: draft.clone(),
+            },
+            "submit-draft-phase",
+            None,
+        ),
+        (
+            TeamAction::EditDraftPhase {
+                phase: 1,
+                generation: 7,
+                draft: draft.clone(),
+            },
+            "edit-draft-phase",
+            Some(7),
+        ),
+    ] {
+        let call = a_call(TEAM, 12, action);
+        let (invocation, id) = prepare(&call).unwrap();
+        assert_eq!(id, ID);
+        assert_eq!(invocation.args, ["team", op, "--json"]);
+        let input = stdin_of(&invocation);
+        assert_eq!(input["request_id"], ID);
+        assert_eq!(input["expected_revision"], 12);
+        assert_eq!(input["phase"], 1);
+        assert_eq!(input.get("generation").and_then(Value::as_u64), generation);
+        assert_eq!(input["draft"], serde_json::to_value(&draft).unwrap());
+        assert!(input["draft"]["nodes"][0].get("task").is_none());
+    }
+    let call = a_call(TEAM, 12, TeamAction::SubmitDraftPhase { phase: 0, draft });
+    assert!(matches!(prepare(&call), Err(TeamOutcome::Failed { .. })));
+}
+
 fn receipt() -> Value {
     json!({"ok": true, "revision": 17, "actor": {"kind": "person"}, "team": TEAM})
 }
@@ -1331,6 +1377,8 @@ fn the_action_kinds_are_the_shared_list() {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
             TeamAction::Create { .. }
+            | TeamAction::SubmitDraftPhase { .. }
+            | TeamAction::EditDraftPhase { .. }
             | TeamAction::AddMember { .. }
             | TeamAction::SwapMember { .. }
             | TeamAction::RenameTeam { .. }
@@ -1361,6 +1409,23 @@ fn the_action_kinds_are_the_shared_list() {
     }
     let member = || "m1".to_owned();
     let samples = vec![
+        TeamAction::SubmitDraftPhase {
+            phase: 1,
+            draft: zerus_team_plan::draft::DraftInput {
+                title: String::new(),
+                barrier: false,
+                nodes: Vec::new(),
+            },
+        },
+        TeamAction::EditDraftPhase {
+            phase: 1,
+            generation: 1,
+            draft: zerus_team_plan::draft::DraftInput {
+                title: String::new(),
+                barrier: false,
+                nodes: Vec::new(),
+            },
+        },
         TeamAction::AddMember {
             role: "developer".into(),
             agent: "claude".into(),

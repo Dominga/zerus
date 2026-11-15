@@ -84,7 +84,7 @@ pub(super) fn want_stage(
     kind: zerus_team_plan::catalog::StageKind,
     role: &str,
 ) -> Result<()> {
-    if ctx.count(true)? >= ctx.team.settings.caps.max_open_tasks {
+    if ctx.task_capacity_used()? >= ctx.team.settings.caps.max_open_tasks {
         return to_lead(
             ctx,
             n,

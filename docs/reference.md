@@ -5964,6 +5964,9 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `waiting` | yes | | | none |
 | `status` | yes | yes | yes | none |
 | `inbox`, `queue`, `cards`, `journal` | yes | yes | | none |
+| `phases`, `phase --phase N` | yes | yes | | none |
+| `submit-draft-phase` | yes | yes | | `phase`, `draft` |
+| `edit-draft-phase` | yes | yes | | `phase`, `generation`, `draft` |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
@@ -6017,6 +6020,34 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+**Planned drafts.** The Team tab's Layers view reads bounded draft phases;
+approval is shown unavailable until publication is implemented. `phases`
+pages at most 200 summaries and supplies `next_phase`, `next_node`, the
+pinned role/pipeline routes and their revision. `phase --phase N` reads one
+complete draft with its generation, revision and editability. An unavailable
+read never means an empty plan. Phase 0 remains the only intake queue.
+
+`submit-draft-phase` uses `next_phase`; new draft nodes use consecutive IDs
+from `next_node`. `edit-draft-phase` retains saved IDs and includes the
+generation that was read. Removed IDs are never reused. The complete `draft`
+has `title`, `barrier` and 1 to the configured phase cap (at most 200) `nodes`.
+Each node has `id`, `title`, `text`, nonempty `criteria`, `role`, `pipeline`,
+optional `deps`, `assignee`, `writes`, `estimate_minutes` and `kind` (`task`
+or `check`). Titles are at most 200 bytes, text 16,384 bytes, and criteria
+1 to 32 entries of at most 2,048 bytes each. The whole request keeps its
+262,144-byte bound. Runtime/task identity fields are refused. Dependencies
+must be acyclic; hard edges stay within the phase. Overlapping writes need
+an ordering dependency or a later phase's barrier. Validation allows at most
+64 million estimated byte
+comparisons over unordered task pairs, otherwise an atomic `over_cap`
+refusal asks for simpler write sets or a smaller phase. Drafts count against
+the team's planned-work cap, including pipeline stage creation. Settings
+cannot lower that cap below admitted tasks and saved drafts. Drafts create
+no task documents, live bindings,
+member launches or hand-outs. Saving preserves the shown revision; an
+unconfirmed save is checked through the existing unresolved action, never
+automatically resubmitted with a new request identity.
 
 `set-deps` replaces dependencies only before the dependent task has started,
 without changing its route, holder or pipeline. The store refuses a started,

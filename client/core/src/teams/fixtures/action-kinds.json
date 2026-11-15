@@ -8,6 +8,7 @@
   "cancel",
   "create",
   "decide",
+  "edit_draft_phase",
   "hold",
   "pause",
   "pause_member",
@@ -24,6 +25,7 @@
   "settings",
   "stop",
   "stop_member",
+  "submit_draft_phase",
   "swap_member",
   "validation_config"
 ]

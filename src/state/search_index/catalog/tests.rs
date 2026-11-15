@@ -331,3 +331,50 @@ fn native_id_records_are_queued_and_unsupported_namespaces_never_mean_absence() 
     assert_eq!(fixture.store.catalog_status().unwrap()["unsupported_native"],true);
     assert!(!super::super::legacy_sources(&fixture.state).unwrap().complete);
 }
+
+#[test]
+fn a_hot_atomic_writer_does_not_starve_stable_late_paths() {
+    let fixture = Fixture::new(0);
+    let mut hot = None;
+    for n in 0..1024 {
+        let name = format!("codex/example/churn-{n}");
+        let path = fixture
+            .state
+            .join(format!("{:x}.json", Sha256::digest(name.as_bytes())));
+        let record = json!({"version":1,"agent":"codex","name":name,"run_id":format!("run-{n}"),"conversation_id":uuid::Uuid::from_u128(n+1).to_string()});
+        fs::write(&path, record.to_string()).unwrap();
+        if n == 0 {
+            hot = Some((path, record));
+        }
+    }
+    let (path, mut record) = hot.unwrap();
+    let mut reached = false;
+    for round in 0..96 {
+        let progress = fixture.discover(32);
+        record["updated"] = json!(round);
+        crate::state::atomic(&path, &record.to_string()).unwrap();
+        assert!(
+            !progress.complete,
+            "a churned census must not prove absence"
+        );
+        if fixture.totals().0 == 1024 {
+            reached = true;
+            break;
+        }
+    }
+    assert!(
+        reached,
+        "one changing record starved stable late paths: {:?}",
+        fixture.totals()
+    );
+    assert_ne!(
+        fixture.store.catalog_status().unwrap()["discovery"],
+        "complete"
+    );
+    for _ in 0..96 {
+        if fixture.discover(32).complete {
+            return;
+        }
+    }
+    panic!("stopping the writer did not allow complete coverage");
+}

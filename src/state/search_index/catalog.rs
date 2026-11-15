@@ -9,6 +9,8 @@ const BATCH: usize = 256;
 // census and a new owner starts incomplete; no serialized offset proves absence.
 pub(super) struct Census {
     stamp: String,
+    identity: String,
+    changed: bool,
     generation: String,
     streams: VecDeque<(&'static str, fs::ReadDir)>,
     pending: Option<(&'static str, PathBuf)>,
@@ -278,6 +280,7 @@ impl Store {
         }
         let roots = roots(state);
         let before = directory_stamp(&roots)?;
+        let identity = directory_identity(&roots)?;
         let saved: Option<String> = self
             .index
             .connection()
@@ -301,7 +304,10 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         let mut owned = self.census.borrow_mut();
-        if owned.as_ref().is_none_or(|census| census.stamp != before) {
+        if owned
+            .as_ref()
+            .is_none_or(|census| census.identity != identity)
+        {
             *owned = None;
             let mut streams = VecDeque::new();
             for (kind, path) in &roots {
@@ -319,6 +325,8 @@ impl Store {
                 .map_err(|_| "Search discovery is already being continued")?;
             *owned = Some(Census {
                 stamp: before.clone(),
+                identity,
+                changed: false,
                 generation: uuid::Uuid::new_v4().to_string(),
                 streams,
                 pending: None,
@@ -326,6 +334,7 @@ impl Store {
             });
         }
         let census = owned.as_mut().expect("census was initialized");
+        census.changed |= census.stamp != before;
         let generation = census.generation.clone();
         let mut batch = Vec::with_capacity(BATCH);
         let mut exhausted = true;
@@ -395,7 +404,9 @@ impl Store {
             progress.staged += batch.len();
         }
         let after = directory_stamp(&roots)?;
-        progress.changed = before != after;
+        let same_namespace = directory_identity(&roots)? == census.identity;
+        census.changed |= before != after;
+        progress.changed = census.changed || !same_namespace;
         progress.complete = exhausted && !progress.changed;
         if progress.complete {
             let tx = self
@@ -420,7 +431,7 @@ impl Store {
             .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
-        if progress.complete || progress.changed {
+        if exhausted || !same_namespace {
             *owned = None;
         }
         // Even complete discovery leaves coverage incomplete until the queued
@@ -491,6 +502,21 @@ pub(super) fn discovery_current(state: &Path, db: &Connection) -> bool {
         )
         .ok();
     saved.is_some_and(|saved| directory_stamp(&roots(state)).is_ok_and(|current| current == saved))
+}
+
+fn directory_identity(roots: &[(&str, PathBuf)]) -> Result<String> {
+    let mut hash = Sha256::new();
+    hash.update(b"search-namespaces-v1");
+    for (kind, path) in roots {
+        hash.update(kind);
+        hash.update(path.to_string_lossy().as_bytes());
+        match crate::platform::FileIdentity::at(path) {
+            Ok((id, meta)) if meta.is_dir() => hash.update(format!("{}:{}", id.device, id.inode)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => hash.update(b"absent"),
+            _ => return Err("Search catalog namespace is unreadable or changed kind".into()),
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn directory_stamp(roots: &[(&str, PathBuf)]) -> Result<String> {

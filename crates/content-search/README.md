@@ -23,7 +23,8 @@ slice. Small search headers are prepared across the catalog before historical
 message ingestion, so a long history cannot hide later sessions from fresh
 fallback. Each preparation/ingestion slice consumes at most 32 file opens / 128 public records / 4 MiB of
 retained metadata and history / 250 ms. Cold metadata preparation has a separate
-64 MiB raw-I/O bound; one record is also capped at 64 MiB. It validates canonical
+256 MiB aggregate raw-I/O bound; one record and its transient body remain
+capped at 64 MiB, and at most 32 source handles are retained. It validates canonical
 JSON and retains only search fields, excluding private job output. Small
 projections (at most 1 MiB each) live in a bounded 32 MiB / 50,000-row cache.
 Every cache reuse opens the canonical file without following its final link and
@@ -42,7 +43,7 @@ validation; neither is inferred from a missing search match. A constant-size
 
 Foreground discovery retains its 500-file / 2,000-entry / 4 MiB raw-I/O / 500 ms
 bounds. It uses the compact projections rather than repeatedly reading large
-private histories. Small computers may wait up to 1.5 seconds for their first
+private histories. Small computers may wait up to 2 seconds for their first
 preparation; a catalog above 500 candidates returns bounded partial results
 while the helper continues. No partial inventory establishes absence.
 

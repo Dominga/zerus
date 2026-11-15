@@ -73,7 +73,7 @@ pub(in crate::state) fn run() -> Result<i32> {
         &serde_json::to_vec(&json!({"pid":std::process::id(),"started":started,"state":"running"}))
             .map_err(|e| e.to_string())?,
     )?;
-    let result = workload(&state, &original);
+    let result = workload(&state, &original, lower_own_priority);
     original.verify()?;
     let (phase, error) = match &result {
         Ok(true) => ("complete", String::new()),
@@ -87,23 +87,50 @@ pub(in crate::state) fn run() -> Result<i32> {
 fn workload(
     state: &Path,
     original: &super::super::repositories::directory::Directory,
+    lower_priority: fn(),
 ) -> Result<bool> {
     let launched = Instant::now();
-    let mut store = Store::open(&state.join("content-search-v1"))?;
+    let mut store = None;
     let cancel = AtomicBool::new(false);
-    let until = Instant::now() + Duration::from_secs(120);
+    let until = launched + Duration::from_secs(120);
     let mut background = false;
     for _ in 0..8192 {
         if Instant::now() >= until {
             return Ok(false);
         }
         original.verify()?;
-        if !background && !preparation_priority(&store.catalog_status()?, launched.elapsed()) {
-            lower_own_priority();
-            background = true;
+        if store.is_none() {
+            match Store::open(&state.join("content-search-v1")) {
+                Ok(opened) => store = Some(opened),
+                Err(error) if contention(&error) => {
+                    std::thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        step(&mut store, state, &cancel)?;
-        let status = store.catalog_status()?;
+        let attempt = (|| -> Result<Value> {
+            let current = store.as_mut().ok_or("Search worker lost its store")?;
+            if !background && !preparation_priority(&current.catalog_status()?, launched.elapsed())
+            {
+                lower_priority();
+                background = true;
+            }
+            step(current, state, &cancel)?;
+            current.catalog_status()
+        })();
+        let status = match attempt {
+            Ok(status) => status,
+            Err(error) if contention(&error) => {
+                // A failed census commit may have advanced its native iterator.
+                // Drop it and reopen from incomplete coverage; never skip paths
+                // or abandon the campaign because a foreground reader overlapped.
+                store = None;
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if status["discovery"] == "complete"
             && status["pending_paths"] == 0
             && status["decoder_pending"] != true
@@ -113,6 +140,13 @@ fn workload(
         std::thread::sleep(Duration::from_millis(1));
     }
     Ok(false)
+}
+
+fn contention(error: &str) -> bool {
+    matches!(
+        error,
+        "database is locked" | "database table is locked" | "database is busy"
+    )
 }
 
 fn preparation_priority(catalog: &Value, elapsed: Duration) -> bool {
@@ -182,6 +216,39 @@ pub(in crate::state) fn wait_small(state: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_overlapping_index_writer_does_not_abandon_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().to_owned();
+        let store = Store::open(&state.join("content-search-v1")).unwrap();
+        store
+            .discover(
+                &state,
+                &DiscoveryBudget::interactive(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        store
+            .index
+            .connection()
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let selected = state.clone();
+        let child = std::thread::spawn(move || {
+            let original =
+                super::super::super::repositories::directory::Directory::open(&selected).unwrap();
+            sent.send(workload(&selected, &original, || {})).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        store.index.connection().execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Ok(true)
+        );
+        child.join().unwrap();
+    }
+
     #[test]
     fn interactive_preparation_yields_on_time_size_or_completed_headers() {
         let pending = json!({"queued_paths":200,"discovery":"incomplete","decoder_pending":true});

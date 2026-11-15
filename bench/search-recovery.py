@@ -34,20 +34,23 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
       import signal
       os.killpg(p.pid,signal.SIGKILL)
      time.sleep(.005)
-    try:io={k:int(v) for k,v in (line.split(':') for line in Path(f'/proc/{p.pid}/io').read_text().splitlines())}
-    except OSError:pass
     _,status,usage=os.wait4(p.pid,0);p.returncode=os.waitstatus_to_exitcode(status)
    else:
     _,status,usage=os.wait4(p.pid,0);p.returncode=os.waitstatus_to_exitcode(status)
    stdout.seek(0);stderr.seek(0)
    errors=stderr.read();(out/f"bench-stderr-{binary.name}-{count}-{label}.log").write_bytes(errors);stderr.seek(0)
    if sys.platform.startswith('linux'):
-    peak=int(usage_path.read_text().strip().splitlines()[-1])
+    measured=usage_path.read_text().strip().split();peak=int(measured[0])
+    io={key:None if int(value)==2**64-1 else int(value) for key,value in zip(['rchar','read_bytes'],measured[1:3])}
+    peak_source='proc-vmhwm-1ms' if int(measured[3]) else 'wait4-upper-bound'
    else:
-    peak=int(re.search(rb'(\d+)\s+maximum resident set size',errors).group(1))/1024
+    peak=int(re.search(rb'(\d+)\s+maximum resident set size',errors).group(1))/1024;peak_source='time-child'
    try:value=json.load(stdout)
    except Exception:value=dict(error=stderr.read().decode(errors='replace')[:500])
-  item=dict(label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source='time-child',reply=value)
+  try:
+   with (state/'content-search-v1/worker.json').open() as handle:worker=json.loads(handle.read(4096))
+  except (OSError,ValueError):worker=None
+  item=dict(worker_status=worker,label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source=peak_source,reply=value)
   results.append(item);print(json.dumps(item),flush=True);return value
  try:
   if order=='legacy-first':

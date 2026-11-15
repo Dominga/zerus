@@ -38,6 +38,40 @@ class SearchRecovery(unittest.TestCase):
             self.assertTrue(indexed['fallback']['discovery']['complete'])
             self.assertEqual(indexed['fallback']['discovery']['metadata_io'],0)
 
+    def test_one_request_survives_a_temporary_index_writer(self):
+        with tempfile.TemporaryDirectory(prefix='hgs-search-busy-') as temporary:
+            root=Path(temporary);state=root/'sessions';state.mkdir(mode=0o700)
+            env={key:value for key,value in os.environ.items() if not key.startswith('HGS_')}
+            env.update(HOME=str(root),HGS_STATE_DIR=str(state),HGS_CONFIG_DIR=str(root/'config'))
+            name='codex/example/busy';conversation=str(uuid.uuid4());transcript=root/(conversation+'.jsonl')
+            transcript.write_text(json.dumps(dict(type='event_msg',timestamp=1,payload=dict(type='agent_message',id='public',message='public needle',phase='final')))+'\n')
+            record=dict(version=1,agent='codex',name=name,run_id='run',conversation_id=conversation,transcript=str(transcript),updated=1,shell_jobs=dict(job=dict(output='x'*(9<<20))))
+            (state/(hashlib.sha256(name.encode()).hexdigest()+'.json')).write_text(json.dumps(record))
+            seeded=subprocess.run([str(HGS),'search','--index-discover'],env=env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(seeded.returncode,0,seeded.stderr)
+            path=state/'content-search-v1/index.sqlite3'
+            with closing(sqlite3.connect(path,timeout=.1)) as db:
+                db.execute('BEGIN IMMEDIATE')
+                process=subprocess.Popen([str(HGS),'search','--query','needle','--limit','20','--indexed'],env=env,text=True,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                try:
+                    until=time.monotonic()+3
+                    while not (state/'content-search-v1/worker.json').exists() and time.monotonic()<until:
+                        time.sleep(.01)
+                    self.assertTrue((state/'content-search-v1/worker.json').exists(),'worker was not launched')
+                    time.sleep(.2) # Longer than SQLite's 50-ms contention wait.
+                finally:
+                    db.rollback()
+                stdout,stderr=process.communicate(timeout=10)
+                self.assertEqual(process.returncode,0,stderr)
+            until=time.monotonic()+3;last=None
+            while time.monotonic()<until:
+                with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True,timeout=.1)) as db:
+                    last=db.execute('SELECT paths,pending FROM catalog_totals WHERE id=1').fetchone()
+                    if last==(1,0) and db.execute('SELECT messages FROM totals WHERE id=1').fetchone()[0]==1:
+                        return
+                time.sleep(.05)
+            self.fail(f'temporary contention abandoned the only requested campaign: {last}; {stdout}')
+
     def test_one_search_finishes_its_pending_catalog_without_more_search_requests(self):
         with tempfile.TemporaryDirectory(prefix='hgs-search-recovery-') as temporary:
             root = Path(temporary)

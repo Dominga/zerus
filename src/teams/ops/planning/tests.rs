@@ -149,6 +149,45 @@ fn ordinary_create_keeps_its_wire_shape_status_and_schema() {
 }
 
 #[test]
+fn ordinary_planning_notices_keep_their_own_authority_without_task_cards() {
+    let mut h = Harness::empty();
+    h.run(&person(), start()).unwrap();
+    let notice = Operation::OpenCard {
+        kind: "standing_confirmation".into(),
+        text: "The lead's startup needs attention.".into(),
+        node: None,
+        decisions: Some(vec!["acknowledged".into()]),
+        parameters: Some(vec![("member".into(), "lead".into())]),
+    };
+    assert_eq!(
+        h.run(&person(), notice.clone()).unwrap_err().code,
+        code::NOT_ALLOWED
+    );
+    let card = h.run(&service(), notice).unwrap().item.unwrap();
+    h.run(
+        &service(),
+        Operation::CloseCard {
+            card,
+            reason: "The lead's startup is ready.".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(h.store.card(TEAM, card).unwrap().unwrap().state, "closed");
+    let refused = Operation::OpenCard {
+        kind: "task_note".into(),
+        text: "A task card is not planning context.".into(),
+        node: Some(1),
+        decisions: None,
+        parameters: None,
+    };
+    assert_eq!(
+        h.run(&service(), refused).unwrap_err().code,
+        code::INVALID_STATE
+    );
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}
+
+#[test]
 fn changed_replay_and_existing_team_refuse_planning_without_a_second_notice() {
     let mut h = Harness::empty();
     let original = request(0, start());

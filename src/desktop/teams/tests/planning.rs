@@ -114,4 +114,18 @@ fn an_unknown_planning_launch_is_never_repeated_after_restart() {
             .unwrap();
     }
     assert_eq!(cards(&h).iter().filter(|c| c.state == "open").count(), 1);
+    let notice = cards(&h).remove(0);
+    assert_eq!(notice.kind, "launch_uncertain");
+    h.run(
+        &person(),
+        ops::Operation::DecideCard {
+            card: notice.seq,
+            decision: "acknowledged".into(),
+        },
+    )
+    .unwrap();
+    advance(&mut replacement, &mut h, &mut e, 20);
+    assert_eq!(e.events, ["worktree:lead", "launch:lead"]);
+    assert_eq!(cards(&h).len(), 1);
+    assert_eq!(cards(&h)[0].state, "closed");
 }

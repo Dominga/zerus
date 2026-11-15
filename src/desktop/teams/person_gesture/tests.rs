@@ -122,7 +122,7 @@ fn expired_original_is_consumed_after_the_writer_lock_and_changes_nothing() {
 
 #[test]
 fn operation_uuid_revision_and_card_are_bound_to_the_native_original() {
-    for field in ["uuid", "revision", "card", "decision", "team"] {
+    for field in ["decision", "uuid", "revision", "card", "team"] {
         let (mut h, request) = sample();
         let mut admission = Admission::fixture(&h.store, &request);
         let mut different = intent(&admission);
@@ -458,7 +458,13 @@ fn receipt_lookup_never_repairs_a_missing_or_oversized_original() {
             "oversized" => {
                 db.execute(
                     "UPDATE requests SET result=?2 WHERE id=?1",
-                    params![request.request_id, "x".repeat(600000)],
+                    // Valid JSON would decode successfully without the size
+                    // fence; a syntax error must not make this control pass.
+                    params![
+                        request.request_id,
+                        json!({"Refused":{"code":"invalid_state","message":"x".repeat(600000)}})
+                            .to_string()
+                    ],
                 )
                 .unwrap();
             }
@@ -475,4 +481,31 @@ fn receipt_lookup_never_repairs_a_missing_or_oversized_original() {
         );
         assert_eq!(h.store.team(TEAM).unwrap().unwrap().revision, before);
     }
+}
+
+#[test]
+fn store_nonce_and_original_native_evidence_are_immutable() {
+    let (mut h, request) = sample();
+    let admission = Admission::fixture(&h.store, &request);
+    let original_intent = intent(&admission);
+    apply(&mut h, &request, admission).unwrap();
+    let db = h.store.db.as_ref().unwrap();
+    let before = identity(db, h.store.state()).unwrap();
+    assert!(db
+        .execute(
+            "UPDATE person_gesture_store SET nonce=?1 WHERE id=1",
+            [uuid::Uuid::new_v4().to_string()]
+        )
+        .is_err());
+    assert!(db
+        .execute("DELETE FROM person_gesture_store WHERE id=1", [])
+        .is_err());
+    assert!(db
+        .execute(
+            "UPDATE person_gestures SET intent='{}' WHERE request_id=?1",
+            [&request.request_id]
+        )
+        .is_err());
+    assert_eq!(identity(db, h.store.state()).unwrap(), before);
+    original(db, &original_intent).unwrap();
 }

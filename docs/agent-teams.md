@@ -579,6 +579,22 @@ also clears an older stale mark in Backlog or To do. An attempt still being
 cancelled is settled before the send creates its new queue entry; a task
 still in In review cannot be resent.
 
+## Hand-outs refused before delivery
+
+A task-attempt fence can refuse a hand-out as `cutting_over`: nothing was
+reserved or sent. That closes the effect as not delivered and frees the task
+and member. The service checks again after its normal refusal backoff and
+hands the task out under a new effect when the fence admits it. It never
+replays the refused effect. An ordinary refusal before input follows the same
+rule; an unknown or uncertain delivery keeps its reservation and is never
+sent again automatically.
+
+A proven non-delivery does not open a `delivery_uncertain` inbox item. The
+service also reconciles such effects recorded by older versions and closes
+only the false item bound to their original outcome receipt, including after
+manual recovery. A genuine unknown delivery stays open. A refused reopen
+still hands the task back to the lead, with its own reason and hold.
+
 ## Project limits
 
 A hand-out is written with the lead as its actor and the member as the

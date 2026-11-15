@@ -34,6 +34,14 @@ const STEPS: &[(u32, Step)] = &[
     (10, hold_owners),
     (11, key_refusal_order),
 ];
+#[cfg(test)]
+pub(in crate::teams::store) fn published_layouts() -> Vec<u32> {
+    STEPS
+        .iter()
+        .map(|(from, _)| *from)
+        .chain([EXTENSION])
+        .collect()
+}
 /// One step from a merged layout to the next, inside the transition.
 type Step = fn(&Connection) -> Result<()>;
 /// Layout 8 to 9: the lead's answers reach their members.

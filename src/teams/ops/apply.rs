@@ -9,7 +9,23 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
+    apply_with_gesture(store, actor, request, now, None)
+}
+
+pub(crate) fn apply_with_gesture(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+) -> Result<Reply> {
     validate_request(request, now)?;
+    if matches!(actor, Actor::Person { .. })
+        && matches!(request.operation, Operation::DecideCard { .. })
+        && admission.is_none()
+    {
+        return Err(crate::desktop::teams::person_gesture::required());
+    }
     store.refresh()?;
     prepare_first(store, actor, request)?;
     let state = store.state().to_owned();
@@ -20,6 +36,18 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
     store::execution_fence(&tx)?;
+    let gesture = admission
+        .map(|admission| admission.consume(&tx, &state, actor, request))
+        .transpose()?;
+    if let Some(intent) = &gesture {
+        if let Some(saved) = replay(&tx, actor, request)? {
+            crate::desktop::teams::person_gesture::original(&tx, intent)?;
+            return saved;
+        }
+        // Bound the native point-read bodies before the common kernel reads
+        // its team. The snapshot cannot change under this writer transaction.
+        crate::desktop::teams::person_gesture::fresh(&tx, intent)?;
+    }
     let current = rows::team(&tx, &request.team)?;
     let team = current
         .clone()
@@ -55,6 +83,9 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         return result;
     }
     save(&tx, actor, request, &result)?;
+    if let Some(intent) = &gesture {
+        crate::desktop::teams::person_gesture::record(&tx, intent)?;
+    }
     tx.commit().map_err(storage)?;
     result
 }
@@ -98,7 +129,11 @@ fn verify_actor(db: &Connection, actor: &Actor, team: &Team) -> Result<()> {
     }
     Ok(())
 }
-fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Result<Reply>>> {
+pub(crate) fn replay(
+    db: &Connection,
+    actor: &Actor,
+    request: &Request,
+) -> Result<Option<Result<Reply>>> {
     let saved: Option<(String, String, String)> = db
         .query_row(
             "SELECT actor,content,result FROM requests WHERE id=?1",

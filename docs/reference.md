@@ -5993,7 +5993,18 @@ Unknown options and repeated valued options are refused ("given twice");
 a repeated switch is accepted and reads as once. `--team` takes a lowercase
 canonical UUID; a lead or a member may omit it for its own team.
 
-**Who runs a command.** `hgs team` proves its caller with one interim check.
+**Owner-card decisions.** A person decides an owner card in the Zerus window,
+after its native confirmation of the canonical card, computer, decision and
+revision. `hgs team decide` returns `person_gesture_required`, including an
+unmarked, detached or remotely forwarded Person command. A renderer
+`confirmed` flag, an actor label or a saved receipt supplies no new permission.
+An uncertain decision is checked only through its exact original receipt;
+missing, corrupt or foreign evidence never resends it. Teams schema 3 retains
+the native intent with the decision's receipt and fences older CLI writers.
+The remaining Person operations below still use the interim caller rule
+during the following migration slices.
+
+**Who runs other commands.** `hgs team` proves its caller with one interim check.
 With the preview on, so does an `hgs task` command that touches a team: one
 with `--team`, or one on a task whose team key guards it. Every other task
 command behaves as with the preview off. A command carrying a session's markers
@@ -6044,7 +6055,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
 | `stop`, `archive` | yes | | | none |
-| `decide` | yes | | | `card`, `decision` |
+| Owner-card Decide | native window only | | | canonical `card`, `decision`; CLI returns `person_gesture_required` |
 | `admit`, `hold`, `release` | yes | yes | | `node` |
 | `set-deps` | yes | | | `node`, `deps` (up to 200 `{node, kind?}` entries; `hard` by default, or `soft`) |
 | `route` | yes | yes | | `node`, `role`, `pipeline`, optional `deps`, `writes`, `assignee` |
@@ -6218,7 +6229,7 @@ puts its open work back to the lead. A task already handed out stays held
 until its observation moves; it takes no free member. A settings change
 touches only the live nodes, and only when the integration setting actually
 changed; the archive keeps the value each node ended with. The lead does not
-resume a team the person paused or a member the person stopped. `decide` takes `approve` or
+resume a team the person paused or a member the person stopped. Owner-card Decide takes `approve` or
 `reject` for the `integration` and `pipeline_acceptance` cards, `acknowledged`
 for an ordinary card without a stored list, and only a listed word for a card
 that stores its list; a wrong word is refused and nothing is written. `create` records the

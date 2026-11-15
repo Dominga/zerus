@@ -713,6 +713,7 @@ impl Validated {
                     | Request::TaskMessageInputRelease { .. }
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
+                    | Request::TeamPersonDecide { .. }
                     | Request::CompactToSend { .. }
                     | Request::SessionResume { .. }
                     | Request::TaskStartReconcile { .. }
@@ -784,6 +785,24 @@ impl Validated {
             anyhow::bail!("not a deferred answer");
         };
         Ok(*intent)
+    }
+    /// Consumed by the Teams kernel only after its BEGIN IMMEDIATE.
+    pub(crate) fn team_person_decide(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person::Intent> {
+        self.check()?;
+        let Request::TeamPersonDecide { intent } = self.0 else {
+            anyhow::bail!("not a Teams Person decision");
+        };
+        Ok(*intent)
+    }
+    pub(crate) fn team_person_intent(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::team_person::Intent> {
+        match &self.0 {
+            Request::TeamPersonDecide { intent } => Some(intent),
+            _ => None,
+        }
     }
     /// Only the compact-to-send actor calls this, after BEGIN IMMEDIATE.
     /// Cached native Service mode was bound to this exact original request
@@ -1641,6 +1660,14 @@ fn validate(
             "deferred answer does not match the native service frontend"
         );
     }
+    if let Request::TeamPersonDecide { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "Teams Person decision does not match the native service frontend"
+        );
+    }
     if let Request::CompactToSend { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1744,6 +1771,7 @@ enum OrderedOperation {
     TaskMessageInputRelease,
     DeferredSend,
     DeferredAnswer,
+    TeamPersonDecide,
     CompactToSend,
     SessionResume,
     TaskStartReconcile,
@@ -1774,6 +1802,7 @@ impl From<&Request> for OrderedOperation {
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::TeamPersonDecide { .. } => Self::TeamPersonDecide,
             Request::CompactToSend { .. } => Self::CompactToSend,
             Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
@@ -2816,6 +2845,61 @@ mod tests {
             .is_err());
         if let Request::DeferredAnswer { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn team_person_decide_requires_the_original_service_frontend_and_its_own_typed_boundary() {
+        use zerus_client_core::desktop::{
+            creation_clone::Scope,
+            ownership::Mode,
+            team_person::{Intent, Plan},
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: id(90),
+            },
+            machine: id(91),
+            store: "b".repeat(64),
+            facts: "c".repeat(64),
+            plan: Plan {
+                request_id: id(92),
+                team: id(93),
+                expected_revision: 7,
+                card: 1,
+                decision: "acknowledged".into(),
+            },
+        };
+        envelope.request = Request::TeamPersonDecide {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TeamPersonDecide
+        );
+        assert_ne!(
+            OrderedOperation::TeamPersonDecide,
+            OrderedOperation::DeferredAnswer
+        );
+        reply.request.request_id = intent.plan.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        let value = serde_json::json!(envelope.request);
+        assert!(Validated::fixture(&value).into_request().is_err());
+        assert_eq!(
+            Validated::fixture(&value).team_person_decide().unwrap(),
+            intent
+        );
+        if let Request::TeamPersonDecide { intent } = &mut envelope.request {
+            intent.scope.configuration = "f".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());

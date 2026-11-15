@@ -1150,6 +1150,10 @@ impl Proof {
         if !holds {
             return closed(None, "changed_version");
         }
+        // The proof resource allowance never extends native admission.
+        if left(deadline).is_zero() {
+            return closed(None, "deadline");
+        }
         let result = then(&catalog, &mut admitted, &mut task)?;
         drop(admitted);
         drop(store);
@@ -1776,12 +1780,21 @@ fn admit_matching<R>(
         if expected == Some(start_mode::Mode::Legacy) {
             return Ok(Err(start_mode::changed()));
         }
+        // The expected-mode load can itself consume the remaining time.
+        if left(deadline).is_zero() {
+            return closed(None, "deadline");
+        }
         entered.set(true);
         (reserve.take().expect("reserved at most once"))(admitted, task)
     };
     // An error once `reserve` was entered leaves its save unknown.
     let uncertain = |error: anyhow::Error| Admission::Uncertain(format!("{error:#}"));
+    let expired = || uncertain(anyhow::anyhow!(
+        "the original task admission deadline elapsed after reservation; \
+         the original result is uncertain and must not be replayed"
+    ));
     match admit_certified(config, project, uuid, deadline, &mut run) {
+        Ok(Ok(Ok(_))) if left(deadline).is_zero() => return Ok(expired()),
         Ok(Ok(Ok(value))) => {
             return Ok(Admission::Reserved {
                 value,
@@ -1824,6 +1837,7 @@ fn admit_matching<R>(
         }))
     });
     match admitted {
+        Ok(Ok(Admission::Reserved { .. })) if left(deadline).is_zero() => Ok(expired()),
         Ok(Ok(decided)) => Ok(decided),
         Ok(Err(refused)) => Ok(Admission::Refused(refused)),
         Err(error) if entered.get() => Ok(uncertain(error)),
@@ -1924,6 +1938,10 @@ pub(crate) fn admit_certified<R>(
     {
         return closed(None, "changed_version");
     }
+    // A certificate's resource allowance is not native admission time.
+    if left(deadline).is_zero() {
+        return closed(None, "deadline");
+    }
     let result = then(&mut admitted, &mut task)?;
     drop(admitted);
     drop(store);
@@ -1939,6 +1957,7 @@ mod tests {
     use crate::swarm::store::Peer;
     use anyhow::ensure;
     mod legacy_writes;
+    mod proof_deadlines;
 
     fn fixture() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();

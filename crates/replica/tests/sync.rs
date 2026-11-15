@@ -338,7 +338,7 @@ fn write_cache(root: &Path, bytes: &[u8]) {
     fs::write(
         cache.with_file_name("inventory.repaired"),
         format!(
-            "schema-repair-2 mark-{} {:x}\n",
+            "schema-repair-3 proof-budget-1 mark-{} {:x}\n",
             zerus_replica::MARK_FORMAT,
             Sha256::digest(bytes)
         ),
@@ -648,4 +648,31 @@ fn a_task_and_the_project_report_the_versions_their_inventory_holds() {
         let loaded = store.load(task.uuid()).unwrap();
         assert_eq!(&loaded.inventory_version(), &inventory.tasks[task.uuid()]);
     }
+}
+
+#[test]
+fn negative_cache_rows_from_the_old_proof_policy_are_revalidated() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let task = add(&a, "Still a valid task");
+    settle_all(root.path());
+    a.inventory().unwrap();
+    let cache = cache_file(root.path());
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    value["tasks"][task.uuid()]["error"] =
+        "the original task floor cannot be proved from its full history".into();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    fs::write(&cache, &bytes).unwrap();
+    fs::write(
+        cache.with_file_name("inventory.repaired"),
+        format!(
+            "schema-repair-2 mark-{} {:x}\n",
+            zerus_replica::MARK_FORMAT,
+            Sha256::digest(&bytes)
+        ),
+    )
+    .unwrap();
+    let (inventory, damaged) = a.inventory().unwrap();
+    assert!(damaged.is_empty());
+    assert!(inventory.tasks.contains_key(task.uuid()));
 }

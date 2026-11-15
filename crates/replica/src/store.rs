@@ -1280,7 +1280,7 @@ impl ProjectStore {
                     return Err(Error::failed("the task's updates are not whole"));
                 }
                 for (payload, _) in found {
-                    if !task.import_block(payload) {
+                    if !task.import_block(payload)? {
                         return Err(Error::failed("an update of the task cannot be read"));
                     }
                 }
@@ -1322,7 +1322,7 @@ impl ProjectStore {
                 task.needs_fold = !intact;
                 first = found.first().map(|(_, end)| bytes[..*end].to_vec());
                 for (payload, end) in found {
-                    if !task.import_block(payload) {
+                    if !task.import_block(payload)? {
                         task.needs_fold = true;
                         break;
                     }
@@ -1455,7 +1455,7 @@ impl ProjectStore {
             if base != durable {
                 let changes = task.export_since_vv(&base)?;
                 let mut current = self.load_admitted(task.uuid())?;
-                if !current.import_block(&changes) {
+                if !current.import_block(&changes)? {
                     return Err(Error::new(
                         "this task changed here meanwhile and these changes do not apply to it; \
                          read it again",
@@ -1568,6 +1568,7 @@ impl ProjectStore {
         for uuid in self.uuids()? {
             match self.load(&uuid) {
                 Ok(task) => tasks.push(task),
+                Err(error) if error.kind() == crate::ErrorKind::Busy => return Err(error),
                 Err(error) => damaged.push(self.damaged(&uuid, error.to_string())),
             }
         }

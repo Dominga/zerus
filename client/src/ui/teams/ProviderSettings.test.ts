@@ -72,3 +72,12 @@ it.each(["home", "project", "team"] as const)("rejects an inspection from anothe
   expect(f.host.textContent).toContain("The team changed. Read its provider configuration again.");
   expect(f.button("save").disabled).toBe(true); expect(f.save).not.toHaveBeenCalled();
 });
+it("does not launch a reread when a save completes after the dialog closed", async () => {
+  const f = setup(); await tick(); f.button("check").click(); await tick();
+  let finish!: (outcome: TeamOutcome) => void;
+  f.save.mockImplementation(() => new Promise<TeamOutcome>((resolve) => { finish = resolve; }));
+  f.button("save").click(); await tick();
+  dispose?.(); dispose = undefined;
+  finish({ outcome: "done", receipt: {}, request_id: "original" }); await tick();
+  expect(f.save).toHaveBeenCalledOnce(); expect(f.port).toHaveBeenCalledTimes(2);
+});

@@ -15,8 +15,10 @@ export function ProviderSettings(props: { view: TeamView; locked: boolean; onSav
   const [error, setError] = createSignal("");
   const [unknown, setUnknown] = createSignal(false);
   let generation = 0;
-  onCleanup(() => { generation++; });
+  let closed = false;
+  onCleanup(() => { closed = true; generation++; });
   const read = async (candidate = false) => {
+    if (closed) return;
     const parsed = parseOverride(text());
     if (candidate && parsed.error) { setError(parsed.error); return; }
     const team = props.view.bar.id, home = props.view.bar.home, project = props.view.bar.project, revision = props.view.revision, token = ++generation;
@@ -34,10 +36,11 @@ export function ProviderSettings(props: { view: TeamView; locked: boolean; onSav
   createEffect(() => { props.view.bar.id; props.view.bar.home; props.view.bar.project; props.view.revision; generation++; setShown(undefined); setChecked(undefined); untrack(() => { void read(); }); });
   const save = async () => {
     const value = checked();
-    if (!value || busy() || props.locked || unknown() || value.team !== props.view.bar.id || value.revision !== props.view.revision) return;
+    if (closed || !value || busy() || props.locked || unknown() || value.team !== props.view.bar.id || value.revision !== props.view.revision) return;
     setBusy(true); setError("");
     try {
       const outcome = await props.onSave({ team: value.team, team_name: props.view.bar.name, expected_revision: value.revision, request_id: newRequestId(), action: { kind: "validation_config", selection: { source_digest: value.source_digest, digest: value.digest, override_config: value.override_config } } });
+      if (closed) return;
       if (outcome.outcome === "done") { setChecked(undefined); await read(); }
       else if (outcome.outcome === "failed") { setError(outcome.detail); setChecked(undefined); }
       else { setUnknown(true); setChecked(undefined); setError(tr("The selection is not confirmed. Check the original action in the Team tab.")); }

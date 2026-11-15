@@ -49,7 +49,7 @@ mod cases {
         json!({"source_digest":r["source_digest"],"digest":r["digest"],"override_config":r["override_config"]})
     }
     fn save(h: &Harness, sel: serde_json::Value, caller: &Caller) -> (serde_json::Value, i32) {
-        h.cli(caller,"validation-settings",&json!({"team":TEAM,"request_id":uid(0xf000+h.revision() as u32),"expected_revision":h.revision(),"selection":sel}).to_string())
+        h.cli(caller,"validation-settings",&json!({"team":TEAM,"request_id":uuid::Uuid::new_v4().to_string(),"expected_revision":h.revision(),"selection":sel}).to_string())
     }
     fn file(root: &std::path::Path, text: &str) {
         fs::create_dir_all(root.join(".zerus")).unwrap();
@@ -188,6 +188,7 @@ mod cases {
         file(&root, FILE);
         let before = read(&h, &Caller::Person, json!({}));
         let sel = selection(&before);
+        let initial_revision = h.revision();
         file(&root, &FILE.replace("'full', 'focused'", "'full'"));
         let (r, e) = save(&h, sel.clone(), &Caller::Person);
         assert_eq!(
@@ -198,6 +199,10 @@ mod cases {
         fs::rename(&root, root.with_extension("old")).unwrap();
         fs::create_dir(&root).unwrap();
         file(&root, FILE);
+        assert_ne!(
+            read(&h, &Caller::Person, json!({}))["inspection"]["source_digest"],
+            before["inspection"]["source_digest"]
+        );
         let (r, e) = save(&h, sel.clone(), &Caller::Person);
         assert_eq!(
             (e, r["error"]["code"].as_str()),
@@ -212,6 +217,15 @@ mod cases {
             (e, r["error"]["code"].as_str()),
             (1, Some("config_changed"))
         );
+
+        assert_eq!(h.revision(), initial_revision);
+        let refusals: u32 = h.store().db.as_ref().unwrap().query_row("SELECT count(DISTINCT id) FROM requests WHERE team=?1 AND json_extract(content,'$.op')='set_validation_config'", [TEAM], |r| r.get(0)).unwrap();
+        assert_eq!(
+            refusals, 3,
+            "each boundary needs its own refused intent, not a receipt replay"
+        );
+        let fresh = read(&h, &Caller::Person, json!({}));
+        assert_eq!(save(&h, selection(&fresh), &Caller::Person).1, 0);
     }
     #[test]
     fn person_lead_members_other_and_service_have_exact_authority() {

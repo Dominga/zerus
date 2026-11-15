@@ -5909,6 +5909,7 @@ hgs team list [--limit 1..200] [--after CURSOR]
 hgs team waiting [--limit 1..200] [--after CURSOR]
 hgs team status [--team TEAM] [--bundle]
 hgs team inbox|queue|cards|journal [--team TEAM] [--limit 1..200] [--after CURSOR]
+hgs team journal [--team TEAM] [--limit 1..200] [--after CURSOR] --recorded-timings
 hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
@@ -5916,6 +5917,21 @@ hgs team pause-member|resume-member|stop-member|archive-member < request.json
 hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
+
+The optional `journal --recorded-timings` read joins only the effect and stage
+records referenced by that page, using indexed point lookups in the same
+SQLite snapshot. Its `timings` marker gives schema 1 and the team revision of
+that read. Event membership keeps the original journal cursor; mutable outcome
+facts describe each read's revision, not historical work intervals. Reservation,
+first recorded outcome and stage creation are bookkeeping timestamps, never
+native work or test duration. No timing writer or executable provider is added.
+The desktop Timeline requests facts for its displayed event IDs with the bounded
+`--timing-seqs` option, preserving its original page and Next cursor even as
+new events arrive; it can also stay in Events only.
+Export page saves only the displayed bounded page through the native Save
+dialog; unknown computer/phase identity and incomplete-history coverage remain
+explicit in its versioned JSON. It reads no additional history and never
+reposts an unconfirmed export automatically.
 
 Every command prints one JSON object. A refusal is
 `{"ok":false,"error":{"code","message","refs"}}` with exit 1; callers match on

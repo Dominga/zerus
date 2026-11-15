@@ -21,12 +21,10 @@ import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
-// The Team tab (the fork's TeamWorkspace, adapted to M1): the team bar, the
-// member column and the Board with the queue as its own group, each card with
-// its stages, a card's detail and decisions, Add task and the next page. The
-// graph, the phase header, the editor, the feed, proposals and the profile are
-// not part of M1 and are not here. Data comes only from the store's followed
-// team view; every action is one intent through the store.
+// The Team workspace adapts the fork's team bar, members, paged Board, task
+// detail and decisions. Feed, Inbox, Reports and Cards read bounded pages;
+// Lead chat uses the bound lead's ordinary guarded composer. The Board uses
+// the store's followed team view, and team actions use its existing intents.
 
 function columnLabel(column: BoardColumn): string {
   switch (column.key) {

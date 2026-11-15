@@ -74,6 +74,9 @@ class ReachableTaskWriters(unittest.TestCase):
         self.assertEqual(sum(entry["kind"] == "started" for entry in again["task"]["log"]), 1)
         self.assertFalse(list((self.swarm.root / "a/state/replica").glob(f"*/fence/{task['uuid']}.json")))
         self.swarm.call("a", "sync")
+        # Fresh native adoption consumes the existing admitted source's
+        # qualified response; an ordinary pushed request is only candidate data.
+        self.swarm.call("c", "sync")
         self.assertTrue(self.swarm.task("c", "get", task["uuid"], "--project", "a")["task"])
 
     def test_ordinary_stage_and_comment_do_not_start_or_certify_a_task(self):

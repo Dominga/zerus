@@ -467,6 +467,7 @@ impl Admitted<'_> {
 }
 
 pub struct ProjectStore {
+    pub(crate) upload: crate::phone::upload::Directory,
     dir: PathBuf,
     project: String,
     _lock: OwnedLock,
@@ -939,7 +940,9 @@ impl ProjectStore {
         if !name.exists() {
             write_atomic(&name, project.as_bytes())?;
         }
+        let upload = crate::phone::upload::Directory::new(&dir)?;
         Ok(Some(Self {
+            upload,
             dir,
             project: project.into(),
             _lock: lock,

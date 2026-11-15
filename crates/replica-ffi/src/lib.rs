@@ -833,6 +833,18 @@ impl TaskStore {
         })
     }
 
+    /// Opt-in uploads for the exact host advertising task_media_upload_v1.
+    /// Old hosts keep exchange/exchange_fetching; never downgrade an in-flight
+    /// upload or turn an uncertain document exchange into native Send.
+    pub fn exchange_uploading(self: Arc<Self>, tasks: Vec<String>) -> Arc<TaskExchange> {
+        let mut exchange = replica::phone::Exchange::with_uploads();
+        exchange.fetch(tasks);
+        Arc::new(TaskExchange {
+            store: self,
+            state: Mutex::new(exchange),
+        })
+    }
+
     /// The computer's side of one request, as hgs answers it: tests play a
     /// computer with it.
     pub fn answer_exchange(&self, request: String) -> Result<String> {

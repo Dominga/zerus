@@ -134,7 +134,7 @@ pub(super) fn list_teams(
     let blocked = crate::desktop::teams::blocked_service_teams(
         &config.state,
         &ids,
-        crate::teams::store::STUCK_KINDS,
+        crate::teams::store::STUCK_SERVICE_KINDS,
     )
     .unwrap_or_default();
     for (id, summary) in &mut progress {

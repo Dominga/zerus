@@ -335,10 +335,14 @@ pub(super) fn receive(store: &ProjectStore, update: Update) -> Result<(Ack, Opti
     let end = header.offset + chunk.len();
     let path = store.dir().join(SLOT);
     let slot = read_slot(&path)?;
-    let mut bytes=match &slot {
-        Some(slot) if slot.source==source=>slot.bytes.clone(),
-        Some(slot) if slot.bytes.len()!=slot.source.size && !slot.expired=>return Err(Error::failed("another task upload is busy; retry document sync after it settles or ten idle minutes")),
-        _=>Vec::new(),
+    let mut bytes = match &slot {
+        Some(slot) if slot.source == source => slot.bytes.clone(),
+        Some(slot) if slot.bytes.len() != slot.source.size && !slot.expired => {
+            return Err(Error::failed(
+                "another task upload is busy; retry document sync after it settles or ten idle minutes",
+            ));
+        }
+        _ => Vec::new(),
     };
     if header.offset == bytes.len() {
         bytes.extend_from_slice(chunk);

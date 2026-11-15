@@ -96,7 +96,9 @@ class Model(guard.Model):
              choices=[dict(index=0,delta=delta,finish_reason=finish)])
    self.wfile.write(('data: '+json.dumps(data)+'\n\n').encode());self.wfile.flush()
   if 'AskUserQuestion' in tools and not answered:
-   call=dict(index=0,id='call_fixture',type='function',function=dict(name='AskUserQuestion',arguments=json.dumps(dict(questions=fixture.items))))
+   arguments=dict(questions=fixture.items)
+   if getattr(fixture,'background',False):arguments['background']=True
+   call=dict(index=0,id='call_fixture',type='function',function=dict(name='AskUserQuestion',arguments=json.dumps(arguments)))
    chunk(dict(role='assistant',content=None,tool_calls=[call]));chunk({},'tool_calls')
   else:chunk(dict(role='assistant',content='Fixture complete.'));chunk({},'stop')
   self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
@@ -390,7 +392,12 @@ class NativeKimiQuestions(NativeKimi):
    self.startup_snapshot('failure')
    raise
  def setUp(self):
+  self.background='_background_' in self._testMethodName
   self.items=SHORT if '_short_' in self._testMethodName else TALL
+  if '_multiple_choice_' in self._testMethodName:
+   self.items=[dict(SHORT[0],multi_select=True)]
+  elif '_multi_part_' in self._testMethodName:
+   self.items=SHORT+[dict(question='Which database should we use?',header='Database',options=[dict(label='Postgres'),dict(label='SQLite')])]
   self.launch('kimi/question-native')
   def started():
    screen=self.screen()
@@ -448,6 +455,68 @@ class NativeKimiQuestions(NativeKimi):
   receipt=self.answer(self.payload(card,'opt_0_0'),timeout=60)
   self.assertEqual(receipt['status'],'answered')
   self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable'})
+
+ def test_short_background_question_never_claims_to_be_blocking(self):
+  # Retain the active-tool projection while the background tool has returned:
+  # that projection alone cannot establish a blocking native question.
+  self.wait_for(lambda:len(self.native_requests)>=2)
+  card=self.card()
+  self.assertEqual(card['source'],'kimi_wire')
+  self.assertIs(card.get('blocking'),False)
+  self.assertIsNone(self.resolved())
+  self.record.update(active_tools={},phase='idle',activity='idle');self.write_record()
+  self.assertEqual(self.inspect().get('pending_questions',[]),[])
+
+ def test_short_question_exact_identity_and_receipt_prevent_replay(self):
+  card=self.card()
+  bounded=subprocess.run([str(questions.HGS),'inspect',self.name,'--after',str(2**63-1),'--skip-processes'],env=self.env,capture_output=True,text=True,timeout=5)
+  self.assertEqual(bounded.returncode,0,bounded.stderr)
+  self.assertEqual(json.loads(bounded.stdout)['pending_questions'],self.inspect()['pending_questions'])
+  self.assertEqual(len(self.native_requests),1,'foreground question must block its native tool')
+  self.assertEqual((card['source'],card['agent_id'],card['answer_transport']),('kimi_wire','main','kimi_tui'))
+  self.assertIs(card.get('blocking'),True)
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  self.assertFalse(card.get('optional',False));self.assertFalse(card.get('approval',False))
+  for field,value in [('expected_run_id','changed-run'),('expected_conversation_id','changed-conversation'),
+                      ('question_id','changed-question'),('expected_question_hash','a'*64)]:
+   request=self.payload(card,'opt_0_0');request[field]=value
+   self.answer(request,success=False,timeout=60)
+   self.assertIsNone(self.resolved(),field)
+   self.assertEqual(self.card()['question_hash'],card['question_hash'])
+  request=self.payload(card,'opt_0_0')
+  receipt=self.answer(request,timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual((receipt['question_id'],receipt['question_hash']),(card['question_id'],card['question_hash']))
+  self.wait_for(lambda:'Fixture complete.' in self.screen())
+  self.assertEqual(self.answer(request,timeout=60),receipt)
+  changed=json.loads(json.dumps(request));changed['answers'][0]['selected_option_ids']=['opt_0_1']
+  self.assertIn('different content',self.answer(changed,success=False,timeout=60))
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable'})
+  resolved=[json.loads(line) for line in self.wire.read_text().splitlines() if '"interaction.resolved"' in line]
+  self.assertEqual(len(resolved),1)
+
+ def test_short_multiple_choice_question_uses_the_same_native_identity(self):
+  card=self.card()
+  self.assertEqual(len(self.native_requests),1,'foreground question must block its native tool')
+  self.assertIs(card.get('blocking'),True)
+  self.assertTrue(card['questions'][0]['multi_select'])
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  request=self.payload(card,'opt_0_0');request['answers'][0]['selected_option_ids']=['opt_0_0','opt_0_1']
+  receipt=self.answer(request,timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable, Preview'})
+
+ def test_short_multi_part_question_uses_the_same_native_identity(self):
+  card=self.card()
+  self.assertEqual(len(self.native_requests),1,'foreground question must block its native tool')
+  self.assertIs(card.get('blocking'),True)
+  self.assertEqual(len(card['questions']),2)
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  request=self.payload(card,'opt_0_0')
+  request['answers'].append(dict(question_id='q_1',selected_option_ids=['opt_1_1'],text=''))
+  receipt=self.answer(request,timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable','Which database should we use?':'SQLite'})
 
  def other_payload(self,card,text):
   payload=self.payload(card,'opt_0_0')

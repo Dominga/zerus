@@ -266,8 +266,13 @@ class KimiNativeCI(unittest.TestCase):
                 ci.target(*pair)
         self.assertEqual(ci.checked_methods(), ci.METHODS)
         self.assertEqual(len(ci.METHODS), len(set(ci.METHODS)))
-        self.assertEqual(len(ci.METHODS), 25)
+        self.assertEqual(len(ci.METHODS), 29)
         self.assertIn('test_kimi_native.NativeKimi.test_native_refusal_has_an_opted_in_terminal_outcome', ci.METHODS)
+        for method in ('test_short_question_exact_identity_and_receipt_prevent_replay',
+                       'test_short_background_question_never_claims_to_be_blocking',
+                       'test_short_multiple_choice_question_uses_the_same_native_identity',
+                       'test_short_multi_part_question_uses_the_same_native_identity'):
+            self.assertIn('test_kimi_questions_native.NativeKimiQuestions.'+method,ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_hint_reaches_model_through_real_hgs_hook',ci.METHODS)
         self.assertIn('test_kimi_native.NativeKimi.test_expired_cache_compacts_before_delivering_one_original_message', ci.METHODS)

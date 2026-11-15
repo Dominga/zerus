@@ -64,7 +64,7 @@ fn read(
             reason: "damaged",
         }));
     };
-    if task.execution_managed() {
+    if task.execution_managed() || task.cutover_seal()?.is_some() {
         return Ok(Ok(Mode::Managed));
     }
     Ok(match gate {

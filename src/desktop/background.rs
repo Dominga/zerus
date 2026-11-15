@@ -19,6 +19,7 @@ use std::{
 const POLL_EVENTS: usize = 16;
 
 pub(super) struct Runtime {
+    input_acknowledgment: super::input_acknowledgment::Worker,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     teams: super::teams::Worker,
     fleet: fleet::Runtime,
@@ -119,6 +120,7 @@ impl Runtime {
         let route = super::question_route::Runtime::new(config, epoch);
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
+                input_acknowledgment: super::input_acknowledgment::Worker::default(),
                 fleet,
                 producer,
                 presence: None,
@@ -177,6 +179,7 @@ impl Runtime {
         broker: &mut feed::Broker,
         seq: &mut u64,
     ) -> (Vec<Value>, bool) {
+        self.input_acknowledgment.poll();
         if self.stopping {
             let _ = self.poll_drain(store);
             return (Vec::new(), false);
@@ -636,6 +639,17 @@ impl Runtime {
     pub fn drained(&self) -> bool {
         self.drained
     }
+    pub fn acknowledge_input(&mut self, authority: super::ui_authority::Validated, epoch: String, queue: Arc<Queue>, seq: u64) {
+        if self.stopping || self.drained {
+            let value = json!({"op":"input_acknowledge","request_id":authority.id(),"accepted":false,"durable":false,"status":"failed","code":"background_service_stopping"});
+            if let Ok(bytes) = super::protocol::encode(&super::frame(&epoch, seq, "response", value)) {
+                queue.offer(bytes.into());
+            }
+            queue.close();
+            return;
+        }
+        self.input_acknowledgment.start(authority, epoch, queue, seq);
+    }
     #[cfg(windows)]
     pub fn restart_swarm(&self) -> Value {
         if self.stopping || self.drained {
@@ -738,7 +752,8 @@ impl Runtime {
             Some(Ok(false)) => false,
             Some(Err(error)) => return Err(error),
         };
-        self.drained = fleet_done
+        self.drained = self.input_acknowledgment.poll()
+            && fleet_done
             && presence_done
             && self.delivery.drained()
             && self.maintenance.drained()

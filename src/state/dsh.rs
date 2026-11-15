@@ -2066,7 +2066,14 @@ fn inspect_record(name: &str, record: &Value, agent_id: Option<&str>, include_pr
     if agent_id.is_none() && record.get("account_defaults").is_some() {
         result["account_defaults"] = record["account_defaults"].clone();
     }
-    if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
+    if agent_id.is_none() {
+        notifications::enrich(
+            &mut result,
+            notifications::load().as_ref(),
+            journal::journal_name(&record),
+        );
+        question_routing::enrich(&mut result, question_routing::load().as_ref());
+    }
     if let Some(current) = read.and_then(|read| current_read_of(name, &record, read, &inspected)) {
         result["current_read"] = current;
     }
@@ -2127,7 +2134,7 @@ fn question_cards(record: &Value, inspected: &Value) -> Vec<Value> {
         })).collect::<Vec<_>>();
         let hash=format!("{:x}",Sha256::digest(json!([inspected["generation"],q]).to_string().as_bytes()));
         json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
-            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items})
+            "agent_id":"main","source":"dsh_native","blocking":q["blocking"]==true && q["approval"]==false,"approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items})
     }).collect()
 }
 
@@ -3261,6 +3268,38 @@ mod question_identity_tests {
 #[cfg(test)]
 mod notification_tests {
     use super::*;
+    #[test]
+    fn only_positive_ordinary_host_proof_marks_a_question_as_blocking() {
+        let record = json!({"run_id":"run","conversation_id":"session-A"});
+        let q = json!({"id":"native-call","approval":false,"blocking":true,"questions":[{
+            "id":"choice","question":"Pick one","options":[{"label":"First"}]}]});
+        let card = |q: &Value| {
+            question_cards(
+                &record,
+                &json!({"generation":"host","pendingQuestions":[q]}),
+            )
+            .remove(0)
+        };
+        let original = card(&q);
+        assert_eq!(original["blocking"], true);
+        for (key, value) in [
+            ("blocking", Value::Null),
+            ("blocking", json!(false)),
+            ("blocking", json!("true")),
+            ("approval", json!(true)),
+            ("approval", Value::Null),
+        ] {
+            let mut changed = q.clone();
+            changed[key] = value;
+            let card = card(&changed);
+            assert_eq!(card["blocking"], false, "{key}");
+            assert_eq!(
+                card["can_answer"], true,
+                "manual availability stays independent"
+            );
+            assert_ne!(card["question_hash"], original["question_hash"]);
+        }
+    }
     #[test]
     fn notification_baseline_observes_only_inspect_and_list_with_matching_generation() {
         let record = json!({"name":"dsh/test/session","backend":"dsh","conversation_id":"session-A","run_id":"run-A"});

@@ -128,6 +128,8 @@ mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
 #[cfg(feature = "live")]
+mod team_drawers;
+#[cfg(feature = "live")]
 mod teams;
 #[cfg(feature = "live")]
 mod terminal;
@@ -754,6 +756,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(teams::Teams::new());
+                app.manage(team_drawers::DrawerReader::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -1722,6 +1725,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_session,
         actions::composer_state,
         actions::clear_input,
+        desktop_service::acknowledge_input,
         actions::inspect_subagent_identity,
         session_folders::session_folder_status,
         session_folders::session_folder_open,
@@ -1732,6 +1736,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_hidden,
         teams::teams_tasks_changed,
         teams::teams_page,
+        team_drawers::teams_drawer_page,
         teams::team_action,
         teams::team_action_again,
         teams::team_intent_dismiss,

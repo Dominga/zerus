@@ -297,7 +297,9 @@ export async function setParent(target: Target, change: ParentChange): Promise<R
 
 /** The inspect fields of a session; null when they are unavailable. */
 /** Terminal's Clear input read (zerus-wkj9l, core clear_input::ComposerState). */
-export interface ComposerState { binding: string; state: "empty" | "text" | "unknown"; text: string; clearable: boolean; reason: string }
+export interface PendingInput { original_request_id: string; pending_at: number }
+export interface ComposerState { binding: string; state: "empty" | "text" | "unknown"; text: string; clearable: boolean; reason: string; recovery?: PendingInput }
+export interface AcknowledgmentOutcome { status: "person-acknowledged-unknown" | "failed" | "unknown"; error: string }
 /** What one explicit clear did: `failed` typed nothing, `uncertain` may have sent keys. */
 export interface ClearOutcome { status: "cleared" | "failed" | "uncertain"; error: string; composer: string | null }
 export async function composerState(target: Target): Promise<ComposerState | null> {
@@ -305,6 +307,21 @@ export async function composerState(target: Target): Promise<ComposerState | nul
 }
 export async function clearInput(target: Target, binding: string, text: string): Promise<ClearOutcome> {
   return invoke<ClearOutcome>("clear_input", { target, binding, text });
+}
+export async function acknowledgeInput(target: Target, binding: string, pending: PendingInput): Promise<AcknowledgmentOutcome> {
+  const value = await invoke<Record<string, unknown>>("acknowledge_input", { target, binding,
+    originalRequestId: pending.original_request_id, pendingAt: pending.pending_at });
+  // A prior unresolved native intent may return its lookup instead of offering
+  // this request. Its success belongs only to that exact session and input.
+  const evidence = value.acknowledgment && typeof value.acknowledgment === "object"
+    ? value.acknowledgment as Record<string, unknown> : undefined;
+  const exact = !target.computer && value.name === target.name && value.run_id === target.run_id && value.conversation_id === target.conversation_id
+    && value.original_request_id === pending.original_request_id && evidence?.name === target.name
+    && evidence.expected_run_id === target.run_id && evidence.expected_conversation_id === target.conversation_id
+    && evidence.original_request_id === pending.original_request_id && evidence.pending_at === pending.pending_at && evidence.terminal_binding_id === binding;
+  const status = exact && value.status === "person-acknowledged-unknown" && value.accepted === true && value.durable === true && value.pending === false ? "person-acknowledged-unknown"
+    : value.accepted === false && value.pending === false ? "failed" : "unknown";
+  return { status, error: typeof value.error === "string" ? value.error : "" };
 }
 
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {

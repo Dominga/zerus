@@ -10,10 +10,11 @@ import { groupRows, type Row } from "./group-rows";
 import { SessionCard, CompactCard } from "./SessionCard";
 import presentation from "./fixtures/team-session-presentation.json";
 import type { ViewRow } from "../../types";
-import { sessionRowName } from "./SessionList";
+import { openSessionTeam, sessionRowName } from "./SessionList";
 import { listRows, rowHeight } from "./model";
 import { teams } from "../../store/teams";
 import { applyMachines } from "../../store/machines";
+import { selectedKey, detailTab, setSelectedKey, setDetailTab } from "../../store/ui";
 import { emptyBatch } from "../../types";
 import type { Session } from "./types";
 
@@ -42,8 +43,8 @@ function show(rows: Row[] | (() => Row[]), compact = false, toggle?: () => void)
   const host = document.createElement("div"); document.body.append(host);
   dispose = render(() => createComponent(For, { get each() { return typeof rows === "function" ? rows() : rows; }, children: (row: Row) => {
     if (row.type !== "card") return null;
-    return compact ? createComponent(CompactCard, { session: row.session, agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, onExpand() {} })
-      : createComponent(SessionCard, { session: row.session, agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, expandable: false, expanded: false, onToggleChildren() {} });
+    return compact ? createComponent(CompactCard, { session: row.session, onOpenTeam: () => openSessionTeam(row.session.key), agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, onExpand() {} })
+      : createComponent(SessionCard, { session: row.session, onOpenTeam: () => openSessionTeam(row.session.key), agentTeamSummary: row.agentTeamSummary, agentTeamRole: row.agentTeamRole, agentTeamName: row.agentTeamName, team: row.team, onToggleTeam: toggle, selected: false, expandable: false, expanded: false, onToggleChildren() {} });
   } }), host);
   return host;
 }
@@ -78,6 +79,8 @@ describe("Agent Teams in Sessions", () => {
     expect(host.textContent).not.toContain("Status unknown");
     expect(sessionRowName(result[0])).toContain("Team: Fixes");
     expect(rowHeight(result[0])).toBe(122);
+    expect(result.slice(1).every((row) => rowHeight(row) === 94)).toBe(true);
+    expect(host.querySelectorAll("[data-team-strip]")).toHaveLength(1);
   });
 
   it("shows the role and waiting caption in compact rows too", () => {
@@ -190,4 +193,19 @@ it("keeps an ordinary parent's children unchanged beside a folded team", () => {
   expect(result[1]).toMatchObject({ team: { total: 1, collapsed: false } });
   expect(result[2]).toMatchObject({ depth: 1, parentKey: ordinary.key });
   expect(result[2].type === "card" && result[2].session.caption).toBe("Status unknown");
+});
+
+it.each([false, true])("opens the bound lead's Team tab from its %s compact strip without folding", (compact) => {
+  const toggle = vi.fn();
+  const result = rows();
+  const host = show(result, compact, toggle);
+  setSelectedKey("another-session"); setDetailTab("activity");
+  host.querySelector<HTMLButtonElement>("[data-team-strip]")!.click();
+  expect(selectedKey()).toBe(result[0].id);
+  expect(detailTab()).toBe("team");
+  expect(toggle).not.toHaveBeenCalled();
+  expect(host.querySelectorAll(".scard")).toHaveLength(4);
+  host.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click();
+  expect(toggle).toHaveBeenCalledOnce();
+  expect(host.querySelector("[data-team-strip] [data-team-toggle]")).toBeNull();
 });

@@ -292,6 +292,9 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   /** The list pages by the cursor they were read from ("" is the first),
    * replaced by every read of that page and pruned to the chain from the first. */
   const [listPagesBy, setListPagesBy] = createSignal<ReadonlyMap<string, ListPage>>(new Map());
+  /** One current browser page, independent of the five-page session lookup.
+   * Explicit paging can go further without accumulating more lookup pages. */
+  const [listPage, setListPage] = createSignal<TeamList>();
   const [waitingView, setWaitingView] = createSignal<WaitingView>();
   /** The last first page of Waiting: the rail counts it, never a later page. */
   const [waitingFirst, setWaitingFirst] = createSignal<WaitingView>();
@@ -396,7 +399,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     stopped = true;
     batch(() => {
       setAvailable(false); setOff(code === "unavailable" ? "unavailable" : "inactive");
-      setListPagesBy(new Map()); setTeam(undefined); setWaitingView(undefined); setWaitingFirst(undefined);
+      setListPagesBy(new Map()); setListPage(undefined); setTeam(undefined); setWaitingView(undefined); setWaitingFirst(undefined);
     });
     requestedPages.clear();
     listSelected = null;
@@ -412,6 +415,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
    * refresh, or a stale page read again) or is the chain's next cursor within
    * the bound; a page of no cursor in the chain, or one that left it, is not. */
   function applyList(view: TeamList) {
+    if ((view.after ?? null) === listSelected) setListPage(view);
     const key = view.after ?? "";
     const pages = new Map(listPagesBy());
     if (key !== "") {
@@ -596,7 +600,20 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     await follow(scope());
   }
   async function tasksChanged() { if (followed() && !stopped) await transport.tasksChanged(); }
-  async function page(key: string, cursor: string | null) { if (!stopped) await transport.page(key, cursor); }
+  async function page(key: string, cursor: string | null) {
+    if (stopped) return;
+    const before = listSelected;
+    if (key === "list") listSelected = cursor;
+    try { await transport.page(key, cursor); }
+    catch (error) { if (key === "list" && listSelected === cursor) listSelected = before; throw error; }
+  }
+  /** Browsing and leaving the Teams screen restore the already-followed first page. */
+  async function firstListPage() {
+    if (!stopped && (listSelected !== null || listPage()?.after)) {
+      requestedPages.clear();
+      await page("list", null);
+    }
+  }
 
   // ------------------------------------------------------------- waiting
 
@@ -827,7 +844,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const listNext = () => chainOf(listPagesBy()).next;
 
   return {
-    list, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending,
+    list, listPage, firstListPage, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending,
     waitingView, waitingCount, waitingLater, apply, probe, recheck, hidden, openTeam, closeTeam, tasksChanged, page, openWaiting, pageWaiting, firstWaitingPage, decide, revisionOf,
     teamOfSession, summaryOf, unresolvedOf, failureFor, readFailureFor, preview, openNewTeam, closeNewTeam, reloadCatalog, createIntent, claimCreate, saveTemplate, project, run, runAgain, confirm, cancelConfirmation, check, dismiss, clearFailure,
   };

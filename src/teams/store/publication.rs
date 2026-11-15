@@ -4,7 +4,7 @@ use super::*;
 use serde::Deserialize;
 use zerus_team_plan::draft::DraftNode;
 
-pub(crate) const PUBLICATION_LAYOUT: u32 = 4;
+pub(crate) const PUBLICATION_LAYOUT: u32 = layout::PUBLICATION;
 
 pub(super) fn extend(db: &Connection) -> Result<()> {
     let complete = |db: &Connection| -> Result<bool> {

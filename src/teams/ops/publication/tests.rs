@@ -344,7 +344,7 @@ fn another_planning_team_cannot_lower_the_publication_floor() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        4
+        store::layout::PUBLICATION
     );
     assert_eq!(
         h.store.team(TEAM_B).unwrap().unwrap().status,
@@ -437,4 +437,61 @@ mod compatibility;
 #[ignore = "manual private-state export for the compiled real slice-2 reader"]
 fn export_s2_compatibility_fixture() {
     compatibility::export();
+}
+
+#[test]
+fn publication_has_its_own_floor_and_keeps_native_person_identity_and_receipts() {
+    let mut h = Harness::new();
+    let card = h
+        .run(
+            &service(),
+            Operation::OpenCard {
+                kind: "launch_refused".into(),
+                text: "No account is available.".into(),
+                node: None,
+                decisions: None,
+                parameters: None,
+            },
+        )
+        .unwrap()
+        .item
+        .unwrap();
+    h.run(
+        &person(),
+        Operation::DecideCard {
+            card,
+            decision: "acknowledged".into(),
+        },
+    )
+    .unwrap();
+    let snapshot = |store: &Store| {
+        let db = store.db.as_ref().unwrap();
+        let version: u32 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let nonce: String = db
+            .query_row(
+                "SELECT nonce FROM person_gesture_store WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let receipts = db
+            .prepare("SELECT intent FROM person_gestures ORDER BY request_id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (version, nonce, receipts)
+    };
+    let before = snapshot(&h.store);
+    assert_eq!(before.0, store::layout::NATIVE_PERSON);
+    assert_eq!(before.2.len(), 1);
+    reserved(&mut h, &[1]);
+    let reopened = Store::open(h.temp.path()).unwrap();
+    let after = snapshot(&reopened);
+    assert_eq!(after.0, store::layout::PUBLICATION);
+    assert_eq!((after.1, after.2), (before.1, before.2));
+    Store::person_evidence(h.temp.path()).expect("a publication keeps the native leaf readable");
 }

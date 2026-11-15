@@ -141,6 +141,13 @@ pub(super) fn export() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, if mode == "base" { 3 } else { 4 });
+    assert_eq!(
+        version,
+        if mode == "base" {
+            store::layout::NATIVE_PERSON
+        } else {
+            store::layout::PUBLICATION
+        }
+    );
     println!("slice-3 writer {mode}: schema {version}");
 }

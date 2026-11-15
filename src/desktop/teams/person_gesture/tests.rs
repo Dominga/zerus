@@ -240,7 +240,7 @@ fn version_two_migrates_atomically_without_changing_existing_team_or_card_rows()
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        crate::teams::store::SCHEMA_VERSION
+        crate::teams::store::NATIVE_PERSON_LAYOUT
     );
     h.store = Store::open(h.temp.path()).unwrap();
     assert_eq!(

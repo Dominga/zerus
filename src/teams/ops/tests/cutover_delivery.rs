@@ -84,3 +84,55 @@ fn uncertain_words_never_prove_non_delivery() {
         }
     }
 }
+
+#[test]
+fn cutover_reopen_keeps_its_handback_with_one_definite_refusal_notice() {
+    let mut h = Harness::new();
+    let (node, lead) = h.reported();
+    h.run(
+        &lead,
+        Operation::Return {
+            node,
+            reason: "Revise the result".into(),
+        },
+    )
+    .unwrap();
+    let id = h.reopen(node, "m1");
+    h.reopen_outcome(
+        &id,
+        HandoutOutcome::CuttingOver {
+            reason: "Fence held. Nothing was sent.".into(),
+        },
+    );
+    assert!(
+        h.node(node).hold,
+        "a refused reopen still waits for the lead"
+    );
+    assert!(h
+        .store
+        .open_effects(TEAM, 200, None)
+        .unwrap()
+        .rows
+        .is_empty());
+    let items = h.store.inbox(TEAM, 200, None).unwrap().rows;
+    assert!(items.iter().all(|i| i.kind != "delivery_uncertain"));
+    let notices: Vec<_> = items
+        .iter()
+        .filter(|i| i.kind == format!("reopen_refused:{id}") && i.state == "open")
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].text.contains("Fence held. Nothing was sent."));
+    refused(
+        h.run(
+            &service(),
+            Operation::ReopenOutcome {
+                effect_request_id: id,
+                outcome: HandoutOutcome::CuttingOver {
+                    reason: "Fence held. Nothing was sent.".into(),
+                },
+            },
+        ),
+        code::INVALID_STATE,
+    );
+    assert_eq!(h.store.inbox(TEAM, 200, None).unwrap().rows, items);
+}

@@ -125,6 +125,10 @@ class ArchiveMetadataAvailability(pause.Harness if pause else unittest.TestCase)
             bad.unlink()
         # The same source is admitted when the inventory is complete.
         self.hgs("__state", "terminate", mirror["name"], "--expected-run-id", mirror["run_id"])
+        # A complete canonical inventory alone does not make an unfinished
+        # display/identity backfill complete. Settle the private metadata helper
+        # before asserting the positive crash-copy reconciliation.
+        self.hgs("__state", "archive-catalog-worker")
         self.hgs("resume", available["name"], "-d")
         self.assertFalse(mirror_path.exists(), "complete positive archive evidence still reconciles the binding")
         self.assertEqual(path.read_bytes(), before)

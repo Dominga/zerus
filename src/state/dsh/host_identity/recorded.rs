@@ -282,6 +282,26 @@ pub(super) fn recorded_hosts_at(
     state: &Path,
     boot: Option<&str>,
 ) -> Result<Vec<Recorded>, Refusal> {
+    host_records_at(state, boot, false)
+}
+
+/// Healthy records only for the additional refusal-only native scan. Damage
+/// elsewhere cannot conceal an observable host or erase a healthy nearer
+/// custodian. Positive caller proof always uses the strict reader above.
+pub(super) fn observable_records() -> Vec<Recorded> {
+    host_records_at(
+        &crate::state::storage::root(),
+        super::boot().ok().as_deref(),
+        true,
+    )
+    .unwrap_or_default()
+}
+
+fn host_records_at(
+    state: &Path,
+    boot: Option<&str>,
+    healthy_only: bool,
+) -> Result<Vec<Recorded>, Refusal> {
     let Some(hosts) = hosts_at(state)? else {
         return Ok(Vec::new());
     };
@@ -291,28 +311,55 @@ pub(super) fn recorded_hosts_at(
         .enumerate()
     {
         if count == HOST_ENTRIES {
+            if healthy_only {
+                break;
+            }
             return Err(Refusal::TooManyEntries(hosts.path.clone()));
         }
-        let entry = entry.map_err(|_| unreadable(&hosts.path))?;
-        let kind = entry.file_type().map_err(|_| unreadable(&entry.path()))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) if healthy_only => continue,
+            Err(_) => return Err(unreadable(&hosts.path)),
+        };
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(_) if healthy_only => continue,
+            Err(_) => return Err(unreadable(&entry.path())),
+        };
         if kind.is_file() {
             continue;
         }
         if !kind.is_dir() {
+            if healthy_only {
+                continue;
+            }
             return Err(unreadable(&entry.path()));
         }
         if folders.len() == HOST_FOLDERS {
+            if healthy_only {
+                break;
+            }
             return Err(Refusal::TooManyFolders(hosts.path.clone()));
         }
-        let name = entry.file_name();
-        folders.push(name.into_string().map_err(|_| unreadable(&entry.path()))?);
+        match entry.file_name().into_string() {
+            Ok(name) => folders.push(name),
+            Err(_) if healthy_only => continue,
+            Err(_) => return Err(unreadable(&entry.path())),
+        }
     }
     hosts.verify().map_err(|_| unreadable(&hosts.path))?;
     let mut named = Vec::new();
     for folder in folders {
         let path = hosts.path.join(&folder);
-        let folder = hosts.child(&folder).map_err(|_| unreadable(&path))?;
-        let found = host(&folder, boot).map_err(|path| unreadable(&path))?;
+        let found = hosts
+            .child(&folder)
+            .map_err(|_| unreadable(&path))
+            .and_then(|folder| host(&folder, boot).map_err(|path| unreadable(&path)));
+        let found = match found {
+            Ok(found) => found,
+            Err(_) if healthy_only => continue,
+            Err(error) => return Err(error),
+        };
         named.extend(
             found
                 .into_iter()

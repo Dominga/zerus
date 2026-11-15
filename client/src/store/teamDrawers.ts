@@ -3,13 +3,18 @@ import { inTauri } from "../bridge";
 import type { ServiceNote, WaitingItem } from "./teams";
 
 export type DrawerKind = "feed" | "inbox" | "cards";
-export type TeamDrawer = DrawerKind | "reports" | "chat";
+export type TeamDrawer = DrawerKind | "reports" | "chat" | "timeline";
 export interface DrawerRow {
   seq: number; kind: string; by: string; text: string; text_truncated: boolean; at_ms: number;
   node: number | null; generation: number | null; state: string; reply: string | null;
   notes: ServiceNote[]; card: WaitingItem | null;
 }
+export interface RecordedCoverage {
+  count: number; limit: number; first_seq: number | null; last_seq: number | null;
+  earlier_page: boolean; later_page: boolean; clock_reversed: boolean;
+}
 export interface DrawerPage {
+  timeline?: RecordedCoverage;
   team: string; kind: DrawerKind; rows: DrawerRow[]; after: string | null; next: string | null;
 }
 export interface DrawerRead { team: string; kind: DrawerKind; after: string | null }

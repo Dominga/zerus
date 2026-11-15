@@ -8,12 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 mod model;
+mod publication;
 mod repair;
 mod store;
 // Inactive bounded API for the separately reviewed reader slice.
 #[allow(dead_code)]
 mod pages;
 use model::{Key, Seed};
+pub(super) use publication::Publication;
 pub(super) use repair::background_at;
 use store::Store;
 
@@ -73,17 +75,17 @@ pub(super) fn write_at<T>(
     root: &Path,
     path: &Path,
     record: &Value,
-    source: impl FnOnce() -> Result<T>,
+    source: impl FnOnce(Option<&mut Publication>) -> Result<T>,
 ) -> Result<T> {
     let Some(key) = Key::at(root, path) else {
-        return source();
+        return source(None);
     };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if super::effort::picker_entered() {
-        return source();
+        return source(None);
     }
     if !enabled(root) {
-        return source();
+        return source(None);
     }
     publish(root, &key, Some(record), source)
 }
@@ -102,13 +104,13 @@ pub(super) fn remove_at<T>(
     if !enabled(root) {
         return source();
     }
-    publish(root, &key, None, source)
+    publish(root, &key, None, |_| source())
 }
 fn publish<T>(
     root: &Path,
     key: &Key,
     record: Option<&Value>,
-    source: impl FnOnce() -> Result<T>,
+    source: impl FnOnce(Option<&mut Publication>) -> Result<T>,
 ) -> Result<T> {
     let prepare = || -> anyhow::Result<(Store, String, bool)> {
         // An unsupported projection is still a canonical change. Reserve a
@@ -125,16 +127,21 @@ fn publish<T>(
     if !prepared.as_ref().is_ok_and(|(_, _, supported)| *supported) {
         gap(root);
     }
-    let result = source();
+    let mut publication = Publication::default();
+    let witness = (record.is_some() && prepared.as_ref().is_ok_and(|(_, _, supported)| *supported))
+        .then_some(&mut publication);
+    let result = source(witness);
     if let Ok((mut store, id, supported)) = prepared {
         if result.is_ok() && supported {
             let settled = (|| -> anyhow::Result<()> {
                 store.verify()?;
-                let stamp = store.source_stamp(key)?;
-                anyhow::ensure!(
-                    stamp.is_some() == record.is_some(),
-                    "Canonical publication did not settle"
-                );
+                let stamp = if record.is_some() {
+                    Some(publication.prove(&store, key)?)
+                } else {
+                    let stamp = store.source_stamp(key)?;
+                    anyhow::ensure!(stamp.is_none(), "Canonical removal did not settle");
+                    None
+                };
                 store.settle(&id, stamp.as_deref())
             })();
             if settled.is_err() {

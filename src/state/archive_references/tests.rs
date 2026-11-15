@@ -41,8 +41,17 @@ fn reconcile() {
         db.execute("DELETE FROM catalog_meta WHERE key='stamp'", [])
             .unwrap();
     }
+    drain_catalog();
+}
+fn drain_catalog() {
+    assert_eq!(
+        super::super::archive_catalog::worker().unwrap(),
+        0,
+        "private archive worker did not complete"
+    );
     drop(super::super::archive_catalog::catalog().unwrap());
 }
+
 fn database() -> Connection {
     Connection::open(root().join("archive-catalog-v1.sqlite3")).unwrap()
 }
@@ -259,7 +268,7 @@ fn isolated_reference_probe() {
                 [],
             )
             .unwrap();
-        drop(super::super::archive_catalog::catalog().unwrap());
+        reconcile();
         assert_eq!(related(&target).unwrap(), vec![original]);
         return;
     }
@@ -553,7 +562,7 @@ fn isolated_reference_probe() {
             assert_eq!(fs::read_to_string(&path).unwrap(), original.to_string());
         }
         "old-catalog" => {
-            let catalog = || drop(super::super::archive_catalog::catalog().unwrap());
+            let catalog = drain_catalog;
             // An upgraded catalog without the new reference stamp must make
             // one ordinary reconciliation even if its search stamp is warm.
             database()

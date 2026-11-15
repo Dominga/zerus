@@ -44,6 +44,7 @@ pub mod providers;
 pub mod read;
 mod refusal;
 pub mod settings;
+pub mod timeline;
 pub mod tolerant;
 pub mod view;
 

@@ -14,7 +14,8 @@
 //! ([`zerus_client_core::desktop::question_route::edge`]); after a short
 //! settle it is read once with a bounded `hgs inspect`, and read again
 //! immediately before the reservation. Only the main agent's qualified Claude
-//! hook, Kimi foreground question or DeepSeek ordinary request routes. The
+//! hook, Kimi foreground question, DeepSeek ordinary request or OpenCode
+//! API-verified pending question tool routes. The
 //! deferred-send actor runs the one fixed send
 //! ([`super::deferred_send::Runtime::route`]); this leaf's ledger reserves
 //! each question identity in the same transaction, and settles it from the

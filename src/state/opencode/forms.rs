@@ -183,6 +183,8 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
             let mut card = json!({"question_id":native["id"],"question_hash":hash,"run_id":record["run_id"],
                 "conversation_id":record["conversation_id"],"kind":format!("opencode_{kind}"),"status":"pending",
                 "answerable":answerable,"can_answer":answerable,"approval":kind=="permission",
+                // Public form metadata does not prove a native tool is waiting.
+                "blocking":false,
                 "answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"});
             if kind == "permission" {
                 card["approval_choices"] = json!(true);
@@ -531,5 +533,53 @@ mod tests {
             assert!(permission_decision(&[bad]).is_err());
         }
         assert!(permission_decision(&[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn all_forms_remain_person_only_even_with_claimed_question_tool_metadata() {
+        let record = json!({"run_id":"run","conversation_id":"ses_A"});
+        let form = json!({"id":"frm_question","sessionID":"ses_A",
+            "metadata":{"kind":"question","tool":{"id":"call_1","messageID":"msg_1"}},
+            "fields":[{"key":"q0","type":"string","description":"Pick one",
+                "options":[{"value":"A","label":"A"}],"custom":true}]});
+        let card = |form: &Value| cards(&record, &json!([form]), &json!([])).remove(0);
+        assert_eq!(card(&form)["can_answer"], true);
+        assert_eq!(card(&form)["blocking"], false);
+        // Supported manual forms do not inherit question-tool route authority.
+        for pointer in [
+            "/metadata",
+            "/metadata/tool",
+            "/metadata/tool/messageID",
+            "/metadata/tool/id",
+        ] {
+            let mut unknown = form.clone();
+            *unknown.pointer_mut(pointer).unwrap() = Value::Null;
+            assert_eq!(card(&unknown)["can_answer"], true);
+            assert_eq!(card(&unknown)["blocking"], false, "{pointer}");
+        }
+        for (pointer, value) in [
+            ("/metadata/kind", json!("authentication")),
+            ("/metadata/tool/id", json!("")),
+            ("/metadata/tool/messageID", json!("msg_")),
+            ("/id", json!("per_question")),
+            ("/fields/0/hidden", json!(true)),
+            ("/fields/0/type", json!("boolean")),
+            ("/fields/0/when", json!({"q1":"yes"})),
+            ("/fields/0/required", json!(false)),
+        ] {
+            let mut unknown = form.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            unknown.pointer_mut(parent).unwrap()[key] = value;
+            assert_eq!(card(&unknown)["blocking"], false, "{pointer}");
+        }
+        let permission = json!({"id":"per_1","sessionID":"ses_A","action":"shell"});
+        let card = cards(&record, &json!([]), &json!([permission])).remove(0);
+        assert_eq!(card["approval"], true);
+        assert_eq!(card["blocking"], false);
     }
 }

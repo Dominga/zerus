@@ -254,6 +254,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
        hgs [@host] archives --json [--bounded]   date-filtered archive pages (JSON stdin); --bounded caps counts at 10,000 and each scan at 25,000 rows
        archive-bounded-pages-v1
+       hgs acknowledge-input <session> --json   person-only keyless release (exact review on stdin)
+       input-acknowledgment-v1
        hgs [@host] archive <session> [--with-children]   move a stopped conversation to Archive
        hgs [@host] terminate <session> [--expected-run-id ID] [--with-children]   stop and keep the conversation in Archive
        hgs [@host] pause <session>|--all       save and gracefully close idle agents
@@ -270,6 +272,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task control plan|execute|status --json   inactive task controls (JSON stdin)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        Mobile task identity ABI: task-session-identity-v2
+       Mobile task media ABI: task-media-upload-v1
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
@@ -1095,6 +1098,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     }
     if command == "desktop" {
         return crate::desktop::dispatch(&config, &target, args, dry);
+    }
+    if command == "acknowledge-input" {
+        return crate::desktop::input_acknowledgment::dispatch(&config, &target, args, dry);
     }
     // Windows only, before local sessions are enabled, and never forwarded: it
     // enables them on this computer (spec D2). On Unix the word stays a program.

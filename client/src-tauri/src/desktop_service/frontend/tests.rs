@@ -1,5 +1,39 @@
 use super::*;
 #[test]
+fn an_input_acknowledgment_needs_its_exact_audited_service_receipt() {
+    assert!(serde_json::from_value::<Operation>(json!("input_acknowledge")).is_err());
+    let ack = zerus_client_core::input_acknowledgment::Acknowledgment {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        name: "claude/example/review".into(),
+        expected_run_id: "run".into(),
+        expected_conversation_id: "conversation".into(),
+        original_request_id: uuid::Uuid::new_v4().to_string(),
+        pending_at: 10.0,
+        terminal_binding_id: "a".repeat(64),
+        expires_at: 15.0,
+    };
+    let request = Request::InputAcknowledge {
+        acknowledgment: Box::new(ack.clone()),
+    };
+    let receipt = json!({"request_id":ack.request_id,"op":"input_acknowledge","status":"person-acknowledged-unknown",
+        "accepted":true,"durable":true,"acknowledgment":ack});
+    assert!(checked(&request, receipt.clone(), false).unwrap().1);
+    for field in [
+        "original_request_id",
+        "expected_run_id",
+        "expected_conversation_id",
+    ] {
+        let mut changed = receipt.clone();
+        changed["acknowledgment"][field] = json!("changed");
+        assert!(!checked(&request, changed, false).unwrap().1);
+    }
+    let mut unknown = receipt;
+    unknown["status"] = json!("unknown");
+    unknown["accepted"] = Value::Null;
+    unknown["durable"] = json!(false);
+    assert!(!checked(&request, unknown, false).unwrap().1);
+}
+#[test]
 fn task_start_reconcile_is_not_a_renderer_policy_operation() {
     assert!(serde_json::from_value::<Operation>(json!("task_start_reconcile")).is_err());
 }

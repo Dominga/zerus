@@ -1076,7 +1076,8 @@ answers, selects or approves anything, never builds a UI permit and never
 changes who is alerted: the child stays quiet exactly as above, and every
 person-only request still notifies. The service watches its own computer's
 rows on every catalog event, whatever the notification settings. A row is an
-edge when it is a running Claude child waiting for input (`phase: input`)
+edge when it is a running Claude, Kimi or DeepSeek child waiting for input
+(`phase: input`)
 whose parent is `live`, not forwarded, and whose host reports
 `human_request: false`; a new `attention_signature` is a new edge, and a
 question already pending at startup counts once. After about 3 seconds the
@@ -1084,13 +1085,30 @@ service reads the child with one bounded `hgs inspect NAME --after
 9223372036854775807 --skip-processes` and its `hgs reference`, at most one
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
-sending. Only Claude's own AskUserQuestion card routes: source `hook`, the
-main agent, not optional, no `answer_delivery`, `can_answer: true` and a full
-identity. Claude Code's own prompts (`claude_native_question`), every
-synthetic native card, approvals, trust and sign-in never route. Codex asks
-blocking questions only through native prompts and its async questions are
-optional, so a Codex child has nothing to route in v1; Kimi, DeepSeek and
-OpenCode questions are a follow-up (zerus-sa9qn.34).
+sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook`,
+Kimi's `kimi_wire`, and DeepSeek's `dsh_native` ordinary requests,
+paired with that child's provider. They must name the main
+agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
+Kimi also requires its qualified `kimi_tui` answer transport and positive
+`blocking` evidence from the exact native tool call, turn and questions. A
+background call or missing/changed tool-call history never establishes that
+proof. Its single-choice,
+multiple-choice, multi-part and Other-text answers retain the existing native
+request, terminal identity and original answer receipt guards. Routing delivers
+the question; the parent explicitly calls `hgs answer` under its own permissions.
+OpenCode forms and permissions remain person-only. Public form metadata does not
+prove a native question tool is waiting, and duplicate successful answers do not
+yet recover their original receipt. OpenCode is excluded from parent routing and
+its per-child switch until both contracts are qualified.
+Claude Code's own prompts (`claude_native_question`), every synthetic native
+card, approvals (including Kimi plan and goal approvals), cache choices, trust
+and sign-in never route, even if answerable. Codex async questions are optional,
+so a Codex child has nothing to route. DeepSeek additionally requires its
+`native_dsh` transport and positive `blocking` evidence from the exact owned
+root's ordinary forever-waiting request. Timed waits, typed approval or plan
+intents and older resident bridges without this proof remain unrouted. Its
+existing durable answer UUID journal, host generation and consume-once request
+checks still govern every answer (zerus-fb9ky).
 
 The parent's own current row on the same computer, matched by the link's
 session ID, must be running a terminal agent (Claude, Codex or Kimi); the send
@@ -1177,7 +1195,7 @@ The person has two switches, both on by default (zerus-sa9qn.32):
   by the background service (Store schema 37) and changed only through the
   person's native frontend request (`question_routes`), never by a command
   an agent can run. It is shown only where the service routes (Linux).
-- **Send questions to PARENT** in a Claude child's Session actions is kept on
+- **Send questions to PARENT** in a qualified child's Session actions is kept on
   the child's computer beside its notification preference
   (`question-routing.json`, keyed by the child's durable session ID, so a
   rename or a new conversation keeps it) and shared with every desktop and
@@ -2010,6 +2028,20 @@ view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
 reasoning and system instructions are excluded.
+
+The unindexed `hgs search --query TEXT` scan and the indexed search's fallback
+bound discovery before loading histories: at most 2,000 directory entries,
+500 record reads and 4 MiB of raw record bytes, with a 500 ms discovery deadline.
+Large shell-job payloads count against that byte budget but are discarded while
+decoding search metadata. Directory enumeration rotates across current bindings,
+ID-layout sessions, archives and DeepSeek bindings instead of collecting an
+entire inventory. Results prefer recent records within the admitted subset;
+they do not imply the globally newest matches when discovery is incomplete.
+The reply then has `truncated: true` and `discovery.complete: false`, so the UI
+keeps **Limited history searched**. `--indexed` retains its separate paged index
+coverage and cursor contract. Discovery bytes also reduce the existing total
+history-read budget. This display-only scan never replaces a complete canonical
+inventory used for lifecycle, cleanup, caller proof or other authority decisions.
 
 **New reply** stays unread until its latest result is visible in an active window
 or an attached Terminal at the bottom. Background windows and old search results
@@ -5047,15 +5079,14 @@ the attempt as not admitted; a new action with a new ID may send it);
 `cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
 reserved or sent); or `uncertain` (the input may have arrived; it is never sent
 again). Repeating a request ID, a restart or `--recover-only` only reads that
-request's receipt and never submits, even when no receipt exists. Only a task
-positively without floor or attempt, whose bootstrap gate is positively open
-(a member not yet known current, or the person's hold), keeps the legacy route,
-checked again there; a task that may hold a floor or attempt is never sent
-that way.
+request's receipt and never submits, even when no receipt exists. Managed native starts require the current causal cutover even when the older
+bootstrap would have selected a legacy route. Missing/unproven migration
+history stays a task-specific refusal; it never authorizes a legacy offer.
 
 For `unroutable`, `unverified` and `deadline`, the refusal includes a catalog
 computer label marked diagnostic beside the exact UUID when available,
-explains the offline-writer dependency, and points to
+explains that absent computers do not block reachable ones and this computer
+must finish its own automatic cutover, and points to
 `hgs task cutover --project P --json`. A catalog label grants no identity or
 route. Desktop Start shows the complete executor reason as its primary notice.
 
@@ -5593,67 +5624,53 @@ The check reports:
   rises, durably before the catalog publishes the change, whenever its peers
   change, including a change an older build made, which the next read
   records);
-- `closed`: the first node that keeps the fence closed, and why:
-  - `unreachable`, `unverified` (another computer answered), or `unroutable`
-    (a catalog machine that no verified route reaches);
-  - `protocol`, `task_schema` below 7, `store`, or `fence_unsupported`;
-  - `unavailable` (the node's own replica cannot be read now: its hello sends
-    an explicit unavailable part, and it stays a writer);
-  - `busy` (the catalog lock was not free within the budget), `deadline`,
-    `discovery_bound` (a node still unseen beyond 16 hops), or
-    `too_many_nodes` (more than 256 candidates, from the catalog, every
-    visited node's writers and the nodes found over peers, counted as they
-    are added). A partial universe is never certified.
+- `closed`: a global local-identity, resource, discovery or task-admission
+  refusal. Per-node `closed` fields such as `unreachable`, `unverified`,
+  `unroutable`, unsupported schema/capability or `unavailable` are retained
+  negative facts; they do not require that computer to acknowledge.
 - `universe_closed`: the first node that keeps the universe closed, alone;
 - `proof`, when the fence is proved: the common `version`, the `rounds` it
   took, every node with the store it answered from, and `admissible: true`
   once the final admission passed (C3c2).
 
 A node whose hello has no replica key, as an older build sends, shares no
-tasks, so it alone is left out. A node whose replica cannot be read sends a
-present part instead, and is never left out.
-The nodes behind it are not left out: with no other route they close the fence
-as `unroutable`. The check holds no lock across the network, creates no floor
-and no attempt, and grants nothing.
+tasks. An unreadable writer and writers behind an unavailable route remain
+listed as exact negative facts, without invented coverage. The check holds
+no lock across the network and grants no native input authority.
 
-The proof (C3c2) runs over that universe. Each round sends every node, over
-its verified route, `swarm replica-task` for the task. That request carries
-this computer's version (a canonical map: decimal peers and positive counts,
-compared as the changes they name, never as encoded bytes) and the updates the
-node lacks. The node then:
-- imports them;
-- runs the store's locked schema repair;
-- saves durably;
-- reads the task again from its files;
-- answers with that read: its version, whether its state is every change it
-  holds, its raw stored schema, whether it holds a valid floor, and the updates
-  this computer lacks.
+Current task writers use fence capability 2 and the reachable-writer causal
+cutover. Computers are optional: unreachable, unverified, unsupported or timed-out
+writers are recorded as exact `not_cut_over` node/store facts, not required
+acknowledgements. Other available current computers proceed. A bounded probe per
+route leaves the rest of the original deadline for healthy peers. Global
+resource/discovery bounds and an unreadable local identity still refuse.
 
-A node answers only from the store its fresh hello over that route showed;
-any other store closes the proof as `changed_identity`. The fence is proved
-when, in ONE round, every node answers exactly this computer's version, with
-nothing more to send. That version must hold a valid floor and a RAW stored
-schema of at least 7 (not the raised one a cut-over task reports), and this
-computer's copy must still hold it when read again afterwards. Answers for
-different versions are never combined. At most three rounds run within the
-budget. The universe is then read again and must be the same incarnation.
+Before availability changes, the common import/save boundary checks every causal
+span against the genuine historical first floor and then the immutable schema-8
+seal. The available cohort freezes exact versions, adopts one dedicated seal,
+and confirms one common version. A peer lost during prepare or confirmation is
+never counted as an adopter and does not veto the remaining cohort. Final
+admission rechecks catalog/project/store identity, own durable pin, pending
+prepare, hold, floor, seal and exact task version before any reservation.
 
-The final admission takes the catalog lock, the project lock and the store's
-admission, in that order and within the budget. Under those locks it reads
-again:
-- this computer's membership view, its store and its replica root;
-- the hold, for a task that records no attempt yet;
-- the task: holding the proven version, its floor and its raw stored schema.
+Returning updated computers automatically adopt the already admitted seal from
+a freshly verified current source. A clean prefix catches up without a person
+ceremony. Extra old-rule writes are refused directly and through relays, with
+original local files kept for review and no automatic replay. Missing, shallow,
+conflicting or damaged migration evidence holds only that task. An older build
+reads schema-8 tasks as newer/read-only; a disconnected old executable cannot be
+remotely prevented from making unknown local effects, which are never treated
+as accepted current task writes. See
+`docs/superpowers/specs/2026-11-14-reachable-task-writer-cutover.md` for the exact
+root, native custody, importer/writer census and qualification boundaries.
 
-Only then would a reservation run; the check runs none. Closed reasons add:
-`no_floor`, `schema`, `damaged`, `not_converged`, `changed_identity`,
-`membership_changed`, `changed_version`, `held`, `malformed`, `busy` and
-`deadline`. It proves the schema barrier only: not exclusive delivery, not
-consent.
+The check grants no dispatch authority or attempt. Current cutover preparation
+can persist protocol custody/seal metadata; it never offers native input.
 
 A proof that passed its final admission can be kept as the task's
 certificate (C3e): `<project store>/fence/<task>.json`, inside the replica
-root, so a replaced root loses it. The record holds:
+root, so a replaced root loses it. The format-2 record holds:
+- the immutable admitted seal and exact negative `not_cut_over` facts;
 - the proven version;
 - this computer's membership view (peers, catalog machines, membership
   generation), store, root and configuration identity (the Location identity
@@ -5970,7 +5987,19 @@ the template as the catalog holds it.
 
 **Replies.** The read shapes are pinned in `crates/team-plan/fixtures/`:
 `cli-list.json` (`list`: `{ok, actor, rows, next}`, each row
-`{id, project, name, status, lead, home, revision, lead_session}`),
+`{id, project, name, status, lead, home, revision, lead_session, members, progress}`),
+where `progress` is a bounded list-page projection: `tasks` (non-cancelled task
+nodes, live and archived), `accepted` (live and archived accepted tasks),
+`questions` (open `question:*` member inbox items), `members` (active/paused
+members plus the lead, counted once even before launch), `phases`,
+`phases_done`, and `stuck`. Internal stage nodes count in neither task count.
+Each count stops at 1000 and has a corresponding `<field>_more` boolean; true
+means a lower bound, displayed as `1000+` without a percentage. Exactly 1000
+keeps the flag false. `stuck` means an open `launch_blocked`, `launch_uncertain`,
+`silent_lead` or `team_actor_blocked` card, or a `project_limit` service item.
+Questions, ordinary approvals, `launch_capacity` cards and delivery-uncertain
+inbox items alone do not establish Stuck. The fields arrive with the bounded
+list read, without extra per-team reads; an older CLI may omit `progress`.
 `cli-waiting.json` (`waiting`: open cards of every team, oldest first, each
 with its `team`), `cli-status.json` (`status`: `{ok, actor, team, members,
 counts, service_running, health, service_items}`; the team without its
@@ -7517,6 +7546,36 @@ the session (`input_cleared`) and settles an unconfirmed earlier input whose
 residue it was. It is only ever the person's action: no delivery or retry uses
 it. The read is `action: "composer"`, which returns the text, `clearable` and
 the reason when it is not.
+
+**Release unconfirmed input** uses the same Terminal toolbar slot for a local
+Claude session whose conversation identity is already known, whose native
+composer is verified empty, and whose previous input remains unconfirmed
+(zerus-iitw8.9). It requires the person's explicit **I checked Terminal: mark
+the previous input as handled** confirmation. The message may or may not have
+reached Claude. This action sends no keys, does not send or retype the message,
+and does not claim that Claude accepted it. A busy agent, copy mode, an active
+delivery proof, a changed input or terminal, and unknown native state refuse it.
+If hooks never established a conversation identity, the identity refusal stays;
+finish startup or repair the hooks in Terminal instead.
+
+The matching `hgs acknowledge-input SESSION --json` is available on Linux and
+macOS only in a verified foreground person terminal on that computer, outside
+Zerus agents. Agent descendants, hosted agent calls and unattended or remote
+CLI requests are refused. Its bounded JSON input names `request_id`, `name`,
+`expected_run_id`, `expected_conversation_id`, `original_request_id`,
+`pending_at`, `terminal_binding_id` and `expires_at` (at most six seconds ahead).
+The composer read supplies the exact original request and timestamp in
+`composer.recovery`; review that input before authorizing the command. A JSON
+role or confirmation flag grants no authority. The desktop uses its native
+frontend request authority instead of this CLI terminal path.
+
+The settlement is audited as `person-acknowledged-unknown`, with the original
+request, run, conversation and terminal binding. The record keeps only its
+latest acknowledgment; exact-ID audit reads are byte bounded and never scan
+history. Native `input_seen_at`, clearing evidence and the original delivery
+receipt remain unchanged. Repeating the same acknowledgment returns its receipt
+without another effect; an interrupted reservation remains unknown and is never
+replayed. A later input has its own gate and cannot inherit the earlier release.
 
 While a send to that run from any client (another desktop, a phone, an agent
 or a task) is still in its proof window, both the read and the clear refuse, and

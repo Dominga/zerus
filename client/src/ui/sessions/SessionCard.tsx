@@ -395,13 +395,13 @@ export function SessionCard(props: {
   agentTeamRole?: string;
   agentTeamName?: string;
   agentTeamSummary?: TeamSummary;
-  agentTeamCollapsed?: boolean;
   selected: boolean;
   expandable: boolean;
   expanded: boolean;
   onToggleChildren: () => void;
   team?: Team;
   onToggleTeam?: () => void;
+  onOpenTeam?: () => void;
   fromParent?: { name: string; key?: string };
   onOpenParent?: (key: string) => void;
 }) {
@@ -447,7 +447,7 @@ export function SessionCard(props: {
         </Show>
         <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
       </div>
-      <Show when={props.agentTeamSummary}>{(team) => <TeamStrip team={team()} expanded={!(props.agentTeamCollapsed ?? props.team?.collapsed)} onToggle={props.onToggleTeam} />}</Show>
+      <Show when={props.agentTeamSummary}>{(team) => <TeamStrip team={team()} onOpen={() => props.onOpenTeam?.()} />}</Show>
     </div>
   );
 }
@@ -611,7 +611,7 @@ export function ContainerCard(props: { container: Container; selected: boolean; 
   );
 }
 
-export function CompactCard(props: { session: Session; agentTeamRole?: string; agentTeamName?: string; agentTeamSummary?: TeamSummary; agentTeamCollapsed?: boolean; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
+export function CompactCard(props: { session: Session; agentTeamRole?: string; agentTeamName?: string; agentTeamSummary?: TeamSummary; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void; onOpenTeam?: () => void }) {
   const s = () => props.session;
   // Tooltips hold still under the pointer (zerus-5ryrx).
   const described = steadyTitle(() => compactDescription(s()));
@@ -635,7 +635,7 @@ export function CompactCard(props: { session: Session; agentTeamRole?: string; a
       </button>
       </div>
       <Show when={props.team}>{(team) => <CompactTeam team={team()} onToggle={props.onToggleTeam} />}</Show>
-      <Show when={props.agentTeamSummary}>{(team) => <TeamStrip team={team()} expanded={!(props.agentTeamCollapsed ?? props.team?.collapsed)} onToggle={props.onToggleTeam} />}</Show>
+      <Show when={props.agentTeamSummary}>{(team) => <TeamStrip team={team()} onOpen={() => props.onOpenTeam?.()} />}</Show>
     </div>
   );
 }

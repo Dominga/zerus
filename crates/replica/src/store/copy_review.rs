@@ -110,7 +110,10 @@ impl ProjectStore {
         if identity != project.as_bytes() {
             return Err(Error::failed("task copy review project identity changed"));
         }
+        let upload = crate::phone::upload::Directory::new(&dir)?;
         Ok(Some(Self {
+            upload,
+            phone: false,
             dir,
             project: project.into(),
             _lock: lock,
@@ -138,7 +141,9 @@ impl ProjectStore {
         let mut files = Vec::new();
         let mut contents = BTreeMap::new();
         let mut remaining = REVIEW_BYTES;
-        for extension in ["loro", "updates", "managed"] {
+        for extension in [
+            "loro", "updates", "managed", "cutover", "prepare", "proposal",
+        ] {
             hash.update(extension.as_bytes());
             let path = folder.join(format!("{uuid}.{extension}"));
             let mut file = match regular(&path, false) {
@@ -183,6 +188,9 @@ impl ProjectStore {
             contents.insert(path, bytes);
         }
         let kept = contents.contains_key(&self.managed_path(uuid))
+            || ["cutover", "prepare", "proposal"].iter().any(|extension| {
+                contents.contains_key(&folder.join(format!("{uuid}.{extension}")))
+            })
             || contents
                 .get(&self.updates_path(uuid))
                 .is_some_and(|bytes| !blocks(bytes).1);
@@ -207,7 +215,7 @@ impl ProjectStore {
         })
     }
 
-    /// Move only the reviewed snapshot/updates; remove the mark last. A partial
+    /// Archive every reviewed document/custody file; remove the mark last. A partial
     /// filesystem failure is unknown and must never be automatically replayed.
     pub fn move_reviewed_copy(&mut self, uuid: &str, expected: &str) -> Result<CopyReviewOutcome> {
         self.move_reviewed_copy_with(uuid, expected, || Ok(()))
@@ -238,7 +246,7 @@ impl ProjectStore {
         }
         builder.create(&backup)?;
         let changed = (|| -> std::io::Result<()> {
-            for extension in ["loro", "updates"] {
+            for extension in ["loro", "updates", "cutover", "prepare", "proposal"] {
                 if review.files.iter().any(|file| file == extension) {
                     let name = format!("{uuid}.{extension}");
                     regular(&folder.join(&name), false)?;

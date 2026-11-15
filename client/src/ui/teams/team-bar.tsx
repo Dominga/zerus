@@ -1,6 +1,6 @@
-import { For, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { setPage } from "../../store/ui";
+import { For, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
+import { setPage } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { progress, stateLabel, stateTone } from "./team-model";
 import { TeamBarActions } from "./TeamActions";
@@ -18,6 +18,7 @@ export function TeamBar(props: {
   onAction: (kind: string) => void;
   /** The strip's width (tests); the strip's own measured width otherwise. */
   width?: number;
+  drawers?: JSX.Element;
 }) {
   const counts = createMemo(() => progress(props.view));
   const [measured, setMeasured] = createSignal(0);
@@ -61,6 +62,7 @@ export function TeamBar(props: {
         <span class="chip team-chip" title={tr("Open cards")}><Icon name="layers" size={12} />{props.view.bar.counts.cards === 1 ? tr("%n card", 1) : tr("%n cards", props.view.bar.counts.cards)}</span>
       </span>
       <button type="button" class="btn ghost small" onClick={() => setPage("team-catalog")}>{tr("Catalog")}</button>
+      {props.drawers}
       <TeamBarActions view={props.view} busy={props.busy} onAction={props.onAction} />
     </header>
   );

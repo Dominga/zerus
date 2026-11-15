@@ -37,6 +37,7 @@
 pub mod action;
 pub mod catalog;
 pub mod catalog_edit;
+pub mod drawers;
 pub mod model;
 pub mod poller;
 pub mod read;

@@ -687,6 +687,9 @@ pub fn sync(config: &Config) -> Result<Value> {
         }
     }
     let _ = super::session_labels::refresh_local(config, Instant::now() + Duration::from_secs(2));
+    if let Err(error)=replica::CutoverScan::default().advance(config) {
+        eprintln!("hgs swarm: the bounded task cutover pass remains pending: {error:#}");
+    }
     Ok(json!(result))
 }
 
@@ -912,6 +915,7 @@ pub fn worker() -> Result<()> {
         eprintln!("hgs swarm: record the worker version: {error:#}");
     }
     let mut schedule = Schedule::default();
+    let mut cutover=replica::CutoverScan::default();
     loop {
         // An upgrade replaced this program: exit so that the service manager
         // starts the new version. Catalog errors never end the loop.
@@ -923,6 +927,9 @@ pub fn worker() -> Result<()> {
             .map_err(anyhow::Error::from)
             .and_then(|config| {
                 schedule.round(&mut Live(&config))?;
+                if let Err(error)=cutover.advance(&config) {
+                    eprintln!("hgs swarm: the bounded task cutover pass remains pending: {error:#}");
+                }
                 if super::session_labels::due_local(&config) {
                     let _ = super::session_labels::refresh_local(
                         &config,

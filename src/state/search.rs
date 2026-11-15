@@ -62,18 +62,19 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 pub(super) fn legacy(query: &str, limit: usize) -> Result<Value> {
-    let mut bindings = records()?;
-    let archives = archive::records()?;
-    bindings.retain(|record| !archive::equivalent(record, &archives));
-    bindings.extend(archives);
-    for mut record in dsh::binding_records() {
-        record["agent"] = json!("dsh");
-        record["updated"] = record["created"].clone();
-        bindings.push(record);
+    let sources = search_index::legacy_sources(&root())?;
+    let mut reply = search_with_bytes(
+        &root(),
+        sources.records,
+        query,
+        limit,
+        MAX_TOTAL_BYTES.saturating_sub(sources.bytes as u64),
+    )?;
+    if !sources.complete {
+        reply["truncated"] = json!(true);
     }
-    // Prefer recent sessions when the explicit scan budget is exhausted.
-    bindings.sort_by(|a, b| number(b, "updated").total_cmp(&number(a, "updated")));
-    search(&root(), bindings, query, limit)
+    reply["discovery"] = json!({"bytes":sources.bytes,"directory_entries":sources.entries,"complete":sources.complete});
+    Ok(reply)
 }
 
 fn number(value: &Value, key: &str) -> f64 {
@@ -292,7 +293,18 @@ impl Search {
     }
 }
 
-fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize) -> Result<Value> {
+#[cfg(test)]
+fn search(directory: &Path, bindings: Vec<Value>, query: &str, limit: usize) -> Result<Value> {
+    search_with_bytes(directory, bindings, query, limit, MAX_TOTAL_BYTES)
+}
+
+fn search_with_bytes(
+    directory: &Path,
+    mut bindings: Vec<Value>,
+    query: &str,
+    limit: usize,
+    bytes: u64,
+) -> Result<Value> {
     let pattern = RegexBuilder::new(&regex::escape(query))
         .case_insensitive(true)
         .build()
@@ -301,7 +313,7 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
         pattern,
         results: Vec::new(),
         limit,
-        bytes_left: MAX_TOTAL_BYTES,
+        bytes_left: bytes,
         rows_left: MAX_JOURNAL_ROWS,
         truncated: bindings.len() > MAX_SESSIONS,
         unavailable: BTreeSet::new(),

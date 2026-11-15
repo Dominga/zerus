@@ -137,6 +137,8 @@ fn a_stalled_leads_queue_item_has_a_team_card_without_a_fake_task() {
     reconcile(&mut w);
     w.pass(T0);
     w.pass(T0 + 21 * MINUTE);
+    let rows = w.h.store.teams(1, None).unwrap().rows;
+    assert!(w.h.store.team_progress(&rows).unwrap()[TEAM].stuck);
     let cards = w.cards("silent_lead");
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].node, None);

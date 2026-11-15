@@ -1128,6 +1128,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     let mut inspector = Inspector::connect();
     let mut value = inspector.row(&record, Detail::Full);
     notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
+    question_routing::enrich(&mut value, question_routing::load().as_ref());
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
     Ok(value)

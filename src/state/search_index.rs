@@ -15,10 +15,12 @@ use zerus_content_search::{
     Index, Message, Part, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES,
 };
 mod catalog;
+mod discovery;
 mod metadata;
 mod query;
 mod wire;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
+pub(super) use discovery::legacy_sources;
 pub(super) use query::read as indexed;
 
 const ABI: &str = "content-search-index-v1";

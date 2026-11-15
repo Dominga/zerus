@@ -40,7 +40,9 @@ impl std::error::Error for ReplicaError {}
 impl From<replica::Error> for ReplicaError {
     fn from(error: replica::Error) -> Self {
         match error.kind() {
-            replica::ErrorKind::Refused => Self::Refused(error.to_string()),
+            replica::ErrorKind::Refused | replica::ErrorKind::Busy => {
+                Self::Refused(error.to_string())
+            }
             replica::ErrorKind::Failed => Self::Failed(error.to_string()),
         }
     }

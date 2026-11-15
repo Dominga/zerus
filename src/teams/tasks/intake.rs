@@ -190,7 +190,7 @@ pub(crate) fn send(
         return Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."));
     }
     let tasks =
-        ProjectStore::open(&caller.state.join("replica"), &task.project).map_err(storage)?;
+        ProjectStore::open(&caller.state.join("replica"), &task.project).map_err(replica_storage)?;
     let mut document = load(&tasks, &task.uuid)?;
     foreign(caller, &document)?;
     let mut store = Store::open(caller.state)?;
@@ -278,7 +278,7 @@ pub(crate) fn send(
                 .ok_or_else(|| Problem::new(code::NOT_FOUND, "Team not found."))?;
         }
     }
-    tasks.save(&mut document).map_err(storage)?;
+    tasks.save(&mut document).map_err(replica_storage)?;
     let add = request(
         &store,
         team,
@@ -327,7 +327,7 @@ pub(crate) fn send(
                     restored = true;
                 }
                 if restored {
-                    tasks.save(&mut document).map_err(storage)?;
+                    tasks.save(&mut document).map_err(replica_storage)?;
                 }
             }
             Ok(Intake {

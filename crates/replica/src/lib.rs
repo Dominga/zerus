@@ -11,6 +11,9 @@ pub mod mobile_edit;
 mod ops;
 pub mod phone;
 mod project;
+mod proof_budget;
+#[cfg(any(test, feature = "test-support"))]
+pub use proof_budget::testing::with_proof_budget_for_test;
 pub mod rank;
 mod render;
 mod schema;

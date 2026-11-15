@@ -2012,3 +2012,42 @@ fn the_cutover_cursor_is_bounded_and_passes_held_rows_before_wrapping() {
 }
 
 mod legacy_candidates;
+
+#[test]
+fn temporary_cutover_proof_exhaustion_is_never_cached_as_damaged() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-a1b2c3", Stage::Todo, "V", "A rooted task");
+    store.save(&mut task).unwrap();
+    age(&store, task.uuid());
+    let (derived, _) = zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+        derive(&store, task.uuid(), || ("fixture-stamp".into(), true))
+    });
+    assert!(matches!(derived, Derived::Busy), "temporary proof must stay busy, never data or damage");
+    let (restored, _) = derive(&store, task.uuid(), || ("fixture-stamp".into(), true));
+    assert!(matches!(restored, Derived::Row { .. }));
+    let mut index = Index::open(&store).unwrap();
+    let old: (Option<String>, Option<String>) = index.db.query_row("SELECT row,error FROM tasks WHERE uuid=?1", [task.uuid()], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let forced = BTreeSet::from([task.uuid().to_owned()]);
+    let busy = zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+        index.refresh(&[task.uuid().to_owned()], None, Some(&forced))
+    });
+    assert!(matches!(busy, Err(Failure::Other)));
+    let kept: (Option<String>, Option<String>) = index.db.query_row("SELECT row,error FROM tasks WHERE uuid=?1", [task.uuid()], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(old, kept, "an incomplete read cannot replace the current cache row");
+}
+
+
+#[test]
+fn a_prior_proof_policy_negative_row_is_read_again_without_a_task_write() {
+    let temp = tempfile::tempdir().unwrap();let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-a1b2c3", Stage::Todo, "V", "Still valid");store.save(&mut task).unwrap();age(&store, task.uuid());
+    let index = Index::open(&store).unwrap();
+    index.db.execute("UPDATE tasks SET row=NULL,error='old proof timeout' WHERE uuid=?1",[task.uuid()]).unwrap();
+    index.db.execute("UPDATE meta SET value='repaired-1' WHERE key='derived'",[]).unwrap();
+    index.db.execute("UPDATE meta SET value=(SELECT value FROM meta WHERE key='revision') WHERE key='derived_revision'",[]).unwrap();
+    drop(index);
+    let (mut index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert!(decoded > 0);assert_eq!(index.page(Stage::Todo, 10, &Anchor::Start).unwrap().rows.len(), 1);
+    assert_eq!(index.damaged().unwrap().1, 0);
+}

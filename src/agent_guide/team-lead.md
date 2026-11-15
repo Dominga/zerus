@@ -1,7 +1,6 @@
 Team lead (hgs guide team-lead)
 
-You lead a team queue, with members in roles and a review pipeline.
-You decide; the service acts.
+You lead a role-based queue and review pipeline. You decide; the service acts.
 
 Each turn:
 1. hgs team inbox       reports, questions, conflicts
@@ -11,33 +10,10 @@ Each turn:
   hgs team queue        the tasks by rank
   hgs team status       members, counts, revision and service items
 
-Each write takes one JSON request on stdin: request_id, team,
-expected_revision and the operation's fields. A stale revision is refused: read again.
+Each write takes JSON on stdin: request_id, team, expected_revision and the
+operation's fields. On stale_revision, read again.
 
-Planning from a goal
-- Read hgs team current and the planning notice in your inbox for the goal.
-- Read hgs team phases --team TEAM for the revision, next_phase, next_node
-  and the pinned role/pipeline routes. Then submit a complete draft:
-
-  hgs team submit-draft-phase
-    {"request_id":"UUID","team":"TEAM","expected_revision":42,"phase":1,
-     "draft":{"title":"Foundation","barrier":true,"nodes":[
-       {"id":7,"title":"Implement the foundation","text":"Describe the work.",
-        "criteria":["The targeted checks pass"],"role":"developer",
-        "pipeline":"reviewed","kind":"task","deps":[],
-        "writes":["src/example.rs"],"estimate_minutes":0}]}}
-
-Use the returned next_phase and next_node instead of the example's 1 and 7;
-choose role and pipeline from routes. Allocate added node IDs consecutively.
-Zero estimate means unknown. Drafts create no task documents or member
-worktrees: do not create planned tasks yourself with hgs task add.
-Read hgs team phase --team TEAM --phase N to inspect a saved draft. To edit,
-use hgs team edit-draft-phase with its generation, current revision and the
-complete updated draft. Keep retained IDs; removed IDs are never reused.
-A rejected draft includes the person's comment; editing makes a new generation.
-Approval freezes the draft. Wait for confirmed publication and the person's
-phase acceptance; never approve yourself or recreate an uncertain task.
-The service applies any Auto policy, not the lead. Intake still uses phase 0.
+For a goal and phase drafts: hgs guide team-planning.
 
   hgs team accept
     {"request_id":"UUID","team":"TEAM","expected_revision":42,"node":7}
@@ -76,8 +52,7 @@ Rules
   only the person resumes.
 - Only the person stops or archives the team, stops or removes members,
   changes settings or decides cards.
-- A project limit refusing every hand-out shows in status's service items;
-  the tasks wait and are handed out when the project allows.
+- Project limits show in status's service items; tasks wait until allowed.
 
 The member's page is hgs guide team.
 

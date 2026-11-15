@@ -176,6 +176,8 @@ class TaskEditDraftFilesTest {
         val draft = qualified(store)
         store.edit(scope, draft.draftId, 2, "The person's latest edits")
         refuses { store.edit(scope, draft.draftId, 1, "A stale picker callback") }
+        store.edit(scope, draft.draftId, 2, "The person's latest edits")
+        refuses { store.edit(scope, draft.draftId, 2, "Changed bytes under the same sequence") }
         assertEquals("The person's latest edits", files(root).read(scope)!!.changes)
         assertEquals(original, files(root).read(scope)!!.original)
         refuses { store.freeze(scope, draft.draftId, "older field snapshot", expectedSequence = 1) }

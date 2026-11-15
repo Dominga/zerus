@@ -139,6 +139,8 @@ final class TaskEditDraftFilesTests: XCTestCase {
         _ = try store.settle(scope, draftId: draft.draftId, requestId: qualification, outcome: .acknowledged)
         _ = try store.edit(scope, draftId: draft.draftId, sequence: 2, changes: "The person's latest edits")
         XCTAssertThrowsError(try store.edit(scope, draftId: draft.draftId, sequence: 1, changes: "Stale callback"))
+        _ = try store.edit(scope, draftId: draft.draftId, sequence: 2, changes: "The person's latest edits")
+        XCTAssertThrowsError(try store.edit(scope, draftId: draft.draftId, sequence: 2, changes: "Changed bytes under the same sequence"))
         XCTAssertEqual(try files().read(scope)?.changes, "The person's latest edits")
         XCTAssertEqual(try files().read(scope)?.original, original)
         XCTAssertThrowsError(try store.freeze(scope, draftId: draft.draftId, manifest: "old fields", expectedSequence: 1))

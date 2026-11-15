@@ -54,6 +54,9 @@ struct TaskEditorPicker: Equatable {
             }
         }
     }
+    func reportError(_ token: UUID, _ message: String) {
+        if state?.id == token { state?.error = message.isEmpty ? taskEditText("task_edit_unavailable") : message }
+    }
     func dismiss() {
         guard let captured = state, !captured.busy else { return }
         autosave?.cancel(); autosave = nil

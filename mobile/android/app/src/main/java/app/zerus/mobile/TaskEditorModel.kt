@@ -57,6 +57,9 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
             }
         }
     }
+    fun reportError(token: String, message: String) {
+        if (state?.token == token) state = state?.copy(error = message.ifBlank { text(R.string.task_edit_unavailable) })
+    }
     fun dismiss() {
         val captured = state?.takeIf { !it.busy } ?: return
         val session = captured.session; val form = captured.form

@@ -84,7 +84,7 @@ final class TasksModel {
         guard let editor = taskEditor, let state = editor.state, state.id == token, tasksKey == state.context.key else { return }
         let first = taskListing.filter { $0.uuid != state.task.uuid && $0.stage == .todo }.map(\.rank).min()
         do { let rank = try taskEditRankBetween(low: nil, high: first); editor.change(token) { $0.rank = rank } }
-        catch { taskNotice = TaskSyncError.reason(error) }
+        catch { editor.reportError(token, TaskSyncError.reason(error)) }
     }
     func openTaskMedia(_ task: TaskInfo, _ file: TaskMediaInfo) {
         guard let key = tasksKey, let replicas else { return }

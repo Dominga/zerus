@@ -1002,8 +1002,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     internal fun moveTaskEditorTop(token: String) {
         val state = taskEditor.state?.takeIf { it.token == token } ?: return
         val first = taskListing.takeIf { tasksKey == state.context.key }?.filter { it.uuid != state.task.uuid && it.stage == TaskStage.TODO }?.minOfOrNull { it.rank }
-        val rank = app.zerus.mobile.replica.taskEditRankBetween(null, first)
-        changeTaskEditor(token) { it.copy(rank = rank) }
+        try {
+            val rank = app.zerus.mobile.replica.taskEditRankBetween(null, first)
+            changeTaskEditor(token) { it.copy(rank = rank) }
+        } catch (error: Exception) { taskEditor.reportError(token, error.message.orEmpty()) }
     }
     internal fun openTaskEditor(key: ProjectKey, task: TaskInfo) {
         if (task.schema != 8L || tasksKey != key) return

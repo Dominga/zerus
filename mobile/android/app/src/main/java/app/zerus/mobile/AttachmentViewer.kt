@@ -62,6 +62,7 @@ data class OpenedAttachment(val key: String, val file: File, val name: String, v
 class AttachmentViewer(application: Application, private val store: AttachmentStore, private val api: RelayApi,
                        private val scope: CoroutineScope, private val connection: (String) -> Connection?,
                        private val access: (Target) -> AttachmentAccess) {
+    private val taskMediaFailure = application.getString(R.string.task_media_open_failed)
     private val cache = AttachmentViewCache(File(application.cacheDir, "attachment-view"))
     var rows by mutableStateOf<Map<String, AttachmentRowState>>(emptyMap()); private set
     var preview by mutableStateOf<OpenedAttachment?>(null); private set
@@ -230,9 +231,12 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
     }
 
     /** A replica token resolves only the captured task's verified bytes; references are never fetched. */
+    internal fun taskState(key: String) = rows[key]
     internal fun openTask(key: String, file: app.zerus.mobile.replica.TaskMediaInfo,
                           read: suspend () -> app.zerus.mobile.replica.TaskMediaContent) {
         if (jobs[key]?.isActive == true) return
+        rows = rows.toList().takeLast(63).toMap() + (key to AttachmentRowState(loading = true))
+        if (jobs.size >= 4) { failed(key, taskMediaFailure); return }
         jobs[key] = scope.launch {
             try {
                 val entry = withContext(Dispatchers.IO) { cache.lookup(key) } ?: run {
@@ -244,10 +248,11 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
                         withContext(Dispatchers.IO) { pending.commit(file.sha256) }
                     } finally { withContext(NonCancellable + Dispatchers.IO) { pending.abort() } }
                 }
+                rows = rows - key
                 val opened = OpenedAttachment(key, entry.file, file.name, file.mime)
                 if (AttachmentViewing.inApp(opened.mime)) preview = opened else external = opened
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { failed(key, "The task attachment could not be opened. Refresh this task and try again.") }
+            } catch (cancelled: CancellationException) { rows = rows - key; throw cancelled }
+            catch (_: Exception) { failed(key, taskMediaFailure) }
             finally { jobs.remove(key) }
         }
     }

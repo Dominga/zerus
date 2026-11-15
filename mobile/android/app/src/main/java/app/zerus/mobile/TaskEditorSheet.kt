@@ -59,7 +59,7 @@ import org.json.JSONObject
                     if (content) {
                         form.kept.forEach { file ->
                             Row(Modifier.fillMaxWidth()) {
-                                TextButton(onClick = { model.previewTaskMedia(state.context.key, state.task.uuid, file) }, modifier = Modifier.weight(1f)) { Text(file.name) }
+                                TaskMediaLink(model, state.context.key, state.task.uuid, file, Modifier.weight(1f))
                                 TextButton(onClick = { model.changeTaskEditor(state.token) { it.copy(kept = it.kept.filterNot { kept -> kept.token == file.token }) } }, enabled = !state.busy) {
                                     Text(stringResource(R.string.task_media_remove))
                                 }
@@ -93,6 +93,8 @@ import org.json.JSONObject
                 } else {
                     Text(form.title, style = MaterialTheme.typography.titleMedium); Text(form.text)
                     if (form.comment.isNotEmpty()) Text(form.comment)
+                    form.kept.forEach { file -> TaskMediaLink(model, state.context.key, state.task.uuid, file) }
+                    form.commentFiles.forEach { file -> TextButton(onClick = { model.previewTaskDraftMedia(file) }) { Text(file.name) } }
                     form.files.forEach { file -> TextButton(onClick = { model.previewTaskDraftMedia(file) }) { Text(file.name) } }
                 }
             }
@@ -123,4 +125,16 @@ import org.json.JSONObject
         }
     }
     if (state.task.stage == TaskStage.TODO) OutlinedButton(onClick = { model.moveTaskEditorTop(state.token) }, enabled = !state.busy) { Text(stringResource(R.string.task_edit_top)) }
+}
+
+@Composable internal fun TaskMediaLink(model: ZerusViewModel, key: ProjectKey, task: String,
+    file: app.zerus.mobile.replica.TaskMediaInfo, modifier: Modifier = Modifier) {
+    val state = model.taskMediaState(key, task, file)
+    Column(modifier) {
+        TextButton(onClick = { model.previewTaskMedia(key, task, file) }, enabled = state?.loading != true) {
+            Text(file.name)
+            if (state?.loading == true) { Spacer(Modifier.width(8.dp)); CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) }
+        }
+        if (!state?.error.isNullOrEmpty()) Text(state!!.error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+    }
 }

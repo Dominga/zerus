@@ -30,7 +30,7 @@ struct TaskEditorSheet: View {
                                     TextField(taskEditText("task_edit_requirement"), text: field(state, \.text), axis: .vertical).lineLimit(3...12)
                                     ForEach(form.kept, id: \.token) { file in
                                         HStack {
-                                            Button(file.name) { model.preview(state.context, state.task.uuid, file) }
+                                            TaskMediaButton(key: state.context.key, task: state.task.uuid, file: file) { model.preview(state.context, state.task.uuid, file) }
                                             Spacer()
                                             Button(role: .destructive) { model.change(state.id) { $0.kept.removeAll { $0.token == file.token } } } label: { Image(systemName: "minus.circle") }
                                         }
@@ -59,6 +59,7 @@ struct TaskEditorSheet: View {
                             Section {
                                 Text(form.title).font(.headline); Text(form.text)
                                 if !form.comment.isEmpty { Text(form.comment) }
+                                ForEach(form.kept, id: \.token) { file in TaskMediaButton(key: state.context.key, task: state.task.uuid, file: file) { model.preview(state.context, state.task.uuid, file) } }
                                 ForEach(form.files + form.commentFiles, id: \.id) { file in Button(file.name) { model.preview(file) } }
                             }
                         }
@@ -68,7 +69,7 @@ struct TaskEditorSheet: View {
                         Section { Button(taskEditText("task_edit_discard"), role: .destructive) { discard = true } }
                     }
                 }
-                .disabled(state.busy && ticket == nil)
+                .disabled(state.busy)
                 .navigationTitle(taskEditText("task_edit_open"))
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button(taskEditText("task_edit_close")) { model.dismiss() }.disabled(state.busy) } }
                 .interactiveDismissDisabled(state.busy)
@@ -104,6 +105,19 @@ struct TaskEditorSheet: View {
                     if comment { form.commentFiles.removeAll { $0.id == file.id } } else { form.files.removeAll { $0.id == file.id } }
                 } } label: { Image(systemName: "minus.circle") }
             }
+        }
+    }
+}
+
+struct TaskMediaButton: View {
+    @Environment(AppModel.self) private var app
+    let key: ProjectKey, task: String, file: TaskMediaInfo
+    let action: () -> Void
+    var body: some View {
+        let state = app.viewer.rows[JSON([key.connectionId, key.swarmId, key.id, task, file.token]).compact]
+        VStack(alignment: .leading) {
+            Button(action: action) { HStack { Text(file.name); if state?.loading == true { ProgressView() } } }.disabled(state?.loading == true)
+            if let error = state?.error, !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }
         }
     }
 }

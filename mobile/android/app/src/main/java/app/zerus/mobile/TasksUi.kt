@@ -396,7 +396,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 Text(androidx.compose.ui.res.stringResource(R.string.task_edit_open))
             }
             task.attachments.forEach { file ->
-                TextButton(onClick = { model.previewTaskMedia(key, task.uuid, file) }) { Text(file.name) }
+                TaskMediaLink(model, key, task.uuid, file)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 actions.forEach { state ->

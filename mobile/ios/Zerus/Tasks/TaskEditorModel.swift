@@ -19,14 +19,16 @@ struct TaskEditorPicker: Equatable {
 
 @MainActor @Observable final class TaskEditorModel {
     private(set) var state: TaskEditorState?
-    @ObservationIgnored private let app: AppModel, replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore
+    @ObservationIgnored private unowned let app: AppModel
+    @ObservationIgnored private let replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore
     @ObservationIgnored private let changed: @MainActor (TaskEditContext) -> Void
     @ObservationIgnored private var picker: TaskEditorPicker?
+    @ObservationIgnored private var autosave: Task<Void, Never>?
     init(app: AppModel, replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore, changed: @escaping @MainActor (TaskEditContext) -> Void) {
         self.app = app; self.replicas = replicas; self.files = files; self.assets = assets; self.changed = changed
     }
     func open(_ context: TaskEditContext, _ task: TaskInfo) {
-        if state?.busy == true { return }
+        if state?.busy == true || state?.session != nil && state?.complete != true { return }
         if let old = state?.session { Task { await old.close() } }
         let token = UUID()
         state = TaskEditorState(id: token, context: context, task: task, loading: true)
@@ -51,21 +53,34 @@ struct TaskEditorPicker: Equatable {
         }
     }
     func dismiss() {
-        guard state?.busy != true else { return }
-        if let session = state?.session { Task { await session.close() } }
-        state = nil
+        guard let captured = state, !captured.busy else { return }
+        autosave?.cancel(); autosave = nil
+        guard let session = captured.session, let form = captured.form, !captured.complete else { state = nil; return }
+        state?.busy = true
+        Task {
+            do {
+                try await session.persist(sequence: form.sequence, changes: form.json())
+                await session.close()
+                if state?.id == captured.id { state = nil }
+            } catch {
+                if state?.id == captured.id { state?.busy = false; state?.error = taskEditText("task_edit_storage_failed") }
+            }
+        }
     }
     func change(_ token: UUID, _ transform: (inout TaskEditForm) -> Void) {
         guard var captured = state, captured.id == token, !captured.busy, !captured.complete, let session = captured.session, var form = captured.form else { return }
         transform(&form); form.sequence += 1; captured.form = form; captured.error = ""; state = captured
         let sequence = form.sequence
-        Task {
-            do { try await session.persist(sequence: sequence, changes: form.json()) }
+        autosave?.cancel()
+        autosave = Task {
+            do { try await Task.sleep(for: .milliseconds(150)); try await session.persist(sequence: sequence, changes: form.json()) }
+            catch is CancellationError {}
             catch { if state?.id == token && state?.form?.sequence == sequence { state?.error = taskEditText("task_edit_storage_failed") } }
         }
     }
     func save(_ token: UUID) {
         guard var captured = state, captured.id == token, !captured.busy, let session = captured.session, let form = captured.form, form.changed(session.view) else { return }
+        autosave?.cancel(); autosave = nil
         captured.busy = true; captured.error = ""; state = captured
         Task {
             do {
@@ -79,7 +94,7 @@ struct TaskEditorPicker: Equatable {
                 let editable = await session.editable
                 if state?.id == token {
                     state?.busy = false; state?.saved = saved; state?.error = TaskSyncError.reason(error)
-                    if !editable || [.pending, .unknown, .refused, .frozen].contains(saved?.state) { state?.session = nil }
+                    if !editable || saved.map({ [.pending, .unknown, .refused, .frozen].contains($0.state) }) == true { state?.session = nil }
                 }
             }
         }
@@ -90,6 +105,7 @@ struct TaskEditorPicker: Equatable {
         guard form.files.count + form.commentFiles.count < 8, comment || form.kept.count + form.files.count < 8 else {
             state?.error = taskEditText("task_media_limit"); return
         }
+        autosave?.cancel(); autosave = nil
         captured.busy = true; state = captured
         Task {
             do {

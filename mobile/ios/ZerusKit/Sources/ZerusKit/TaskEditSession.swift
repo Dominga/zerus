@@ -22,10 +22,10 @@ public struct TaskEditDraftHeld: Error, Sendable { public let saved: TaskEditSav
 
 /// A live original handle. Saved draft bytes cannot reconstruct this object.
 public actor TaskEditSession {
-    public let scope: TaskEditDraftScope
-    public let original: TaskEditSavedDraft
-    public let view: TaskEditView
-    public var id: String { original.draftId }
+    public nonisolated let scope: TaskEditDraftScope
+    public nonisolated let original: TaskEditSavedDraft
+    public nonisolated let view: TaskEditView
+    public nonisolated var id: String { original.draftId }
     public var editable: Bool { !closed && !busy }
     private let store: TaskStore
     private let qualification: TaskEditQualification

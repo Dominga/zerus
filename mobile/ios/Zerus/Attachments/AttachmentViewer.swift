@@ -63,6 +63,9 @@ final class AttachmentViewer {
     /// Replica tokens resolve exact verified bytes; reference strings never trigger network reads.
     func openTask(key: String, file: TaskMediaInfo, read: @escaping @Sendable () async throws -> TaskMediaContent) {
         guard tasks[key] == nil, let cache else { return }
+        if rows.count >= 64, let first = rows.keys.first { rows[first] = nil }
+        guard tasks.count < 4 else { rows[key] = AttachmentRowState(error: taskEditText("task_media_open_failed")); return }
+        rows[key] = AttachmentRowState(loading: true)
         tasks[key] = Task { [weak self] in
             guard let self else { return }
             defer { tasks[key] = nil }
@@ -79,8 +82,9 @@ final class AttachmentViewer {
                         return try pending.commit(file.sha256)
                     }.value
                 }
+                rows[key] = nil
                 opened = OpenedAttachment(key: key, file: entry.file, name: file.name, mime: file.mime)
-            } catch { rows[key] = AttachmentRowState(error: Self.message(error)) }
+            } catch { rows[key] = AttachmentRowState(error: taskEditText("task_media_open_failed")) }
         }
     }
 

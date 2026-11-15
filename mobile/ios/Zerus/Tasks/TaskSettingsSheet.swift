@@ -116,7 +116,7 @@ struct TaskSettingsSheet: View {
                 })
                 if task.schema == 8 { Button(taskEditText("task_edit_open")) { tasks.openTaskEditor(task) }.buttonStyle(.bordered) }
                 ForEach(task.attachments, id: \.token) { file in
-                    Button(file.name) { tasks.openTaskMedia(task, file) }
+                    if let key = tasks.tasksKey { TaskMediaButton(key: key, task: task.uuid, file: file) { tasks.openTaskMedia(task, file) } }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(actions, id: \.action) { state in

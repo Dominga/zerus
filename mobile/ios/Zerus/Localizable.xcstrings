@@ -852,6 +852,23 @@
           }
         }
       }
+    },
+    "task_media_open_failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The task attachment could not be opened. Refresh this task and try again."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось открыть вложение задачи. Обновите задачу и попробуйте ещё раз."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

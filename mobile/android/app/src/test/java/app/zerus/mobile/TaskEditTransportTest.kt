@@ -69,7 +69,7 @@ class TaskEditTransportTest {
     private data class World(val native: NativeFixture, val server: MockWebServer, val api: RelayApi, val connection: Connection,
                              val key: ProjectKey, val machine: Machine, val replicas: TaskReplicas, val store: TaskStore, val task: String,
                              val files: TaskEditDraftFiles, val scope: TaskEditDraftScope, var posts: Int = 0, var corruptNextResult: Boolean = false)
-    private fun world(block: suspend (World) -> Unit) = runBlocking {
+    private fun world(syncDirectory: () -> Unit = {}, block: suspend (World) -> Unit) = runBlocking {
         val publicFixture = folders.newFile("workspace-fixture.json").apply { writeText(fixture.toString()) }
         val binary = checkNotNull(System.getProperty("zerus.taskFixtureBinary")) { "Build the private native task fixture before the client tests." }
         NativeFixture(binary, publicFixture, folders.newFolder()).use { native ->
@@ -95,7 +95,7 @@ class TaskEditTransportTest {
                     val secret = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
                     val world = World(native, server, RelayApi(workspace = journal), connection, key,
                         Machine(connection.id, computer, "Fixture host", true, machineId = computer), replicas, store, task,
-                        TaskEditDraftFiles(folders.newFolder(), { secret }), TaskEditDraftScope(connection.id, key.swarmId, key.id, task))
+                        TaskEditDraftFiles(folders.newFolder(), { secret }, syncDirectory = syncDirectory), TaskEditDraftScope(connection.id, key.swarmId, key.id, task))
                     server.dispatcher = object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
                             if (request.path!!.startsWith("/v2/membership")) return MockResponse().setBody(JSONObject().put("changes", JSONArray())
@@ -238,4 +238,42 @@ class TaskEditTransportTest {
             assertEquals(1, w.native.call("inspect").getJSONArray("log").objects().count { it.string("text") == form.comment })
         }
     }
+    @Test fun aForwardedRouteCannotOpenEvenWhenTheHostAdvertisesTheFeature() = world { w ->
+        val journal = checkNotNull(w.api.workspace)
+        val before = journal.load(w.connection)
+        val original = checkNotNull(before.routes[w.machine.id])
+        journal.update(w.connection, before, before.withRoutes(mapOf(w.machine.id to original.copy(routeId = "forwarded-route"))))
+        assertTrue(runCatching { transport(w) }.isFailure)
+        assertEquals(0, w.posts)
+    }
+    @Test fun aRouteReplacementBetweenOpenAndPostRefusesBeforeInput() = world { w ->
+        val original = transport(w)
+        w.store.qualifyEdit(w.task, original.route).use { qualification ->
+            val journal = checkNotNull(w.api.workspace)
+            val before = journal.load(w.connection)
+            val route = checkNotNull(before.routes[w.machine.id])
+            journal.update(w.connection, before, before.withRoutes(mapOf(w.machine.id to route.copy(machineId = "changed-machine"))))
+            var reserved = false
+            assertTrue(runCatching { original.proof(qualification.request()) { reserved = true } }.isFailure)
+            assertFalse(reserved)
+            assertEquals(0, w.posts)
+        }
+    }
+    @Test fun aRetainedOriginalRequestCannotBePostedAgainAfterVerifiedSettlement() = world { w ->
+        val transport = transport(w)
+        w.store.qualifyEdit(w.task, transport.route).use { qualification ->
+            val (draft, _) = qualify(w, transport, qualification)
+            draft.use {
+                assertTrue(runCatching { transport.proof(qualification.request()) { } }.isFailure)
+                assertEquals(1, w.posts)
+            }
+        }
+    }
+    @Test fun aDraftDurabilityFailurePreventsEveryNativePost() = world(syncDirectory = { error("Forced private-directory sync failure") }) { w ->
+        val failure = runCatching { TaskEditSession.open(w.replicas, "Fixture", transport(w), w.files) }.exceptionOrNull()
+        assertNotNull(failure)
+        assertEquals(0, w.posts)
+        assertEquals("Original requirement", w.native.call("inspect").string("text"))
+    }
+
 }

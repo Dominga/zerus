@@ -9,6 +9,8 @@ import app.zerus.mobile.replica.TaskInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -27,11 +29,12 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
     private val replicas: TaskReplicas, private val files: TaskEditDraftFiles, private val assets: AttachmentStore,
     private val changed: (TaskEditContext, String) -> Unit) {
     var state by mutableStateOf<TaskEditorState?>(null); private set
+    private var autosave: Job? = null
     private fun text(id: Int) = app.getString(id)
     fun open(context: TaskEditContext, task: TaskInfo) {
         val old = state
         if (old?.busy == true) return
-        if (old?.context?.key == context.key && old.task.uuid == task.uuid && old.session != null && !old.complete) return
+        if (old?.session != null && !old.complete) return
         old?.session?.close()
         val token = UUID.randomUUID().toString()
         state = TaskEditorState(token, context, task, loading = true)
@@ -54,13 +57,29 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
             }
         }
     }
-    fun dismiss() { if (state?.busy != true) { state?.session?.close(); state = null } }
+    fun dismiss() {
+        val captured = state?.takeIf { !it.busy } ?: return
+        val session = captured.session; val form = captured.form
+        autosave?.cancel(); autosave = null
+        if (session == null || form == null || captured.complete) { session?.close(); state = null; return }
+        state = captured.copy(busy = true)
+        scope.launch {
+            try {
+                session.persist(form.sequence, form.json())
+                session.close()
+                if (state?.token == captured.token) state = null
+            } catch (error: Exception) {
+                if (state?.token == captured.token) state = captured.copy(busy = false, error = text(R.string.task_edit_storage_failed))
+            }
+        }
+    }
     fun change(token: String, transform: (TaskEditForm) -> TaskEditForm) {
         val old = state?.takeIf { it.token == token && !it.busy && it.session != null && it.form != null && !it.complete } ?: return
         val form = transform(old.form!!).copy(sequence = old.form.sequence + 1)
         state = old.copy(form = form, error = "")
-        scope.launch {
-            try { old.session!!.persist(form.sequence, form.json()) }
+        autosave?.cancel()
+        autosave = scope.launch {
+            try { delay(150); old.session!!.persist(form.sequence, form.json()) }
             catch (error: CancellationException) { throw error }
             catch (error: Exception) { if (state?.token == token && state?.form?.sequence == form.sequence) state = state?.copy(error = text(R.string.task_edit_storage_failed)) }
         }
@@ -69,6 +88,7 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
         val captured = state?.takeIf { it.token == token && !it.busy && it.session != null && it.form != null } ?: return
         val session = captured.session!!; val form = captured.form!!
         if (!form.changed(session.view)) return
+        autosave?.cancel(); autosave = null
         state = captured.copy(busy = true, error = "")
         scope.launch {
             try {
@@ -92,6 +112,7 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
         if (form.files.size + form.commentFiles.size >= AttachmentPolicy.MAX_FILES || !comment && form.kept.size + form.files.size >= AttachmentPolicy.MAX_FILES) {
             state = captured.copy(error = text(R.string.task_media_limit)); return
         }
+        autosave?.cancel(); autosave = null
         val ticket = TaskEditorPicker(token, captured.session!!.id, captured.session.scope, comment)
         state = captured.copy(busy = true)
         scope.launch {

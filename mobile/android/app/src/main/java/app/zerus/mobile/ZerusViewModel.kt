@@ -1016,9 +1016,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     internal fun previewTaskDraftMedia(file: Attachment) = attachments.open(null,
         DisplayedAttachment(file.name, file.mime, file.bytes, localId = file.id, sha256 = file.sha256))
+    internal fun taskMediaKey(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) =
+        org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, file.token)).toString()
+    internal fun taskMediaState(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) = attachments.taskState(taskMediaKey(key, task, file))
     internal fun previewTaskMedia(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) {
         val name = taskProjectName(key)
-        attachments.openTask(org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, file.token)).toString(), file) {
+        attachments.openTask(taskMediaKey(key, task, file), file) {
             withContext(Dispatchers.IO) { taskReplicas.store(key, name).use { store ->
                 val index = store.media(task, null).indexOfFirst { it.token == file.token }
                 check(index >= 0)

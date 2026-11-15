@@ -102,7 +102,7 @@ final class TaskEditTransportTests: XCTestCase {
             active.routes = [machine.id: WorkspaceRoute(computerId: machine.id, gatewayId: host.device.deviceId, routeId: host.device.deviceId, machineId: machine.machineId)]
             try journal.update(connection, expected: first, next: active, changes: [approval.membership])
             replicas = try TaskReplicas(root: root.appendingPathComponent("replicas")); store = replicas.store(key, name: "Fixture")
-            let exchange = try store.exchange()
+            let exchange = store.exchange()
             for _ in 0..<8 {
                 guard let request = try exchange.nextRequest() else { break }
                 let payload = try XCTUnwrap(JSON.parse(Data(request.utf8)).object)
@@ -135,12 +135,12 @@ final class TaskEditTransportTests: XCTestCase {
         func close() throws { StubProtocol.reset { _ in StubProtocol.json(404, "{}") }; try native.close(); try FileManager.default.removeItem(at: root) }
     }
     func testUnadvertisedHostNeverPosts() async throws {
-        let w = try World(); defer { try! w.close() }
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
         do { _ = try await w.transport(advertised: false); XCTFail("An unadvertised host accepted a qualified edit") } catch {}
         XCTAssertEqual(w.responses.withLock { $0.posts }, 0)
     }
     func testActualNativeCommentCommitsOnceAndSavedRecordCannotReopen() async throws {
-        let w = try World(); defer { try! w.close() }
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
         let session = try await w.open()
         var form = TaskEditForm(session.view); form.comment = "Native phone comment"; form.sequence = 1
         try await session.save(sequence: 1, changes: form.json(), input: TaskEditInput(comment: form.comment))
@@ -151,7 +151,7 @@ final class TaskEditTransportTests: XCTestCase {
         XCTAssertFalse(try w.store.get(reference: w.task).writable)
     }
     func testPostCommitCorruptProofIsUnknownAndCannotPostAgain() async throws {
-        let w = try World(); defer { try! w.close() }
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
         let session = try await w.open(); let scope = session.scope
         w.responses.withLock { $0.corrupt = true }
         do { try await session.save(sequence: 1, changes: "retained form", input: TaskEditInput(comment: "Committed before bad proof")); XCTFail("Bad proof accepted") }
@@ -162,13 +162,43 @@ final class TaskEditTransportTests: XCTestCase {
         XCTAssertEqual(w.responses.withLock { $0.posts }, 2)
     }
     func testActualNativeLargeMediaIsByteCompleteBeforeFinalEdit() async throws {
-        let w = try World(); defer { try! w.close() }
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
         let session = try await w.open(), bytes = Data((0..<(800 * 1024)).map { UInt8($0 % 251) })
         let file = TaskMediaInput(name: "sample.bin", mime: "application/octet-stream", data: bytes, reference: "")
-        try await session.save(sequence: 1, changes: "retained media form", input: TaskEditInput(comment: "Complete media", commentFiles: [file]))
+        try await session.save(sequence: 1, changes: "retained media form", input: TaskEditInput(content: TaskEditContent(title: "Reviewed title", text: "Reviewed requirement", kept: [], files: [file])))
         XCTAssertGreaterThan(w.responses.withLock { $0.posts }, 3)
         let result = try JSON.object(w.native.call("inspect")).compact
         XCTAssertTrue(result.contains(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()))
         XCTAssertEqual(try w.files.read(session.scope)?.state, .completed)
     }
+    func testForwardedRouteCannotOpenEvenWithAdvertisedFeature() async throws {
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
+        let before = try w.journal.load(w.connection)
+        var next = before
+        next.routes[w.machine.id] = WorkspaceRoute(computerId: w.machine.id, gatewayId: w.host.device.deviceId, routeId: "forwarded-route", machineId: w.machine.machineId)
+        try w.journal.update(w.connection, expected: before, next: next)
+        do { _ = try await w.transport(); XCTFail("A forwarded route gained local edit authority") } catch {}
+        XCTAssertEqual(w.responses.withLock { $0.posts }, 0)
+    }
+    func testRouteReplacementBeforePostCannotReserveOrSubmit() async throws {
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
+        let transport = try await w.transport(), qualification = try w.store.qualifyEdit(reference: w.task, route: transport.route)
+        let before = try w.journal.load(w.connection)
+        var next = before
+        next.routes[w.machine.id] = WorkspaceRoute(computerId: w.machine.id, gatewayId: w.host.device.deviceId, routeId: w.host.device.deviceId, machineId: "changed-machine")
+        try w.journal.update(w.connection, expected: before, next: next)
+        let reserved = Mutex(false)
+        do { _ = try await transport.proof(qualification.request()) { reserved.withLock { $0 = true } }; XCTFail("Changed route posted") } catch {}
+        XCTAssertFalse(reserved.withLock { $0 }); XCTAssertEqual(w.responses.withLock { $0.posts }, 0)
+    }
+    func testRetainedOriginalRequestCannotPostAgainAfterSettlement() async throws {
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
+        let transport = try await w.transport(), qualification = try w.store.qualifyEdit(reference: w.task, route: transport.route)
+        let proof = try await transport.proof(qualification.request()) {}
+        _ = try qualification.accept(proof: proof)
+        try await transport.verified(qualification.request().requestId)
+        do { _ = try await transport.proof(qualification.request()) {}; XCTFail("Retained UUID posted twice") } catch {}
+        XCTAssertEqual(w.responses.withLock { $0.posts }, 1)
+    }
+
 }

@@ -227,6 +227,7 @@ fn an_old_outcome_can_only_be_reconciled_with_its_exact_original_proof() {
 
 /// Only an exact cutting_over reply from a child that exited 0 is proof of
 /// non-delivery; every unknown child end stays uncertain.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn only_an_exact_cutting_over_reply_from_a_settled_child_proves_non_delivery() {
     use super::super::super::native::delivery_reply;

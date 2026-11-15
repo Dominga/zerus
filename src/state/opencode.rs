@@ -6,6 +6,7 @@ mod catalog;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod favorites;
 mod forms;
+mod answers;
 mod history;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod providers;
@@ -607,6 +608,7 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    native_questions: std::collections::HashMap<String, Value>,
     /// The Zerus request that sent each of the newest user messages, from the
     /// receipt index (message ID to request ID).
     requests: std::collections::HashMap<String, String>,
@@ -619,7 +621,17 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let session = observed.map_or(&null, |o| &o.session);
     let active = observed.is_some_and(|o| o.active);
     let messages: &[Value] = observed.map_or(&[], |o| &o.page.messages);
-    let pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
+    let mut pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
+    if let Some(observed) = observed {
+        for card in &mut pending {
+            if card["kind"] == "opencode_form" && card["can_answer"] == true {
+                if let Some(proof) = observed.native_questions.get(string(card, "question_id")) {
+                    card["blocking"] = json!(true);
+                    card["native_question"] = proof.clone();
+                }
+            }
+        }
+    }
     let failure = history::last_error(messages);
     let phase = if !available {
         "unknown"
@@ -823,6 +835,11 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    let native_questions = if active.get(string(record, "conversation_id")).is_some() {
+        forms::qualify(native, record, &forms)
+    } else {
+        Default::default()
+    };
     // Only a full inspection shows events; listings and actions drop them.
     let requests = if requests {
         sent_requests(&Ledger::current(), record, &page.messages, &inbox)
@@ -836,6 +853,7 @@ fn observe(
         inbox,
         forms,
         permissions,
+        native_questions,
         requests,
     })
 }
@@ -1184,6 +1202,11 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     Ok(rows)
 }
 fn checked_request(record: &Value) -> Result<Value> {
+    let request = read_request()?;
+    check_request_identity(record, &request)?;
+    Ok(request)
+}
+fn read_request() -> Result<Value> {
     let mut bytes = Vec::new();
     io::stdin()
         .take(30 * 1024 * 1024 + 1)
@@ -1195,14 +1218,18 @@ fn checked_request(record: &Value) -> Result<Value> {
     let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let id =
         uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
-    if id.is_nil()
-        || id.to_string() != string(&request, "request_id")
-        || request["expected_run_id"] != record["run_id"]
+    if id.is_nil() || id.to_string() != string(&request, "request_id") {
+        return Err("Invalid request ID".into());
+    }
+    Ok(request)
+}
+fn check_request_identity(record: &Value, request: &Value) -> Result<()> {
+    if request["expected_run_id"] != record["run_id"]
         || request["expected_conversation_id"] != record["conversation_id"]
     {
         return Err("Session changed; refresh before trying again".into());
     }
-    Ok(request)
+    Ok(())
 }
 /// The native OpenCode 2 operations that delivery needs.
 trait Native {
@@ -1712,6 +1739,13 @@ fn clip_text(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).take(200).collect()
 }
 fn answer(record: &Value, request: &Value) -> Result<Value> {
+    let path = root()
+        .join("opencode/answers")
+        .join(format!("{}.json", string(request, "request_id")));
+    if let Some(prior) = answers::prior(string(record, "name"), request, &path)? {
+        return Ok(prior);
+    }
+    check_request_identity(record, request)?;
     let current = own_state(string(record, "name"))?;
     let card = current["pending_questions"]
         .as_array()
@@ -1722,9 +1756,6 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
                 && q["question_hash"] == request["expected_question_hash"]
         })
         .ok_or(CHANGED)?;
-    let path = root()
-        .join("opencode/answers")
-        .join(format!("{}.json", string(request, "request_id")));
     answer_with(&running_service()?, record, request, card, &path)
 }
 /// Core of `answer`: the journal, the exact native request and the reply.
@@ -1735,8 +1766,8 @@ fn answer_with(
     card: &Value,
     path: &Path,
 ) -> Result<Value> {
-    if path.exists() {
-        return Err("This answer was already attempted; refresh its native acknowledgement".into());
+    if let Some(prior) = answers::prior(string(record, "name"), request, path)? {
+        return Ok(prior);
     }
     let raw = request["answers"]
         .as_array()
@@ -1765,7 +1796,7 @@ fn answer_with(
         return Err(CHANGED.into());
     }
     let (route, body) = reply_for(card, found, raw)?;
-    let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
+    let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"digest":answers::digest(string(record,"name"),request),"status":"pending"});
     atomic(path, &receipt.to_string())?;
     // A 4xx is a definite refusal; anything else leaves the delivery unknown
     // and the pending journal blocks a replay.
@@ -2225,7 +2256,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             println!("{}", send(&record, &request)?);
         }
         "answer" => {
-            let request = checked_request(&record)?;
+            let request = read_request()?;
             println!("{}", answer(&record, &request)?);
         }
         "settings" => {
@@ -3854,6 +3885,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            native_questions: Default::default(),
             requests: Default::default(),
         }
     }
@@ -4147,7 +4179,7 @@ mod tests {
     fn answering(reply: Result<Response>) -> (Answering, Value, Value) {
         let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
         let card = forms::cards(&session_record(), &json!([form.clone()]), &json!([])).remove(0);
-        let request = json!({"request_id":"r1","question_id":"frm_1","expected_question_hash":card["question_hash"],
+        let request = json!({"request_id":"r1","expected_run_id":"r1","expected_conversation_id":"ses_A","question_id":"frm_1","expected_question_hash":card["question_hash"],
             "answers":[{"question_id":"q0","selected_option_ids":[],"text":"hi"}]});
         let native = Answering { forms: json!([form]).into(), reply, posted: Default::default() };
         (native, card, request)
@@ -4217,6 +4249,21 @@ mod tests {
         let receipt = answer_with(&native, &session_record(), &request, &card, &path).unwrap();
         assert_eq!(receipt["status"], "answered");
         assert_eq!(native.posted.borrow()[0].1, json!({"answer":{"q0":"hi"}}));
+    }
+    #[test]
+    fn an_exact_duplicate_answer_returns_its_receipt_without_a_native_read_or_post() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        let mut record = session_record();
+        let first = answer_with(&native, &record, &request, &card, &path).unwrap();
+        *native.forms.borrow_mut() = json!([]);
+        record["run_id"] = json!("new-run");
+        assert_eq!(answer_with(&native, &record, &request, &card, &path).unwrap(), first);
+        let mut changed = request.clone();
+        changed["answers"] = json!([]);
+        assert!(answer_with(&native, &record, &changed, &card, &path).is_err());
+        assert_eq!(native.posted.borrow().len(), 1);
     }
     #[test]
     fn pending_forms_or_permissions_need_attention_before_work() {

@@ -116,10 +116,6 @@ fn every_row_that_is_not_supervised_and_quiet_never_routes() {
             Box::new(|r| r["cmd"] = json!("kimi")),
         ),
         (
-            "an OpenCode child",
-            Box::new(|r| r["cmd"] = json!("opencode")),
-        ),
-        (
             "not waiting for input",
             Box::new(|r| r["phase"] = json!("tool")),
         ),
@@ -821,24 +817,45 @@ fn a_supervised_kimi_question_routes_with_its_exact_native_identity() {
 }
 
 #[test]
-fn opencode_is_person_only_even_when_a_card_claims_native_question_provenance() {
+fn only_api_verified_pending_opencode_question_tools_route() {
     let mut child = row();
-    let mut original_edge = edge(&child).unwrap();
     child["cmd"] = json!("opencode");
     child["name"] = json!("opencode/project/child");
-    assert!(edge(&child).is_none());
-    original_edge.name = "opencode/project/child".into();
+    let original_edge = edge(&child).expect("a supervised OpenCode child");
     let mut claimed = card();
     claimed["source"] = json!("opencode_native");
     claimed["kind"] = json!("opencode_form");
     claimed["status"] = json!("pending");
     claimed["answer_transport"] = json!("native_opencode");
     claimed["blocking"] = json!(true);
-    assert!(!routable(&claimed));
-    let mut inspected = inspect(vec![claimed]);
+    claimed["question_id"] = json!("frm_question");
+    claimed["native_question"] =
+        json!({"message_id":"msg_question","tool_call_id":"call_question"});
+    assert!(routable(&claimed));
+    let mut inspected = inspect(vec![claimed.clone()]);
     inspected["agent"] = json!("opencode");
     inspected["name"] = child["name"].clone();
-    assert!(questions(&inspected, &original_edge, MACHINE).is_empty());
+    assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
+    let mut provider_card = claimed.clone();
+    provider_card["native_question"]["tool_call_id"] = json!("toolu_native_provider_id");
+    inspected["pending_questions"] = json!([provider_card]);
+    assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
+    for (key, value) in [
+        ("native_question", Value::Null),
+        ("blocking", json!(false)),
+        ("kind", json!("opencode_permission")),
+        ("status", json!("answered")),
+        ("approval", json!(true)),
+        ("answer_transport", json!("unknown")),
+    ] {
+        let mut changed = claimed.clone();
+        changed[key] = value;
+        inspected["pending_questions"] = json!([changed]);
+        assert!(
+            questions(&inspected, &original_edge, MACHINE).is_empty(),
+            "{key}"
+        );
+    }
 }
 
 #[test]

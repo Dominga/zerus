@@ -118,7 +118,7 @@ class TaskListPages(Fixture):
         variants = ["true", '"text"', "[1, 2]", "{}", "not json",
                     bound("id", other["id"]), bound("id", 7), bound("rank", "zzz")]
         for raw in variants:
-            db = sqlite3.connect(folder / "task-index-v2.sqlite3")
+            db = sqlite3.connect(folder / "task-index-v3.sqlite3")
             db.execute("UPDATE tasks SET row=? WHERE uuid=?", (raw, first["uuid"]))
             db.commit()
             db.close()
@@ -132,7 +132,7 @@ class TaskListPages(Fixture):
         good = self.page("todo", 10)
         project = good["project"]["id"]
         folder = self.state / "replica" / hashlib.sha256(project.encode()).hexdigest()
-        index = folder / "task-index-v2.sqlite3"
+        index = folder / "task-index-v3.sqlite3"
         self.assertTrue(index.exists())
         self.assertEqual(index.stat().st_mode & 0o777, 0o600)
         index.write_bytes(b"not a database")

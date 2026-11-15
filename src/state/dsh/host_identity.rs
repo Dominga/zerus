@@ -5,6 +5,8 @@ use std::process::Child;
 
 /// A live host recognized by its own command line (zerus-ppd26.21).
 mod argv;
+/// Refusal-only native evidence for hosts outside the recorded launch path.
+pub(super) mod unregistered;
 /// The recorded hosts and the ancestor check (zerus-ppd26.15).
 pub(super) mod recorded;
 

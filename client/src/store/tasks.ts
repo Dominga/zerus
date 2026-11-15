@@ -15,7 +15,7 @@ export const ADOPTED = 16;
 const MAX_REREAD_PAGES = 64;
 
 export type Page = { tasks: unknown[]; page: { next: unknown } };
-type ReadPage = (project: string, stage: Stage, limit: number, after: string | null, scope?: TaskScope) => Promise<unknown>;
+type ReadPage = (project: string, stage: Stage, limit: number, after: string | null, scope?: TaskScope, query?: string) => Promise<unknown>;
 
 const none = <T,>(value: T) => Object.fromEntries(STAGES.map((s) => [s, value])) as Record<Stage, T>;
 
@@ -48,7 +48,7 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   let whole: Task[] | null = null;
   let sent = Promise.resolve(), generation = 0;
   /** Only this session: hgs's own pages of one session's view. */
-  const session = createSessionView((p, s, limit, after, scope) => readPage(p, s, limit, after, scope), WINDOW, PAGE_LIMIT, MAX_REREAD_PAGES);
+  const session = createSessionView(readPage, WINDOW, PAGE_LIMIT, MAX_REREAD_PAGES);
 
   /** The stages in board order, each task once, To do numbered by its position. */
   const publish = () => {

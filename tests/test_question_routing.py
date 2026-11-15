@@ -4,8 +4,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+import uuid
 
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
 PARENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -66,6 +69,37 @@ class QuestionRouting(unittest.TestCase):
         path = self.state / 'question-routing.json'
         return json.loads(path.read_text()) if path.exists() else None
 
+    def run_person(self, argv, env, payload):
+        """A real sibling terminal, outside both the fixture agent and controller ancestry.
+
+        Clearing markers on a descendant does not make it the person. The private
+        tmux daemon owns this terminal; the owner's server is never consulted.
+        """
+        slot = self.root / uuid.uuid4().hex
+        slot.mkdir()
+        request = slot / 'request.json'
+        request.write_text(json.dumps(dict(argv=argv, env=env, payload=payload)))
+        script = slot / 'person.py'
+        script.write_text(
+            'import json,subprocess\nfrom pathlib import Path\n'
+            f'p=Path({str(slot)!r})\n'
+            "v=json.loads((p/'request.json').read_text())\n"
+            "r=subprocess.run(v['argv'],env=v['env'],input=v['payload'],capture_output=True,text=True,timeout=10)\n"
+            "(p/'result.json').write_text(json.dumps(dict(code=r.returncode,stdout=r.stdout,stderr=r.stderr)))\n")
+        socket = self.root / 'sockets/person.sock'
+        command = ['tmux', '-S', str(socket)]
+        self.addCleanup(lambda: subprocess.run([*command, 'kill-server'], env=self.env,
+                                               capture_output=True, timeout=10))
+        subprocess.run([*command, 'new-session', '-d', '-s', 'person-' + slot.name,
+                        sys.executable, str(script)], env=self.env, capture_output=True, check=True, timeout=10)
+        deadline = time.monotonic() + 15
+        while not (slot / 'result.json').exists():
+            if time.monotonic() >= deadline:
+                self.fail('private person terminal did not finish')
+            time.sleep(.02)
+        result = json.loads((slot / 'result.json').read_text())
+        return subprocess.CompletedProcess(argv, result['code'], result['stdout'], result['stderr'])
+
     def test_the_person_turns_a_child_off_and_on_by_compare_and_swap(self):
         code, off = self.change(False, 0)
         self.assertEqual(code, 0, off)
@@ -124,7 +158,10 @@ class QuestionRouting(unittest.TestCase):
                   self.child['name'], '--json'],
                  ['@peer', '__state', 'question-routing', self.child['name'], '--json'])
         for form in forms:
-            def run(extra):
+            def run(extra, person=False):
+                if person:
+                    return self.run_person([str(HGS), '--dry-run', *form],
+                                           dict(self.env, HGS_PEERS='peer', **extra), request)
                 return subprocess.run([str(HGS), '--dry-run', *form], env=dict(self.env, HGS_PEERS='peer', **extra),
                                       input=request, capture_output=True, text=True, timeout=10)
             with self.subTest(form=' '.join(form[1:-2])):
@@ -135,7 +172,7 @@ class QuestionRouting(unittest.TestCase):
                 # The person's call (no agent process tree) goes on to the
                 # forwarding path: the plain form prints its ssh command; the
                 # guarded form reaches its own refusal of --dry-run.
-                forwarded = run({})
+                forwarded = run({}, person=True)
                 self.assertNotIn('agent_refused', forwarded.stdout)
                 if form[1] in ('question-routing', '__state'):
                     self.assertEqual(forwarded.returncode, 0, forwarded.stderr)
@@ -158,7 +195,9 @@ class QuestionRouting(unittest.TestCase):
                  ['@peer', '--expect-machine', '55555555-5555-4555-8555-555555555555', 'question-routing',
                   self.child['name'], '--json'])
 
-        def remote(form, env):
+        def remote(form, env, person=False):
+            if person:
+                return self.run_person([str(HGS), '--dry-run', *form], dict(env, HGS_PEERS='peer'), request)
             return subprocess.run([str(HGS), '--dry-run', *form], env=dict(env, HGS_PEERS='peer'), input=request,
                                   capture_output=True, text=True, timeout=10)
 
@@ -175,7 +214,7 @@ class QuestionRouting(unittest.TestCase):
                     self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'agent_refused'})
                     self.assertNotIn('ssh', result.stdout + result.stderr)
         person = dict(self.env, HGS_AGENT='claude')
-        forwarded = remote(forms[0], person)
+        forwarded = remote(forms[0], person, person=True)
         self.assertEqual(forwarded.returncode, 0, forwarded.stderr)
         self.assertIn('ssh', forwarded.stdout)
         code, changed = self.change(False, 0, env=person)

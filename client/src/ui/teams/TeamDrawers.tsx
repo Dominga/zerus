@@ -2,6 +2,7 @@
 // Our store returns one ascending snapshot page, not the fork's event cache.
 import { For, Show, Switch, Match, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup } from "solid-js";
 import { tr } from "../../i18n";
+import { teams } from "../../store/teams";
 import { Icon } from "../lib/icons";
 import { TextInput } from "../lib/TextField";
 import { TeamDrawerRead, readTeamDrawer, type DrawerKind, type DrawerRow, type TeamDrawer, type DrawerPort } from "../../store/teamDrawers";
@@ -11,13 +12,15 @@ import { ProposalCards } from "./ProposalCards";
 import type { TeamView } from "./types";
 import "../styles/team-drawers.css";
 
+const TeamTimeline = lazy(() => import("./TeamTimeline").then((module) => ({ default: module.TeamTimeline })));
+
 const TeamLeadChat = lazy(() => import("./TeamLeadChat").then((module) => ({ default: module.TeamLeadChat })));
 
-export const drawerLabel = (kind: TeamDrawer) => ({ feed: tr("Feed"), inbox: tr("Inbox"), reports: tr("Reports"), cards: tr("Cards"), chat: tr("Lead chat") })[kind];
+export const drawerLabel = (kind: TeamDrawer) => ({ timeline: tr("Timeline"), feed: tr("Feed"), inbox: tr("Inbox"), reports: tr("Reports"), cards: tr("Cards"), chat: tr("Lead chat") })[kind];
 
 export function TeamDrawerButtons(props: { value: TeamDrawer | null; onOpen: (kind: TeamDrawer) => void }) {
   return <div class="team-drawer-buttons" role="group" aria-label={tr("Team drawers")}>
-    <For each={["feed", "inbox", "reports", "cards", "chat"] as const}>{(kind) =>
+    <For each={["timeline", "feed", "inbox", "reports", "cards", "chat"] as const}>{(kind) =>
       <button type="button" class="btn small" aria-expanded={props.value === kind} data-team-drawer={kind} onClick={() => props.onOpen(kind)}>{drawerLabel(kind)}</button>
     }</For>
   </div>;
@@ -56,18 +59,19 @@ export function TeamInbox(props: { rows: DrawerRow[]; busy: boolean; onAction: D
   </div>;
 }
 
-export function TeamDrawers(props: { kind: TeamDrawer; view: TeamView; busy: boolean; onAction: DrawerAction; onClose: () => void; port?: DrawerPort }) {
+export function TeamDrawers(props: { kind: TeamDrawer; view: TeamView; busy: boolean; onAction: DrawerAction; onClose: () => void; port?: DrawerPort; visible?: boolean }) {
   const [tick, setTick] = createSignal(0);
   const [readRevision, setReadRevision] = createSignal<number>();
   const model = new TeamDrawerRead(props.port ?? readTeamDrawer, () => setTick((n) => n + 1));
   const read = () => (tick(), model);
-  const target = createMemo(() => `${props.view.bar.id}:${props.kind}`);
+  const active = () => props.kind !== "timeline" || (props.visible ?? teams.visible?.() ?? true);
+  const target = createMemo(() => JSON.stringify([props.view.bar.id, props.kind, active()]));
   createEffect(on(target, () => {
     setReadRevision(props.view.revision);
-    if (props.kind === "chat") model.close();
-    else model.open(props.view.bar.id, props.kind === "reports" ? "inbox" : props.kind as DrawerKind);
+    if (!active() || props.kind === "chat") model.close();
+    else model.open(props.view.bar.id, props.kind === "timeline" ? "feed" : props.kind === "reports" ? "inbox" : props.kind as DrawerKind);
   }));
-  createEffect(on(() => props.view.revision, (revision) => { setReadRevision(revision); model.refresh(); }, { defer: true }));
+  createEffect(on(() => props.view.revision, (revision) => { setReadRevision(revision); if (active() && props.kind !== "timeline") model.refresh(); }, { defer: true }));
   onCleanup(() => model.close());
   const busy = () => props.busy || read().loading || !!read().error || readRevision() !== props.view.revision;
   const act: DrawerAction = (kind, fields) => { if (!busy()) props.onAction(kind, fields); };
@@ -81,6 +85,7 @@ export function TeamDrawers(props: { kind: TeamDrawer; view: TeamView; busy: boo
     <Show when={props.kind === "chat"}><Suspense fallback={<p>{tr("Loading…")}</p>}><TeamLeadChat view={props.view} /></Suspense></Show>
     <Show when={read().page}>{(page) => <>
       <Switch>
+        <Match when={props.kind === "timeline"}><Suspense fallback={<p>{tr("Loading…")}</p>}><TeamTimeline page={page()} /></Suspense></Match>
         <Match when={props.kind === "feed"}><TeamFeed rows={page().rows} /></Match>
         <Match when={props.kind === "inbox"}><TeamInbox rows={page().rows} busy={busy()} onAction={act} /></Match>
         <Match when={props.kind === "reports"}><TeamReports rows={page().rows} busy={busy()} onAction={act} /></Match>

@@ -2808,7 +2808,9 @@ mod tests {
         assert!(repaired.repair_schema().unwrap());
         assert_eq!(repaired.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
         let mut imported = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
-        imported.import(&older.snapshot().unwrap()).unwrap();
+        let before = imported.snapshot().unwrap();
+        assert!(imported.import(&older.snapshot().unwrap()).is_err());
+        assert_eq!(imported.snapshot().unwrap(), before);
         assert_eq!(imported.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
         let mut written = TaskDoc::from_bytes(&merged.snapshot().unwrap()).unwrap();
         written
@@ -2817,7 +2819,7 @@ mod tests {
         assert_eq!(written.stored_schema(), execution::EXECUTION_TASK_SCHEMA);
         // A newer schema than this build's is never lowered.
         let mut newer = TaskDoc::from_bytes(&bytes).unwrap();
-        newer.set_stored_schema_for_test(execution::EXECUTION_TASK_SCHEMA + 1);
+        newer.set_stored_schema_for_test(crate::TASK_SCHEMA + 1);
         assert!(newer.floor().is_err());
     }
 

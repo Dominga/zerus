@@ -706,6 +706,7 @@ impl ProjectStore {
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
         };
+        if self.phone && task.schema()>=crate::task::cutover_schema() {task.projection_only=true;}
         task.repair_schema()?;
         if task.uuid() != uuid {
             return Err(Error::new("the update is for another task").into());
@@ -714,10 +715,13 @@ impl ProjectStore {
         if view.project != self.project_id() {
             return Err(Error::new("the task belongs to another project").into());
         }
+        // Preflight before moving even a damaged canonical copy aside. A
+        // refused fresh seal or frozen update must preserve every local file.
+        self.check_cutover_save(&mut task, true)?;
         if replacing {
             self.set_aside(uuid)?;
         }
-        self.save(&mut task)?;
+        self.save_received(&mut task)?;
         Ok(true)
     }
 
@@ -747,7 +751,7 @@ impl ProjectStore {
                  copy and any unsent edits are kept for a person's review",
             ));
         }
-        admitted.save(&mut incoming)?;
+        admitted.save_received(&mut incoming)?;
         Ok(true)
     }
 
@@ -941,7 +945,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let (mut newer, older) = race();
-        store.save(&mut newer).unwrap();
+        store.save_legacy_for_test(&mut newer).unwrap();
         let imported = store.import_updates(vec![update(&newer, older)]).unwrap();
         assert_eq!((imported.changed, imported.refused.len()), (1, 0));
         let saved = store.load(newer.uuid()).unwrap();
@@ -955,7 +959,7 @@ mod tests {
         let mut stale = merged_unrepaired();
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
-        store.save(&mut stale).unwrap();
+        store.save_legacy_for_test(&mut stale).unwrap();
         let again = store
             .import_updates(vec![update(&stale, stale.snapshot().unwrap())])
             .unwrap();
@@ -971,7 +975,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut stale = merged_unrepaired();
-        store.save(&mut stale).unwrap();
+        store.save_legacy_for_test(&mut stale).unwrap();
         let stale_version = version(&stale.current_vv());
         let (inventory, damaged) = store.inventory().unwrap();
         assert!(damaged.is_empty());
@@ -1108,7 +1112,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut stale = merged_unrepaired();
-        store.save(&mut stale).unwrap();
+        store.save_legacy_for_test(&mut stale).unwrap();
         let old_time = SystemTime::now() - Duration::from_secs(60);
         for path in [
             store.snapshot_path(stale.uuid()),
@@ -1173,58 +1177,36 @@ mod tests {
     }
 
     #[test]
-    fn a_floored_task_without_attempts_is_repaired_by_imports_and_inventories() {
-        // zerus-cg5h.4 S2b.2 C1: the floor before a first attempt is kept at 6
-        // just like attempts are.
+    fn a_concurrent_prefloor_write_cannot_be_repaired_into_a_qualified_floor() {
         let base = created();
         let bytes = base.snapshot().unwrap();
-        let version = base.version();
         let mut floored = TaskDoc::from_bytes(&bytes).unwrap();
-        assert!(floored.floor().unwrap());
+        floored.floor().unwrap();
         let mut older = TaskDoc::from_bytes(&bytes).unwrap();
-        for n in 0..8 {
-            older
-                .comment(&format!("older {n}"), &Actor::Person, 2)
-                .unwrap();
-        }
+        for n in 0..8 { older.comment(&format!("older {n}"), &Actor::Person, 2).unwrap(); }
         older.set_stored_schema_for_test(5);
-        let older_update = older.export_since(&version).unwrap();
-        // A live import saves it at 6.
+        let older_update = older.export_since(&base.version()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
-        store.save(&mut floored).unwrap();
-        store
-            .import_updates(vec![update(&floored, older_update.clone())])
-            .unwrap();
-        let saved = store.load(floored.uuid()).unwrap();
-        assert_eq!(saved.stored_schema(), EXECUTION_TASK_SCHEMA);
-        assert!(!saved.executes_attempts());
-        // A copy an older importer persisted at 5 is repaired by the inventory
-        // and exported at 6.
+        store.save_legacy_for_test(&mut floored).unwrap();
+        let original = fs::read(store.snapshot_path(floored.uuid())).unwrap();
+        let imported = store.import_updates(vec![update(&floored, older_update.clone())]).unwrap();
+        assert_eq!(imported.refused.len(), 1);
+        assert_eq!(fs::read(store.snapshot_path(floored.uuid())).unwrap(), original);
+        assert_eq!(store.load(floored.uuid()).unwrap().stored_schema(), EXECUTION_TASK_SCHEMA);
+        // A pre-upgrade importer may already have laundered the branch. A
+        // schema repair cannot establish its missing causal dependency.
         let mut stale = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
         stale.import_unrepaired_for_test(&older_update);
         assert_eq!(stale.stored_schema(), 5);
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
-        store.save(&mut stale).unwrap();
-        let (inventory, _) = store.inventory().unwrap();
-        assert_eq!(
-            store.load(stale.uuid()).unwrap().stored_schema(),
-            EXECUTION_TASK_SCHEMA
-        );
-        let (page, _) = store
-            .updates_for(&inventory, &Inventory::default(), 1 << 20)
-            .unwrap();
-        let exported = page
-            .iter()
-            .find(|u| u.document == Document::Task(stale.uuid().to_owned()))
-            .unwrap();
-        assert_eq!(
-            TaskDoc::from_bytes(&exported.bytes)
-                .unwrap()
-                .stored_schema(),
-            EXECUTION_TASK_SCHEMA
-        );
+        store.save_legacy_for_test(&mut stale).unwrap();
+        let original = fs::read(store.snapshot_path(stale.uuid())).unwrap();
+        let (inventory, damaged) = store.inventory().unwrap();
+        assert!(!inventory.tasks.contains_key(stale.uuid()));
+        assert_eq!(damaged.len(), 1);
+        assert_eq!(fs::read(store.snapshot_path(stale.uuid())).unwrap(), original);
     }
 
     #[test]
@@ -1237,11 +1219,11 @@ mod tests {
         // A document of a newer schema is left as it is: read-only here.
         let mut newer = created();
         reserve(&mut newer);
-        newer.set_stored_schema_for_test(EXECUTION_TASK_SCHEMA + 1);
+        newer.set_stored_schema_for_test(crate::TASK_SCHEMA + 1);
         assert!(!newer.repair_schema().unwrap());
         let other = TaskDoc::from_bytes(&newer.snapshot().unwrap()).unwrap();
         newer.import(&other.snapshot().unwrap()).unwrap();
-        assert_eq!(newer.stored_schema(), EXECUTION_TASK_SCHEMA + 1);
+        assert_eq!(newer.stored_schema(), crate::TASK_SCHEMA + 1);
         assert!(!newer.view().unwrap().writable);
         // A task without attempts is never raised.
         let mut plain = created();
@@ -1258,10 +1240,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut task = created();
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
         if floored {
             assert!(task.floor().unwrap());
-            store.save(&mut task).unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
         }
         let mut peer = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
         if !floored {
@@ -1270,7 +1252,7 @@ mod tests {
         }
         let mut here = store.load(task.uuid()).unwrap();
         reserve(&mut here);
-        store.save(&mut here).unwrap();
+        store.save_legacy_for_test(&mut here).unwrap();
         assert!(store.updates_path(task.uuid()).exists());
         let uuid = task.uuid().to_owned();
         (dir, store, uuid, peer.snapshot().unwrap())
@@ -1318,9 +1300,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = ProjectStore::open(dir.path(), "project-1").unwrap();
             let mut task = created();
-            store.save(&mut task).unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
             task.comment("Local", &Actor::Person, 2).unwrap();
-            store.save(&mut task).unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
             assert!(!store.was_managed(task.uuid()));
             let (uuid, peer) = (task.uuid().to_owned(), task.snapshot().unwrap());
             fifo(&if snapshot {
@@ -1342,7 +1324,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut task = created();
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
         // Only settled files are cached.
         let old_time = SystemTime::now() - Duration::from_secs(60);
         for path in [
@@ -1527,19 +1509,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut task = created();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         assert!(!store.was_managed(task.uuid()));
         let snapshot = task.current_vv();
         // The cutover saved as an update block: the mark names everything
         // saved, and that block, the first of the updates file.
         reserve(&mut task);
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         assert_eq!(mark_version(&store, task.uuid()), Some(task.current_vv()));
         assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
         let opening = store.mark(task.uuid()).unwrap().opening;
         // Every later save moves the version; the opening stays.
         task.comment("Appended", &Actor::Person, 11).unwrap();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
         assert_eq!(store.mark(task.uuid()).unwrap().opening, opening);
         // A fold moves the mark with the snapshot and opens a new updates
@@ -1547,7 +1529,7 @@ mod tests {
         // read as nothing.
         task.needs_fold = true;
         task.comment("Folded", &Actor::Person, 12).unwrap();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         only_the_opening_block(&store, task.uuid());
         assert_eq!(store.fresh_version(task.uuid()), Some(task.current_vv()));
         assert_ne!(mark_version(&store, task.uuid()), Some(snapshot.clone()));
@@ -1556,12 +1538,12 @@ mod tests {
         let mut foreign = Mark::new(&created().current_vv(), b"foreign");
         store.write_mark(task.uuid(), &foreign).unwrap();
         task.comment("Refused", &Actor::Person, 13).unwrap();
-        assert!(store.save(&mut task).is_err());
+        assert!(store.save_received(&mut task).is_err());
         foreign = Mark::new(&snapshot, b"stale");
         store.write_mark(task.uuid(), &foreign).unwrap();
         assert!(store.fresh_version(task.uuid()).is_none());
         task.comment("Corrected", &Actor::Person, 13).unwrap();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         let reloaded = store.load(task.uuid()).unwrap();
         assert_eq!(
             store.fresh_version(task.uuid()),
@@ -1569,10 +1551,10 @@ mod tests {
         );
         // A task that never cut over still folds to no updates file.
         let mut plain = created();
-        store.save(&mut plain).unwrap();
+        store.save_received(&mut plain).unwrap();
         plain.needs_fold = true;
         plain.comment("Plain", &Actor::Person, 2).unwrap();
-        store.save(&mut plain).unwrap();
+        store.save_received(&mut plain).unwrap();
         assert!(!store.updates_path(plain.uuid()).exists());
         assert!(!store.was_managed(plain.uuid()));
     }
@@ -1612,7 +1594,7 @@ mod tests {
         let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
         let mut folded = store.load(&uuid).unwrap();
         folded.needs_fold = true;
-        store.save(&mut folded).unwrap();
+        store.save_received(&mut folded).unwrap();
         only_the_opening_block(&store, &uuid);
         damage(&store, &uuid);
         kept(&store, &uuid, &peer);
@@ -1640,7 +1622,7 @@ mod tests {
         here.cancel_attempt(ID, "Settled only here", &Actor::Person, 11)
             .unwrap();
         here.needs_fold = true;
-        store.save(&mut here).unwrap();
+        store.save_received(&mut here).unwrap();
         damage(&store, &uuid);
         kept(&store, &uuid, &cut_over);
 
@@ -1649,9 +1631,9 @@ mod tests {
         let mut here = store.load(&uuid).unwrap();
         here.comment("Only here", &Actor::Person, 11).unwrap();
         here.needs_fold = true;
-        store.save(&mut here).unwrap();
+        store.save_received(&mut here).unwrap();
         here.comment("After the fold", &Actor::Person, 12).unwrap();
-        store.save(&mut here).unwrap();
+        store.save_received(&mut here).unwrap();
         damage(&store, &uuid);
         kept(&store, &uuid, &peer);
 
@@ -1723,7 +1705,7 @@ mod tests {
         let mark = fs::read(store.managed_path(&uuid)).unwrap();
         let mut task = store.load(&uuid).unwrap();
         task.needs_fold = true;
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         fs::write(store.managed_path(&uuid), mark).unwrap();
         damage(&store, &uuid);
         kept(&store, &uuid, &peer);
@@ -1772,7 +1754,7 @@ mod tests {
                     .unwrap(),
             }
             task.needs_fold = true;
-            store.save(&mut task).unwrap();
+            store.save_received(&mut task).unwrap();
             only_the_opening_block(&store, &uuid);
             marks.push(fs::read(store.managed_path(&uuid)).unwrap());
             copies.push(store.load(&uuid).unwrap().snapshot().unwrap());
@@ -1816,18 +1798,18 @@ mod tests {
         let mut task = store.load(&uuid).unwrap();
         task.comment("The next save corrects the mark", &Actor::Person, 30)
             .unwrap();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         assert!(store.fresh_version(&uuid).is_some());
         // A fold with no change since the last one opens with the same block
         // and writes the same mark: the two describe the same version.
         let mut folded = store.load(&uuid).unwrap();
         folded.needs_fold = true;
-        store.save(&mut folded).unwrap();
+        store.save_received(&mut folded).unwrap();
         let mark = fs::read(store.managed_path(&uuid)).unwrap();
         let opening = fs::read(store.updates_path(&uuid)).unwrap();
         let mut again = store.load(&uuid).unwrap();
         again.needs_fold = true;
-        store.save(&mut again).unwrap();
+        store.save_received(&mut again).unwrap();
         assert_eq!(fs::read(store.updates_path(&uuid)).unwrap(), opening);
         assert_eq!(fs::read(store.managed_path(&uuid)).unwrap(), mark);
     }
@@ -1874,16 +1856,16 @@ mod tests {
         task.cancel_attempt(ID, "Settled before the fold", &Actor::Person, 11)
             .unwrap();
         task.needs_fold = true;
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         let peer = store.load(&uuid).unwrap().snapshot().unwrap();
         // review-n's case: the second Unknown is saved as an append.
         let mut task = store.load(&uuid).unwrap();
         second_attempt(&mut task);
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         for n in 0..3 {
             task.comment(&format!("Append {n}"), &Actor::Person, 20 + n)
                 .unwrap();
-            store.save(&mut task).unwrap();
+            store.save_received(&mut task).unwrap();
         }
         let full = fs::read(store.updates_path(&uuid)).unwrap();
         let ends = block_ends(&store, &uuid);
@@ -1935,11 +1917,11 @@ mod tests {
         task.cancel_attempt(ID, "Settled before the fold", &Actor::Person, 11)
             .unwrap();
         task.needs_fold = true;
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
         let opening = block_ends(&store, &uuid)[0];
         let mut task = store.load(&uuid).unwrap();
         second_attempt(&mut task);
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
         let full = fs::read(store.updates_path(&uuid)).unwrap();
         fs::File::options()
             .write(true)
@@ -1987,7 +1969,7 @@ mod tests {
         assert!(store.load(&uuid).is_ok());
         // A task that never cut over loads as before, with no mark read.
         let mut plain = created();
-        store.save(&mut plain).unwrap();
+        store.save_legacy_for_test(&mut plain).unwrap();
         assert!(!store.was_managed(plain.uuid()));
         assert!(store.load(plain.uuid()).is_ok());
     }
@@ -2255,7 +2237,7 @@ mod tests {
                     // Another document's save moved the base on first.
                     let mut other = store.load(&uuid).unwrap();
                     other.comment("Saved first", &Actor::Person, 11).unwrap();
-                    store.save(&mut other).unwrap();
+                    store.save_received(&mut other).unwrap();
                 }
                 cached.note("A harmless note", &Actor::Person, 12).unwrap();
                 let path = store.managed_path(&uuid);
@@ -2266,7 +2248,7 @@ mod tests {
                 }
                 assert!(store.load(&uuid).is_err(), "{name}");
                 let before = files(&store, &uuid);
-                let error = store.save(&mut cached).err().map(|e| e.to_string());
+                let error = store.save_received(&mut cached).err().map(|e| e.to_string());
                 assert!(
                     error.is_some(),
                     "{name} stale={stale}: a cached document overwrote it"
@@ -2283,7 +2265,7 @@ mod tests {
         let (_dir, store, uuid, _) = damaged_beside_a_pre_attempt_peer();
         let mut cached = store.load(&uuid).unwrap();
         cached.note("A harmless note", &Actor::Person, 12).unwrap();
-        store.save(&mut cached).unwrap();
+        store.save_received(&mut cached).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let plain = ProjectStore::open(dir.path(), "project-1").unwrap();
         let mut task = created();
@@ -2360,7 +2342,7 @@ mod tests {
         base.cancel_attempt(ID, "first disposed", &Actor::Person, 12)
             .unwrap();
         base.needs_fold = true;
-        store.save(&mut base).unwrap();
+        store.save_received(&mut base).unwrap();
         let peer = base.snapshot().unwrap();
         let mark_before = fs::read(store.managed_path(&uuid)).unwrap();
         let updates_before = fs::read(store.updates_path(&uuid)).unwrap();
@@ -2415,7 +2397,7 @@ mod tests {
         let (_dir, store, uuid, peer) = damaged_beside_a_pre_attempt_peer();
         let mut task = store.load(&uuid).unwrap();
         task.comment("Saved", &Actor::Person, 11).unwrap();
-        store.save(&mut task).unwrap();
+        store.save_received(&mut task).unwrap();
         let saved = task.snapshot().unwrap();
         task.comment("Never appended", &Actor::Person, 12).unwrap();
         let first = fs::read(store.updates_path(&uuid)).unwrap();
@@ -2520,10 +2502,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = ProjectStore::open(dir.path(), "project-1").unwrap();
             let mut task = created();
-            store.save(&mut task).unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
             let other = task.snapshot().unwrap();
             task.comment("Only here", &Actor::Person, 11).unwrap();
-            store.save(&mut task).unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
             if spoil {
                 let mut updates = fs::read(store.updates_path(task.uuid())).unwrap();
                 updates.push(9);

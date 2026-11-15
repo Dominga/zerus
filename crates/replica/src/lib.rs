@@ -2,6 +2,8 @@
 //! that imports `loro`: hgs and the mobile apps use its typed operations, so
 //! a Loro upgrade or a schema change happens here once.
 mod attachment;
+mod cutover;
+mod cutover_root;
 mod error;
 pub mod execution;
 pub mod ids;
@@ -59,4 +61,4 @@ pub use sync::{
 };
 #[cfg(not(feature = "test-without-team"))]
 pub use task::TaskTeam;
-pub use task::{NewTask, Settled, Settlement, TaskDoc};
+pub use task::{Capture, CutoverSeal, NewTask, NotCutOver, Settled, Settlement, TaskDoc};

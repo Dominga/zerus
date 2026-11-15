@@ -1,6 +1,34 @@
 //! Indexed base reads. A missing pin never adopts the team's newer default.
 use super::*;
 
+/// Opt-in layout fence: ordinary stores stay at 12 until their first advance.
+pub(crate) const PINNED_EXTENSION: u32 = 13;
+
+pub(crate) fn register_writer(db: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    db.create_scalar_function(
+        "zerus_teams_base_pins_v13",
+        0,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| Ok(i64::from(PINNED_EXTENSION)),
+    )
+    .map_err(storage)
+}
+
+pub(crate) fn protect_writers(db: &Connection) -> Result<()> {
+    timers::fence(db)?;
+    db.execute_batch(include_str!("base-fence.sql"))
+        .map_err(storage)?;
+    db.execute(
+        "UPDATE timers_extension SET version=?1 WHERE id=1",
+        [PINNED_EXTENSION],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// Older effects inherit the frozen pre-advance base only below its recorded
 /// high-water. A newer missing pin fails closed. All joins are primary keys.
 pub(crate) const VALUE: &str = "COALESCE(b.base_commit,CASE WHEN o.team IS NULL THEN t.base_commit WHEN e.seq<=o.legacy_ceiling THEN o.base_commit END)";

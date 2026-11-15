@@ -166,6 +166,44 @@ fn advance_base_equal_backward_unrelated_missing_and_non_main_are_refused() {
     }
 }
 
+/// The reviewer's DWIM probes: ordinary branch commands must not impersonate
+/// either literal main ref when that exact ref is absent.
+#[test]
+fn advance_base_refuses_branches_named_like_missing_main_refs() {
+    for missing in ["refs/heads/main", "refs/remotes/origin/main"] {
+        let f = GitFixture::new();
+        let mut h = f.harness();
+        if missing == "refs/heads/main" {
+            f.git(&["update-ref", "refs/remotes/origin/main", &f.latest]);
+            f.git(&["update-ref", "-d", missing]);
+        }
+        f.git(&["branch", missing, &f.side]);
+        let facts = crate::teams::integrate::main_refs(&f.repo).unwrap();
+        assert!(facts.iter().all(|r| r.reference != missing), "{facts:?}");
+        let req = f.request(&h, &f.side);
+        let error = f.apply(&mut h, &person(), &req).unwrap_err();
+        assert_eq!(error.code, code::INVALID_STATE);
+        assert!(error.message.contains("not contained"), "{error:?}");
+        assert_eq!(h.store.team(TEAM).unwrap().unwrap().base_commit, f.old);
+    }
+}
+
+#[test]
+fn advance_base_requires_an_exact_main_ref_even_with_matching_descendants() {
+    let f = GitFixture::new();
+    let mut h = f.harness();
+    f.git(&["update-ref", "-d", "refs/heads/main"]);
+    for name in ["refs/heads/main", "refs/remotes/origin/main", "main/nested"] {
+        f.git(&["branch", name, &f.next]);
+    }
+    let error = crate::teams::integrate::main_refs(&f.repo).unwrap_err();
+    assert_eq!(error.code, code::INVALID_STATE);
+    assert!(error.message.contains("refs/heads/main"));
+    assert!(error.message.contains("refs/remotes/origin/main"));
+    let req = f.request(&h, &f.next);
+    assert_eq!(f.apply(&mut h, &person(), &req).unwrap_err(), error);
+}
+
 #[test]
 fn advance_base_uses_fetched_origin_main_without_a_fetch_or_head_fallback() {
     let f = GitFixture::new();

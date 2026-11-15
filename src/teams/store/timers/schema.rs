@@ -15,6 +15,7 @@
 //! lock for several seconds, once. Another process opening the store
 //! meanwhile waits for it, up to a minute, instead of the usual two seconds.
 use super::*;
+use crate::teams::store::bases::PINNED_EXTENSION;
 use std::time::Duration;
 mod legacy_holds;
 use legacy_holds::legacy_owners;
@@ -312,9 +313,9 @@ enum Mark {
 fn marked(db: &Connection) -> Result<Mark> {
     match version(db)? {
         None => Ok(Mark::Absent),
-        Some(EXTENSION) => Ok(Mark::Current),
+        Some(EXTENSION | PINNED_EXTENSION) => Ok(Mark::Current),
         // The same refusal as a newer core schema's.
-        Some(v) if v > EXTENSION => Err(Problem::new(
+        Some(v) if v > PINNED_EXTENSION => Err(Problem::new(
             code::INVALID_STATE,
             "store schema is newer than this version of Zerus",
         )),

@@ -18,6 +18,7 @@ pub(super) fn advance(
     let main_ref =
         crate::teams::integrate::validate_base_advance(&repo, &ctx.team.base_commit, commit)?;
     ctx.db.execute("INSERT OR IGNORE INTO base_origins(team,base_commit,legacy_ceiling) SELECT ?1,?2,COALESCE(MAX(seq),0) FROM effects WHERE team=?1",params![ctx.team.id,ctx.team.base_commit]).map_err(storage)?;
+    crate::teams::store::bases::protect_writers(ctx.db)?;
     ctx.db
         .execute(
             "UPDATE teams SET base_commit=?2 WHERE id=?1",

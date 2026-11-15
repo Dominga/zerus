@@ -1,6 +1,7 @@
 //! The transition that adds this package to a store: one immediate
 //! transaction, a marker written last, rerun whole when the marker is absent.
 use super::*;
+use crate::teams::store::bases::PINNED_EXTENSION;
 use crate::teams::store::timers::schema::{AFTER_FENCE, BASE, BEFORE_MARK, EXTENSION, TRANSITIONS};
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -307,7 +308,10 @@ fn a_store_marked_before_the_key_refusal_order_gains_its_index() {
 fn a_marker_newer_than_this_program_refuses_the_open_and_writes_nothing() {
     let h = stopped();
     db(&h)
-        .execute("UPDATE timers_extension SET version=?1", [EXTENSION + 1])
+        .execute(
+            "UPDATE timers_extension SET version=?1",
+            [PINNED_EXTENSION + 1],
+        )
         .unwrap();
     let full = names(&h);
     let before = transitions();
@@ -321,7 +325,7 @@ fn a_marker_newer_than_this_program_refuses_the_open_and_writes_nothing() {
         refused.message
     );
     assert_eq!(transitions(), before, "no transition");
-    assert_eq!(marker(&h), Some(EXTENSION + 1), "no lowered mark");
+    assert_eq!(marker(&h), Some(PINNED_EXTENSION + 1), "no lowered mark");
     assert_eq!(names(&h), full);
 }
 
@@ -347,7 +351,10 @@ fn older_card_index(h: &Harness) {
 fn a_store_marked_by_a_newer_program_is_refused_before_any_schema_write() {
     let h = stopped();
     db(&h)
-        .execute("UPDATE timers_extension SET version=?1", [EXTENSION + 1])
+        .execute(
+            "UPDATE timers_extension SET version=?1",
+            [PINNED_EXTENSION + 1],
+        )
         .unwrap();
     older_card_index(&h);
     db(&h)
@@ -367,7 +374,7 @@ fn a_store_marked_by_a_newer_program_is_refused_before_any_schema_write() {
         before,
         "the index, the schema batches and the mark are untouched"
     );
-    assert_eq!(marker(&h), Some(EXTENSION + 1));
+    assert_eq!(marker(&h), Some(PINNED_EXTENSION + 1));
 }
 
 #[test]
@@ -417,7 +424,7 @@ fn a_mark_committed_after_the_first_fence_stops_the_index_conversion() {
         &h,
         format!(
             "BEGIN IMMEDIATE; UPDATE timers_extension SET version={}; DROP INDEX integration_card; CREATE UNIQUE INDEX integration_card ON cards(decision_seq); COMMIT;",
-            EXTENSION + 1
+            PINNED_EXTENSION + 1
         ),
     );
     refused_as_newer(&h);
@@ -434,7 +441,7 @@ fn a_mark_committed_after_the_first_fence_stops_the_common_batches() {
         &h,
         format!(
             "BEGIN IMMEDIATE; UPDATE timers_extension SET version={}; DROP TABLE verdicts; DROP INDEX teams_live; COMMIT;",
-            EXTENSION + 1
+            PINNED_EXTENSION + 1
         ),
     );
     refused_as_newer(&h);

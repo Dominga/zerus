@@ -9436,7 +9436,9 @@ write transaction, after exact receipt replay and revision validation.
 The commit must exist, strictly descend from the current base, and be an
 ancestor of or equal to at least one of `refs/heads/main` and
 `refs/remotes/origin/main`. Neither HEAD nor a remote/network fallback is used;
-refusals name the checked main refs. The revision and journal advance together,
+the two literal names are read in one snapshot without revision-name guessing,
+and prefix descendants or branches named like those refs are excluded.
+Refusals name the checked main refs. The revision and journal advance together,
 and the journal names the admitting ref. Ordinary `stale_revision`,
 `store_busy` and `storage_failed` receipt and retry semantics apply.
 
@@ -9448,3 +9450,13 @@ and integration ancestry/admission. Queue rows add `assigned_base` (null before
 hand-out). Members start from the integration branch and merge their given
 base into their own branch. New member launches use the current default;
 existing and already-reserved launches keep their original checkout plan.
+
+The first successful advance atomically raises the private Teams compatibility
+mark, refusing older engines at store open. Narrow per-team SQLite guards also
+refuse already-open older engines' hand-out/effect and integration row writes;
+the newer engine registers their connection capability. A refusal rolls back
+the operation without partial rows (older callers may report `storage_failed`
+with the newer-writer cause). Pre-advance unpinned rows retain the original
+base through the indexed high-water, and the new engine continues to pin
+future hand-outs. Unadvanced teams and unrelated writes on existing connections
+remain outside those row guards.

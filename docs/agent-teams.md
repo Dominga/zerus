@@ -641,7 +641,9 @@ commit hash must exist in that repository, be strictly newer than the current
 base, and contain the current base in its ancestry. It must also be contained
 by either the literal local `refs/heads/main` or locally fetched
 `refs/remotes/origin/main`. There is no fetch, network lookup, HEAD fallback or
-arbitrary ref selection. Missing main refs and backward, equal, unrelated or
+arbitrary ref selection. Both names are read exactly in one ref snapshot;
+a branch whose name merely resembles either ref cannot substitute for it.
+Missing main refs and backward, equal, unrelated or
 non-main commits are refused. The journal records the old base, new base and
 the ref that admitted it. Repeating the exact request returns its saved receipt
 before rechecking the revision or repository.
@@ -652,6 +654,14 @@ check use that pin even after another advance. The task detail and queue show
 `assigned_base` separately from the team's current default. On upgrade, older
 effects keep the pre-advance base through a frozen default and indexed
 high-water mark; upgrading does not scan or rewrite the effect history.
+
+The first successful advance also raises the computer's private Teams store
+compatibility mark. Older builds cannot reopen that store. An older engine
+that already holds a connection cannot write hand-out, effect or integration
+rows for an advanced team: its transaction fails without partial rows, with
+a cause naming the required newer Zerus writer. Those guards do not cover
+other teams or unrelated settings/status writes on an already-open connection.
+Use the updated engine to continue the affected work.
 
 Advancing writes no Git objects or refs. It does not merge into, reset or
 rewrite the integration branch or any member branch. Existing member

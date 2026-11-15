@@ -283,11 +283,14 @@ fn connect_mode(path: &Path, create: bool, migrate: bool) -> Result<Connection> 
     .map_err(storage)?;
     #[cfg(unix)]
     crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
+    bases::register_writer(&db)?;
     db.busy_timeout(Duration::from_secs(8)).map_err(storage)?;
     if migrate {
         initialize(&mut db)?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(storage)?;
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+        )
+        .map_err(storage)?;
     }
     Ok(db)
 }

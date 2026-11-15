@@ -16,23 +16,38 @@ fn invalid(message: impl Into<String>) -> Problem {
 
 fn refs(git: &Git) -> Result<Vec<MainRef>, Problem> {
     let mut refs = Vec::new();
-    for reference in MAIN_REFS {
-        // A literal main ref must not alias HEAD or another ref.
-        let symbolic = git.run(&["symbolic-ref", "-q", reference])?;
-        match symbolic.status.code() {
-            Some(1) => (),
-            Some(0) => return Err(invalid(format!("{reference} must be a direct main ref."))),
-            _ => return Err(git_failure(&symbolic)),
+    // One snapshot of literal refs: revision parsing can DWIM a missing
+    // refs/remotes/origin/main into refs/heads/refs/remotes/origin/main.
+    let output = git.run(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(symref)",
+        MAIN_REFS[0],
+        MAIN_REFS[1],
+    ])?;
+    if !output.status.success() {
+        return Err(git_failure(&output));
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|_| invalid("The repository returned invalid main refs."))?;
+    for row in text.lines() {
+        let fields: Vec<_> = row.split('\0').collect();
+        let [reference, commit, symbolic] = fields.as_slice() else {
+            return Err(invalid("The repository returned invalid main refs."));
+        };
+        // for-each-ref patterns also include descendants of the named ref.
+        if !MAIN_REFS.contains(reference) {
+            continue;
         }
-        if let Some(commit) = git.reference(reference)? {
-            if git.commit(&commit)? != commit {
-                return Err(invalid(format!("{reference} does not name a commit.")));
-            }
-            refs.push(MainRef {
-                reference: reference.into(),
-                commit,
-            });
+        if !symbolic.is_empty() {
+            return Err(invalid(format!("{reference} must be a direct main ref.")));
         }
+        if git.commit(commit)? != *commit {
+            return Err(invalid(format!("{reference} does not name a commit.")));
+        }
+        refs.push(MainRef {
+            reference: (*reference).into(),
+            commit: (*commit).into(),
+        });
     }
     if refs.is_empty() {
         return Err(invalid("No main commit is available. Checked refs/heads/main and refs/remotes/origin/main; fetch or update main outside Zerus first."));

@@ -14,6 +14,8 @@ mod active_app;
 mod analytics;
 #[cfg(feature = "live")]
 mod approvals;
+#[cfg(feature = "live")]
+mod catalog_editor;
 // The path-shared child_environment module must use the linked core gate,
 // never a second copy of unix_spawn.rs and its process-local mutex.
 #[cfg(unix)]
@@ -1741,6 +1743,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_action_again,
         teams::team_intent_dismiss,
         teams::teams_catalog,
+        catalog_editor::catalog_editor_load,
+        catalog_editor::catalog_editor_validate,
+        catalog_editor::catalog_editor_import,
+        catalog_editor::catalog_editor_import_file,
+        catalog_editor::catalog_editor_export,
+        catalog_editor::catalog_editor_export_template,
+        catalog_editor::catalog_editor_save,
+        catalog_editor::catalog_editor_receipt,
         teams::teams_template_save,
         teams::teams_project,
         teams::teams_preview,

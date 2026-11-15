@@ -115,7 +115,11 @@ pub(super) fn stop_sentence(code: &str, reason: Option<&str>) -> String {
     }
 }
 
-pub(super) fn members(team: &Team, members: Vec<MemberRow>, work: &std::collections::BTreeMap<String, usize>) -> Result<Vec<Value>, Problem> {
+pub(super) fn members(
+    team: &Team,
+    members: Vec<MemberRow>,
+    work: &std::collections::BTreeMap<String, usize>,
+) -> Result<Vec<Value>, Problem> {
     members
         .into_iter()
         .map(|row| {
@@ -124,14 +128,22 @@ pub(super) fn members(team: &Team, members: Vec<MemberRow>, work: &std::collecti
             value["person_stopped"] = json!(row.person_stopped);
             value["open_work"] = json!(work.get(&member.id).copied().unwrap_or(0));
             let choices = if let Some(launch) = &member.launch {
-                Some((launch.model.as_str(),launch.effort.as_str(),&launch.account))
+                Some((
+                    launch.model.as_str(),
+                    launch.effort.as_str(),
+                    &launch.account,
+                ))
             } else if member.id == team.lead {
-                let lead=&team.bundle.template.lead;
-                Some((lead.model.as_str(),lead.effort.as_str(),&lead.account))
+                let lead = &team.bundle.template.lead;
+                Some((lead.model.as_str(), lead.effort.as_str(), &lead.account))
             } else {
-                team.bundle.roles.iter().find(|r|r.id==member.role).map(|r|(r.model.as_str(),r.effort.as_str(),&r.account))
+                team.bundle
+                    .roles
+                    .iter()
+                    .find(|r| r.id == member.role)
+                    .map(|r| (r.model.as_str(), r.effort.as_str(), &r.account))
             };
-            if let Some((model,effort,account))=choices {
+            if let Some((model, effort, account)) = choices {
                 if !model.trim().is_empty() {
                     value["model"] = json!(model);
                 }

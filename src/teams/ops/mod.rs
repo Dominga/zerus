@@ -5,15 +5,15 @@ mod apply;
 mod authority;
 mod common;
 mod decisions;
-mod dependencies;
 mod delegation;
+mod dependencies;
 pub(super) mod handout;
 pub(crate) use handout::handout_admissible;
+mod editing;
 mod integration;
 mod journal;
 pub(crate) mod lead_queue;
 mod members;
-mod editing;
 mod pipeline;
 mod queue;
 #[cfg(test)]

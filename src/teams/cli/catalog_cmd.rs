@@ -39,7 +39,26 @@ pub(super) fn run(
     let (command, rest) = args
         .split_first()
         .ok_or_else(|| input::usage(format!("{group} needs a command")))?;
+    let _writer = if matches!(command.as_str(), "import" | "save" | "remove") {
+        Some(catalog::editor::writer(&config.dir)?)
+    } else {
+        None
+    };
     match (group, command.as_str()) {
+        ("catalog", "snapshot") => {
+            words(rest)?.nothing_else("catalog snapshot")?;
+            reply(&actor, catalog::editor::snapshot(&config.dir)?)
+        }
+        ("catalog", "receipt") => {
+            let options = words(rest)?;
+            let id = options.required("a request UUID")?;
+            let receipt = catalog::editor::receipt(&config.dir, id)?;
+            if receipt.get("actor").is_some() {
+                Ok(receipt)
+            } else {
+                reply(&actor, receipt)
+            }
+        }
         ("catalog", "show") => catalog_show(&actor, &catalog::load(&config.dir)?),
         ("catalog", "export") => catalog_of(&actor, &catalog::person(&config.dir)?),
         ("catalog", "import") => import_catalog(&actor, config, provided),
@@ -183,7 +202,13 @@ fn import_catalog(
     config: &Config,
     provided: Option<&str>,
 ) -> Result<Value, Problem> {
-    let value = without_read_only(input::value(&request_input(provided)?, "catalog")?);
+    let value = input::value(&request_input(provided)?, "catalog")?;
+    if value.get("schema").is_some() {
+        let edit: catalog::editor::Edit = serde_json::from_value(value)
+            .map_err(|error| input::serde_problem(error.to_string()))?;
+        return catalog::editor::import(&config.dir, edit, actor);
+    }
+    let value = without_read_only(value);
     let catalog: Catalog =
         serde_json::from_value(value).map_err(|error| input::serde_problem(error.to_string()))?;
     catalog::save(&config.dir, &catalog)?;

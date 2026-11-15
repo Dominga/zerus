@@ -118,6 +118,10 @@ fn verified_existing(db: &rusqlite::Connection, record: &Value) -> Result<Option
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
+    super::listing_metadata::remove_at(&root(), path, || remove_synced_inner(path))
+}
+
+fn remove_synced_inner(path: &Path) -> Result<()> {
     storage::cut_write()?;
     match fs::remove_file(path) {
         Ok(()) => {

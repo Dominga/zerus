@@ -63,6 +63,7 @@ const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ 
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 // New team loads the first time it opens; its catalog read happens then.
+const CatalogPage = lazy(() => import("./ui/teams/CatalogPage").then((m) => ({ default: m.CatalogPage })));
 const NewTeamDialog = lazy(() => import("./ui/teams/NewTeam").then((m) => ({ default: m.NewTeamDialog })));
 // Waiting for you loads the first time its rail entry opens.
 const WaitingScreen = lazy(() => import("./ui/screens/Waiting").then((m) => ({ default: m.WaitingScreen })));
@@ -167,6 +168,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
           <Match when={page() === "projects"}><Suspense><ProjectsScreen /></Suspense></Match>
           <Match when={page() === "waiting"}><Suspense><WaitingScreen /></Suspense></Match>
+          <Match when={page() === "team-catalog"}><Suspense><CatalogPage /></Suspense></Match>
           <Match when={page() === "teams"}><Suspense><TeamsScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>

@@ -6,9 +6,10 @@
 #![cfg_attr(not(test), allow(dead_code))] // The `hgs team` CLI in package 5 is the caller.
 
 mod digest;
+pub(crate) mod editor;
 mod roster;
-pub(crate) use roster::validate_member_agent;
 pub(crate) use digest::template_digest;
+pub(crate) use roster::validate_member_agent;
 pub(crate) use roster::{validate_catalog_roles, validate_roster};
 
 use std::io::{self, Write};
@@ -82,6 +83,11 @@ fn merge_by_id<T: Clone>(base: &[T], over: &[T], id: impl Fn(&T) -> &str) -> Vec
 /// Replaces the person's catalog. Writes nothing unless the merged catalog is
 /// valid.
 pub fn save(config_dir: &Path, catalog: &Catalog) -> Result<(), Problem> {
+    checked(catalog)?;
+    write(config_dir, catalog)
+}
+
+fn checked(catalog: &Catalog) -> Result<(), Problem> {
     first_problem(validate_ids(catalog))?;
     let merged = merge(&builtin(), catalog);
     first_problem(validate_catalog(&merged))?;
@@ -92,7 +98,7 @@ pub fn save(config_dir: &Path, catalog: &Catalog) -> Result<(), Problem> {
     for template in &merged.templates {
         export_bundle(&merged, &template.id)?;
     }
-    write(config_dir, catalog)
+    Ok(())
 }
 
 /// Adds a bundle's template, roles and pipelines to the person's catalog.
@@ -127,14 +133,23 @@ pub fn export_bundle(catalog: &Catalog, template: &str) -> Result<TemplateBundle
     Ok(bundle)
 }
 
+/// The exact bytes stored by every catalog writer, including the final newline.
+fn encoded(catalog: &Catalog) -> Result<Vec<u8>, Problem> {
+    let mut bytes = serde_json::to_vec_pretty(catalog)
+        .map_err(|error| write_error(io::Error::other(error.to_string())))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 fn write(config_dir: &Path, catalog: &Catalog) -> Result<(), Problem> {
+    write_encoded(config_dir, &encoded(catalog)?)
+}
+
+fn write_encoded(config_dir: &Path, bytes: &[u8]) -> Result<(), Problem> {
     let directory = config_dir.join(DIR);
     crate::platform::private_dir(&directory).map_err(write_error)?;
-    let text = serde_json::to_string_pretty(catalog)
-        .map_err(|error| write_error(io::Error::other(error.to_string())))?;
     let mut temporary = tempfile::NamedTempFile::new_in(&directory).map_err(write_error)?;
-    temporary.write_all(text.as_bytes()).map_err(write_error)?;
-    temporary.write_all(b"\n").map_err(write_error)?;
+    temporary.write_all(bytes).map_err(write_error)?;
     temporary.as_file().sync_all().map_err(write_error)?;
     crate::platform::persist(temporary, path(config_dir))
         .map_err(|error| write_error(error.error))?;

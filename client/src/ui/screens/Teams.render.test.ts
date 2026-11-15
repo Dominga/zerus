@@ -233,18 +233,18 @@ it("uses Russian team statuses consistently in the list, session strip and Team 
 });
 
 it("offers sibling header and row action hooks without opening the lead from a drawer control", () => {
-  const [opened, setOpened] = createSignal<string>(); let catalogs = 0;
+  const [opened, setOpened] = createSignal<string>(); let headerClicks = 0;
   const team = data.pages[0].teams[0]; f.rows = [session(team)]; publish(data.pages[0]);
   const host = show(() => createComponent(TeamsScreen, {
     get headerActions() {
-      const action = document.createElement("button"); action.textContent = "Catalog"; action.onclick = () => { catalogs++; }; return action;
+      const action = document.createElement("button"); action.textContent = "Extra action"; action.onclick = () => { headerClicks++; }; return action;
     },
     rowActions: (team: TeamSummary) => {
       const action = document.createElement("button"); action.textContent = "Drawer"; action.onclick = () => setOpened(team.id); return action;
     },
     rowDetails: (team: TeamSummary) => createComponent(Show, { keyed: true, get when() { return opened() === team.id; }, children: "Team drawer content" }),
   }));
-  expect(button(host, "Catalog")).toBeDefined(); button(host, "Catalog").click(); expect(catalogs).toBe(1); expect(store.newTeamOpen()).toBe(false);
+  expect(button(host, "Extra action")).toBeDefined(); button(host, "Extra action").click(); expect(headerClicks).toBe(1); expect(store.newTeamOpen()).toBe(false);
   const drawer = button(host, "Drawer"); expect(drawer.parentElement!.closest("button")).toBeNull();
   drawer.click(); expect(host.textContent).toContain("Team drawer content"); expect(ui.selectedKey()).toBeUndefined();
   host.querySelector<HTMLButtonElement>("[data-team-row]")!.click(); expect(ui.selectedKey()).toBe(f.rows[0].key);
@@ -255,4 +255,23 @@ it("opens the new product-bound lead from a refreshed list rather than its old s
   const old = session(before.teams[0]), fresh = session(after.teams[0]); f.rows = [old, fresh];
   publish(after); const host = show(); host.querySelector<HTMLButtonElement>("[data-team-row]")!.click();
   expect(ui.selectedKey()).toBe(fresh.key); expect(nav.navigationTeamFor(old)).toBeUndefined();
+});
+
+it("opens Catalog from the Teams header without creating or changing a team", () => {
+  publish(data.empty); const host = show();
+  const catalog = [...host.querySelectorAll<HTMLButtonElement>(".teams-screen-head button")].find((entry) => entry.textContent === "Catalog");
+  expect(catalog).toBeDefined(); expect(catalog!.disabled).toBe(false);
+  expect(catalog!.closest(".teams-screen-actions")).not.toBeNull();
+  catalog!.click();
+  expect(ui.page()).toBe("team-catalog"); expect(store.newTeamOpen()).toBe(false);
+  expect(f.calls).toEqual([]); expect(f.pages).toEqual([]);
+});
+
+it("keeps the Catalog header entry disabled until Teams are available", () => {
+  const host = show();
+  const catalog = () => [...host.querySelectorAll<HTMLButtonElement>(".teams-screen-head button")].find((entry) => entry.textContent === "Catalog")!;
+  expect(catalog()).toBeDefined(); expect(catalog().disabled).toBe(true);
+  publish(data.running); expect(catalog().disabled).toBe(false);
+  store.apply([entry("list", "failed", { code: "teams_inactive", message: "fixture refusal" })]);
+  expect(catalog().disabled).toBe(true); catalog().click(); expect(ui.page()).toBe("teams");
 });

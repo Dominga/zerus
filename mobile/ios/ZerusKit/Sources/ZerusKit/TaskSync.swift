@@ -132,6 +132,8 @@ public struct TaskPeer: Hashable, Sendable {
 
 public enum TaskSyncPlan {
     public static let operation = "task_exchange"
+    public static let identityFeature = "task_session_identity_v2"
+    public static let uploadFeature = "task_media_upload_v1"
 
     /// Each catalogued project's computers that are online, not last known, and offer the exchange, as their relay does.
     public static func peers(_ digests: [ProjectKey: [String: String]], relayOperations: [String: Set<String>],
@@ -292,9 +294,17 @@ public actor TaskSync {
     /// Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back.
     public func send(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, task: String,
                      session: String, computerName: String? = nil, sessionId: String = "") async -> TaskOutcome {
-        let payload: JSONObject = ["schema": 1, "project": .string(key.id), "task": .string(task), "session": .string(session)]
+        let identity = await identitySchema(connection, computerId: computerId, sessionId: sessionId)
+        var payload: JSONObject = ["schema": .int(identity ? 2 : 1), "project": .string(key.id), "task": .string(task), "session": .string(session)]
+        if identity { payload = payload.putting("session_id", .string(sessionId)) }
         return await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
                          operation: "task_send", payload: payload)
+    }
+
+    private func identitySchema(_ connection: Connection, computerId: String, sessionId: String) async -> Bool {
+        guard connection.protocolVersion == 2, !sessionId.isEmpty else { return false }
+        let advertised = await capabilities()
+        return advertised[MachineKey(connectionId: connection.id, computerId: computerId)]?.contains(TaskSyncPlan.identityFeature) == true
     }
 
     /// A Send now that may have happened holds the task until an exchange with that computer shows its stage.
@@ -341,9 +351,15 @@ public actor TaskSync {
     /// One page of that computer's Done list; with `session`, of the tasks sent to it.
     public func donePage(_ connection: Connection, _ key: ProjectKey, computerId: String, before: DoneCursor?,
                          limit: Int = 50, session: SessionRef? = nil) async throws -> DonePage {
-        var payload: JSONObject = ["schema": 1, "project": .string(key.id), "limit": .int(Int64(limit))]
+        guard connection.id == key.connectionId else { throw TaskSyncError("The original task exchange scope changed.") }
+        let identity = await identitySchema(connection, computerId: computerId, sessionId: session?.sessionId ?? "")
+        var payload: JSONObject = ["schema": .int(identity ? 2 : 1), "project": .string(key.id), "limit": .int(Int64(limit))]
         if let before { payload = payload.putting("before", ["at": .int(before.at), "uuid": .string(before.uuid)]) }
-        if let session { payload = payload.putting("session", ["machine": .string(session.machine), "session": .string(session.session)]) }
+        if let session {
+            var ref: JSONObject = ["machine": .string(session.machine), "session": .string(session.session)]
+            if identity { ref = ref.putting("session_id", .string(session.sessionId)) }
+            payload = payload.putting("session", .object(ref))
+        }
         let receipt = try await request(connection, computerId: computerId, operation: "task_done", payload: payload, maxPolls: Self.exchangePolls)
         guard receipt.string("state") == "completed" else {
             let error = receipt.string("error")

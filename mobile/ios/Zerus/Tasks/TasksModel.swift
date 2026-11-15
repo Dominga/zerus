@@ -60,7 +60,7 @@ final class TasksModel {
         self.app = app
         self.replicas = replicas
         self.storageError = replicas == nil && storageError.isEmpty ? "The phone keeps no task storage." : storageError
-        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0, mediaUnavailable: taskEditText("task_media_exchange_update"), heldSend: taskEditText("task_send_unknown_hold")) }
+        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0, mediaUnavailable: taskEditText("task_media_exchange_update"), heldSend: taskEditText("task_send_unknown_hold"), capabilities: { [weak app] in app?.machineFeatures ?? [:] }) }
     }
 
     private(set) var taskEditor: TaskEditorModel?
@@ -480,7 +480,7 @@ final class TasksModel {
         let name = taskProjectName(key), computer = computerName(key, route.computerId)
         Task {
             let outcome = await taskSync.send(connection, key, name: name, computerId: route.computerId, task: task.uuid,
-                                              session: route.session, computerName: computer)
+                                              session: route.session, computerName: computer, sessionId: route.sessionId)
             taskNotice = switch outcome {
             case .done: "Sent to \(route.session)"
             case .refused(let reason): reason
@@ -539,8 +539,8 @@ final class TasksModel {
         doneExpanded = more || (keepExpanded && doneExpanded)
         var session: SessionRef?
         if tasksOnlyThisSession {
-            let reason = TasksPresentation.addReason(tasksChosen)
-            guard reason.isEmpty, let chosen = tasksChosen else {
+            let reason = TasksPresentation.addReason(displayedTaskChosen)
+            guard reason.isEmpty, let chosen = displayedTaskChosen else {
                 doneError = reason
                 return
             }

@@ -407,7 +407,10 @@ pub(crate) fn admit(db: &Connection, gate: &Gate) -> Result<()> {
 /// reserved, and an item beyond the previous mark still open.
 pub(crate) fn admit_bell(db: &Connection, bell: &Bell) -> Result<()> {
     let team = super::rows::team(db, &bell.team)?.ok_or_else(|| refuse("The team is gone."))?;
-    if team.status != zerus_team_plan::model::TeamStatus::Running {
+    if !(team.status == zerus_team_plan::model::TeamStatus::Running
+        || (team.status == zerus_team_plan::model::TeamStatus::Planning
+            && super::planning::paused(db, &team.id)? == Some(false)))
+    {
         return Err(refuse("The team is not running."));
     }
     let lead = super::rows::member(db, &team.id, &team.lead)?;

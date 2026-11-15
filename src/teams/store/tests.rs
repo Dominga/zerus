@@ -7,6 +7,7 @@ mod holder;
 mod member_sessions;
 #[cfg(unix)]
 mod paths;
+mod planning;
 mod stage;
 mod timeline;
 

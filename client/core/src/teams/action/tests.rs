@@ -1381,6 +1381,7 @@ fn the_action_kinds_are_the_shared_list() {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
             TeamAction::Create { .. }
+            | TeamAction::StartPlanning { .. }
             | TeamAction::SubmitDraftPhase { .. }
             | TeamAction::EditDraftPhase { .. }
             | TeamAction::AddMember { .. }
@@ -1412,6 +1413,12 @@ fn the_action_kinds_are_the_shared_list() {
     }
     let member = || "m1".to_owned();
     let samples = vec![
+        serde_json::from_value::<TeamAction>({
+            let mut value = serde_json::to_value(create(None, Integration::Branch).action).unwrap();
+            value["kind"] = "start_planning".into();
+            value
+        })
+        .unwrap(),
         TeamAction::SubmitDraftPhase {
             phase: 1,
             draft: zerus_team_plan::draft::DraftInput {

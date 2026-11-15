@@ -75,6 +75,7 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  planning?: { known: boolean; paused: boolean; goal: string } | null;
   plan?: PhasePane | null;
   /** Complete bounded goal for the editor, distinct from the bar preview. */
   edit_goal?: string | null;

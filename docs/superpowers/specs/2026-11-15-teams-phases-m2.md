@@ -74,6 +74,17 @@ the fence belongs to the first executable slice, not the draft-only slice.
 A newer Teams store must be refused by an older engine before
 it can cause a planned effect; no desktop/task-document schema bump is needed.
 
+Slice 2 uses private `user_version` 3 for planned startup, raised in the same
+transaction as `StartPlanning`; queue-only creation stays at 2. Its pause flag
+is a companion value and the team retains `Planning`, so an already-open old
+writer's legacy `Paused -> Running` resume cannot activate the roster. The new
+selector and final admission permit only the exact unpaused lead. Initial goal
+context is a team-wide inbox notice, using the existing non-task `(0,0)` notice
+sentinel and the original guarded doorbell; it never becomes a fake task row.
+`current` also exposes the bound lead's goal. Ordinary planning notices retain
+their own authority and listed decisions; task-backed and integration decisions
+retain their existing active-team rules. No saved launch Plan shape changes.
+
 ## Operations and authority
 
 These names are proposed additions, not commands that exist today. Each takes

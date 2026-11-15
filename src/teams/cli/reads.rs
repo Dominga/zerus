@@ -48,7 +48,7 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
     } else {
         None
     };
-    Ok(json!({
+    let mut reply = json!({
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": view,
@@ -60,7 +60,11 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
         "service_items": crate::desktop::teams::service_items(&config.state, &team, running, input::now_ms()),
         "key_refusals": store.key_refusal_page(&team)?,
         "cancel_refusals": cancel_refusals,
-    }))
+    });
+    if row.status == TeamStatus::Planning {
+        reply["planning"] = serde_json::to_value(store.planning(&team)?).map_err(storage)?;
+    }
+    Ok(reply)
 }
 
 /// One page of the queue, the lead inbox, the owner cards or the journal.
@@ -307,14 +311,18 @@ pub(super) fn current(config: &Config, caller: &Caller, args: &[String]) -> Resu
         .member(&team, &member)?
         .ok_or_else(|| Problem::new(code::UNKNOWN_MEMBER, "Member does not exist."))?;
     let team_row = store.team(&team)?.ok_or_else(|| not_found_team(&team))?;
-    Ok(json!({
+    let mut reply = json!({
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": team,
         "revision": team_row.revision,
         "member": row,
         "nodes": held(&store, &team, &member)?,
-    }))
+    });
+    if member == team_row.lead && team_row.status == TeamStatus::Planning {
+        reply["planning"] = json!({"goal":team_row.goal,"state":store.planning(&team)?});
+    }
+    Ok(reply)
 }
 
 /// A member's own live nodes. The queue is bounded by the team's cap, and this

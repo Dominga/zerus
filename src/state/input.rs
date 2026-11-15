@@ -3265,3 +3265,6 @@ mod clear_input_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod wrapped_title_tests;

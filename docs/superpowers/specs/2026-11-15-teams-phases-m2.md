@@ -143,6 +143,13 @@ limit and bounded text; never assemble `TeamFixture` in production. Drafts
 count toward the planned-work cap. Whole-phase validation is bounded; page
 counts never prove that a phase is complete or unstarted.
 
+Slice 1 validation also bounds write-set comparison work under the writer
+lock. Barriers and dependencies are checked first, each unordered pair once;
+the sum of each pair's path bytes times the other set's path count is capped
+at 64 million. Exceeding it refuses atomically with `over_cap`, asking for
+simpler write sets or a smaller phase. The comparison itself remains the
+existing kernel's conservative overlap check.
+
 Project through `client/core/src/teams/read`, the single Teams poller/model,
 view DTOs, coalescer and batch into a separate client phase store. Preserve
 unknown/malformed/missing state as unavailable; an older local or remote hgs

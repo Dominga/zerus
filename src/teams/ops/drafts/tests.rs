@@ -275,6 +275,42 @@ fn overlap_requires_a_dependency_and_cross_phase_hard_edges_are_refused() {
 }
 
 #[test]
+fn a_later_barrier_orders_overlapping_phases_before_write_comparison() {
+    let mut h = Harness::new();
+    submit(&mut h, draft(&[1])).unwrap();
+    let mut second = draft(&[2]);
+    second.nodes[0].writes = draft(&[1]).nodes[0].writes.clone();
+    second.barrier = false;
+    refused(submit(&mut h, second.clone()), code::INVALID_STATE);
+    second.barrier = true;
+    submit(&mut h, second).unwrap();
+    assert_eq!(h.store.phase_draft(TEAM, 2).unwrap().nodes.len(), 1);
+}
+
+#[test]
+fn expensive_write_comparison_refuses_atomically_and_simpler_sets_can_be_saved() {
+    let mut h = Harness::new();
+    h.settings(|s| s.caps.max_phase_tasks = 20);
+    let before = h.store.team(TEAM).unwrap().unwrap().revision;
+    let mut d = draft(&(1..=20).collect::<Vec<_>>());
+    for node in &mut d.nodes {
+        node.writes = (0..200).map(|p| format!("{}/{p}", node.id)).collect();
+    }
+    assert!(serde_json::to_vec(&d).unwrap().len() < 262_000);
+    let error = submit(&mut h, d.clone()).unwrap_err();
+    assert_eq!(error.code, code::OVER_CAP);
+    assert!(error.message.contains("write-set validation"));
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap().revision, before);
+    assert_eq!(h.store.next_draft_node(TEAM).unwrap(), 1);
+    assert!(h.store.phase_draft(TEAM, 1).is_err());
+    for node in &mut d.nodes {
+        node.writes.truncate(2);
+    }
+    submit(&mut h, d).unwrap();
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}
+
+#[test]
 fn draft_and_queue_capacity_share_the_admitted_limit() {
     let mut h = Harness::new();
     h.settings(|s| s.caps.max_open_tasks = 2);

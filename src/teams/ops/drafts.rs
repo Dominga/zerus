@@ -282,16 +282,29 @@ fn validate(
     }
     phases.insert(phase.n, phase.clone());
     let index: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n)).collect();
+    // Bound work under the writer lock, including long path components. The
+    // request's byte limit alone permits a quadratic number of path pairs.
+    const MAX_WRITE_WORK: u64 = 64_000_000;
+    let write_sizes: BTreeMap<_, _> = graph
+        .iter()
+        .map(|n| {
+            (
+                n.id,
+                n.writes.iter().map(|p| p.len() as u64 + 1).sum::<u64>(),
+            )
+        })
+        .collect();
+    let mut write_work = 0u64;
     let mut ancestry = BTreeMap::new();
     for a in graph.iter().filter(|n| n.phase == phase.n) {
-        for b in graph.iter().filter(|n| n.id != a.id) {
-            if !zerus_team_plan::overlap::overlaps(&a.writes, &b.writes) {
+        for b in graph.iter().filter(|n| n.phase != phase.n || n.id > a.id) {
+            if a.writes.is_empty() || b.writes.is_empty() {
                 continue;
             }
             let later = if a.phase != b.phase {
                 let x = &phases[&a.phase];
                 let y = &phases[&b.phase];
-                Some(if (x.order, x.n) > (y.order, y.n) {
+                Some(if phase_order(x) > phase_order(y) {
                     x
                 } else {
                     y
@@ -302,9 +315,21 @@ fn validate(
             if later.is_some_and(|p| p.barrier) {
                 continue;
             }
-            if !depends(&index, &mut ancestry, a.id, b.id)
-                && !depends(&index, &mut ancestry, b.id, a.id)
+            if depends(&index, &mut ancestry, a.id, b.id)
+                || depends(&index, &mut ancestry, b.id, a.id)
             {
+                continue;
+            }
+            write_work = write_work.saturating_add(
+                a.writes.len() as u64 * write_sizes[&b.id]
+                    + b.writes.len() as u64 * write_sizes[&a.id],
+            );
+            if write_work > MAX_WRITE_WORK {
+                return Err(over(
+                    "The draft's write-set validation exceeds its work bound; simplify write sets or split the phase.",
+                ));
+            }
+            if zerus_team_plan::overlap::overlaps(&a.writes, &b.writes) {
                 return Err(Problem::new(
                     code::INVALID_STATE,
                     "Overlapping write sets need a dependency or a phase barrier.",
@@ -314,6 +339,17 @@ fn validate(
         }
     }
     Ok(next)
+}
+
+fn phase_order(phase: &Phase) -> (u32, u32) {
+    (
+        if phase.order == 0 {
+            phase.n
+        } else {
+            phase.order
+        },
+        phase.n,
+    )
 }
 
 fn other_drafts(ctx: &Context<'_>, phase: u32) -> Result<Vec<Node>> {

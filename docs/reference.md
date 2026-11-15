@@ -5978,7 +5978,10 @@ or `check`). Titles are at most 200 bytes, text 16,384 bytes, and criteria
 1 to 32 entries of at most 2,048 bytes each. The whole request keeps its
 262,144-byte bound. Runtime/task identity fields are refused. Dependencies
 must be acyclic; hard edges stay within the phase. Overlapping writes need
-an ordering dependency or a later phase's barrier. Drafts count against
+an ordering dependency or a later phase's barrier. Validation allows at most
+64 million estimated byte
+comparisons over unordered task pairs, otherwise an atomic `over_cap`
+refusal asks for simpler write sets or a smaller phase. Drafts count against
 the team's planned-work cap but create no task documents, live bindings,
 member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never

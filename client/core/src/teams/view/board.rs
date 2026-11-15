@@ -200,6 +200,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
             revision,
             counts: team_counts(&status["counts"]),
         },
+        settings: crate::teams::settings::complete(&team["settings"]),
         members: member_cards(status),
         groups,
         truncated,

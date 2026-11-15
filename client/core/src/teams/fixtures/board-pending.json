@@ -274,5 +274,36 @@
   ],
   "next": null,
   "revision": 18,
-  "truncated": false
+  "truncated": false,
+  "settings": {
+    "caps": {
+      "max_members": 6,
+      "max_open_questions": 3,
+      "max_open_tasks": 500,
+      "max_phase_tasks": 50
+    },
+    "delegations": {
+      "accept_results": true,
+      "answer_members": true,
+      "confirm_trust": true,
+      "merge_accepted": true,
+      "resume_exited": true
+    },
+    "integration": "branch",
+    "land_allowed": false,
+    "phase_acceptance": "lead",
+    "plan_approval": "review",
+    "queue": true,
+    "routing": "direct",
+    "timers": {
+      "answer_escalate_minutes": 10,
+      "inbox_interval_seconds": 120,
+      "lead_stall_minutes": 20,
+      "remind_lead_minutes": 15,
+      "remind_person_minutes": 60,
+      "report_timeout_seconds": 120,
+      "resume_limit_per_hour": 3,
+      "start_timeout_seconds": 180
+    }
+  }
 }

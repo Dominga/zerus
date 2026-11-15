@@ -19,6 +19,7 @@ pub mod overlap;
 pub mod pipeline;
 pub mod problem;
 pub mod ready;
+pub mod settings;
 #[cfg(test)]
 mod testkit;
 pub mod validate;

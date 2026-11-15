@@ -40,7 +40,7 @@ fn image(store: &ProjectStore) -> (String, Vec<u8>) {
 fn a_phone_created_large_image_arrives_complete() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = ProjectStore::open(a.path(), "project-1").unwrap();
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = ProjectStore::open(b.path(), "project-1").unwrap();
     let (uuid, bytes) = image(&phone);
     let mut exchange = Exchange::with_uploads();
@@ -55,6 +55,8 @@ fn a_phone_created_large_image_arrives_complete() {
             "large phone media was not uploaded: {:?}",
             progress.unsent
         );
+        assert!(progress.refused_here.is_empty());
+        assert!(progress.refused_there.is_empty());
         requests += 1;
     }
     assert!(requests > 2);

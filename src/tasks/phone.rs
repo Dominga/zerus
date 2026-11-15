@@ -192,7 +192,7 @@ mod tests {
         use zerus_replica::{phone::Exchange, TaskAttachment};
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let phone = ProjectStore::open(a.path(), "project-1").unwrap();
+        let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
         let mut task = TaskDoc::create(NewTask {
             project: "project-1",
             id: "T-upload",

@@ -94,7 +94,7 @@ fn finish(exchange: &mut Exchange, phone: &ProjectStore, host: &ProjectStore) {
 fn ordinary_exchange_keeps_the_downlevel_large_update_refusal() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     let (uuid, _) = image(&phone);
     let mut old = Exchange::new();
@@ -118,7 +118,7 @@ fn ordinary_exchange_keeps_the_downlevel_large_update_refusal() {
 fn upload_survives_host_restarts_and_freezes_its_source_while_rows_arrive() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let (uuid, bytes) = image(&phone);
     let mut host = store(b.path());
     let mut exchange = Exchange::with_uploads();
@@ -186,7 +186,7 @@ fn upload_survives_host_restarts_and_freezes_its_source_while_rows_arrive() {
 fn a_chunk_and_its_acknowledgement_are_exact_and_repeating_it_only_repeats_replication() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     let (uuid, _) = image(&phone);
     let mut exchange = Exchange::with_uploads();
@@ -237,7 +237,7 @@ fn a_chunk_and_its_acknowledgement_are_exact_and_repeating_it_only_repeats_repli
 fn bad_frame_bindings_lengths_and_offsets_never_change_the_slot_or_import_a_prefix() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     let (uuid, _) = image(&phone);
     let mut exchange = Exchange::with_uploads();
@@ -303,7 +303,7 @@ fn the_whole_hash_and_canonical_task_identity_are_checked_before_import() {
     for wrong_task in [false, true] {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let phone = store(a.path());
+        let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
         let host = store(b.path());
         let (uuid, _) = image(&phone);
         let mut exchange = Exchange::with_uploads();
@@ -364,9 +364,9 @@ fn a_busy_private_slot_is_bounded_and_expired_document_sync_can_restart() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     let c = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
-    let other = store(c.path());
+    let other = ProjectStore::open_phone(c.path(), "project-1").unwrap();
     image(&phone);
     image(&other);
     let mut first = Exchange::with_uploads();
@@ -394,7 +394,7 @@ fn a_busy_private_slot_is_bounded_and_expired_document_sync_can_restart() {
 fn losing_the_final_answer_recovers_only_by_document_sync() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     let (uuid, bytes) = image(&phone);
     let mut exchange = Exchange::with_uploads();
@@ -427,7 +427,7 @@ fn private_namespace_replacement_links_and_special_files_are_refused() {
     use std::os::unix::fs::symlink;
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     image(&phone);
     let mut exchange = Exchange::with_uploads();
@@ -462,7 +462,7 @@ fn private_namespace_replacement_links_and_special_files_are_refused() {
 fn a_caller_cannot_make_the_chunk_budget_unbounded_or_too_small_for_framing() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     image(&phone);
     let mut large = Exchange::with_upload_budget(Budget {
@@ -506,7 +506,7 @@ fn a_caller_cannot_make_the_chunk_budget_unbounded_or_too_small_for_framing() {
 fn an_upload_keeps_the_original_request_budget_and_an_incomplete_slot_is_not_delivery() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let phone = store(a.path());
+    let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
     let host = store(b.path());
     let (uuid, _) = image(&phone);
     let mut exchange = Exchange::with_upload_budget(Budget {

@@ -27,6 +27,7 @@ import { NewWorktreeDialog } from "./NewWorktreeDialog";
 import { ClaudeAppDialog } from "./ClaudeAppDialog";
 import { sameSessions, type PickerSession } from "./worktree-dialogs";
 import type { Json } from "../lib/json";
+import { useLocalSpeed } from "../lib/localSpeed";
 import { tr } from "../../i18n";
 import "../styles/newsession.css";
 
@@ -341,6 +342,8 @@ function AccountLine(props: { row: () => AccountRow; selected: boolean }) {
   const minute = createMemo(() => Math.floor(now() / 60) * 60);
   const windows = createMemo(() => launchWindows(props.row().usage, minute()));
   const provider = () => props.row().provider;
+  // A local model account: its model's speed instead of limits.
+  const local = useLocalSpeed(() => props.row().shell ? [] : [props.row().profile, ...props.row().members]);
   return (
     <>
       <span class="ns-acc-logo" style={{ color: AGENTS.has(provider()) ? `var(--z-agent-${agentKind(provider())})` : undefined }} aria-hidden="true">
@@ -350,8 +353,12 @@ function AccountLine(props: { row: () => AccountRow; selected: boolean }) {
       </span>
       <span class="ns-acc-text">
         <b class="ell">{props.row().name}</b>
-        <Show when={windows().length} fallback={
-          <span class="ns-usage ell" classList={{ [`tone-${props.row().tone}`]: !!props.row().tone, selected: props.selected }}>{props.row().summary}</span>
+        <Show when={!local.server() && windows().length} fallback={
+          <Show when={local.server()} fallback={
+            <span class="ns-usage ell" classList={{ [`tone-${props.row().tone}`]: !!props.row().tone, selected: props.selected }}>{props.row().summary}</span>
+          }>
+            <span class="ns-usage ell tabular" classList={{ selected: props.selected }} title={local.title()}>{local.text()}</span>
+          </Show>
         }>
           <span class="ns-meters"><UsageMeters windows={windows()} compact /></span>
         </Show>

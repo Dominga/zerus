@@ -18,6 +18,7 @@ import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, balanceTitle, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
 import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, metricsLoading, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
+import { useLocalSpeed } from "../lib/localSpeed";
 import { tr } from "../../i18n";
 
 // Overview (DashboardPage.cpp), ported from design/webui/src/screens/Dashboard.tsx:
@@ -88,8 +89,10 @@ function AccountCard(props: { a: Account; now: number }) {
   // An agent that is not installed reads as unavailable (DashboardPage.cpp:262).
   const usage = () => (props.a.installed ? props.a.usage : { ...props.a.usage, status: "unavailable" });
   const hosts = () => props.a.members.filter((m, i, all) => all.findIndex((x) => x.host === m.host) === i);
+  // A local model account shows its model's speed instead of limits (owner, 2026-11-15).
+  const local = useLocalSpeed(() => props.a.members);
   // The usage tooltip holds still under the pointer (zerus-5ryrx).
-  const tip = steadyTitle(() => accountTooltip(usage(), props.now));
+  const tip = steadyTitle(() => (local.server() ? local.title() : accountTooltip(usage(), props.now)));
   const open = () => {
     setRequestedProfile(props.a.members[0]?.key);
     setAccountMachine("*");
@@ -107,8 +110,12 @@ function AccountCard(props: { a: Account; now: number }) {
         <span class="ell muted">{accountIdentity(props.a)}</span>
         <span class="grow" />
         <span class="ov-ausage tabular">
-          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} summaryTitle={balanceTitle(usage())} />
-          <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
+          <Show when={local.server()} fallback={<>
+            <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} summaryTitle={balanceTitle(usage())} />
+            <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
+          </>}>
+            <UsageMeters windows={[]} compact summary={local.text()} summaryTitle={local.title()} />
+          </Show>
         </span>
       </span>
     </button>

@@ -23,6 +23,7 @@ import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
 import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts, type SignFilter, identityFields, type AccountSort } from "./accounts-ui";
+import { useLocalSpeed } from "../lib/localSpeed";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
 
@@ -70,6 +71,7 @@ function AccountRow(props: { a: Account; now: number; selected: boolean }) {
   const on = () => props.selected;
   const tags = createMemo(() => profileTags(props.a));
   const sign = () => accountSignState(props.a, accountMachine());
+  const local = useLocalSpeed(() => props.a.members);
   const pick = () => {
     closeManagement();clearManagementNotice();
     setSelectedAccount(props.a.key);
@@ -95,8 +97,13 @@ function AccountRow(props: { a: Account; now: number; selected: boolean }) {
       </span>
       {/* The detail's usage windows in the Overview card's compact meters; the reset shows from 90%.
           An account without windows but with a balance (a DeepSeek API key) shows the balance there instead. */}
-      <Show when={props.a.usage.windows.length || balanceCompact(props.a.usage)}>
-        <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceCompact(props.a.usage)} summaryTitle={balanceTitle(props.a.usage)} /></span>
+      {/* A local model account (GB10) shows its model's speed instead (owner, 2026-11-15). */}
+      <Show when={local.server()} fallback={
+        <Show when={props.a.usage.windows.length || balanceCompact(props.a.usage)}>
+          <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} summary={balanceCompact(props.a.usage)} summaryTitle={balanceTitle(props.a.usage)} /></span>
+        </Show>
+      }>
+        <span class="acct-row-usage"><UsageMeters windows={[]} compact summary={local.text()} summaryTitle={local.title()} /></span>
       </Show>
       <Show when={balanceLow(props.a.usage)}><span class="acct-balance-low">{tr("Balance too low for API calls")}</span></Show>
       <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>

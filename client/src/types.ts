@@ -614,6 +614,8 @@ export interface OpenCodeInfo { providers: { label: string; connection: string; 
 export interface Profile {
   key: string; host: ComputerId; machine: string; id: string; label: string; provider: string;
   native: boolean; installed: boolean; is_default: boolean; home: string; auth_revision: string; online: boolean;
+  /** The local model server its agent talks to (root URL); empty or absent for a cloud account or an older peer. */
+  gateway?: string;
   state: MemberState; detail: Text; signed_in: boolean;
   permission: string; permission_mode?: string; permission_label: Text; permission_hint: Text;
   permission_source?: "provider" | "zerus";

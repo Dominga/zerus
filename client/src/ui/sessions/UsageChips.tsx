@@ -19,9 +19,19 @@ import { accountTooltip, exhausted, rateLimitNotice, usageRetryWaiting, usageChi
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
 import { footerUsageSummary, footerUsageTitle } from "./session-usage-ui";
 import type { Session } from "./types";
+import { useLocalSpeed, type LocalAccount } from "../lib/localSpeed";
 import { tr } from "../../i18n";
 
 const toneClass = (tone: string) => tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "";
+
+/** The session's account as a local model account: its profile when listed (for its gateway), else its id. */
+function sessionAccount(session: Session): LocalAccount[] {
+  const provider = session.accountProvider || session.agent;
+  const id = session.accountId || `native-${provider}`;
+  const profile = accountsPage().accounts.flatMap((group) => group.members)
+    .find((member) => member.host === session.computer && member.provider === provider && member.id === id);
+  return [profile ?? { id }];
+}
 
 /** AccountUsage::Button and RefreshButton in the bottom status bar. */
 export function AccountUsageChip(props: { session: Session }) {
@@ -59,13 +69,19 @@ export function AccountUsageChip(props: { session: Session }) {
   const accountTip = steadyTitle(() => accountTooltip(u(), now()));
   const refreshTip = steadyTitle(() => (usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now(), true)
     : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")));
+  // A local model account: its model's speed instead of limits (owner, 2026-11-15).
+  const local = useLocalSpeed(() => sessionAccount(props.session));
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
       <span class="session-usage-strip">
-        <button ref={chip} type="button" class="sb-usage account-usage" title={accountTip.title()} onPointerEnter={accountTip.enter} onPointerLeave={accountTip.leave} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
+        <button ref={chip} type="button" class="sb-usage account-usage" title={local.server() ? local.title() : accountTip.title()} onPointerEnter={accountTip.enter} onPointerLeave={accountTip.leave} aria-label={`${tr("Account usage")}\n${local.server() ? local.title() : `${exhausted(u(), now())}\n${accountTooltip(u(), now())}`}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
-          <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} summaryTitle={footerUsageTitle(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
-          <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
+          <Show when={local.server()} fallback={<>
+            <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} summaryTitle={footerUsageTitle(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
+            <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
+          </>}>
+            <UsageMeters windows={[]} summary={local.text()} summaryTitle={local.title()} />
+          </Show>
         </button>
         <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}
           title={refreshTip.title()} onPointerEnter={refreshTip.enter} onPointerLeave={refreshTip.leave} onClick={() => void refreshSessionUsage(true)}>
@@ -118,7 +134,15 @@ export function UsageLimitChip(props: { session: Session; compact: boolean }) {
     ? [view().balance, view().reason, accountTooltip(u(), now())].filter(Boolean).join("\n")
     : accountTooltip(u(), now()));
   createEffect(() => { if (!show()) setOpen(false); });
+  // A local model account: its model's speed instead of limits or balance (owner, 2026-11-15).
+  const local = useLocalSpeed(() => sessionAccount(props.session));
   return (
+    <Show when={!local.server()} fallback={
+      <span class="tchip usage-chip" title={local.title()} aria-label={local.title()}>
+        <Icon name="gauge" size={13} />
+        <span class="usage-balance tabular">{local.text()}</span>
+      </span>
+    }>
     <Show when={show()}>
       <span class="att-anchor">
         <button ref={chip} type="button" class={`tchip usage-chip ${warning() ? exhaustedText() ? "danger" : "warn" : ""}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
@@ -138,6 +162,7 @@ export function UsageLimitChip(props: { session: Session; compact: boolean }) {
           <div class="cache-actions"><button type="button" class="btn small" disabled={computerOffline(props.session.computer) || u().refreshing} onClick={() => void refreshSessionUsage(true)}>{tr("Refresh usage")}</button></div>
         </ChipPopover>
       </span>
+    </Show>
     </Show>
   );
 }

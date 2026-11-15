@@ -171,6 +171,20 @@ fn a_status_read_names_its_models_memory_and_actions() {
 }
 
 #[test]
+fn a_status_read_keeps_each_models_reported_speed() {
+    let status = parse_status(
+        &lab(),
+        Ok(&json!({"source": "command", "models": [
+        {"name": "small", "state": "running", "tok_s": 56.6, "tok_s_kind": "last"},
+        {"name": "odd", "state": "running", "tok_s": 12.0, "tok_s_kind": "soon"},
+        {"name": "large", "state": "stopped", "tok_s": -3}]})),
+    );
+    assert_eq!((status.models[0].tok_s, status.models[0].tok_s_kind.as_str()), (56.6, "last"));
+    assert_eq!((status.models[1].tok_s, status.models[1].tok_s_kind.as_str()), (12.0, ""));
+    assert_eq!((status.models[2].tok_s, status.models[2].tok_s_kind.as_str()), (0.0, ""));
+}
+
+#[test]
 fn a_failed_read_says_why_and_that_nothing_retries() {
     let refused = parse_status(
         &lab(),

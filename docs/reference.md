@@ -9717,6 +9717,25 @@ line splits at the last `": "`, so a model named with a tag (`coder-a:q4:
 running`) keeps its whole name and `Down` targets exactly that model; a name
 starting with `-` is offered by no list and refused by `up` and `down`.
 
+A status may also report each model's generation speed (owner, 2026-11-15):
+in the JSON contract a model's `tok_s` (tokens per second, above 0) and
+`tok_s_kind`, which is `live` (while it generates), `last` (its latest answer)
+or `mean`; as a line, `speed NAME: 53.2 tok/s (live)` or, as the GB10 tool
+prints it, `Скорость NAME: 53.2 ток/с (последний ответ)` (the note in
+parentheses names the kind: now, last or average, in English or Russian; a
+decimal comma is read too). A speed line for a model the status does not list
+stays raw. `status --json` carries both fields on the model's row.
+
+A local model account shows that speed where a cloud account shows its limits
+or balance: the account row of New session…, Accounts and Overview, and the
+session's usage chips. An account is local when `account ls` reports its
+`gateway`, the root URL its own configuration points the agent at (Claude's
+`env.ANTHROPIC_BASE_URL`; the base URL of Codex's selected `model_provider` in
+its `config.toml`; never a key), and a model server of this computer has that
+root; an older peer without `gateway` matches a model server named like the
+account. While such a place shows, the desktop reads that server's status
+every 15 seconds; with no speed reported it says "local model".
+
 Commands (all local to the configured computer; `--json` is available on `list`
 and `status`):
 

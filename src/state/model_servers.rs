@@ -621,6 +621,53 @@ fn since(value: &Value) -> Option<Value> {
     }
 }
 
+/// What a model's speed measures: `live` while it generates, `last` for its
+/// latest answer, `mean` for an average; empty when the server does not say.
+const SPEED_KINDS: [&str; 3] = ["live", "last", "mean"];
+
+fn speed_kind(note: &str) -> &'static str {
+    let note = note.to_lowercase();
+    if ["live", "now", "сейчас"].iter().any(|word| note.contains(word)) {
+        "live"
+    } else if ["last", "последн"].iter().any(|word| note.contains(word)) {
+        "last"
+    } else if ["mean", "average", "средн"].iter().any(|word| note.contains(word)) {
+        "mean"
+    } else {
+        ""
+    }
+}
+
+/// A model's generation speed from its server's own line,
+/// `speed NAME: 53.2 tok/s (live)` or `Скорость NAME: 53.2 ток/с (сейчас)`:
+/// the model, its tokens per second and what they measure.
+fn speed_line(line: &str) -> Option<(String, f64, &'static str)> {
+    let (word, rest) = line.trim().split_once(char::is_whitespace)?;
+    if !matches!(word.to_lowercase().as_str(), "speed" | "скорость") {
+        return None;
+    }
+    let (name, value) = split_state(rest.trim())?;
+    let name = name.trim();
+    if name.is_empty() || name.starts_with('-') || name.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut parts = value.trim().splitn(2, char::is_whitespace);
+    let tok_s = parts.next()?.replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
+    let note = parts.next().unwrap_or_default();
+    let unit = note.trim_start().to_lowercase();
+    if !["tok/s", "t/s", "ток/с", "т/с"].iter().any(|u| unit.starts_with(u)) {
+        return None;
+    }
+    Some((name.to_owned(), tok_s, speed_kind(note)))
+}
+
+fn set_speed(row: &mut Value, tok_s: f64, kind: &str) {
+    row["tok_s"] = json!((tok_s * 10.0).round() / 10.0);
+    if SPEED_KINDS.contains(&kind) {
+        row["tok_s_kind"] = json!(kind);
+    }
+}
+
 fn parse_status(text: &str) -> Parsed {
     let mut parsed = Parsed::default();
     let trimmed = text.trim();
@@ -635,6 +682,9 @@ fn parse_status(text: &str) -> Parsed {
                     if let Some(since) = since(&model["since"]) {
                         row["since"] = since;
                     }
+                    if let Some(tok_s) = model["tok_s"].as_f64().filter(|v| v.is_finite() && *v > 0.0) {
+                        set_speed(&mut row, tok_s, model["tok_s_kind"].as_str().unwrap_or_default());
+                    }
                     parsed.models.push(row);
                 }
                 if let Some(memory) = value["memory"].as_object() {
@@ -646,9 +696,14 @@ fn parse_status(text: &str) -> Parsed {
             }
         }
     }
+    let mut speeds = Vec::new();
     for line in text.lines().take(MAX_LINES) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(speed) = speed_line(trimmed) {
+            speeds.push((speed, line.to_owned()));
             continue;
         }
         let lower = trimmed.to_lowercase();
@@ -674,6 +729,13 @@ fn parse_status(text: &str) -> Parsed {
             }
         }
         parsed.raw.push(line.to_owned());
+    }
+    // A speed belongs to its model's row; one for an unlisted model stays raw.
+    for ((name, tok_s, kind), line) in speeds {
+        match parsed.models.iter_mut().find(|row| row["name"] == name.as_str()) {
+            Some(row) => set_speed(row, tok_s, kind),
+            None => parsed.raw.push(line),
+        }
     }
     parsed
 }
@@ -1347,6 +1409,26 @@ pub(crate) fn account_gateway(home: &Path) -> Option<Server> {
     checked(Server { name: "gateway".into(), base_url: base_url.into(), kind: "anthropic".into(), key: key.into(), ..Default::default() }).ok()
 }
 
+/// The root URL of the gateway an account's own configuration points its agent
+/// at, for `account ls`: Claude's `env.ANTHROPIC_BASE_URL`, or the base URL of
+/// Codex's selected `model_provider` in `<home>/config.toml`. None for an
+/// account that talks to its provider's cloud. Never the key.
+pub(crate) fn account_gateway_url(home: &Path, provider: &str) -> Option<String> {
+    match provider {
+        "claude" => account_gateway(home).map(|server| server.base_url),
+        "codex" => {
+            let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+            let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+            let selected = doc.get("model_provider")?.as_str()?;
+            let base_url = doc.get("model_providers")?.get(selected)?.get("base_url")?.as_str()?;
+            checked(Server { name: "gateway".into(), base_url: base_url.into(), kind: "openai".into(), ..Default::default() })
+                .ok()
+                .map(|server| server.base_url)
+        }
+        _ => None,
+    }
+}
+
 /// `--settings <picker>` for a Claude session record behind a gateway (its
 /// model server, else its account's own gateway), for a resume or a fresh
 /// start of a session that began before its launch carried one. Empty for any
@@ -1619,7 +1701,11 @@ fn fail(failure: &Failure) -> Result<i32> {
 
 fn print_status(value: &Value) {
     for model in value["models"].as_array().into_iter().flatten() {
-        println!("{}: {}", model["name"].as_str().unwrap_or_default(), model["state"].as_str().unwrap_or_default());
+        let speed = model["tok_s"].as_f64().map(|tok_s| match model["tok_s_kind"].as_str() {
+            Some(kind) => format!(", {tok_s:.1} tok/s ({kind})"),
+            None => format!(", {tok_s:.1} tok/s"),
+        });
+        println!("{}: {}{}", model["name"].as_str().unwrap_or_default(), model["state"].as_str().unwrap_or_default(), speed.unwrap_or_default());
     }
     if value["memory"].is_object() {
         println!("memory: {}/{}", value["memory"]["free"], value["memory"]["total"]);
@@ -2076,6 +2162,36 @@ mod tests {
             {"name":"c","state":"loading"},{"name":"d","state":"stopped"}]));
     }
 
+    /// The owner, 2026-11-15: a local model shows its speed, not limits. The
+    /// GB10 tool prints one Russian line per running model after its states.
+    #[test]
+    fn a_status_line_gives_its_model_the_current_speed() {
+        let parsed = parse_status(concat!(
+            "  qwen3.8-flash-next: готова\n  glm-ocr: выключена\n  coder-a:q4: running\n",
+            "Скорость qwen3.8-flash-next: 56.6 ток/с (последний ответ)\n",
+            "speed coder-a:q4: 12,34 tok/s (live)\n",
+            "Скорость gone: 9 ток/с (среднее)\nСкорость glm-ocr: fast\n",
+            "Свободно памяти: 12.0 ГиБ из 121.6\n"));
+        assert_eq!(json!(parsed.models), json!([
+            {"name":"qwen3.8-flash-next","state":"готова","tok_s":56.6,"tok_s_kind":"last"},
+            {"name":"glm-ocr","state":"выключена"},
+            {"name":"coder-a:q4","state":"running","tok_s":12.3,"tok_s_kind":"live"}]));
+        assert_eq!(parsed.memory, json!({"free":12.0,"total":121.6}));
+        // A speed for a model the list lacks, and one without a number, stay raw.
+        assert_eq!(parsed.raw, ["Скорость glm-ocr: fast", "Скорость gone: 9 ток/с (среднее)"]);
+    }
+
+    #[test]
+    fn the_json_contract_carries_a_models_speed() {
+        let parsed = parse_status(r#"{"models":[{"name":"a","state":"running","tok_s":53.24,"tok_s_kind":"live"},
+            {"name":"b","state":"running","tok_s":40,"tok_s_kind":"soon"},{"name":"c","state":"stopped","tok_s":-1},
+            {"name":"d","state":"running","tok_s":"fast"}]}"#);
+        assert_eq!(json!(parsed.models), json!([
+            {"name":"a","state":"running","tok_s":53.2,"tok_s_kind":"live"},
+            {"name":"b","state":"running","tok_s":40.0},
+            {"name":"c","state":"stopped"},{"name":"d","state":"running"}]));
+    }
+
     #[test]
     fn sessions_on_a_server_are_named_with_their_model() {
         let records = vec![
@@ -2200,6 +2316,24 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
         assert!(account_gateway(&plain).is_none());
+    }
+
+    /// `account ls` names a local model account's gateway (never its key), so
+    /// the desktop can show that server's speed in place of limits.
+    #[test]
+    fn an_accounts_gateway_url_comes_from_its_agents_own_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("settings.json"), json!({"env":{"ANTHROPIC_BASE_URL":"http://192.0.2.7:4000/v1/","ANTHROPIC_AUTH_TOKEN":"sk-x"}}).to_string()).unwrap();
+        assert_eq!(account_gateway_url(&claude, "claude").as_deref(), Some("http://192.0.2.7:4000"));
+        let codex = dir.path().join("codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("config.toml"), "model_provider = \"lab\"\nmodel = \"coder\"\n\n[model_providers.lab]\nname = \"Lab\"\nbase_url = \"http://192.0.2.7:4000/v1\"\n").unwrap();
+        assert_eq!(account_gateway_url(&codex, "codex").as_deref(), Some("http://192.0.2.7:4000"));
+        std::fs::write(codex.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+        assert!(account_gateway_url(&codex, "codex").is_none(), "an account on the provider's cloud");
+        assert!(account_gateway_url(&claude, "kimi").is_none());
     }
 
     #[test]

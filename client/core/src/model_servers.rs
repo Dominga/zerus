@@ -440,6 +440,12 @@ pub struct Model {
     pub can_up: bool,
     /// model-catalog/2: what the catalog says of this service.
     pub catalog: Option<CatalogModel>,
+    /// The model's generation speed as its server reports it, tokens per
+    /// second; 0 when not reported.
+    pub tok_s: f64,
+    /// What `tok_s` measures: live, last (the latest answer) or mean; empty
+    /// when the server does not say.
+    pub tok_s_kind: String,
 }
 
 /// One variant ("quality") of a catalog service.
@@ -675,6 +681,11 @@ pub fn parse_status(server: &Server, reply: Result<&Value, &str>) -> Status {
                 && matches!(state.as_str(), "stopped" | "unloaded" | "idle"),
             since: row["since"].as_f64().unwrap_or(0.0) as i64,
             catalog: facts,
+            tok_s: row["tok_s"].as_f64().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0),
+            tok_s_kind: match row["tok_s_kind"].as_str() {
+                Some(kind @ ("live" | "last" | "mean")) => kind.to_owned(),
+                _ => String::new(),
+            },
             name,
             state,
         });

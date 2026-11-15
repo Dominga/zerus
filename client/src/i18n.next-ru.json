@@ -3228,5 +3228,12 @@
   "attempt %1": "попытка %1",
   "held": "удержана",
   "now": "сейчас",
-  "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt": "В терминале есть черновик, диалог или неизвестное приглашение ввода. Откройте терминал и вернитесь к пустому полю ввода агента."
+  "terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt": "В терминале есть черновик, диалог или неизвестное приглашение ввода. Откройте терминал и вернитесь к пустому полю ввода агента.",
+  "%1 tok/s": "%1 ток/с",
+  "local model": "локальная модель",
+  "A local model on %1: it reports no speed yet.": "Локальная модель на %1: скорость пока неизвестна.",
+  "%1 on %2 generates %3 tokens per second now.": "%1 на %2 сейчас выдаёт %3 токена в секунду.",
+  "%1 on %2 generated its latest answer at %3 tokens per second.": "%1 на %2 выдала последний ответ со скоростью %3 токена в секунду.",
+  "%1 on %2 generates %3 tokens per second on average.": "%1 на %2 в среднем выдаёт %3 токена в секунду.",
+  "%1 on %2: %3 tokens per second.": "%1 на %2: %3 токена в секунду."
 }

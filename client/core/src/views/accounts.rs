@@ -151,6 +151,10 @@ pub struct Profile {
     pub is_default: bool,
     pub home: String,
     pub auth_revision: String,
+    /// The root URL of the gateway (a local model server) the account's own
+    /// configuration points its agent at; empty for a cloud account or an
+    /// older peer.
+    pub gateway: String,
     pub online: bool,
     pub state: MemberState,
     /// The status line under the machine tags.
@@ -761,6 +765,7 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
         native: flag(raw, "native"),
         installed,
         is_default: flag(raw, "is_default"),
+        gateway: text(raw, "gateway"),
         online,
         state: member_state,
         detail,

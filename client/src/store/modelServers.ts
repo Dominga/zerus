@@ -53,6 +53,8 @@ export const CATALOG_INTERVAL = 8_000;
 /** After an action, a catalog server is read until no service is starting or stopping. */
 export const SETTLE_POLL = 5_000;
 export const SETTLE_LIMIT = 20 * 60_000;
+/** Owner, 2026-11-15: a local model account shows its server's speed in place of limits, read this often while shown. */
+export const SPEED_INTERVAL = 15_000;
 
 /** A core Text error, an Error or anything else, as words. */
 export function words(error: unknown): string {
@@ -67,8 +69,11 @@ export function createModelServers(port: Port, clock: Clock = realClock) {
   const [upping, setUpping] = createSignal<ReadonlySet<string>>(new Set());
   const [notice, setNoticeSignal] = createSignal<Notice>();
   let listing = false, active = false, stop: (() => void) | undefined, stopCatalog: (() => void) | undefined;
+  let stopSpeed: (() => void) | undefined;
   const queue: string[] = [];
   const reading = new Set<string>();
+  /** Servers whose speed something on screen shows, with how many places show it. */
+  const watched = new Map<string, number>();
 
   const server = (name: string) => servers().find((s) => s.name === name);
   const entry = (name: string): StatusEntry => statuses()[name] ?? { known: false, reading: false, readAt: 0 };
@@ -155,6 +160,23 @@ export function createModelServers(port: Port, clock: Clock = realClock) {
       stopCatalog = clock.every(CATALOG_INTERVAL, refreshCatalogs);
       // The first look reads every server once; later ones follow the timer.
       for (const s of servers()) if (!entry(s.name).known) refreshStatus(s.name);
+    },
+    /**
+     * A place shows `target`'s speed: read it now unless a read is recent,
+     * then every SPEED_INTERVAL until the last such place releases it.
+     */
+    watchSpeed(target: string): () => void {
+      watched.set(target, (watched.get(target) ?? 0) + 1);
+      if (!entry(target).known || clock.now() - entry(target).readAt >= SPEED_INTERVAL) refreshStatus(target);
+      stopSpeed ??= clock.every(SPEED_INTERVAL, () => { for (const name of watched.keys()) refreshStatus(name); });
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const left = (watched.get(target) ?? 1) - 1;
+        if (left > 0) watched.set(target, left); else watched.delete(target);
+        if (!watched.size) { stopSpeed?.(); stopSpeed = undefined; }
+      };
     },
     /** Up detaches; its run's own outcome shows when it ends. */
     up(target: string, model: string) {

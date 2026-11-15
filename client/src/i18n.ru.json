@@ -6792,5 +6792,11 @@
   "the lead routes first": "сначала маршрутизирует лид",
   "the team takes tasks as they come": "команда берёт задачи по мере поступления",
   "unassigned": "не назначен",
-  "“%1” was sent to %2.": "«%1» отправлена команде %2."
+  "“%1” was sent to %2.": "«%1» отправлена команде %2.",
+  "local model": "локальная модель",
+  "A local model on %1: it reports no speed yet.": "Локальная модель на %1: скорость пока неизвестна.",
+  "%1 on %2 generates %3 tokens per second now.": "%1 на %2 сейчас выдаёт %3 токена в секунду.",
+  "%1 on %2 generated its latest answer at %3 tokens per second.": "%1 на %2 выдала последний ответ со скоростью %3 токена в секунду.",
+  "%1 on %2 generates %3 tokens per second on average.": "%1 на %2 в среднем выдаёт %3 токена в секунду.",
+  "%1 on %2: %3 tokens per second.": "%1 на %2: %3 токена в секунду."
 }

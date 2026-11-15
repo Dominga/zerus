@@ -744,7 +744,11 @@ export interface ModelServerCatalogModel {
   memory_gib: number; needs_gib: number; fit: string; tok_s: number; code_tok_s: number; api_models: { id: string; wire: string }[];
   can_variant: boolean; use_for: string;
 }
-export interface ModelServerModel { name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean; catalog?: ModelServerCatalogModel | null }
+export interface ModelServerModel {
+  name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean; catalog?: ModelServerCatalogModel | null;
+  /** Generation speed the server reports, tokens per second (0: none); `tok_s_kind` is live, last, mean or empty. */
+  tok_s?: number; tok_s_kind?: string;
+}
 export interface ModelServerStatus {
   error: string; detail: string; error_label: Text; problem: Text; source: string; models: ModelServerModel[];
   free: number; total: number; memory: Text; low: boolean; used: number; raw: string[]; running: number; active: string[];

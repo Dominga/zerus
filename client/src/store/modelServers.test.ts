@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createModelServers, INTERVAL, MAX_READS, UP_POLL, type Clock, type Port } from "./modelServers";
+import { createModelServers, INTERVAL, MAX_READS, SPEED_INTERVAL, UP_POLL, type Clock, type Port } from "./modelServers";
 import type { ModelServer, ModelServerStatus } from "../bridge";
 
 // Task 67: Qt's ModelServers::Controller over client/core's hgs calls.
@@ -113,5 +113,23 @@ describe("model servers", () => {
     await store.startSession("codex", "/work/app", "small", "a", "small");
     expect(calls.at(-1)).toBe("session codex /work/app small a small");
     expect(store.notice()?.text).toBe("Starting small on a with codex…");
+  });
+
+  it("reads a watched server's speed while some place shows it, and stops after the last one", async () => {
+    const { store, calls, pending, timers, advance } = fixture();
+    await store.refreshList();
+    const first = store.watchSpeed("a");
+    expect(calls.filter((c) => c === "status a")).toHaveLength(1);
+    pending.shift()!(); await tick();
+    // A second place reuses the fresh read and the one timer.
+    const second = store.watchSpeed("a");
+    expect(calls.filter((c) => c === "status a")).toHaveLength(1);
+    advance(SPEED_INTERVAL); timers.every!();
+    expect(calls.filter((c) => c === "status a")).toHaveLength(2);
+    pending.shift()!(); await tick();
+    first(); first();
+    expect(timers.every).toBeTypeOf("function");
+    second();
+    expect(timers.every).toBeUndefined();
   });
 });

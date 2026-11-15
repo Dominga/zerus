@@ -491,11 +491,17 @@ fn row(config: &Config, id: &str, p: &Profile, native: bool) -> Value {
         profile_home(config, id)
     };
     let found = credential_file(&home, &p.provider);
-    json!({"id":id,"provider":p.provider,"label":p.label,"home":home,"native":native,
+    let mut row = json!({"id":id,"provider":p.provider,"label":p.label,"home":home,"native":native,
         "account_status":inspection::catalog_status(config,id,&p.provider,&home),
         "auth_revision":inspection::signature(&home,&p.provider),
         "credential_file":found,"auth_status":if found {"credential_file"} else {"unknown"},
-        "portable":p.provider!="claude","installed":platform::available(&p.provider)})
+        "portable":p.provider!="claude","installed":platform::available(&p.provider)});
+    // A local model's account: where its agent sends requests, so a client can
+    // show that server's speed instead of cloud limits.
+    if let Some(gateway) = crate::state::model_servers::account_gateway_url(&home, &p.provider) {
+        row["gateway"] = json!(gateway);
+    }
+    row
 }
 fn list(config: &Config) -> Result<Value> {
     let bytes = read(config)?;

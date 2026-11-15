@@ -17,6 +17,7 @@ import {
 } from "./model-servers";
 import "../styles/model-servers.css";
 import { TextInput } from "../lib/TextField";
+import { speedIn, speedText, speedTitle } from "../lib/localSpeed";
 
 // Task 67: Qt's ModelServersPage. Every server of this computer with its API
 // address (copied in one click), SSH host, free memory and models: their
@@ -256,6 +257,9 @@ function ServerCard(props: { server: ModelServer; entry: StatusEntry; ask(dialog
           <Icon name="box" size={12} />
           <b class="mono ms-model-name">{m.name}</b>
           <span class={`ms-state tone-${stateTone(m.state)}`}><span class="dot" aria-hidden="true" />{trText(m.label)}</span>
+          <Show when={speedIn(s().name, { ...st()!, models: [m] })}>{(speed) => (
+            <span class="muted tabular" title={speedTitle(s().name, speed())}>{speedText(speed())}</span>
+          )}</Show>
           <Show when={st()!.source === "api"} fallback={<Show when={m.since > 0}><span class="muted">{sinceText(m.since)}</span></Show>}><span class="muted">{tr("from GET /v1/models")}</span></Show>
           <Show when={m.catalog}>{(facts) => <>
             <Show when={facts().managed} fallback={<span class="muted">{tr("runs outside the server's control")}</span>}>

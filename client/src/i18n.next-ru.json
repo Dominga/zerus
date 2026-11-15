@@ -456,7 +456,6 @@
   "Click to copy": "Нажмите, чтобы скопировать",
   "Click to select; double-click to show its sessions": "Щёлкните, чтобы выбрать; дважды щёлкните, чтобы показать его сессии",
   "Close and reopen Zerus to connect to the refreshed service. Background work stays paused in this window.": "Закройте и снова откройте Zerus, чтобы подключиться к обновлённой службе. В этом окне фоновая работа остаётся приостановленной.",
-  "Close and reopen settings to review the current values.": "Закройте и снова откройте настройки, чтобы проверить актуальные значения.",
   "Close and review the recorded outcome. This confirmation will not be replayed.": "Закройте окно и проверьте записанный результат. Это подтверждение не будет повторено.",
   "Close the verified shell terminal for %1? Its working folder will be kept; no archive will be created.": "Закрыть проверенный терминал оболочки %1? Рабочая папка будет сохранена; архив не будет создан.",
   "Close these programs, then choose Check again. Zerus never stops them on its own.": "Закройте эти программы, затем нажмите «Проверить снова». Zerus никогда не останавливает их сам.",

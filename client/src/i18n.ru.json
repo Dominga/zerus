@@ -932,7 +932,6 @@
   "Cloning…": "Клонирование…",
   "Close": "Закрыть",
   "Close and reopen Zerus to connect to the refreshed service. Background work stays paused in this window.": "Закройте и снова откройте Zerus, чтобы подключиться к обновлённой службе. В этом окне фоновая работа остаётся приостановленной.",
-  "Close and reopen settings to review the current values.": "Закройте и снова откройте настройки, чтобы проверить актуальные значения.",
   "Close and review the recorded outcome. This confirmation will not be replayed.": "Закройте окно и проверьте записанный результат. Это подтверждение не будет повторено.",
   "Close the idle agent and save its conversation. Resume starts it again with the same history.": "Закройте неактивного агента и сохраните его разговор. «Возобновить» запускает его снова с той же историей.",
   "Close the verified shell terminal for %1? Its working folder will be kept; no archive will be created.": "Закрыть проверенный терминал оболочки %1? Рабочая папка будет сохранена; архив не будет создан.",

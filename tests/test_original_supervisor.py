@@ -1,6 +1,7 @@
 """Disabled owner route and uncertain-creation fence, real CLI/private tmux only."""
 import json
 import subprocess
+import sys
 import time
 import unittest
 
@@ -66,8 +67,11 @@ if 'resume' in args or '--resume' in args:
         self.hgs('codex', 'p', '-n', 'late-auto', '-c', '-d')
         self.wait(lambda: (self.root / 'failed-resume-original.json').exists())
         self.wait(lambda: len(self.starts()) > 1 or self.binding(name).get('exited_at'))
-        self.assertEqual(len(self.starts()), 1, 'reserved original was replayed by auto-continue')
         original = json.loads((self.root / 'failed-resume-original.json').read_text())
+        self.assert_reserved_exit(name, original)
+
+    def assert_reserved_exit(self, name, original):
+        self.assertEqual(len(self.starts()), 1, 'reserved original was replayed by auto-continue')
         final = self.binding(name)
         for key in ('original_owner', 'pid', 'process_start', 'run_id', 'session_id',
                     'conversation_id', 'expected_id', 'startup_kind', 'transcript'):
@@ -76,6 +80,36 @@ if 'resume' in args or '--resume' in args:
         self.assertEqual(final['completion_source'], 'supervisor')
         self.assertTrue(final['exited_at'])
         self.assertFalse(list((self.root / 'state/archives').glob('*.json')))
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux loader interleaving fixture')
+    def test_final_fallback_writer_rechecks_a_reservation_after_the_first_decision(self):
+        import fcntl
+        barrier = self.root / 'fallback-barrier.so'
+        subprocess.run(['cc', '-shared', '-fPIC',
+                        str(test_pause.REPO / 'tests/fixtures/supervisor_fallback_barrier.c'),
+                        '-ldl', '-o', str(barrier)], env=self.env, check=True, capture_output=True)
+        self.failing_resume(publish_owner=False)
+        self.env.update(LD_PRELOAD=str(barrier), G1_FALLBACK_BARRIER=str(self.root))
+        name = 'codex/p/final-admission'
+        try:
+            self.hgs('codex', 'p', '-n', 'final-admission', '-c', '-d')
+            self.wait(lambda: (self.root / 'decision-ready').exists())
+            selected = self.binding(name)
+            state = self.root / 'state'
+            with (state / '.lock').open('ab') as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX)
+                records = [path for path in state.rglob('*.json') if self._same_record(path, selected)]
+                self.assertEqual(len(records), 1)
+                original = json.loads(records[0].read_text())
+                original['original_owner'] = {'nonce': 'post-decision-original', 'root': original['pid']}
+                staged = records[0].with_suffix('.fixture')
+                staged.write_text(json.dumps(original))
+                staged.replace(records[0])
+            (self.root / 'decision-release').touch()
+            self.wait(lambda: len(self.starts()) > 1 or self.binding(name).get('exited_at'))
+            self.assert_reserved_exit(name, original)
+        finally:
+            (self.root / 'decision-release').touch()
 
     def test_unreserved_early_resume_failure_still_starts_fresh(self):
         self.failing_resume(publish_owner=False)

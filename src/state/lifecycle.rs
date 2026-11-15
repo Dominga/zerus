@@ -461,19 +461,28 @@ fn run_agent<C: supervisor::ChildStatus>(
             return Ok(ExitInfo::of(status).exit_code());
         }
         eprintln!("hgs: nothing to resume — starting fresh");
-        {
+        let fallback_admitted = {
             let _guard = lock(None)?;
             let mut current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
-            terminating::check_mutation(&current)?;
-            current["pid"] = json!(std::process::id());
-            current["process_start"] = json!(process_start(std::process::id()));
-            current["activity"] = json!("unknown");
-            current["conversation_id"] = Value::Null;
-            current["transcript"] = Value::Null;
-            current.as_object_mut().unwrap().remove("cleared_conversations");
-            current["startup_kind"] = json!("new");
-            write(&mut current)?;
+            if supervisor::owned_pending(&current) {
+                false
+            } else {
+                terminating::check_mutation(&current)?;
+                current["pid"] = json!(std::process::id());
+                current["process_start"] = json!(process_start(std::process::id()));
+                current["activity"] = json!("unknown");
+                current["conversation_id"] = Value::Null;
+                current["transcript"] = Value::Null;
+                current.as_object_mut().unwrap().remove("cleared_conversations");
+                current["startup_kind"] = json!("new");
+                write(&mut current)?;
+                true
+            }
+        };
+        if !fallback_admitted {
+            supervisor::finish(&name, &token, child_id, status)?;
+            return Ok(ExitInfo::of(status).exit_code());
         }
     }
     let mut spawned = spawn(&base, &name, &token)?;

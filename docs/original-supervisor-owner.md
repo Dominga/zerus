@@ -66,7 +66,9 @@ always `effect_authority: false`; no installed observer or effect consumer exist
 
 A creation failure keeps its reservation. Unknown creation is not retried,
 including the legacy early-resume fallback when a reservation is published
-while that first child runs. Its original exit evidence still commits without
+while that first child runs. Both the early decision and the fresh locked
+admission before the fallback identity rewrite refuse a reserved launch.
+Its original exit evidence still commits without
 rewriting its identity or creating a replacement. This single-original profile
 does not qualify an automatic replacement root. Any owned-mode reservation, including
 malformed metadata or an already-exited root, refuses legacy root-only Terminate

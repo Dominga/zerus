@@ -7,7 +7,8 @@ struct TaskEditorSheet: View {
     let model: TaskEditorModel
     let tasks: TasksModel
     @State private var ticket: TaskEditorPicker?
-    @State private var picking = false, discard = false
+    @State private var picking = false
+    @State private var discard = false
     var body: some View {
         NavigationStack {
             if let state = model.state {

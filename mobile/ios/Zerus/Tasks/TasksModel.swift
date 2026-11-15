@@ -100,7 +100,8 @@ final class TasksModel {
     func openTaskEditor(_ task: TaskInfo) {
         guard task.schema == 8, let key = tasksKey, let replicas, let assets = app.attachmentStore,
               let connection = app.connections.first(where: { $0.id == key.connectionId }) else { return }
-        let bound: String? = if case .session(let target) = task.target { target.machine } else { task.session?.machine }
+        let targetMachine: String? = if case .session(let target) = task.target { target.machine } else { nil }
+        let bound = [.todo, .backlog].contains(task.stage) ? targetMachine : task.session?.machine ?? targetMachine
         let computers = app.machines.filter { $0.connectionId == key.connectionId && (bound != nil ? $0.machineId == bound : $0.id == tasksChosen?.computerId) }
         guard computers.count == 1 else { taskNotice = taskEditText("task_edit_unavailable"); return }
         do {

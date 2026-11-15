@@ -1008,7 +1008,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     internal fun openTaskEditor(key: ProjectKey, task: TaskInfo) {
         if (task.schema != 8L || tasksKey != key) return
         val connection = connections.singleOrNull { it.id == key.connectionId } ?: return
-        val bound = (task.target as? TaskTarget.Session)?.session?.machine ?: task.session?.machine
+        val targetMachine = (task.target as? TaskTarget.Session)?.session?.machine
+        val bound = if (task.stage in setOf(TaskStage.TODO, TaskStage.BACKLOG)) targetMachine else task.session?.machine ?: targetMachine
         val computer = if (bound != null) machines.singleOrNull { it.connectionId == key.connectionId && it.machineId == bound }
             else machines.singleOrNull { it.connectionId == key.connectionId && it.id == tasksChosen?.computerId }
         if (computer == null) { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }

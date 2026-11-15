@@ -317,3 +317,8 @@ changes, Android unit tests/lint/unsigned assemble, and private headless Mac
 Rust/ZerusKit tests plus an unsigned simulator build. Use only private stores,
 profiles and sockets. No owner sessions, devices, signing, installations,
 relay deployment or automatic task controls.
+
+Typing checkpoints coalesce into one pending private writer. Save, attachment picking and Close
+flush the exact current form sequence before proceeding. A local validation refusal keeps the
+original live form editable; a frozen, submitted or unknown outcome stays held for review.
+Changing the selected project while a request is running never changes its captured route.

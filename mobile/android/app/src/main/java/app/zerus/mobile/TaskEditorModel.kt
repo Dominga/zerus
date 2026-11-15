@@ -99,8 +99,9 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 val saved = withContext(Dispatchers.IO) { runCatching { files.read(session.scope) }.getOrNull() }
-                if (state?.token == token) state = captured.copy(busy = false, saved = saved,
-                    session = if (!session.editable || saved?.state in setOf(TaskEditDraftState.Pending, TaskEditDraftState.Unknown, TaskEditDraftState.Refused, TaskEditDraftState.Frozen)) null else session,
+                val held = !session.editable || saved?.state in setOf(TaskEditDraftState.Pending, TaskEditDraftState.Unknown, TaskEditDraftState.Refused, TaskEditDraftState.Frozen)
+                if (state?.token == token) state = captured.copy(busy = false, saved = if (held) saved else null,
+                    session = if (held) null else session,
                     error = error.message.orEmpty().ifBlank { text(R.string.task_edit_draft_kept) })
             }
         }

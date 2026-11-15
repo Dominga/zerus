@@ -264,7 +264,9 @@ class TaskEditTransportTest {
         w.store.qualifyEdit(w.task, transport.route).use { qualification ->
             val (draft, _) = qualify(w, transport, qualification)
             draft.use {
-                assertTrue(runCatching { transport.proof(qualification.request()) { } }.isFailure)
+                var reserved = false
+                assertTrue(runCatching { transport.proof(qualification.request()) { reserved = true } }.isFailure)
+                assertFalse(reserved)
                 assertEquals(1, w.posts)
             }
         }
@@ -274,6 +276,29 @@ class TaskEditTransportTest {
         assertNotNull(failure)
         assertEquals(0, w.posts)
         assertEquals("Original requirement", w.native.call("inspect").string("text"))
+    }
+
+    @Test fun aRequestReservationSyncFailurePreventsTheFirstPost() {
+        val syncs = java.util.concurrent.atomic.AtomicInteger()
+        world(syncDirectory = { if (syncs.incrementAndGet() == 2) error("Forced request reservation sync failure") }) { w ->
+            assertTrue(runCatching { TaskEditSession.open(w.replicas, "Fixture", transport(w), w.files) }.isFailure)
+            assertEquals(0, w.posts)
+            assertTrue(w.files.read(w.scope)!!.state in setOf(TaskEditDraftState.Pending, TaskEditDraftState.Unknown))
+        }
+    }
+
+    @Test fun aLocalValidationFailureKeepsTheOriginalEditableAndDropsAbandonedFields() = world { w ->
+        TaskEditSession.open(w.replicas, "Fixture", transport(w), w.files).use { session ->
+            val abandoned = TaskEditContent("Must not leak", "Abandoned replacement", emptyList(), emptyList())
+            assertTrue(runCatching { session.save(1, "invalid local form", TaskEditInput(content = abandoned, rank = "")) }.isFailure)
+            assertTrue(session.editable)
+            assertEquals(1, w.posts)
+            session.save(2, "corrected local form", TaskEditInput(comment = "Only corrected comment"))
+            val actual = w.native.call("inspect")
+            assertEquals("Original requirement", actual.string("text"))
+            assertTrue(actual.toString().contains("Only corrected comment"))
+            assertEquals(2, w.posts)
+        }
     }
 
 }

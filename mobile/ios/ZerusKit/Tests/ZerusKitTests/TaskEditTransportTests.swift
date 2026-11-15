@@ -197,8 +197,25 @@ final class TaskEditTransportTests: XCTestCase {
         let proof = try await transport.proof(qualification.request()) {}
         _ = try qualification.accept(proof: proof)
         try await transport.verified(qualification.request().requestId)
-        do { _ = try await transport.proof(qualification.request()) {}; XCTFail("Retained UUID posted twice") } catch {}
+        let reserved = Mutex(false)
+        do { _ = try await transport.proof(qualification.request()) { reserved.withLock { $0 = true } }; XCTFail("Retained UUID posted twice") } catch {}
+        XCTAssertFalse(reserved.withLock { $0 })
         XCTAssertEqual(w.responses.withLock { $0.posts }, 1)
+    }
+
+    func testLocalValidationKeepsTheOriginalEditableAndDropsAbandonedFields() async throws {
+        let w = try World(); defer { XCTAssertNoThrow(try w.close()) }
+        let session = try await w.open()
+        let abandoned = TaskEditContent(title: "Must not leak", text: "Abandoned replacement", kept: [], files: [])
+        do { try await session.save(sequence: 1, changes: "invalid local form", input: TaskEditInput(content: abandoned, rank: "")); XCTFail("Invalid local rank accepted") } catch {}
+        let editable = await session.editable
+        XCTAssertTrue(editable)
+        XCTAssertEqual(w.responses.withLock { $0.posts }, 1)
+        try await session.save(sequence: 2, changes: "corrected local form", input: TaskEditInput(comment: "Only corrected comment"))
+        let actual = try w.native.call("inspect")
+        XCTAssertEqual(actual.string("text"), "Original requirement")
+        XCTAssertTrue(JSON.object(actual).compact.contains("Only corrected comment"))
+        XCTAssertEqual(w.responses.withLock { $0.posts }, 2)
     }
 
 }

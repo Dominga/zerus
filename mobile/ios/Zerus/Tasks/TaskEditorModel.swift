@@ -20,7 +20,9 @@ struct TaskEditorPicker: Equatable {
 @MainActor @Observable final class TaskEditorModel {
     private(set) var state: TaskEditorState?
     @ObservationIgnored private unowned let app: AppModel
-    @ObservationIgnored private let replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore
+    @ObservationIgnored private let replicas: TaskReplicas
+    @ObservationIgnored private let files: TaskEditDraftFiles
+    @ObservationIgnored private let assets: AttachmentStore
     @ObservationIgnored private let changed: @MainActor (TaskEditContext) -> Void
     @ObservationIgnored private var picker: TaskEditorPicker?
     @ObservationIgnored private var autosave: Task<Void, Never>?
@@ -93,8 +95,9 @@ struct TaskEditorPicker: Equatable {
                 let saved = try? await replicas.run { try files.read(scope) }
                 let editable = await session.editable
                 if state?.id == token {
-                    state?.busy = false; state?.saved = saved; state?.error = TaskSyncError.reason(error)
-                    if !editable || saved.map({ [.pending, .unknown, .refused, .frozen].contains($0.state) }) == true { state?.session = nil }
+                    let held = !editable || saved.map({ [.pending, .unknown, .refused, .frozen].contains($0.state) }) == true
+                    state?.busy = false; state?.saved = held ? saved : nil; state?.error = TaskSyncError.reason(error)
+                    if held { state?.session = nil }
                 }
             }
         }

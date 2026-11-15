@@ -190,25 +190,44 @@ fn oversized_or_missing_stores_are_refused_without_creating_anything() {
 #[test]
 fn confirmed_review_archives_the_exact_cutover_custody() {
     let (_root, mut store, uuid) = fixture();
-    let own = store.prepare_cutover(&uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap().0;
+    let own = store
+        .prepare_cutover(&uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .unwrap()
+        .0;
     let mut task = store.counted(&uuid).unwrap();
     let captures = BTreeMap::from([("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(), own.clone())]);
     task.seal_cutover(captures, BTreeMap::new()).unwrap();
     let bytes = task.snapshot().unwrap();
     store.retain_cutover_proposal(&bytes, &own).unwrap();
     store.adopt_cutover(&bytes, Some(&own)).unwrap();
-    let (current, bytes) = store.prepare_cutover(&uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    let (current, bytes) = store
+        .prepare_cutover(&uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .unwrap();
     store.retain_cutover_proposal(&bytes, &current).unwrap();
     fs::write(store.snapshot_path(&uuid), b"damaged").unwrap();
-    let originals: BTreeMap<_, _> = ["cutover", "prepare", "proposal"].into_iter()
-        .map(|ext| (ext, fs::read(store.dir.join("tasks").join(format!("{uuid}.{ext}"))).unwrap())).collect();
+    let originals: BTreeMap<_, _> = ["cutover", "prepare", "proposal"]
+        .into_iter()
+        .map(|ext| {
+            (
+                ext,
+                fs::read(store.dir.join("tasks").join(format!("{uuid}.{ext}"))).unwrap(),
+            )
+        })
+        .collect();
     let review = store.prepare_copy_review(&uuid).unwrap();
-    for ext in originals.keys() {assert!(review.files.iter().any(|file| file == ext));}
-    let moved = store.move_reviewed_copy(&uuid, &review.fingerprint).unwrap();
+    for ext in originals.keys() {
+        assert!(review.files.iter().any(|file| file == ext));
+    }
+    let moved = store
+        .move_reviewed_copy(&uuid, &review.fingerprint)
+        .unwrap();
     assert_eq!(moved.state, "moved");
     for (ext, bytes) in originals {
         let name = format!("{uuid}.{ext}");
         assert!(!store.dir.join("tasks").join(&name).exists());
-        assert_eq!(fs::read(Path::new(&moved.backup).join(name)).unwrap(), bytes);
+        assert_eq!(
+            fs::read(Path::new(&moved.backup).join(name)).unwrap(),
+            bytes
+        );
     }
 }

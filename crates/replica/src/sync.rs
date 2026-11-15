@@ -706,7 +706,9 @@ impl ProjectStore {
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
         };
-        if self.phone && task.schema()>=crate::task::cutover_schema() {task.projection_only=true;}
+        if self.phone && task.schema() >= crate::task::cutover_schema() {
+            task.projection_only = true;
+        }
         task.repair_schema()?;
         if task.uuid() != uuid {
             return Err(Error::new("the update is for another task").into());
@@ -1183,17 +1185,29 @@ mod tests {
         let mut floored = TaskDoc::from_bytes(&bytes).unwrap();
         floored.floor().unwrap();
         let mut older = TaskDoc::from_bytes(&bytes).unwrap();
-        for n in 0..8 { older.comment(&format!("older {n}"), &Actor::Person, 2).unwrap(); }
+        for n in 0..8 {
+            older
+                .comment(&format!("older {n}"), &Actor::Person, 2)
+                .unwrap();
+        }
         older.set_stored_schema_for_test(5);
         let older_update = older.export_since(&base.version()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(dir.path(), "project-1").unwrap();
         store.save_legacy_for_test(&mut floored).unwrap();
         let original = fs::read(store.snapshot_path(floored.uuid())).unwrap();
-        let imported = store.import_updates(vec![update(&floored, older_update.clone())]).unwrap();
+        let imported = store
+            .import_updates(vec![update(&floored, older_update.clone())])
+            .unwrap();
         assert_eq!(imported.refused.len(), 1);
-        assert_eq!(fs::read(store.snapshot_path(floored.uuid())).unwrap(), original);
-        assert_eq!(store.load(floored.uuid()).unwrap().stored_schema(), EXECUTION_TASK_SCHEMA);
+        assert_eq!(
+            fs::read(store.snapshot_path(floored.uuid())).unwrap(),
+            original
+        );
+        assert_eq!(
+            store.load(floored.uuid()).unwrap().stored_schema(),
+            EXECUTION_TASK_SCHEMA
+        );
         // A pre-upgrade importer may already have laundered the branch. A
         // schema repair cannot establish its missing causal dependency.
         let mut stale = TaskDoc::from_bytes(&floored.snapshot().unwrap()).unwrap();
@@ -1206,7 +1220,10 @@ mod tests {
         let (inventory, damaged) = store.inventory().unwrap();
         assert!(!inventory.tasks.contains_key(stale.uuid()));
         assert_eq!(damaged.len(), 1);
-        assert_eq!(fs::read(store.snapshot_path(stale.uuid())).unwrap(), original);
+        assert_eq!(
+            fs::read(store.snapshot_path(stale.uuid())).unwrap(),
+            original
+        );
     }
 
     #[test]
@@ -2248,7 +2265,10 @@ mod tests {
                 }
                 assert!(store.load(&uuid).is_err(), "{name}");
                 let before = files(&store, &uuid);
-                let error = store.save_received(&mut cached).err().map(|e| e.to_string());
+                let error = store
+                    .save_received(&mut cached)
+                    .err()
+                    .map(|e| e.to_string());
                 assert!(
                     error.is_some(),
                     "{name} stale={stale}: a cached document overwrote it"

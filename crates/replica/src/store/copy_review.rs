@@ -139,7 +139,9 @@ impl ProjectStore {
         let mut files = Vec::new();
         let mut contents = BTreeMap::new();
         let mut remaining = REVIEW_BYTES;
-        for extension in ["loro", "updates", "managed", "cutover", "prepare", "proposal"] {
+        for extension in [
+            "loro", "updates", "managed", "cutover", "prepare", "proposal",
+        ] {
             hash.update(extension.as_bytes());
             let path = folder.join(format!("{uuid}.{extension}"));
             let mut file = match regular(&path, false) {
@@ -184,7 +186,9 @@ impl ProjectStore {
             contents.insert(path, bytes);
         }
         let kept = contents.contains_key(&self.managed_path(uuid))
-            || ["cutover", "prepare", "proposal"].iter().any(|extension| contents.contains_key(&folder.join(format!("{uuid}.{extension}"))))
+            || ["cutover", "prepare", "proposal"].iter().any(|extension| {
+                contents.contains_key(&folder.join(format!("{uuid}.{extension}")))
+            })
             || contents
                 .get(&self.updates_path(uuid))
                 .is_some_and(|bytes| !blocks(bytes).1);

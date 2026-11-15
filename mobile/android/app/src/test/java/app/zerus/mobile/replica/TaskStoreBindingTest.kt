@@ -16,6 +16,37 @@ class TaskStoreBindingTest {
     private fun store() = TaskStore(folders.newFolder().path, "project-1", "orchard")
 
     @Test
+    fun explicitUploadBindingsPreserveLargePhoneCreatedMedia() {
+        val (host, phone) = store() to store()
+        val bytes = ByteArray(800 * 1024).also { java.util.Random(731).nextBytes(it) }
+        val task = phone.addWithMedia("Inspect the original photo", TaskStage.TODO,
+            TaskTarget.AnySession, TaskPosition.End, listOf(TaskMediaInput("fixture.png", "image/png", bytes)))
+        phone.exchange().use { legacy ->
+            var unsent = false
+            while (true) {
+                val request = legacy.nextRequest() ?: break
+                unsent = legacy.accept(host.answerExchange(request)).unsent.contains(task.uuid) || unsent
+            }
+            assertTrue(unsent)
+        }
+        phone.exchangeUploading(emptyList()).use { exchange ->
+            var requests = 0
+            while (true) {
+                val request = exchange.nextRequest() ?: break
+                assertTrue(request.toByteArray(Charsets.UTF_8).size <= 1_048_576)
+                val progress = exchange.accept(host.answerExchange(request))
+                assertTrue(progress.unsent.isEmpty())
+                assertTrue(progress.refusedHere.isEmpty())
+                assertTrue(progress.refusedThere.isEmpty())
+                requests += 1
+            }
+            assertTrue(requests > 2)
+        }
+        val media = host.media(task.uuid, null).single()
+        assertArrayEquals(bytes, host.readMedia(task.uuid, null, 0u, media.token).data)
+    }
+
+    @Test
     fun mediaBindingsKeepBytesScopeAndTheOriginalContentRevision() {
         val (computer, phone) = store() to store()
         val bytes = byteArrayOf(0, -1, 10)

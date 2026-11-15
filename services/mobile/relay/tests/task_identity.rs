@@ -71,3 +71,12 @@ fn task_identity_done_filter_is_bound_and_legacy_stays_unchanged() {
     )
     .is_err());
 }
+
+#[test]
+fn task_identity_is_advertised_as_an_additive_relay_capability() {
+    let advertised = protocol::capabilities(Vec::new());
+    assert!(advertised["features"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("task_session_identity_v2")));
+}

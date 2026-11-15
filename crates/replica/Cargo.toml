@@ -21,6 +21,7 @@ base64 = "0.22"
 # golden vectors in tests/vectors must still decode (see tests/vectors.rs).
 loro = { version = "=1.16.2", default-features = false }
 fs2 = "0.4"
+same-file = "1"
 zerus-file-lock = { path = "../file-lock" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

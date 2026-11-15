@@ -19,11 +19,12 @@ vi.mock("../../store/teamDrawers", async (original) => {
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.replaceChildren(); });
 
-it("keeps Graph and Board beside the drawer controls without losing the graph when a drawer opens", async () => {
+it("keeps Graph and Board beside drawers and Settings without losing the graph", async () => {
   const host = document.createElement("div"); document.body.append(host);
+  const save = vi.fn();
   dispose = render(() => createComponent(TeamWorkspace, {
     view: graph as unknown as TeamView, busy: false, failure: null,
-    onAction: vi.fn(), onPage: vi.fn(), onAddTask: vi.fn(),
+    onAction: vi.fn(), onPage: vi.fn(), onAddTask: vi.fn(), onSettingsSave: save,
   }), host);
   expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(5);
   expect(host.querySelector("[data-team-board]")).not.toBeNull();
@@ -37,6 +38,15 @@ it("keeps Graph and Board beside the drawer controls without losing the graph wh
   expect(host.querySelector("[data-team-graph]")).toBe(canvas);
   drawer!.querySelector<HTMLButtonElement>('[aria-label="Close"]')!.click();
   expect(host.querySelector("[data-team-drawer-panel]")).toBeNull();
+  expect(host.querySelector("[data-team-graph]")).toBe(canvas);
+  const settings = host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!;
+  expect(settings.disabled).toBe(false); settings.click();
+  expect(host.querySelector("[data-team-settings]")).not.toBeNull();
+  expect(host.querySelector("[data-team-settings] [data-setting=routing]")).not.toBeNull();
+  expect(host.querySelector("[data-team-graph]")).toBe(canvas);
+  host.querySelector<HTMLButtonElement>("[data-team-settings] [data-initial]")!.click();
+  expect(host.querySelector("[data-team-settings]")).toBeNull();
+  expect(save).not.toHaveBeenCalled();
   expect(host.querySelector("[data-team-graph]")).toBe(canvas);
   host.querySelector<HTMLButtonElement>(".team-board-head button")!.click();
   expect(host.querySelector("[data-team-board]")).not.toBeNull();

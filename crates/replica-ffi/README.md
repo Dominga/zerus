@@ -39,3 +39,30 @@ reports a single update beyond its 512 KiB budget as `unsent`; no Send may follo
 that result. Until the separately advertised upload extension is available,
 pickers must refuse unsupported/unproven transfers upfront with a clear message.
 Never drop bytes, fall back to text-only delivery or retry an unknown native Send.
+
+Phone-created media larger than the ordinary push page uses
+`exchange_uploading(tasks)` only when that exact target computer advertises
+`task_media_upload_v1`. `exchange()` and `exchange_fetching()` retain their
+legacy behavior. An old or unproven target must get a clear picker refusal
+before new media is accepted; text-only use and existing previews still work.
+Do not downgrade a refused or uncertain upload, omit its bytes, or issue native
+Send before the original exchange has settled without refusals or unsent data.
+
+The upload keeps exchange schema 1 and every request key. `WireUpdate.bytes`
+contains `ZERUSUP1`, a big-endian 32-bit header length (at most 1024), a JSON
+header `{source:{project,task,sha256,size},offset}`, and nonempty raw update
+bytes. Each frame fits the existing 512 KiB push page and travels alone; the
+relay treats it as opaque base64, requiring no relay deployment. The source is
+an immutable task UUID and a frozen canonical update, bounded by
+`MAX_TASK_DOCUMENT`. The host keeps one private assembly slot per project under
+its existing writer lock, checks directory and file identity, and imports only
+a complete size/hash-verified update through the existing canonical guards.
+Different active sources report busy; after ten idle minutes an abandoned
+partial document assembly may be replaced by a fresh offset-zero source.
+
+The additive answer `upload` acknowledgement repeats the exact source, requested
+end offset and completion flag. Missing or mismatched acknowledgements cannot
+advance the source. Interrupted transfers recover through ordinary document
+sync; idempotent replica import is separate from native input and never replays
+an unknown task outcome. Phone pickers and task drafts must retain their
+original project/task/revision and target computer throughout this exchange.

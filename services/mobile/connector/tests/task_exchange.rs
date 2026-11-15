@@ -807,3 +807,30 @@ async fn a_done_page_is_a_short_read() {
         .claim("d", "task_done", Some("hash"), EPOCH + 121.0)
         .unwrap());
 }
+
+#[test]
+fn task_media_uploads_need_the_exact_native_marker_and_an_offered_exchange() {
+    const UPLOAD: &str = "Mobile task media ABI: task-media-upload-v1";
+    let supports = |help: String, windows: bool| {
+        let flags = Flags::from_help(&help);
+        let flags = if windows {
+            flags.windows_local()
+        } else {
+            flags
+        };
+        flags.advertised(true)["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("task_media_upload_v1"))
+    };
+    assert!(supports(format!("{MARKER}{UPLOAD}\n"), false));
+    for help in [
+        MARKER.to_owned(),
+        UPLOAD.to_owned(),
+        format!("{MARKER}{UPLOAD}-extra\n"),
+        format!("{MARKER}not {UPLOAD}\n"),
+    ] {
+        assert!(!supports(help, false));
+    }
+    assert!(!supports(format!("{MARKER}{UPLOAD}\n"), true));
+}

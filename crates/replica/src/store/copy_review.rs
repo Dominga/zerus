@@ -110,7 +110,9 @@ impl ProjectStore {
         if identity != project.as_bytes() {
             return Err(Error::failed("task copy review project identity changed"));
         }
+        let upload = crate::phone::upload::Directory::new(&dir)?;
         Ok(Some(Self {
+            upload,
             phone: false,
             dir,
             project: project.into(),

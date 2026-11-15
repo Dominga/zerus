@@ -42,6 +42,7 @@ pub mod startup;
 pub mod task_message;
 pub mod task_start_reconcile;
 pub mod team_person;
+pub mod team_person_actions;
 pub mod termination_outcome;
 pub mod ui_requests;
 

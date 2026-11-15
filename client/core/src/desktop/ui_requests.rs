@@ -55,6 +55,12 @@ pub enum Request {
     TeamPersonDecide {
         intent: Box<super::team_person::Intent>,
     },
+    TeamPersonPlanPiece {
+        piece: Box<super::team_person_actions::Piece>,
+    },
+    TeamPersonAction {
+        intent: Box<super::team_person_actions::Intent>,
+    },
     CompactToSend {
         intent: Box<super::compact_to_send::Intent>,
     },
@@ -159,6 +165,8 @@ impl Request {
             Self::DeferredSend { intent } => &intent.request_id,
             Self::DeferredAnswer { intent } => &intent.request_id,
             Self::TeamPersonDecide { intent } => &intent.plan.request_id,
+            Self::TeamPersonPlanPiece { piece } => &piece.request_id,
+            Self::TeamPersonAction { intent } => &intent.plan.request_id,
             Self::CompactToSend { intent } => &intent.request_id,
             Self::SessionResume { intent } => &intent.request_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
@@ -188,6 +196,8 @@ impl Request {
             Self::DeferredSend { .. } => "deferred_send",
             Self::DeferredAnswer { .. } => "deferred_answer",
             Self::TeamPersonDecide { .. } => "team_person_decide",
+            Self::TeamPersonPlanPiece { .. } => "team_person_plan_piece",
+            Self::TeamPersonAction { .. } => "team_person_action",
             Self::CompactToSend { .. } => "compact_to_send",
             Self::SessionResume { .. } => "session_resume",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
@@ -217,6 +227,8 @@ impl Request {
             Self::DeferredSend { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::DeferredAnswer { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TeamPersonDecide { intent } => intent.valid(),
+            Self::TeamPersonPlanPiece { piece } => piece.valid(),
+            Self::TeamPersonAction { intent } => intent.valid(),
             Self::CompactToSend { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::SessionResume { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -412,6 +424,8 @@ impl Cache {
                 | Request::DeferredSend { .. }
                 | Request::DeferredAnswer { .. }
                 | Request::TeamPersonDecide { .. }
+                | Request::TeamPersonPlanPiece { .. }
+                | Request::TeamPersonAction { .. }
                 | Request::CompactToSend { .. }
                 | Request::SessionResume { .. }
                 | Request::TaskStartReconcile { .. }
@@ -641,6 +655,22 @@ impl Responder {
             Request::TeamPersonDecide { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TeamPersonAction { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TeamPersonPlanPiece { piece } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&piece.scope.configuration)
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }

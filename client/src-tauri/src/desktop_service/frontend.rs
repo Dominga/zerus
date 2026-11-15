@@ -41,6 +41,10 @@ pub enum Operation {
     DeferredAnswer,
     #[serde(skip)] // Native owner-card confirmation only; never generic policy JSON.
     TeamPersonDecide,
+    #[serde(skip)] // Data-only native preparation, never renderer admission.
+    TeamPersonPlanPiece,
+    #[serde(skip)] // Confirmed original native team action only.
+    TeamPersonAction,
     #[serde(skip)] // Native compact-to-send owner only; never generic policy dispatch or receipts.
     CompactToSend,
     #[serde(skip)] // Native session resume owner only; never generic policy dispatch or receipts.
@@ -79,6 +83,8 @@ impl Operation {
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
             Request::TeamPersonDecide { .. } => Self::TeamPersonDecide,
+            Request::TeamPersonPlanPiece { .. } => Self::TeamPersonPlanPiece,
+            Request::TeamPersonAction { .. } => Self::TeamPersonAction,
             Request::CompactToSend { .. } => Self::CompactToSend,
             Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
@@ -108,6 +114,8 @@ impl Operation {
             Self::DeferredSend => "deferred_send",
             Self::DeferredAnswer => "deferred_answer",
             Self::TeamPersonDecide => "team_person_decide",
+            Self::TeamPersonPlanPiece => "team_person_plan_piece",
+            Self::TeamPersonAction => "team_person_action",
             Self::CompactToSend => "compact_to_send",
             Self::SessionResume => "session_resume",
             Self::TaskStartReconcile => "task_start_reconcile",
@@ -752,6 +760,8 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
             | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -952,6 +962,8 @@ fn lookup(
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
             | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -1003,6 +1015,8 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
             | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -1098,6 +1112,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
             | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -1184,6 +1200,8 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::DeferredSend { .. }
         | Request::DeferredAnswer { .. }
         | Request::TeamPersonDecide { .. }
+        | Request::TeamPersonPlanPiece { .. }
+        | Request::TeamPersonAction { .. }
         | Request::CompactToSend { .. }
         | Request::SessionResume { .. }
         | Request::TaskStartReconcile { .. }

@@ -54,6 +54,17 @@ enum NativeContext {
     Fixture,
 }
 impl Admission {
+    pub(crate) fn preflight(&self, who: &ops::Actor, expected: &ops::Request) -> Result<()> {
+        let intent = self.authority.team_person_intent().ok_or_else(required)?;
+        if !intent.valid()
+            || who != &actor()
+            || store::encode(expected)? != store::encode(&request(&intent.plan))?
+        {
+            return Err(required());
+        }
+        Ok(())
+    }
+
     pub(crate) fn consume(
         self,
         db: &Connection,

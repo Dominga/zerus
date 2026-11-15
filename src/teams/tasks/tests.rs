@@ -736,3 +736,41 @@ fn a_task_store_admission_that_cannot_be_taken_answers_store_busy() {
     drop(held);
     super::load(&store, &reference.uuid).unwrap();
 }
+
+#[test]
+fn person_gesture_intake_preflight_refuses_before_a_project_is_created() {
+    let h = Harness::new();
+    let error = preflight(
+        &caller(&h, &TaskActor::Person),
+        "example-project",
+        TEAM,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "person_gesture_required");
+    assert!(!h.temp.path().join("replica").exists());
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}
+
+#[test]
+fn person_gesture_intake_refuses_before_task_metadata_or_queue_writes() {
+    let h = Harness::new();
+    let reference = document(&h);
+    let before = task(&h, &reference);
+    let revision = before.revision();
+    let error = send(
+        &caller(&h, &TaskActor::Person),
+        &reference,
+        TEAM,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "person_gesture_required");
+    let after = task(&h, &reference);
+    assert_eq!(after.revision(), revision);
+    assert_eq!(after.team().unwrap(), before.team().unwrap());
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}

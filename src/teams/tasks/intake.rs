@@ -165,6 +165,9 @@ pub(crate) fn preflight(
     pipeline: Option<&str>,
     existing: Option<&str>,
 ) -> Result<()> {
+    if matches!(caller.actor, TaskActor::Person) {
+        return Err(crate::desktop::teams::person_actions::required());
+    }
     let store = Store::open(caller.state)?;
     check(&store, caller, project, team, role, pipeline, existing).map(|_| ())
 }
@@ -186,6 +189,9 @@ pub(crate) fn send(
     role: Option<&str>,
     pipeline: Option<&str>,
 ) -> Result<Intake> {
+    if matches!(caller.actor, TaskActor::Person) {
+        return Err(crate::desktop::teams::person_actions::required());
+    }
     if !super::super::enabled(caller.state) {
         return Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."));
     }

@@ -26,13 +26,33 @@ pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog 
 /// test's stdin, and `None` reads this command's own stdin when it needs one.
 pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
     let words = input::words(args);
-    // No CLI invocation can carry the window's opaque original-child permit.
-    // Refuse before caller inspection; detach, markers and state-root changes
-    // cannot affect this terminal-only boundary.
-    if words.first().is_some_and(|word| word == "decide") {
-        return refusal(crate::desktop::teams::person_gesture::required());
+    // None of these commands has an independent Session alternative. Refuse
+    // before caller inspection; neither detachment nor a different state root
+    // can supply a window gesture. The writer repeats this boundary too.
+    if words.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "create"
+                | "decide"
+                | "settings"
+                | "add-member"
+                | "swap-member"
+                | "rename-team"
+                | "set-goal"
+                | "set-deps"
+                | "stop"
+                | "archive"
+                | "stop-member"
+                | "archive-member"
+        )
+    }) {
+        return refusal(crate::desktop::teams::person_actions::required());
     }
     let caller = crate::teams::caller::caller(config);
+    let mutation = words.first().is_some_and(|word| commands::variant(word).is_some());
+    if mutation && matches!(caller, actor::Caller::Person) {
+        return refusal(crate::desktop::teams::person_actions::required());
+    }
     run(config, &caller, &words, None)
 }
 

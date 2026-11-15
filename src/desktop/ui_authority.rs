@@ -714,6 +714,8 @@ impl Validated {
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
                     | Request::TeamPersonDecide { .. }
+                    | Request::TeamPersonPlanPiece { .. }
+                    | Request::TeamPersonAction { .. }
                     | Request::CompactToSend { .. }
                     | Request::SessionResume { .. }
                     | Request::TaskStartReconcile { .. }
@@ -803,6 +805,45 @@ impl Validated {
             Request::TeamPersonDecide { intent } => Some(intent),
             _ => None,
         }
+    }
+
+    /// Preparation is data only and cannot be consumed as a Person action.
+    pub(crate) fn team_person_plan_piece(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person_actions::Piece> {
+        self.check()?;
+        let Request::TeamPersonPlanPiece { piece } = self.0 else {
+            anyhow::bail!("not a native team plan piece")
+        };
+        Ok(*piece)
+    }
+
+    pub(crate) fn team_person_action_intent(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::team_person_actions::Intent> {
+        match &self.0 {
+            Request::TeamPersonAction { intent } => Some(intent),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn check_team_person_action(&self) -> Result<()> {
+        self.check()?;
+        ensure!(
+            self.team_person_action_intent().is_some(),
+            "not a native team action"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn team_person_action(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person_actions::Intent> {
+        self.check_team_person_action()?;
+        let Request::TeamPersonAction { intent } = self.0 else {
+            anyhow::bail!("not a native team action")
+        };
+        Ok(*intent)
     }
     /// Only the compact-to-send actor calls this, after BEGIN IMMEDIATE.
     /// Cached native Service mode was bound to this exact original request
@@ -1668,6 +1709,22 @@ fn validate(
             "Teams Person decision does not match the native service frontend"
         );
     }
+    if let Request::TeamPersonPlanPiece { piece } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && piece.scope.configuration == configuration,
+            "Teams plan preparation does not match the native service frontend"
+        );
+    }
+    if let Request::TeamPersonAction { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "Teams Person action does not match the native service frontend"
+        );
+    }
     if let Request::CompactToSend { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1772,6 +1829,8 @@ enum OrderedOperation {
     DeferredSend,
     DeferredAnswer,
     TeamPersonDecide,
+    TeamPersonPlanPiece,
+    TeamPersonAction,
     CompactToSend,
     SessionResume,
     TaskStartReconcile,
@@ -1803,6 +1862,8 @@ impl From<&Request> for OrderedOperation {
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
             Request::TeamPersonDecide { .. } => Self::TeamPersonDecide,
+            Request::TeamPersonPlanPiece { .. } => Self::TeamPersonPlanPiece,
+            Request::TeamPersonAction { .. } => Self::TeamPersonAction,
             Request::CompactToSend { .. } => Self::CompactToSend,
             Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
@@ -2903,6 +2964,102 @@ mod tests {
         }
         reply.request.fingerprint = envelope.request.fingerprint();
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn team_person_actions_keep_preparation_separate_from_the_person_boundary() {
+        use base64::Engine;
+        use zerus_client_core::{
+            desktop::{creation_clone::Scope, ownership::Mode, team_person_actions as wire},
+            teams::action::TeamAction,
+        };
+        let plan = wire::Plan {
+            request_id: id(92),
+            team: id(93),
+            expected_revision: 7,
+            action: wire::Action::Team {
+                change: Box::new(TeamAction::RenameTeam {
+                    name: "A native review".into(),
+                }),
+            },
+        };
+        let scope = Scope {
+            configuration: "a".repeat(64),
+            service_epoch: id(90),
+        };
+        let intent = wire::Intent {
+            scope: scope.clone(),
+            machine: id(91),
+            store: wire::StoreBinding::Existing {
+                fingerprint: "b".repeat(64),
+            },
+            facts: "c".repeat(64),
+            plan: plan.reference().unwrap(),
+        };
+        let piece = wire::Piece {
+            request_id: id(94),
+            scope,
+            plan: intent.plan.clone(),
+            ordinal: 0,
+            payload: base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&plan).unwrap()),
+        };
+        let preparation = Request::TeamPersonPlanPiece {
+            piece: Box::new(piece.clone()),
+        };
+        let action = Request::TeamPersonAction {
+            intent: Box::new(intent.clone()),
+        };
+        assert_ne!(
+            OrderedOperation::from(&preparation),
+            OrderedOperation::from(&action)
+        );
+        for request in [preparation.clone(), action.clone()] {
+            let (mut envelope, caller, frontend, mut reply) = fixture();
+            envelope.request = request.clone();
+            reply.request.request_id = request.id().into();
+            reply.request.fingerprint = request.fingerprint();
+            for mode in [None, Some(Mode::Native)] {
+                reply.request.ownership_mode = mode;
+                assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+            }
+            reply.request.ownership_mode = Some(Mode::Service);
+            validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+            let value = serde_json::json!(request);
+            assert!(Validated::fixture(&value).into_request().is_err());
+            let mut foreign = value.clone();
+            if request.operation() == "team_person_action" {
+                foreign["intent"]["scope"]["configuration"] = serde_json::json!("f".repeat(64));
+            } else {
+                foreign["piece"]["scope"]["configuration"] = serde_json::json!("f".repeat(64));
+            }
+            envelope.request = serde_json::from_value(foreign).unwrap();
+            reply.request.fingerprint = envelope.request.fingerprint();
+            assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        }
+        let preparation = serde_json::json!(preparation);
+        assert!(Validated::fixture(&preparation)
+            .team_person_action()
+            .is_err());
+        assert_eq!(
+            Validated::fixture(&preparation)
+                .team_person_plan_piece()
+                .unwrap(),
+            piece
+        );
+        let action = serde_json::json!(action);
+        assert!(Validated::fixture(&action)
+            .team_person_plan_piece()
+            .is_err());
+        assert_eq!(
+            Validated::fixture(&action).team_person_action().unwrap(),
+            intent
+        );
+        assert!(
+            Validated::fixture_expiring(&action, Instant::now() - Duration::from_secs(1))
+                .team_person_action()
+                .is_err()
+        );
     }
 
     /// A valid compact-to-send, built as the client builds it.

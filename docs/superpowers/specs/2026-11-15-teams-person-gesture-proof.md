@@ -342,3 +342,64 @@ is not a killed authority mutant.
 Every authority-changing slice receives G1 review and local qualification.
 The coordinator chooses slices; this note authorizes no implementation or
 installation and changes no current Person/session/service behavior.
+
+## Slice 2 implementation protocol (in progress)
+
+Slice 2 covers team mutations and decisions, first Create, and task intake.
+The coordinator separated ordinary commands on live team-owned tasks into
+S2b (`zerus-63rru.31.4`), immediately after S2 and before this parent closes.
+The Person bypass in those ordinary task commands remains interim until S2b;
+its same-user limit must remain explicit. Preview and catalog/template
+configuration remain for S3. Session and Service authority does not widen.
+
+The existing frontend control line is 64 KiB, while a valid draft-phase
+request may contain 250000 bytes. V2 therefore binds a small full-plan
+reference (request UUID, team, expected revision, exact byte count and SHA256)
+in the native original. A separate, data-only native preparation request
+stages pieces of at most 32 KiB. It requires the genuine original window
+child and Service/configuration binding, but grants no Person admission.
+Its typed consumer cannot consume a Person action. Completed data must decode
+as the exact closed plan and match its reference before canonical review.
+The cache holds at most 64 plans at the existing 256 KiB request bound,
+expires inert data, and never grants absence or replay authority. V1 owner-card
+intent encoding and original-receipt reads remain compatible.
+
+The action original is registered only after the native dialog accepts the
+canonical review. Its sealed permit binds the full plan, the computer,
+configuration/service epoch, the existing store object and immutable nonce,
+and the canonical team/target facts. It is checked after the appropriate
+writer locks and immediately before the first mutation. A card permit cannot
+be substituted for Create or another operation, including before first-store
+setup. New Person mutations without any permit refuse before store discovery.
+
+First Create must bind canonical state-directory identity and observed store
+absence, then exclude another first-store creator through setup. The proof is
+checked before setup as well as under the actual Teams writer transaction.
+The receipt binds the database object that was created, not merely the earlier
+absence. An existing or replaced store cannot be adopted through an absent
+binding. Ordinary older opens are fenced by the new schema; already-open old
+executables and arbitrary same-user store injection remain outside this
+boundary and require operational deployment of current writers.
+
+Intake is a compound metadata action. Project locks precede the Teams writer
+lock. Native admission and a durable exact-request reservation must precede
+any task/document write. Only its live, nonserializable original custody may
+continue the admitted action; a reservation read after restart cannot restart
+it. A crash between the replicated task save and the queue receipt therefore
+stays Unknown. Retain the existing partial outcome when the task exists but
+its team queue refuses or cannot be confirmed. Preserve the existing Session
+and Service intake checks and settlement rules.
+
+The New task form must checkpoint its exact native original before any
+authority-bearing request is sent. Its recovery action reads the original
+receipt only; it cannot invoke `task add --team` again. A legacy or missing
+native original stays unavailable, never adopting a current revision. A
+proved not-sent preparation/cancel may show a new native confirmation; that
+fact alone grants no permission. Pending reservations and unknown originals
+remain bounded and cannot be replaced or reconstructed by a retry.
+
+Team metadata work must run off the desktop actor, with bounded admission and
+retained original lifetime until it settles. This is not the task-message
+native executor: that executor currently has a separate macOS refusal, which
+must not be counted as a positive Mac control for this path. The new metadata
+path needs its own private Arch and headless Mac qualification and G1 review.

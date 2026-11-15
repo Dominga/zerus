@@ -9,7 +9,7 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
-    apply_with_gesture(store, actor, request, now, None)
+    apply_with_native(store, actor, request, now, None)
 }
 
 pub(crate) fn apply_with_gesture(
@@ -19,12 +19,22 @@ pub(crate) fn apply_with_gesture(
     now: i64,
     admission: Option<crate::desktop::teams::person_gesture::Admission>,
 ) -> Result<Reply> {
+    apply_with_native(store, actor, request, now, admission.map(Into::into))
+}
+
+pub(crate) fn apply_with_native(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    mut admission: Option<crate::desktop::teams::person_actions::kernel::Permit>,
+) -> Result<Reply> {
     validate_request(request, now)?;
-    if matches!(actor, Actor::Person { .. })
-        && matches!(request.operation, Operation::DecideCard { .. })
-        && admission.is_none()
-    {
-        return Err(crate::desktop::teams::person_gesture::required());
+    if matches!(actor, Actor::Person { .. }) && admission.is_none() {
+        return Err(crate::desktop::teams::person_actions::required());
+    }
+    if let Some(original) = &mut admission {
+        original.preflight(actor, request)?;
     }
     store.refresh()?;
     prepare_first(store, actor, request)?;
@@ -40,12 +50,12 @@ pub(crate) fn apply_with_gesture(
         .transpose()?;
     if let Some(intent) = &gesture {
         if let Some(saved) = replay(&tx, actor, request)? {
-            crate::desktop::teams::person_gesture::original(&tx, intent)?;
+            intent.original(&tx)?;
             return saved;
         }
         // Bound the native point-read bodies before the common kernel reads
         // its team. The snapshot cannot change under this writer transaction.
-        crate::desktop::teams::person_gesture::fresh(&tx, intent)?;
+        intent.fresh(&tx)?;
     }
     let current = rows::team(&tx, &request.team)?;
     let team = current
@@ -82,7 +92,7 @@ pub(crate) fn apply_with_gesture(
     }
     save(&tx, actor, request, &result)?;
     if let Some(intent) = &gesture {
-        crate::desktop::teams::person_gesture::record(&tx, intent)?;
+        intent.record(&tx)?;
     }
     tx.commit().map_err(storage)?;
     result

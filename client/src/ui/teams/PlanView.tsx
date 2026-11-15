@@ -6,7 +6,7 @@ import { tr } from "../../i18n";
 import type { TeamCard, TeamDependency, TeamView } from "../../store/teams";
 import { chain, phasePlans } from "./plan";
 import { orthoPath } from "./planLayout";
-import { canSetDeps, taskState } from "./planTasks";
+import { canSetDeps, dependencyEditCause, taskState } from "./planTasks";
 import "../styles/team-plan.css";
 
 export function PlanView(props: {
@@ -53,6 +53,10 @@ export function PlanView(props: {
     window.addEventListener("pointerup", done, { once: true }); window.addEventListener("pointercancel", cancel, { once: true }); window.addEventListener("blur", cancel, { once: true });
     cancelDrag = cleanup;
   };
+  const edgeCause = () => {
+    const target = tasks().find((task) => task.node === edge()?.to);
+    return target ? dependencyEditCause(target, props.view.bar.status) : "";
+  };
   const remove = () => {
     const chosen = edge();
     const target = tasks().find((task) => task.node === chosen?.to);
@@ -67,6 +71,7 @@ export function PlanView(props: {
       if (event.key === "Delete" && edge()) { event.preventDefault(); remove(); }
     }}>
     <p class="team-plan-help">{tr("Connect an output port to a task's input port to add a dependency. Select an arrow and press Delete to remove it.")}</p>
+    <Show when={edgeCause()}>{(cause) => <p role="note" data-dependency-edit-cause>{cause()}</p>}</Show>
     <Show when={link() !== null}><p role="status">{tr("Choose the task that depends on #%1.", link()!)} <button type="button" class="btn small" onClick={reset}>{tr("Cancel")}</button></p></Show>
     <Show when={props.view.after || props.view.next || props.view.truncated}><p role="note">{tr("This graph shows the current queue page. Dependencies outside this page are listed on the cards.")}</p></Show>
     <For each={plans()}>{(plan) => <section class="team-plan-phase">
@@ -93,7 +98,7 @@ export function PlanView(props: {
           const external = () => (task.deps ?? []).filter((dep) => !plan.layout.rects.has(dep.node));
           return <div class="team-plan-node" data-plan-task={task.node} data-state={task.state} classList={{ selected: props.selected === task.node, dim: !!lit() && !lit()!.has(task.node) }}
             style={{ left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px` }} onPointerEnter={() => setHover(task.node)} onPointerLeave={() => setHover(null)}>
-            <button type="button" class="team-plan-port input" disabled={!editable(task) || link() === null || link() === task.node} aria-label={tr("Add dependency to #%1", task.node)}
+            <button type="button" class="team-plan-port input" title={dependencyEditCause(task, props.view.bar.status)} disabled={!editable(task) || link() === null || link() === task.node} aria-label={tr("Add dependency to #%1", task.node)}
               onClick={() => { if (link() !== null) connect(link()!, task.node); }}>←</button>
             <button type="button" class="team-plan-card" aria-pressed={props.selected === task.node} onClick={() => { setEdge(null); props.onSelect(task.node); }}
               title={(task.deps ?? []).map((dep) => `#${dep.node}${dep.kind === "soft" ? ` (${tr("soft")})` : ""}`).join(", ")}>

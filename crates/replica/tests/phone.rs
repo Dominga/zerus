@@ -448,6 +448,7 @@ fn a_part_out_of_step_starts_again() {
     // A part that does not continue what arrived drops the document.
     forged.offset = 999;
     let out_of_step = Answer {
+        upload: None,
         schema: 1,
         imported: 0,
         refused: vec![],
@@ -732,6 +733,7 @@ fn a_document_that_leaves_while_in_parts_ends_the_exchange() {
 
 fn empty_answer(computer: &ProjectStore) -> Answer {
     Answer {
+        upload: None,
         schema: 1,
         imported: 0,
         refused: vec![],

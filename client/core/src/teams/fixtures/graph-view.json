@@ -29,6 +29,37 @@
       "cards": 0
     }
   },
+  "settings": {
+    "delegations": {
+      "accept_results": true,
+      "answer_members": true,
+      "confirm_trust": true,
+      "resume_exited": true,
+      "merge_accepted": true
+    },
+    "caps": {
+      "max_members": 6,
+      "max_phase_tasks": 50,
+      "max_open_tasks": 500,
+      "max_open_questions": 3
+    },
+    "timers": {
+      "report_timeout_seconds": 120,
+      "start_timeout_seconds": 180,
+      "inbox_interval_seconds": 120,
+      "remind_lead_minutes": 15,
+      "remind_person_minutes": 60,
+      "lead_stall_minutes": 20,
+      "answer_escalate_minutes": 10,
+      "resume_limit_per_hour": 3
+    },
+    "queue": true,
+    "routing": "direct",
+    "plan_approval": "review",
+    "phase_acceptance": "lead",
+    "integration": "branch",
+    "land_allowed": false
+  },
   "members": [
     {
       "id": "lead",
@@ -94,6 +125,7 @@
       "state": "pending",
       "cards": [
         {
+          "deps_editable": true,
           "node": 1,
           "title": "Task 1",
           "state": "pending",
@@ -119,6 +151,7 @@
           "pending_replaceable": false
         },
         {
+          "deps_editable": true,
           "node": 2,
           "deps": [
             {
@@ -151,6 +184,7 @@
           "pending_replaceable": false
         },
         {
+          "deps_editable": true,
           "node": 3,
           "deps": [
             {

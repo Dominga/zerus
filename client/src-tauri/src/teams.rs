@@ -30,6 +30,8 @@ use zerus_client_core::teams::{TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
 
+mod settings;
+
 /// The one Teams reader of this computer and the intents whose actions it
 /// sent.
 #[derive(Default)]
@@ -174,7 +176,11 @@ pub fn teams_phases(
 /// main thread, with the request id the person's action made. The followed
 /// view is read again after it.
 #[tauri::command]
-pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<TeamOutcome, String> {
+pub async fn team_action(teams: State<'_, Teams>, call: Value) -> Result<TeamOutcome, String> {
+    let call = match settings::checked_call(call) {
+        Ok(call) => call,
+        Err(outcome) => return Ok(outcome),
+    };
     let admission = teams.intents().admit(&call);
     run(teams, admission, call).await
 }
@@ -184,8 +190,12 @@ pub async fn team_action(teams: State<'_, Teams>, call: TeamCall) -> Result<Team
 #[tauri::command]
 pub async fn team_action_again(
     teams: State<'_, Teams>,
-    call: TeamCall,
+    call: Value,
 ) -> Result<TeamOutcome, String> {
+    let call = match settings::checked_call(call) {
+        Ok(call) => call,
+        Err(outcome) => return Ok(outcome),
+    };
     let admission = teams.intents().admit_again(&call);
     run(teams, admission, call).await
 }

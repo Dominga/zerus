@@ -7,6 +7,43 @@ import ZerusReplica
 final class ReplicaBindingsTests: XCTestCase {
     private func folder() -> String { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path }
 
+    func testExplicitUploadBindingsPreserveLargePhoneCreatedMedia() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            do { try FileManager.default.removeItem(at: root) }
+            catch { XCTFail("Private upload fixture cleanup failed: \(error)") }
+        }
+        let host = TaskStore(root: root.appendingPathComponent("host").path, project: "project-1", projectName: "orchard")
+        let phone = TaskStore(root: root.appendingPathComponent("phone").path, project: "project-1", projectName: "orchard")
+        var seed: UInt64 = 731
+        let bytes = Data((0..<(800 * 1024)).map { _ in
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+            return UInt8(truncatingIfNeeded: seed)
+        })
+        let task = try phone.addWithMedia(text: "Inspect the original photo", stage: .todo,
+            target: .anySession, position: .end, files: [TaskMediaInput(name: "fixture.png", mime: "image/png", data: bytes)])
+        let legacy = phone.exchange()
+        var unsent = false
+        while let request = try legacy.nextRequest() {
+            let progress = try legacy.accept(answer: host.answerExchange(request: request))
+            unsent = progress.unsent.contains(task.uuid) || unsent
+        }
+        XCTAssertTrue(unsent)
+        let exchange = phone.exchangeUploading(tasks: [])
+        var requests = 0
+        while let request = try exchange.nextRequest() {
+            XCTAssertLessThanOrEqual(request.utf8.count, 1_048_576)
+            let progress = try exchange.accept(answer: host.answerExchange(request: request))
+            XCTAssertTrue(progress.unsent.isEmpty)
+            XCTAssertTrue(progress.refusedHere.isEmpty)
+            XCTAssertTrue(progress.refusedThere.isEmpty)
+            requests += 1
+        }
+        XCTAssertGreaterThan(requests, 2)
+        let media = try XCTUnwrap(host.media(reference: task.uuid, entry: nil).first)
+        XCTAssertEqual(try host.readMedia(reference: task.uuid, entry: nil, index: 0, expectedToken: media.token).data, bytes)
+    }
+
     func testMediaBindingsKeepBytesScopeAndTheOriginalContentRevision() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {

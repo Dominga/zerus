@@ -5992,9 +5992,14 @@ member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.
 
-`set-deps` replaces dependencies on an undecided task in an active team,
-including one already in work, without changing its route, holder or pipeline.
-It refuses a stage, a pending decision, missing or repeated dependencies,
+`set-deps` replaces dependencies only before the dependent task has started,
+without changing its route, holder or pipeline. The store refuses a started,
+reserved, handed-out, submitted or reported dependent, any current or historical
+attempt or effect, and an unsettled decision. These are store facts checked
+inside the writer transaction; a pending task may still depend on a started or
+done prerequisite. The queue exposes `deps_editable` from those same facts;
+an absent value keeps the UI read-only. Refusals keep their request receipt.
+It also refuses a stage, missing or repeated dependencies,
 self-dependencies and cycles (including soft edges). The graph in the Team tab
 shows one bounded queue page; dependencies outside the page stay listed on the
 card. Drag a card's output port onto another card, or select its port and then

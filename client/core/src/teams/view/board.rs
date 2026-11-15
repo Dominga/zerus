@@ -74,11 +74,17 @@ fn is_stage(node: &Value) -> bool {
 
 fn card(node: &Value) -> QueueCard {
     QueueCard {
+        deps_editable: node.get("deps_editable").and_then(Value::as_bool),
         node: count(node, "id"),
         deps: graph::dependencies(node),
-        phase: node.get("phase").and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0),
-        origin: node.get("origin").and_then(Value::as_u64)
+        phase: node
+            .get("phase")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0),
+        origin: node
+            .get("origin")
+            .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok()),
         layer: None,
         title: text(node, "title", LINE_CHARS),
@@ -207,6 +213,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
             revision,
             counts: team_counts(&status["counts"]),
         },
+        settings: crate::teams::settings::complete(&team["settings"]),
         members: member_cards(status),
         groups,
         truncated,

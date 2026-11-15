@@ -139,18 +139,180 @@ fn set_deps_refuses_a_pending_decision() {
     refused(h.run(&person(), deps(b, &[a])), code::INVALID_STATE);
 }
 
+const PRESTART_CAUSE: &str =
+    "Dependencies can only be edited before this task starts or has an attempt or hand-out recorded.";
+
+fn refuses_started_edit(h: &mut Harness, node: u32, dependency: u32) {
+    let before = h.node(node);
+    assert!(
+        !h.store
+            .queue_rows(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|row| row.node.id == node)
+            .unwrap()
+            .deps_editable,
+        "the bounded queue exposes the same store refusal"
+    );
+    let revision = h.store.team(TEAM).unwrap().unwrap().revision;
+    let req = request(revision, deps(node, &[dependency]));
+    let error = apply(&mut h.store, &person(), &req, 1234).unwrap_err();
+    assert_eq!(error.code, code::INVALID_STATE);
+    assert_eq!(error.message, PRESTART_CAUSE);
+    assert_eq!(h.node(node), before);
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap().revision, revision);
+    let saved: bool = h
+        .store
+        .db
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+            [&req.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(saved, "the refusal is stored under the original request ID");
+    assert_eq!(
+        serde_json::to_value(apply(&mut h.store, &person(), &req, 1235).unwrap_err()).unwrap(),
+        serde_json::to_value(error).unwrap(),
+    );
+}
+
 #[test]
-fn set_deps_can_edit_started_work_without_reassigning_its_holder() {
+fn set_deps_refuses_started_work_without_a_delivery_effect() {
+    let mut h = Harness::new();
+    let a = h.enqueue(&person(), 1);
+    let b = h.add(&person(), 2);
+    h.observe(b, TaskStage::InProgress);
+    assert_eq!(h.node(b).state, NodeState::InProgress);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_refuses_reserved_work_even_while_the_node_is_pending() {
+    let mut h = Harness::new();
+    h.bind("m1");
+    let a = h.enqueue(&person(), 1);
+    let b = h.add(&person(), 2);
+    h.intent(b, "m1");
+    assert_eq!(h.node(b).state, NodeState::Pending);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_refuses_submitted_work_even_before_a_started_observation() {
+    let mut h = Harness::new();
+    h.bind("m1");
+    let a = h.enqueue(&person(), 1);
+    let b = h.add(&person(), 2);
+    let effect = h.intent(b, "m1");
+    h.outcome(
+        &effect,
+        HandoutOutcome::Submitted {
+            receipt: "receipt-example".into(),
+        },
+    );
+    assert_eq!(h.node(b).state, NodeState::Pending);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_refuses_reported_work() {
     let mut h = Harness::new();
     h.bind("m1");
     let a = h.enqueue(&person(), 1);
     let b = h.add(&person(), 2);
     h.submit(b, "m1");
-    let original = h.node(b);
+    h.report(b, "m1");
+    assert_eq!(h.node(b).state, NodeState::Reported);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_refuses_historical_refused_effects() {
+    let mut h = Harness::new();
+    h.bind("m1");
+    let a = h.enqueue(&person(), 1);
+    let b = h.add(&person(), 2);
+    let effect = h.intent(b, "m1");
+    h.outcome(
+        &effect,
+        HandoutOutcome::Refused {
+            reason: "Fixture refusal.".into(),
+        },
+    );
+    assert_eq!(h.node(b).state, NodeState::Pending);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_refuses_current_and_historical_task_attempts_without_effects() {
+    for current in [true, false] {
+        let mut h = Harness::new();
+        let a = h.enqueue(&person(), 1);
+        let b = h.add(&person(), 2);
+        let mut observation = h.observation(b, TaskStage::Todo);
+        observation.attempt = 1;
+        observation.attempt_id = "example-person-attempt".into();
+        h.run(
+            &service(),
+            Operation::ObserveTask {
+                node: b,
+                observation,
+            },
+        )
+        .unwrap();
+        if !current {
+            let mut observation = h.observation(b, TaskStage::Todo);
+            observation.attempt_id.clear();
+            h.run(
+                &service(),
+                Operation::ObserveTask {
+                    node: b,
+                    observation,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(h.node(b).state, NodeState::Pending);
+        refuses_started_edit(&mut h, b, a);
+    }
+}
+
+#[test]
+fn set_deps_refuses_started_work_masked_by_the_waiting_state() {
+    let mut h = Harness::new();
+    let a = h.enqueue(&person(), 1);
+    let b = h.enqueue(&other(), 2);
+    h.observe(b, TaskStage::InProgress);
+    assert_eq!(h.node(b).state, NodeState::Waiting);
+    refuses_started_edit(&mut h, b, a);
+}
+
+#[test]
+fn set_deps_allows_a_pending_node_to_depend_on_a_started_node() {
+    let mut h = Harness::new();
+    h.bind("m1");
+    let a = h.add(&person(), 1);
+    h.submit(a, "m1");
+    let b = h.add(&person(), 2);
     h.run(&person(), deps(b, &[a])).unwrap();
-    let mut changed = h.node(b);
-    changed.deps.clear();
-    assert_eq!(changed, original);
+    assert_eq!(h.node(b).deps[0].node, a);
+    assert_eq!(h.node(a).state, NodeState::InProgress);
+}
+
+#[test]
+fn set_deps_allows_a_pending_node_to_depend_on_a_done_node() {
+    let mut h = Harness::new();
+    h.settings(|settings| settings.integration = Integration::None);
+    let a = h.add(&person(), 1);
+    h.observe(a, TaskStage::Done);
+    let b = h.add(&person(), 2);
+    h.run(&person(), deps(b, &[a])).unwrap();
+    assert_eq!(h.node(b).deps[0].node, a);
+    assert_eq!(h.node(a).state, NodeState::Accepted);
 }
 
 #[test]
@@ -192,4 +354,18 @@ fn set_deps_checks_edges_retained_by_an_archived_dependency() {
     assert_eq!(h.node(a).deps[0].node, b);
     refused(h.run(&person(), deps(b, &[a])), code::DEPENDENCY_CYCLE);
     assert!(h.node(b).deps.is_empty());
+}
+
+#[test]
+fn set_deps_refuses_restored_execution_history_without_an_attempt_id() {
+    let mut h = Harness::new();
+    h.settings(|settings| settings.integration = Integration::None);
+    let a = h.enqueue(&person(), 1);
+    let b = h.add(&person(), 2);
+    h.observe(b, TaskStage::InProgress);
+    h.observe(b, TaskStage::Done);
+    h.observe(b, TaskStage::Todo);
+    assert_eq!(h.node(b).state, NodeState::Pending);
+    assert!(h.store.generation(TEAM, b).unwrap().unwrap() > 1);
+    refuses_started_edit(&mut h, b, a);
 }

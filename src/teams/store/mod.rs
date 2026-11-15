@@ -9,6 +9,7 @@ mod cross;
 mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
+pub(crate) mod dependency_edit;
 mod holder;
 mod disposition;
 pub(crate) mod drafts;

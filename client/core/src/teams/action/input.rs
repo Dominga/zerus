@@ -178,11 +178,9 @@ impl TeamAction {
                 super::drafts::check(*phase, draft)
             }
             Self::Create { .. } => check_create(self),
-            Self::Pause {}
-            | Self::Resume {}
-            | Self::Stop {}
-            | Self::Archive {}
-            | Self::Settings { .. } => Ok(()),
+            Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
+            Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
+                .map_err(|problem| problem.message),
             Self::PauseMember { member }
             | Self::ResumeMember { member }
             | Self::StopMember { member }

@@ -467,6 +467,9 @@ pub(crate) fn task_ref(node: &Value) -> Option<TaskRefView> {
 /// its stages. A card is never a stage node of another card.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct QueueCard {
+    /// Store-owned pre-start predicate; an older read grants no edit affordance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deps_editable: Option<bool>,
     pub node: u64,
     /// Dependency facts are kept even when the other endpoint is off-page.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -554,6 +557,9 @@ pub struct TeamView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<phases::PhasePane>,
     pub bar: TeamBar,
+    /// Complete settings for editing; absent if this version cannot read every field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<zerus_team_plan::Settings>,
     pub members: Vec<MemberCard>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.

@@ -181,3 +181,24 @@ fn draft_and_partial_scopes_share_layers_and_keep_external_edge_kinds() {
     assert_eq!(full.nodes, partial.nodes);
     assert_eq!(full.edges, partial.edges);
 }
+
+#[cfg(test)]
+#[test]
+fn dependency_editability_requires_the_store_boolean_and_keeps_false() {
+    // Deliberately malformed/older protocol inputs, not persisted task rows.
+    let queue = serde_json::json!({"rows":[
+        {"id":1,"phase":0,"state":"pending","deps_editable":true},
+        {"id":2,"phase":0,"state":"pending","deps_editable":false},
+        {"id":3,"phase":0,"state":"pending"},
+        {"id":4,"phase":0,"state":"pending","deps_editable":null},
+        {"id":5,"phase":0,"state":"pending","deps_editable":"true"}
+    ]});
+    let view = super::team(&serde_json::json!({"team":{}}), &queue);
+    let flags: Vec<_> = view
+        .groups
+        .iter()
+        .flat_map(|group| &group.cards)
+        .map(|card| card.deps_editable)
+        .collect();
+    assert_eq!(flags, vec![Some(true), Some(false), None, None, None]);
+}

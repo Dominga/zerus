@@ -8,6 +8,8 @@ mod executor;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod helper;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use helper::Call as AppearanceCall;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod owner;
 mod parser;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

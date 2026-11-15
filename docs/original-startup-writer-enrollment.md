@@ -1,9 +1,9 @@
 # Original startup writer enrollment
 
-Design proposal for `zerus-jmxyf.7.2.11`, after #2448, based on main
+Approved design for `zerus-jmxyf.7.2.11`, after #2448, based on main
 `f821172ee` and REV2 SHA-256
 `592bd8393057e723f6655fa735ef7c0d24df7a605e1dc20b9191e44d55b2adb9`.
-Coordinator design approval precedes implementation; independent G1 precedes merge.
+The coordinator approved this scope before implementation; independent G1 precedes merge.
 
 ## Choice and first slice
 
@@ -150,3 +150,29 @@ Root/Core clippy with warnings denied, local Windows/Darwin cross-clippy as
 applicable, both client fmt checks and source/privacy checks. Use short `/tmp`
 fixture paths on the Mac. Follow its one-step lease and immediate target cleanup
 protocol. No hosted CI dispatch/polling gate or owner runtime operations.
+
+## Implementation boundaries
+
+The sealed status facade's `appearance` method returns no resource for a legacy
+Child. Only the retained `owned::Original` can open one appearance producer, and
+only while its startup program is open. Its non-cloneable outer lifetime closes
+admission on Drop. Helpers retain private shared companions of the same native
+source and domain; those companions have no constructor from saved data. A
+native/source refusal is sticky even if the changed object is restored.
+
+`claude_theme::executor::wait` is the sole production borrower. Its read-only
+Observation and mutating Scope carry that same producer. The fixed `helper::run`
+reserves through `OriginalDomain::appearance`, then uses the paired original
+source/row/IO bridge; its legacy branch keeps the existing Core helper custody.
+An observation acquires only the existing state writer until its spawn and empty
+stdin handoff. A Scope borrows its already held writer throughout. Neither path
+waits on a run exclusion while retaining the global writer.
+
+The row has a fresh helper UUID and `launch` kind; its intent digest binds the
+parent appearance request, closed call/target and SID/run. It is not a receipt.
+The Core charge retains both the original per-run lease and the actual native
+Scope/Observation companion. A positive physical report retires only that row,
+using a separate one-second accounting bound; it cannot renew the helper budget.
+Timeout, unwind or Drop with no retained report leaves the row unresolved even
+after the original retirement worker eventually releases its lease. Inspect,
+producer closure, a new UUID and a free gate cannot erase that uncertainty.

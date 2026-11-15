@@ -5,7 +5,8 @@ use super::*;
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
-use std::{io, marker::PhantomData, rc::Rc, time::Duration};
+use std::{io, marker::PhantomData, rc::Rc, sync::Arc, time::Duration};
+pub(super) mod appearance;
 mod channel;
 mod creation;
 mod native;
@@ -18,8 +19,9 @@ pub(in crate::state) struct Original {
     root: Child,
     exit: Option<ExitStatus>,
     channel: channel::Channel,
-    source: native::Source,
-    domain: terminating::OriginalDomain,
+    source: Arc<native::Source>,
+    domain: Arc<terminating::OriginalDomain>,
+    appearance: Option<Arc<appearance::Producer>>,
     binding: Value,
     startup: bool,
     unresolved: bool,
@@ -27,6 +29,19 @@ pub(in crate::state) struct Original {
 }
 impl super::sealed::Status for Original {}
 impl ChildStatus for Original {
+    fn appearance(
+        &mut self,
+        record: &Value,
+        request: &str,
+    ) -> Result<Option<appearance::Appearance>> {
+        self.check();
+        if !self.startup || self.unresolved || self.appearance.is_some() {
+            return Err("Original startup producer is unavailable or already closed".into());
+        }
+        let producer = appearance::Producer::new(self, record, request)?;
+        self.appearance = Some(producer.clone());
+        Ok(Some(appearance::Appearance::new(producer)))
+    }
     fn id(&self) -> u32 {
         #[cfg(target_os = "linux")]
         {
@@ -131,6 +146,7 @@ impl Original {
         };
         let data = json!({"version":1,"binding":self.binding,"phase":phase,
             "writer_domain":self.domain.observation(),
+            "appearance_producer":self.appearance.as_ref().map(|p|p.observation()),
             "continuity":"fixed_original_program_only",
             "root_exit":self.exit.map(|s| ExitInfo::of(s).exit_code()),
             "descendant_coverage":if cfg!(target_os="linux") {"retained_linux_cohort"} else {"unproved"},
@@ -200,8 +216,9 @@ pub(in crate::state) fn spawn(
         root: child,
         exit: None,
         channel,
-        source,
-        domain,
+        source: Arc::new(source),
+        domain: Arc::new(domain),
+        appearance: None,
         binding,
         startup: true,
         unresolved: identity.is_none(),

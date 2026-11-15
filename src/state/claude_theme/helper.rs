@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use zerus_client_core::run::writer_custody::Admission;
+use zerus_client_core::run::writer_custody::{Admission, Exchange, Report};
 
 pub(super) const INPUT_FIELDS: [backend::PaneField; 9] = [
     backend::PaneField::Tty,
@@ -20,7 +20,7 @@ pub(super) const INPUT_FIELDS: [backend::PaneField; 9] = [
     backend::PaneField::BracketedPaste,
 ];
 
-pub(super) enum Call {
+pub(in crate::state) enum Call {
     Capture(String),
     Pane(String),
     Layout(String),
@@ -28,6 +28,15 @@ pub(super) enum Call {
     Enter(String),
 }
 impl Call {
+    pub(in crate::state) fn wire(&self) -> Value {
+        match self {
+            Self::Capture(v) => json!(["capture", v]),
+            Self::Pane(v) => json!(["pane", v]),
+            Self::Layout(v) => json!(["layout", v]),
+            Self::Process(v) => json!(["process", v]),
+            Self::Enter(v) => json!(["enter", v]),
+        }
+    }
     fn command(&self) -> Command {
         let mut command = Command::new(if matches!(self, Self::Process(_)) {
             "ps"
@@ -70,6 +79,15 @@ impl Call {
 }
 
 pub(super) trait Source: Send + Sync + 'static {
+    fn enrollment(&self) -> Option<&Arc<supervisor::AppearanceProducer>> {
+        None
+    }
+    fn record(&self) -> Result<Value> {
+        Err("No original appearance enrollment".into())
+    }
+    fn writer(&self) -> Option<&storage::Guard> {
+        None
+    }
     /// Original objects and native identity, never a nested native callback.
     fn check(&self) -> Result<()>;
     fn until(&self) -> Instant;
@@ -90,8 +108,26 @@ pub(super) fn run<S: Source>(source: &Arc<S>, call: Call) -> Result<Output> {
     source.check()?;
     let until = source.until();
     let charge: Arc<dyn Send + Sync> = source.clone();
-    let admission = Admission::reserve(charge, until)
-        .map_err(|error| format!("Claude appearance helper admission refused: {error:?}"))?;
+    // Observation borrows only this bounded existing writer; mutating Scope
+    // already owns it, and must never acquire a second global writer.
+    let owned_writer = match source.enrollment() {
+        Some(producer) if source.writer().is_none() => Some(producer.writer(until)?),
+        _ => None,
+    };
+    let writer = source.writer().or(owned_writer.as_ref());
+    let admission =
+        match source.enrollment() {
+            Some(producer) => Pending::Original(Box::new(producer.admit(
+                writer.ok_or("Missing original appearance writer")?,
+                &source.record()?,
+                &call,
+                charge,
+                until,
+            )?)),
+            None => Pending::Legacy(Admission::reserve(charge, until).map_err(|error| {
+                format!("Claude appearance helper admission refused: {error:?}")
+            })?),
+        };
     let mut command = call.command();
     let child = {
         let _turn = crate::platform::spawn_turn();
@@ -102,9 +138,13 @@ pub(super) fn run<S: Source>(source: &Arc<S>, call: Call) -> Result<Output> {
     };
     // No post-spawn check, refusal or unwind can lose this exact Child/pipes.
     let mut exchange = admission.attach(child);
-    let _ = exchange.close_empty_input(|_, original| original == until && source.check().is_ok());
+    let _ = exchange.close_empty_input(writer, |_, original| {
+        original == until && source.check().is_ok()
+    });
+    drop(owned_writer);
     loop {
         if let Some(report) = exchange.poll() {
+            let report = report?;
             source.check()?;
             if report.failure.is_some() || !report.input_written {
                 return Err(format!(
@@ -134,5 +174,49 @@ pub(super) fn run<S: Source>(source: &Arc<S>, call: Call) -> Result<Output> {
         std::thread::sleep(
             Duration::from_millis(2).min(until.saturating_duration_since(Instant::now())),
         );
+    }
+}
+
+enum Pending {
+    Legacy(Admission),
+    Original(Box<terminating::StartupAdmission>),
+}
+impl Pending {
+    fn attach(self, child: std::process::Child) -> Running {
+        match self {
+            Self::Legacy(admitted) => Running::Legacy(admitted.attach(child)),
+            Self::Original(admitted) => Running::Original(admitted.attach(child)),
+        }
+    }
+}
+enum Running {
+    Legacy(Exchange),
+    Original(terminating::StartupExchange),
+}
+impl Running {
+    fn close_empty_input(
+        &mut self,
+        writer: Option<&storage::Guard>,
+        check: impl FnOnce(&mut std::process::Child, Instant) -> bool,
+    ) -> std::result::Result<(), zerus_client_core::run::writer_custody::Failure> {
+        match self {
+            Self::Legacy(exchange) => exchange.close_empty_input(check),
+            Self::Original(exchange) => exchange.close_empty_input(
+                writer.ok_or(zerus_client_core::run::writer_custody::Failure::Invalid)?,
+                check,
+            ),
+        }
+    }
+    fn poll(&mut self) -> Option<Result<Report>> {
+        match self {
+            Self::Legacy(exchange) => exchange.poll().map(Ok),
+            Self::Original(exchange) => exchange.poll(),
+        }
+    }
+    fn cancel(&mut self) {
+        match self {
+            Self::Legacy(exchange) => exchange.cancel(),
+            Self::Original(exchange) => exchange.cancel(),
+        }
     }
 }

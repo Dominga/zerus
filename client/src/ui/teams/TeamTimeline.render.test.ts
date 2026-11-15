@@ -122,3 +122,29 @@ it("new team events do not silently refresh Timeline's first-page ceiling before
   (host.querySelector("[data-drawer-next]") as HTMLButtonElement).click(); await settle();
   expect(reads.map((read) => read.after)).toEqual([null, "t1.original-ceiling"]);
 });
+
+it("offers export only for the selected loaded journal page", async () => {
+  const host = mount(() => createComponent(TeamDrawers, { kind: "timeline", view: teamView, busy: false, onAction: vi.fn(), onClose: vi.fn(), port: async () => feed }));
+  await settle(); await vi.waitFor(() => expect(host.querySelectorAll("[data-timeline-seq]")).toHaveLength(feed.rows.length));
+  expect(host.querySelector('[data-timeline-export]')).not.toBeNull();
+});
+
+it("exports the loaded snapshot once, with no fetch, task action or automatic retry", async () => {
+  const port = vi.fn(async () => feed); const action = vi.fn();
+  const exportPort = vi.fn(async () => { throw new Error("destination result unknown"); });
+  const host = mount(() => createComponent(TeamDrawers, { kind: "timeline", view: teamView, busy: false, onAction: action, onClose: vi.fn(), port, exportPort }));
+  await settle(); (host.querySelector('[data-timeline-export]') as HTMLButtonElement).click(); await settle();
+  expect(exportPort).toHaveBeenCalledTimes(1); expect(port).toHaveBeenCalledTimes(1); expect(action).not.toHaveBeenCalled();
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("Export not confirmed");
+  await settle(); expect(exportPort).toHaveBeenCalledTimes(1);
+});
+
+it("export remains disabled while a replacement page is being read", async () => {
+  let resolve!: (page: DrawerPage) => void; let reads = 0; const exportPort = vi.fn(async () => true);
+  const port = () => ++reads === 1 ? Promise.resolve(feed) : new Promise<DrawerPage>((done) => { resolve = done; });
+  const host = mount(() => createComponent(TeamDrawers, { kind: "timeline", view: teamView, busy: false, onAction: vi.fn(), onClose: vi.fn(), port, exportPort }));
+  await settle(); (host.querySelector('[data-drawer-refresh]') as HTMLButtonElement).click(); await settle();
+  const button = host.querySelector('[data-timeline-export]') as HTMLButtonElement;
+  expect(button.disabled).toBe(true); button.click(); expect(exportPort).not.toHaveBeenCalled();
+  resolve(feed); await settle(); expect(button.disabled).toBe(false);
+});

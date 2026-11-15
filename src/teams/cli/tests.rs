@@ -21,6 +21,7 @@ mod planning;
 mod progress;
 mod progress157;
 mod reads;
+mod recorded_timings;
 mod session_groups;
 mod status_items;
 mod storage_failure;

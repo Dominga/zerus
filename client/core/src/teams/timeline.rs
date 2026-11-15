@@ -1,9 +1,10 @@
 //! Coverage of one recorded journal page, never a work-time measurement.
 use super::drawers::DrawerRow;
 use super::read::{TeamError, PAGE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecordedCoverage {
     pub count: usize,
     pub limit: u64,
@@ -64,6 +65,9 @@ mod tests {
                 team: value["team"].as_str().unwrap().into(),
                 kind: DrawerKind::Feed,
                 after: after.map(str::to_owned),
+                recorded_timings: false,
+                timing_seqs: None,
+                timing_next: None,
             },
             Exit::Code {
                 code: 0,

@@ -6284,6 +6284,29 @@ reads. In **Settings > Approvals**, only a confirmed folder-trust grant says
 unconfirmed and unknown outcomes say it was requested but not confirmed.
 Resume and other ordinary approval rows do not claim that trust grant.
 
+### Tests/Builds provider inspection and selection
+
+`hgs team validation-config --json` takes `{ "team": "UUID" }` on stdin.
+The person or exact team lead may read it. Add `override_config` (the version-1
+JSON equivalent of `.zerus/tests.toml`, or `null`) to check a candidate without
+saving or executing it. The bounded `inspection` reply includes `schema`, team,
+revision, project/home, native checkout, file/detected/none source, source digest,
+effective config digest, provider metadata, diagnostics, current saved selection
+and unsupported capabilities. Invalid project/configuration facts are explicit
+`valid: false` diagnostics, never empty successful validation.
+
+`hgs team validation-settings --json` is **person only**. It takes the normal
+`team`, `request_id`, `expected_revision` envelope and `selection` containing the
+reviewed `source_digest`, `digest` and `override_config`. The operation recomputes
+these under the writer transaction, refuses `config_changed` or `stale_revision`,
+and atomically records the selection, revision, journal and exact request receipt.
+Replay keeps the original receipt; a changed request never borrows its UUID.
+Selections live in additive `validation_settings` companion storage, leaving the
+strict legacy settings object and schema version unchanged. They grant no runner,
+mandatory validation or automatic task-dispatch authority. Ordinary settings
+writes preserve the companion choice.
+
+
 ## Machines and accounts
 
 **Machines** edits local SSH aliases and overrides in

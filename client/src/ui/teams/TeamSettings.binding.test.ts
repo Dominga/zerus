@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { teamView } from "./fixtures";
+import providers from "../../../core/src/teams/fixtures/providers.json";
 import status from "../../../core/src/teams/fixtures/cli-status.json";
 import { completeSettings } from "./team-settings";
 const writtenSettings = () => { const value = structuredClone(status.team.settings); if (!completeSettings(value)) throw new Error("Incomplete product fixture"); return value; };
@@ -39,7 +40,7 @@ afterEach(() => { dispose?.(); dispose = undefined; f.choose(undefined); f.setBi
 const select = (id: string) => f.choose({ key: id, computer: "workstation", launchId: `launch-${id}`, sessionId: "not-a-launch-id", runId: `run-${id}` });
 function setup() { const host = document.createElement("div"); document.body.append(host); dispose = render(() => createComponent(TeamTab, {}), host); return host; }
 
-it("sends settings from the actual Team tab with the displayed revision and blocks unresolved settings", async () => {
+it.each(["settings", "validation_config"])("sends settings from the actual Team tab and blocks unresolved %s", async (kind) => {
   select("a"); f.setBinding({ state: "lead", team: teamView.bar.id }); const host = setup();
   await vi.waitFor(() => expect(f.open).toHaveBeenCalled());
   f.setTeam({ ...teamView, settings: writtenSettings() });
@@ -52,13 +53,14 @@ it("sends settings from the actual Team tab with the displayed revision and bloc
   await vi.waitFor(() => expect(f.run).toHaveBeenCalledOnce());
   const call = f.run.mock.calls[0][0];
   expect(call).toEqual({ team: teamView.bar.id, team_name: "Fixes", expected_revision: 16, request_id: "request-1", action: { kind: "settings", settings: { ...status.team.settings, routing: "lead" } } });
-  f.setUnresolved([{ call, detail: "Read the team before sending it again.", state: "uncertain" }]);
+  const held = kind === "settings" ? call : { ...call, action: { kind, selection: { source_digest: providers.inspection.source_digest, digest: providers.inspection.digest, override_config: null } } };
+  f.setUnresolved([{ call: held, detail: "Read the team before sending it again.", state: "uncertain" }]);
   await vi.waitFor(() => expect(host.querySelector("[data-team-settings]")).toBeNull());
   expect(host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!.disabled).toBe(true);
   host.querySelector<HTMLButtonElement>("[data-team-request] button")!.click();
-  expect(f.check.mock.calls[0][0].call).toEqual(call); expect(f.run).toHaveBeenCalledOnce();
+  expect(f.check.mock.calls[0][0].call).toEqual(held); expect(f.run).toHaveBeenCalledOnce();
   host.querySelectorAll<HTMLButtonElement>("[data-team-request] button")[1].click();
-  expect(f.dismiss.mock.calls[0][0].call).toEqual(call);
+  expect(f.dismiss.mock.calls[0][0].call).toEqual(held);
 });
 
 it("closes a settings draft on a session change and never sends it to the next team", async () => {

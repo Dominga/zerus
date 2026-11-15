@@ -24,5 +24,6 @@
   "settings",
   "stop",
   "stop_member",
-  "swap_member"
+  "swap_member",
+  "validation_config"
 ]

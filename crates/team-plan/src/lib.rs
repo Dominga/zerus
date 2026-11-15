@@ -24,6 +24,7 @@ pub mod settings;
 #[cfg(test)]
 mod testkit;
 pub mod validate;
+pub mod validation;
 
 pub use builtin::builtin;
 pub use catalog::{

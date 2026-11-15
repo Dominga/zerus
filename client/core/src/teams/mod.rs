@@ -40,6 +40,7 @@ pub mod catalog_edit;
 pub mod drawers;
 pub mod model;
 pub mod poller;
+pub mod providers;
 pub mod read;
 mod refusal;
 pub mod settings;

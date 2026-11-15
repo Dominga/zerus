@@ -8,6 +8,7 @@ import { teamCall } from "./actions";
 import { delegationWords } from "./NewTeam";
 import { CAPS, DELEGATIONS, TIMERS, capMax, completeSettings, wholeNumber, type TeamSettings } from "./team-settings";
 import "./team-settings.css";
+import { ProviderSettings } from "./ProviderSettings";
 
 // Adapted from WhiteWh's TeamSettingsDialog: one saved settings object, the
 // phase choice. Only our settings op is
@@ -145,6 +146,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
         </fieldset>
         <Show when={!value()}><p class="notice danger" role="alert">{tr("Enter whole numbers within the shown limits.")}</p></Show>
       </Show>
+      <ProviderSettings view={props.view} locked={locked()} onSave={props.onSave} />
       <Show when={stale()}><p class="hint">{tr("Waiting for the current team settings…")}</p></Show>
     </div>
     <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>

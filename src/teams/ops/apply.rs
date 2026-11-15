@@ -9,6 +9,16 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
+    apply_with_config(store, actor, request, now, None)
+}
+
+pub fn apply_with_config(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+) -> Result<Reply> {
     validate_request(request, now)?;
     store.refresh()?;
     prepare_first(store, actor, request)?;
@@ -46,7 +56,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         event: None,
         superseded: None,
     };
-    let result = run(&mut ctx, request, current.is_some());
+    let result = run(&mut ctx, request, current.is_some(), config);
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
@@ -119,14 +129,19 @@ fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Re
         Saved::Refused(p) => Err(p),
     }))
 }
-fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply> {
+fn run(
+    ctx: &mut Context<'_>,
+    request: &Request,
+    existed: bool,
+    config: Option<&crate::config::Config>,
+) -> Result<Reply> {
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
     if existed && matches!(ctx.op, Operation::Create { .. }) {
         return Err(invalid("Team already exists."));
     }
-    dispatch(ctx)?;
+    dispatch(ctx, config)?;
     ctx.reply.revision = ctx
         .team
         .revision
@@ -168,7 +183,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
     .map_err(storage)?;
     Ok(())
 }
-fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
+fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),
@@ -179,6 +194,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::Resume => team::resume(ctx),
         Operation::Stop => team::stop(ctx),
         Operation::Archive => team::archive(ctx),
+        Operation::SetValidationConfig { .. } => provider_settings::select(ctx, config),
         Operation::ChangeSettings { .. } => team::change_settings(ctx),
         Operation::SetMemberSession { .. } => members::set_session(ctx),
         Operation::SetMemberHandle { .. } => members::set_handle(ctx),

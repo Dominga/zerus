@@ -11,6 +11,18 @@ pub(super) fn member_lifecycle(ctx: &Context<'_>, member: &str) -> Result<()> {
     ctx.active()
 }
 
+/// Planning can report and decide ordinary notices, never task cards.
+/// Operation authority and each card's own listed decisions still apply.
+pub(super) fn ordinary_card(ctx: &Context<'_>, node: Option<u32>) -> Result<()> {
+    if ctx.team.status == TeamStatus::Planning && node.is_none() {
+        if store::planning::paused(ctx.db, &ctx.team.id)?.is_some() {
+            return Ok(());
+        }
+        return Err(invalid("The planning startup record is missing."));
+    }
+    ctx.active()
+}
+
 pub(super) fn start(ctx: &mut Context<'_>) -> Result<()> {
     if ctx.team.goal.trim().is_empty() {
         return Err(invalid("A planning goal is required."));

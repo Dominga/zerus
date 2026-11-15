@@ -516,9 +516,10 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 4] = [
+const COMMON_SCHEMA: [&str; 5] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
+    include_str!("validation-settings.sql"),
     include_str!("read-indexes.sql"),
     include_str!("non-delivery-schema.sql"),
 ];

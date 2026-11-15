@@ -228,7 +228,7 @@ fn names_a_refusal(stdout: &[u8]) -> bool {
 }
 
 /// The standard output of a read, or why it gave none.
-fn output(exit: Exit) -> Result<Vec<u8>, TeamError> {
+pub(crate) fn output(exit: Exit) -> Result<Vec<u8>, TeamError> {
     match exit {
         Exit::Code {
             code: 0, stdout, ..

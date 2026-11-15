@@ -8,6 +8,7 @@ import { teamCall } from "./actions";
 import { delegationWords } from "./NewTeam";
 import { CAPS, DELEGATIONS, TIMERS, capMax, completeSettings, wholeNumber, type TeamSettings } from "./team-settings";
 import "./team-settings.css";
+import { ProviderSettings } from "./ProviderSettings";
 
 // Adapted from WhiteWh's TeamSettingsDialog: one saved settings object, the
 // phase choice. Only our settings op is
@@ -15,6 +16,7 @@ import "./team-settings.css";
 export interface TeamSettingsDialogProps {
   /** The live view; only a stale refusal admits a newer revision into the draft. */
   view: TeamView;
+  providerHome?: string;
   busy: boolean;
   onSave: (call: TeamCall) => Promise<TeamOutcome>;
   onClose: () => void;
@@ -158,6 +160,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           </section>
         </fieldset>
       </Show>
+      <ProviderSettings view={props.view} home={props.providerHome} locked={locked()} onSave={props.onSave} />
       <Show when={stale()}><p class="hint">{tr("Waiting for the current team settings…")}</p></Show>
     </div>
     <Show when={error() && !errorField()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>

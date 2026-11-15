@@ -1396,6 +1396,7 @@ fn the_action_kinds_are_the_shared_list() {
             | TeamAction::ResumeMember { .. }
             | TeamAction::StopMember { .. }
             | TeamAction::ArchiveMember { .. }
+            | TeamAction::ValidationConfig { .. }
             | TeamAction::Settings { .. }
             | TeamAction::Decide { .. }
             | TeamAction::Admit { .. }
@@ -1465,6 +1466,13 @@ fn the_action_kinds_are_the_shared_list() {
         TeamAction::ResumeMember { member: member() },
         TeamAction::StopMember { member: member() },
         TeamAction::ArchiveMember { member: member() },
+        TeamAction::ValidationConfig {
+            selection: zerus_team_plan::validation::Selection {
+                source_digest: "a".repeat(64),
+                digest: "b".repeat(64),
+                override_config: None,
+            },
+        },
         TeamAction::Settings {
             settings: Default::default(),
         },

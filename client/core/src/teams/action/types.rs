@@ -138,6 +138,10 @@ pub enum TeamAction {
     ArchiveMember {
         member: String,
     },
+    /// Person-reviewed advisory metadata, without execution policy.
+    ValidationConfig {
+        selection: zerus_team_plan::validation::Selection,
+    },
     /// Changes the team's settings; the whole object, with its bounds.
     Settings {
         settings: Settings,

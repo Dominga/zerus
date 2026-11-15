@@ -3,8 +3,6 @@ use super::*;
 #[test]
 fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate() {
     let (mut f, p, requests) = fixture();
-    f.h.bind("m1");
-    f.h.bind("m3");
     for r in &requests {
         write(&f, r).unwrap();
     }

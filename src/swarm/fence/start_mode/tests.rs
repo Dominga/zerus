@@ -9,6 +9,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::create(false)
+    }
+    fn legacy() -> Self {
+        Self::create(true)
+    }
+    fn create(legacy: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let base = root.path();
         let config = Config {
@@ -38,7 +44,11 @@ impl Fixture {
             now: 1,
         })
         .unwrap();
-        store.save(&mut task).unwrap();
+        if legacy {
+            store.save_legacy_for_test(&mut task).unwrap();
+        } else {
+            store.save(&mut task).unwrap();
+        }
         Self {
             _root: root,
             config,
@@ -68,6 +78,22 @@ impl Fixture {
     fn mode(&self) -> std::result::Result<Mode, Closed> {
         read(&self.config, "p", &self.uuid, until(), SCAN_ENTRIES).unwrap()
     }
+    fn adopt(&self) {
+        let node = crate::swarm::local_node_id(&self.config).unwrap();
+        let store = self.store();
+        let mut task = store.load(&self.uuid).unwrap();
+        // The old writer's original floor is evidence, never admission.
+        task.floor().unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
+        let (capture, bytes) = store.prepare_cutover(&self.uuid, &node).unwrap();
+        let mut proposal = TaskDoc::from_bytes(&bytes).unwrap();
+        proposal
+            .seal_cutover(BTreeMap::from([(node, capture.clone())]), BTreeMap::new())
+            .unwrap();
+        store
+            .adopt_cutover(&proposal.snapshot().unwrap(), Some(&capture))
+            .unwrap();
+    }
 }
 fn until() -> Instant {
     Instant::now() + Duration::from_secs(5)
@@ -81,7 +107,7 @@ impl Net for NoNetwork {
 
 #[test]
 fn planning_reads_the_exact_gate_without_writing_a_floor_or_task_bytes() {
-    let f = Fixture::new();
+    let f = Fixture::legacy();
     let bytes = f.bytes();
     assert_eq!(f.mode(), Ok(Mode::Managed));
     assert_eq!(f.bytes(), bytes);
@@ -90,11 +116,7 @@ fn planning_reads_the_exact_gate_without_writing_a_floor_or_task_bytes() {
     assert_eq!(f.mode(), Ok(Mode::Legacy));
     assert_eq!(f.bytes(), bytes);
     f.hold(false);
-    let store = f.store();
-    let mut task = store.load(&f.uuid).unwrap();
-    task.floor().unwrap();
-    store.save(&mut task).unwrap();
-    drop(store);
+    f.adopt();
     f.hold(true);
     let floored = f.bytes();
     assert_eq!(f.mode(), Ok(Mode::Managed));
@@ -103,7 +125,7 @@ fn planning_reads_the_exact_gate_without_writing_a_floor_or_task_bytes() {
 
 #[test]
 fn unknown_scan_or_members_and_damaged_bytes_never_choose_legacy() {
-    let f = Fixture::new();
+    let f = Fixture::legacy();
     let bytes = f.bytes();
     assert!(read(&f.config, "p", &f.uuid, until(), 0).unwrap().is_err());
     let folder = f.config.dir.join("swarm");
@@ -127,7 +149,7 @@ fn unknown_scan_or_members_and_damaged_bytes_never_choose_legacy() {
 #[test]
 fn both_mismatch_directions_refuse_before_floor_reservation_or_native_work() {
     for planned in [Mode::Managed, Mode::Legacy] {
-        let f = Fixture::new();
+        let f = Fixture::legacy();
         f.hold(planned == Mode::Legacy);
         assert_eq!(f.mode(), Ok(planned));
         f.hold(planned == Mode::Managed);
@@ -144,7 +166,15 @@ fn both_mismatch_directions_refuse_before_floor_reservation_or_native_work() {
             },
         )
         .unwrap();
-        assert_eq!(result, Admission::Refused(changed()));
+        let refused = if planned == Mode::Managed {
+            Closed {
+                node: None,
+                reason: "held",
+            }
+        } else {
+            changed()
+        };
+        assert_eq!(result, Admission::Refused(refused));
         assert_eq!(f.bytes(), bytes);
         assert!(!f.store().load(&f.uuid).unwrap().execution_managed());
     }
@@ -152,14 +182,13 @@ fn both_mismatch_directions_refuse_before_floor_reservation_or_native_work() {
 
 #[test]
 fn an_already_managed_task_never_uses_a_frozen_legacy_acknowledgement() {
-    let f = Fixture::new();
+    let f = Fixture::legacy();
     f.hold(true);
     assert_eq!(f.mode(), Ok(Mode::Legacy));
-    let store = f.store();
-    let mut task = store.load(&f.uuid).unwrap();
-    task.floor().unwrap();
-    store.save(&mut task).unwrap();
-    drop(store);
+    f.adopt();
+    // Isolate the frozen-mode check after adoption; an active hold has its
+    // own earlier refusal and must not hide this mismatch control.
+    f.hold(false);
     let bytes = f.bytes();
     let result = admit(
         &f.config,
@@ -176,9 +205,10 @@ fn an_already_managed_task_never_uses_a_frozen_legacy_acknowledgement() {
 }
 
 #[test]
-fn matching_modes_keep_the_existing_legacy_or_managed_admission() {
-    let f = Fixture::new();
+fn a_legacy_plan_grants_no_admission_and_an_adopted_managed_plan_can_reserve() {
+    let f = Fixture::legacy();
     f.hold(true);
+    let before = f.bytes();
     assert!(matches!(
         admit(
             &f.config,
@@ -188,13 +218,15 @@ fn matching_modes_keep_the_existing_legacy_or_managed_admission() {
             until(),
             Some(Mode::Legacy),
             |_, _| -> Result<std::result::Result<(), Closed>> {
-                panic!("Legacy is not a reservation")
+                panic!("A legacy plan grants no reservation")
             }
         )
         .unwrap(),
-        Admission::Legacy(_)
+        Admission::Refused(Closed { reason: "held", .. })
     ));
+    assert_eq!(f.bytes(), before);
     f.hold(false);
+    f.adopt();
     let result = admit(
         &f.config,
         &NoNetwork,
@@ -209,6 +241,20 @@ fn matching_modes_keep_the_existing_legacy_or_managed_admission() {
         matches!(result, Admission::Reserved { value: 42, .. }),
         "{result:?}"
     );
+}
+
+#[test]
+fn a_native_birth_seal_plans_managed_even_when_the_project_gate_is_open_or_unknown() {
+    let f = Fixture::new();
+    f.hold(true);
+    let before = f.bytes();
+    assert_eq!(f.mode(), Ok(Mode::Managed));
+    assert_eq!(
+        read(&f.config, "p", &f.uuid, until(), 0).unwrap(),
+        Ok(Mode::Managed)
+    );
+    assert_eq!(f.bytes(), before);
+    assert!(!f.store().load(&f.uuid).unwrap().execution_managed());
 }
 
 #[test]

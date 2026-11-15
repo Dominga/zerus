@@ -34,7 +34,25 @@ fn input(data: Vec<u8>) -> TaskMediaInput {
 }
 
 fn seed(root: &tempfile::TempDir, comment_media: bool) -> String {
-    let store = ProjectStore::open(root.path(), "project-1").unwrap();
+    seed_with(root, comment_media, false)
+}
+
+// Literal old data, without a native birth seal. The projection lane keeps
+// these pre-cutover media/content rules testable without granting authority.
+fn legacy_seed(root: &tempfile::TempDir, comment_media: bool) -> String {
+    seed_with(root, comment_media, true)
+}
+
+fn legacy_store(root: &tempfile::TempDir) -> ProjectStore {
+    ProjectStore::open_phone(root.path(), "project-1").unwrap()
+}
+
+fn seed_with(root: &tempfile::TempDir, comment_media: bool, legacy: bool) -> String {
+    let store = if legacy {
+        legacy_store(root)
+    } else {
+        ProjectStore::open(root.path(), "project-1").unwrap()
+    };
     let mut task = TaskDoc::create(NewTask {
         project: "project-1",
         id: &store.unused_short_id().unwrap(),
@@ -81,6 +99,66 @@ fn refused<T: std::fmt::Debug>(value: Result<T, ReplicaError>) {
     match value {
         Err(ReplicaError::Refused(message)) => assert!(!message.is_empty()),
         other => panic!("expected a rule refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn sealed_computer_tasks_allow_media_reads_but_refuse_phone_edits() {
+    for comment_media in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let uuid = seed(&root, comment_media);
+        let api = phone(&root);
+        let task = api.get(uuid.clone()).unwrap();
+        assert_eq!(task.schema, zerus_replica::TASK_SCHEMA);
+        assert!(!task.writable);
+        assert_eq!(
+            api.read_media(uuid.clone(), None, 0, task.attachments[0].token.clone())
+                .unwrap()
+                .data,
+            b"hello"
+        );
+        if comment_media {
+            let entry = task
+                .log
+                .iter()
+                .find(|entry| entry.kind == "comment")
+                .unwrap();
+            let selected = api
+                .media(uuid.clone(), Some(entry.entry_id.clone()))
+                .unwrap();
+            assert_eq!(
+                api.read_media(
+                    uuid.clone(),
+                    Some(entry.entry_id.clone()),
+                    0,
+                    selected[0].token.clone()
+                )
+                .unwrap()
+                .data,
+                b"hello"
+            );
+        }
+        let before = saved(&root, &uuid);
+        let edits = [
+            api.edit_text(uuid.clone(), "No phone edit".into()),
+            api.comment(uuid.clone(), "No phone comment".into()),
+            api.edit_content(
+                uuid.clone(),
+                "No replacement".into(),
+                vec![],
+                vec![input(b"new".to_vec())],
+                task.content_revision,
+            ),
+        ];
+        for edit in edits {
+            match edit {
+                Err(ReplicaError::Refused(reason)) => {
+                    assert_eq!(reason, "Update Zerus to change this task.")
+                }
+                other => panic!("a sealed task must remain read-only: {other:?}"),
+            }
+        }
+        assert_eq!(saved(&root, &uuid), before);
     }
 }
 
@@ -197,7 +275,7 @@ fn previews_bind_the_selected_position_and_exact_bytes() {
 #[test]
 fn unrelated_history_does_not_overwrite_or_invalidate_a_content_draft() {
     let root = tempfile::tempdir().unwrap();
-    let uuid = seed(&root, false);
+    let uuid = legacy_seed(&root, false);
     let api = phone(&root);
     let original = api.get(uuid.clone()).unwrap();
     let arrived = api
@@ -223,7 +301,7 @@ fn unrelated_history_does_not_overwrite_or_invalidate_a_content_draft() {
 #[test]
 fn comment_media_is_lazy_read_only_and_bound_to_a_stable_history_entry() {
     let root = tempfile::tempdir().unwrap();
-    let uuid = seed(&root, true);
+    let uuid = legacy_seed(&root, true);
     let api = phone(&root);
     let task = api.get(uuid.clone()).unwrap();
     assert!(!task.writable);
@@ -249,7 +327,7 @@ fn comment_media_is_lazy_read_only_and_bound_to_a_stable_history_entry() {
         b"hello"
     );
     {
-        let store = ProjectStore::open(root.path(), "project-1").unwrap();
+        let store = legacy_store(&root);
         let mut task = store.find(&uuid).unwrap();
         // An arriving row must not reinterpret a selection as a history index.
         task.comment("A concurrently arriving comment", &Actor::Person, 0)
@@ -453,10 +531,10 @@ fn legacy_cards_stay_schema_one_and_media_bounds_refuse_before_creation() {
 #[test]
 fn a_late_history_budget_refusal_saves_neither_text_nor_files() {
     let root = tempfile::tempdir().unwrap();
-    let uuid = seed(&root, false);
+    let uuid = legacy_seed(&root, false);
     let mut rejected = None;
     {
-        let store = ProjectStore::open(root.path(), "project-1").unwrap();
+        let store = legacy_store(&root);
         let mut task = store.find(&uuid).unwrap();
         for generation in 1..=6 {
             let data = bytes(16 * 1024 * 1024, generation);

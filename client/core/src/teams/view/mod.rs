@@ -557,6 +557,9 @@ pub struct TeamView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<phases::PhasePane>,
     pub bar: TeamBar,
+    /// Complete settings for editing; absent if this version cannot read every field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<zerus_team_plan::Settings>,
     pub members: Vec<MemberCard>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.

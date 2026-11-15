@@ -42,21 +42,7 @@ pub(super) fn creation_team(request: &Request, actor: &Actor) -> Result<Team, Pr
     })
 }
 pub(super) fn settings(settings: &Settings) -> Result<(), Problem> {
-    if settings.phase_acceptance == Acceptance::Pipeline {
-        return Err(invalid("A phase cannot be accepted by a pipeline."));
-    }
-    if settings.caps.max_members == 0
-        || settings.caps.max_members > 200
-        || settings.caps.max_open_tasks == 0
-        || settings.caps.max_open_tasks > 500
-        || settings.caps.max_phase_tasks == 0
-        || settings.caps.max_phase_tasks > 200
-        || settings.caps.max_open_questions == 0
-        || settings.caps.max_open_questions > 200
-    {
-        return Err(over("Settings exceed the supported storage bounds."));
-    }
-    Ok(())
+    zerus_team_plan::settings::validate_settings(settings)
 }
 pub(super) fn route_valid(team: &Team, role: &str, pipeline: &str) -> Result<(), Problem> {
     if !team.bundle.roles.iter().any(|r| r.id == role) {

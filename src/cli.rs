@@ -272,6 +272,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task control plan|execute|status --json   inactive task controls (JSON stdin)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        Mobile task identity ABI: task-session-identity-v2
+       Mobile task media ABI: task-media-upload-v1
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
@@ -3994,20 +3995,37 @@ mod tests {
     use super::*;
 
     /// #1355 review: every command whose usage takes a session first accepts
-    /// `--session-id`; only the tray's and tmux's own entry points do not.
+    /// `--session-id`; internal entry points and the local person-only
+    /// acknowledgement keep their own exact session-name contracts.
     #[test]
     fn every_command_that_takes_a_session_first_accepts_a_session_id() {
-        let pattern = regex::Regex::new(r"hgs (?:\[@host\] |@host )?(?:--expect-machine ID )?([a-z_-]+) <session>").unwrap();
-        let mut usage: Vec<&str> = pattern.captures_iter(USAGE).map(|c| c.get(1).unwrap().as_str()).collect();
+        let pattern = regex::Regex::new(
+            r"hgs (?:\[@host\] |@host )?(?:--expect-machine ID )?([a-z_-]+) <session>",
+        )
+        .unwrap();
+        let mut usage: Vec<&str> = pattern
+            .captures_iter(USAGE)
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
         usage.sort_unstable();
         usage.dedup();
         assert!(usage.len() >= 25, "{usage:?}");
-        let internal = ["notify", "paste"];
+        let internal = ["notify", "paste", "acknowledge-input"];
         for command in usage.iter().filter(|command| !internal.contains(command)) {
             assert!(SESSION_COMMANDS.contains(command), "{command}");
         }
         // Forms the usage writes without `<session>` first.
-        for command in ["kill", "rename", "archive", "terminate", "pause", "resume", "send-now", "native-ui", "__dsh-ui-url"] {
+        for command in [
+            "kill",
+            "rename",
+            "archive",
+            "terminate",
+            "pause",
+            "resume",
+            "send-now",
+            "native-ui",
+            "__dsh-ui-url",
+        ] {
             assert!(SESSION_COMMANDS.contains(&command), "{command}");
         }
         for command in internal.iter().chain(&["task", "subagent", "ls", "search"]) {

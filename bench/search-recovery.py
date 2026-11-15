@@ -32,6 +32,12 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
   descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
   try:os.fsync(descriptor)
   finally:os.close(descriptor)
+ cache_policy='os-warm'
+ if os.environ.get('SEARCH_EVICT_FIXTURE')=='1':
+  if not sys.platform.startswith('linux'):raise SystemExit('Per-file cold-cache preparation needs Linux posix_fadvise.')
+  for path in [*state.glob('*.json'),*root.glob('*.jsonl')]:
+   with path.open('rb') as handle:os.posix_fadvise(handle.fileno(),0,0,os.POSIX_FADV_DONTNEED)
+  cache_policy='private-files-dontneed'
  results=[]
  def call(label,args,timeout=30):
   start=time.monotonic();io={};usage=None;usage_path=root/(label+'.usage')
@@ -60,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
   try:
    with (state/'content-search-v1/worker.json').open() as handle:worker=json.loads(handle.read(4096))
   except (OSError,ValueError):worker=None
-  item=dict(fixture_durable=True,worker_status=worker,label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source=peak_source,reply=value)
+  item=dict(fixture_durable=True,fixture_cache_policy=cache_policy,worker_status=worker,label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source=peak_source,reply=value)
   results.append(item);print(json.dumps(item),flush=True);return value
  try:
   if order=='legacy-first':

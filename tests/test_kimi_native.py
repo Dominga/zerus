@@ -1012,6 +1012,16 @@ class NativeKimi(lifecycle.Harness):
         self.assertFalse((self.root / 'state/input_receipts' / (pending['request_id'] + '.json')).exists())
 
     def test_exact_native_wire_repairs_a_lost_acceptance_write_without_replay(self):
+        import hashlib,shlex
+        capture=self.root/'native-prompt-shapes.py'
+        captured=self.root/'native-prompt-shapes.jsonl'
+        capture.write_text("import hashlib,json,sys\nfrom pathlib import Path\ne=json.load(sys.stdin)\np=e.get('prompt')\nt=p if isinstance(p,str) else p[0].get('text') if isinstance(p,list) and len(p)==1 and isinstance(p[0],dict) and p[0].get('type')=='text' else None\n"+
+            "v=dict(kind=e.get('hook_event_name'),turn=e.get('turn_id'),prompt_type=type(p).__name__,sha=hashlib.sha256(t.encode()).hexdigest() if isinstance(t,str) else None,parts=p if not isinstance(t,str) else None)\n"+
+            f"with Path({str(captured)!r}).open('a') as f:f.write(json.dumps(v)+'\\n')\n")
+        command=' '.join(shlex.quote(item) for item in (sys.executable,str(capture)))
+        with (self.home/'config.toml').open('a') as config:
+            for kind in ('UserPromptSubmit','TurnStarted'):
+                config.write('\n[[hooks]]\nevent = '+json.dumps(kind)+'\ncommand = '+json.dumps(command)+'\n')
         name = self.launch()
         before_initial=self.binding(name)
         initial = self.send(name, self.payload(name, 'Initialize native acceptance fixture'))
@@ -1040,6 +1050,11 @@ class NativeKimi(lifecycle.Harness):
             'before_initial':{key:before_initial.get(key) for key in ('input_pending_at','input_seen_at','input_pending_request','hook_observation')},
             'after_initial':{key:after_initial.get(key) for key in ('input_pending_at','input_seen_at','input_pending_request','input_pending_native_context','input_native_submit_binding','input_native_hook_context','hook_observation')},
             'initial':{key:initial.get(key) for key in ('request_id','conversation_id','first_message','submitted_at')},
+            'initial_sha':hashlib.sha256(initial['submitted_text'].encode()).hexdigest(),
+            'hook_shapes':captured.read_text() if captured.exists() else None,
+            'wire_shapes':[dict(turn=row.get('turnId'),time=row.get('time'),parts=[dict(type=part.get('type'),length=len(part.get('text','')),sha=hashlib.sha256(part.get('text','').encode()).hexdigest()) for part in row.get('input',[])])
+                for wire in (self.home/'sessions').glob('*/'+record['conversation_id']+'/agents/main/wire.jsonl')
+                for line in wire.read_text().splitlines() if (row:=json.loads(line)).get('type')=='turn.prompt'],
             'current':{key:repaired.get(key) for key in ('run_id','conversation_id','input_pending_native_context','input_native_hook_context','input_native_submit_binding','hook_observation')},
         }))
         self.assertEqual(repaired['input_acceptance']['request_id'],request['request_id'])

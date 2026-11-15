@@ -7,7 +7,8 @@ use std::io::{Read, Seek, SeekFrom};
 mod kimi_order;
 mod uncertainty;
 pub(in crate::state) use kimi_order::{
-    bind as bind_native_context, record_hook as record_native_context,
+    bind as bind_native_context, first_context as first_native_context,
+    record_hook as record_native_context,
 };
 pub(in crate::state) use uncertainty::remember_unknown;
 

@@ -1887,8 +1887,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     // analytics. Persist it after the existing caller/conversation checks and
     // keep-warm classification, before a busy journal can exhaust the hook's
     // native timeout. A later journal failure must not lose this acceptance.
+    let first_context = input::acceptance::first_native_context(&mut record, &event);
     if record["input_seen_at"] != seen_before {
         input::acceptance::record_native_context(&mut record, &event);
+    }
+    if record["input_seen_at"] != seen_before || first_context {
         write(&mut record)?;
     }
     if resumed_clear_end {

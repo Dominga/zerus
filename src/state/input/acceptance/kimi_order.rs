@@ -10,7 +10,9 @@ fn bootstrap(record: &Value, before: f64) -> bool {
     let context = &record["input_pending_native_context"];
     let observation = &record["hook_observation"];
     !string(record, "conversation_id").is_empty()
-        && string(record, "expected_id").is_empty()
+        && record
+            .get("expected_id")
+            .is_none_or(|value| value.is_null() || value.as_str() == Some(""))
         && context.as_object().is_some_and(|fields| fields.len() == 7)
         && context["version"] == 1
         && context["conversation_id"] == ""
@@ -27,6 +29,50 @@ fn bootstrap(record: &Value, before: f64) -> bool {
                     && at >= record["input_pending_at"].as_f64().unwrap_or(f64::INFINITY)
                     && at < before
             })
+}
+
+fn first_candidate(record: &Value, event: &Value) -> bool {
+    let submitted = &record["input_native_submit_binding"];
+    string(record, "agent") == "kimi"
+        && string(event, "hook_event_name") == "TurnStarted"
+        && event
+            .get("agent_id")
+            .is_none_or(|value| matches!(value.as_str(), Some("" | "main")))
+        && event["origin_kind"] == "user"
+        && event["turn_id"].as_u64() == Some(0)
+        && bootstrap(record, now())
+        && submitted["exact"] == true
+        && scope(submitted, record)
+        && submitted["request_id"] == record["input_pending_request"]
+        && submitted["pending_at"] == record["input_pending_at"]
+        && submitted["seen_at"] == record["input_seen_at"]
+        && record["input_seen_at"].as_f64().is_some_and(|seen| {
+            seen.is_finite() && seen > record["input_pending_at"].as_f64().unwrap_or(f64::INFINITY)
+        })
+}
+
+/// Refine an ALREADY accepted first input with its actual registered typed turn.
+/// Startup hook-result parts do not weaken full-input matching. No input is
+/// settled here, and an unconfirmed first input/S1 cannot use this path.
+pub(in crate::state) fn first_context(record: &mut Value, event: &Value) -> bool {
+    if !first_candidate(record, event) {
+        return false;
+    }
+    let Some(receipt) = bound_receipt(record, true) else {
+        return false;
+    };
+    if hook_text("kimi", event) != receipt["submitted_text"].as_str()
+        || uncertainty::load(record).blocks(string(&receipt, "submitted_text"))
+    {
+        return false;
+    }
+    let marker = json!({"version":1,"run_id":record["run_id"],"conversation_id":record["conversation_id"],
+        "turn_id":0,"seen_at":record["input_seen_at"],"request_id":record["input_pending_request"],"pending_at":record["input_pending_at"]});
+    if record["input_native_hook_context"] == marker {
+        return false;
+    }
+    record["input_native_hook_context"] = marker;
+    true
 }
 
 // Some(None): no older acceptance to confuse; Some(Some(id)): positive typed
@@ -228,7 +274,7 @@ mod tests {
         json!({"agent":"kimi","run_id":"run","conversation_id":"cid"})
     }
     fn receipt(id: &str, at: f64) -> Value {
-        json!({"request_id":id,"submitted_at":at})
+        json!({"request_id":id,"submitted_at":at,"conversation_id":"cid"})
     }
     fn mark(record: &mut Value, id: &str, at: f64) {
         record["input_pending_request"] = json!(id);
@@ -317,6 +363,40 @@ mod tests {
         assert!(!bootstrap(&record, 11.0));
         record["hook_observation"]["conversation_id"] = json!("other");
         assert!(!bootstrap(&record, 20.0));
+    }
+
+    #[test]
+    fn first_context_keeps_receipt_cid_typed_and_unconfirmed_first_input_closed() {
+        let mut record = initial();
+        record["conversation_id"] = Value::Null;
+        let first = json!({"request_id":"a","submitted_at":10.0,"conversation_id":""});
+        bind(&mut record, &first);
+        mark(&mut record, "a", 10.0);
+        assert_eq!(
+            record["input_pending_native_context"]["conversation_id"],
+            ""
+        );
+        assert!(record.get("input_seen_at").is_none());
+        record["conversation_id"] = json!("native-cid");
+        record["hook_observation"] = json!({"run_id":"run","conversation_id":"native-cid","events":{"SessionStart":{"last_at":11.0}}});
+        record["input_seen_at"] = json!(12.0);
+        record["input_native_submit_binding"] = json!({"run_id":"run","conversation_id":"native-cid","request_id":"a","pending_at":10.0,"seen_at":12.0,"exact":true});
+        let event = json!({"hook_event_name":"TurnStarted","origin_kind":"user","turn_id":0});
+        assert!(first_candidate(&record, &event));
+        for (key, value) in [
+            ("turn_id", json!(1)),
+            ("turn_id", json!(false)),
+            ("origin_kind", json!("task")),
+            ("agent_id", json!("child")),
+            ("agent_id", json!({})),
+        ] {
+            let mut changed = event.clone();
+            changed[key] = value;
+            assert!(!first_candidate(&record, &changed));
+        }
+        record["input_seen_at"] = json!(0.0);
+        assert!(!first_candidate(&record, &event));
+        assert_eq!(first["conversation_id"], "");
     }
 
     #[test]

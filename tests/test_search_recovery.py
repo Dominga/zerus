@@ -34,7 +34,7 @@ class SearchRecovery(unittest.TestCase):
             plain=query(False)
             self.assertEqual(len(plain['results']),1)
             indexed=query(True)
-            self.assertEqual(len(indexed['results']),1,json.dumps(indexed))
+            self.assertEqual(len({hit['message_id'] for hit in indexed['results']+indexed['fallback']['results']}),1,json.dumps(indexed))
             self.assertTrue(indexed['fallback']['discovery']['complete'])
             self.assertEqual(indexed['fallback']['discovery']['metadata_io'],0)
 

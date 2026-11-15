@@ -97,16 +97,7 @@ fn workload(
             return Ok(false);
         }
         original.verify()?;
-        store.discover(
-            state,
-            &DiscoveryBudget {
-                entries: 256,
-                path_bytes: 1 << 20,
-                deadline: Instant::now() + Duration::from_millis(25),
-            },
-            &cancel,
-        )?;
-        store.consume(state, &Budget::interactive(), &cancel)?;
+        step(&mut store, state, &cancel)?;
         let status = store.catalog_status()?;
         if status["discovery"] == "complete"
             && status["pending_paths"] == 0
@@ -117,6 +108,24 @@ fn workload(
         std::thread::sleep(Duration::from_millis(1));
     }
     Ok(false)
+}
+
+fn step(store: &mut Store, state: &Path, cancel: &AtomicBool) -> Result<()> {
+    store.discover(
+        state,
+        &DiscoveryBudget {
+            entries: 256,
+            path_bytes: 1 << 20,
+            deadline: Instant::now() + Duration::from_millis(25),
+        },
+        cancel,
+    )?;
+    if store.catalog_status()?["decoder_pending"] == true {
+        store.prepare_metadata(state, &Budget::interactive(), cancel)?;
+    } else {
+        store.consume(state, &Budget::interactive(), cancel)?;
+    }
+    Ok(())
 }
 
 /// A small cold computer may finish preparation during its first search. Large
@@ -132,7 +141,7 @@ pub(in crate::state) fn wait_small(state: &Path) {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .ok();
-            if let Some((paths, pending)) = totals {
+            if let Some((paths, _pending)) = totals {
                 if paths > 500 {
                     return;
                 }
@@ -144,11 +153,48 @@ pub(in crate::state) fn wait_small(state: &Path) {
                         |r| r.get(0),
                     )
                     .unwrap_or(true);
-                if complete && pending == 0 && !outdated {
+                let known: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_queue WHERE identity IS NULL LIMIT 1)",[],|r|r.get(0)).unwrap_or(false);
+                if complete && !outdated && known && catalog::discovery_current(state, &db) {
                     return;
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn every_small_catalog_header_precedes_historical_ingestion() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        for n in 0..200 {
+            let name = format!("codex/example/session-{n}");
+            let record = json!({"version":1,"name":name,"agent":"codex","run_id":format!("run-{n}"),
+                "conversation_id":uuid::Uuid::new_v4().to_string(),"transcript":state.join("not-yet-opened.jsonl"),
+                "shell_jobs":{"job":{"output":"x".repeat(270_000)}}});
+            fs::write(
+                state.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(&state.join("content-search-v1")).unwrap();
+        for _ in 0..128 {
+            step(&mut store, state, &AtomicBool::new(false)).unwrap();
+            let status = store.catalog_status().unwrap();
+            assert_eq!(
+                store.index.status().unwrap().sources,
+                0,
+                "history work delayed metadata needed by fresh fallback"
+            );
+            if status["discovery"] == "complete" && status["decoder_pending"] == false {
+                assert_eq!(discovery::legacy_sources(state).unwrap().records.len(), 200);
+                return;
+            }
+        }
+        panic!("bounded header preparation did not converge");
     }
 }

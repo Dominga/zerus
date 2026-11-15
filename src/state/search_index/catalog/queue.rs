@@ -58,6 +58,25 @@ impl Store {
         budget: &Budget,
         cancel: &AtomicBool,
     ) -> Result<CatchupProgress> {
+        self.consume_mode(state, budget, cancel, false)
+    }
+
+    pub(in crate::state::search_index) fn prepare_metadata(
+        &mut self,
+        state: &Path,
+        budget: &Budget,
+        cancel: &AtomicBool,
+    ) -> Result<CatchupProgress> {
+        self.consume_mode(state, budget, cancel, true)
+    }
+
+    fn consume_mode(
+        &mut self,
+        state: &Path,
+        budget: &Budget,
+        cancel: &AtomicBool,
+        metadata_only: bool,
+    ) -> Result<CatchupProgress> {
         if budget.files > 256
             || budget.directory_entries > 2000
             || budget.records > 512
@@ -78,11 +97,13 @@ impl Store {
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
         let mut reader = metadata::Reader::cached(state);
-        self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
+        if !metadata_only {
+            self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
+        }
         let last:i64=self.index.connection().query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='queue_cursor'),0)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
-        let mut rows = self.queue_page(last)?;
+        let mut rows = self.queue_page(if metadata_only { 0 } else { last }, metadata_only)?;
         if rows.is_empty() && last > 0 {
-            rows = self.queue_page(0)?;
+            rows = self.queue_page(0, metadata_only)?;
         }
         for (id, path, kind) in rows {
             if !progress.ingestion.available(budget, cancel) {
@@ -99,6 +120,7 @@ impl Store {
                 cancel,
                 &mut progress,
                 &mut reader,
+                metadata_only,
             );
             let ended = self.end_step(owned);
             row?;
@@ -127,14 +149,8 @@ impl Store {
         cancel: &AtomicBool,
         progress: &mut CatchupProgress,
         reader: &mut metadata::Reader,
+        metadata_only: bool,
     ) -> Result<()> {
-        self.index
-            .connection()
-            .execute(
-                "UPDATE catalog_queue SET reader_version=? WHERE id=?",
-                params![metadata_cache::VERSION, id],
-            )
-            .map_err(|e| e.to_string())?;
         let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
         let mut record = match record {
             Ok(metadata::Record::Ready(record)) => record,
@@ -194,15 +210,20 @@ impl Store {
         self.index
             .connection()
             .execute(
-                "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0 WHERE id=?",
+                "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0,reader_version=? WHERE id=?",
                 params![
                     serde_json::to_string(&identity).map_err(|e| e.to_string())?,
                     source,
                     updated,
+                    metadata_cache::VERSION,
                     id
                 ],
             )
             .map_err(|e| e.to_string())?;
+        if metadata_only && !native {
+            progress.visited_paths += 1;
+            return Ok(()); // History remains pending; fresh fallback can use its header.
+        }
         if native {
             // The native engine remains authoritative; the existing bounded
             // query stays its fallback until an indexed adapter is admitted.
@@ -266,7 +287,7 @@ impl Store {
     }
 
     fn skip_queued(&self, id: i64, shadow: bool) -> Result<()> {
-        self.index.connection().execute("UPDATE catalog_queue SET done=1,identity=?,source=NULL,skipped=?,fallback=? WHERE id=?",params![if shadow{"null"}else{""},if shadow{2}else{1},!shadow,id]).map_err(|e|e.to_string())?;
+        self.index.connection().execute("UPDATE catalog_queue SET done=1,identity=?,source=NULL,skipped=?,fallback=?,reader_version=? WHERE id=?",params![if shadow{"null"}else{""},if shadow{2}else{1},!shadow,metadata_cache::VERSION,id]).map_err(|e|e.to_string())?;
         Ok(())
     }
 
@@ -332,20 +353,30 @@ impl Store {
         }
         Ok(pruned)
     }
-    fn queue_page(&self, after: i64) -> Result<Vec<(i64, PathBuf, String)>> {
-        self.index
+    fn queue_page(&self, after: i64, metadata_only: bool) -> Result<Vec<(i64, PathBuf, String)>> {
+        let sql = if metadata_only {
+            "SELECT id,path,kind FROM catalog_queue WHERE reader_version<? AND id>=? ORDER BY reader_version,id LIMIT 16"
+        } else {
+            "SELECT id,path,kind FROM catalog_queue WHERE done=0 AND id>? ORDER BY id LIMIT 16"
+        };
+        let mut statement = self
+            .index
             .connection()
-            .prepare(
-                "SELECT id,path,kind FROM catalog_queue WHERE done=0 AND id>? ORDER BY id LIMIT 16",
-            )
-            .map_err(|e| e.to_string())?
-            .query_map([after], |r| {
-                Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<_>>()
+            .prepare(sql)
+            .map_err(|e| e.to_string())?;
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?))
+        };
+        let rows = if metadata_only {
+            statement.query_map(params![metadata_cache::VERSION, after], map)
+        } else {
+            statement.query_map([after], map)
+        }
+        .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<_>>()
             .map_err(|e| e.to_string())
     }
+
 }
 
 fn queued_record(

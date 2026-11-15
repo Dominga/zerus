@@ -19,7 +19,9 @@ source fingerprint and exact run/conversation/archive checks. DeepSeek and other
 unsupported histories retain their bounded native/legacy fallback.
 
 The helper stages at most 256 directory entries / 1 MiB of paths / 25 ms in a
-slice, then consumes at most 32 file opens / 128 public records / 4 MiB of
+slice. Small search headers are prepared across the catalog before historical
+message ingestion, so a long history cannot hide later sessions from fresh
+fallback. Each preparation/ingestion slice consumes at most 32 file opens / 128 public records / 4 MiB of
 retained metadata and history / 250 ms. Cold metadata preparation has a separate
 64 MiB raw-I/O bound; one record is also capped at 64 MiB. It validates canonical
 JSON and retains only search fields, excluding private job output. Small

@@ -442,6 +442,7 @@ impl Store {
                 source=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.source ELSE NULL END,
                 fallback=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.fallback ELSE 1 END,
                 skipped=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.skipped ELSE 0 END,
+                reader_version=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.reader_version ELSE 0 END,
                 stamp=excluded.stamp,seen=excluded.seen",params![path,kind,stamp,generation]).map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())
@@ -481,6 +482,17 @@ fn candidate(state: &Path, path: &Path, kind: &str) -> bool {
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     }
 }
+pub(super) fn discovery_current(state: &Path, db: &Connection) -> bool {
+    let saved: Option<String> = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='catalog_stamp'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    saved.is_some_and(|saved| directory_stamp(&roots(state)).is_ok_and(|current| current == saved))
+}
+
 fn directory_stamp(roots: &[(&str, PathBuf)]) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(b"search-census-v2");

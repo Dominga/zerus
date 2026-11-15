@@ -622,7 +622,13 @@ pub struct WaitingItem {
     /// older store has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<CardParameters>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_reference: Option<PhaseReference>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseReference { pub phase: u32, pub generation: u64, pub purpose: String }
 
 /// A card row's parameters, kept in one of the three states the window must
 /// tell apart (zerus-63rru.34, F6). The core never drops, cuts or normalizes

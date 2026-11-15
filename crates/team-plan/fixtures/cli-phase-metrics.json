@@ -8,9 +8,11 @@
       "person": "local"
     },
     "draft": {
+      "accept_available": false,
       "complete": true,
       "editable": true,
       "generation": 1,
+      "live": null,
       "next_node": 5,
       "nodes": [
         {
@@ -104,6 +106,9 @@
         "state": "draft",
         "title": "Estimated plan"
       },
+      "previous": null,
+      "publication": null,
+      "rejection": null,
       "revision": 2
     },
     "ok": true,
@@ -117,7 +122,7 @@
       "origin": "cli_interim",
       "person": "local"
     },
-    "approval_available": false,
+    "approval_available": true,
     "default_pipeline": "reviewed",
     "drafts_available": true,
     "next": null,

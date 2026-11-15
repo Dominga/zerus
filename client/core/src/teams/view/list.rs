@@ -57,6 +57,7 @@ fn waiting_item(row: &Value) -> Option<WaitingItem> {
         decisions: decisions(row),
         notes: service_notes(row),
         parameters: parameters(row.get("parameters")),
+        phase_reference: row.get("phase_reference").and_then(|v|serde_json::from_value::<PhaseReference>(v.clone()).ok()).filter(|v|v.phase>0 && v.generation>0 && matches!(v.purpose.as_str(),"review"|"accept")),
     })
 }
 

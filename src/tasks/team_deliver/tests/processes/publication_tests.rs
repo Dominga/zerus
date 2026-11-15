@@ -2,6 +2,8 @@
 //! missing-file test deliberately removes its own private task files.
 use super::*;
 use ops::Operation;
+mod completion;
+mod recovery;
 
 fn fixture() -> (
     Fixture,

@@ -92,6 +92,7 @@ export interface ServiceNote { code: string; text?: string | null }
 
 /** One open owner card that waits for the person. */
 export interface WaitingItem {
+  phase_reference?: { phase: number; generation: number; purpose: "review" | "accept" } | null;
   id: string;
   team: string;
   card: number;

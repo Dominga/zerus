@@ -47,6 +47,32 @@ fn phase_record(ctx: &Context<'_>, n: u32) -> Result<Phase> {
     phase(ctx, n)
 }
 
+fn review_id(ctx: &Context<'_>) -> Result<String> {
+    if uuid::Uuid::parse_str(ctx.request_id).is_ok_and(|id| !id.is_nil()) {
+        Ok(ctx.request_id.to_owned())
+    } else {
+        Err(invalid("A phase review needs a non-nil request UUID."))
+    }
+}
+
+/// A versioned, domain-separated UUIDv8 derived from the already unique
+/// approval identity. It is saved once; recovery always uses the saved input.
+fn task_id(team: &str, publication: &str, node: u32) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"zerus-team-phase-task-v1\0");
+    hash.update(team.as_bytes());
+    hash.update(b"\0");
+    hash.update(publication.as_bytes());
+    hash.update(node.to_be_bytes());
+    let bytes: [u8; 16] = hash.finalize()[..16]
+        .try_into()
+        .expect("fixed SHA-256 prefix");
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
 pub(super) fn approve(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::ApprovePhase {
         phase,
@@ -83,13 +109,10 @@ pub(super) fn approve(ctx: &mut Context<'_>) -> Result<()> {
     if nodes.is_empty() {
         return Err(invalid("An empty phase cannot be approved."));
     }
-    for n in &nodes {
-        validation::route_valid(ctx.team, &n.role, &n.pipeline)?;
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    ctx.db
-        .pragma_update(None, "user_version", PUBLICATION_LAYOUT)
-        .map_err(storage)?;
+    drafts::revalidate(ctx, &record, &nodes)?;
+    phase_review::close(ctx, *phase, "review")?;
+    let id = review_id(ctx)?;
+    store::raise_execution_floor(ctx.db, PUBLICATION_LAYOUT)?;
     ctx.db.execute("INSERT INTO phase_publications(id,team,phase,generation,snapshot,initial,state,created_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7)",params![id,ctx.team.id,phase,generation,encode(&nodes)?,initial,ctx.now]).map_err(storage)?;
     for node in nodes {
         let request = PlannedTaskRequest {
@@ -98,7 +121,7 @@ pub(super) fn approve(ctx: &mut Context<'_>) -> Result<()> {
             phase: *phase,
             task: TaskRef {
                 project: ctx.team.project.clone(),
-                uuid: uuid::Uuid::new_v4().to_string(),
+                uuid: task_id(&ctx.team.id, &id, node.id),
             },
             lead: lead.clone(),
             home: ctx.team.home.clone(),
@@ -140,7 +163,8 @@ pub(super) fn reject(ctx: &mut Context<'_>) -> Result<()> {
         return Err(invalid("Only a draft can be rejected."));
     }
     reason(comment)?;
-    let id = uuid::Uuid::new_v4().to_string();
+    phase_review::close(ctx, *phase, "review")?;
+    let id = review_id(ctx)?;
     ctx.db.execute("INSERT INTO phase_reviews(team,phase,generation,rejection,comment,actor) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(team,phase) DO UPDATE SET generation=excluded.generation,rejection=excluded.rejection,comment=excluded.comment,actor=excluded.actor",params![ctx.team.id,phase,generation,id,comment,encode(ctx.actor)?]).map_err(storage)?;
     record.state = PhaseState::Rejected;
     save_phase(ctx, &record)?;
@@ -166,6 +190,7 @@ pub(super) fn undo(ctx: &mut Context<'_>) -> Result<()> {
     {
         return Err(invalid("That rejection is no longer current."));
     }
+    phase_review::close_rejection(ctx, *phase)?;
     ctx.db
         .execute(
             "UPDATE phase_reviews SET rejection=NULL,comment=NULL WHERE team=?1 AND phase=?2",
@@ -181,15 +206,31 @@ pub(super) fn problem(ctx: &mut Context<'_>) -> Result<()> {
         publication,
         node,
         reason: message,
+        kind,
     } = ctx.op
     else {
         unreachable!()
     };
     reason(message)?;
-    let changed=ctx.db.execute("UPDATE phase_publication_nodes SET reason=?4 WHERE team=?1 AND publication=?2 AND node=?3 ",params![ctx.team.id,publication,node,message]).map_err(storage)?;
-    if changed != 1 {
-        return Err(invalid("The publication task is no longer pending."));
-    }
+    text(message, 2048)?;
+    let (state,failures):(String,u32)=ctx.db.query_row("SELECT state,failures FROM phase_publication_nodes WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or_else(missing)?;
+    let terminal = matches!(ctx.team.status, TeamStatus::Stopped | TeamStatus::Archived);
+    let failures = if *kind == PublicationProblemKind::Uncertain {
+        failures.saturating_add(1).min(3)
+    } else {
+        failures
+    };
+    let final_state = match kind {
+        PublicationProblemKind::Refused => Some("refused"),
+        PublicationProblemKind::Uncertain if failures >= 3 => Some("uncertain"),
+        _ => None,
+    };
+    let next = if !terminal && matches!(state.as_str(), "writing" | "created") {
+        final_state.unwrap_or(&state)
+    } else {
+        &state
+    };
+    ctx.db.execute("UPDATE phase_publication_nodes SET state=?4,reason=?5,failures=?6,clear_outcome=CASE WHEN ?7 THEN COALESCE(?8,clear_outcome) ELSE clear_outcome END WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node,next,message,failures,terminal,final_state]).map_err(storage)?;
     Ok(())
 }
 
@@ -232,6 +273,7 @@ pub(super) fn publish(ctx: &mut Context<'_>) -> Result<()> {
     for request in &requests {
         let mut n = request.node.node(*phase);
         n.task = Some(request.task.clone());
+        n.text.clear();
         n.state = NodeState::Waiting;
         ctx.db
             .execute(
@@ -274,7 +316,7 @@ pub(super) fn publish(ctx: &mut Context<'_>) -> Result<()> {
     if ctx.team.status == TeamStatus::Planning {
         ctx.db
             .execute(
-                "UPDATE teams SET status='\"running\"' WHERE id=?1",
+                "UPDATE teams SET status='\"running\"' WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM phase_publications p WHERE p.team=teams.id AND p.initial=1 AND p.state<>'published')",
                 [&ctx.team.id],
             )
             .map_err(storage)?;
@@ -342,6 +384,7 @@ pub(super) fn reconcile(ctx: &mut Context<'_>) -> Result<()> {
         ));
     }
     record.state = PhaseState::AwaitingAcceptance;
+    phase_review::card(ctx, &record, p.generation, "accept")?;
     save_phase(ctx, &record)
 }
 
@@ -361,6 +404,7 @@ pub(super) fn accept(ctx: &mut Context<'_>) -> Result<()> {
             "The phase's completion facts no longer permit acceptance.",
         ));
     }
+    phase_review::close(ctx, *phase, "accept")?;
     record.state = PhaseState::Done;
     save_phase(ctx, &record)
 }

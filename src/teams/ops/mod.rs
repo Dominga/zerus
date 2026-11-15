@@ -17,6 +17,7 @@ pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
 mod planning;
+mod phase_review;
 pub(crate) mod publication;
 mod queue;
 #[cfg(test)]

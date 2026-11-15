@@ -4,7 +4,7 @@ use super::*;
 
 pub const MAX_NODES: usize = 4096;
 // Leave transport room for the frozen draft, phase header and envelope.
-pub const MAX_BYTES: usize = 8 * 1024 * 1024 - 512 * 1024;
+pub const MAX_BYTES: usize = 7 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PhaseNodeSnapshot {
@@ -69,7 +69,7 @@ pub(crate) fn load(
         if p.state != "published" || p.total == 0 || p.total != p.created {
             answer.complete = false;
         }
-        let missing: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM phase_publication_nodes p WHERE p.publication=?1 AND (NOT EXISTS(SELECT 1 FROM node_identity i WHERE i.team=p.team AND i.id=p.node AND i.task_uuid=p.task_uuid) OR NOT EXISTS(SELECT 1 FROM nodes n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid UNION ALL SELECT 1 FROM node_archive n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid)))",[p.id],|r|r.get(0)).map_err(storage)?;
+        let missing: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM phase_publication_nodes p WHERE p.publication=?1 AND (NOT EXISTS(SELECT 1 FROM node_identity i WHERE i.team=p.team AND i.id=p.node AND i.task_uuid=p.task_uuid) OR NOT EXISTS(SELECT 1 FROM nodes n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid UNION ALL SELECT 1 FROM node_archive n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid)))",params![p.id, phase],|r|r.get(0)).map_err(storage)?;
         answer.complete &= !missing;
     } else {
         answer.complete = false;

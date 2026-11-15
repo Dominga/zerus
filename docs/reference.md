@@ -6014,6 +6014,10 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `phases`, `phase --phase N` | yes | yes | | none |
 | `submit-draft-phase` | yes | yes | | `phase`, `draft` |
 | `edit-draft-phase` | yes | yes | | `phase`, `generation`, `draft` |
+| `approve-phase` | yes | | | `phase`, `generation`, `confirm_initial` for initial roster/folder confirmation |
+| `reject-phase` | yes | | | `phase`, `generation`, nonblank `comment` |
+| `undo-reject-phase` | yes | | | `phase`, `generation`, current `rejection` UUID |
+| `accept-phase` | yes | | | `phase`, current `publication` UUID; no task receipt |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
@@ -6085,12 +6089,14 @@ decisions, without granting task or integration authority. Approval and
 publication are unavailable in this slice.
 
 Starting the first planned team atomically raises the private Teams execution
-schema to 3. Queue-only stores remain at 2; this engine reads both. Older
-engines refuse fresh opens of a store marked 3, so all Teams commands and its
-desktop service on that computer need the M2-capable engine thereafter.
+schema to 3; reserving the first phase publication raises it to 4. Queue-only
+stores remain at 2, and this engine reads 2, 3 and 4. Starting another planning
+team never lowers an existing floor. A pre-planning engine refuses 3, and a
+planning-only engine refuses 4, including final native effect admission. All
+Teams commands and the desktop service on that computer must support its floor.
 
-**Planned drafts.** The Team tab's Layers view reads bounded draft phases;
-approval is shown unavailable until publication is implemented. `phases`
+**Planned drafts and publication.** The Team tab's Layers view reads bounded
+draft phases and the live-and-archived nodes of published phases. `phases`
 pages at most 200 summaries and supplies `next_phase`, `next_node`, the
 pinned role/pipeline routes and their revision. `phase --phase N` reads one
 complete draft with its generation, revision and editability. An unavailable
@@ -6116,6 +6122,42 @@ no task documents, live bindings,
 member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.
+
+The person approves an exact draft generation. For initial Planning, the
+confirmation also shows and authorizes the current roster and working-folder
+mode. The engine saves the reviewed input and each named-task request before
+calling its task writer; partial creation keeps the phase closed. Once every
+creation is confirmed, the phase becomes Approved. Initial member launch is
+released only after all reserved initial publications settle. Auto approval is
+the person's policy for later phases, never authority for the lead to approve
+itself or activate the initial plan.
+
+Reject requires a comment; undo names that exact current rejection. Editing a
+rejected draft creates a new generation and keeps one bounded previous draft
+for comparison. Waiting for you cards link the exact phase and generation.
+A reserved publication freezes draft editing. Unknown creation never becomes a
+successful task, and a missing task after a committed creation claim is not
+reinserted. Unreadable recovery is attempted at most three times before the
+phase stays explicitly uncertain. A stop clears unpublished task keys through
+the ordinary silent key writer and retains a final refusal or unknown outcome.
+Created task documents are retained, not deleted to roll back publication.
+
+`phase --phase N` adds `live: {phase, revision, nodes, complete}` for a published
+phase. This is the same reader and poller, with live and archived nodes including
+stages, no state filtering, and at most 4,096 nodes. Its 7 MiB node payload
+reserves the rest of the 8 MiB command budget for the frozen draft, previous
+generation and metadata. Incomplete or unreadable scopes do not supply live
+metrics. Layers and metrics use the shared core graph and metric projections.
+
+Completion is a service-only fact from publication, live/archive, decision and
+outstanding-effect records, never from an empty queue. Hand-out admission
+rechecks this through the same scheduler kernel, so a completed earlier phase
+already blocks later work before the AwaitingAcceptance fact is recorded.
+The person's `accept-phase` rechecks completion under the lock and moves the
+phase to Done. Send back, delegated lead acceptance and the full rework UI are
+a later slice. Phase 0 remains the only intake queue. Approved-plan structural
+edits, including generic dependency/route edits, are deferred to logged plan
+changes; draft nodes remain editable.
 
 `set-deps` replaces dependencies only before the dependent task has started,
 without changing its route, holder or pipeline. The store refuses a started,

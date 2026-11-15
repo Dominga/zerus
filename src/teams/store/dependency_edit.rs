@@ -15,6 +15,7 @@ pub(crate) fn eligible_sql(table: &str) -> String {
         AND {table}.task_stage IN ('unobserved','backlog','todo')
         AND {table}.generation=1
         AND COALESCE(json_extract({table}.data,'$.kind'),'task')<>'stage'
+        AND COALESCE(json_extract({table}.data,'$.source'),'sent')<>'planned'
         AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.team={table}.team AND d.node={table}.id AND d.state<>'settled')
         AND NOT EXISTS(SELECT 1 FROM effects e INDEXED BY effects_attempt WHERE e.team={table}.team AND e.node={table}.id)
         AND NOT EXISTS(SELECT 1 FROM reports r WHERE r.team={table}.team AND r.node={table}.id)

@@ -189,3 +189,139 @@ fn rejection_requires_a_comment_and_undo_binds_the_exact_episode() {
     assert_eq!(read.generation, Some(2));
     assert!(read.rejection.is_none());
 }
+
+#[test]
+fn another_planning_team_cannot_lower_the_publication_floor() {
+    let mut h = Harness::new();
+    reserved(&mut h, &[1]);
+    let Operation::Create {
+        expected_template,
+        delegations,
+        project,
+        name,
+        goal: _,
+        home,
+        bundle,
+        integration_branch,
+        base_commit,
+    } = create()
+    else {
+        unreachable!()
+    };
+    h.run_for(
+        TEAM_B,
+        &person(),
+        Operation::StartPlanning {
+            expected_template,
+            delegations,
+            project,
+            name,
+            goal: "Plan the second goal".into(),
+            home,
+            bundle,
+            integration_branch: format!("{integration_branch}-second-plan"),
+            base_commit,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        h.store.team(TEAM_B).unwrap().unwrap().status,
+        TeamStatus::Planning
+    );
+}
+
+#[test]
+fn review_cards_link_one_exact_generation_and_edits_keep_the_previous_draft() {
+    let mut h = Harness::new();
+    h.bind("lead");
+    h.run(
+        &person(),
+        Operation::SubmitDraftPhase {
+            phase: 1,
+            draft: input(&[1]),
+        },
+    )
+    .unwrap();
+    h.run(
+        &service(),
+        Operation::ReconcilePhaseReview {
+            phase: 1,
+            generation: 1,
+        },
+    )
+    .unwrap();
+    let card = h.store.waiting(200, None).unwrap().rows.remove(0);
+    let reference = h
+        .store
+        .phase_card_ref(TEAM, card.card.seq)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            reference.phase,
+            reference.generation,
+            reference.purpose.as_str()
+        ),
+        (1, 1, "review")
+    );
+    refused(
+        h.run(
+            &service(),
+            Operation::ReconcilePhaseReview {
+                phase: 1,
+                generation: 1,
+            },
+        ),
+        code::INVALID_STATE,
+    );
+    let mut edit = input(&[1, 2]);
+    edit.title = "Reviewed again".into();
+    h.run(
+        &person(),
+        Operation::EditDraftPhase {
+            phase: 1,
+            generation: 1,
+            draft: edit,
+        },
+    )
+    .unwrap();
+    assert!(h.store.waiting(200, None).unwrap().rows.is_empty());
+    let previous = h.store.phase_draft(TEAM, 1).unwrap().previous.unwrap();
+    assert_eq!(previous.generation, 1);
+    assert_eq!(previous.draft, input(&[1]));
+    h.run(
+        &service(),
+        Operation::ReconcilePhaseReview {
+            phase: 1,
+            generation: 2,
+        },
+    )
+    .unwrap();
+    let card = h.store.waiting(200, None).unwrap().rows.remove(0);
+    assert_eq!(
+        h.store
+            .phase_card_ref(TEAM, card.card.seq)
+            .unwrap()
+            .unwrap()
+            .generation,
+        2
+    );
+}
+
+#[cfg(unix)]
+mod compatibility;
+#[test]
+#[cfg(unix)]
+#[ignore = "manual private-state export for the compiled real slice-2 reader"]
+fn export_s2_compatibility_fixture() {
+    compatibility::export();
+}

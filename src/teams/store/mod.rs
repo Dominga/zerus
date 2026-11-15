@@ -405,6 +405,15 @@ pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Raise the private execution floor without lowering an already-published
+/// store when another team starts planning. Called under the operation lock.
+pub(crate) fn raise_execution_floor(db: &Connection, floor: u32) -> Result<()> {
+    execution_fence(db)?;
+    let current: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(storage)?;
+    if current < floor { db.pragma_update(None,"user_version",floor).map_err(storage)?; }
+    Ok(())
+}
+
 /// The notes columns beside the member's own words (zerus-63rru.69). They are
 /// added in place, not by a version bump: a version-2 store from before them
 /// keeps its rows and takes the additive columns on its next open. Each add

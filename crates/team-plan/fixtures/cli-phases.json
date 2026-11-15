@@ -6,7 +6,7 @@
     "origin": "cli_interim",
     "person": "local"
   },
-  "approval_available": false,
+  "approval_available": true,
   "default_pipeline": "reviewed",
   "drafts_available": true,
   "next": null,

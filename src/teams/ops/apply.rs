@@ -36,6 +36,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         actor,
         team: &team,
         op: &request.operation,
+        request_id: &request.request_id,
         now,
         reply: Reply {
             ok: true,
@@ -176,6 +177,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
+        Operation::ReconcilePhaseReview { .. } => phase_review::review(ctx),
         Operation::ApprovePhase { .. } => publication::approve(ctx),
         Operation::RejectPhase { .. } => publication::reject(ctx),
         Operation::UndoRejectPhase { .. } => publication::undo(ctx),

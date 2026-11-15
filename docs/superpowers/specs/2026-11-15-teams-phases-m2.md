@@ -120,7 +120,10 @@ writer pattern (`actor/tasks.rs`, `actor/native/tasks.rs`,
 `tasks/team_deliver/stage.rs`), **not** the stage-only command unchanged:
 
 1. Save the reviewed snapshot, stable per-node creation UUIDs and their
-   original requests before any child. Keep the phase closed to hand-outs.
+   original requests before any child. The approval request UUID identifies
+   the publication; a versioned domain-separated SHA-256 UUIDv8 names each
+   node's task. Recovery still reads the saved request and never reconstructs
+   it from current state. Keep the phase closed to hand-outs.
 2. A service-only planned-task writer checks the exact publication under the
    caller's task-store admission and Teams lock, then uses `new_named_task`,
    `Target::Any`, To do, the lead attribution and the ordinary team key/save.

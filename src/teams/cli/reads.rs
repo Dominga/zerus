@@ -244,6 +244,9 @@ pub(super) fn waiting(config: &Config, caller: &Caller, args: &[String]) -> Resu
             let mut row = serde_json::to_value(&waiting.card).map_err(storage)?;
             if let Some(object) = row.as_object_mut() {
                 object.insert("team".into(), json!(waiting.team));
+                if let Some(reference) = store.phase_card_ref(&waiting.team,waiting.card.seq)? {
+                    object.insert("phase_reference".into(),json!(reference));
+                }
             }
             Ok(row)
         })

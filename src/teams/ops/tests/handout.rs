@@ -690,6 +690,7 @@ fn readiness_view_contains_only_live_nodes_and_their_archived_direct_leaves() {
         actor: &actor,
         team: &team,
         op: &op,
+        request_id: TEAM,
         now: 1234,
         reply: Reply {
             ok: true,

@@ -14,6 +14,8 @@ import { resolveIcon } from "../lib/icons";
 // sentence and icon, never another kind's text.
 
 const TABLE: Record<string, { label: string; icon: string }> = {
+  phase_review: { label: "Phase review", icon: "layers" },
+  phase_acceptance: { label: "Phase acceptance", icon: "check-check" },
   note: { label: "Note", icon: "message-square" },
   integration: { label: "Integration", icon: "git-merge" },
   pipeline_acceptance: { label: "Work acceptance", icon: "check" },
@@ -64,7 +66,7 @@ describe("a card's kind", () => {
     expect(waitingKindIcon("pipeline_acceptance")).toBe("check");
   });
 
-  it.each(["phase_acceptance", "unknown_kind", "milestone_review", "owner_word_asked", ""])("an unknown kind %j shows a neutral label with its plain kind", (kind) => {
+  it.each(["future_phase_acceptance", "unknown_kind", "milestone_review", "owner_word_asked", ""])("an unknown kind %j shows a neutral label with its plain kind", (kind) => {
     const labels = new Set(KNOWN_KINDS.map((known) => waitingKindLabel({ kind: known })));
     const sentences = new Set(KNOWN_KINDS.map((known) => waitingKindSentence({ kind: known, text: "The stored sentence.", parameters: [] })));
     const icons = new Set(KNOWN_KINDS.map((known) => waitingKindIcon(known)));

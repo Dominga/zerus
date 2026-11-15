@@ -8,7 +8,7 @@ pub(crate) const PUBLICATION_LAYOUT: u32 = 4;
 
 pub(super) fn extend(db: &Connection) -> Result<()> {
     let complete = |db: &Connection| -> Result<bool> {
-        db.query_row("SELECT count(*)=7 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive')", [], |r| r.get(0)).map_err(storage)
+        db.query_row("SELECT count(*)=9 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive','phase_draft_previous','phase_cards')", [], |r| r.get(0)).map_err(storage)
     };
     if complete(db)? {
         return Ok(());
@@ -77,15 +77,72 @@ pub(crate) fn rejection(db: &Connection, team: &str, phase: u32) -> Result<Optio
     db.query_row("SELECT rejection,generation,comment FROM phase_reviews WHERE team=?1 AND phase=?2 AND rejection IS NOT NULL",params![team,phase],|r| Ok(Rejection{id:r.get(0)?,generation:r.get(1)?,comment:r.get(2)?})).optional().map_err(storage)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PreviousDraft {
+    pub generation: u64,
+    pub draft: zerus_team_plan::draft::DraftInput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PhaseCardRef {
+    pub phase: u32,
+    pub generation: u64,
+    pub purpose: String,
+}
+
+pub(crate) fn previous(db: &Connection, team: &str, phase: u32) -> Result<Option<PreviousDraft>> {
+    let size:Option<usize>=db.query_row("SELECT length(CAST(draft AS BLOB)) FROM phase_draft_previous WHERE team=?1 AND phase=?2",params![team,phase],|r|r.get(0)).optional().map_err(storage)?;
+    if size.is_some_and(|n| n > 262_144) {
+        return Err(Problem::new(
+            code::OVER_CAP,
+            "The previous draft exceeds its bound.",
+        ));
+    }
+    db.query_row(
+        "SELECT generation,draft FROM phase_draft_previous WHERE team=?1 AND phase=?2",
+        params![team, phase],
+        |r| {
+            Ok(PreviousDraft {
+                generation: r.get(0)?,
+                draft: sql_json(r, 1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(storage)
+}
+
 impl Store {
     /// A pass holds at most four exact saved requests. Uncertain/refused work
     /// is visible in the phase read and never becomes an automatic resend.
+    pub fn phase_card_ref(&self, team: &str, card: u64) -> Result<Option<PhaseCardRef>> {
+        self.active()?;
+        self.db.as_ref().map_or(Ok(None), |db| {
+            db.query_row(
+                "SELECT phase,generation,purpose FROM phase_cards WHERE card=?1 AND team=?2",
+                params![card, team],
+                |r| {
+                    Ok(PhaseCardRef {
+                        phase: r.get(0)?,
+                        generation: r.get(1)?,
+                        purpose: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage)
+        })
+    }
+    pub fn phase_review_generation(&self, team: &str, phase: u32) -> Result<Option<u64>> {
+        self.active()?;
+        self.db.as_ref().map_or(Ok(None),|db| db.query_row("SELECT generation FROM phase_cards WHERE team=?1 AND phase=?2 AND purpose='review'",params![team,phase],|r|r.get(0)).optional().map_err(storage))
+    }
     pub fn publication_work(&self, team: &str) -> Result<Vec<PlannedTaskRequest>> {
         self.active()?;
         let Some(db) = &self.db else {
             return Ok(vec![]);
         };
-        let mut stmt = db.prepare("SELECT n.request FROM phase_publications p JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.state='reserved' AND n.cleared=0 AND (n.state IN ('pending','writing') OR (n.state='created' AND n.reason<>'')) ORDER BY p.phase,n.node LIMIT 4").map_err(storage)?;
+        let mut stmt = db.prepare("SELECT CASE WHEN length(CAST(n.request AS BLOB))<=530000 THEN n.request ELSE NULL END FROM phase_publications p JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.state='reserved' AND n.cleared=0 AND (n.state IN ('pending','writing') OR (n.state='created' AND n.reason<>'')) ORDER BY p.phase,n.node LIMIT 4").map_err(storage)?;
         let answer = stmt
             .query_map([team], |r| sql_json(r, 0))
             .map_err(storage)?
@@ -98,7 +155,7 @@ impl Store {
         let Some(db) = &self.db else {
             return Ok(vec![]);
         };
-        let mut stmt = db.prepare("SELECT n.request FROM phase_publications p JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.state='reserved' AND n.cleared=0 ORDER BY p.phase,n.node LIMIT 4").map_err(storage)?;
+        let mut stmt = db.prepare("SELECT CASE WHEN length(CAST(n.request AS BLOB))<=530000 THEN n.request ELSE NULL END FROM phase_publications p JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.state='reserved' AND n.cleared=0 AND n.clear_outcome IS NULL ORDER BY p.phase,n.node LIMIT 4").map_err(storage)?;
         let rows = stmt
             .query_map([team], |r| sql_json(r, 0))
             .map_err(storage)?
@@ -113,7 +170,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<PlannedTaskRequest>> {
         self.active()?;
-        self.db.as_ref().map_or(Ok(None), |db| db.query_row("SELECT request FROM phase_publication_nodes WHERE team=?1 AND node=?2 AND task_uuid=?3",params![team,node,id],|r|sql_json(r,0)).optional().map_err(storage))
+        self.db.as_ref().map_or(Ok(None), |db| db.query_row("SELECT CASE WHEN length(CAST(request AS BLOB))<=530000 THEN request ELSE NULL END FROM phase_publication_nodes WHERE team=?1 AND node=?2 AND task_uuid=?3",params![team,node,id],|r|sql_json(r,0)).optional().map_err(storage))
     }
     pub fn publications_pending(&self, team: &str) -> Result<Vec<(u32, String)>> {
         self.active()?;

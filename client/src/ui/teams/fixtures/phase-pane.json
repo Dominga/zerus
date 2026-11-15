@@ -146,6 +146,7 @@
   "next": null,
   "plan": {
     "draft": {
+      "accept_available": false,
       "complete": true,
       "editable": true,
       "generation": 1,
@@ -172,6 +173,7 @@
           }
         ]
       },
+      "live": null,
       "metrics": {
         "average_parallelism_tenths": null,
         "critical_path_minutes": null,
@@ -230,12 +232,16 @@
         "state": "draft",
         "title": "Foundation"
       },
+      "previous": null,
+      "publication": null,
+      "rejection": null,
       "revision": 2,
       "unknown_fields": false
     },
     "draft_failure": null,
     "epoch": 2,
     "list": {
+      "approval_available": true,
       "default_pipeline": "reviewed",
       "drafts_available": true,
       "next": null,

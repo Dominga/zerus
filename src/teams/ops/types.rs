@@ -199,9 +199,14 @@ pub enum CancelState {
     Released,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum PublicationProblemKind { Refused, Uncertain, Deferred }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    ReconcilePhaseReview { phase: u32, generation: u64 },
     ApprovePhase {
         phase: u32,
         generation: u64,
@@ -211,7 +216,7 @@ pub enum Operation {
     RejectPhase { phase: u32, generation: u64, comment: String },
     UndoRejectPhase { phase: u32, generation: u64, rejection: String },
     ReconcilePublication { phase: u32, publication: String },
-    PublicationTaskProblem { publication: String, node: u32, reason: String },
+    PublicationTaskProblem { publication: String, node: u32, reason: String, kind: PublicationProblemKind },
     ReconcilePhase { phase: u32, publication: String },
     AcceptPhase { phase: u32, publication: String },
     SubmitDraftPhase {

@@ -42,8 +42,10 @@ pub struct PhaseDraft {
     pub nodes: Vec<DraftNode>,
     pub complete: bool,
     pub editable: bool,
+    pub accept_available: bool,
     pub publication: Option<publication::Publication>,
     pub rejection: Option<publication::Rejection>,
+    pub previous: Option<publication::PreviousDraft>,
     pub live: Option<phase_snapshot::PhaseNodeSnapshot>,
 }
 
@@ -138,16 +140,23 @@ impl Store {
                 header.status,
                 TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused
             );
+        let accept_available = record.state == PhaseState::AwaitingAcceptance
+            && matches!(header.status,TeamStatus::Running|TeamStatus::Paused)
+            && crate::teams::ops::publication::complete(&tx,team,phase)?;
+        let previous = publication::previous(&tx, team, phase)?;
+        let complete = generation.is_some() && !nodes.is_empty();
         let answer = PhaseDraft {
             phase: record,
             revision: header.revision,
             generation,
             next_node,
             nodes,
-            complete: generation.is_some() && (publication.is_none() || live.is_some()),
+            complete,
             editable,
+            accept_available,
             publication,
             rejection,
+            previous,
             live,
         };
         tx.commit().map_err(storage)?;

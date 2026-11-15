@@ -32,37 +32,36 @@ impl Runtime {
                     continue;
                 }
                 let outcome = ports.planned_task(team, &request, terminal);
-                let reason = match outcome {
+                let problem = match outcome {
                     Ok(TaskReply::Created | TaskReply::Cleared) => None,
-                    Ok(TaskReply::Refused { reason } | TaskReply::CuttingOver { reason }) => {
-                        Some(reason)
+                    Ok(TaskReply::Refused { reason }) => {
+                        Some((ops::PublicationProblemKind::Refused, reason))
                     }
-                    Ok(_) => Some("The planned-task command returned an unexpected answer.".into()),
-                    Err(e) => Some(crate::teams::clean::sentence(&e.message, 2048)),
+                    Ok(TaskReply::CuttingOver { reason }) => {
+                        Some((ops::PublicationProblemKind::Deferred, reason))
+                    }
+                    Ok(_) => Some((
+                        ops::PublicationProblemKind::Uncertain,
+                        "The planned-task command returned an unexpected answer.".into(),
+                    )),
+                    Err(e) => Some((
+                        ops::PublicationProblemKind::Uncertain,
+                        crate::teams::clean::sentence(&e.message, 2000),
+                    )),
                 };
-                if let Some(reason) = reason.filter(|s| !s.trim().is_empty()) {
-                    let old: String = store
-                        .db
-                        .as_ref()
-                        .unwrap()
-                        .query_row(
-                            "SELECT reason FROM phase_publication_nodes WHERE team=?1 AND node=?2",
-                            rusqlite::params![team.id, request.node.id],
-                            |r| r.get(0),
-                        )
-                        .map_err(crate::teams::store::storage)?;
-                    if old != reason {
-                        write(
-                            store,
-                            &team.id,
-                            Operation::PublicationTaskProblem {
-                                publication: request.publication,
-                                node: request.node.id,
-                                reason: reason.clone(),
-                            },
-                            now,
-                        )?;
-                    }
+                if let Some((kind, reason)) = problem {
+                    let reason = cut(&format!("Task {}: {}", request.node.id, reason), 2048);
+                    write(
+                        store,
+                        &team.id,
+                        Operation::PublicationTaskProblem {
+                            publication: request.publication,
+                            node: request.node.id,
+                            reason,
+                            kind,
+                        },
+                        now,
+                    )?;
                     self.cooldown(store, team, &key, "", now.saturating_add(5_000))?;
                 }
             }
@@ -93,28 +92,45 @@ impl Runtime {
         let fresh = store
             .team(&team.id)?
             .ok_or_else(|| Problem::new(code::NOT_FOUND, "Team disappeared."))?;
-        if fresh.status == TeamStatus::Running && fresh.settings.plan_approval == Approval::Auto {
-            let phases = store.phases(&team.id, 200, None)?;
-            for phase in phases.rows {
-                if phase.kind == PhaseKind::Plan
-                    && phase.state == PhaseState::Draft
+        if matches!(
+            fresh.status,
+            TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused
+        ) {
+            for phase in store.phases(&team.id, 200, None)?.rows {
+                if phase.kind != PhaseKind::Plan || phase.state != PhaseState::Draft {
+                    continue;
+                }
+                let draft = store.phase_draft(&team.id, phase.n)?;
+                if draft.publication.is_some() {
+                    continue;
+                }
+                let Some(generation) = draft.generation else {
+                    continue;
+                };
+                if fresh.status == TeamStatus::Running
+                    && fresh.settings.plan_approval == Approval::Auto
                     && phase.approval == Approval::Auto
                 {
-                    let p = store.phase_draft(&team.id, phase.n)?;
-                    if p.publication.is_none() {
-                        if let Some(generation) = p.generation {
-                            write(
-                                store,
-                                &fresh.id,
-                                Operation::ApprovePhase {
-                                    phase: phase.n,
-                                    generation,
-                                    confirm_initial: false,
-                                },
-                                now,
-                            )?;
-                        }
-                    }
+                    write(
+                        store,
+                        &fresh.id,
+                        Operation::ApprovePhase {
+                            phase: phase.n,
+                            generation,
+                            confirm_initial: false,
+                        },
+                        now,
+                    )?;
+                } else if store.phase_review_generation(&team.id, phase.n)? != Some(generation) {
+                    write(
+                        store,
+                        &fresh.id,
+                        Operation::ReconcilePhaseReview {
+                            phase: phase.n,
+                            generation,
+                        },
+                        now,
+                    )?;
                 }
             }
         }

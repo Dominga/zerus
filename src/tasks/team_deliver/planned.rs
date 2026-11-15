@@ -71,13 +71,16 @@ pub(crate) fn write(
         .ok_or_else(|| fail("Team store is unavailable."))?;
     db.execute_batch("BEGIN IMMEDIATE").map_err(fail)?;
     let team = check(&teams, &expected, clear)?;
-    let (state,cleared):(String,bool)=db.query_row("SELECT state,cleared FROM phase_publication_nodes WHERE team=?1 AND node=?2 AND task_uuid=?3",params![team_id,node,id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(fail)?;
+    let (state,cleared,clear_outcome):(String,bool,Option<String>)=db.query_row("SELECT state,cleared,clear_outcome FROM phase_publication_nodes WHERE team=?1 AND node=?2 AND task_uuid=?3",params![team_id,node,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(fail)?;
     if cleared {
         return if clear {
             Ok("cleared")
         } else {
             Err(rule("Publication task was retired."))
         };
+    }
+    if clear && clear_outcome.is_some() {
+        return Err(rule("The publication cleanup already has a final refusal or unknown outcome; it is not repeated."));
     }
     let present = task_present(config, &expected.task)?;
     if clear {
@@ -89,16 +92,14 @@ pub(crate) fn write(
                 if key.team != team_id || key.home != here || doc.team_invalid() {
                     return Err(rule("The task has a different or invalid team key."));
                 }
-                let actor = creation_actor(&expected);
-                doc.set_team_named(None, &expected.team_name, &actor, now())
-                    .map_err(fail)?;
+                doc.clear_team_silent().map_err(fail)?;
                 admitted.save(&mut doc).map_err(fail)?;
             } else if doc.team_invalid() {
                 return Err(rule("The task has an invalid team key."));
             }
         }
         db.execute(
-            "UPDATE phase_publication_nodes SET cleared=1 WHERE team=?1 AND node=?2",
+            "UPDATE phase_publication_nodes SET cleared=1,clear_outcome='cleared' WHERE team=?1 AND node=?2",
             params![team_id, node],
         )
         .map_err(fail)?;
@@ -131,7 +132,18 @@ pub(crate) fn write(
         #[cfg(test)]
         pause(config, "publication_claim");
         db.execute_batch("BEGIN IMMEDIATE").map_err(fail)?;
-        check(&teams, &expected, false)?;
+        if let Err(error) = check(&teams, &expected, false) {
+            // This call still owns the only project writer and has not called
+            // the document writer. A pause/stop is a positively known non-write.
+            // Never write over a newer schema or a changed retained request.
+            if let Ok(Some(fresh)) = teams.team(team_id) {
+                if !crate::teams::ops::publication::writing_allowed(db, &fresh).map_err(problem)? {
+                    db.execute("UPDATE phase_publication_nodes SET state='pending' WHERE team=?1 AND node=?2 AND request=?3 AND state='writing'",params![team_id,node,crate::teams::store::encode(&expected).map_err(problem)?]).map_err(fail)?;
+                    db.execute_batch("COMMIT").map_err(fail)?;
+                }
+            }
+            return Err(error);
+        }
     }
     // Dropping the admission turn keeps this same ProjectStore's exclusion.
     // The named writer takes its own turn. No second store is opened.
@@ -154,6 +166,25 @@ pub(crate) fn write(
         .map_err(fail)?;
     if !new {
         marker(&doc, team_id, &here)?;
+        let published: bool = db
+            .query_row(
+                "SELECT state='published' FROM phase_publications WHERE id=?1",
+                [&expected.publication],
+                |r| r.get(0),
+            )
+            .map_err(fail)?;
+        if !published {
+            let view = doc.view().map_err(fail)?;
+            if view.title != expected.node.title
+                || view.text != expected.text
+                || view.stage != Stage::Todo
+                || view.target != Target::Any
+                || view.author != actor
+                || view.cancelled_at.is_some()
+            {
+                return Err(rule("The original publication task was edited or started; its contents no longer match approval."));
+            }
+        }
     } else {
         if state != "pending" || present {
             return Err(rule("Recovery cannot create a replacement task."));
@@ -175,7 +206,7 @@ pub(crate) fn write(
         pause(config, "publication_saved");
     }
     db.execute(
-        "UPDATE phase_publication_nodes SET state='created',reason='' WHERE team=?1 AND node=?2",
+        "UPDATE phase_publication_nodes SET state='created',reason='',failures=0 WHERE team=?1 AND node=?2",
         params![team_id, node],
     )
     .map_err(fail)?;

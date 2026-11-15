@@ -7,6 +7,7 @@ pub(super) struct Context<'a> {
     pub actor: &'a Actor,
     pub team: &'a Team,
     pub op: &'a Operation,
+    pub request_id: &'a str,
     pub now: i64,
     pub reply: Reply,
     pub event: Option<&'static str>,

@@ -7,9 +7,11 @@
     "person": "local"
   },
   "draft": {
+    "accept_available": false,
     "complete": true,
     "editable": true,
     "generation": 1,
+    "live": null,
     "next_node": 3,
     "nodes": [
       {
@@ -59,6 +61,9 @@
       "state": "draft",
       "title": "Foundation"
     },
+    "previous": null,
+    "publication": null,
+    "rejection": null,
     "revision": 2
   },
   "ok": true,

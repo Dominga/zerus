@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use zerus_team_plan::draft::{DraftInput, DraftNode};
+mod graph_scope;
 
 pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
     if !matches!(
@@ -68,6 +69,7 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         }
         Vec::new()
     };
+    let previous = old.clone();
     let mut record = old.unwrap_or(Phase {
         n: phase,
         order: phase,
@@ -92,6 +94,9 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         )
         .map_err(storage)?;
     let next_node = validate(ctx, &record, draft, &old_nodes, next_node)?;
+    if let (Some(record),Some(generation)) = (&previous,generation) {
+        phase_review::remember(ctx,record,&old_nodes,generation)?;
+    }
     let next_generation = generation
         .unwrap_or(0)
         .checked_add(1)
@@ -132,6 +137,7 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
             )
             .map_err(storage)?;
     }
+    phase_review::close_rejection(ctx,phase)?;
     ctx.db.execute("UPDATE phase_reviews SET rejection=NULL,comment=NULL WHERE team=?1 AND phase=?2",params![ctx.team.id,phase]).map_err(storage)?;
     ctx.db
         .execute(
@@ -141,6 +147,12 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         .map_err(storage)?;
     ctx.db.execute("UPDATE inbox SET state='closed' WHERE team=?1 AND kind='planning_goal' AND state='open'", [&ctx.team.id]).map_err(storage)?;
     Ok(())
+}
+
+pub(super) fn revalidate(ctx: &Context<'_>, phase: &Phase, nodes: &[DraftNode]) -> Result<()> {
+    let next: u32 = ctx.db.query_row("SELECT next_node FROM teams WHERE id=?1",[&ctx.team.id],|r|r.get(0)).map_err(storage)?;
+    let input=DraftInput{title:phase.title.clone(),barrier:phase.barrier,nodes:nodes.to_vec()};
+    validate(ctx,phase,&input,nodes,next).map(|_|())
 }
 
 fn named(value: &str, field: &str, bytes: usize) -> Result<()> {
@@ -192,12 +204,13 @@ fn validate(
             .ok_or_else(|| over("Node IDs are exhausted."))?;
     }
     let mut graph = other_drafts(ctx, phase.n)?;
+    graph_scope::extend(ctx, &mut graph)?;
     let removed: BTreeSet<_> = old_ids.difference(&ids).copied().collect();
     if graph
         .iter()
         .any(|n| n.deps.iter().any(|d| removed.contains(&d.node)))
     {
-        return Err(invalid("Another draft depends on a node being removed."));
+        return Err(invalid("Another plan node depends on a node being removed."));
     }
     let others: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n.phase)).collect();
     for n in &input.nodes {
@@ -287,6 +300,7 @@ fn validate(
         phases.insert(p.n, p);
     }
     phases.insert(phase.n, phase.clone());
+    if graph.iter().any(|n|!phases.contains_key(&n.phase)) {return Err(invalid("A plan node names an unknown phase."));}
     let index: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n)).collect();
     // Bound work under the writer lock, including long path components. The
     // request's byte limit alone permits a quadratic number of path pairs.
@@ -304,6 +318,7 @@ fn validate(
     let mut ancestry = BTreeMap::new();
     for a in graph.iter().filter(|n| n.phase == phase.n) {
         for b in graph.iter().filter(|n| n.phase != phase.n || n.id > a.id) {
+            if matches!(a.state,NodeState::Accepted|NodeState::Cancelled) || matches!(b.state,NodeState::Accepted|NodeState::Cancelled) { continue; }
             if a.writes.is_empty() || b.writes.is_empty() {
                 continue;
             }

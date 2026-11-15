@@ -5970,6 +5970,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `stop`, `archive` | yes | | | none |
 | `decide` | yes | | | `card`, `decision` |
 | `admit`, `hold`, `release` | yes | yes | | `node` |
+| `set-deps` | yes | | | `node`, `deps` (up to 200 `{node, kind?}` entries; `hard` by default, or `soft`) |
 | `route` | yes | yes | | `node`, `role`, `pipeline`, optional `deps`, `writes`, `assignee` |
 | `accept` | yes | with the delegation | | `node` |
 | `return`, `cancel` | yes | yes | | `node`, `reason` |
@@ -6016,6 +6017,21 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+`set-deps` replaces dependencies only before the dependent task has started,
+without changing its route, holder or pipeline. The store refuses a started,
+reserved, handed-out, submitted or reported dependent, any current or historical
+attempt or effect, and an unsettled decision. These are store facts checked
+inside the writer transaction; a pending task may still depend on a started or
+done prerequisite. The queue exposes `deps_editable` from those same facts;
+an absent value keeps the UI read-only. Refusals keep their request receipt.
+It also refuses a stage, missing or repeated dependencies,
+self-dependencies and cycles (including soft edges). The graph in the Team tab
+shows one bounded queue page; dependencies outside the page stay listed on the
+card. Drag a card's output port onto another card, or select its port and then
+the target port, to add a hard dependency. Select an arrow and press Delete
+to remove it. The task detail also lists every dependency and allows editing an off-page
+endpoint by number. Edits send the revision shown and preserve other edges.
 
 Rules the store enforces beyond the table: a lead's `accept` and `reply` need
 the team's `accept_results` and `answer_members` delegations; a lead accepts

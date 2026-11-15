@@ -4,6 +4,7 @@ mod board;
 mod catalog;
 mod catalog148;
 mod create_binding;
+mod dependencies;
 mod dispatch;
 mod drawer_pages;
 mod editing;

@@ -11,6 +11,7 @@
 //! ([`waiting`]).
 pub mod board;
 mod editing;
+pub mod graph;
 pub use editing::MemberRole;
 pub mod list;
 
@@ -473,7 +474,21 @@ pub(crate) fn task_ref(node: &Value) -> Option<TaskRefView> {
 /// its stages. A card is never a stage node of another card.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct QueueCard {
+    /// Store-owned pre-start predicate; an older read grants no edit affordance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deps_editable: Option<bool>,
     pub node: u64,
+    /// Dependency facts are kept even when the other endpoint is off-page.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<zerus_team_plan::model::Dep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u32>,
+    /// The longest dependency path within this bounded queue page; absent
+    /// at layer zero, preserving older empty-edge view shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u32>,
     pub title: String,
     pub state: String,
     pub task: Option<TaskRefView>,

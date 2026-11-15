@@ -41,6 +41,8 @@ pub mod types;
 pub mod wire;
 
 #[cfg(test)]
+mod dependencies;
+#[cfg(test)]
 mod tests;
 
 pub use intents::{Admission, IntentState, Intents, Pending};

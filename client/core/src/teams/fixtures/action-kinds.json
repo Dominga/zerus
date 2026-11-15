@@ -19,6 +19,7 @@
   "resume_member",
   "return",
   "route",
+  "set_deps",
   "set_goal",
   "settings",
   "stop",

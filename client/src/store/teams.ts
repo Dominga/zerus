@@ -46,7 +46,11 @@ export interface TeamNodeCounts { waiting: number; pending: number; in_progress:
 export interface TeamCounts { members: TeamMemberCounts; nodes: TeamNodeCounts; inbox: number; cards: number }
 export interface TeamStage { node: number; index: number; role: string; state: string; assignee: string; implementer: string; kind?: "review" | "test" | "land" | null; target?: number | null; round?: number | null }
 export interface TeamTaskRef { project: string; uuid: string }
+export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
+  /** Authoritative store fact; absent on older reads keeps editing disabled. */
+  deps_editable?: boolean | null;
+  deps?: TeamDependency[]; phase?: number | null; origin?: number | null; layer?: number | null;
   node: number; title: string; state: string; task: TeamTaskRef | null; role: string; pipeline: string;
   assignee: string; implementer: string; rank: string; round: number; held: boolean; admitted: boolean;
   integrated: boolean; decided_by: string; stages: TeamStage[];

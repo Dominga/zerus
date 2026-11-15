@@ -36,8 +36,9 @@ const STEPS: &[(u32, Step)] = &[
     (10, hold_owners),
     (11, key_refusal_order),
 ];
-// Every layout, including each step's destination, stays outside the fence range.
+// Core layouts and every timer step destination stay outside the fence range.
 const _: () = {
+    assert!(crate::teams::store::SCHEMA_VERSION < PINNED_LAYOUT_FLAG);
     assert!(BASE < PINNED_LAYOUT_FLAG);
     assert!(EXTENSION < PINNED_LAYOUT_FLAG);
     let mut i = 0;

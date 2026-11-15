@@ -345,3 +345,45 @@ fn advance_base_cached_writer_cannot_insert_a_report_before_any_later_guard() {
     );
     assert_eq!(h.store.effect_base(TEAM, &effect).unwrap(), f.old);
 }
+
+#[test]
+fn advance_base_preserves_the_core_planning_layout_namespace() {
+    let f = GitFixture::new();
+    let mut h = f.harness();
+    let mut planning = serde_json::to_value(create()).unwrap();
+    planning["op"] = "start_planning".into();
+    planning["goal"] = "Prepare a reviewed release plan.".into();
+    planning["integration_branch"] = "zerus/team/planning".into();
+    planning["base_commit"] = f.old.clone().into();
+    h.run_for(TEAM_B, &person(), serde_json::from_value(planning).unwrap())
+        .unwrap();
+    let core_version = |store: &Store| {
+        store
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+            .unwrap()
+    };
+    let core = core_version(&h.store);
+    assert_eq!(core, crate::teams::store::SCHEMA_VERSION);
+    let plan = h.store.planning(TEAM_B).unwrap();
+    assert!(plan.is_some());
+    let advance = f.request(&h, &f.next);
+    f.apply(&mut h, &person(), &advance).unwrap();
+    assert_eq!(
+        core_version(&h.store),
+        core,
+        "advance never writes the core layout"
+    );
+    assert_ne!(
+        mark(&h),
+        core,
+        "the extension marker is a separate namespace"
+    );
+    assert_ne!(mark(&h) & crate::teams::store::bases::PINNED_LAYOUT_FLAG, 0);
+    h.store = Store::open(h.temp.path()).unwrap();
+    assert_eq!(core_version(&h.store), core);
+    assert_eq!(h.store.planning(TEAM_B).unwrap(), plan);
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap().base_commit, f.next);
+}

@@ -4,9 +4,18 @@ const SOURCES = new Set(["codex_transcript", "claude_transcript", "kimi_wire"]);
 const PROMPTS = new Set(["UserPromptSubmit", "UserPromptQueued", "TurnStarted"]);
 
 export const ownMessageText = (event: ActivityEvent): string => typeof event.message_text === "string" ? event.message_text : event.detail ?? "";
-const oldPreview = (text: string) => text.endsWith("…") && Array.from(text).length === 1201;
+const oldPreview = (text: string) => text.length <= 2401 && text.endsWith("…") && Array.from(text).length === 1201;
+// Scan only the preview prefix, even for a large receipt body.
+function hookPreview(text: string): string {
+  let count = 0, end = 0;
+  for (const character of text) {
+    if (count++ === 1200) break;
+    end += character.length;
+  }
+  return text.slice(0, end) + "…";
+}
 export const matchesOwnPreview = (preview: string, full: string): boolean => oldPreview(preview)
-  && Array.from(full).slice(0, 1200).join("") + "…" === preview;
+  && hookPreview(full) === preview;
 export const ownMessageTruncated = (event: ActivityEvent): boolean => event.message_text_truncated === true
   || (event.message_text === undefined && PROMPTS.has(event.type ?? "") && oldPreview(event.detail ?? ""));
 
@@ -25,7 +34,7 @@ export function restoreOwnMessages(given: readonly ActivityEvent[], summary?: Re
     if (seen.has(identity)) continue;
     seen.add(identity);
     for (const text of new Set(parts.filter((part): part is string => typeof part === "string"))) {
-      const preview = Array.from(text).slice(0, 1200).join("") + "…";
+      const preview = hookPreview(text);
       const candidates = byPreview.get(preview) ?? [];
       candidates.push({ body, text }); byPreview.set(preview, candidates);
     }

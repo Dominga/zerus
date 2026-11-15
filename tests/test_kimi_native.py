@@ -1013,8 +1013,10 @@ class NativeKimi(lifecycle.Harness):
 
     def test_exact_native_wire_repairs_a_lost_acceptance_write_without_replay(self):
         name = self.launch()
+        before_initial=self.binding(name)
         initial = self.send(name, self.payload(name, 'Initialize native acceptance fixture'))
         self.until(lambda: self.settled(name, initial), name)
+        after_initial=self.binding(name)
         text = 'Exact Kimi acceptance repair ' + str(uuid.uuid4())
         request = self.payload(name, text)
         receipt = self.send(name, request)
@@ -1034,7 +1036,12 @@ class NativeKimi(lifecycle.Harness):
         original=receipt_path.read_bytes()
         self.inspect(name)
         repaired=json.loads(path.read_text())
-        self.assertGreaterEqual(repaired['input_seen_at'],repaired['input_pending_at'])
+        self.assertGreaterEqual(repaired['input_seen_at'],repaired['input_pending_at'],json.dumps({
+            'before_initial':{key:before_initial.get(key) for key in ('input_pending_at','input_seen_at','input_pending_request','hook_observation')},
+            'after_initial':{key:after_initial.get(key) for key in ('input_pending_at','input_seen_at','input_pending_request','input_pending_native_context','input_native_submit_binding','input_native_hook_context','hook_observation')},
+            'initial':{key:initial.get(key) for key in ('request_id','conversation_id','first_message','submitted_at')},
+            'current':{key:repaired.get(key) for key in ('run_id','conversation_id','input_pending_native_context','input_native_hook_context','input_native_submit_binding','hook_observation')},
+        }))
         self.assertEqual(repaired['input_acceptance']['request_id'],request['request_id'])
         self.assertEqual(receipt_path.read_bytes(),original)
         self.assertEqual(self.send(name,request),receipt)

@@ -742,9 +742,12 @@ mod tests {
             assert_eq!(original.matches(teams).count(), 1, "Teams gate projection changed");
             original = original.replacen(teams, main, 1);
         }
-        // wvzyk adds only the exact original receipt/text fences to the legacy
-        // record write. Keep the original-body seal after projecting those
-        // metadata assignments away; no admission or native key is changed.
+        // wvzyk adds original receipt/text fences and a request-bound native
+        // ordering snapshot. Project only those metadata additions away;
+        // the original body seal, admission and native keys stay unchanged.
+        let context_binding = "    acceptance::bind_native_context(&mut record, &receipt);\n";
+        assert_eq!(original.matches(context_binding).count(), 1);
+        original = original.replacen(context_binding, "", 1);
         let acceptance_fences = r###"    record["input_pending_digest"] = receipt["digest"].clone();
     record["input_pending_text_sha256"] = json!(format!("{:x}", Sha256::digest(string(&receipt, "submitted_text").as_bytes())));
 "###;

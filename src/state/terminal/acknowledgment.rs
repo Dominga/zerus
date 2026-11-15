@@ -186,6 +186,7 @@ pub(crate) fn settle(
         "run_id":ack.expected_run_id,"conversation_id":ack.expected_conversation_id,
         "status":"claimed","accepted":null,"durable":false,"source":authority.source(),"acknowledgment":ack});
     atomic(&path, &receipt.to_string())?;
+    input::acceptance::remember_unknown(&record)?;
     // Revalidate the original native caller and session immediately before the
     // record write. A failed reserved decision remains unknown and is not replayed.
     authority.check(ack)?;

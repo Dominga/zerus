@@ -2071,6 +2071,7 @@ fn submit_core(
     }
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.map(tempfile::TempDir::keep);
+    acceptance::bind_native_context(&mut record, &receipt);
     record["input_pending_at"] = json!(submitted_at);
     // Clear input reads this send's receipt to tell an input still in its proof
     // window from one left uncertain or stuck (zerus-wkj9l.1).

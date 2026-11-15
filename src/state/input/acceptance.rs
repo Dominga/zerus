@@ -4,6 +4,13 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
+mod kimi_order;
+mod uncertainty;
+pub(in crate::state) use kimi_order::{
+    bind as bind_native_context, record_hook as record_native_context,
+};
+pub(in crate::state) use uncertainty::remember_unknown;
+
 const BYTES: u64 = 16 << 20;
 const HEADER: u64 = 64 << 10;
 const ROWS: usize = 16_384;
@@ -138,36 +145,91 @@ fn text<'a>(parts: &'a Value, kind: &str) -> Option<&'a str> {
         .flatten()
 }
 
-fn consumed(rows: &[Value], agent: &str, pending: f64, submitted: &str) -> Option<f64> {
-    rows.iter().find_map(|row| {
-        let (at, input) = if agent == "codex" {
+fn hook_text<'a>(agent: &str, event: &'a Value) -> Option<&'a str> {
+    event["prompt"].as_str().or_else(|| {
+        (agent == "kimi")
+            .then(|| text(&event["prompt"], "text"))
+            .flatten()
+    })
+}
+
+fn timestamp(row: &Value) -> Option<f64> {
+    let at = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str()?)
+        .ok()?
+        .timestamp_micros() as f64
+        / 1_000_000.0;
+    (at.is_finite() && at > 0.0 && at <= now()).then_some(at)
+}
+
+fn consumed(
+    rows: &[Value],
+    agent: &str,
+    pending: f64,
+    submitted: &str,
+    after: Option<u64>,
+) -> Option<(f64, Option<u64>)> {
+    let mut turn = None;
+    for row in rows {
+        let (at, input, native_id) = if agent == "codex" {
             let payload = &row["payload"];
+            if row["type"] == "event_msg" {
+                match string(payload, "type") {
+                    "task_started" | "turn_started" => {
+                        // UserPromptSubmit can finish before its user row is
+                        // written. A later row of that old turn cannot credit
+                        // a newer send. No in-turn steer inference.
+                        turn = timestamp(row).zip(native_turn(agent, payload));
+                    }
+                    "task_complete" | "turn_complete" | "turn_aborted" => turn = None,
+                    _ => {}
+                }
+                continue;
+            }
             if row["type"] != "response_item"
                 || payload["type"] != "message"
                 || payload["role"] != "user"
             {
-                return None;
+                continue;
             }
-            let at = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str()?)
-                .ok()?
-                .timestamp_micros() as f64
-                / 1_000_000.0;
-            (at, text(&payload["content"], "input_text")?)
+            let Some(at) = timestamp(row) else {
+                continue;
+            };
+            let Some((started, _)) = &turn else {
+                continue;
+            };
+            if *started <= pending || *started > at {
+                continue;
+            }
+            let Some(input) = text(&payload["content"], "input_text") else {
+                continue;
+            };
+            (at, input, None)
         } else {
             if row["type"] != "turn.prompt"
                 || row["agentId"] != "main"
                 || row["origin"]["kind"] != "user"
-                || row["turnId"].as_u64().is_none()
+                || native_turn(agent, row).is_none()
             {
-                return None;
+                continue;
             }
-            (row["time"].as_f64()? / 1000.0, text(&row["input"], "text")?)
+            let (Some(at), Some(input)) = (row["time"].as_f64(), text(&row["input"], "text"))
+            else {
+                continue;
+            };
+            let id = row["turnId"].as_u64()?;
+            if after.is_some_and(|floor| id <= floor) {
+                continue;
+            }
+            (at / 1000.0, input, Some(id))
         };
-        (at.is_finite() && at > pending && at <= now() && input == submitted).then_some(at)
-    })
+        if at.is_finite() && at > pending && at <= now() && input == submitted {
+            return Some((at, native_id));
+        }
+    }
+    None
 }
 
-fn receipt(record: &Value) -> Option<Value> {
+fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
     let id = string(record, "input_pending_request");
     if !zerus_client_core::input_acknowledgment::canonical(id) {
         return None;
@@ -182,12 +244,13 @@ fn receipt(record: &Value) -> Option<Value> {
     if receipt["request_id"] != id
         || receipt["name"] != record["name"]
         || receipt["run_id"] != record["run_id"]
-        || receipt["conversation_id"] != record["conversation_id"]
+        || (receipt["conversation_id"] != record["conversation_id"]
+            && !(bootstrap
+                && receipt["first_message"] == true
+                && receipt["conversation_id"].as_str() == Some("")))
         || receipt["submitted_at"] != record["input_pending_at"]
-        || !matches!(receipt["status"].as_str(), Some("submitted" | "uncertain"))
         || receipt["transport"] != "terminal"
         || string(&receipt, "submitted_text").is_empty()
-        || !receipt["attachments"].as_array().is_some_and(Vec::is_empty)
         || digest.len() != 64
         || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         || record
@@ -206,6 +269,81 @@ fn receipt(record: &Value) -> Option<Value> {
         return None;
     }
     Some(receipt)
+}
+
+fn pending_receipt(record: &Value) -> Option<Value> {
+    bound_receipt(record, false)
+}
+
+fn receipt(record: &Value) -> Option<Value> {
+    let receipt = pending_receipt(record)?;
+    (matches!(receipt["status"].as_str(), Some("submitted" | "uncertain"))
+        && receipt["attachments"].as_array().is_some_and(Vec::is_empty))
+    .then_some(receipt)
+}
+
+pub(in crate::state) fn allows_pending(record: &Value) -> bool {
+    if !input_unconfirmed(record) {
+        return true;
+    }
+    let state = uncertainty::load(record);
+    !state.uncertain()
+        || pending_receipt(record)
+            .is_some_and(|receipt| !state.blocks(string(&receipt, "submitted_text")))
+}
+
+/// A delayed old callback is not evidence for a newer pending request. Once an
+/// unknown input exists, only an unambiguous complete prompt can open its gate.
+pub(in crate::state) fn allows_hook(record: &Value, event: &Value) -> bool {
+    if !matches!(
+        string(event, "hook_event_name"),
+        "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "TaskStarted"
+    ) {
+        return true;
+    }
+    if string(record, "agent") == "kimi"
+        && matches!(
+            string(event, "hook_event_name"),
+            "TurnStarted" | "TaskStarted"
+        )
+    {
+        let Some(after) = kimi_order::pending(record) else {
+            return false;
+        };
+        let Some(id) = event["turn_id"]
+            .as_u64()
+            .filter(|id| *id <= i64::MAX as u64)
+        else {
+            return false;
+        };
+        if after.is_some_and(|floor| id <= floor) {
+            return false;
+        }
+        let Some(receipt) = pending_receipt(record) else {
+            return false;
+        };
+        if event["origin_kind"] != "user"
+            || hook_text(string(record, "agent"), event) != receipt["submitted_text"].as_str()
+        {
+            return false;
+        }
+    }
+    if !input_unconfirmed(record) {
+        return true;
+    }
+    let state = uncertainty::load(record);
+    if !state.uncertain() {
+        return true;
+    }
+    let Some(receipt) = pending_receipt(record) else {
+        return false;
+    };
+    !state.blocks(string(&receipt, "submitted_text"))
+        && matches!(
+            string(event, "hook_event_name"),
+            "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted"
+        )
+        && hook_text(string(record, "agent"), event) == receipt["submitted_text"].as_str()
 }
 
 /// The caller holds Root and the selected record. Only acceptance changes;
@@ -227,6 +365,17 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let Some(receipt) = receipt(record) else {
         return Ok(());
     };
+    if uncertainty::load(record).blocks(string(&receipt, "submitted_text")) {
+        return Ok(());
+    }
+    let after = if agent == "kimi" {
+        let Some(after) = kimi_order::pending(record) else {
+            return Ok(());
+        };
+        after
+    } else {
+        None
+    };
     let source = if agent == "codex" {
         source(
             Path::new(string(record, "transcript")),
@@ -238,11 +387,12 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let Some(source) = source else {
         return Ok(());
     };
-    let Some(at) = consumed(
+    let Some((at, native_id)) = consumed(
         &source.rows,
         agent,
         record["input_pending_at"].as_f64().unwrap_or(f64::INFINITY),
         string(&receipt, "submitted_text"),
+        after,
     ) else {
         return Ok(());
     };
@@ -252,7 +402,7 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     record["input_seen_at"] = json!(at);
     record["input_acceptance"] = json!({"source":"native_user_input", "request_id":receipt["request_id"],
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],"pending_at":record["input_pending_at"],
-        "digest":receipt["digest"],"text_sha256":format!("{:x}",Sha256::digest(string(&receipt,"submitted_text").as_bytes())),"at":at});
+        "native_turn_id":native_id,"digest":receipt["digest"],"text_sha256":format!("{:x}",Sha256::digest(string(&receipt,"submitted_text").as_bytes())),"at":at});
     write(record)
 }
 
@@ -307,16 +457,18 @@ pub(in crate::state) fn native_idle(record: &Value) -> bool {
                     return false;
                 };
                 started_at = at;
-                turn = payload
-                    .get(if agent == "kimi" { "turnId" } else { "turn_id" })
-                    .cloned()
-                    .filter(|id| !id.is_null());
+                let Some(id) = native_turn(agent, &payload) else {
+                    return false;
+                };
+                turn = Some(id);
                 ended = false;
             }
             "turn.ended" | "task_complete" | "turn_complete" => {
-                let id = payload.get(if agent == "kimi" { "turnId" } else { "turn_id" });
+                let Some(id) = native_turn(agent, &payload) else {
+                    return false;
+                };
                 ended = at.is_some_and(|at| at.is_finite() && at >= started_at && at <= now())
-                    && turn.as_ref().is_some_and(|turn| Some(turn) == id)
+                    && turn.as_ref() == Some(&id)
                     && if agent == "kimi" {
                         payload["reason"] == "completed"
                     } else {
@@ -329,30 +481,101 @@ pub(in crate::state) fn native_idle(record: &Value) -> bool {
     ended && source.current()
 }
 
+fn native_turn(agent: &str, payload: &Value) -> Option<Value> {
+    if agent == "kimi" {
+        return payload["turnId"]
+            .as_u64()
+            .filter(|id| *id <= i64::MAX as u64)
+            .map(Value::from);
+    }
+    payload["turn_id"]
+        .as_str()
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 200
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-:".contains(&byte))
+        })
+        .map(|id| json!(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn consumed(rows: &[Value], agent: &str, pending: f64, text: &str) -> Option<f64> {
+        super::consumed(rows, agent, pending, text, None).map(|(at, _)| at)
+    }
+    #[test]
+    fn native_hook_text_accepts_only_the_complete_native_input() {
+        let kimi = json!({"prompt":[{"type":"text","text":"literal"}]});
+        assert_eq!(hook_text("kimi", &kimi), Some("literal"));
+        assert_eq!(hook_text("codex", &kimi), None);
+        for parts in [
+            json!([]),
+            json!([{"type":"text","text":"literal"},{"type":"text","text":"extra"}]),
+            json!([{"type":"image","text":"literal"}]),
+        ] {
+            assert_eq!(hook_text("kimi", &json!({"prompt":parts})), None);
+        }
+    }
+    #[test]
+    fn native_turn_identity_types_are_closed() {
+        for id in [
+            Value::Null,
+            json!(false),
+            json!(true),
+            json!({}),
+            json!([]),
+            json!("0"),
+            json!(-1),
+            json!(u64::MAX),
+        ] {
+            assert!(native_turn("kimi", &json!({"turnId":id})).is_none());
+        }
+        for id in [0, 1, i64::MAX] {
+            assert_eq!(native_turn("kimi", &json!({"turnId":id})), Some(json!(id)));
+        }
+        for id in [
+            Value::Null,
+            json!(false),
+            json!(0),
+            json!([]),
+            json!(""),
+            json!("bad id"),
+        ] {
+            assert!(native_turn("codex", &json!({"turn_id":id})).is_none());
+        }
+    }
+
     #[test]
     fn exact_user_input_only_never_timing_completion_substring_or_peer() {
         let pending = 10.0;
         let good = json!({"timestamp":"1970-01-01T00:00:11Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"exact\ninput"}]}});
+        let start = json!({"type":"event_msg","timestamp":"1970-01-01T00:00:10.500Z","payload":{"type":"task_started","turn_id":"native-turn"}});
         assert_eq!(
             consumed(
-                std::slice::from_ref(&good),
+                &[start.clone(), good.clone()],
                 "codex",
                 pending,
                 "exact\ninput"
             ),
             Some(11.0)
         );
-        assert!(consumed(std::slice::from_ref(&good), "codex", 11.0, "exact\ninput").is_none());
+        assert!(consumed(
+            &[start.clone(), good.clone()],
+            "codex",
+            11.0,
+            "exact\ninput"
+        )
+        .is_none());
         for key in ["assistant", "tool", "system"] {
             let mut row = good.clone();
             row["payload"]["role"] = json!(key);
-            assert!(consumed(&[row], "codex", pending, "exact\ninput").is_none());
+            assert!(consumed(&[start.clone(), row], "codex", pending, "exact\ninput").is_none());
         }
         for text in ["exact", " exact\ninput", "exact\ninput\n"] {
-            assert!(consumed(std::slice::from_ref(&good), "codex", pending, text).is_none());
+            assert!(consumed(&[start.clone(), good.clone()], "codex", pending, text).is_none());
         }
         let kimi = json!({"type":"turn.prompt","agentId":"main","origin":{"kind":"user"},"turnId":1,"time":11000,"input":[{"type":"text","text":"exact"}]});
         assert_eq!(

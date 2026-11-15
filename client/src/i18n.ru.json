@@ -317,6 +317,7 @@
   "A different draft was already here, so these copies stayed where they were.": "Здесь уже был другой черновик, поэтому эти копии остались на месте.",
   "A keep-warm change is already in progress.": "Изменение прогрева кэша уже выполняется.",
   "A keep-warm ping may have been typed when its worker stopped. Keeping it warm resumes after your next message.": "Пинг прогрева мог быть введён, когда его обработчик остановился. Прогрев возобновится после вашего следующего сообщения.",
+  "A later identical message can also remain unconfirmed; check Terminal before releasing it.": "Повторное сообщение с тем же текстом тоже может остаться неподтверждённым; перед снятием блокировки проверьте Терминал.",
   "A lead takes the tasks you send and hands them to the members with the right role.": "Лид берёт отправленные вами задачи и передаёт их участникам с подходящей ролью.",
   "A little more focus.": "Еще немного внимания.",
   "A matching project is detected automatically.\nOtherwise this session stays in Inbox.": "Подходящий проект определяется автоматически.\nИначе сессия останется в «Inbox».",

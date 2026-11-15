@@ -7566,6 +7566,19 @@ digest and run must still match; new sends additionally bind the submitted-text
 hash in the record. This updates native acceptance only and never replays or
 rewrites the original receipt. Completion, tool activity, age, partial text,
 other conversations and absent or unreadable evidence never prove acceptance.
+Codex also requires a typed native turn start after the pending input; a delayed
+user row from an older turn and in-turn steers without this context stay unknown.
+Each Kimi send captures its already-observed native main-user turn floor, bound
+to that request. A prior submit without typed ordering leaves this context
+unknown; a later old prompt or typed hook cannot fill that gap for the new send.
+Only a strictly newer integer native prompt can repair a complete context.
+Legacy or incomplete ordering stays unknown and retains the person's recovery.
+A person-acknowledged unknown input is not cancelled. Before opening its gate,
+Zerus durably retains bounded uncertainty for that provider and conversation,
+across session renames and runs. An indistinguishable later input cannot be
+confirmed by a delayed native row, hook or Claude transcript entry. Different
+complete input can still confirm normally. Incomplete legacy uncertainty,
+unreadable evidence or overflow stays unknown; nothing expires or is replayed.
 Attachments or text outside the bounded native window remain unconfirmed.
 
 The settlement is audited as `person-acknowledged-unknown`, with the original

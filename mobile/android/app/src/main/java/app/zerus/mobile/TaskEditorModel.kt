@@ -27,7 +27,7 @@ internal data class TaskEditorPicker(val token: String, val draftId: String, val
 /** At most one visible live editor; every asynchronous operation carries its original context. */
 internal class TaskEditorModel(private val app: Application, private val scope: CoroutineScope, private val api: () -> RelayApi,
     private val replicas: TaskReplicas, private val files: TaskEditDraftFiles, private val assets: AttachmentStore,
-    private val changed: (TaskEditContext, String) -> Unit) {
+    private val changed: (TaskEditContext, String, String) -> Unit) {
     var state by mutableStateOf<TaskEditorState?>(null); private set
     private var autosave: Job? = null
     private fun text(id: Int) = app.getString(id)
@@ -88,7 +88,7 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
         }
     }
     fun save(token: String) {
-        val captured = state?.takeIf { it.token == token && !it.busy && it.session != null && it.form != null } ?: return
+        val captured = state?.takeIf { it.token == token && !it.busy && !it.complete && it.session != null && it.form != null } ?: return
         val session = captured.session!!; val form = captured.form!!
         if (!form.changed(session.view)) return
         autosave?.cancel(); autosave = null
@@ -98,7 +98,7 @@ internal class TaskEditorModel(private val app: Application, private val scope: 
                 val input = form.input(session.view, assets)
                 session.save(form.sequence, form.json(), input)
                 if (state?.token == token) state = captured.copy(complete = true, busy = false)
-                changed(captured.context, captured.task.uuid)
+                changed(captured.context, captured.task.uuid, captured.token)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 val saved = withContext(Dispatchers.IO) { runCatching { files.read(session.scope) }.getOrNull() }

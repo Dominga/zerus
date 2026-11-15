@@ -90,7 +90,11 @@ internal class TaskEditSession private constructor(
                 if (frozen) synchronized(lifecycle) { dispose = true }
                 throw error
             } finally {
-                val release = synchronized(lifecycle) { busy = false; if (dispose) { closed = true; true } else false }
+                val release = synchronized(lifecycle) {
+                    busy = false
+                    if (frozen) dispose = true
+                    if (dispose) { closed = true; true } else false
+                }
                 if (release) closeHandles()
             }
         }

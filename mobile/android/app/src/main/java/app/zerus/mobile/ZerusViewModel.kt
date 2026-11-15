@@ -969,9 +969,23 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
     }
     private val taskEditor by lazy {
-        TaskEditorModel(getApplication(), viewModelScope, { api }, taskReplicas, store.taskEditDrafts, attachmentStore) { context, _ ->
-            launchProjectSync(context.key) { if (tasksKey == context.key) refreshTasks() }
+        TaskEditorModel(getApplication(), viewModelScope, { api }, taskReplicas, store.taskEditDrafts, attachmentStore, ::refreshEditedTask)
+    }
+    /** Completion reads the exact edited host despite an unchanged heartbeat; it never repeats the edit. */
+    private fun refreshEditedTask(context: TaskEditContext, task: String, token: String) {
+        val job = viewModelScope.launch {
+            try {
+                taskSync.exchangeNow(context.connection, context.key, context.projectName, context.computer.id, fetch = listOf(task))
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                val shown = taskEditor.state
+                if (shown?.token == token && shown.context.key == context.key && shown.task.uuid == task)
+                    taskEditor.reportError(shown.token, getApplication<Application>().getString(R.string.task_edit_refresh_failed))
+            }
+            if (tasksKey == context.key) refreshTasks()
         }
+        projectSyncs += job
+        job.invokeOnCompletion { projectSyncs -= job }
     }
     internal val taskEditorState get() = taskEditor.state
     internal fun closeTaskEditor() = taskEditor.dismiss()
@@ -1001,9 +1015,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     internal fun moveTaskEditorTop(token: String) {
         val state = taskEditor.state?.takeIf { it.token == token } ?: return
-        val first = taskListing.takeIf { tasksKey == state.context.key }?.filter { it.uuid != state.task.uuid && it.stage == TaskStage.TODO }?.minOfOrNull { it.rank }
         try {
-            val rank = app.zerus.mobile.replica.taskEditRankBetween(null, first)
+            val rank = TaskEditOrdering.top(state.context.key, tasksKey, state.task.uuid,
+                taskListing.filter { it.stage == TaskStage.TODO }.map { it.uuid to it.rank }) ?: return
             changeTaskEditor(token) { it.copy(rank = rank) }
         } catch (error: Exception) { taskEditor.reportError(token, error.message.orEmpty()) }
     }

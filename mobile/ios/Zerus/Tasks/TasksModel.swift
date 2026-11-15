@@ -105,11 +105,32 @@ final class TasksModel {
         let computers = app.machines.filter { $0.connectionId == key.connectionId && (bound != nil ? $0.machineId == bound : $0.id == tasksChosen?.computerId) }
         guard computers.count == 1 else { taskNotice = taskEditText("task_edit_unavailable"); return }
         do {
-            if taskEditor == nil { taskEditor = TaskEditorModel(app: app, replicas: replicas, files: try TaskEditDraftFiles.applicationSupport(), assets: assets) { [weak self] context in
-                self?.launchProjectSync(context.key) { [weak self] in if self?.tasksKey == context.key { self?.refreshTasks() } }
+            if taskEditor == nil { taskEditor = TaskEditorModel(app: app, replicas: replicas, files: try TaskEditDraftFiles.applicationSupport(), assets: assets) { [weak self] context, task, token in
+                self?.refreshEditedTask(context, task, token)
             } }
             taskEditor?.open(TaskEditContext(connection: connection, key: key, projectName: taskProjectName(key), computer: computers[0], features: app.machineFeatures), task)
         } catch { taskNotice = TaskSyncError.reason(error) }
+    }
+
+    /// Known edit completion refreshes its exact computer even if its last heartbeat is unchanged.
+    /// A failed document read never changes or repeats the already completed edit.
+    private func refreshEditedTask(_ context: TaskEditContext, _ task: String, _ token: UUID) {
+        guard let taskSync else { return }
+        let id = UUID()
+        projectSyncs[id] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.projectSyncs[id] = nil }
+            do {
+                try await taskSync.exchangeNow(context.connection, context.key, name: context.projectName,
+                                               computerId: context.computer.id, fetch: [task])
+            } catch {
+                if !Task.isCancelled, let editor = self.taskEditor, let shown = editor.state,
+                   shown.id == token, shown.context.key == context.key, shown.task.uuid == task {
+                    editor.reportError(shown.id, taskEditText("task_edit_refresh_failed"))
+                }
+            }
+            if !Task.isCancelled && self.tasksKey == context.key { self.refreshTasks() }
+        }
     }
 
     // MARK: Sync

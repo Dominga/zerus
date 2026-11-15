@@ -223,6 +223,7 @@ class TaskEditTransportTest {
             val form = TaskEditForm.initial(session.view).copy(comment = "From the original editor", sequence = 1)
             session.persist(form.sequence, form.json())
             session.save(form.sequence, form.json(), TaskEditInput(comment = form.comment))
+            assertFalse("A completed live edit handle remains editable", session.editable)
             assertEquals(TaskEditDraftState.Completed, w.files.read(w.scope)!!.state)
             assertEquals(form.comment, TaskEditForm.read(w.files.read(w.scope)!!.changes, 1).comment)
             assertEquals(1, w.native.call("inspect").getJSONArray("log").objects().count { it.string("text") == form.comment })

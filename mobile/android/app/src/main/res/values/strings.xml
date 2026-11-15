@@ -69,4 +69,5 @@
     <string name="task_media_picker_changed">The task editor changed while choosing files. Its original draft was kept.</string>
     <string name="task_media_files">Attachments</string>
     <string name="task_media_open_failed">The task attachment could not be opened. Refresh this task and try again.</string>
+    <string name="task_edit_refresh_failed">Task saved. Refresh its project to see the latest copy.</string>
 </resources>

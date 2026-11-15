@@ -27,10 +27,10 @@ struct TaskEditorPicker: Equatable {
     @ObservationIgnored private let replicas: TaskReplicas
     @ObservationIgnored private let files: TaskEditDraftFiles
     @ObservationIgnored private let assets: AttachmentStore
-    @ObservationIgnored private let changed: @MainActor (TaskEditContext) -> Void
+    @ObservationIgnored private let changed: @MainActor (TaskEditContext, String, UUID) -> Void
     @ObservationIgnored private var picker: TaskEditorPicker?
     @ObservationIgnored private var autosave: Task<Void, Never>?
-    init(app: AppModel, replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore, changed: @escaping @MainActor (TaskEditContext) -> Void) {
+    init(app: AppModel, replicas: TaskReplicas, files: TaskEditDraftFiles, assets: AttachmentStore, changed: @escaping @MainActor (TaskEditContext, String, UUID) -> Void) {
         self.app = app; self.replicas = replicas; self.files = files; self.assets = assets; self.changed = changed
     }
     func open(_ context: TaskEditContext, _ task: TaskInfo) {
@@ -88,7 +88,7 @@ struct TaskEditorPicker: Equatable {
         }
     }
     func save(_ token: UUID) {
-        guard var captured = state, captured.id == token, !captured.busy, let session = captured.session, let form = captured.form, form.changed(session.view) else { return }
+        guard var captured = state, captured.id == token, !captured.busy, !captured.complete, let session = captured.session, let form = captured.form, form.changed(session.view) else { return }
         autosave?.cancel(); autosave = nil
         captured.busy = true; captured.error = ""; state = captured
         Task {
@@ -96,7 +96,7 @@ struct TaskEditorPicker: Equatable {
                 let input = try await form.input(view: session.view, assets: assets)
                 try await session.save(sequence: form.sequence, changes: form.json(), input: input)
                 if state?.id == token { state?.complete = true; state?.busy = false }
-                changed(captured.context)
+                changed(captured.context, captured.task.uuid, captured.id)
             } catch {
                 let scope = session.scope, files = files
                 let saved = try? await replicas.run { try files.read(scope) }

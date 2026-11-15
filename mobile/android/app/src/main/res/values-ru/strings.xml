@@ -69,4 +69,5 @@
     <string name="task_media_picker_changed">Редактор задачи изменился во время выбора файлов. Исходный черновик сохранён.</string>
     <string name="task_media_files">Вложения</string>
     <string name="task_media_open_failed">Не удалось открыть вложение задачи. Обновите задачу и попробуйте ещё раз.</string>
+    <string name="task_edit_refresh_failed">Задача сохранена. Обновите проект, чтобы увидеть изменения.</string>
 </resources>

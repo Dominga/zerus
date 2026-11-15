@@ -869,6 +869,23 @@
           }
         }
       }
+    },
+    "task_edit_refresh_failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task saved. Refresh its project to see the latest copy."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Задача сохранена. Обновите проект, чтобы увидеть изменения."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

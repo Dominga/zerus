@@ -366,7 +366,10 @@ pub(crate) fn send_in_flight(record: &Value) -> bool {
     let root = absolute_root().ok();
     in_flight(record, now(), |request| {
         let path = root.as_ref()?.join("input_receipts").join(format!("{request}.json"));
-        serde_json::from_slice(&fs::read(path).ok()?).ok()
+        // Unavailable evidence keeps the recent proof closed, without following
+        // a link or waiting on a special file before the recovery read.
+        let bytes = labels::read_file(&path, 256 * 1024).ok()??;
+        serde_json::from_slice(&bytes).ok()
     })
 }
 

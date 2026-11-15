@@ -20,17 +20,15 @@ pub(crate) fn matches(record: &Value) -> bool {
         })
 }
 
-fn bounded(path: &Path, limit: u64) -> Result<Value> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > limit {
-        return Err("Input evidence exceeds its bound".into());
-    }
-    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+fn bounded(path: &Path, limit: u64) -> Result<Option<Value>> {
+    // The shared reader opens no-follow/nonblocking and verifies the held
+    // object is regular before reading. A byte limit alone cannot bound a FIFO.
+    let Some(bytes) = labels::read_file(path, limit).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn pending(record: &Value) -> Result<PendingInput> {
@@ -66,7 +64,8 @@ pub(crate) fn pending(record: &Value) -> Result<PendingInput> {
             .join("input_receipts")
             .join(format!("{id}.json")),
         256 * 1024,
-    )?;
+    )?
+    .ok_or("The original input evidence is unavailable")?;
     if receipt["request_id"] != id
         || receipt["run_id"] != record["run_id"]
         || receipt["conversation_id"] != record["conversation_id"]
@@ -136,11 +135,9 @@ pub(crate) fn lookup(ack: &Acknowledgment) -> Result<Option<Value>> {
     if !ack.valid() {
         return Err("Invalid input acknowledgment".into());
     }
-    let path = path(&ack.request_id)?;
-    if !path.try_exists().map_err(|e| e.to_string())? {
+    let Some(mut receipt) = bounded(&path(&ack.request_id)?, AUDIT_BYTES)? else {
         return Ok(None);
-    }
-    let mut receipt = bounded(&path, AUDIT_BYTES)?;
+    };
     if !valid_audit(&receipt, ack) {
         return Err(
             "The recorded acknowledgment is not verified for this decision; check Terminal".into(),
@@ -215,6 +212,54 @@ pub(crate) fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    #[test]
+    fn evidence_reads_require_bounded_regular_files_and_never_follow_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.json");
+        assert!(bounded(&path, 4).unwrap().is_none());
+        fs::write(&path, b"null").unwrap();
+        assert_eq!(bounded(&path, 4).unwrap(), Some(Value::Null));
+        assert!(bounded(&path, 3).is_err());
+        assert!(bounded(dir.path(), 4).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(bounded(&link, 4).is_err());
+            fs::remove_file(&path).unwrap();
+            assert!(bounded(&link, 4).is_err(), "a dangling link is not absence");
+            assert!(bounded(Path::new("/dev/null"), 4).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fifo_evidence_refuses_without_waiting_for_a_writer() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt, sync::mpsc, time::Duration};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.json");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = mpsc::channel();
+        let target = path.clone();
+        let reader = std::thread::spawn(move || tx.send(bounded(&target, 4)).unwrap());
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        if result.is_err() {
+            // Settle this fixture's reader before failing a blocking-open mutant.
+            use std::{io::Write, os::unix::fs::OpenOptionsExt};
+            if let Ok(mut writer) = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+            {
+                let _ = writer.write_all(b"null");
+            }
+        }
+        reader.join().unwrap();
+        assert!(result.expect("FIFO evidence read blocked").is_err());
+    }
+
     #[test]
     fn acknowledgment_settles_only_its_exact_original_pending_input() {
         let mut record = json!({"run_id":"run","conversation_id":"conversation",

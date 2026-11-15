@@ -160,3 +160,21 @@ it("mounts the actual lazy Teams route from the application's rail", async () =>
   rail.click(); expect(ui.page()).toBe("teams");
   await vi.waitFor(() => expect(host.querySelector("[data-teams-page]")).not.toBeNull());
 });
+
+it("opens Catalog from the Teams header without creating or changing a team", () => {
+  publish(data.empty); const host = show();
+  const catalog = [...host.querySelectorAll<HTMLButtonElement>(".teams-screen-head button")].find((entry) => entry.textContent === "Catalog");
+  expect(catalog).toBeDefined(); expect(catalog!.disabled).toBe(false);
+  catalog!.click();
+  expect(ui.page()).toBe("team-catalog"); expect(store.newTeamOpen()).toBe(false);
+  expect(f.calls).toEqual([]); expect(f.pages).toEqual([]);
+});
+
+it("keeps the Catalog header entry disabled until Teams are available", () => {
+  const host = show();
+  const catalog = () => [...host.querySelectorAll<HTMLButtonElement>(".teams-screen-head button")].find((entry) => entry.textContent === "Catalog")!;
+  expect(catalog()).toBeDefined(); expect(catalog().disabled).toBe(true);
+  publish(data.running); expect(catalog().disabled).toBe(false);
+  store.apply([entry("list", "failed", { code: "teams_inactive", message: "fixture refusal" })]);
+  expect(catalog().disabled).toBe(true); catalog().click(); expect(ui.page()).toBe("teams");
+});

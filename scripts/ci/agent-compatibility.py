@@ -48,7 +48,7 @@ AGENTS = {
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
                 'test_codex_rate_limit.NativeCodexRateLimit',
                 'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native',
-                'test_codex_input_native', 'test_busy_input_native.NativeBusyCodex', 'test_clear_input_native.NativeClearInputCodex',
+                'test_codex_input_native', 'codex_wrapped_title_native.NativeWrappedTitle', 'test_busy_input_native.NativeBusyCodex', 'test_clear_input_native.NativeClearInputCodex',
                 'test_task_context_native.NativeCodexTaskContext', 'test_terminate_native.NativeCodexTermination'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsCodex'], timeout=900, coverage=HOST_COVERAGE)),
     'claude': dict(

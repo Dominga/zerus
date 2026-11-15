@@ -58,3 +58,55 @@ fn wrapped_composer_requires_a_successful_native_width_read() {
         assert_eq!(frame.reads.load(Ordering::Relaxed), 1);
     }
 }
+
+#[test]
+fn wrapped_title_read_is_empty_only_with_its_native_width_and_model() {
+    struct NamedFrame(Option<&'static str>);
+    impl backend::TerminalBackend for NamedFrame {
+        fn input_state(&self, _: &backend::InputClaim) -> Result<backend::InputState> {
+            Ok(backend::InputState {
+                cursor_x: "2".into(),
+                cursor_y: "19".into(),
+            })
+        }
+        fn capture(&self, _: &str, _: backend::Capture) -> Result<Vec<u8>> {
+            Ok(
+                include_bytes!("../../../tests/fixtures/codex-composer-wrapped-title-0169.txt")
+                    .to_vec(),
+            )
+        }
+        fn pane_info(
+            &self,
+            _: backend::Target,
+            fields: &[backend::PaneField],
+        ) -> Result<backend::PaneInfo> {
+            assert!(matches!(fields, [backend::PaneField::Width]));
+            self.0
+                .map(|v| backend::PaneInfo::new(format!("{v}\n")))
+                .ok_or("width unavailable".into())
+        }
+        fn send(&self, _: &str, _: &[backend::Key]) -> Result<()> {
+            panic!("composer inspection must never send keys")
+        }
+    }
+    let record = json!({"agent":"codex","model":"gpt-6.1-sol","cwd":"/fixture/root/fixture-project",
+        "pane":"%1","name":"codex/fixture/title","run_id":"pinned-run"});
+    for (width, empty) in [
+        (Some("80"), true),
+        (Some("78"), false),
+        (Some("128"), false),
+        (Some("bad"), false),
+        (None, false),
+    ] {
+        assert_eq!(
+            composer_now(&NamedFrame(width), &record) == Some(input::composer::Composer::Empty),
+            empty
+        );
+    }
+    let mut changed = record;
+    changed["model"] = json!("gpt-5.4");
+    assert_ne!(
+        composer_now(&NamedFrame(Some("80")), &changed),
+        Some(input::composer::Composer::Empty)
+    );
+}

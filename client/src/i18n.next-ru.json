@@ -1,6 +1,7 @@
 {
   "How to start": "Как начать",
   "Planning goal": "Цель планирования",
+  "The lead starts in its own worktree to prepare your plan.": "Лид запускается в своей рабочей копии, чтобы подготовить ваш план.",
   "Start with a task queue": "Начать с очереди задач",
   "Plan a goal first": "Сначала составить план по цели",
   "Only the lead starts. Other members and the integration branch wait for your approval of the initial plan.": "Запускается только лид. Остальные участники и ветка интеграции ждут вашего одобрения первоначального плана.",

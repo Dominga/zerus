@@ -402,7 +402,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       </Show>
       <Show when={saved()}><div class="notice nt-note" role="status"><Icon name="check" size={16} /><span>{saved()}</span></div></Show>
       <section class="nt-section">
-        <NewTeamIntroSteps />
+        <NewTeamIntroSteps planning={planning()} />
         <NewTeamHowTo open={howto()} onToggle={setHowto} />
       </section>
       <NewTeamFooter busy={props.busy || creating() || sendingCreate()} createWhy={createWhy()} error={shownError()} canSave={!!template() && !locked() && !unknownConfirmed()}

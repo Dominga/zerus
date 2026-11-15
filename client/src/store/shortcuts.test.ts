@@ -49,7 +49,7 @@ describe("chords as Qt writes them", () => {
 
 describe("commands and defaults (Shortcuts.cpp)", () => {
   it("keeps the existing command order and adds own-message navigation", () => {
-    expect(COMMANDS).toHaveLength(30);
+    expect(COMMANDS).toHaveLength(31);
     expect(COMMANDS[0].id).toBe("go.overview");
     expect(COMMANDS.filter((c) => c.scope === "composer").map((c) => c.id)).toEqual(["message.send", "message.push"]);
   });

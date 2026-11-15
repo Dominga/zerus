@@ -230,3 +230,14 @@ it("restores the selected list cursor after a transport refusal", async () => {
   teams.apply([entry("list", "list", screenPages[0])]);
   expect(teams.listPage()).toEqual(screenPages[0]);
 });
+
+it("restores a retained browser page after the native reader has ended", async () => {
+  const { transport, calls } = fake(), teams = createTeams(transport);
+  teams.apply([entry("list", "list", screenPages[0])]);
+  await teams.page("list", screenPages[1].after!);
+  teams.apply([entry("list", "list", screenPages[1])]);
+  teams.apply([entry("list", "ended", {})]);
+  calls.pages.length = 0;
+  await teams.firstListPage();
+  expect(calls.pages).toEqual([["list", null]]);
+});

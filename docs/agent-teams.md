@@ -64,12 +64,17 @@ Counts with `+` are lower bounds. **More teams** reads one bounded cursor page;
 does not grow the bounded session lookup cache.
 
 Select a row to open its bound lead session's **Team** tab. The binding uses
-the computer's machine identity and launch or run identity. If the lead is
-missing from the session list or has changed, the screen explains that instead
-of opening a similarly named session.
+the computer's machine identity and launch or run identity. If the lead has no
+session yet, the list says so. A bound session missing from the session list
+gets its own notice. If a fresh Team tab read shows that
+the binding changed, the tab asks you to open the team from Teams again. A
+similarly named session is never substituted. The binding stays available
+when you switch tabs of the same selected session.
 
 Press **New team** in the screen header or its empty state. The `team.new`
-command also remains available. The dialog starts from a **Template**:
+command is also listed in Settings > Keyboard. It has no default shortcut;
+assign one there to open New team from the keyboard. The dialog starts from
+a **Template**:
 
 | Template | Roster besides the lead | Default pipeline | A queued task starts |
 |---|---|---|---|

@@ -13,6 +13,10 @@
   .tasks-split { flex: 1; display: grid; grid-template-columns: minmax(240px, 1fr) minmax(280px, 1fr); min-height: 0; gap: 16px; }
   .tasks-board { display: flex; flex-direction: column; min-height: 0; }
   .tasks-list { flex: 1; min-height: 0; overflow: auto; }
+  .tk-search { display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); color: var(--z-color-muted); }
+  .tk-search input { flex: 1; min-width: 0; padding: 7px 0; border: 0; outline: none; background: transparent; color: var(--z-color-text); font: inherit; }
+  .tk-search:focus-within { border-color: var(--z-color-accent); }
+  .tk-search > svg, .tk-search button { flex: none; }
   .tasks-row { display: flex; text-align: left; width: 100%; gap: 10px; padding: 12px 10px; border-radius: var(--z-radius-md); border-bottom: 1px solid var(--z-color-divider); }
   .tasks-row:hover { background: var(--z-color-hover); }
   .tasks-row.on { background: var(--z-color-row-selected); }

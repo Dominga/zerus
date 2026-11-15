@@ -73,6 +73,46 @@ pub struct PageScope<'a> {
 
 /// The reply of an hgs that cannot read one session's view.
 pub const UPDATE_FOR_SESSION_PAGES: &str = "Update hgs to read one session's tasks.";
+pub const UPDATE_FOR_TASK_SEARCH: &str = "Update hgs to search tasks.";
+
+/// A bounded task page with a literal query. The reply must echo the query,
+/// so a peer that silently ignores a new option cannot show unrelated tasks.
+pub fn queried_page_call(
+    project: &str,
+    stage: &str,
+    limit: usize,
+    after: Option<&str>,
+    scope: Option<PageScope>,
+    query: Option<&str>,
+) -> Result<TaskCall, String> {
+    let mut call = scoped_page_call(project, stage, limit, after, scope)?;
+    if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
+        if query.len() > 1024 || query.chars().any(char::is_control) {
+            return Err("Invalid task search query.".into());
+        }
+        call.args.extend(["--query".into(), query.into()]);
+    }
+    Ok(call)
+}
+
+pub fn checked_queried_page(
+    reply: &Map<String, Value>,
+    project: &str,
+    stage: &str,
+    limit: usize,
+    scope: Option<PageScope>,
+    query: Option<&str>,
+) -> Result<Value, String> {
+    let query = query.map(str::trim).filter(|q| !q.is_empty());
+    if query.is_some() && reply.get("query").and_then(Value::as_str) != query {
+        return Err(UPDATE_FOR_TASK_SEARCH.into());
+    }
+    let mut out = checked_scoped_page(reply, project, stage, limit, scope)?;
+    if let Some(query) = query {
+        out["query"] = json!(query);
+    }
+    Ok(out)
+}
 
 /// [`page_call`], of one session's view when `scope` is set.
 pub fn scoped_page_call(
@@ -349,6 +389,36 @@ impl TasksState {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn task_search_is_bounded_forwarded_and_requires_a_matching_echo() {
+        let call =
+            queried_page_call("p1", "todo", 50, None, None, Some(" orchard/T-aaaa01 ")).unwrap();
+        assert_eq!(
+            &call.args[call.args.len() - 2..],
+            ["--query", "orchard/T-aaaa01"]
+        );
+        for query in ["x".repeat(1025), "a\nb".into(), "a\0b".into()] {
+            assert!(queried_page_call("p1", "todo", 50, None, None, Some(&query)).is_err());
+        }
+        let mut reply = json!({"project": {"id": "p1"}, "tasks": [], "counts": {},
+            "page": {"schema": 1, "stage": "todo", "next": null}})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap_err(),
+            UPDATE_FOR_TASK_SEARCH
+        );
+        reply.insert("query".into(), json!("other"));
+        assert!(checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).is_err());
+        reply.insert("query".into(), json!("needle"));
+        assert_eq!(
+            checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap()["query"],
+            "needle"
+        );
+        assert!(checked_queried_page(&reply, "p1", "todo", 50, None, None).is_ok());
+    }
 
     fn page(key: &str, tasks: &[&str], page: u32, last: Option<&str>) -> Snapshot {
         Snapshot {

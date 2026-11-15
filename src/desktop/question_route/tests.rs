@@ -50,7 +50,7 @@ mod inventory {
         ("kimi_tool_approval", NativePrompt),
         ("dsh_native", Routes),
         ("dsh_native_api", OtherProvider),
-        ("opencode_native", OtherProvider),
+        ("opencode_native", Routes),
         ("adopt", NotACard),
         ("agent/disposed", NotACard),
         ("auto", NotACard),
@@ -93,6 +93,7 @@ mod inventory {
         ("native_statusline", NotACard),
         ("native_terminal", NotACard),
         ("native_usage", NotACard),
+        ("native_user_input", NotACard),
         ("process_tree", NotACard),
         ("provider_hook", NotACard),
         ("read-marks.json", NotACard),
@@ -210,7 +211,9 @@ mod inventory {
         for (literal, class) in CLASSES {
             let card = serde_json::json!({"source": literal, "agent_id": "main",
                 "can_answer": true, "answer_transport": if *literal == "opencode_native" { "native_opencode" } else if *literal == "dsh_native" { "native_dsh" } else { "kimi_tui" },
-                "kind": "opencode_form", "status": "pending", "blocking": true, "questions": [{"question": "?"}]});
+                "kind": "opencode_form", "status": "pending", "blocking": true,
+                "question_id":"frm_question", "native_question":{"message_id":"msg_question","tool_call_id":"call_question"},
+                "questions": [{"question": "?"}]});
             assert_eq!(routable(&card), *class == Routes, "{literal}");
         }
     }

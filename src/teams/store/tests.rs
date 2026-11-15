@@ -664,7 +664,7 @@ fn observations_upgrade_version_two_and_keep_departures_released_after_reopen() 
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        2
+        SCHEMA_VERSION
     );
 }
 
@@ -693,7 +693,7 @@ fn member_handles_move_neither_the_version_nor_the_mark_an_older_build_checks() 
     };
     // The values this build writes: the core version and its current
     // layout mark (`timers::EXTENSION`, which later changes move on).
-    let current = (2, super::timers::EXTENSION, true);
+    let current = (SCHEMA_VERSION, super::timers::EXTENSION, true);
     let db = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(read(&db), current);
     // A store as an older build leaves it: without the table.

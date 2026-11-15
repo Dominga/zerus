@@ -31,6 +31,7 @@ mod validation;
 use super::store::{self, rows, DecisionState, Store};
 #[allow(unused_imports)]
 pub use apply::apply;
+pub(crate) use apply::{apply_with_gesture, replay};
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

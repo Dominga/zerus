@@ -1,8 +1,19 @@
 # Teams person decisions from a window gesture
 
-Date: 2026-11-15. Status: design for coordinator selection and G1 review;
-no implementation is included. Tracking: `zerus-63rru.31`, with the
+Date: 2026-11-15. Status: accepted design, with slice 1 implemented for G1
+review in this change. Tracking: `zerus-63rru.31`, with the
 `zerus-ppd26` audit as supporting evidence.
+
+Slice 1 uses the existing original-child native responder with a closed
+`team_person_decide` intent. It migrates the Teams core schema from 2 to 3,
+so an older CLI refuses to open the upgraded store. The migration creates an
+immutable store nonce and an indexed companion for each native decision's
+exact intent. The nonce, native file object, configuration, computer, service
+epoch, team/card contents, revision and request UUID are checked under the
+Teams writer transaction. The decision and its original receipt and evidence
+commit together. Receipt reads use the existing store as-is, without a
+migration or replay. This first native mutation is enabled on Linux and
+macOS; unsupported clients refuse it without a CLI fallback.
 
 Read against main `9a2fa6df16d5ff7bf6166dab530c51b52d06eaab`.
 

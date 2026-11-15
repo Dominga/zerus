@@ -1090,7 +1090,8 @@ service reads the child with one bounded `hgs inspect NAME --after
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
 sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook`,
-Kimi's `kimi_wire`, and DeepSeek's `dsh_native` ordinary requests,
+Kimi's `kimi_wire`, DeepSeek's `dsh_native` ordinary requests, and OpenCode's
+`opencode_native` API-verified question tools,
 paired with that child's provider. They must name the main
 agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
 Kimi also requires its qualified `kimi_tui` answer transport and positive
@@ -1100,10 +1101,17 @@ proof. Its single-choice,
 multiple-choice, multi-part and Other-text answers retain the existing native
 request, terminal identity and original answer receipt guards. Routing delivers
 the question; the parent explicitly calls `hgs answer` under its own permissions.
-OpenCode forms and permissions remain person-only. Public form metadata does not
-prove a native question tool is waiting, and duplicate successful answers do not
-yet recover their original receipt. OpenCode is excluded from parent routing and
-its per-child switch until both contracts are qualified.
+OpenCode qualifies only an active exact native session's pending form whose
+referenced assistant message contains the same running `question` tool call and
+whose complete fields match that tool's question input. It uses at most eight
+native message point reads in one 250 ms budget, without scanning history.
+Missing, changed, completed, foreign or ambiguous tool/form evidence stays
+unqualified; public form metadata alone never establishes authority. Generic
+forms and all permissions remain manual. Exact duplicate OpenCode answers return
+the original durable answered receipt before reading live native state, including
+after the form disappears or the run changes. Changed content or target under the
+same UUID is refused; legacy unbound, pending, unknown or unavailable receipts
+never permit another delivery.
 Claude Code's own prompts (`claude_native_question`), every synthetic native
 card, approvals (including Kimi plan and goal approvals), cache choices, trust
 and sign-in never route, even if answerable. Codex async questions are optional,

@@ -33,6 +33,7 @@ import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import type { BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { teams } from "./store/teams";
+import { watchTeamNavigation } from "./ui/teams/lead-navigation";
 import { lazyView } from "./ui/lazy-view";
 import { LazyBoundary } from "./ui/lazy-boundary";
 const ParentDialogs = lazyView(() => import("./ui/sessions/ParentDialogs"), (m) => m.ParentDialogs);
@@ -65,6 +66,7 @@ const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.Pe
 const NewTeamDialog = lazy(() => import("./ui/teams/NewTeam").then((m) => ({ default: m.NewTeamDialog })));
 // Waiting for you loads the first time its rail entry opens.
 const WaitingScreen = lazy(() => import("./ui/screens/Waiting").then((m) => ({ default: m.WaitingScreen })));
+const TeamsScreen = lazy(() => import("./ui/screens/Teams").then((m) => ({ default: m.TeamsScreen })));
 
 function LoginItemButton() {
   return (
@@ -107,6 +109,7 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
+  watchTeamNavigation();
   createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
@@ -164,6 +167,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
           <Match when={page() === "projects"}><Suspense><ProjectsScreen /></Suspense></Match>
           <Match when={page() === "waiting"}><Suspense><WaitingScreen /></Suspense></Match>
+          <Match when={page() === "teams"}><Suspense><TeamsScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>
       </main>

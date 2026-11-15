@@ -36,6 +36,7 @@
 //! entry point.
 pub mod action;
 pub mod catalog;
+pub mod drawers;
 pub mod model;
 pub mod poller;
 pub mod read;

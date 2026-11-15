@@ -66,7 +66,7 @@ export function progress(view: TeamView): Progress {
     reported: nodes.reported,
     active: nodes.in_progress,
     waiting: nodes.pending + nodes.waiting,
-    total: nodes.waiting + nodes.pending + nodes.in_progress + nodes.reported + nodes.accepted + nodes.cancelled,
+    total: nodes.waiting + nodes.pending + nodes.in_progress + nodes.reported + nodes.accepted,
   };
 }
 

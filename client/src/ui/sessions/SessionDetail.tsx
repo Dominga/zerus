@@ -18,6 +18,7 @@ import { AgentBadge, MachineBadge, captionText, statusOf, folderOf } from "./Ses
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { teams } from "../../store/teams";
 import { rowIdentity } from "../teams/session-binding";
+import { navigationTeamFor } from "../teams/lead-navigation";
 import { activity, subagentActivity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
@@ -229,6 +230,7 @@ createRoot(() => {
 const teamTabShown = () => {
   const row = selected();
   if (!row || teams.available() !== true) return false;
+  if (navigationTeamFor(row)) return true;
   const identity = rowIdentity(row);
   return !!identity.machine && teams.teamOfSession(identity).state !== "none";
 };

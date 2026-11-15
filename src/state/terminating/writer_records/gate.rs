@@ -114,7 +114,8 @@ impl RunWriterGate {
 }
 
 #[cfg(test)]
-pub(super) static CONTENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(super) static CONTENDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 pub(super) fn contended() {
     CONTENDED.store(true, std::sync::atomic::Ordering::SeqCst);

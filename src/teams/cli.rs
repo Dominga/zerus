@@ -122,7 +122,8 @@ fn problem_reply(mut problem: Problem, read: bool) -> (Value, i32) {
 fn is_read(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some(
-            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current" | "phases" | "phase",
+            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current"
+            | "phases" | "phase",
         ) => true,
         Some("catalog" | "template") => matches!(
             args.get(1).map(String::as_str),

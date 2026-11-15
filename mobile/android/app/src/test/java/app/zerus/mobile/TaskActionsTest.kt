@@ -283,4 +283,12 @@ class TaskActionsTest {
         assertEquals(2, computer.operations().count { it == "task_send" })
     }
 
+    @Test fun anUnknownOriginalSendCannotBeRepeatedByTheCaller() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original requirement")
+        computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, "Unknown private outcome") }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertEquals(1, computer.operations().count { it == "task_send" })
+    }
+
 }

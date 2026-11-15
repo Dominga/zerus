@@ -95,6 +95,31 @@ public struct DonePage: Equatable, Sendable {
     public let damaged: Int
 }
 
+/// Retains only required keys across pages, never a growing per-page refusal journal.
+struct TaskExchangeEvidence: Sendable {
+    private let required: Set<String>
+    private var blocked: [String: String] = [:]
+    private(set) var digest = ""
+    private(set) var warning: String?
+    private let mediaUnavailable: String
+    init(tasks: [String], mediaUnavailable: String) { required = Set(tasks).union(["project"]); self.mediaUnavailable = mediaUnavailable }
+    mutating func accept(_ progress: ExchangeProgress) {
+        digest = progress.digest
+        for refusal in progress.refusedHere + progress.refusedThere { problem(refusal.uuid, refusal.error) }
+        for document in progress.unsent { problem(document, mediaUnavailable) }
+    }
+    private mutating func problem(_ document: String, _ reason: String) {
+        let message = "\(document.prefix(128)): \(reason.prefix(512))"
+        if warning == nil { warning = message }
+        if required.contains(document), blocked[document] == nil { blocked[document] = message }
+    }
+    func clean(_ task: String) -> Bool { blocked["project"] == nil && blocked[task] == nil }
+    func requireClean(_ tasks: [String]) throws {
+        if let reason = blocked["project"] { throw TaskSyncError(reason) }
+        for task in tasks { if let reason = blocked[task] { throw TaskSyncError(reason) } }
+    }
+}
+
 /// A computer of a project that can exchange its tasks now, and the digest its heartbeat names.
 public struct TaskPeer: Hashable, Sendable {
     public let computerId: String
@@ -154,6 +179,7 @@ public actor TaskSync {
     public static let exchangePolls = 80
     public static let actionPolls = 150
     public static let pollDelay: Duration = .milliseconds(400)
+    static let scopedTasks = 64
 
     private struct PeerKey: Hashable { let project: ProjectKey; let computerId: String }
     /// After an exchange: the phone's digest, the heartbeat's it answered, and the computer's after it.
@@ -163,20 +189,28 @@ public actor TaskSync {
     let replicas: TaskReplicas
     private let exchangeTimeout: Duration
     private let clock: @Sendable () -> Date
+    private let mediaUnavailable: String
+    private let heldSend: String
     private var waiting: [PeerKey: Date] = [:]
     private var quiet: [PeerKey: Quiet] = [:]
     private var locked: Set<ProjectKey> = []
     private var queued: [ProjectKey: [CheckedContinuation<Void, Never>]] = [:]
     /// Tasks whose Send now may have happened, with their project and computer.
-    private var sends: [String: PeerKey] = [:]
+    private struct PendingSend: Equatable { let peer: PeerKey; let requestId: String }
+    private var sends: [String: PendingSend] = [:]
+    private var settleAfter: [String: String] = [:]
     private var known: Set<ProjectKey> = []
 
     public init(client: RelayClient, replicas: TaskReplicas, exchangeTimeout: Duration = .seconds(300),
-                clock: @escaping @Sendable () -> Date = Date.init) {
+                clock: @escaping @Sendable () -> Date = Date.init,
+                mediaUnavailable: String = "Update Zerus on this computer to transfer this task's media.",
+                heldSend: String = "It may have been sent already; its stage arrives with the next sync") {
         self.client = client
         self.replicas = replicas
         self.exchangeTimeout = exchangeTimeout
         self.clock = clock
+        self.mediaUnavailable = mediaUnavailable
+        self.heldSend = heldSend
     }
 
     /// Exchanges `key`'s tasks with each of `peers` whose digest is not the phone's; the failures by computer ID.
@@ -193,8 +227,9 @@ public actor TaskSync {
                 let mine = try await replicas.run { try store.liveDigest() }
                 if mine == peer.digest { continue }
                 if let known = quiet[wait], known.mine == mine, [known.heartbeat, known.theirs].contains(peer.digest) { continue }
-                let theirs = try await bounded { try await self.exchange(connection, store, computerId: peer.computerId) }
-                quiet[wait] = Quiet(mine: try await replicas.run { try store.liveDigest() }, heartbeat: peer.digest, theirs: theirs)
+                let evidence = try await bounded { try await self.exchange(connection, store, computerId: peer.computerId) }
+                quiet[wait] = Quiet(mine: try await replicas.run { try store.liveDigest() }, heartbeat: peer.digest, theirs: evidence.digest)
+                if let warning = evidence.warning { failures[peer.computerId] = warning }
                 waiting[wait] = nil
             } catch {
                 if Task.isCancelled { break }
@@ -212,6 +247,7 @@ public actor TaskSync {
         for key in keys { await lock(key) }
         defer { keys.forEach(unlock) }
         try? await replicas.purge(connectionId: connectionId)
+        settleAfter[connectionId] = nil
     }
 
     // MARK: The project's lock
@@ -243,8 +279,10 @@ public actor TaskSync {
 
     /// One exchange with this computer now, whatever the digests: the phone's edits reach it, and `fetch` brings tasks it does not hold.
     public func exchangeNow(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, fetch: [String] = []) async throws {
+        guard connection.id == key.connectionId, fetch.count <= Self.scopedTasks else { throw TaskSyncError("The original task exchange scope is invalid.") }
         try await project(key, name: name) { store in
-            _ = try await bounded { try await self.exchange(connection, store, computerId: computerId, fetch: fetch) }
+            let evidence = try await bounded { try await self.exchange(connection, store, computerId: computerId, fetch: fetch, required: fetch) }
+            try evidence.requireClean(fetch)
         }
     }
 
@@ -252,10 +290,8 @@ public actor TaskSync {
     public func send(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, task: String,
                      session: String, computerName: String? = nil) async -> TaskOutcome {
         let payload: JSONObject = ["schema": 1, "project": .string(key.id), "task": .string(task), "session": .string(session)]
-        let outcome = await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
-                                operation: "task_send", payload: payload)
-        if case .uncertain = outcome { sends[task] = PeerKey(project: key, computerId: computerId) }
-        return outcome
+        return await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
+                         operation: "task_send", payload: payload)
     }
 
     /// A Send now that may have happened holds the task until an exchange with that computer shows its stage.
@@ -264,10 +300,26 @@ public actor TaskSync {
 
     /// Exchanges once with each computer of this connection that holds a task back; one that completes releases them.
     public func settleSends(_ connection: Connection, names: @Sendable (ProjectKey) -> String) async {
-        for pending in Set(sends.values.filter { $0.project.connectionId == connection.id }) {
+        // The active in-memory hold map already exists. Keep at most64 selected
+        // keys, in stable key order; never load task files or an entire journal.
+        func page(after: String?) -> [(String, PendingSend)] {
+            var page: [(String, PendingSend)] = []
+            for (task, peer) in sends where peer.peer.project.connectionId == connection.id && (after == nil || task > after!) {
+                page.append((task, peer)); page.sort { $0.0 < $1.0 }
+                if page.count > Self.scopedTasks { page.removeLast() }
+            }
+            return page
+        }
+        var pending = page(after: settleAfter[connection.id])
+        if pending.isEmpty { pending = page(after: nil) }
+        if let last = pending.last { settleAfter[connection.id] = last.0 }
+        for (original, tasks) in Dictionary(grouping: pending, by: { $0.1.peer }) {
             do {
-                try await exchangeNow(connection, pending.project, name: names(pending.project), computerId: pending.computerId)
-                sends = sends.filter { $0.value != pending }
+                let ids = tasks.map(\.0)
+                let evidence = try await project(original.project, name: names(original.project)) { store in
+                    try await bounded { try await self.exchange(connection, store, computerId: original.computerId, fetch: ids, required: ids) }
+                }
+                for (task, peer) in tasks where evidence.clean(task) && sends[task] == peer { sends[task] = nil }
             } catch {
                 if Task.isCancelled { return }
                 // The next sync tries again.
@@ -315,12 +367,19 @@ public actor TaskSync {
     private func act(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, computerName: String,
                      operation: String, payload: JSONObject) async -> TaskOutcome {
         await project(key, name: name) { store in
-            do { _ = try await bounded { try await self.exchange(connection, store, computerId: computerId) } }
+            let task = payload.string("task")
+            if operation == "task_send", sends[task] != nil { return .refused(heldSend) }
+            do {
+                guard connection.id == key.connectionId else { throw TaskSyncError("The original task exchange scope changed.") }
+                let evidence = try await bounded { try await self.exchange(connection, store, computerId: computerId, required: [task]) }
+                try evidence.requireClean([task])
+            }
             catch { return .refused("The tasks could not reach \(computerName): \(TaskSyncError.reason(error))") }
             let outcome: TaskOutcome
+            let originalRequestId = UUID().uuidString.lowercased()
             do {
                 let receipt = try await request(connection, computerId: computerId, operation: operation, payload: payload,
-                                                maxPolls: Self.actionPolls)
+                                                maxPolls: Self.actionPolls, requestId: originalRequestId)
                 let reason = receipt.string("error")
                 switch receipt.string("state") {
                 case "completed": outcome = .done
@@ -334,6 +393,9 @@ public actor TaskSync {
             } catch {
                 // The request may be queued although its answer was lost.
                 outcome = .uncertain("The relay did not confirm it: \(TaskSyncError.reason(error))")
+            }
+            if operation == "task_send", case .uncertain = outcome {
+                sends[task] = PendingSend(peer: PeerKey(project: key, computerId: computerId), requestId: originalRequestId)
             }
             // Its copy comes back now; when that fails the next sync brings it.
             _ = try? await bounded { try await self.exchange(connection, store, computerId: computerId) }
@@ -361,11 +423,12 @@ public actor TaskSync {
     }
 
     /// One whole exchange with the computer; its live digest after the last answer.
-    nonisolated func exchange(_ connection: Connection, _ store: TaskStore, computerId: String, fetch: [String] = []) async throws -> String {
+    nonisolated func exchange(_ connection: Connection, _ store: TaskStore, computerId: String, fetch: [String] = [], required: [String] = []) async throws -> TaskExchangeEvidence {
+        guard required.count <= Self.scopedTasks else { throw TaskSyncError("Too many task outcomes in one exchange.") }
         let exchange = try await replicas.run { fetch.isEmpty ? store.exchange() : store.exchangeFetching(tasks: fetch) }
-        var digest = ""
+        var evidence = TaskExchangeEvidence(tasks: required, mediaUnavailable: mediaUnavailable)
         while true {
-            guard let request = try await replicas.run({ try exchange.nextRequest() }) else { return digest }
+            guard let request = try await replicas.run({ try exchange.nextRequest() }) else { return evidence }
             guard let payload = try JSON.parse(request).object else { throw TaskSyncError("The task exchange made an invalid request.") }
             let receipt = try await self.request(connection, computerId: computerId, operation: TaskSyncPlan.operation, payload: payload,
                                                  maxPolls: Self.exchangePolls)
@@ -375,15 +438,15 @@ public actor TaskSync {
             }
             guard let result = receipt.object("result") else { throw TaskSyncError("The computer's answer has no result.") }
             let answer = JSON.object(result).compact
-            digest = try await replicas.run { try exchange.accept(answer: answer) }.digest
+            evidence.accept(try await replicas.run { try exchange.accept(answer: answer) })
         }
     }
 
     /// One computer-scoped request through the relay, and its receipt once it settles or the polls run out.
     nonisolated func request(_ connection: Connection, computerId: String, operation: String, payload: JSONObject,
-                             maxPolls: Int) async throws -> JSONObject {
+                             maxPolls: Int, requestId: String = UUID().uuidString.lowercased()) async throws -> JSONObject {
         let posted = try await client.post(connection, computerId: computerId, operation: operation, payload: payload,
-                                           id: UUID().uuidString.lowercased())
+                                           id: requestId)
         return try await client.waitForReceipt(connection, initial: posted, maxPolls: maxPolls, pollDelay: Self.pollDelay)
     }
 }

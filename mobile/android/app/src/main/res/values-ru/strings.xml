@@ -70,4 +70,6 @@
     <string name="task_media_files">Вложения</string>
     <string name="task_media_open_failed">Не удалось открыть вложение задачи. Обновите задачу и попробуйте ещё раз.</string>
     <string name="task_edit_refresh_failed">Задача сохранена. Обновите проект, чтобы увидеть изменения.</string>
+    <string name="task_media_exchange_update">Обновите Zerus на этом компьютере, чтобы передать вложения задачи.</string>
+    <string name="task_send_unknown_hold">Возможно, задача уже отправлена. Дождитесь обновления её состояния.</string>
 </resources>

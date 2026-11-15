@@ -172,7 +172,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
     // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
     private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
-    private val taskSync by lazy { TaskSync({ api }, taskReplicas) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas, mediaUnavailable = getApplication<Application>().getString(R.string.task_media_exchange_update), heldSend = getApplication<Application>().getString(R.string.task_send_unknown_hold)) }
     private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
     private var taskDigestsAt = 0L
     private var taskSyncRunning = false
@@ -2821,7 +2821,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun sendRoute(task: TaskInfo): RouteState {
         val key = tasksKey ?: return RouteState.Blocked("No project")
         if (taskBusy) return RouteState.Blocked("Another task action is running")
-        if (task.uuid in heldSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        if (task.uuid in heldSends) return RouteState.Blocked(getApplication<Application>().getString(R.string.task_send_unknown_hold))
         return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
     }
     fun cancelRoute(task: TaskInfo): RouteState {

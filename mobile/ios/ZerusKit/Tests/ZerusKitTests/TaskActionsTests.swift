@@ -283,4 +283,14 @@ final class TaskActionsTests: XCTestCase {
         XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 2)
     }
 
+    func testUnknownOriginalSendCannotBeRepeatedByCaller() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Original requirement")
+        computer.update { $0.receipts["task_send"] = { _ in ("uncertain", .null, "Unknown private outcome") } }
+        let first = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .uncertain = first else { return XCTFail("Expected an unknown original") }
+        let second = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = second else { return XCTFail("Unknown original delivery never authorizes another send") }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
+    }
+
 }

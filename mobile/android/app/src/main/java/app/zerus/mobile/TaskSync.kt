@@ -12,6 +12,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentSkipListMap
 
 /**
  * The phone's task replicas (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md,
@@ -46,6 +47,30 @@ data class DoneRow(val uuid: String, val id: String, val text: String, val sessi
 /** One page of a computer's Done list, newest first; `recent` counts the last 7 days. */
 data class DonePage(val rows: List<DoneRow>, val next: DoneCursor?, val total: Int, val recent: Int, val damaged: Int)
 
+/** Only the original required keys are retained across pages, never a growing refusal journal. */
+internal class TaskExchangeEvidence(tasks: Collection<String>, private val mediaUnavailable: String) {
+    private val required = tasks.toSet() + "project"
+    private val blocked = mutableMapOf<String, String>()
+    var digest = ""; private set
+    var warning: String? = null; private set
+    fun accept(progress: app.zerus.mobile.replica.ExchangeProgress) {
+        digest = progress.digest
+        fun problem(document: String, reason: String) {
+            val message = "${document.take(128)}: ${reason.take(512)}"
+            if (warning == null) warning = message
+            if (document in required) blocked.putIfAbsent(document, message)
+        }
+        progress.refusedHere.forEach { problem(it.uuid, it.error) }
+        progress.refusedThere.forEach { problem(it.uuid, it.error) }
+        progress.unsent.forEach { problem(it, mediaUnavailable) }
+    }
+    fun clean(task: String) = "project" !in blocked && task !in blocked
+    fun requireClean(tasks: Collection<String>) {
+        check("project" !in blocked) { blocked.getValue("project") }
+        tasks.firstOrNull { it in blocked }?.let { error(blocked.getValue(it)) }
+    }
+}
+
 object TaskSyncPlan {
     const val OPERATION = "task_exchange"
 
@@ -72,13 +97,17 @@ object TaskSyncPlan {
  */
 class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplicas,
                private val exchangeTimeoutMs: Long = EXCHANGE_MS,
+               private val mediaUnavailable: String = "Update Zerus on this computer to transfer this task's media.",
+               private val heldSend: String = "It may have been sent already; its stage arrives with the next sync",
                private val clock: () -> Long = System::currentTimeMillis) {
     private val locks = ConcurrentHashMap<ProjectKey, Mutex>()
     private val waiting = ConcurrentHashMap<Pair<ProjectKey, String>, Long>()
     /** After an exchange: the phone's digest, the heartbeat's it answered, and the computer's after it. */
     private val quiet = ConcurrentHashMap<Pair<ProjectKey, String>, Triple<String, String, String>>()
     /** Tasks whose Send now may have happened, with their project and computer. */
-    private val sends = ConcurrentHashMap<String, Pair<ProjectKey, String>>()
+    private data class PendingSend(val project: ProjectKey, val computerId: String, val requestId: String)
+    private val sends = ConcurrentSkipListMap<String, PendingSend>()
+    private val settleAfter = ConcurrentHashMap<String, String>()
 
     /** Exchanges `key`'s tasks with each of `peers` whose digest is not the phone's; the failures by computer. */
     suspend fun sync(connection: Connection, key: ProjectKey, name: String, peers: List<TaskPeer>): Map<String, String> =
@@ -94,8 +123,9 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                         if (mine == peer.digest) continue
                         val known = quiet[wait]
                         if (known != null && known.first == mine && peer.digest in setOf(known.second, known.third)) continue
-                        val theirs = bounded { exchange(connection, store, peer.computerId) }
-                        quiet[wait] = Triple(withContext(Dispatchers.IO) { store.liveDigest() }, peer.digest, theirs)
+                        val evidence = bounded { exchange(connection, store, peer.computerId) }
+                        quiet[wait] = Triple(withContext(Dispatchers.IO) { store.liveDigest() }, peer.digest, evidence.digest)
+                        evidence.warning?.let { failures[peer.computerId] = it }
                         waiting.remove(wait)
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
@@ -109,7 +139,9 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
 
     /** One exchange with this computer now, whatever the digests: the phone's edits reach it, and `fetch` brings tasks it does not hold. */
     suspend fun exchangeNow(connection: Connection, key: ProjectKey, name: String, computerId: String, fetch: List<String> = emptyList()) {
-        project(key, name) { store -> bounded { exchange(connection, store, computerId, fetch) } }
+        require(connection.id == key.connectionId)
+        require(fetch.size <= SCOPED_TASKS)
+        project(key, name) { store -> bounded { exchange(connection, store, computerId, fetch, fetch) }.requireClean(fetch) }
     }
 
     /** Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back. */
@@ -117,7 +149,6 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                      computerName: String = computerId): TaskOutcome =
         act(connection, key, name, computerId, computerName, "task_send",
             JSONObject().put("schema", 1).put("project", key.id).put("task", task).put("session", session))
-            .also { if (it is TaskOutcome.Uncertain) sends[task] = key to computerId }
 
     /** A Send now that may have happened holds the task until an exchange with that computer shows its stage. */
     fun held(task: String) = sends.containsKey(task)
@@ -125,10 +156,17 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
 
     /** Exchanges once with each computer of this connection that holds a task back; one that completes releases them. */
     suspend fun settleSends(connection: Connection, names: (ProjectKey) -> String) {
-        for (pending in sends.values.filter { it.first.connectionId == connection.id }.toSet()) {
+        fun page(after: String?) = (if (after == null) sends else sends.tailMap(after, false)).entries.asSequence()
+            .filter { it.value.project.connectionId == connection.id }.take(SCOPED_TASKS).map { it.key to it.value }.toList()
+        val pending = page(settleAfter[connection.id]).ifEmpty { page(null) }
+        pending.lastOrNull()?.let { settleAfter[connection.id] = it.first }
+        for ((original, tasks) in pending.groupBy { it.second.project to it.second.computerId }) {
             try {
-                exchangeNow(connection, pending.first, names(pending.first), pending.second)
-                sends.values.removeAll { it == pending }
+                val ids = tasks.map { it.first }
+                val evidence = project(original.first, names(original.first)) { store ->
+                    bounded { exchange(connection, store, original.second, ids, ids) }
+                }
+                tasks.filter { evidence.clean(it.first) }.forEach { sends.remove(it.first, it.second) }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { /* The next sync tries again. */ }
         }
@@ -164,11 +202,17 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     /** The exchange, then `operation` on that computer, then the exchange that shows its result. */
     private suspend fun act(connection: Connection, key: ProjectKey, name: String, computerId: String, computerName: String,
                             operation: String, payload: JSONObject): TaskOutcome = project(key, name) { store ->
-        try { bounded { exchange(connection, store, computerId) } }
+        val task = payload.getString("task")
+        if (operation == "task_send" && task in sends) return@project TaskOutcome.Refused(heldSend)
+        try {
+            require(connection.id == key.connectionId)
+            bounded { exchange(connection, store, computerId, required = listOf(task)) }.requireClean(listOf(task))
+        }
         catch (e: CancellationException) { throw e }
         catch (e: Exception) { return@project TaskOutcome.Refused("The tasks could not reach $computerName: ${e.message.orEmpty()}") }
+        val originalRequestId = UUID.randomUUID().toString()
         val outcome = try {
-            val receipt = request(connection, computerId, operation, payload, maxPolls = 150)
+            val receipt = request(connection, computerId, operation, payload, maxPolls = 150, requestId = originalRequestId)
             val reason = receipt.string("error")
             when (receipt.string("state")) {
                 "completed" -> TaskOutcome.Done
@@ -184,6 +228,8 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         }
         // The request may be queued although its answer was lost.
         catch (e: Exception) { TaskOutcome.Uncertain("The relay did not confirm it: ${e.message.orEmpty().ifBlank { e.javaClass.simpleName }}") }
+        if (operation == "task_send" && outcome is TaskOutcome.Uncertain)
+            sends[task] = PendingSend(key, computerId, originalRequestId)
         // Its copy comes back now; when that fails the next sync brings it.
         try { bounded { exchange(connection, store, computerId) } }
         catch (e: CancellationException) { throw e }
@@ -201,10 +247,11 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     private suspend fun <T> bounded(block: suspend () -> T): T = withTimeoutOrNull(exchangeTimeoutMs) { block() }
         ?: error("The task exchange took longer than ${exchangeTimeoutMs / 1000} seconds.")
 
-    private suspend fun request(connection: Connection, computerId: String, operation: String, payload: JSONObject, maxPolls: Int = 80): JSONObject {
+    private suspend fun request(connection: Connection, computerId: String, operation: String, payload: JSONObject, maxPolls: Int = 80,
+                                requestId: String = UUID.randomUUID().toString()): JSONObject {
         val relay = api()
         val target = Target(computerId, "", "", "", connection.id)
-        return relay.await(connection, relay.submit(connection, target, operation, payload, UUID.randomUUID().toString(), SendAttempt()),
+        return relay.await(connection, relay.submit(connection, target, operation, payload, requestId, SendAttempt()),
             maxPolls = maxPolls, pollDelayMs = 400)
     }
 
@@ -212,23 +259,25 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     suspend fun purge(connectionId: String) {
         val held = locks.filterKeys { it.connectionId == connectionId }.toSortedMap(compareBy { it.key }).values.toList()
         held.forEach { it.lock() }
-        try { withContext(Dispatchers.IO) { replicas.purge(connectionId) } }
+        try { withContext(Dispatchers.IO) { replicas.purge(connectionId) }; settleAfter.remove(connectionId) }
         finally { held.forEach { it.unlock() } }
     }
 
     /** One whole exchange with the computer; its live digest after the last answer. */
-    private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String, fetch: List<String> = emptyList()): String {
+    private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String, fetch: List<String> = emptyList(),
+                                 required: List<String> = emptyList()): TaskExchangeEvidence {
+        require(required.size <= SCOPED_TASKS)
         val exchange = withContext(Dispatchers.IO) { if (fetch.isEmpty()) store.exchange() else store.exchangeFetching(fetch) }
+        val evidence = TaskExchangeEvidence(required, mediaUnavailable)
         try {
-            var digest = ""
             while (true) {
-                val payload = withContext(Dispatchers.IO) { exchange.nextRequest() } ?: return digest
+                val payload = withContext(Dispatchers.IO) { exchange.nextRequest() } ?: return evidence
                 val receipt = request(connection, computerId, TaskSyncPlan.OPERATION, JSONObject(payload))
                 check(receipt.string("state") == "completed") {
                     receipt.string("error").ifBlank { "The computer did not answer the task exchange." }
                 }
                 val result = receipt.optJSONObject("result") ?: error("The computer's answer has no result.")
-                digest = withContext(Dispatchers.IO) { exchange.accept(result.toString()) }.digest
+                evidence.accept(withContext(Dispatchers.IO) { exchange.accept(result.toString()) })
             }
         } finally { exchange.close() }
     }
@@ -236,5 +285,6 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     companion object {
         const val RETRY_MS = 60_000L
         const val EXCHANGE_MS = 5 * 60_000L
+        const val SCOPED_TASKS = 64
     }
 }

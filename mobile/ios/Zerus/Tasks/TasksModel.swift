@@ -60,7 +60,7 @@ final class TasksModel {
         self.app = app
         self.replicas = replicas
         self.storageError = replicas == nil && storageError.isEmpty ? "The phone keeps no task storage." : storageError
-        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0) }
+        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0, mediaUnavailable: taskEditText("task_media_exchange_update"), heldSend: taskEditText("task_send_unknown_hold")) }
     }
 
     private(set) var taskEditor: TaskEditorModel?
@@ -255,7 +255,7 @@ final class TasksModel {
     func sendRoute(_ task: TaskInfo) -> RouteState {
         guard let key = tasksKey else { return .blocked("No project") }
         if taskBusy { return .blocked("Another task action is running") }
-        if heldSends.contains(task.uuid) { return .blocked("It may have been sent already; its stage arrives with the next sync") }
+        if heldSends.contains(task.uuid) { return .blocked(taskEditText("task_send_unknown_hold")) }
         return TasksPresentation.route(task, chosen: tasksChosen, machines: app.machines, connectionId: key.connectionId,
                                        operations: taskOperations, sessions: projectSessions(key))
     }

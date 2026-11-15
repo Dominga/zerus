@@ -22,6 +22,7 @@ import { TaskDependencies } from "./TaskDependencies";
 import { PlanView } from "./PlanView";
 import { LanesView } from "./LanesView";
 import { TeamTaskCard } from "./TeamTaskCard";
+import { TeamAdvanceBase } from "./TeamAdvanceBase";
 import { PhasePane } from "./PhasePane";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
@@ -69,6 +70,7 @@ export function TeamWorkspace(props: {
   const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
+  const [advance, setAdvance] = createSignal(false);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
   const [openNotice, setOpenNotice] = createSignal("");
@@ -81,6 +83,7 @@ export function TeamWorkspace(props: {
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
+  createEffect(on(teamId, () => setAdvance(false), { defer: true }));
   createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers" || planMode() === "lanes") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
@@ -117,11 +120,13 @@ export function TeamWorkspace(props: {
   const send = (kind: string, fields: Record<string, unknown> = {}) => { if (kind === "swap_member") { editors.open(kind, String(fields.member)); return; } props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
-      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
+      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => kind === "advance_base" ? setAdvance(true) : send(kind)}
         onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked}
         drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
       <Show when={settingsView()}><TeamSettingsDialog view={props.view} providerHome={props.providerHome} busy={props.busy || !!props.settingsBlocked}
         onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} /></Show>
+      <Show when={advance()}><TeamAdvanceBase team={props.view.bar.id} busy={props.busy}
+        onCancel={() => setAdvance(false)} onAdvance={(commit, revision) => { props.onAction("advance_base", { commit }, revision); setAdvance(false); }} /></Show>
       <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
       <TeamEditButtons view={props.view} busy={props.busy} open={editors.open} />
       {editors.dialogs()}
@@ -179,6 +184,7 @@ export function TeamWorkspace(props: {
                       <dt>{tr("Checks the work of")}</dt><dd>{shown().implementer || tr("nobody yet")}</dd>
                     </Show>
                     <dt>{tr("Round")}</dt><dd>{shown().round}</dd>
+                    <Show when={shown().assigned_base}>{(base) => <><dt>{tr("Assigned base")}</dt><dd class="mono">{base()}</dd></>}</Show>
                     <Show when={shown().decided_by}><dt>{tr("Decided by")}</dt><dd>{tr(shown().decided_by)}</dd></Show>
                   </dl>
                   <Show when={shown().stages.length}>

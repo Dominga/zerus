@@ -11,6 +11,7 @@
   "rows": [
     {
       "admitted": true,
+      "assigned_base": null,
       "deps_editable": true,
       "holder": null,
       "id": 1,
@@ -34,6 +35,7 @@
     },
     {
       "admitted": true,
+      "assigned_base": null,
       "deps": [
         {
           "kind": "soft",
@@ -63,6 +65,7 @@
     },
     {
       "admitted": true,
+      "assigned_base": null,
       "deps": [
         {
           "node": 2

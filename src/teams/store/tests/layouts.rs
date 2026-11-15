@@ -4,7 +4,7 @@ use super::*;
 fn published_core_and_extension_layouts_have_distinct_allocations() {
     // .165 reserves this namespace in timers_extension.version, never in
     // PRAGMA user_version. Its low bits keep the ordinary migration layout.
-    const PINNED_LAYOUT_FLAG: u32 = 1 << 31;
+    use super::super::bases::{PINNED_EXTENSION, PINNED_LAYOUT_FLAG};
     let ordinary = super::super::timers::published_layouts();
     let mut allocations = vec![
         1,
@@ -21,8 +21,5 @@ fn published_core_and_extension_layouts_have_distinct_allocations() {
         .iter()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(unique.len(), allocations.len(), "{allocations:?}");
-    assert_eq!(
-        PINNED_LAYOUT_FLAG | super::super::timers::EXTENSION,
-        2147483660
-    );
+    assert_eq!(PINNED_EXTENSION, 2147483660);
 }

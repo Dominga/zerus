@@ -370,12 +370,28 @@ fn request(
     };
     let base = if handover {
         attempts::render(
-            settings, starts, task, name, &to, true, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            true,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else if permit.kind == "handout" {
         attempts::render(
-            settings, starts, task, name, &to, false, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            false,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else {
@@ -452,6 +468,9 @@ fn request(
             &permit.team,
             &permit.node,
             &permit.member,
+            &store
+                .effect_base(&permit.team.id, &body.id)
+                .map_err(problem)?,
             handover.then_some((permit.reason.as_str(), earlier))
         )
         .map_err(problem)?

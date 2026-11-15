@@ -1151,6 +1151,7 @@ fn invalid_card_parameters_survive_the_waiting_read_as_the_invalid_state() {
     }
 }
 
+/// Pending-decision variants are handwritten controls, serialized by the core view writer.
 #[test]
 #[ignore = "regenerates the board view from the product CLI status and the existing pending-decision cases"]
 fn regenerate_pending_board_view() {

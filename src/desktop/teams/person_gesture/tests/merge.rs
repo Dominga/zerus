@@ -266,3 +266,21 @@ fn configured_mutation_entry_never_substitutes_configuration_for_a_gesture() {
         unchanged(&h, &request);
     }
 }
+
+#[test]
+fn trusted_repository_reader_is_not_a_native_gesture_and_is_not_called_on_refusal() {
+    let (mut h, request) = sample();
+    let called = std::cell::Cell::new(false);
+    let repository = |_: &Team| {
+        called.set(true);
+        Err(Problem::new(
+            code::INVALID_STATE,
+            "unexpected repository read",
+        ))
+    };
+    let error = ops::apply_with_repository(&mut h.store, &actor(), &request, 1234, &repository)
+        .unwrap_err();
+    assert_eq!(error.code, "person_gesture_required");
+    assert!(!called.get());
+    unchanged(&h, &request);
+}

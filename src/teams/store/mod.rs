@@ -20,6 +20,7 @@ mod member_sessions;
 mod native_person;
 pub(in crate::teams) mod non_delivery;
 pub use decision_state::DecisionState;
+pub(crate) mod bases;
 pub(crate) mod pages;
 mod progress;
 mod recorded_timings;
@@ -296,11 +297,14 @@ fn connect_mode(path: &Path, create: bool, migrate: bool) -> Result<Connection> 
     .map_err(storage)?;
     #[cfg(unix)]
     crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
+    bases::register_writer(&db)?;
     db.busy_timeout(Duration::from_secs(8)).map_err(storage)?;
     if migrate {
         initialize(&mut db)?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(storage)?;
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+        )
+        .map_err(storage)?;
     }
     Ok(db)
 }
@@ -531,11 +535,12 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 5] = [
+const COMMON_SCHEMA: [&str; 6] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
     include_str!("validation-settings.sql"),
     include_str!("read-indexes.sql"),
+    include_str!("base-schema.sql"),
     include_str!("non-delivery-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied

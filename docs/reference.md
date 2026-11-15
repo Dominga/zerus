@@ -9676,6 +9676,49 @@ Process coverage includes exact call identity, background tasks, stale generatio
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
 
+### `hgs team base` and `hgs team advance-base`
+
+`hgs team base --team UUID --json` is an explicit person-only read on the
+team's home computer. It returns `team`, `revision`, `base_commit` and at most
+two `refs` entries (`reference`, `commit`): the direct local
+`refs/heads/main` and locally fetched `refs/remotes/origin/main` that exist.
+It performs no network operation. The desktop reads this only when the
+Advance base form opens, not in its polling loop.
+
+`hgs team advance-base --json` reads the ordinary operation envelope on stdin:
+`request_id`, `team`, `expected_revision`, and `commit` (a full lowercase Git
+commit hash). Only a person may advance a running or paused team with branch
+integration; leads, members, other sessions and the service are refused.
+The trusted local project placement and Git facts are read inside the store
+write transaction, after exact receipt replay and revision validation.
+The commit must exist, strictly descend from the current base, and be an
+ancestor of or equal to at least one of `refs/heads/main` and
+`refs/remotes/origin/main`. Neither HEAD nor a remote/network fallback is used;
+the two literal names are read in one snapshot without revision-name guessing,
+and prefix descendants or branches named like those refs are excluded.
+Refusals name the checked main refs. The revision and journal advance together,
+and the journal names the admitting ref. Ordinary `stale_revision`,
+`store_busy` and `storage_failed` receipt and retry semantics apply.
+
+No Git ref or object is written by advancing the default. The integration
+branch history and existing member branches are preserved. Each hand-out or
+reopen reservation records its own base: new prompts use the current default,
+while previous generations retain their assigned base for both prompt recovery
+and integration ancestry/admission. Queue rows add `assigned_base` (null before
+hand-out). Members start from the integration branch and merge their given
+base into their own branch. New member launches use the current default;
+existing and already-reserved launches keep their original checkout plan.
+
+The first successful advance atomically raises the private Teams compatibility
+mark, refusing older engines at store open. Narrow per-team SQLite guards also
+refuse already-open older engines' hand-out/effect and integration row writes;
+the newer engine registers their connection capability. A refusal rolls back
+the operation without partial rows (older callers may report `storage_failed`
+with the newer-writer cause). Pre-advance unpinned rows retain the original
+base through the indexed high-water, and the new engine continues to pin
+future hand-outs. Unadvanced teams and unrelated writes on existing connections
+remain outside those row guards.
+
 ### Team catalog editor receipts
 
 The desktop Teams catalog edits roles, pipelines and templates from `team-plan`.

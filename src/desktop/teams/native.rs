@@ -31,6 +31,22 @@ pub(super) struct Native {
     pub machine: String,
     pub stop: Arc<AtomicBool>,
 }
+/// Same bounded local project/placement read as member launch. The stored home
+/// is verified against the catalog's actual computer identity in project().
+pub(crate) fn repository(
+    config: &Config,
+    team: &zerus_team_plan::model::Team,
+) -> Result<integrate::Repo> {
+    let mut native = Native {
+        config: config.clone(),
+        machine: team.home.clone(),
+        stop: Arc::new(AtomicBool::new(false)),
+    };
+    let placement = native.placement(&team.project, "base-read")?;
+    Ok(integrate::Repo {
+        git_dir: PathBuf::from(placement.git_dir),
+    })
+}
 impl Native {
     fn read(&self, args: &[String], input: Option<&[u8]>) -> Result<Value> {
         self.read_until(args, input, Instant::now() + Duration::from_secs(15))
@@ -143,12 +159,13 @@ impl Effects for Native {
         let admitted = (|| -> Result<bool> {
             let store = crate::teams::store::Store::open(&self.config.state)?;
             let team = store.team(&plan.team)?;
+            let creation_base = store.creation_base(&plan.team)?;
             Ok(team.is_some_and(|t| {
                 t.status == zerus_team_plan::model::TeamStatus::Running
                     && t.home == plan.machine
                     && t.project == plan.project
                     && t.integration_branch == plan.branch
-                    && t.base_commit == plan.base
+                    && creation_base == plan.base
             }))
         })();
         if admitted != Ok(true) {

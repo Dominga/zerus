@@ -561,3 +561,157 @@ fn legacy_short_writer_budget_keeps_its_original_local_reserve() {
     );
     assert!(current.view().unwrap().execution.is_none());
 }
+
+struct G1UnconfirmedSource<'a> {
+    inner: InProcess<'a>,
+    source: String,
+    mode: u8,
+}
+impl Net for G1UnconfirmedSource<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if left(deadline).is_zero() {
+            anyhow::bail!("private original deadline expired");
+        }
+        if command == "replica-task" {
+            let value = input.unwrap();
+            let node = route.nodes.last().unwrap();
+            if value["cutover"]["action"] == "export" && node == &self.source {
+                if self.mode == 2 {
+                    return self.inner.call(swarm, route, command, input, deadline);
+                }
+                let answer = match self.mode {
+                    0 => json!({}),
+                    3 => json!({"seal":value["cutover"]["seal"]}),
+                    4 => json!({"kind":"prepared", "seal":value["cutover"]["seal"]}),
+                    _ => json!({"kind":"admitted", "seal":"0".repeat(64)}),
+                };
+                return Ok(
+                    json!({"node_id":node,"store":value["store"],"task":value["task"],"cutover":answer}),
+                );
+            }
+            anyhow::bail!("private peer supplies no other cutover attestation");
+        }
+        self.inner.call(swarm, route, command, input, deadline)
+    }
+}
+fn g1_confirm_retained_original(mode: u8) {
+    let m = members(
+        &["a", "b", "c", "d", "e", "f", "g", "h", "i", "z"],
+        &[
+            ("a", "b"),
+            ("a", "c"),
+            ("a", "d"),
+            ("a", "e"),
+            ("a", "f"),
+            ("a", "g"),
+            ("a", "h"),
+            ("a", "i"),
+            ("a", "z"),
+        ],
+    );
+    let task = legacy(&m, 4);
+    // Source-query iteration is keyed by actual node identity, not alias.
+    let (healthy, healthy_id) = m
+        .ids
+        .iter()
+        .filter(|(name, _)| name.as_str() != "a")
+        .max_by(|a, b| a.1.cmp(b.1))
+        .map(|(name, id)| (name.clone(), id.clone()))
+        .unwrap();
+    {
+        let store = ProjectStore::open(&m.configs[&healthy].state.join("replica"), "p").unwrap();
+        assert!(store
+            .import_updates(vec![Update {
+                document: Document::Task(task.uuid().into()),
+                bytes: task.snapshot().unwrap()
+            }])
+            .unwrap()
+            .refused
+            .is_empty());
+    }
+    synced(&m, &healthy);
+    let bootstrap = InProcess::new(
+        &m,
+        Faults {
+            offline: BTreeSet::from([m.ids["a"].clone()]),
+            ..Faults::default()
+        },
+    );
+    catch_up_writer(&m.configs[&healthy], &bootstrap, "p", task.uuid(), soon()).unwrap();
+    let original = held(&m, &healthy, task.uuid()).unwrap();
+    assert!(original.floor_record().is_some() && original.cutover_seal().unwrap().is_some());
+    assert!(held(&m, "a", task.uuid()).unwrap().floor_record().is_none());
+    let original_proposal = original.snapshot().unwrap();
+    let original_capture = {
+        let store = ProjectStore::open(&m.configs["a"].state.join("replica"), "p").unwrap();
+        let (capture, _) = store.prepare_cutover(task.uuid(), &m.ids["a"]).unwrap();
+        store
+            .retain_cutover_proposal(&original_proposal, &capture)
+            .unwrap();
+        capture
+    };
+    synced(&m, "a");
+    let net = G1UnconfirmedSource {
+        inner: InProcess::new(&m, Faults::default()),
+        source: healthy_id,
+        mode,
+    };
+    let answer = catch_up_writer(&m.configs["a"], &net, "p", task.uuid(), soon());
+    let current = held(&m, "a", task.uuid()).unwrap();
+    let exportable = ProjectStore::open(&m.configs["a"].state.join("replica"), "p")
+        .unwrap()
+        .export_cutover(task.uuid())
+        .is_ok();
+    eprintln!("G1 source-confirm mode={mode}, answer={answer:?}, native_exportable={exportable}, floor={:?}", current.floor_record());
+    if mode == 2 {
+        answer.unwrap();
+        assert!(exportable);
+        assert_eq!(current.floor_record(), original.floor_record());
+    } else {
+        assert!(
+            answer.is_err(),
+            "a nonconfirming Export response authorized original-proposal adoption"
+        );
+        assert!(
+            !exportable,
+            "saved proposal data became native admission without source confirmation"
+        );
+        let store = ProjectStore::open(&m.configs["a"].state.join("replica"), "p").unwrap();
+        assert_eq!(
+            store.pending_cutover_capture(task.uuid()).unwrap(),
+            Some(original_capture)
+        );
+        assert_eq!(
+            store.original_cutover_proposal(task.uuid()).unwrap(),
+            Some(original_proposal)
+        );
+    }
+}
+#[test]
+fn g1_retained_confirmation_accepts_exact_original() {
+    g1_confirm_retained_original(2);
+}
+#[test]
+fn g1_retained_confirmation_refuses_missing_kind() {
+    g1_confirm_retained_original(0);
+}
+#[test]
+fn g1_retained_confirmation_refuses_another_seal() {
+    g1_confirm_retained_original(1);
+}
+
+#[test]
+fn g1_retained_confirmation_refuses_exact_seal_without_kind() {
+    g1_confirm_retained_original(3);
+}
+#[test]
+fn g1_retained_confirmation_refuses_exact_seal_with_wrong_kind() {
+    g1_confirm_retained_original(4);
+}

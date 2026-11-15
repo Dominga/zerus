@@ -5686,7 +5686,9 @@ readers cannot hide a later healthy original seal or cause a new floor to be
 minted. Already sealed tasks retain their native protocol
 validation and ordinary business rules. An older task with no floor is included in the bounded background pass; it need not be started first.
 Returning clean prefixes adopt the existing seal before any first-floor write,
-and extra old-rule writes still require review. A pending team cancellation
+and extra old-rule writes still require review. Recovery requires a current
+native source to confirm that exact original seal; a missing or mismatched
+confirmation leaves the original held. A pending team cancellation
 recovers on its next due backoff pass once migration can finish; the person
 need not press Retry. A 60-second service pass does not bypass that backoff.
 

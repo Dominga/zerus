@@ -386,8 +386,9 @@ pub(super) fn upgrade(
                     },
                     source_deadline,
                 )
-                .is_ok()
-                {
+                .is_ok_and(|answer| {
+                    answer["kind"] == "admitted" && answer["seal"] == original.identity()
+                }) {
                     source = Some(node);
                     break;
                 }

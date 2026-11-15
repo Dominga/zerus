@@ -178,9 +178,10 @@ pub(super) fn removed(db: Catalog, path: &Path) {
 
 /// Exact run lookup with complete native coverage, never an advisory SQL miss.
 /// The selected body is still read through the caller's original native root.
+#[cfg(unix)]
 pub(crate) fn find_run(state: &Path, name: &str, run: &str) -> Result<Option<String>> {
     if crate::platform::canonical(state).map_err(|e| e.to_string())?
-        != crate::platform::canonical(&root()).map_err(|e| e.to_string())?
+        != crate::platform::canonical(root()).map_err(|e| e.to_string())?
     {
         return Err("Archive lookup belongs to another state root".into());
     }

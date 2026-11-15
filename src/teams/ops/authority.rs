@@ -69,6 +69,8 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
             _ => person || lead || service,
         },
         Operation::Pause
+        | Operation::SubmitDraftPhase { .. }
+        | Operation::EditDraftPhase { .. }
         | Operation::Resume
         | Operation::PauseMember { .. }
         | Operation::ResumeMember { .. }

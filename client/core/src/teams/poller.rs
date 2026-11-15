@@ -102,6 +102,30 @@ impl TeamsPoller {
         self.shared.lock().model.following().clone()
     }
 
+    /// The optional phase pane uses this same reader and its visibility/scope.
+    pub fn phases(
+        &self,
+        team: &str,
+        phase: Option<u32>,
+        enabled: bool,
+        expected_epoch: Option<u64>,
+    ) -> Option<u64> {
+        let mut state = self.shared.lock();
+        let (epoch, updates) = if enabled {
+            state
+                .model
+                .follow_phases(team, phase, true, Instant::now())?
+        } else {
+            state
+                .model
+                .close_phases(team, expected_epoch, Instant::now())?
+        };
+        state.outbox.extend(updates);
+        drop(state);
+        self.shared.wake.notify_all();
+        Some(epoch)
+    }
+
     /// Reads every followed view again now (after an action).
     pub fn refresh(&self) {
         self.shared.lock().model.refresh(Instant::now());

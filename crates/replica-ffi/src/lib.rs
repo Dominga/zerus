@@ -11,6 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerus_replica as replica;
 
+mod mobile_edit;
+pub use mobile_edit::*;
+mod task_execution;
+pub use task_execution::{TaskAttemptInfo, TaskExecutionInfo};
+
 uniffi::setup_scaffolding!();
 
 /// A rule refused the change and nothing changed (show the message), or
@@ -353,11 +358,15 @@ pub struct TaskInfo {
     /// Derived from this task's body and description media, not unrelated history.
     #[uniffi(default = "")]
     pub content_revision: String,
+    /// Bounded saved evidence only; never a live observation or write capability.
+    #[uniffi(default = None)]
+    pub execution: Option<TaskExecutionInfo>,
 }
 
 impl TryFrom<replica::TaskView> for TaskInfo {
     type Error = replica::Error;
     fn try_from(view: replica::TaskView) -> replica::Result<Self> {
+        let execution = task_execution::project(view.schema, view.execution);
         let text = if view.title.is_empty() {
             view.text.clone()
         } else if view.text.is_empty() {
@@ -405,6 +414,7 @@ impl TryFrom<replica::TaskView> for TaskInfo {
             log: view.log.into_iter().map(Into::into).collect(),
             attachments,
             content_revision,
+            execution,
         })
     }
 }

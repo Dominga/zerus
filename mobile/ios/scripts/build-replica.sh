@@ -43,8 +43,8 @@ stamp=$(
     echo "$mode"
     cat "$here/build-replica.sh"
     rustc --version
-    cat crates/replica-ffi/Cargo.lock crates/replica-ffi/Cargo.toml crates/replica-ffi/uniffi.toml crates/replica/Cargo.toml crates/file-lock/Cargo.toml
-    find crates/replica/src crates/replica-ffi/src crates/file-lock/src -type f | LC_ALL=C sort | while read -r file; do
+    cat crates/replica-ffi/Cargo.lock crates/replica-ffi/Cargo.toml crates/replica-ffi/uniffi.toml crates/replica/Cargo.toml crates/file-lock/Cargo.toml services/mobile/crypto/Cargo.toml services/mobile/endpoint/Cargo.toml services/mobile/windows-private/Cargo.toml crates/mobile-task-edit/Cargo.toml
+    find crates/replica/src crates/replica-ffi/src crates/file-lock/src services/mobile/crypto/src services/mobile/endpoint/src services/mobile/windows-private/src crates/mobile-task-edit/src -type f | LC_ALL=C sort | while read -r file; do
       echo "$file"
       cat "$file"
     done

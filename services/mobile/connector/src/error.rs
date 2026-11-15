@@ -54,3 +54,9 @@ pub const UNREADABLE_CONFIGURATION: &str = "connector configuration could not be
 pub const INVALID_JSON: &str = "connector configuration is not valid JSON";
 pub const STATE_UNAVAILABLE: &str = "connector state_dir could not be created";
 pub const JOURNAL_UNAVAILABLE: &str = "connector journal is unavailable";
+
+impl From<zerus_mobile_endpoint::EndpointError> for ConnectorError {
+    fn from(error: zerus_mobile_endpoint::EndpointError) -> Self {
+        Self::new(error.to_string())
+    }
+}

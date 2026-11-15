@@ -1,0 +1,297 @@
+{
+  "bar": {
+    "base_commit": "0123456789abcdef0123456789abcdef01234567",
+    "counts": {
+      "cards": 0,
+      "inbox": 0,
+      "members": {
+        "active": 0,
+        "not_created": 4,
+        "paused": 0,
+        "removed": 0,
+        "total": 4
+      },
+      "nodes": {
+        "accepted": 0,
+        "cancelled": 0,
+        "in_progress": 0,
+        "pending": 0,
+        "reported": 0,
+        "waiting": 0
+      }
+    },
+    "goal": "",
+    "id": "00000000-0000-4000-8000-00000000beef",
+    "integration_branch": "zerus/team/fixes",
+    "lead": "lead",
+    "name": "Fixes",
+    "project": "example-project",
+    "revision": 2,
+    "status": "running"
+  },
+  "groups": [
+    {
+      "cards": [],
+      "state": "draft"
+    },
+    {
+      "cards": [],
+      "state": "waiting"
+    },
+    {
+      "cards": [],
+      "state": "pending"
+    },
+    {
+      "cards": [],
+      "state": "in_progress"
+    },
+    {
+      "cards": [],
+      "state": "reported"
+    },
+    {
+      "cards": [],
+      "state": "accepted"
+    },
+    {
+      "cards": [],
+      "state": "cancelled"
+    }
+  ],
+  "member_roles": [
+    {
+      "account": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "effort": "",
+      "id": "developer",
+      "model": "",
+      "name": "Developer"
+    },
+    {
+      "account": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "effort": "",
+      "id": "reviewer",
+      "model": "",
+      "name": "Reviewer"
+    }
+  ],
+  "members": [
+    {
+      "account": "",
+      "account_choice": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "id": "lead",
+      "lead": true,
+      "model": null,
+      "open_work": 0,
+      "person_stopped": false,
+      "role": "lead",
+      "session": null,
+      "state": "not_created"
+    },
+    {
+      "account": "",
+      "account_choice": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "id": "m1",
+      "lead": false,
+      "model": null,
+      "open_work": 0,
+      "person_stopped": false,
+      "role": "developer",
+      "session": null,
+      "state": "not_created"
+    },
+    {
+      "account": "",
+      "account_choice": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "id": "m2",
+      "lead": false,
+      "model": null,
+      "open_work": 0,
+      "person_stopped": false,
+      "role": "developer",
+      "session": null,
+      "state": "not_created"
+    },
+    {
+      "account": "",
+      "account_choice": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "id": "m3",
+      "lead": false,
+      "model": null,
+      "open_work": 0,
+      "person_stopped": false,
+      "role": "reviewer",
+      "session": null,
+      "state": "not_created"
+    }
+  ],
+  "next": null,
+  "plan": {
+    "draft": {
+      "complete": true,
+      "editable": true,
+      "generation": 1,
+      "graph": {
+        "complete": true,
+        "edges": [
+          {
+            "external": false,
+            "from": 1,
+            "kind": "hard",
+            "to": 2
+          }
+        ],
+        "nodes": [
+          {
+            "id": 1,
+            "layer": 0,
+            "phase": 1
+          },
+          {
+            "id": 2,
+            "layer": 1,
+            "phase": 1
+          }
+        ]
+      },
+      "next_node": 3,
+      "nodes": [
+        {
+          "assignee": null,
+          "criteria": [
+            "The foundation tests pass"
+          ],
+          "deps": [],
+          "estimate_minutes": 0,
+          "id": 1,
+          "kind": "task",
+          "pipeline": "reviewed",
+          "role": "developer",
+          "text": "Implement the shared part.",
+          "title": "Build the foundation",
+          "writes": [
+            "src/base.rs"
+          ]
+        },
+        {
+          "assignee": null,
+          "criteria": [
+            "The feature tests pass"
+          ],
+          "deps": [
+            {
+              "node": 1
+            }
+          ],
+          "estimate_minutes": 0,
+          "id": 2,
+          "kind": "task",
+          "pipeline": "reviewed",
+          "role": "developer",
+          "text": "Use the new contract.",
+          "title": "Use the foundation",
+          "writes": [
+            "src/feature.rs"
+          ]
+        }
+      ],
+      "phase": {
+        "barrier": true,
+        "kind": "plan",
+        "n": 1,
+        "order": 1,
+        "state": "draft",
+        "title": "Foundation"
+      },
+      "revision": 2,
+      "unknown_fields": false
+    },
+    "draft_failure": null,
+    "epoch": 2,
+    "list": {
+      "default_pipeline": "reviewed",
+      "drafts_available": true,
+      "next": null,
+      "next_node": 3,
+      "next_phase": 2,
+      "revision": 2,
+      "routes": [
+        {
+          "pipeline": "reviewed",
+          "role": "developer"
+        }
+      ],
+      "rows": [
+        {
+          "kind": "queue",
+          "mode": "free",
+          "n": 0,
+          "state": "approved",
+          "title": "Queue"
+        },
+        {
+          "barrier": true,
+          "kind": "plan",
+          "n": 1,
+          "order": 1,
+          "state": "draft",
+          "title": "Foundation"
+        }
+      ],
+      "team": "00000000-0000-4000-8000-00000000beef"
+    },
+    "list_failure": null,
+    "selected": 1
+  },
+  "revision": 2,
+  "settings": {
+    "caps": {
+      "max_members": 6,
+      "max_open_questions": 3,
+      "max_open_tasks": 500,
+      "max_phase_tasks": 50
+    },
+    "delegations": {
+      "accept_results": true,
+      "answer_members": true,
+      "confirm_trust": true,
+      "merge_accepted": true,
+      "resume_exited": true
+    },
+    "integration": "branch",
+    "land_allowed": false,
+    "phase_acceptance": "lead",
+    "plan_approval": "review",
+    "queue": true,
+    "routing": "direct",
+    "timers": {
+      "answer_escalate_minutes": 10,
+      "inbox_interval_seconds": 120,
+      "lead_stall_minutes": 20,
+      "remind_lead_minutes": 15,
+      "remind_person_minutes": 60,
+      "report_timeout_seconds": 120,
+      "resume_limit_per_hour": 3,
+      "start_timeout_seconds": 180
+    }
+  },
+  "truncated": false
+}

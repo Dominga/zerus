@@ -170,6 +170,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
+        Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),
         Operation::RenameTeam { .. } => editing::rename(ctx),

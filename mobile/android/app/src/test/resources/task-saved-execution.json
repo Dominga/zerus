@@ -1,0 +1,499 @@
+{
+  "version": 1,
+  "meaning": "Saved evidence only; no native status, executor queue or control authority.",
+  "cases": [
+    {
+      "name": "submitted",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Submitted — begin unconfirmed"
+    },
+    {
+      "name": "running",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "running",
+          "at": 1700000000000,
+          "began_at": 1700000001000,
+          "progress_at": 1700000002000,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Begin recorded"
+    },
+    {
+      "name": "paused",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "paused",
+          "at": 1700000000000,
+          "began_at": 1700000001000,
+          "progress_at": 1700000002000,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Pause recorded"
+    },
+    {
+      "name": "ready",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "ready",
+          "at": 1700000000000,
+          "began_at": 1700000001000,
+          "progress_at": 1700000002000,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Ready for review recorded"
+    },
+    {
+      "name": "cancelled",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "cancelled",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Cancellation recorded"
+    },
+    {
+      "name": "not_started",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "not_started",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Not started"
+    },
+    {
+      "name": "unknown",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "unknown",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": true,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Delivery unknown"
+    },
+    {
+      "name": "unconfirmed",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "unconfirmed",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Begin unconfirmed"
+    },
+    {
+      "name": "legacy",
+      "schema": 6,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "",
+          "generation": 0,
+          "origin": "start",
+          "executor": null,
+          "request_id": "",
+          "requirement": 2,
+          "phase": "unconfirmed",
+          "at": 0,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": true
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Begin unconfirmed"
+    },
+    {
+      "name": "uncertain-without-current",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": null,
+        "conflict": true,
+        "has_unknown": true,
+        "has_unexplained": true
+      },
+      "available": true,
+      "phase_label": null
+    },
+    {
+      "name": "older-unknown-beside-begun",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "running",
+          "at": 1700000000000,
+          "began_at": 1700000001000,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": true,
+        "has_unexplained": false
+      },
+      "available": true,
+      "phase_label": "Begin recorded"
+    },
+    {
+      "name": "absent",
+      "schema": 8,
+      "execution": null,
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "future-schema",
+      "schema": 999,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "overbound-attempts",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 257,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "missing-executor",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": null,
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "overlong-identity",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "invalid-running",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "running",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": false
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    },
+    {
+      "name": "invalid-legacy",
+      "schema": 8,
+      "execution": {
+        "requirement": 4,
+        "attempts": 3,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "generation": 3,
+          "origin": "send",
+          "executor": {
+            "machine": "22222222-2222-4222-8222-222222222222",
+            "session": "codex/example/worker",
+            "session_id": "launch_id:33333333-3333-4333-8333-333333333333"
+          },
+          "request_id": "44444444-4444-4444-8444-444444444444",
+          "requirement": 2,
+          "phase": "submitted",
+          "at": 1700000000000,
+          "began_at": null,
+          "progress_at": null,
+          "legacy": true
+        },
+        "conflict": false,
+        "has_unknown": false,
+        "has_unexplained": false
+      },
+      "available": false,
+      "phase_label": null
+    }
+  ]
+}

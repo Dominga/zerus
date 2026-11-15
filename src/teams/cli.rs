@@ -10,6 +10,7 @@ mod catalog_cmd;
 mod commands;
 mod create;
 mod input;
+mod phases;
 mod reads;
 #[cfg(test)]
 mod tests;
@@ -19,7 +20,7 @@ use serde_json::{json, Value};
 use zerus_team_plan::problem::code;
 use zerus_team_plan::Problem;
 
-pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|snapshot|receipt|import|export | template list|show|save|import|export|remove | create --template ID | list|waiting|status|inbox|queue|cards|journal [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | current | settings|pause|resume|stop|archive|decide|admit|route|set-deps|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member|add-member|swap-member|rename-team|set-goal (JSON on stdin)";
+pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|snapshot|receipt|import|export | template list|show|save|import|export|remove | create --template ID | list|waiting|status|inbox|queue|cards|journal|phases [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | phase --team ID --phase N | current | settings|pause|resume|stop|archive|decide|admit|route|set-deps|submit-draft-phase|edit-draft-phase|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member|add-member|swap-member|rename-team|set-goal (JSON on stdin)";
 
 /// The running command. `args` are the words after `team`; `provided` is a
 /// test's stdin, and `None` reads this command's own stdin when it needs one.
@@ -54,6 +55,7 @@ fn execute(
         "catalog" | "template" => catalog_cmd::run(config, caller, command, rest, provided),
         "create" => commands::create(config, caller, rest, provided),
         "status" => reads::status(config, caller, rest),
+        "phases" | "phase" => phases::read(config, caller, command, rest),
         "list" => reads::list_teams(config, caller, rest),
         "waiting" => reads::waiting(config, caller, rest),
         "inbox" | "queue" | "cards" | "journal" => reads::list(config, caller, command, rest),
@@ -120,7 +122,8 @@ fn problem_reply(mut problem: Problem, read: bool) -> (Value, i32) {
 fn is_read(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some(
-            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current",
+            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current"
+            | "phases" | "phase",
         ) => true,
         Some("catalog" | "template") => matches!(
             args.get(1).map(String::as_str),

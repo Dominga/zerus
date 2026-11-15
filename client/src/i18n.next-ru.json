@@ -32,6 +32,7 @@
   "%1 is stopped. How should it start before your message is sent?": "Сессия %1 остановлена. Как запустить её перед отправкой сообщения?",
   "%1 m": "%1 мин",
   "%1 m left": "Осталось %1 мин",
+  "%1 members": "Участников: %1",
   "%1 more accounts are not shown.": "Ещё не показано учётных записей: %1.",
   "%1 more in this stage": "Ещё %1 на этом этапе",
   "%1 need attention": "Требуют внимания: %1",

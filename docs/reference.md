@@ -7550,6 +7550,36 @@ residue it was. It is only ever the person's action: no delivery or retry uses
 it. The read is `action: "composer"`, which returns the text, `clearable` and
 the reason when it is not.
 
+**Release unconfirmed input** uses the same Terminal toolbar slot for a local
+Claude session whose conversation identity is already known, whose native
+composer is verified empty, and whose previous input remains unconfirmed
+(zerus-iitw8.9). It requires the person's explicit **I checked Terminal: mark
+the previous input as handled** confirmation. The message may or may not have
+reached Claude. This action sends no keys, does not send or retype the message,
+and does not claim that Claude accepted it. A busy agent, copy mode, an active
+delivery proof, a changed input or terminal, and unknown native state refuse it.
+If hooks never established a conversation identity, the identity refusal stays;
+finish startup or repair the hooks in Terminal instead.
+
+The matching `hgs acknowledge-input SESSION --json` is available on Linux and
+macOS only in a verified foreground person terminal on that computer, outside
+Zerus agents. Agent descendants, hosted agent calls and unattended or remote
+CLI requests are refused. Its bounded JSON input names `request_id`, `name`,
+`expected_run_id`, `expected_conversation_id`, `original_request_id`,
+`pending_at`, `terminal_binding_id` and `expires_at` (at most six seconds ahead).
+The composer read supplies the exact original request and timestamp in
+`composer.recovery`; review that input before authorizing the command. A JSON
+role or confirmation flag grants no authority. The desktop uses its native
+frontend request authority instead of this CLI terminal path.
+
+The settlement is audited as `person-acknowledged-unknown`, with the original
+request, run, conversation and terminal binding. The record keeps only its
+latest acknowledgment; exact-ID audit reads are byte bounded and never scan
+history. Native `input_seen_at`, clearing evidence and the original delivery
+receipt remain unchanged. Repeating the same acknowledgment returns its receipt
+without another effect; an interrupted reservation remains unknown and is never
+replayed. A later input has its own gate and cannot inherit the earlier release.
+
 While a send to that run from any client (another desktop, a phone, an agent
 or a task) is still in its proof window, both the read and the clear refuse, and
 nothing is typed (zerus-wkj9l.1). The proof window lasts while the send's

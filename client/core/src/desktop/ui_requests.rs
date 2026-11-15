@@ -22,6 +22,9 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    InputAcknowledge {
+        acknowledgment: Box<crate::input_acknowledgment::Acknowledgment>,
+    },
     WorktreeProgramStop {
         intent: Box<crate::worktree_programs::invocation::Intent>,
     },
@@ -142,6 +145,7 @@ impl Request {
     }
     pub fn id(&self) -> &str {
         match self {
+            Self::InputAcknowledge { acknowledgment } => &acknowledgment.request_id,
             Self::WorktreeProgramStop { intent } => intent.request_id(),
             Self::WorktreeProgramCleanup { intent } => intent.request_id(),
             Self::CreationClone { intent } => &intent.clone_request_id,
@@ -169,6 +173,7 @@ impl Request {
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::InputAcknowledge { .. } => "input_acknowledge",
             Self::WorktreeProgramStop { .. } => "worktree_program_stop",
             Self::WorktreeProgramCleanup { .. } => "worktree_program_cleanup",
             Self::CreationClone { .. } => "creation_clone",
@@ -196,6 +201,7 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::InputAcknowledge { acknowledgment } => acknowledgment.valid(),
             Self::WorktreeProgramStop { intent } => intent.valid(),
             Self::WorktreeProgramCleanup { intent } => intent.valid(),
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -391,6 +397,7 @@ impl Cache {
             envelope.request,
             Request::CacheMaintenance { .. }
                 | Request::DesktopOwnershipObserve { .. }
+                | Request::InputAcknowledge { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
@@ -521,6 +528,12 @@ impl Responder {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let mode = match &request {
+            Request::InputAcknowledge { .. } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service) {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
             Request::CacheMaintenance { .. } => {
                 let mode = self.ownership_mode.get().copied();
                 if mode != Some(super::ownership::Mode::Service) {
@@ -1721,6 +1734,32 @@ mod tests {
         let mut bad = serde_json::to_value(&value.request).unwrap();
         bad["confirmed"] = true.into();
         assert!(serde_json::from_value::<Request>(bad).is_err());
+    }
+
+    #[test]
+    fn input_acknowledgment_requires_cached_service_mode() {
+        use crate::desktop::ownership::Mode;
+        let mut envelope = envelope(1);
+        envelope.request = Request::InputAcknowledge {
+            acknowledgment: Box::new(crate::input_acknowledgment::Acknowledgment {
+                request_id: id(2),
+                name: "claude/example/review".into(),
+                expected_run_id: "run".into(),
+                expected_conversation_id: "conversation".into(),
+                original_request_id: id(3),
+                pending_at: 10.0,
+                terminal_binding_id: "a".repeat(64),
+                expires_at: 15.0,
+            }),
+        };
+        let cache = Cache::default();
+        assert!(cache.prepare(envelope.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Native))
+            .is_err());
+        assert!(cache
+            .prepare_with_mode(envelope, Some(Mode::Service))
+            .is_ok());
     }
 
     #[test]

@@ -215,7 +215,7 @@ struct TasksView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(tasks.taskChips(key), id: \.session) { chip in
-                    let selected = chip.session == tasks.tasksChosen
+                    let selected = TasksPresentation.sameSelection(chip.session, tasks.displayedTaskChosen)
                     Button { tasks.chooseTaskSession(key, chip.session) } label: {
                         HStack(spacing: 6) {
                             StatusDot(dot: chip.dot)
@@ -243,7 +243,7 @@ struct TasksView: View {
     }
 
     private func tabStrip(_ tasks: TasksModel) -> some View {
-        let counts = TasksPresentation.counts(tasks.taskListing, chosen: tasks.tasksChosen, onlyThisSession: tasks.tasksOnlyThisSession)
+        let counts = TasksPresentation.counts(tasks.taskListing, chosen: tasks.displayedTaskChosen, onlyThisSession: tasks.tasksOnlyThisSession)
         return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 18) {
@@ -274,8 +274,8 @@ struct TasksView: View {
     }
 
     private func cards(_ tasks: TasksModel) -> some View {
-        let cards = TasksPresentation.cards(tasks.taskListing, tab: tasks.taskTab, chosen: tasks.tasksChosen,
-                                            onlyThisSession: tasks.tasksOnlyThisSession, send: tasks.sendRoute, cancel: tasks.cancelRoute)
+        let cards = TasksPresentation.cards(tasks.taskListing, tab: tasks.taskTab, chosen: tasks.displayedTaskChosen,
+                                            onlyThisSession: tasks.tasksOnlyThisSession, send: tasks.sendRoute, cancel: tasks.cancelRoute, current: tasks.taskCurrentSession)
         let key = tasks.tasksKey
         return ScrollView {
             LazyVStack(spacing: 10) {
@@ -411,7 +411,7 @@ private struct DoneList: View {
                 }
                 ForEach(rows, id: \.uuid) { row in
                     let card = TaskCard(uuid: row.uuid, id: row.id, text: row.text, tab: .done,
-                                        sessionLabel: row.session.map { TasksPresentation.shortName($0.session) } ?? "any session",
+                                        sessionLabel: row.session.map { TasksPresentation.shortName(tasks.taskCurrentSession($0) ?? $0.session) } ?? "any session",
                                         highlighted: false, note: "",
                                         actions: [ActionState(.backToTodo, enabled: !tasks.taskBusy, reason: "Another task action is running", main: true)],
                                         anySession: row.session == nil)
@@ -436,7 +436,7 @@ private struct TaskInput: View {
     var body: some View {
         let tasks = app.tasks!
         let stage = tasks.taskTab == .backlog ? "Backlog" : "To do"
-        let reason = TasksPresentation.addReason(tasks.tasksChosen)
+        let reason = TasksPresentation.addReason(tasks.displayedTaskChosen)
         let blank = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let canAdd = !blank && reason.isEmpty
         HStack(alignment: .bottom, spacing: 8) {

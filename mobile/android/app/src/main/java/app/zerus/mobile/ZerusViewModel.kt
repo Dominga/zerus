@@ -998,13 +998,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val machine = machines.singleOrNull { it.connectionId == key.connectionId && it.id == session.target.computerId }
         machine?.machineId?.isNotEmpty() == true && taskSessionIdentity(session).isNotEmpty()
     }
-    private fun taskSessionIdentity(session: Session): String {
-        for (field in listOf("launch_id", "run_id")) {
-            val value = session.raw.opt(field)
-            if (value is String && value.isNotEmpty()) return "$field:$value"
-        }
-        return ""
-    }
+    private fun taskSessionIdentity(session: Session) = TasksPresentation.nativeIdentity(session)
+
     internal fun chooseTaskEditorAny(token: String) = changeTaskEditor(token) { it.copy(target = TaskTarget.AnySession) }
     internal fun chooseTaskEditorSession(token: String, session: Session) {
         val state = taskEditor.state?.takeIf { it.token == token } ?: return
@@ -2805,6 +2800,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun taskProject(session: Session) = session.projectKey?.takeIf { key -> projects.any { it.key == key && it.catalogued } }
     fun projectSessions(key: ProjectKey) = sessions.filter { it.projectKey == key && it.target.archiveId.isBlank() && it.target.agentId.isBlank() }
     fun taskChips(key: ProjectKey) = TasksPresentation.chips(projectSessions(key), machines)
+    fun taskCurrentSession(ref: SessionRef): String? {
+        val key = tasksKey ?: return null
+        return TasksPresentation.resolve(ref, machines, key.connectionId, projectSessions(key))?.target?.session
+    }
+    fun displayedTaskChosen(): ChosenSession? {
+        val chosen = tasksChosen ?: return null
+        return chosen.copy(name = taskCurrentSession(SessionRef(chosen.machineId, chosen.name, chosen.sessionId)) ?: chosen.name)
+    }
+    fun taskSessionLabel(task: TaskInfo) = TasksPresentation.sessionLabel(task, displayedTaskChosen(), ::taskCurrentSession)
+
     /** An operation counts when both the relay and the computer offer it. */
     private fun taskOperations(machine: Machine) =
         machineOperations[MachineKey(machine.connectionId, machine.id)].orEmpty() intersect relayOperations[machine.connectionId].orEmpty()
@@ -2828,7 +2833,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun openTasks(session: Session) {
         val key = taskProject(session) ?: return
         val machine = machines.firstOrNull { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
-        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()))
+        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty(), taskSessionIdentity(session)))
     }
     /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
     fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
@@ -2919,7 +2924,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val chosen = tasksChosen
         TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
         val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
-        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name))
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
         editTasks { it.add(text, stage, target, TaskPosition.End) }
     }
     private fun computerName(key: ProjectKey, computerId: String) =
@@ -3036,7 +3041,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val chosen = tasksChosen
         val session = if (!tasksOnlyThisSession) null else {
             TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
-            SessionRef(chosen!!.machineId, chosen.name)
+            SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId)
         }
         val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
         val connection = connections.find { it.id == key.connectionId } ?: return

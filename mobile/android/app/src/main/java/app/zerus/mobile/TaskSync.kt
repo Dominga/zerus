@@ -149,7 +149,12 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "The computer did not list its Done tasks." } }
         val result = receipt.optJSONObject("result") ?: error("The computer's Done list has no result.")
         val rows = result.optJSONArray("tasks")?.objects().orEmpty().map { row ->
-            val session = row.optJSONObject("session")?.let { app.zerus.mobile.replica.SessionRef(it.string("machine"), it.string("session")) }
+            val session = row.optJSONObject("session")?.let {
+                val id = if (!it.has("session_id")) "" else it.get("session_id").also { value ->
+                    require(value is String) { "The Done task has an invalid session identity." }
+                } as String
+                app.zerus.mobile.replica.SessionRef(it.string("machine"), it.string("session"), id)
+            }
             DoneRow(row.string("uuid"), row.string("id"), row.string("text"), session, row.optLong("accepted_at"))
         }
         val next = result.optJSONObject("next")?.let { DoneCursor(it.optLong("at"), it.string("uuid")) }

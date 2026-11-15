@@ -295,9 +295,16 @@ public actor TaskSync {
             throw TaskSyncError(error.isEmpty ? "The computer did not list its Done tasks." : error)
         }
         guard let result = receipt.object("result") else { throw TaskSyncError("The computer's Done list has no result.") }
-        let rows = result.objects("tasks").map { row in
-            DoneRow(uuid: row.string("uuid"), id: row.string("id"), text: row.string("text"),
-                    session: row.object("session").map { SessionRef(machine: $0.string("machine"), session: $0.string("session")) },
+        let rows = try result.objects("tasks").map { row in
+            let session = try row.object("session").map { value in
+                let id: String
+                if let raw = value["session_id"] {
+                    guard case .string(let string) = raw else { throw TaskSyncError("The Done task has an invalid session identity.") }
+                    id = string
+                } else { id = "" }
+                return SessionRef(machine: value.string("machine"), session: value.string("session"), sessionId: id)
+            }
+            return DoneRow(uuid: row.string("uuid"), id: row.string("id"), text: row.string("text"), session: session,
                     acceptedAt: Int64(row.int("accepted_at")))
         }
         let next = result.object("next").map { DoneCursor(at: Int64($0.int("at")), uuid: $0.string("uuid")) }

@@ -142,7 +142,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @Composable internal fun TasksScreen(model: ZerusViewModel) {
     val key = model.tasksKey ?: return
     TaskEditorSheet(model)
-    val chosen = model.tasksChosen
+    val chosen = model.displayedTaskChosen()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
@@ -192,7 +192,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         chips.forEach { chip ->
-                            FilterChip(selected = chip.session == chosen, onClick = { model.chooseTaskSession(key, chip.session) },
+                            FilterChip(selected = TasksPresentation.sameSelection(chip.session, chosen), onClick = { model.chooseTaskSession(key, chip.session) },
                                 label = { Text(TasksPresentation.shortName(chip.session.name), maxLines = 1) }, leadingIcon = { StatusDot(chip.dot) })
                         }
                         AssistChip(onClick = { allSessions = true }, label = { Icon(Icons.Default.MoreHoriz, "Sessions of every project", Modifier.size(18.dp)) })
@@ -208,7 +208,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                     if (model.taskBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
                     if (model.taskTab == TaskTab.DONE) DoneList(model, Modifier.weight(1f), onOpen = { openTask = it.uuid })
                     else {
-                        val cards = TasksPresentation.cards(tasks, model.taskTab, chosen, model.tasksOnlyThisSession, model::sendRoute, model::cancelRoute)
+                        val cards = TasksPresentation.cards(tasks, model.taskTab, chosen, model.tasksOnlyThisSession, model::sendRoute, model::cancelRoute, model::taskCurrentSession)
                         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             if (cards.isEmpty()) item { Text("Nothing ${model.taskTab.label.replaceFirstChar { it.lowercase() }}.",
                                 Modifier.padding(8.dp), color = TasksColors.Muted) }
@@ -324,7 +324,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             Text(if (model.doneTotal > 0) "Nothing done in the last 7 days." else "Nothing done.", Modifier.padding(8.dp), color = TasksColors.Muted)
         }
         items(rows, key = { it.uuid }) { row ->
-            val card = TaskCard(row.uuid, row.id, row.text, TaskTab.DONE, row.session?.session?.let(TasksPresentation::shortName) ?: "any session", false, "",
+            val card = TaskCard(row.uuid, row.id, row.text, TaskTab.DONE, row.session?.let { TasksPresentation.shortName(model.taskCurrentSession(it) ?: it.session) } ?: "any session", false, "",
                 listOf(ActionState(TaskAction.BACK_TO_TODO, !model.taskBusy, "Another task action is running", main = true)), anySession = row.session == null)
             TaskCardView(card, onOpen = { model.openDoneTask(row, onOpen) }, onAction = { state ->
                 if (!state.enabled) model.taskNotice = state.reason
@@ -372,7 +372,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     val targetChanged = target != original.target
     // Send now's reason follows the session chosen here, before it is saved.
     val draft = task.copy(target = target)
-    val actions = TasksPresentation.cards(listOf(draft), tab, model.tasksChosen, false, model::sendRoute, model::cancelRoute)
+    val actions = TasksPresentation.cards(listOf(draft), tab, model.displayedTaskChosen(), false, model::sendRoute, model::cancelRoute, model::taskCurrentSession)
         .single().actions.filter { it.action != TaskAction.EDIT }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = TasksColors.Sheet, dragHandle = { SheetHandle() }) {
@@ -389,7 +389,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             if (editable) OutlinedButton(onClick = { choosing = true }, Modifier.fillMaxWidth()) {
                 Text("Session: $sessionLabel", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Default.ArrowDropDown, null)
-            } else Text("Session: ${TasksPresentation.sessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
+            } else Text("Session: ${model.taskSessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
             if (TasksPresentation.note(task).isNotBlank()) Text(TasksPresentation.note(task), style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
             SavedExecutionSection(SavedExecutionPresentation.section(task, key.id, model.taskExecutionStale, ::time))
             if (task.schema == 8L) OutlinedButton(onClick = { model.openTaskEditor(key, task); onDismiss() }) {
@@ -441,7 +441,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 colors = ListItemDefaults.colors(containerColor = TasksColors.Sheet))
             model.taskChips(key).filter { it.session.machineId.isNotBlank() }.forEach { chip ->
                 ListItem(headlineContent = { Text(TasksPresentation.shortName(chip.session.name)) }, leadingContent = { StatusDot(chip.dot) },
-                    modifier = Modifier.clickable { onPick(TaskTarget.Session(SessionRef(chip.session.machineId, chip.session.name))) },
+                    modifier = Modifier.clickable { onPick(TaskTarget.Session(SessionRef(chip.session.machineId, chip.session.name, chip.session.sessionId))) },
                     colors = ListItemDefaults.colors(containerColor = TasksColors.Sheet))
             }
         }

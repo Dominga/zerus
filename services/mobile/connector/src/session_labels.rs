@@ -89,7 +89,13 @@ impl Selection {
             generation: crate::private_state::random_id().ok()?,
         })
     }
-    pub(crate) fn current(&self) -> bool {
+    pub(crate) fn allows_native_edits(selection: Option<&Self>) -> bool {
+        // Selection exists only after the maintained configuration reader and
+        // canonical path match. Native independently verifies its private
+        // profile; label-query directory permissions grant no edit authority.
+        !cfg!(windows) && selection.is_some()
+    }
+    fn current(&self) -> bool {
         let Ok(Some(store)) = Store::try_lock(&self.directory, false) else {
             return false;
         };
@@ -364,6 +370,19 @@ mod tests {
             labels_by_id: true,
         };
         (temp, selection, query, context, at)
+    }
+    #[test]
+    fn a_readable_canonical_configuration_keeps_native_edits_when_its_parent_is_0755() {
+        let (temp, selection, _, _, _) = fixture();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::workspace_cli::read_config(&selection.path)
+            .expect("the maintained reader supports this safe configuration mode");
+        assert!(Selection::allows_native_edits(Some(&selection)),"canonical encrypted task edits must not depend on the separate private label-query directory");
+        assert!(!Selection::allows_native_edits(None));
+        assert!(
+            !selection.current(),
+            "private label-query policy remains unchanged"
+        );
     }
     fn put(selection: &Selection, name: &str, value: &impl serde::Serialize) {
         let store = Store::lock(&selection.directory, false).unwrap();

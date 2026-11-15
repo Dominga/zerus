@@ -249,10 +249,7 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
-        let native_edits_slot = !cfg!(windows)
-            && labels
-                .as_ref()
-                .is_some_and(session_labels::Selection::current);
+        let native_edits_slot = session_labels::Selection::allows_native_edits(labels.as_ref());
         let work = async {
             if let Some(private_dir) = config.encrypted_workspace {
                 #[cfg(unix)]

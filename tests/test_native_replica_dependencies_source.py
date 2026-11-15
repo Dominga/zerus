@@ -43,7 +43,7 @@ class NativeReplicaDependencies(unittest.TestCase):
     def test_ios_fingerprint_covers_each_manifest_and_source_directory(self):
         source = (ROOT / 'mobile/ios/scripts/build-replica.sh').read_text()
         stamp = source.split('stamp=$(', 1)[1].split('\nstamp_file=', 1)[0]
-        paths = set(re.findall(r'crates/[A-Za-z0-9_./-]+', stamp))
+        paths = set(re.findall(r'(?:crates|services)/[A-Za-z0-9_./-]+', stamp))
         required = {crate + suffix for crate in replica_crates() for suffix in ['/Cargo.toml', '/src']}
         self.assertFalse(required - paths, 'Cargo dependency can change without changing the cache stamp')
 

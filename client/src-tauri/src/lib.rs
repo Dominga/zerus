@@ -14,6 +14,8 @@ mod active_app;
 mod analytics;
 #[cfg(feature = "live")]
 mod approvals;
+#[cfg(feature = "live")]
+mod catalog_editor;
 // The path-shared child_environment module must use the linked core gate,
 // never a second copy of unix_spawn.rs and its process-local mutex.
 #[cfg(unix)]
@@ -129,7 +131,6 @@ mod task_settings;
 mod task_start;
 #[cfg(feature = "live")]
 mod teams;
-mod catalog_editor;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]

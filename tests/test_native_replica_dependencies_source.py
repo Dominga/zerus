@@ -3,13 +3,14 @@ from pathlib import Path
 import re
 import shlex
 import tomllib
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def replica_crates():
-    pending = [ROOT / 'crates/replica-ffi']
+def replica_crates(root=ROOT):
+    pending = [root / 'crates/replica-ffi']
     found = set()
     while pending:
         crate = pending.pop().resolve()
@@ -17,16 +18,50 @@ def replica_crates():
             continue
         found.add(crate)
         manifest = tomllib.loads((crate / 'Cargo.toml').read_text())
-        tables = [manifest.get('dependencies', {})]
-        tables += [target.get('dependencies', {}) for target in manifest.get('target', {}).values()]
+        # Cargo resolves manifests for dev/build and every target table even
+        # when the selected command only builds the production library.
+        sections = [manifest, *manifest.get('target', {}).values()]
+        tables = [section.get(kind, {}) for section in sections
+                  for kind in ('dependencies', 'dev-dependencies', 'build-dependencies')]
         for dependencies in tables:
             for dependency in dependencies.values():
                 if isinstance(dependency, dict) and 'path' in dependency:
                     pending.append(crate / dependency['path'])
-    return {crate.relative_to(ROOT).as_posix() for crate in found}
+    return {crate.relative_to(root).as_posix() for crate in found}
 
 
 class NativeReplicaDependencies(unittest.TestCase):
+    def test_resolution_walk_includes_dev_build_target_and_transitive_paths(self):
+        with tempfile.TemporaryDirectory(prefix='zerus-native-closure-') as folder:
+            root = Path(folder)
+            start = root / 'crates/replica-ffi'
+            start.mkdir(parents=True)
+            (start / 'Cargo.toml').write_text('''[package]
+name = "fixture"
+version = "0.1.0"
+[dependencies]
+normal = { path = "../../native/normal" }
+[dev-dependencies]
+dev = { path = "../../native/dev" }
+[build-dependencies]
+build = { path = "../../native/build" }
+[target.'cfg(unix)'.dependencies]
+target_normal = { path = "../../native/target-normal" }
+[target.'cfg(windows)'.dev-dependencies]
+target_dev = { path = "../../native/target-dev" }
+[target.'cfg(target_os = "macos")'.build-dependencies]
+target_build = { path = "../../native/target-build" }
+''')
+            leaves = {'normal', 'dev', 'build', 'target-normal', 'target-dev', 'target-build', 'nested'}
+            for name in leaves:
+                crate = root / 'native' / name
+                crate.mkdir(parents=True)
+                text = f'[package]\nname = "{name}"\nversion = "0.1.0"\n'
+                if name == 'dev':
+                    text += '[build-dependencies]\nnested = { path = "../nested" }\n'
+                (crate / 'Cargo.toml').write_text(text)
+            self.assertEqual(replica_crates(root), {'crates/replica-ffi'} | {'native/' + name for name in leaves})
+
     def test_android_task_inputs_cover_every_local_native_crate(self):
         source = (ROOT / 'mobile/android/app/build.gradle.kts').read_text()
         declaration = re.search(r'val replicaSources = (.*?)\.flatMap', source, re.S).group(1)

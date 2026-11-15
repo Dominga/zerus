@@ -15,7 +15,7 @@ shift
 ios=$(cd "$(dirname "$0")/.." && pwd)
 repo=$(git -C "$ios" rev-parse --show-toplevel)
 revision=$(git -C "$repo" rev-parse --short=12 HEAD)
-[ -z "$(git -C "$repo" status --porcelain -- mobile/ios crates/replica crates/replica-ffi crates/file-lock services/mobile/crypto)" ] || revision="$revision+dirty"
+[ -z "$(git -C "$repo" status --porcelain -- mobile/ios crates/replica crates/replica-ffi crates/file-lock services/mobile/crypto services/mobile/endpoint services/mobile/windows-private crates/mobile-task-edit)" ] || revision="$revision+dirty"
 # One scratch copy per worktree on the Mac, named after the worktree folder and path.
 slug=$(basename "$repo" | tr -c 'A-Za-z0-9._-' '-')-$(printf '%s' "$repo" | shasum | cut -c1-8)
 remote_dir="Library/Caches/zerus-ios/src/$slug"
@@ -31,7 +31,10 @@ rsync -a --delete -e "ssh -o BatchMode=yes" \
     --include /crates/file-lock/ --include '/crates/file-lock/**' \
     --include /crates/replica-ffi/ --include '/crates/replica-ffi/**' \
     --include /services/ --include /services/mobile/ \
-    --include /services/mobile/crypto/ --include '/services/mobile/crypto/**' --exclude '*' \
+    --include /services/mobile/crypto/ --include '/services/mobile/crypto/**' \
+    --include /services/mobile/endpoint/ --include '/services/mobile/endpoint/**' \
+    --include /services/mobile/windows-private/ --include '/services/mobile/windows-private/**' \
+    --include /crates/mobile-task-edit/ --include '/crates/mobile-task-edit/**' --exclude '*' \
     "$repo/" "$host:$remote_dir/"
 
 quoted=""

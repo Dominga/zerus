@@ -46,6 +46,9 @@ val replicaSources = listOf(
     rootProject.file("../../crates/replica"),
     rootProject.file("../../crates/file-lock"),
     rootProject.file("../../services/mobile/crypto"),
+    rootProject.file("../../services/mobile/endpoint"),
+    rootProject.file("../../services/mobile/windows-private"),
+    rootProject.file("../../crates/mobile-task-edit"),
 ).flatMap {
     listOf(it.resolve("src"), it.resolve("Cargo.toml"), it.resolve("Cargo.lock"))
 } + replicaCrate.resolve("uniffi.toml")

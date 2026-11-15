@@ -77,6 +77,8 @@ mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
+mod task_binding_index;
+pub(crate) use task_binding_index::rows as task_binding_rows;
 // Process projection data. The advisory writer never grants caller authority.
 mod process_index;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1502,6 +1504,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("receipt-index-worker") {
         if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
         return receipt_index::worker();
+    }
+    if args.first().map(String::as_str) == Some("task-binding-index-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected task routing worker arguments".into());
+        }
+        return task_binding_index::worker();
     }
     if args.first().map(String::as_str)==Some("receipt-index-page") {
         return attachments::page_dispatch(&args[1..]);

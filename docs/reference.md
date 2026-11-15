@@ -5139,6 +5139,19 @@ page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
 nothing changed, after checking that page's rows against their files.
 
+Task lists check the caller before discovering session bindings. Only session
+references in the selected rows need routing metadata; an empty or unchanged
+page, or one containing only remote references, reads no session bodies for
+routing. The caller's own record is still checked for agent proof.
+The disposable `task-routing-v1` cache keeps routing fields without command
+output and verifies the canonical binding namespaces and file versions on each
+lookup. Cold or changed metadata is refreshed in bounded slices, with a finite
+background helper when needed. While coverage is incomplete, the command
+returns `Task session routing is incomplete` and asks the caller to retry;
+unreadable canonical evidence returns an unavailable error. Neither case
+reports a referenced session as missing. This cache supplies task-list labels
+only; caller proof and task changes still verify canonical session records.
+
 `--session ID` (`launch_id:...` or `run_id:...`, with `--host` for a session on
 another computer) pages one session's view of the stage: the tasks its
 identity owns, the session of a task in progress, in review or done, or the

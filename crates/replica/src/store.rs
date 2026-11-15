@@ -1404,6 +1404,19 @@ impl ProjectStore {
         self.save_checked(task, true)
     }
 
+    pub(crate) fn save_mobile_received(&self, task: &mut TaskDoc) -> Result<()> {
+        let _turn = self.admission.enter();
+        self.check_mobile_received(task)?;
+        self.save_checked(task, true)
+    }
+
+    pub(crate) fn check_mobile_received(&self, task: &TaskDoc) -> Result<()> {
+        if !self.phone && task.schema() >= crate::task::cutover_schema() {
+            return Err(Error::new("This sealed task needs an authenticated mobile edit receipt; its draft is kept for review on its computer"));
+        }
+        Ok(())
+    }
+
     /// Reads a task, saves it when its execution schema needs the repair, and
     /// stamps its files with `stamp`, all in one admission: the version read
     /// and the stamps taken are one observation, which no save of this store

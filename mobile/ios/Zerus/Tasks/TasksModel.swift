@@ -19,6 +19,8 @@ final class TasksModel {
     private(set) var tasksKey: ProjectKey?
     private(set) var tasksChosen: ChosenSession?
     private(set) var taskListing: [TaskInfo] = []
+    /// The retained local listing failed its latest refresh. Never native freshness.
+    private(set) var taskExecutionStale = false
     var taskTab: TaskTab = .todo
     private(set) var tasksOnlyThisSession = false
     /// The screen's next notice.
@@ -213,6 +215,7 @@ final class TasksModel {
         tasksKey = key
         tasksChosen = chosen
         taskListing = []
+        taskExecutionStale = false
         doneRows = []
         doneNext = nil
         doneTotal = 0
@@ -229,6 +232,7 @@ final class TasksModel {
     func closeTasks() {
         tasksKey = nil
         taskNotice = nil
+        taskExecutionStale = false
     }
 
     /// Done lists from a computer each time it is opened, so tasks accepted since show.
@@ -256,12 +260,14 @@ final class TasksModel {
                 }
             }
             guard let listing = read else {
+                if tasksKey == key { taskExecutionStale = true }
                 if tasksKey == key && (selectDefault || taskListing.isEmpty) {
                     taskNotice = failure.isEmpty ? "The tasks could not be read." : failure
                 }
                 return
             }
             guard tasksKey == key else { return }
+            taskExecutionStale = false
             taskListing = listing.tasks
             reviewCounts[key] = listing.tasks.count { $0.stage == .review }
             if selectDefault {

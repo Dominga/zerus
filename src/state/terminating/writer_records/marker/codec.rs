@@ -51,6 +51,7 @@ fn target(record: &Value) -> Result<serde_json::Map<String, Value>> {
     if !record.is_object()
         || record["version"] != 1
         || record.get("terminating").is_some()
+        || record.get("layout_transition").is_some()
         || record.get("pausing").is_some()
         || record["resume_pending"] == true
         || record

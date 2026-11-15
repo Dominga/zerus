@@ -3964,8 +3964,20 @@ class RequestedConversation(Harness):
 @unittest.skipIf(LEGACY_STATE, "archive records are supported by the native lifecycle model")
 class Archive(Harness):
     def rows(self, name=None):
-        rows = json.loads(self.hgs("ls", "--local", "--json"))["sessions"]
-        return [row for row in rows if name is None or row["name"] == name]
+        # Lifecycle controls assert ready archive projections. Cold/incomplete
+        # coverage is exercised separately in test_archive_pages; the native
+        # metadata worker never starts an agent or changes the selected source.
+        if not LEGACY_STATE:
+            self.hgs("__state", "archive-catalog-worker")
+        pages = []
+        def ready():
+            page = json.loads(self.hgs("ls", "--local", "--json"))
+            if page.get("archive_page", {}).get("catalog_complete") is False:
+                return False
+            pages.append(page)
+            return True
+        self.wait(ready)
+        return [row for row in pages[0]["sessions"] if name is None or row["name"] == name]
 
     def archived(self, name=None):
         return [row for row in self.rows(name) if row.get("state") == "archived"]

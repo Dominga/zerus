@@ -7,6 +7,7 @@ mod cutover_root;
 mod error;
 pub mod execution;
 pub mod ids;
+pub mod mobile_edit;
 mod ops;
 pub mod phone;
 mod project;

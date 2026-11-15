@@ -19,6 +19,7 @@ test-hooks = []
 # limits, without the relay's HTTP server, database or TLS stack.
 zerus-relay = { path = "../relay", default-features = false }
 zerus-mobile-crypto = { path = "../crypto" }
+zerus-mobile-endpoint = { path = "../endpoint" }
 zerus-watch-protocol = { path = "../../../crates/watch-protocol" }
 zerus-file-lock = { path = "../../../crates/file-lock" }
 serde = { version = "1", features = ["derive"] }
@@ -59,6 +60,8 @@ zerus-windows-private = { path = "../windows-private" }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+zerus-mobile-task-edit = { path = "../../../crates/mobile-task-edit" }
+zerus-replica = { path = "../../../crates/replica" }
 tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }
 
 [profile.release]

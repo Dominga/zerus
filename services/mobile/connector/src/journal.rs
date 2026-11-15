@@ -24,6 +24,8 @@ use zerus_relay::protocol::{OPERATIONS, READS};
 
 #[path = "encrypted_journal.rs"]
 mod encrypted;
+#[path = "mobile_edit_journal.rs"]
+mod mobile_edit;
 
 pub const JOURNAL: &str = "journal.sqlite3";
 pub const LOCK: &str = "connector.lock";
@@ -226,12 +228,17 @@ impl Journal {
                 "UPDATE requests SET delivered_at=? WHERE delivered=1 AND delivered_at IS NULL",
                 [now],
             )?;
-            let running: Vec<(String, String)> = tx
-                .prepare("SELECT request_id, operation FROM requests WHERE state='running'")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            let qualified_column = if mobile_edit::has_table(&tx)? {
+                "EXISTS (SELECT 1 FROM qualified_task_edits q WHERE q.request_id=requests.request_id)"
+            } else {
+                "0"
+            };
+            let running: Vec<(String, String, bool)> = tx
+                .prepare(&format!("SELECT request_id, operation, {qualified_column} FROM requests WHERE state='running'"))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            for (request_id, operation) in running {
-                let state = if is_mutation(&operation) {
+            for (request_id, operation, qualified) in running {
+                let state = if is_mutation(&operation) || qualified {
                     "uncertain"
                 } else {
                     "failed"
@@ -288,7 +295,14 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
         )?;
-        tx.execute(TASK_READ_PRUNE, [short])?;
+        if mobile_edit::has_table(&tx)? {
+            tx.execute(
+                &format!("{TASK_READ_PRUNE} AND {}", mobile_edit::ABSENT),
+                [short],
+            )?;
+        } else {
+            tx.execute(TASK_READ_PRUNE, [short])?;
+        }
         tx.execute(
             &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
             [now - 3600.0],
@@ -348,7 +362,17 @@ impl Journal {
             }
             return Ok(false);
         }
-        let reads = READS.contains(&operation);
+        let has_qualified = mobile_edit::has_table(&tx)?;
+        let qualified: bool = has_qualified
+            && tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM qualified_task_edits WHERE request_id=?)",
+                [request_id],
+                |row| row.get(0),
+            )?;
+        if qualified && operation != "task_exchange" {
+            return Err(refused(CONFLICT));
+        }
+        let reads = READS.contains(&operation) && !qualified;
         let count: i64 = tx.query_row(
             &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL})=?"),
             [reads as i64],
@@ -357,10 +381,15 @@ impl Journal {
         // The legacy NOT-IN count includes new Rust-only reads. Correct only
         // this additive class, in the same transaction as admission.
         let git_reads: i64 = tx.query_row(GIT_STATUS_COUNT_SQL, [], |row| row.get(0))?;
-        let count = if reads {
-            count + git_reads
+        let qualified_count: i64 = if has_qualified {
+            tx.query_row(mobile_edit::COUNT, [], |row| row.get(0))?
         } else {
-            count - git_reads
+            0
+        };
+        let count = if reads {
+            count + git_reads - qualified_count
+        } else {
+            count - git_reads + qualified_count
         };
         if count >= if reads { READ_CAP } else { MUTATION_CAP } {
             return Err(refused(RETAINED_LIMIT));

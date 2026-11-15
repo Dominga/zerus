@@ -14,7 +14,11 @@ struct TaskEditorState: Identifiable {
     var loading = false, busy = false, error = "", complete = false
 }
 struct TaskEditorPicker: Equatable {
-    let id = UUID(), token: UUID, draftId: String, scope: TaskEditDraftScope, comment: Bool
+    let id = UUID()
+    let token: UUID
+    let draftId: String
+    let scope: TaskEditDraftScope
+    let comment: Bool
 }
 
 @MainActor @Observable final class TaskEditorModel {

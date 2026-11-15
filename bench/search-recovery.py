@@ -10,7 +10,7 @@ if not 1<=count<=50_000 or not 0<=size<=64<<20:raise SystemExit('Use 1..50000 se
 if not (sys.platform.startswith('linux') or sys.platform=='darwin'):raise SystemExit('This manual benchmark needs Linux or macOS wait4 accounting.')
 scratch=Path(os.environ.get('SEARCH_SCRATCH',tempfile.gettempdir()));scratch.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
- root=Path(raw);state=root/'sessions';state.mkdir(mode=0o700)
+ root=Path(raw).resolve();state=root/'sessions';state.mkdir(mode=0o700)
  for d in ['config','tmp','tmux','home']:(root/d).mkdir(mode=0o700)
  env={k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ['TMUX','TMUX_PANE']}
  env.update(HOME=str(root/'home'),HGS_STATE_DIR=str(state),HGS_CONFIG_DIR=str(root/'config'),TMPDIR=str(root/'tmp'),TMUX_TMPDIR=str(root/'tmux'))

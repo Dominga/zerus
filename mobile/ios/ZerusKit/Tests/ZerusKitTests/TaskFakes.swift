@@ -12,6 +12,7 @@ final class FakeComputer: Sendable {
         var paths: [String] = []
         /// A failed exchange receipt with this error.
         var refusal: String?
+        var modifyExchange: (@Sendable (JSONObject) -> JSONObject)?
         /// Operations whose receipts stay queued, as a computer that has not claimed them yet.
         var queued: Set<String> = []
         var delay: Duration = .zero
@@ -37,10 +38,10 @@ final class FakeComputer: Sendable {
     private func reply(_ recorded: StubProtocol.Recorded) -> StubProtocol.Reply {
         guard let envelope = recorded.json?.object else { return StubProtocol.json(400, #"{"error":"no envelope"}"#) }
         let operation = envelope.string("operation")
-        let (delay, refusal, receipt, raw, queued) = state.withLock { state in
+        let (delay, refusal, receipt, raw, queued, modifyExchange) = state.withLock { state in
             state.envelopes.append(envelope)
             state.paths.append(recorded.url.path)
-            return (state.delay, state.refusal, state.receipts[operation], state.raw[operation], state.queued.contains(operation))
+            return (state.delay, state.refusal, state.receipts[operation], state.raw[operation], state.queued.contains(operation), state.modifyExchange)
         }
         if delay > .zero { Thread.sleep(forTimeInterval: Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18) }
         if let raw { return raw() }
@@ -54,7 +55,8 @@ final class FakeComputer: Sendable {
             } else {
                 do {
                     let answer = try store.answerExchange(request: JSON.object(payload).compact)
-                    outcome = ("completed", try JSON.parse(answer), .null)
+                    let parsed = try JSON.parse(answer)
+                    outcome = ("completed", parsed.object.map { .object(modifyExchange?($0) ?? $0) } ?? parsed, .null)
                 } catch {
                     outcome = ("failed", .null, .string("\(error)"))
                 }

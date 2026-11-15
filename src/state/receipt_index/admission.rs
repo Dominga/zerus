@@ -148,9 +148,12 @@ mod tests {
             Some(LIMIT),
             "ordinary processing is not SQLite waiting"
         );
+        assert!(pause(Duration::from_millis(1)));
+        let before_nested = remaining();
         let left;
         {
             let _nested = Wait::new();
+            assert_eq!(remaining(),before_nested,"nesting must not replenish the budget");
             assert!(pause(Duration::from_millis(1)));
             left = remaining().unwrap();
             assert!(left < LIMIT);

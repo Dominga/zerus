@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub(crate) mod composer;
 mod diagnostic;
+pub(in crate::state) mod acceptance;
 mod refusal;
 pub(in crate::state) mod outcome;
 pub(crate) mod settle;
@@ -425,7 +426,8 @@ fn checked_input_gate(
     // zerus-ucck P3c: the request's identities select among sessions that
     // share the label.
     expect(name, run_id, conversation_id)?;
-    let record = read(name)?;
+    let mut record = read(name)?;
+    acceptance::reconcile_locked(&mut record)?;
     checked_bound_record_gate(record, run_id, conversation_id, allow_working)
 }
 
@@ -2069,10 +2071,13 @@ fn submit_core(
     }
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.map(tempfile::TempDir::keep);
+    acceptance::bind_native_context(&mut record, &receipt);
     record["input_pending_at"] = json!(submitted_at);
     // Clear input reads this send's receipt to tell an input still in its proof
     // window from one left uncertain or stuck (zerus-wkj9l.1).
     record["input_pending_request"] = json!(request_id);
+    record["input_pending_digest"] = receipt["digest"].clone();
+    record["input_pending_text_sha256"] = json!(format!("{:x}", Sha256::digest(string(&receipt, "submitted_text").as_bytes())));
     // From this send on the record follows the acceptance rule.
     if record.get("input_seen_at").is_none() {
         record["input_seen_at"] = json!(0.0);

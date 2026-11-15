@@ -35,6 +35,7 @@ METHODS = (
     'test_kimi_native.NativeKimi.test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded',
     'test_kimi_native.NativeKimi.test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume',
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
+    'test_kimi_native.NativeKimi.test_exact_native_wire_repairs_a_lost_acceptance_write_without_replay',
     'test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',
     'test_kimi_native.NativeKimi.test_busy_attachment_send_is_typed_once_and_delivered_once',
     'test_kimi_native.NativeKimi.test_clear_input_discards_a_residue_and_kimi_keeps_running',

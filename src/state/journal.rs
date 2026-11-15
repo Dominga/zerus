@@ -8,6 +8,31 @@ use std::sync::OnceLock;
 /// Final replies are the conversation itself, not an excerpt: Activity reads
 /// them from the journal once the provider transcript window has moved on.
 pub(super) const REPLY_LIMIT: usize = 32_000;
+/// Activity bodies are separate from the short status/list preview. Larger
+/// messages carry an explicit incomplete flag; no delivery state is inferred.
+pub(super) const MESSAGE_TEXT_LIMIT: usize = 32_000;
+
+pub(super) fn activity_message_body(source: &str, text: &str, at: f64, id: &str) -> Value {
+    json!({"type":"UserMessageBody", "source":source, "agent_id":"", "at":at, "message_id":id,
+        "detail":clipped(&json!(text), MESSAGE_TEXT_LIMIT),
+        "message_text_truncated":text.chars().count() > MESSAGE_TEXT_LIMIT})
+}
+
+fn retain_message_text(data: &mut Value, event: &Value) {
+    if !["UserPromptSubmit", "UserPromptQueued", "TurnStarted"]
+        .contains(&string(event, "hook_event_name"))
+        || !string(data, "agent_id").is_empty()
+        || !string(data, "origin").is_empty()
+        || !["", "user"].contains(&string(data, "turn_origin"))
+    {
+        return;
+    }
+    let Some(text) = event["prompt"].as_str() else {
+        return;
+    };
+    data["message_text"] = json!(clipped(&json!(text), MESSAGE_TEXT_LIMIT));
+    data["message_text_truncated"] = json!(text.chars().count() > MESSAGE_TEXT_LIMIT);
+}
 /// `pending_questions_error` while the Codex question index is incomplete:
 /// the questions are unknown, not absent (zerus-a4mub.8).
 const QUESTIONS_INDEXING: &str = "Codex questions are still being indexed; refresh shortly";
@@ -327,6 +352,7 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
             data["origin"] = json!("keep_warm");
         }
     }
+    retain_message_text(&mut data, event);
     if let Some(id) = kimi_turn_id(record, event) {
         data["kimi_turn_id"] = json!(id);
         data["kimi_conversation_id"] = record["conversation_id"].clone();
@@ -1170,9 +1196,17 @@ pub(super) fn inspection_with(
             output["kimi_turns_complete"] = json!(complete);
             messages
         })
-    } else { provider_messages::read(&record) };
+    } else { provider_messages::read_activity(&record) };
     match messages {
-        Ok(messages) => output["provider_messages"] = json!(messages),
+        Ok(messages) => {
+            // Display-only body candidates never become extra user rows in
+            // clients that consume the existing assistant-message window.
+            let (bodies, messages): (Vec<_>, Vec<_>) = messages
+                .into_iter()
+                .partition(|message| message["type"] == "UserMessageBody");
+            output["user_message_bodies"] = json!(bodies);
+            output["provider_messages"] = json!(messages);
+        }
         Err(error) => output["provider_messages_error"] = json!(error),
     }
     // Optional-question indexing must never suppress successfully read replies.
@@ -1196,6 +1230,7 @@ pub(super) fn inspection_with(
         output["prompt"] = json!("");
         output["last_message"] = json!("");
         output["provider_messages"] = json!([]);
+        output["user_message_bodies"] = json!([]);
         output["kimi_turns"] = json!([]);
         output["kimi_turns_complete"] = json!(false);
         output["cache_hint"] = Value::Null;
@@ -3231,5 +3266,63 @@ mod lock_regressions {
         }
         let mode = std::fs::symlink_metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "created owner-only");
+    }
+}
+
+#[cfg(test)]
+mod full_own_message {
+    use super::*;
+
+    #[test]
+    fn journal_keeps_full_body_separate_from_bounded_preview() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::journal::full_own_message::fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("TMUX_TMPDIR", state.path())
+            .env("ZERUS_FULL_OWN_FIXTURE", "1")
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "private child of journal_keeps_full_body_separate_from_bounded_preview"]
+    fn fixture() {
+        if std::env::var_os("ZERUS_FULL_OWN_FIXTURE").is_none() {
+            return;
+        }
+        std::fs::create_dir_all(root()).unwrap();
+        for agent in ["codex", "claude", "kimi"] {
+            for length in [1800, 40000] {
+                let text = "x".repeat(length) + "TRAILING TEXT";
+                let record = json!({"name":format!("{agent}/example/full"), "agent":agent, "run_id":"run", "conversation_id":"cid"});
+                let event = json!({"hook_event_name":"UserPromptSubmit", "prompt":text, "agent_id":if agent == "kimi" {"main"} else {""}});
+                log_event(&record, &event).unwrap();
+                let payload: String = event_db()
+                    .unwrap()
+                    .query_row(
+                        "SELECT payload FROM events ORDER BY seq DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let saved: Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(saved["detail"], json!("x".repeat(1200) + "…"));
+                assert_eq!(saved["message_text"], json!(clipped(&json!(text), 32000)));
+                assert_eq!(saved["message_text_truncated"], json!(length > 32000));
+            }
+        }
     }
 }

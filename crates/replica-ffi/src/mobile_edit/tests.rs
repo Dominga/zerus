@@ -729,8 +729,7 @@ fn a_native_busy_answer_keeps_the_phone_copy_and_has_a_public_refusal() {
         replica::with_proof_budget_for_test(std::time::Duration::from_secs(31), 131_072, || {
             replica::phone::answer(&native, request.clone())
         })
-        .err()
-        .expect("incomplete native proof must not produce a successful answer");
+        .expect_err("incomplete native proof must not produce a successful answer");
     assert_eq!(error.kind(), replica::ErrorKind::Busy);
     match crate::ReplicaError::from(error) {
         crate::ReplicaError::Refused(reason) => assert!(

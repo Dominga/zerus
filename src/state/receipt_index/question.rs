@@ -83,10 +83,12 @@ fn question_page_at(
         // A fresh explicit authority read seals the current original family,
         // including writers from older builds that do not update the locator.
         let _wait = admission::Wait::new();
+        let started = now();
         let mut migration = migration::Migration::questions(state)?;
         while !migration.step()? {
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::yield_now();
         }
+        admission::reconciled_question(state, started);
     }
     let catalog = match Catalog::read_until(state, deadline) {
         Ok(catalog) => catalog,
@@ -498,10 +500,9 @@ mod tests {
         let inspect = || page(Some(Instant::now() + Duration::from_secs(60))).unwrap();
         assert_eq!(page(None).unwrap().coverage, Coverage::Complete);
         send_history(temp.path(), 30_000);
-        // 30,000 rows after the witness token is more than a reader verifies
-        // by itself: unknown until the worker, which readers request,
-        // re-witnesses the exact rows (zerus-z5uax).
-        assert_eq!(inspect().coverage, Coverage::Partial);
+        // Terminal coverage needs its own witness refresh. Exact question
+        // coverage remains valid while that unrelated backfill runs.
+        assert_eq!(inspect().coverage, Coverage::Complete);
         assert_eq!(
             Catalog::open(temp.path(), true).unwrap().witness().unwrap(),
             Witnessed::Agreed
@@ -517,16 +518,17 @@ mod tests {
         let answer = page(None).unwrap();
         assert_eq!(answer.coverage, Coverage::Complete);
         assert_eq!(answer.rows.len(), 1);
-        // The row-set witness still refuses a history it cannot account for.
+        // A broken terminal witness cannot certify terminal coverage, but it
+        // does not erase the independently verified question family.
         let db = rusqlite::Connection::open(temp.path().join(DATABASE)).unwrap();
         let execute = |statement: &str| db.execute_batch(statement).unwrap();
         execute("UPDATE receipt_sources SET indexed=indexed+1 WHERE source='terminal'");
-        assert_eq!(inspect().coverage, Coverage::Partial);
-        assert!(page(None).is_err());
+        assert_eq!(inspect().coverage, Coverage::Complete);
+        assert_eq!(page(None).unwrap().coverage, Coverage::Complete);
         execute("UPDATE receipt_sources SET indexed=indexed-1 WHERE source='terminal'");
         assert_eq!(inspect().coverage, Coverage::Complete);
-        // So do the per-source consistency seeks: an unseeded row of this or
-        // any other source, and a frontier behind any source's change.
+        // Question consistency remains mandatory. Other source frontiers
+        // neither certify nor invalidate this family's absence proof.
         let question: i64 = db
             .query_row(
                 "SELECT change FROM receipt_rows WHERE source='question'",
@@ -555,7 +557,7 @@ mod tests {
             [&last],
         )
         .unwrap();
-        assert_eq!(inspect().coverage, Coverage::Partial);
+        assert_eq!(inspect().coverage, Coverage::Complete);
         db.execute(
             "UPDATE receipt_rows SET change=? WHERE source='terminal' AND request=?",
             params![change, last],
@@ -567,6 +569,105 @@ mod tests {
             [(change - 1).to_string()],
         )
         .unwrap();
+        assert_eq!(inspect().coverage, Coverage::Complete);
+        db.execute(
+            "UPDATE receipt_meta SET value=? WHERE key='change_seq'",
+            [(question - 1).to_string()],
+        )
+        .unwrap();
         assert_eq!(inspect().coverage, Coverage::Partial);
+    }
+
+    #[test]
+    fn question_authority_is_independent_of_a_bulk_terminal_rowset() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(temp.path(), true).unwrap();
+        let transaction = catalog.db.unchecked_transaction().unwrap();
+        for n in 1..=WITNESS_DELTA + 1 {
+            catalog.db.execute("INSERT INTO receipt_rows(source,request,name,run,conversation,agent,first_message,at,files,binding,stamp,change) VALUES('terminal',?1,'codex/fixture/other','run','conversation','',0,?2,0,'synthetic','synthetic',?2)", params![uuid::Uuid::from_u128(n as u128).to_string(),n]).unwrap();
+        }
+        catalog
+            .db
+            .execute(
+                "UPDATE receipt_meta SET value=?1 WHERE key='change_seq'",
+                [(WITNESS_DELTA + 1).to_string()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert!(!catalog.source_witness_current("terminal"));
+        let question = question_page_at(
+            temp.path(),
+            "codex/fixture/question",
+            "run",
+            "conversation",
+            None,
+            1,
+            None,
+        );
+        assert!(
+            question.is_ok(),
+            "an unrelated terminal backfill must not poison exact question coverage: {question:?}"
+        );
+        assert_eq!(question.unwrap().coverage, Coverage::Complete);
+        // A broken question counter is still unknown, never an empty family.
+        catalog
+            .db
+            .execute(
+                "UPDATE receipt_sources SET indexed=indexed+1 WHERE source='question'",
+                [],
+            )
+            .unwrap();
+        assert!(question_page_at(
+            temp.path(),
+            "codex/fixture/question",
+            "run",
+            "conversation",
+            None,
+            1,
+            None
+        )
+        .is_err());
+    }
+    #[test]
+    fn nested_question_checks_reread_recent_foreign_originals_after_the_clock_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let _worker = worker_lease(temp.path());
+        let _answer = admission::Wait::for_answer(temp.path()).unwrap();
+        original(
+            temp.path(),
+            1,
+            "codex/fixture/other",
+            "other-run",
+            "other-conversation",
+        );
+        let path = temp
+            .path()
+            .join("question_receipts")
+            .join(format!("{}.json", uuid::Uuid::from_u128(1)));
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let page = || {
+            question_page_at(
+                temp.path(),
+                "codex/fixture/current",
+                "run",
+                "conversation",
+                None,
+                1,
+                None,
+            )
+        };
+        assert_eq!(page().unwrap().coverage, Coverage::Complete);
+        let length = fs::metadata(&path).unwrap().len() as usize;
+        fs::write(&path, vec![b'x'; length]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        // Model a filesystem whose coarse timestamp cannot distinguish this
+        // in-place rewrite, then let a later nested check cross that window.
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(page().is_err(), "a request-local optimization must not turn corrupt foreign evidence into an empty family");
     }
 }

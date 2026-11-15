@@ -752,6 +752,17 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
                 )
             } else if string(event, "type") == "response_item"
                 && string(payload, "type") == "message"
+                && string(payload, "role") == "user"
+            {
+                (
+                    "user",
+                    text_parts(&payload["content"], &["input_text", "text"]),
+                    string(payload, "id"),
+                    timestamp(&event["timestamp"]),
+                    "codex_transcript",
+                )
+            } else if string(event, "type") == "response_item"
+                && string(payload, "type") == "message"
                 && string(payload, "role") == "assistant"
                 && ["", "final", "commentary"].contains(&string(payload, "channel"))
                 && ["", "final", "final_answer", "commentary"].contains(&string(payload, "phase"))

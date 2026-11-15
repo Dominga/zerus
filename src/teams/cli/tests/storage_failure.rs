@@ -48,6 +48,7 @@ fn a_command_reports_unknown_storage_outcome_and_can_repeat_the_original_request
 fn storage_reads_and_cli_conversion_errors_do_not_claim_a_logical_refusal() {
     let h = Harness::new();
     h.create();
+    let revision = h.revision();
     h.store()
         .db
         .as_ref()
@@ -55,7 +56,7 @@ fn storage_reads_and_cli_conversion_errors_do_not_claim_a_logical_refusal() {
         .execute_batch("DROP TABLE requests")
         .unwrap();
     let input =
-        json!({"request_id":uid(0xf003),"team":TEAM,"expected_revision":h.revision()}).to_string();
+        json!({"request_id":uid(0xf003),"team":TEAM,"expected_revision":revision}).to_string();
     let (reply, exit) = h.cli(&Caller::Person, "pause", &input);
     assert_eq!((code(&reply), exit), ("storage_failed", 1));
     let (reply, exit) =

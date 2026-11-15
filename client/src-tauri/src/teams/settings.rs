@@ -12,6 +12,7 @@ pub(super) fn checked_call(value: Value) -> Result<TeamCall, TeamOutcome> {
     let failed = |detail: &str| TeamOutcome::Failed {
         detail: detail.into(),
         code: "invalid_state".into(),
+        field: None,
         request_id: request_id.clone(),
     };
     if value["action"]["kind"].as_str() == Some("settings")

@@ -19,6 +19,7 @@ fn outcome_failed(detail: impl Into<String>, request_id: &str) -> TeamOutcome {
     TeamOutcome::Failed {
         detail: detail.into(),
         code: String::new(),
+        field: None,
         request_id: request_id.to_owned(),
     }
 }
@@ -43,6 +44,14 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
     // changes.
     if !crate::teams::read::valid_team(&call.team) {
         return Err(outcome_failed("Not a team id.", &request_id));
+    }
+    if let Some(problem) = call.action.settings_problem() {
+        return Err(TeamOutcome::Failed {
+            detail: problem.message,
+            code: problem.code,
+            field: problem.field,
+            request_id,
+        });
     }
     if let Err(detail) = call.action.check() {
         return Err(outcome_failed(detail, &request_id));
@@ -114,7 +123,7 @@ pub const STORAGE_FAILED: &str = zerus_team_plan::problem::code::STORAGE_FAILED;
 /// A valid coded answer: a refusal is `failed`; a storage failure is
 /// `uncertain`, keeping the call's request id and the store's own sentence,
 /// so the person checks it with the same id and never sends a new one.
-fn coded(code: String, message: String, request_id: &str) -> TeamOutcome {
+fn coded(code: String, message: String, field: Option<String>, request_id: &str) -> TeamOutcome {
     if code == STORAGE_FAILED {
         let detail = if message.trim().is_empty() {
             format!("The team store did not confirm the change. {READ_FIRST}")
@@ -126,6 +135,7 @@ fn coded(code: String, message: String, request_id: &str) -> TeamOutcome {
     TeamOutcome::Failed {
         detail: message,
         code,
+        field,
         request_id: request_id.to_owned(),
     }
 }
@@ -160,8 +170,8 @@ pub fn classify(call: &TeamCall, exit: Exit) -> TeamOutcome {
             code,
             stdout,
             stderr,
-        } if code != 0 => match super::super::refusal::parse(&stdout) {
-            Some((code, message)) => coded(code, message, request_id),
+        } if code != 0 => match super::super::refusal::parse_with_field(&stdout) {
+            Some((code, message, field)) => coded(code, message, field, request_id),
             // An exit code alone cannot prove that nothing was written: a
             // post-write failure or a lost receipt can end nonzero too.
             None => outcome_uncertain(
@@ -179,8 +189,8 @@ pub fn classify(call: &TeamCall, exit: Exit) -> TeamOutcome {
             ),
         },
         Exit::Code { stdout, .. } => {
-            if let Some((code, message)) = super::super::refusal::parse(&stdout) {
-                return coded(code, message, request_id);
+            if let Some((code, message, field)) = super::super::refusal::parse_with_field(&stdout) {
+                return coded(code, message, field, request_id);
             }
             let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
             if !complete_receipt(call, &receipt) {

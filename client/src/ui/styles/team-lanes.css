@@ -1,0 +1,21 @@
+@layer components {
+  .team-board-head { flex-wrap: wrap; }
+  .team-lanes { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%; }
+  .team-lanes-note { font-size: var(--fs-sm); }
+  .team-lane { min-width: 0; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); background: var(--z-color-card); overflow: hidden; }
+  .team-lane-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 10px; text-align: left; color: var(--z-color-text); background: var(--z-color-pane); }
+  .team-lane-head > svg, .team-lane-head .team-agent { flex: none; }
+  .team-lane-name { min-width: 0; overflow-wrap: anywhere; font-size: var(--fs-md); }
+  .team-lane-head .role-badge { max-width: 100%; }
+  .team-lane-head .dim { font-size: var(--fs-xs); }
+  .team-lane-count { margin-left: auto; white-space: nowrap; }
+  .team-lane-body { display: flex; gap: 8px; padding: 10px; min-width: 0; overflow-x: auto; }
+  .team-lane-task { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; flex: 0 0 230px; max-width: 100%; min-width: 0; padding: 10px; text-align: left; color: var(--z-color-text); background: var(--z-color-pane); border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); }
+  .team-lane-task > b { max-width: 100%; overflow-wrap: anywhere; font-size: var(--fs-sm); }
+  .team-lane-task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .team-lane-task.is-selected { outline: 2px solid var(--z-color-accent); outline-offset: -2px; }
+  .team-lane-task.cancelled > b { text-decoration: line-through; }
+  .team-lane-task:hover { background: var(--z-color-card-hover); }
+  .team-lane-task:focus-visible, .team-lane-head:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: -2px; }
+  .team-lane-empty { font-size: var(--fs-sm); }
+}

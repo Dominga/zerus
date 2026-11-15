@@ -15,6 +15,7 @@ mod readiness;
 mod removed_handout;
 mod replace;
 mod roster;
+mod settings_fields;
 mod storage;
 mod talk;
 mod team;
@@ -341,3 +342,5 @@ impl Harness {
 mod names74;
 
 mod editing;
+
+mod cutover_delivery;

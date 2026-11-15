@@ -14,7 +14,7 @@ export function navigationTeamFor(row: Session | undefined): string | undefined 
   return row && target?.key === row.key && rowIsSession(row, target.lead) ? target.team : undefined;
 }
 
-export function openTeamLead(team: TeamSummary, row: Session): boolean {
+export function openTeamLead(team: Pick<TeamSummary, "id" | "lead_session">, row: Session): boolean {
   const lead = team.lead_session;
   if (teams.available() !== true || !lead || !rowIsSession(row, lead)) return false;
   batch(() => {

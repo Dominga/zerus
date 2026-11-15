@@ -800,13 +800,22 @@ fn codex_warning_footer(row: &str) -> bool {
         && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
 }
 
-/// Native 0.167 adds the agent-picker hint before the idle shortcuts hint.
-/// Accept only that fixed row and its optional existing warning indicator;
-/// arbitrary trailing content still cannot terminate a draft.
+/// Native 0.167 adds an agent-picker hint; 0.169 uses a return-to-latest
+/// hint while its transcript is scrolled above the live composer. Accept only
+/// these fixed rows and the existing warning indicator, never arbitrary text.
 fn codex_shortcuts_footer(plain: &str) -> bool {
     let plain = plain.trim();
-    if plain.starts_with("? for shortcuts") { return true; }
-    let Some(tail) = plain.strip_prefix("← for agents · ? for shortcuts") else { return false; };
+    if plain.starts_with("? for shortcuts") {
+        return true;
+    }
+    let Some(tail) = [
+        "← for agents · ? for shortcuts",
+        "enter/esc latest · ? shortcuts",
+    ]
+    .iter()
+    .find_map(|prefix| plain.strip_prefix(prefix)) else {
+        return false;
+    };
     tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
 }
 
@@ -2834,6 +2843,49 @@ mod tests {
             assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft), 2, 1));
         }
         assert!(!composer_empty("codex", screen, 3, 1));
+    }
+
+    #[test]
+    fn codex_scrolled_footer_preserves_the_live_composer_guards() {
+        // Native Codex 0.169.0, private Responses stream held open while PageUp
+        // and mouse-wheel scrolling change history above the live composer.
+        let screen = include_str!("../../tests/fixtures/codex-composer-scrolled-0169.txt");
+        assert!(composer_empty("codex", screen, 2, 31));
+        let plain = "enter/esc\x1b[0;2m latest\x1b[0m · \x1b[1m?\x1b[0m shortcuts";
+        let footer = screen.lines().last().unwrap();
+        for suffix in [
+            "",
+            "   ⚠ 1 warning · f2 to view",
+            "   ⚠ 2 warnings · f2 to view",
+        ] {
+            let changed = screen.replace(footer, &format!("  {plain}{suffix}"));
+            assert!(composer_empty("codex", &changed, 2, 31), "{suffix}");
+        }
+        for footer in [
+            "enter/esc latest · ? shortcuts draft",
+            "enter/esc latest · ? shortcuts ⚠ 0 warnings · f2 to view",
+            "enter/esc latest · ? shortcuts ⚠ 2 warnings · enter to approve",
+            "enter/esc latest · ? shortcuts\n  draft",
+            "enter/esc latest · Approve command?",
+            "enter latest · ? shortcuts",
+            "arbitrary footer",
+        ] {
+            let changed = screen.replace(screen.lines().last().unwrap(), footer);
+            assert!(!composer_empty("codex", &changed, 2, 31), "{footer}");
+        }
+        for draft in [
+            "",
+            "retained draft",
+            "\n  draft continuation",
+            "\n  enter/esc latest · ? shortcuts",
+        ] {
+            let changed = screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft);
+            assert!(!composer_empty("codex", &changed, 2, 31), "{draft}");
+        }
+        assert!(!composer_empty("codex", screen, 3, 31));
+        assert!(!composer_empty("codex", screen, 2, 30));
+        assert!(!composer_empty("claude", screen, 2, 31));
+        assert!(!composer_empty("kimi", screen, 2, 31));
     }
 
     #[test]

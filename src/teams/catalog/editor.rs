@@ -158,11 +158,8 @@ pub(crate) fn import(config: &Path, edit: Edit, actor: &Value) -> Result<Value, 
             "Unknown catalog edit schema.",
         ));
     }
-    if serde_json::to_vec(&edit.catalog)
-        .map_err(write_error_serde)?
-        .len() as u64
-        > EDIT_BYTES
-    {
+    let bytes = encoded(&edit.catalog)?;
+    if bytes.len() as u64 > EDIT_BYTES {
         return Err(Problem::new(
             code::OVER_CAP,
             "The catalog exceeds the editor size bound.",
@@ -206,7 +203,7 @@ pub(crate) fn import(config: &Path, edit: Edit, actor: &Value) -> Result<Value, 
         receipt: json!({"ok":true,"schema":1,"request_id":edit.request_id,"outcome":"uncertain","actor":actor}),
     };
     publish(config, &record)?;
-    write(config, &edit.catalog).map_err(write_error_serde)?;
+    write_encoded(config, &bytes).map_err(write_error_serde)?;
     crate::platform::sync_dir(&config.join(DIR)).map_err(write_error_serde)?;
     record.receipt = json!({"ok":true,"schema":1,"request_id":edit.request_id,"outcome":"done","revision":revision(&edit.catalog)?,"actor":actor});
     publish(config, &record).map_err(write_error_serde)?;

@@ -93,3 +93,78 @@ fn editor_duplicate_receipt_never_overwrites_a_later_legacy_save() {
         json!(["later"])
     );
 }
+
+/// The review148 fixture uses real catalog writers; only the input roles are synthetic.
+fn review148_catalog(pretty_bytes: usize) -> Value {
+    let roles: Vec<Value> = (0..200)
+        .map(|i| json!({"id":format!("r{i:03}"),"name":"Role","agent":"codex","prompt":"x".repeat(1102)}))
+        .collect();
+    let mut catalog: zerus_team_plan::catalog::Catalog =
+        serde_json::from_value(json!({"roles":roles})).unwrap();
+    let original = serde_json::to_vec_pretty(&catalog).unwrap().len() + 1;
+    assert_eq!(original, 240_020, "the reviewed pretty-file reproduction");
+    assert!(pretty_bytes <= original);
+    catalog
+        .roles
+        .last_mut()
+        .unwrap()
+        .prompt
+        .truncate(1102 - (original - pretty_bytes));
+    assert_eq!(
+        serde_json::to_vec_pretty(&catalog).unwrap().len() + 1,
+        pretty_bytes
+    );
+    serde_json::to_value(catalog).unwrap()
+}
+
+#[test]
+fn review148_compact_fits_but_pretty_does_not_refuses_before_publication() {
+    let h = Harness::new();
+    let snapshot = call(&h, "catalog snapshot", json!({}));
+    let catalog = review148_catalog(240_020);
+    assert_eq!(serde_json::to_vec(&catalog).unwrap().len(), 231_611);
+    let edit = json!({"schema":1,"request_id":"00000000-0000-4000-8000-000000000170","expected_revision":snapshot["revision"],"catalog":catalog});
+    let refused = call(&h, "catalog import", edit);
+    assert_eq!(refused["error"]["code"], "over_cap", "{refused}");
+    assert!(!crate::teams::catalog::path(&h.config.dir).exists());
+    assert!(!h
+        .config
+        .dir
+        .join("teams/catalog-requests/00000000-0000-4000-8000-000000000170.json")
+        .exists());
+    assert_eq!(call(&h, "catalog snapshot", json!({}))["person"], json!({}));
+}
+
+#[test]
+fn editor_writer_accepts_exact_stored_limit_and_reopens_but_refuses_one_more_byte() {
+    let h = Harness::new();
+    let snapshot = call(&h, "catalog snapshot", json!({}));
+    let catalog = review148_catalog(240_000);
+    let edit = json!({"schema":1,"request_id":"00000000-0000-4000-8000-000000000172","expected_revision":snapshot["revision"],"catalog":catalog});
+    let saved = call(&h, "catalog import", edit);
+    assert_eq!(saved["outcome"], "done", "{saved}");
+    let path = crate::teams::catalog::path(&h.config.dir);
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(before.len(), 240_000);
+    let reopened = call(&h, "catalog snapshot", json!({}));
+    assert_eq!(reopened["ok"], true, "{reopened}");
+    assert_eq!(reopened["revision"], saved["revision"]);
+    let edit = json!({"schema":1,"request_id":"00000000-0000-4000-8000-000000000173","expected_revision":saved["revision"],"catalog":review148_catalog(240_001)});
+    let refused = call(&h, "catalog import", edit);
+    assert_eq!(refused["error"]["code"], "over_cap", "{refused}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!h
+        .config
+        .dir
+        .join("teams/catalog-requests/00000000-0000-4000-8000-000000000173.json")
+        .exists());
+    let mut next = reopened["person"].clone();
+    next["roles"][0]["name"] = json!("Next");
+    let edit = json!({"schema":1,"request_id":"00000000-0000-4000-8000-000000000174","expected_revision":saved["revision"],"catalog":next});
+    let saved = call(&h, "catalog import", edit);
+    assert_eq!(saved["outcome"], "done", "{saved}");
+    assert_eq!(
+        call(&h, "catalog snapshot", json!({}))["revision"],
+        saved["revision"]
+    );
+}

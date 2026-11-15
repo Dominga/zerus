@@ -57,7 +57,7 @@ export function createCatalogEditor(port: CatalogPort = desktopCatalog) {
     await run(async () => { const got = await port.load(); setSnapshot(got); setWorking(copy(got.person)); });
   }
   function replace(value: Catalog) { if (!locked()) {
-    if (new TextEncoder().encode(JSON.stringify(value)).length > 240_000 || [value.roles, value.pipelines, value.templates].some((rows) => rows && rows.length > 200)) { setNotice("The catalog exceeds the editor size limit."); return; }
+    if (new TextEncoder().encode(JSON.stringify(value, null, 2) + "\n").length > 240_000 || [value.roles, value.pipelines, value.templates].some((rows) => rows && rows.length > 200)) { setNotice("The catalog exceeds the editor size limit."); return; }
     setWorking(copy(value)); setNotice("");
   } }
   function items(kind: CatalogList): Item[] {

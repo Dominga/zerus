@@ -100,7 +100,12 @@ fn settings() -> Value {
 }
 
 fn bounded(value: &Value) -> Result<(), String> {
-    if serde_json::to_vec(value).map_err(|e| e.to_string())?.len() > BYTES {
+    if serde_json::to_vec_pretty(value)
+        .map_err(|e| e.to_string())?
+        .len()
+        .saturating_add(1)
+        > BYTES
+    {
         return Err("The catalog exceeds the editor's size limit.".into());
     }
     Ok(())
@@ -164,7 +169,9 @@ pub fn validate(value: Value, base: Value) -> Result<Value, String> {
     if let Some(problem) = problems.first() {
         return Err(problem.message.clone());
     }
-    serde_json::to_value(person).map_err(|e| e.to_string())
+    let canonical = serde_json::to_value(person).map_err(|e| e.to_string())?;
+    bounded(&canonical)?;
+    Ok(canonical)
 }
 
 /// Import replaces the draft, never the saved catalog. Bundle imports merge
@@ -488,5 +495,28 @@ mod lookup_tests {
             interpret_receipt(&request, &refused)["outcome"],
             "uncertain"
         );
+    }
+}
+
+#[cfg(test)]
+mod stored_byte_tests {
+    use super::*;
+    fn sample(bytes: usize) -> Value {
+        let roles: Vec<Value> = (0..200).map(|i|json!({"id":format!("r{i:03}"),"name":"Role","agent":"codex","prompt":"x".repeat(1102)})).collect();
+        let mut value = json!({"roles":roles});
+        let mut last = "x".repeat(1102);
+        last.truncate(1102 - (240020 - bytes));
+        value["roles"][199]["prompt"] = json!(last);
+        assert_eq!(serde_json::to_vec_pretty(&value).unwrap().len() + 1, bytes);
+        value
+    }
+    #[test]
+    fn review148_pretty_storage_bound_matches_writer_and_counts_newline() {
+        let base = serde_json::to_value(zerus_team_plan::builtin()).unwrap();
+        let value = sample(240020);
+        assert_eq!(serde_json::to_vec(&value).unwrap().len(), 231611);
+        assert!(validate(value, base.clone()).is_err());
+        assert!(validate(sample(BYTES), base.clone()).is_ok());
+        assert!(validate(sample(BYTES + 1), base).is_err());
     }
 }

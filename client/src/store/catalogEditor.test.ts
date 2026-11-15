@@ -82,3 +82,15 @@ it("a receipt lookup refusal keeps the original uncertain edit",async()=>{
   s.port.receipt=async(id)=>({outcome:"failed",request_id:id,detail:"Preview off"});await s.editor.check();
   expect(s.editor.pending()).toEqual(held);expect(s.editor.working()).toEqual(held!.catalog);expect(s.counts().saves).toBe(1);
 });
+it("counts the pretty stored form and newline at the exact writer boundary",async()=>{
+  const s=setup();await s.editor.load();
+  const roles=Array.from({length:200},(_,i)=>({id:`r${String(i).padStart(3,"0")}`,name:"Role",agent:"codex",prompt:"x".repeat(1102)}));
+  const value={roles};expect(new TextEncoder().encode(JSON.stringify(value)).length).toBe(231611);
+  expect(new TextEncoder().encode(JSON.stringify(value,null,2)+"\n").length).toBe(240020);
+  s.editor.replace(value);expect(s.editor.working()).toEqual({});
+  roles[199].prompt=roles[199].prompt.slice(0,-20);
+  expect(new TextEncoder().encode(JSON.stringify(value,null,2)+"\n").length).toBe(240000);
+  s.editor.replace(value);expect(s.editor.working().roles).toHaveLength(200);
+  roles[199].prompt+="x";s.editor.replace(value);
+  expect((s.editor.working().roles![199].prompt as string).length).toBe(1082);
+});

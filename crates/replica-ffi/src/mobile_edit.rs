@@ -293,6 +293,10 @@ impl TaskStore {
 
 #[uniffi::export]
 impl TaskEditQualification {
+    /// The exact pre-network view; a later cache refresh cannot replace it.
+    pub fn view(&self) -> TaskEditView {
+        self.view.clone()
+    }
     pub fn request(&self) -> TaskEditRequest {
         self.request.clone()
     }
@@ -347,6 +351,13 @@ impl TaskEditQualification {
         drop(store);
         Ok(draft::new(self, receipt))
     }
+}
+
+/// Pure queue-position calculation. Never use rank_for here: it may renumber
+/// and save other documents. This function grants no store or writer handle.
+#[uniffi::export]
+pub fn task_edit_rank_between(low: Option<String>, high: Option<String>) -> Result<String> {
+    Ok(replica::rank::between(low.as_deref(), high.as_deref())?)
 }
 
 #[cfg(test)]

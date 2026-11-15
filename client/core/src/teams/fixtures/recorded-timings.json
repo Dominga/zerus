@@ -1,0 +1,457 @@
+{
+  "timings": {
+    "schema": 1,
+    "revision": 18
+  },
+  "timeline": {
+    "count": 18,
+    "limit": 200,
+    "first_seq": 1,
+    "last_seq": 18,
+    "earlier_page": false,
+    "later_page": false,
+    "clock_reversed": false
+  },
+  "team": "00000000-0000-4000-8000-00000000beef",
+  "kind": "feed",
+  "rows": [
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 1,
+      "kind": "create",
+      "by": "local",
+      "text": "create at revision 1",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 2,
+      "kind": "set_member_session",
+      "by": "local",
+      "text": "set_member_session at revision 2",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 3,
+      "kind": "set_member_session",
+      "by": "local",
+      "text": "set_member_session at revision 3",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 4,
+      "kind": "set_member_session",
+      "by": "local",
+      "text": "set_member_session at revision 4",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 5,
+      "kind": "add_task",
+      "by": "local",
+      "text": "add_task at revision 5",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 6,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 6",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": {
+          "record": {
+            "request_id": "00000000-0000-4000-8000-000000011001",
+            "node": 1,
+            "generation": 1,
+            "member": "m1",
+            "kind": "handout",
+            "state": "observed_done",
+            "reserved_ms": 1700000000000,
+            "first_outcome_recorded_ms": 1700000000000
+          },
+          "bookkeeping_elapsed_ms": 0,
+          "clock_or_range_unknown": false
+        },
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 7,
+      "kind": "handout_intent",
+      "by": "local",
+      "text": "handout_intent at revision 7",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": {
+          "record": {
+            "request_id": "00000000-0000-4000-8000-000000011001",
+            "node": 1,
+            "generation": 1,
+            "member": "m1",
+            "kind": "handout",
+            "state": "observed_done",
+            "reserved_ms": 1700000000000,
+            "first_outcome_recorded_ms": 1700000000000
+          },
+          "bookkeeping_elapsed_ms": 0,
+          "clock_or_range_unknown": false
+        },
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 8,
+      "kind": "handout_outcome",
+      "by": "local",
+      "text": "handout_outcome at revision 8: submitted",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 9,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 9",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 10,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 10",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 11,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 11",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 12,
+      "kind": "record_report",
+      "by": "local",
+      "text": "record_report at revision 12",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": {
+          "node": 2,
+          "target": 1,
+          "generation": 1,
+          "state": "created",
+          "created_ms": 1700000000000
+        },
+        "effect_unavailable": "record_missing",
+        "stage_unavailable": null
+      },
+      "seq": 13,
+      "kind": "stage_task_intent",
+      "by": "local",
+      "text": "stage_task_intent at revision 13",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": null,
+        "effect_unavailable": "record_missing",
+        "stage_unavailable": null
+      },
+      "seq": 14,
+      "kind": "stage_task_outcome",
+      "by": "local",
+      "text": "stage_task_outcome at revision 14",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": {
+          "node": 2,
+          "target": 1,
+          "generation": 1,
+          "state": "created",
+          "created_ms": 1700000000000
+        },
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 15,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 15",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": {
+          "record": {
+            "request_id": "00000000-0000-4000-8000-000000010001",
+            "node": 2,
+            "generation": 1,
+            "member": "m3",
+            "kind": "handout",
+            "state": "submitted",
+            "reserved_ms": 1700000000000,
+            "first_outcome_recorded_ms": 1700000000000
+          },
+          "bookkeeping_elapsed_ms": 0,
+          "clock_or_range_unknown": false
+        },
+        "stage": {
+          "node": 2,
+          "target": 1,
+          "generation": 1,
+          "state": "created",
+          "created_ms": 1700000000000
+        },
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 16,
+      "kind": "handout_intent",
+      "by": "local",
+      "text": "handout_intent at revision 16",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": {
+          "record": {
+            "request_id": "00000000-0000-4000-8000-000000010001",
+            "node": 2,
+            "generation": 1,
+            "member": "m3",
+            "kind": "handout",
+            "state": "submitted",
+            "reserved_ms": 1700000000000,
+            "first_outcome_recorded_ms": 1700000000000
+          },
+          "bookkeeping_elapsed_ms": 0,
+          "clock_or_range_unknown": false
+        },
+        "stage": null,
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 17,
+      "kind": "handout_outcome",
+      "by": "local",
+      "text": "handout_outcome at revision 17: submitted",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    },
+    {
+      "timing": {
+        "effect": null,
+        "stage": {
+          "node": 2,
+          "target": 1,
+          "generation": 1,
+          "state": "created",
+          "created_ms": 1700000000000
+        },
+        "effect_unavailable": null,
+        "stage_unavailable": null
+      },
+      "seq": 18,
+      "kind": "observe_task",
+      "by": "local",
+      "text": "observe_task at revision 18",
+      "text_truncated": false,
+      "at_ms": 1700000000000,
+      "node": null,
+      "generation": null,
+      "state": "",
+      "reply": null,
+      "notes": [],
+      "card": null
+    }
+  ],
+  "next": null,
+  "after": null
+}

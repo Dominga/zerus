@@ -968,6 +968,84 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         AttachmentIdentity.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],
             machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
     }
+    private val taskEditor by lazy {
+        TaskEditorModel(getApplication(), viewModelScope, { api }, taskReplicas, store.taskEditDrafts, attachmentStore, ::refreshEditedTask)
+    }
+    /** Completion reads the exact edited host despite an unchanged heartbeat; it never repeats the edit. */
+    private fun refreshEditedTask(context: TaskEditContext, task: String, token: String) {
+        val job = viewModelScope.launch {
+            try {
+                taskSync.exchangeNow(context.connection, context.key, context.projectName, context.computer.id, fetch = listOf(task))
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                val shown = taskEditor.state
+                if (shown?.token == token && shown.context.key == context.key && shown.task.uuid == task)
+                    taskEditor.reportError(shown.token, getApplication<Application>().getString(R.string.task_edit_refresh_failed))
+            }
+            if (tasksKey == context.key) refreshTasks()
+        }
+        projectSyncs += job
+        job.invokeOnCompletion { projectSyncs -= job }
+    }
+    internal val taskEditorState get() = taskEditor.state
+    internal fun closeTaskEditor() = taskEditor.dismiss()
+    internal fun changeTaskEditor(token: String, change: (TaskEditForm) -> TaskEditForm) = taskEditor.change(token, change)
+    internal fun saveTaskEditor(token: String) = taskEditor.save(token)
+    internal fun discardTaskEditor(token: String) = taskEditor.discard(token)
+    internal fun taskEditorPicker(token: String, comment: Boolean, ready: (TaskEditorPicker) -> Unit) = taskEditor.picker(token, comment, ready)
+    internal fun taskEditorPicked(ticket: TaskEditorPicker, uris: List<Uri>) = taskEditor.picked(ticket, uris)
+    internal fun taskEditorSessions(key: ProjectKey) = projectSessions(key).filter { session ->
+        val machine = machines.singleOrNull { it.connectionId == key.connectionId && it.id == session.target.computerId }
+        machine?.machineId?.isNotEmpty() == true && taskSessionIdentity(session).isNotEmpty()
+    }
+    private fun taskSessionIdentity(session: Session): String {
+        for (field in listOf("launch_id", "run_id")) {
+            val value = session.raw.opt(field)
+            if (value is String && value.isNotEmpty()) return "$field:$value"
+        }
+        return ""
+    }
+    internal fun chooseTaskEditorAny(token: String) = changeTaskEditor(token) { it.copy(target = TaskTarget.AnySession) }
+    internal fun chooseTaskEditorSession(token: String, session: Session) {
+        val state = taskEditor.state?.takeIf { it.token == token } ?: return
+        if (session !in taskEditorSessions(state.context.key)) return
+        val machine = machines.singleOrNull { it.connectionId == state.context.key.connectionId && it.id == session.target.computerId } ?: return
+        val identity = taskSessionIdentity(session).takeIf { it.isNotEmpty() } ?: return
+        changeTaskEditor(token) { it.copy(target = TaskTarget.Session(SessionRef(machine.machineId, session.target.session, identity))) }
+    }
+    internal fun moveTaskEditorTop(token: String) {
+        val state = taskEditor.state?.takeIf { it.token == token } ?: return
+        try {
+            val rank = TaskEditOrdering.top(state.context.key, tasksKey, state.task.uuid,
+                taskListing.filter { it.stage == TaskStage.TODO }.map { it.uuid to it.rank }) ?: return
+            changeTaskEditor(token) { it.copy(rank = rank) }
+        } catch (error: Exception) { taskEditor.reportError(token, error.message.orEmpty()) }
+    }
+    internal fun openTaskEditor(key: ProjectKey, task: TaskInfo) {
+        if (task.schema != 8L || tasksKey != key) return
+        val connection = connections.singleOrNull { it.id == key.connectionId } ?: return
+        val targetMachine = (task.target as? TaskTarget.Session)?.session?.machine
+        val bound = if (task.stage in setOf(TaskStage.TODO, TaskStage.BACKLOG)) targetMachine else task.session?.machine ?: targetMachine
+        val computer = if (bound != null) machines.singleOrNull { it.connectionId == key.connectionId && it.machineId == bound }
+            else machines.singleOrNull { it.connectionId == key.connectionId && it.id == tasksChosen?.computerId }
+        if (computer == null) { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }
+        taskEditor.open(TaskEditContext(connection, key, taskProjectName(key), computer, machineFeatures.toMap()), task)
+    }
+    internal fun previewTaskDraftMedia(file: Attachment) = attachments.open(null,
+        DisplayedAttachment(file.name, file.mime, file.bytes, localId = file.id, sha256 = file.sha256))
+    internal fun taskMediaKey(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) =
+        org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, file.token)).toString()
+    internal fun taskMediaState(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) = attachments.taskState(taskMediaKey(key, task, file))
+    internal fun previewTaskMedia(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) {
+        val name = taskProjectName(key)
+        attachments.openTask(taskMediaKey(key, task, file), file) {
+            withContext(Dispatchers.IO) { taskReplicas.store(key, name).use { store ->
+                val index = store.media(task, null).indexOfFirst { it.token == file.token }
+                check(index >= 0)
+                store.readMedia(task, null, index.toUInt(), file.token)
+            } }
+        }
+    }
     internal val computerFiles = ComputerFiles(application, api, viewModelScope,
         { id -> connections.find { it.id == id } }) { target ->
         ComputerFileProtocol.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],

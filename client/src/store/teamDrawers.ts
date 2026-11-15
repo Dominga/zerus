@@ -4,7 +4,12 @@ import type { ServiceNote, WaitingItem } from "./teams";
 
 export type DrawerKind = "feed" | "inbox" | "cards";
 export type TeamDrawer = DrawerKind | "reports" | "chat" | "timeline";
+export interface EffectRecord { request_id: string; node: number; generation: number; member: string; kind: string; state: string; reserved_ms: number; first_outcome_recorded_ms: number | null }
+export interface StageRecord { node: number; target: number; generation: number; state: string; created_ms: number }
+export interface RecordedFacts { effect: { record: EffectRecord; bookkeeping_elapsed_ms: number | null; clock_or_range_unknown: boolean } | null; stage: StageRecord | null; effect_unavailable: string | null; stage_unavailable: string | null }
+export interface TimingSnapshot { schema: number; revision: number }
 export interface DrawerRow {
+  timing?: RecordedFacts;
   seq: number; kind: string; by: string; text: string; text_truncated: boolean; at_ms: number;
   node: number | null; generation: number | null; state: string; reply: string | null;
   notes: ServiceNote[]; card: WaitingItem | null;
@@ -15,9 +20,10 @@ export interface RecordedCoverage {
 }
 export interface DrawerPage {
   timeline?: RecordedCoverage;
+  timings?: TimingSnapshot;
   team: string; kind: DrawerKind; rows: DrawerRow[]; after: string | null; next: string | null;
 }
-export interface DrawerRead { team: string; kind: DrawerKind; after: string | null }
+export interface DrawerRead { team: string; kind: DrawerKind; after: string | null; recorded_timings?: boolean; timing_seqs?: number[]; timing_next?: string | null }
 export type DrawerPort = (read: DrawerRead) => Promise<DrawerPage>;
 export const readTeamDrawer: DrawerPort = (read) => {
   if (!inTauri()) return Promise.reject(new Error("Teams need a live hgs event stream."));
@@ -40,10 +46,25 @@ export class TeamDrawerRead {
     this.page = undefined;
     this.select({ team, kind, after: null });
   }
-  next() {
-    if (!this.loading && this.page?.next && this.selected) this.select({ ...this.selected, after: this.page.next });
+  timingsRequested() { return !!this.selected?.recorded_timings; }
+  timings(on: boolean) {
+    if (this.loading || this.selected?.kind !== "feed" || !this.page) return;
+    const { recorded_timings: _old, timing_seqs: _seqs, timing_next: _next, ...read } = this.selected;
+    if (!on) {
+      this.selected = read; this.error = "";
+      this.page = { ...this.page, timings: undefined, rows: this.page.rows.map(({ timing: _timing, ...row }) => row) };
+      this.changed(); return;
+    }
+    this.select({ ...read, recorded_timings: true, timing_seqs: this.page.rows.map((row) => row.seq), timing_next: this.page.next });
   }
-  first() { if (!this.loading && this.selected) this.select({ ...this.selected, after: null }); }
+  next() {
+    if (!this.loading && this.page?.next && this.selected) this.select(this.pageRead(this.page.next));
+  }
+  first() { if (!this.loading && this.selected) this.select(this.pageRead(null)); }
+  private pageRead(after: string | null): DrawerRead {
+    const { timing_seqs: _seqs, timing_next: _next, ...read } = this.selected!;
+    return { ...read, after };
+  }
   refresh() { if (this.selected) this.select(this.selected); }
   close() {
     ++this.generation; this.selected = undefined; this.pending = undefined;
@@ -64,6 +85,8 @@ export class TeamDrawerRead {
           const page = await this.port(read);
           if (generation !== this.generation) continue;
           if (page.team !== read.team || page.kind !== read.kind || page.after !== read.after || page.rows.length > 200) throw new Error("The team page did not match this drawer.");
+          if (!!page.timings !== !!read.recorded_timings || (page.timings && (page.timings.schema !== 1 || !Number.isSafeInteger(page.timings.revision) || page.timings.revision < 1 || page.rows.some((row) => !row.timing)))) throw new Error("The recorded timing page is unsupported. Use Events only.");
+          if (read.timing_seqs && (page.rows.length !== read.timing_seqs.length || page.rows.some((row, i) => row.seq !== read.timing_seqs![i]) || page.next !== read.timing_next)) throw new Error("The selected event window changed. Read the page again.");
           this.page = page;
         } catch (error) {
           if (generation !== this.generation) continue;

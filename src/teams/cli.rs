@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use zerus_team_plan::problem::code;
 use zerus_team_plan::Problem;
 
-pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|snapshot|receipt|import|export | template list|show|save|import|export|remove | create|start-planning --template ID | list|waiting|status|inbox|queue|cards|journal|phases [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | phase --team ID --phase N | current | settings|pause|resume|stop|archive|decide|admit|route|set-deps|submit-draft-phase|edit-draft-phase|approve-phase|reject-phase|undo-reject-phase|accept-phase|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member|add-member|swap-member|rename-team|set-goal (JSON on stdin)";
+pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|snapshot|receipt|import|export | template list|show|save|import|export|remove | create|start-planning --template ID | list|waiting|status|inbox|queue|cards|journal|phases [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | phase --team ID --phase N | journal --recorded-timings [same page flags] [--timing-seqs IDS] | current | settings|pause|resume|stop|archive|decide|admit|route|set-deps|submit-draft-phase|edit-draft-phase|approve-phase|reject-phase|undo-reject-phase|accept-phase|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member|add-member|swap-member|rename-team|set-goal (JSON on stdin)";
 
 /// The running command. `args` are the words after `team`; `provided` is a
 /// test's stdin, and `None` reads this command's own stdin when it needs one.

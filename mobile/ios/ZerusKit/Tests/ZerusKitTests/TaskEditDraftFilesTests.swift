@@ -133,4 +133,39 @@ final class TaskEditDraftFilesTests: XCTestCase {
         XCTAssertEqual(try store.read(scope)?.state, .pending)
         XCTAssertThrowsError(try store.reserve(scope, draftId: draft.draftId, requestId: edit, payload: "payload"))
     }
+    func testTypingSurvivesRestartAndOldCallbacksCannotReplaceNewerChanges() throws {
+        let store = files(), draft = try create(store)
+        _ = try store.reserve(scope, draftId: draft.draftId, requestId: qualification, payload: "qualification")
+        _ = try store.settle(scope, draftId: draft.draftId, requestId: qualification, outcome: .acknowledged)
+        _ = try store.edit(scope, draftId: draft.draftId, sequence: 2, changes: "The person's latest edits")
+        XCTAssertThrowsError(try store.edit(scope, draftId: draft.draftId, sequence: 1, changes: "Stale callback"))
+        XCTAssertEqual(try files().read(scope)?.changes, "The person's latest edits")
+        XCTAssertEqual(try files().read(scope)?.original, original)
+        XCTAssertThrowsError(try store.freeze(scope, draftId: draft.draftId, manifest: "old fields", expectedSequence: 1))
+        _ = try store.freeze(scope, draftId: draft.draftId, manifest: "current fields", expectedSequence: 2)
+        XCTAssertThrowsError(try store.edit(scope, draftId: draft.draftId, sequence: 3, changes: "Late typing"))
+        XCTAssertEqual(try files().read(scope)?.manifest, "current fields")
+    }
+    func testOnlyAnExactKnownCompletionReleasesItsDraft() throws {
+        let store = files(), draft = try frozen(store)
+        XCTAssertThrowsError(try store.releaseCompleted(scope, draftId: draft.draftId))
+        _ = try store.reserve(scope, draftId: draft.draftId, requestId: edit, payload: "payload")
+        XCTAssertThrowsError(try store.releaseCompleted(scope, draftId: draft.draftId))
+        _ = try store.settle(scope, draftId: draft.draftId, requestId: edit, outcome: .completed)
+        XCTAssertThrowsError(try store.releaseCompleted(scope, draftId: UUID().uuidString.lowercased()))
+        try store.releaseCompleted(scope, draftId: draft.draftId)
+        XCTAssertNil(try store.read(scope))
+        XCTAssertNotEqual(try create(store).draftId, draft.draftId)
+    }
+    func testPersonDiscardOfAnUnsubmittedDraftCannotClearUnknownDelivery() throws {
+        let store = files(), first = try create(store)
+        XCTAssertThrowsError(try store.discardUnsubmitted(scope, draftId: UUID().uuidString.lowercased()))
+        try store.discardUnsubmitted(scope, draftId: first.draftId)
+        let next = try frozen(store)
+        _ = try store.reserve(scope, draftId: next.draftId, requestId: edit, payload: "payload")
+        XCTAssertThrowsError(try store.discardUnsubmitted(scope, draftId: next.draftId))
+        _ = try store.settle(scope, draftId: next.draftId, requestId: edit, outcome: .unknown)
+        XCTAssertThrowsError(try store.discardUnsubmitted(scope, draftId: next.draftId))
+        XCTAssertEqual(try store.read(scope)?.state, .unknown)
+    }
 }

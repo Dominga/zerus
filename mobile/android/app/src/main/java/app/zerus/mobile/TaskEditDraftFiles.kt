@@ -19,7 +19,7 @@ import javax.crypto.spec.GCMParameterSpec
 internal data class TaskEditDraftScope(val connectionId: String, val swarmId: String, val project: String, val task: String) {
     fun json() = JSONObject().put("connection", connectionId).put("swarm", swarmId).put("project", project).put("task", task)
     fun validate() {
-        listOf(connectionId, swarmId, project).forEach { require(it.length in 1..512 && it.none(Char::isISOControl)) }
+        listOf(connectionId, swarmId, project).forEach { require(it.toByteArray(Charsets.UTF_8).size in 1..512 && it.none(Char::isISOControl)) }
         taskDraftUuid(task)
     }
     companion object {
@@ -37,6 +37,7 @@ internal enum class TaskEditDraftOutcome { Acknowledged, Completed, Refused, Unk
 internal data class TaskEditSavedDraft(
     val scope: TaskEditDraftScope, val draftId: String, val machineId: String, val hostDevice: String,
     val qualificationId: String, val editId: String, val original: String,
+    val changes: String = original, val changeSequence: Long = 0,
     val state: TaskEditDraftState = TaskEditDraftState.Editing, val qualified: Boolean = false,
     val manifest: String? = null, val pendingId: String? = null, val pendingPayload: String? = null,
     val usedRequests: List<String> = emptyList()
@@ -44,7 +45,8 @@ internal data class TaskEditSavedDraft(
     override fun toString() = "TaskEditSavedDraft(id=$draftId, state=$state)"
     fun json() = JSONObject().put("version", 1).put("scope", scope.json()).put("draft_id", draftId)
         .put("machine_id", machineId).put("host_device", hostDevice).put("qualification_id", qualificationId).put("edit_id", editId)
-        .put("original", original).put("state", state.name).put("qualified", qualified)
+        .put("original", original).put("changes", changes).put("change_sequence", changeSequence)
+        .put("state", state.name).put("qualified", qualified)
         .put("manifest", manifest ?: JSONObject.NULL).put("pending_id", pendingId ?: JSONObject.NULL)
         .put("pending_payload", pendingPayload ?: JSONObject.NULL).put("used_requests", JSONArray(usedRequests))
     fun validate() {
@@ -52,6 +54,7 @@ internal data class TaskEditSavedDraft(
         listOf(draftId, machineId, qualificationId, editId).forEach(::taskDraftUuid)
         WorkspaceProtocol.identifier(hostDevice)
         require(qualificationId != editId && usedRequests.size <= 256 && usedRequests.distinct().size == usedRequests.size)
+        require(changeSequence >= 0)
         usedRequests.forEach(::taskDraftUuid)
         require(!qualified || qualificationId in usedRequests)
         require(manifest == null || qualified && manifest.isNotEmpty())
@@ -68,7 +71,7 @@ internal data class TaskEditSavedDraft(
     companion object {
         fun parse(value: JSONObject): TaskEditSavedDraft {
             WorkspaceProtocol.exactFields(value, setOf("version", "scope", "draft_id", "machine_id", "host_device", "qualification_id",
-                "edit_id", "original", "state", "qualified", "manifest", "pending_id", "pending_payload", "used_requests"))
+                "edit_id", "original", "changes", "change_sequence", "state", "qualified", "manifest", "pending_id", "pending_payload", "used_requests"))
             require(WorkspaceProtocol.number(value, "version") == 1L)
             require(value.get("qualified") is Boolean)
             val used = value.getJSONArray("used_requests")
@@ -77,8 +80,10 @@ internal data class TaskEditSavedDraft(
             return TaskEditSavedDraft(TaskEditDraftScope.parse(value.getJSONObject("scope")), WorkspaceProtocol.string(value, "draft_id"),
                 WorkspaceProtocol.string(value, "machine_id"), WorkspaceProtocol.string(value, "host_device"),
                 WorkspaceProtocol.string(value, "qualification_id"), WorkspaceProtocol.string(value, "edit_id"), WorkspaceProtocol.string(value, "original"),
-                TaskEditDraftState.valueOf(WorkspaceProtocol.string(value, "state")), value.getBoolean("qualified"), nullable("manifest"), nullable("pending_id"),
-                nullable("pending_payload"), (0 until used.length()).map { used.get(it) as? String ?: error("Invalid saved task draft identity.") })
+                changes = WorkspaceProtocol.string(value, "changes"), changeSequence = WorkspaceProtocol.number(value, "change_sequence"),
+                state = TaskEditDraftState.valueOf(WorkspaceProtocol.string(value, "state")), qualified = value.getBoolean("qualified"),
+                manifest = nullable("manifest"), pendingId = nullable("pending_id"), pendingPayload = nullable("pending_payload"),
+                usedRequests = (0 until used.length()).map { used.get(it) as? String ?: error("Invalid saved task draft identity.") })
                 .also { it.validate() }
         }
     }
@@ -128,9 +133,17 @@ internal class TaskEditDraftFiles(
         check(bytes.size <= MAX_RECORD)
         TaskEditSavedDraft.parse(JSONObject(String(bytes, Charsets.UTF_8))).also { check(it.scope == scope) }
     }
-    fun freeze(scope: TaskEditDraftScope, draftId: String, manifest: String): TaskEditSavedDraft = synchronized(LOCK) {
+    fun edit(scope: TaskEditDraftScope, draftId: String, sequence: Long, changes: String): TaskEditSavedDraft = synchronized(LOCK) {
         val previous = original(scope, draftId)
-        check(previous.state == TaskEditDraftState.Editing && previous.qualified && previous.manifest == null && manifest.isNotEmpty()) {
+        check(previous.state == TaskEditDraftState.Editing && previous.qualified && sequence > previous.changeSequence) {
+            "This task draft changed or transport already started. The newer draft was kept."
+        }
+        write(previous.copy(changes = changes, changeSequence = sequence))
+    }
+    fun freeze(scope: TaskEditDraftScope, draftId: String, manifest: String, expectedSequence: Long = 0): TaskEditSavedDraft = synchronized(LOCK) {
+        val previous = original(scope, draftId)
+        check(previous.state == TaskEditDraftState.Editing && previous.qualified && previous.manifest == null && manifest.isNotEmpty() &&
+            previous.changeSequence == expectedSequence) {
             "The original task draft cannot be replaced or changed after transport starts."
         }
         write(previous.copy(state = TaskEditDraftState.Frozen, manifest = manifest))
@@ -168,6 +181,23 @@ internal class TaskEditDraftFiles(
             TaskEditDraftOutcome.Unknown -> previous.copy(state = TaskEditDraftState.Unknown)
         }
         write(next)
+    }
+    /** Known completion may release a draft; pending, refused and unknown bytes stay for review. */
+    fun releaseCompleted(scope: TaskEditDraftScope, draftId: String) = synchronized(LOCK) {
+        val previous = original(scope, draftId)
+        check(previous.state == TaskEditDraftState.Completed) { "Only this task's verified completed edit can release its draft." }
+        Files.delete(file(scope).toPath())
+        syncDirectory()
+    }
+    /** Explicit person-confirmed discard only. An unconfirmed delivery remains held. */
+    fun discardUnsubmitted(scope: TaskEditDraftScope, draftId: String) = synchronized(LOCK) {
+        val previous = original(scope, draftId)
+        check(previous.state in setOf(TaskEditDraftState.Editing, TaskEditDraftState.Refused) ||
+            previous.state == TaskEditDraftState.Frozen && previous.editId !in previous.usedRequests) {
+            "This task edit may have been submitted. Its draft must stay for review."
+        }
+        Files.delete(file(scope).toPath())
+        syncDirectory()
     }
     private fun original(scope: TaskEditDraftScope, id: String): TaskEditSavedDraft =
         checkNotNull(read(scope)) { "The original task draft is unavailable." }.also { check(it.draftId == id) { "The original task draft identity changed." } }

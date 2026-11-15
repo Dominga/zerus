@@ -36,6 +36,8 @@ public struct TaskEditSavedDraft: Equatable, Sendable, CustomStringConvertible {
     public let qualificationId: String
     public let editId: String
     public let original: String
+    public fileprivate(set) var changes = ""
+    public fileprivate(set) var changeSequence: Int64 = 0
     public fileprivate(set) var state: TaskEditDraftState = .editing
     public fileprivate(set) var qualified = false
     public fileprivate(set) var manifest: String?
@@ -46,7 +48,8 @@ public struct TaskEditSavedDraft: Equatable, Sendable, CustomStringConvertible {
     fileprivate var json: JSONObject {
         ["version": 1, "scope": .object(scope.json), "draft_id": .string(draftId), "machine_id": .string(machineId),
          "host_device": .string(hostDevice), "qualification_id": .string(qualificationId), "edit_id": .string(editId),
-         "original": .string(original), "state": .string(state.rawValue), "qualified": .bool(qualified),
+         "original": .string(original), "changes": .string(changes), "change_sequence": .int(changeSequence),
+         "state": .string(state.rawValue), "qualified": .bool(qualified),
          "manifest": manifest.map(JSON.string) ?? .null, "pending_id": pendingId.map(JSON.string) ?? .null,
          "pending_payload": pendingPayload.map(JSON.string) ?? .null, "used_requests": .array(usedRequests.map(JSON.string))]
     }
@@ -55,6 +58,7 @@ public struct TaskEditSavedDraft: Equatable, Sendable, CustomStringConvertible {
         for id in [draftId, machineId, qualificationId, editId] { try draftUUID(id) }
         try WorkspaceProtocol.identifier(hostDevice)
         try draftRequire(qualificationId != editId && usedRequests.count <= 256 && Set(usedRequests).count == usedRequests.count)
+        try draftRequire(changeSequence >= 0)
         for id in usedRequests { try draftUUID(id) }
         try draftRequire(!qualified || usedRequests.contains(qualificationId))
         try draftRequire(manifest == nil || qualified && manifest?.isEmpty == false)
@@ -71,7 +75,7 @@ public struct TaskEditSavedDraft: Equatable, Sendable, CustomStringConvertible {
         if !qualified, let pendingId { try draftRequire(pendingId == qualificationId && manifest == nil) }
     }
     fileprivate static func parse(_ value: JSONObject) throws -> Self {
-        try WorkspaceProtocol.fields(value, ["version", "scope", "draft_id", "machine_id", "host_device", "qualification_id", "edit_id", "original", "state", "qualified", "manifest", "pending_id", "pending_payload", "used_requests"])
+        try WorkspaceProtocol.fields(value, ["version", "scope", "draft_id", "machine_id", "host_device", "qualification_id", "edit_id", "original", "changes", "change_sequence", "state", "qualified", "manifest", "pending_id", "pending_payload", "used_requests"])
         guard try WorkspaceProtocol.number(value, "version") == 1, let scope = value["scope"]?.object,
               case .bool(let qualified)? = value["qualified"], let rawUsed = value["used_requests"]?.array,
               rawUsed.count <= 256, let state = TaskEditDraftState(rawValue: try WorkspaceProtocol.string(value, "state")) else { throw draftError() }
@@ -80,6 +84,7 @@ public struct TaskEditSavedDraft: Equatable, Sendable, CustomStringConvertible {
                               machineId: WorkspaceProtocol.string(value, "machine_id"), hostDevice: WorkspaceProtocol.string(value, "host_device"),
                               qualificationId: WorkspaceProtocol.string(value, "qualification_id"), editId: WorkspaceProtocol.string(value, "edit_id"), original: WorkspaceProtocol.string(value, "original"))
         record.state = state; record.qualified = qualified
+        record.changes = try WorkspaceProtocol.string(value, "changes"); record.changeSequence = try WorkspaceProtocol.number(value, "change_sequence")
         record.manifest = try nullable("manifest"); record.pendingId = try nullable("pending_id"); record.pendingPayload = try nullable("pending_payload")
         record.usedRequests = try rawUsed.map { item in guard case .string(let id) = item else { throw draftError() }; return id }
         try record.validate(); return record
@@ -117,8 +122,10 @@ public final class TaskEditDraftFiles: @unchecked Sendable {
     public func create(_ scope: TaskEditDraftScope, machineId: String, hostDevice: String, qualificationId: String, editId: String, original: String) throws -> TaskEditSavedDraft { try locked {
         try scope.validate(); try ensureRoot()
         try draftRequire(!exists(file(scope)), "This task already has a saved draft. Review it before creating another.")
-        return try write(TaskEditSavedDraft(scope: scope, draftId: UUID().uuidString.lowercased(), machineId: machineId, hostDevice: hostDevice,
-                                             qualificationId: qualificationId, editId: editId, original: original))
+        var record = TaskEditSavedDraft(scope: scope, draftId: UUID().uuidString.lowercased(), machineId: machineId, hostDevice: hostDevice,
+                                       qualificationId: qualificationId, editId: editId, original: original)
+        record.changes = original
+        return try write(record)
     } }
     public func read(_ scope: TaskEditDraftScope) throws -> TaskEditSavedDraft? { try locked {
         try scope.validate()
@@ -139,9 +146,14 @@ public final class TaskEditDraftFiles: @unchecked Sendable {
         guard let json = try JSON.parse(clear).object else { throw draftError() }
         let record = try TaskEditSavedDraft.parse(json); try draftRequire(record.scope == scope); return record
     } }
-    public func freeze(_ scope: TaskEditDraftScope, draftId: String, manifest: String) throws -> TaskEditSavedDraft { try locked {
+    public func edit(_ scope: TaskEditDraftScope, draftId: String, sequence: Int64, changes: String) throws -> TaskEditSavedDraft { try locked {
         var previous = try original(scope, id: draftId)
-        try draftRequire(previous.state == .editing && previous.qualified && previous.manifest == nil && !manifest.isEmpty)
+        try draftRequire(previous.state == .editing && previous.qualified && sequence > previous.changeSequence)
+        previous.changes = changes; previous.changeSequence = sequence; return try write(previous)
+    } }
+    public func freeze(_ scope: TaskEditDraftScope, draftId: String, manifest: String, expectedSequence: Int64 = 0) throws -> TaskEditSavedDraft { try locked {
+        var previous = try original(scope, id: draftId)
+        try draftRequire(previous.state == .editing && previous.qualified && previous.manifest == nil && !manifest.isEmpty && previous.changeSequence == expectedSequence)
         previous.state = .frozen; previous.manifest = manifest; return try write(previous)
     } }
     public func reserve(_ scope: TaskEditDraftScope, draftId: String, requestId: String, payload: String) throws -> TaskEditSavedDraft { try locked {
@@ -150,6 +162,20 @@ public final class TaskEditDraftFiles: @unchecked Sendable {
         try draftRequire(!previous.qualified ? requestId == previous.qualificationId : previous.manifest != nil && requestId != previous.qualificationId)
         previous.state = .pending; previous.pendingId = requestId; previous.pendingPayload = payload; previous.usedRequests.append(requestId)
         return try write(previous)
+    } }
+    public func releaseCompleted(_ scope: TaskEditDraftScope, draftId: String) throws { try locked {
+        let previous = try original(scope, id: draftId)
+        try draftRequire(previous.state == .completed, "Only this task's verified completed edit can release its draft.")
+        try FileManager.default.removeItem(at: file(scope))
+        try syncDirectory()
+    } }
+    /// Only after an explicit person confirmation. Unknown delivery cannot be discarded here.
+    public func discardUnsubmitted(_ scope: TaskEditDraftScope, draftId: String) throws { try locked {
+        let previous = try original(scope, id: draftId)
+        try draftRequire([.editing, .refused].contains(previous.state) || previous.state == .frozen && !previous.usedRequests.contains(previous.editId),
+                         "This task edit may have been submitted. Its draft must stay for review.")
+        try FileManager.default.removeItem(at: file(scope))
+        try syncDirectory()
     } }
     /// The caller must first verify the original FFI proof before supplying an acknowledged outcome.
     public func settle(_ scope: TaskEditDraftScope, draftId: String, requestId: String, outcome: TaskEditDraftOutcome) throws -> TaskEditSavedDraft { try locked {

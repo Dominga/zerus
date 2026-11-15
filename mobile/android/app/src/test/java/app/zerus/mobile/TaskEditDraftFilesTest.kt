@@ -170,4 +170,43 @@ class TaskEditDraftFilesTest {
         assertEquals(TaskEditDraftState.Pending, store.read(scope)!!.state)
         refuses { store.reserve(scope, draft.draftId, edit, "payload") }
     }
+    @Test fun typingIsDurableAndOlderCallbacksCannotReplaceTheNewerDraft() {
+        val root = temporary.newFolder()
+        val store = files(root)
+        val draft = qualified(store)
+        store.edit(scope, draft.draftId, 2, "The person's latest edits")
+        refuses { store.edit(scope, draft.draftId, 1, "A stale picker callback") }
+        assertEquals("The person's latest edits", files(root).read(scope)!!.changes)
+        assertEquals(original, files(root).read(scope)!!.original)
+        refuses { store.freeze(scope, draft.draftId, "older field snapshot", expectedSequence = 1) }
+        store.freeze(scope, draft.draftId, "current field snapshot", expectedSequence = 2)
+        refuses { store.edit(scope, draft.draftId, 3, "late typing") }
+        assertEquals("current field snapshot", files(root).read(scope)!!.manifest)
+    }
+    @Test fun onlyAnExactKnownCompletionReleasesTheDraftForAnotherPersonEdit() {
+        val root = temporary.newFolder()
+        val store = files(root)
+        val draft = frozen(store)
+        refuses { store.releaseCompleted(scope, draft.draftId) }
+        store.reserve(scope, draft.draftId, edit, "payload")
+        refuses { store.releaseCompleted(scope, draft.draftId) }
+        store.settle(scope, draft.draftId, edit, TaskEditDraftOutcome.Completed)
+        refuses { store.releaseCompleted(scope, UUID.randomUUID().toString()) }
+        store.releaseCompleted(scope, draft.draftId)
+        assertNull(store.read(scope))
+        assertNotEquals(draft.draftId, create(store).draftId)
+    }
+    @Test fun aPersonCanDiscardAnUnsubmittedDraftButCannotDiscardAnUnknownDelivery() {
+        val root = temporary.newFolder()
+        val store = files(root)
+        val first = qualified(store)
+        refuses { store.discardUnsubmitted(scope, UUID.randomUUID().toString()) }
+        store.discardUnsubmitted(scope, first.draftId)
+        val next = frozen(store)
+        store.reserve(scope, next.draftId, edit, "payload")
+        refuses { store.discardUnsubmitted(scope, next.draftId) }
+        store.settle(scope, next.draftId, edit, TaskEditDraftOutcome.Unknown)
+        refuses { store.discardUnsubmitted(scope, next.draftId) }
+        assertEquals(TaskEditDraftState.Unknown, store.read(scope)!!.state)
+    }
 }

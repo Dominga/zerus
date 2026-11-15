@@ -43,7 +43,9 @@ mod team;
 #[cfg(not(feature = "test-without-team"))]
 pub use team::TaskTeam;
 
-pub(crate) fn cutover_schema()->i64 {cutover::SCHEMA}
+pub(crate) fn cutover_schema() -> i64 {
+    cutover::SCHEMA
+}
 
 pub struct NewTask<'a> {
     pub project: &'a str,
@@ -278,26 +280,46 @@ impl TaskDoc {
     pub(crate) fn apply_checked(&mut self, bytes: &[u8]) -> Result<()> {
         let doc = self.doc.fork();
         if doc.import(bytes)?.pending.is_some() {
-            return Err(Error::new("the task update has incomplete causal history; the saved copy is kept"));
+            return Err(Error::new(
+                "the task update has incomplete causal history; the saved copy is kept",
+            ));
         }
         let candidate = Self {
-            uuid:self.uuid.clone(), doc, saved:self.saved.clone(), saved_len:self.saved_len,
-            needs_fold:self.needs_fold, saved_stage:self.saved_stage, created_here:false, projection_only:self.projection_only,
+            uuid: self.uuid.clone(),
+            doc,
+            saved: self.saved.clone(),
+            saved_len: self.saved_len,
+            needs_fold: self.needs_fold,
+            saved_stage: self.saved_stage,
+            created_here: false,
+            projection_only: self.projection_only,
         };
         if string(&candidate.meta(), "uuid") != Some(self.uuid.clone())
-            || string(&candidate.meta(), "project") != string(&self.meta(), "project") {
-                return Err(Error::new("the update changes the original task or project identity"));
+            || string(&candidate.meta(), "project") != string(&self.meta(), "project")
+        {
+            return Err(Error::new(
+                "the update changes the original task or project identity",
+            ));
         }
         // Legacy unrooted DTOs still decode/merge for projection. They cannot
         // construct store authority: every authoritative save/import calls
         // validate_cutover_history and the native pin gate independently.
         // Never skip a malformed, replaced or newly received actual root.
-        if !self.projection_only && (self.meta().get("floor").is_some() || self.meta().get("cutover").is_some()
-            || candidate.meta().get("floor").is_some() || candidate.meta().get("cutover").is_some()) {
+        if !self.projection_only
+            && (self.meta().get("floor").is_some()
+                || self.meta().get("cutover").is_some()
+                || candidate.meta().get("floor").is_some()
+                || candidate.meta().get("cutover").is_some())
+        {
             candidate.validate_cutover_history()?;
         }
-        if self.cutover_seal()?.is_some_and(|seal| candidate.cutover_seal().ok().flatten().as_ref() != Some(&seal)) {
-            return Err(Error::new("an incoming update cannot replace the original task seal"));
+        if self
+            .cutover_seal()?
+            .is_some_and(|seal| candidate.cutover_seal().ok().flatten().as_ref() != Some(&seal))
+        {
+            return Err(Error::new(
+                "an incoming update cannot replace the original task seal",
+            ));
         }
         self.doc = candidate.doc;
         self.created_here = false;
@@ -920,7 +942,9 @@ impl TaskDoc {
     }
 
     pub(crate) fn writable(&self) -> Result<()> {
-        if self.projection_only {return Err(Error::new("This sealed task is read-only on the phone; use its computer to change or start it"));}
+        if self.projection_only {
+            return Err(Error::new("This sealed task is read-only on the phone; use its computer to change or start it"));
+        }
         if self.schema() > TASK_SCHEMA {
             return Err(Error::new("Update Zerus to edit this task"));
         }
@@ -1808,7 +1832,10 @@ mod tests {
             .unwrap();
         let mut merged = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
         let old = stale.export_since_vv(&merged.current_vv()).unwrap();
-        assert!(!merged.import_block(&old), "a live import must refuse the pre-floor branch");
+        assert!(
+            !merged.import_block(&old),
+            "a live import must refuse the pre-floor branch"
+        );
         // Decode a literal older importer's result to retain the raw-schema
         // reader control; this does not qualify it for a current store save.
         merged.import_unrepaired_for_test(&old);

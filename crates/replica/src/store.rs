@@ -901,13 +901,16 @@ impl ProjectStore {
 
     /// Mobile cache receipt is read-only for sealed native tasks. It can
     /// never construct a native cutover pin or dispatch authority.
-    pub fn open_phone(root:&Path, project:&str)->Result<Self> {
-        let mut store=Self::open(root,project)?;
-        store.phone=true;
+    pub fn open_phone(root: &Path, project: &str) -> Result<Self> {
+        let mut store = Self::open(root, project)?;
+        store.phone = true;
         Ok(store)
     }
-    pub fn open_phone_within(root:&Path, project:&str, wait:Duration)->Result<Option<Self>> {
-        Ok(Self::open_within(root,project,wait)?.map(|mut store|{store.phone=true;store}))
+    pub fn open_phone_within(root: &Path, project: &str, wait: Duration) -> Result<Option<Self>> {
+        Ok(Self::open_within(root, project, wait)?.map(|mut store| {
+            store.phone = true;
+            store
+        }))
     }
 
     /// Opens the project like `open`, but gives up after `wait` while another
@@ -1108,8 +1111,7 @@ impl ProjectStore {
         !matches!(
             fs::symlink_metadata(self.managed_path(uuid)),
             Err(error) if error.kind() == ErrorKind::NotFound
-        )
-        || !matches!(fs::symlink_metadata(self.cutover_path(uuid)), Err(error) if error.kind() == ErrorKind::NotFound)
+        ) || !matches!(fs::symlink_metadata(self.cutover_path(uuid)), Err(error) if error.kind() == ErrorKind::NotFound)
     }
 
     /// The task's mark; none when it is missing or cannot be read.
@@ -1250,7 +1252,9 @@ impl ProjectStore {
     /// less than its mark is damaged. It writes nothing (no mark is raised).
     fn counted(&self, uuid: &str) -> Result<TaskDoc> {
         let task = self.counted_with(uuid, read_regular)?;
-        if !self.phone {self.check_cutover_pin(&task)?;}
+        if !self.phone {
+            self.check_cutover_pin(&task)?;
+        }
         Ok(task)
     }
 
@@ -1260,7 +1264,7 @@ impl ProjectStore {
         read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
     ) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&read(&self.snapshot_path(uuid))?)?;
-        task.projection_only=self.phone && task.schema()>=crate::task::cutover_schema();
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
@@ -1295,7 +1299,7 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        task.projection_only=self.phone && task.schema()>=crate::task::cutover_schema();
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         task.view()?;
         Ok(task)
     }
@@ -1304,7 +1308,7 @@ impl ProjectStore {
         #[cfg(any(test, feature = "test-support"))]
         LOADS.with(|n| n.set(n.get() + 1));
         let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
-        task.projection_only=self.phone && task.schema()>=crate::task::cutover_schema();
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
@@ -1325,8 +1329,10 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        task.projection_only=self.phone && task.schema()>=crate::task::cutover_schema();
-        if !self.phone {self.check_cutover_pin(&task)?;}
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
+        if !self.phone {
+            self.check_cutover_pin(&task)?;
+        }
         if !self.phone && task.cutover_seal()?.is_some() {
             task.validate_cutover_history()?;
         }

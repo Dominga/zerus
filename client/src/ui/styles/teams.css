@@ -106,7 +106,8 @@
   .team-member-session { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .team-task-detail { margin-top: 12px; padding: 14px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); background: var(--z-color-card); }
-  .team-task-detail h3 { font-size: var(--fs-md); margin-bottom: 12px; }
+  .team-task-detail-head { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
+  .team-task-detail-head h3 { flex: 1; min-width: 0; font-size: var(--fs-md); margin: 0; }
   .team-facts { display: grid; grid-template-columns: minmax(100px, 130px) minmax(0, 1fr); gap: 6px 12px; margin: 0 0 12px; font-size: var(--fs-sm); }
   .team-facts dt { color: var(--z-color-muted); }
   .team-facts dd { margin: 0; overflow-wrap: anywhere; }

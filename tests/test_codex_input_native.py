@@ -54,6 +54,107 @@ class NativeCodexInput(unittest.TestCase):
     def screen(self):
         return self.tmux('capture-pane', '-p', '-t', self.pane)
 
+    def prepare_native_hooks(self):
+        if self._testMethodName != 'test_native_five_second_hook_timeout_keeps_acceptance_under_contention':
+            return
+        import shlex
+        # Model two seconds of scheduling/startup delay before the real hook.
+        # A held SQLite writer adds its real three-second busy wait. The native
+        # five-second hook budget then expires; acceptance must already survive.
+        wrapper = self.root / 'delayed-hook.py'
+        wrapper.write_text('import subprocess,time\nfrom pathlib import Path\ntime.sleep(2)\n'
+                           + 'child=subprocess.Popen(' + repr([str(test_input.HGS),'__state','hook']) + ')\n'
+                           + 'Path(' + repr(str(self.root/'hook-child-pid')) + ').write_text(str(child.pid))\n'
+                           + 'raise SystemExit(child.wait())\n')
+        env = dict(HGS_SESSION=self.name,HGS_RUN_ID=self.run_id,HGS_STATE_DIR=str(self.state),
+                   HGS_CONFIG_DIR=str(self.root/'config'),PATH=self.env['PATH'])
+        command = 'env ' + ' '.join(shlex.quote(k+'='+v) for k,v in env.items()) + ' python3 ' + shlex.quote(str(wrapper))
+        (self.native_home/'hooks.json').write_text(json.dumps(dict(hooks=dict(UserPromptSubmit=[dict(hooks=[
+            dict(type='command',command=command,timeout=5)])]))))
+
+    def test_native_five_second_hook_timeout_keeps_acceptance_under_contention(self):
+        import sqlite3
+        inspected = subprocess.run([str(test_input.HGS),'inspect',self.name],env=self.env,capture_output=True,text=True,timeout=15)
+        self.assertEqual(inspected.returncode,0,inspected.stderr)
+        db=sqlite3.connect(self.state/'events.sqlite3'); db.execute('BEGIN IMMEDIATE')
+        started=time.monotonic()
+        try:
+            receipt=self.send(self.payload(text='Native timed hook fixture'))
+            deadline=started+4
+            while time.monotonic()<deadline:
+                record=json.loads(self.record_path.read_text())
+                if record.get('input_seen_at',0)>=receipt['submitted_at']: break
+                time.sleep(.02)
+            self.assertGreaterEqual(record.get('input_seen_at',0),receipt['submitted_at'])
+            accepted=time.monotonic()-started
+            # Keep contention until the provider has moved past its timeout.
+            self.wait_for(lambda:'Fixture turn complete.' in self.screen())
+            elapsed=time.monotonic()-started
+            self.assertGreater(elapsed,4.5)
+            print('ZERUS_NATIVE_HOOK_TIMEOUT='+json.dumps(dict(version=self.native_version,
+                accepted_ms=round(accepted*1000),model_completed_ms=round(elapsed*1000))),flush=True)
+        finally:
+            db.rollback(); db.close()
+            pid_path=self.root/'hook-child-pid'
+            if pid_path.exists():
+                pid=pid_path.read_text().strip()
+                def ended():
+                    state=subprocess.run(['ps','-p',pid,'-o','stat='],capture_output=True,text=True,timeout=5).stdout.strip()
+                    return not state or state.startswith(('Z','X'))
+                self.wait_for(ended)
+
+    def test_consumed_input_without_hook_is_reconciled_from_exact_native_user_row(self):
+        text = 'Exact hookless Codex fixture input ' + str(uuid.uuid4())
+        payload = self.payload(text=text)
+        receipt = self.send(payload)
+        self.wait_for(lambda: 'Fixture turn complete.' in self.screen())
+        before = json.loads(self.record_path.read_text())
+        self.assertGreater(before['input_pending_at'], before['input_seen_at'])
+        original = (self.state / 'input_receipts' / (payload['request_id'] + '.json')).read_bytes()
+        inspected = subprocess.run([str(test_input.HGS), 'inspect', self.name],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        after = json.loads(self.record_path.read_text())
+        self.assertGreaterEqual(after['input_seen_at'], after['input_pending_at'])
+        self.assertEqual((self.state / 'input_receipts' / (payload['request_id'] + '.json')).read_bytes(), original)
+        self.assertEqual(self.send(payload), receipt, 'the original request is never replayed')
+        self.assertEqual(sum(request['texts'][-1:] == [text] for request in self.server.requests), 1)
+
+    def test_prompt_acceptance_is_durable_before_a_busy_activity_journal(self):
+        import sqlite3
+        # Initialize the real private journal, then hold its writer. Native hook
+        # acceptance must survive a slow/failed journal or a five-second timeout.
+        inspected = subprocess.run([str(test_input.HGS), 'inspect', self.name],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.record.update(input_pending_request=str(uuid.uuid4()), input_pending_at=time.time(), input_seen_at=0)
+        self.write_record()
+        db = sqlite3.connect(self.state / 'events.sqlite3')
+        db.execute('BEGIN IMMEDIATE')
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        event = dict(hook_event_name='UserPromptSubmit', session_id=self.conversation_id,
+                     transcript_path=self.record['transcript'], prompt='Private durable acceptance fixture')
+        started = time.monotonic()
+        child = subprocess.Popen([str(test_input.HGS), '__state', 'hook'], env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            child.stdin.write(json.dumps(event))
+            child.stdin.close()
+            deadline = started + 1.5
+            while time.monotonic() < deadline:
+                record = json.loads(self.record_path.read_text())
+                if record.get('input_seen_at', 0) >= self.record['input_pending_at']:
+                    break
+                time.sleep(.02)
+            self.assertGreaterEqual(record.get('input_seen_at', 0), self.record['input_pending_at'],
+                'journal contention must not postpone durable native acceptance')
+            print('ZERUS_HOOK_ACCEPTANCE_MS=' + str(round((time.monotonic()-started)*1000)), flush=True)
+        finally:
+            db.rollback()
+            db.close()
+            child.stdin = None
+            child.communicate(timeout=10)
+
     def test_native_refusal_has_an_opted_in_terminal_outcome(self):
         import native_send_outcome
         native_send_outcome.refused_draft(self, self.name, self.record, self.screen,

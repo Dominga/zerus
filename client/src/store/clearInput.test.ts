@@ -14,14 +14,15 @@ const BINDING = "a".repeat(64);
 const residue = (text: string, clearable = true): ComposerState => ({ binding: BINDING, state: "text", text, clearable, reason: clearable ? "" : "Wait until the agent is idle" });
 const flush = async () => { for (let n = 0; n < 8; n++) await Promise.resolve(); };
 
-it("offers recovery only for this local idle session and rechecks the exact pending input on confirmation", async () => {
+it("offers only native-verified local recovery, including a stale busy display, and rechecks the exact input", async () => {
   const pending = { original_request_id: "11111111-1111-4111-8111-111111111111", pending_at: 100 };
   const read: ComposerState = { binding: BINDING, state: "empty", text: "", clearable: false, reason: "", recovery: pending };
   const row = { key: "a", catalogKey: "run:a", computer: "", name: A.name, sessionId: "id", status: "ready" as const };
   const shown = { key: "a", composer: read };
   expect(recoverableInput(shown, row, undefined, false)).toEqual(pending);
   expect(recoverableInput(shown, { ...row, computer: "peer" }, undefined, false)).toBeUndefined();
-  expect(recoverableInput(shown, { ...row, status: "working" }, undefined, false)).toBeUndefined();
+  expect(recoverableInput(shown, { ...row, status: "working" }, undefined, false)).toEqual(pending);
+  expect(recoverableInput({ ...shown, composer: { ...read, recovery: undefined } }, { ...row, status: "working" }, undefined, false)).toBeUndefined();
   expect(recoverableInput(shown, row, undefined, true)).toBeUndefined();
   expect(recoverableInput({ ...shown, key: "other" }, row, undefined, false)).toBeUndefined();
   const acknowledge = vi.fn(async () => ({ status: "person-acknowledged-unknown" as const, error: "" }));

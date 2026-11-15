@@ -16,6 +16,7 @@ use store::{Lease, Store};
 mod admission;
 mod gate;
 mod io;
+mod marker;
 
 const VERSION: u8 = 1;
 const ROWS: usize = 16;

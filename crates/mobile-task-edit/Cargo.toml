@@ -1,0 +1,23 @@
+[package]
+name = "zerus-mobile-task-edit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Native admitted task edits for authenticated local mobile requests"
+publish = false
+
+[dependencies]
+zerus-replica = { path = "../replica" }
+zerus-mobile-endpoint = { path = "../../services/mobile/endpoint" }
+zerus-mobile-crypto = { path = "../../services/mobile/crypto" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"

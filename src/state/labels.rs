@@ -748,6 +748,41 @@ mod tests {
         );
     }
 
+    fn is_label_index_reader(relative: &str, production: &str) -> bool {
+        if !(production.contains("\"labels\"") && production.contains(".complete")) {
+            return false;
+        }
+        // Listing repair only witnesses/enumerates this directory; it never
+        // reads label-index contents. Its completion fields belong to its own
+        // scan. Any other .complete use in this exact file still needs proof.
+        relative != "src/state/listing_metadata/repair.rs"
+            || regex::Regex::new(r"\bstats\.complete\b")
+                .unwrap()
+                .replace_all(production, "")
+                .contains(".complete")
+    }
+
+    #[test]
+    fn listing_repair_exception_only_covers_its_own_completion_field() {
+        let file = "src/state/listing_metadata/repair.rs";
+        let witness = "const CONTROL_DIRS: &[&str] = &[\"labels\"]; stats.complete = true;";
+        assert!(!is_label_index_reader(file, witness));
+        assert!(is_label_index_reader("src/state/other.rs", witness));
+        let reader = format!(
+            "{witness}\nfn read_index(root: &Path) {{ std::fs::read(root.join(\"labels\").join(\".complete\")); }}"
+        );
+        assert!(
+            is_label_index_reader(file, &reader),
+            "a real unproved reader must not inherit the directory-witness exemption"
+        );
+        for field in ["another.complete", "mystats.complete", "stats.completed"] {
+            assert!(
+                is_label_index_reader(file, &witness.replace("stats.complete", field)),
+                "{field}"
+            );
+        }
+    }
+
     /// #1437 review: every reader of the label index outside this module
     /// decides through `prove_label_index`, the same proof label resolution
     /// uses, and never parses an index file's IDs itself. A new reader fails
@@ -783,7 +818,7 @@ mod tests {
                     .split("#[cfg(all(test, unix))]\nmod tests")
                     .next()
                     .unwrap();
-                if !(production.contains("\"labels\"") && production.contains(".complete")) {
+                if !is_label_index_reader(&relative, production) {
                     continue;
                 }
                 assert!(production.contains("prove_label_index("), "{relative} reads the label index without the shared proof");

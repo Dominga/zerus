@@ -5169,12 +5169,27 @@ view before it never shift the page after it. The view reads two bounded
 ranges of the index (the owner's rows and the unassigned rows), never every
 row of the stage.
 
+`--query TEXT` with `--stage` and `--limit` searches literal substrings of the
+short task reference, title and full prompt, ignoring letter case. A reference
+may include the project's name (`orchard/T-xxxxxx`). Queries are at most
+1024 UTF-8 bytes and contain no control characters. The reply echoes `query`;
+`position`, `total` and every stage's `counts` describe matching tasks. Search
+combines with `--session`, and its cursors bind the query and session scope as
+well as the project and stage. The session side panel uses these pages, with
+the same stage filters and Show more controls, rather than searching only the
+loaded window. The index keeps full search text separately from the capped
+preview and applies the query before the page limit.
+With **Only this session** on, a session without a stable launch or run identity
+cannot search: no project-wide request is sent, results and counts stay empty,
+and the panel explains how to turn off the session filter explicitly.
+
 Pages come from a local index of task headers in the project's replica folder
-(`task-index-v2.sqlite3`): a disposable cache, never replicated, rebuilt
+(`task-index-v3.sqlite3`): a disposable cache, never replicated, rebuilt
 silently from the task documents when it is missing, damaged or of another
 version, and never a reason for a read to fail. An older hgs that shares the
-state folder keeps its own `task-index-v1.sqlite3`, which this one never
-opens, migrates or removes, so the two never rebuild each other's index. Each save notes the task in the
+state folder keeps its own `task-index-v1.sqlite3` or `task-index-v2.sqlite3`,
+which this one never opens, migrates or removes, so they never rebuild each
+other's index. Each save notes the task in the
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every

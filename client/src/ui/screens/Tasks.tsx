@@ -6,6 +6,7 @@ import { createTaskReason } from "./TaskReason";
 import { canCancel, requestTaskCancellation, PAUSE_REASON } from "../../store/taskCancel";
 import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
+import { TextInput } from "../lib/TextField";
 import { statusOf } from "../sessions/SessionCard";
 import { selectedTask, openTask, requestTaskRename } from "../../store/taskNavigation";
 import { tasks } from "../../store/tasks";
@@ -30,16 +31,25 @@ const LABEL: Record<string, string> = { current: trNoop("Active"), ...STAGE_LABE
 const EMPTY = { current: tr("No tasks in progress or review"), review: tr("Nothing to review"), active: tr("No session is running a task"), todo: tr("No tasks in To do"), backlog: tr("Empty"), done: tr("Nothing yet") };
 export function TasksPanel() {
   const [stage, setStage] = createSignal<Filter>("current"), [older, setOlder] = createSignal(false), [at, setAt] = createSignal(0);
+  const [searchText, setSearchText] = createSignal(""), [query, setQuery] = createSignal("");
+  createEffect(() => {
+    const text = searchText().trim();
+    if (!text) { setQuery(""); return; }
+    const timer = setTimeout(() => setQuery(text), 200);
+    onCleanup(() => clearTimeout(timer));
+  });
   const { show: showReason, clear: clearReason, Tip: ReasonTip } = createTaskReason();
   createEffect(on(() => project()?.id, clearReason));
   const only = () => flag("tasks/onlySession") ? selected() : undefined;
+  const searchBlocked = createMemo(() => !!query() && flag("tasks/onlySession") && (!selected() || !sessionIdentity(selected()!)));
   const ageNow = createMemo(() => Math.floor(now() / 60) * 60_000);
   const stagesOf = (filter: Filter): Stage[] => filter === "current" ? ["review", "active"] : [filter];
-  // Only this session over a windowed list: hgs pages the session's own rows by its identity.
+  // Session filtering and search use hgs's own bounded pages beyond the loaded window.
   createEffect(() => {
-    const s = only(), id = s ? sessionIdentity(s) : "", owner = tasks.windowed() && tasks.project() === project()?.id ? tasks.project() : undefined;
+    const s = only(), id = s ? sessionIdentity(s) : "", search = query();
+    const owner = !searchBlocked() && (tasks.windowed() || search) && tasks.project() === project()?.id ? tasks.project() : undefined;
     const scope = s && id ? { host: s.computer, sessionId: id } : undefined, stages = stagesOf(stage());
-    untrack(() => tasks.session.show(owner, scope, stages));
+    untrack(() => tasks.session.show(owner, scope, stages, search));
   });
   // A closed panel reads no more pages of the view.
   onCleanup(() => tasks.session.suspend());
@@ -49,14 +59,14 @@ export function TasksPanel() {
     if (own) return filter === "current" ? [...own.review, ...own.active] : own[filter].filter((t) => filter !== "done" || (ageNow() - t.stageAt > RECENT_DONE) === old);
     return filter === "current" ? rows().filter((t) => ["review", "active"].includes(t.stage) && (!only() || belongsTo(t, only()!))) : boardRows(rows(), filter, only(), ageNow(), old);
   };
-  const visible = createMemo(() => tasks.error() ? [] : [...stageRows(stage()), ...(stage() === "done" && older() ? stageRows("done", true) : [])]);
+  const visible = createMemo(() => tasks.error() || searchBlocked() ? [] : [...stageRows(stage()), ...(stage() === "done" && older() ? stageRows("done", true) : [])]);
   const shown = () => visible().slice(at(), at() + TASK_PAGE);
   // A windowed list knows each stage's total, and hgs counts a session's view;
   // a session filter over a whole list counts the rows it shows.
-  const tileCount = (s: Filter) => sessionTaskRows() ? stagesOf(s).reduce((sum, st) => sum + view.total(st), 0)
+  const tileCount = (s: Filter) => searchBlocked() ? 0 : sessionTaskRows() ? stagesOf(s).reduce((sum, st) => sum + view.total(st), 0)
     : !tasks.windowed() || only() ? stageRows(s).length
     : s === "current" ? tasks.total("review") + tasks.total("active") : tasks.total(s);
-  const remaining = (s: Stage) => sessionTaskRows() ? view.remaining(s) : tasks.remaining(s);
+  const remaining = (s: Stage) => searchBlocked() ? 0 : sessionTaskRows() ? view.remaining(s) : tasks.remaining(s);
   const reading = (s: Stage) => sessionTaskRows() ? view.loading()[s] : tasks.loading()[s];
   const pageError = () => sessionTaskRows() ? view.error() : tasks.pageError();
   const listed = () => sessionTaskRows() ? stagesOf(stage()).every((s) => view.read(s)) : tasks.loaded();
@@ -66,8 +76,8 @@ export function TasksPanel() {
     await (sessionTaskRows() ? view.more(s) : tasks.more(s));
     if (visible().length > before) setAt(Math.floor(before / TASK_PAGE) * TASK_PAGE);
   };
-  createEffect(on(() => project()?.id, () => { setAt(0); setOlder(false); setStage("current"); }));
-  createEffect(on(() => [stage(), only()?.key, older()] as const, () => setAt(0)));
+  createEffect(on(() => project()?.id, () => { setAt(0); setOlder(false); setStage("current"); setSearchText(""); setQuery(""); }));
+  createEffect(on(() => [stage(), only()?.key, older(), query()] as const, () => setAt(0)));
   createEffect(on(visible, (next, previous) => { if (previous) setAt(taskPageOffset(previous, next, at())); }));
   createEffect(() => { if (at() >= visible().length) setAt(Math.max(0, Math.floor((visible().length - 1) / TASK_PAGE) * TASK_PAGE)); });
   let revealed = "";
@@ -86,7 +96,7 @@ export function TasksPanel() {
   const [lineAt, setLineAt] = createSignal<number>();
   const endDrag = () => { setLineAt(undefined); clearInterval(timer); timer = undefined; step = 0; };
   onCleanup(endDrag);
-  createEffect(on(() => [project()?.id, stage(), at(), draggedTask()] as const, endDrag));
+  createEffect(on(() => [project()?.id, stage(), at(), query(), draggedTask()] as const, endDrag));
   const canReorder = () => { const t = drag(); return !!t && canDrag(t) && !writingTask() && (t.stage === stage() || stage() === "current" && ["active", "review"].includes(t.stage)); };
   const gapAt = (y: number) => {
     const t = drag(), elements = t ? [...cards.querySelectorAll<HTMLElement>(".tk-card")].filter((r) => r.dataset.stage === t.stage) : [];
@@ -173,6 +183,7 @@ export function TasksPanel() {
     <button class="tk-sq" aria-label={tr("Task settings")} title={project() ? tr("Task settings for %1", project()!.name) : tr("Task settings")} disabled={!project()?.accessible || taskSettings.busy()} onClick={(e) => { const p = project(); if (p) void taskSettings.open(p.id, p.name, e.currentTarget); }}><Icon name="settings" size={15} /></button>
   </TaskCreate></Suspense>
     <Show when={project()} fallback={<div class="tk-empty tk-noproject"><Icon name="list-todo" size={22} /><span>{selected() && selected()!.state !== "archived" ? tr("Tasks belong to a project. Move this session into one to keep tasks for it.") : tr("Open a project session to see tasks")}</span></div>}>
+      <div class="tk-search"><Icon name="search" size={14} /><TextInput type="search" aria-label={tr("Search tasks")} placeholder={tr("Search by reference, title or text")} maxLength={256} value={searchText()} onInput={(e) => setSearchText(e.currentTarget.value)} /><Show when={searchText()}><button class="icon-btn" aria-label={tr("Clear task search")} title={tr("Clear task search")} onClick={() => setSearchText("")}><Icon name="x" size={13} /></button></Show></div>
       <div class="tk-tiles" role="tablist" aria-label={tr("Task stages")}><For each={FILTERS}>{(s) => <button class={`tk-tile st-${s}`} data-filter={s} classList={{ on: stage() === s, drop: dropTile() === s }} onDragOver={(e) => { if (tileOver(e, s)) setDropTile(s); }} onDragLeave={() => setDropTile(undefined)} onDrop={(e) => { setDropTile(undefined); if (!tileOver(e, s)) return; const task = readTaskDrag(e, project()!.id), action = stageDropAction(task, s); setDraggedTask(undefined); if (task && action) void actOnTask(project()!.id, task, action); }} role="tab" aria-label={`${tr(LABEL[s])} ${tileCount(s)}`} aria-selected={stage() === s} tabindex={stage() === s ? 0 : -1} onClick={() => setStage(s)} onKeyDown={(e) => { const i = FILTERS.indexOf(s), next = e.key === "ArrowRight" ? (i + 1) % 6 : e.key === "ArrowLeft" ? (i + 5) % 6 : e.key === "Home" ? 0 : e.key === "End" ? 5 : -1; if (next >= 0) { e.preventDefault(); setStage(FILTERS[next]); e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus(); } }}><span class="tk-tile-ico"><Icon name={ICON[s]} size={14} /></span><span class="tk-tile-label">{tr(LABEL[s])}</span><b class="tk-tile-count">{tileCount(s)}</b></button>}</For></div>
       <Show when={tasks.error()}><div class="notice danger tk-line" role="alert">Tasks could not be read: {tasks.error()}</div></Show>
       <Show when={tasks.damaged()}><div class="notice warn tk-line">{tasks.damaged()} task files of {project()!.name} could not be read.</div></Show>
@@ -184,8 +195,8 @@ export function TasksPanel() {
         <span class={`tk-glyph st-${t.stage}`} aria-hidden="true"><Show when={t.stage === "todo" && t.queue > 0}>{t.queue}</Show><Show when={["review", "done"].includes(t.stage)}><Icon name="check" size={11} /></Show></span>
         <div class="tk-card-main"><div class="tk-card-title">{t.title || tr("Untitled task")}</div><div class="tk-meta"><Show when={stage() === "current"}><span class="tk-meta-stage">{stageLabel(t.stage)}</span></Show><span class="mono tk-id">{t.id}</span><span class="tk-target ell" title={assignmentLabel(t)}>{t.worker ? `Subagent: ${t.worker}` : assignmentLabel(t)}</span><Show when={t.stage === "active" && find()(executorRef(t))}>{(s) => <span class={`hbadge t-${statusOf(s())}`}>{s().caption}</span>}</Show></div><Show when={t.stage === "review" && (t.summary || t.cancelReason)}><p class="tk-summary">{t.cancelReason || t.summary}</p></Show></div>
         <div class="tk-card-acts"><Show when={supportsTaskStart(t) && ["todo", "backlog"].includes(t.stage)}><TaskStartButton card project={project()!.id} task={t} showReason={showReason} /></Show><Show when={t.stage === "active"}><button class="icon-btn tk-act tk-primary blocked" aria-label={tr("Pause task")} aria-description={tr(PAUSE_REASON)} title={tr(PAUSE_REASON)} onClick={(e) => { e.stopPropagation(); openTask(project()!.id, t.uuid); showReason(e.currentTarget, tr(PAUSE_REASON)); }}><Icon name="pause" size={15} /></button></Show><Show when={primaryAction(t.stage)}>{(action) => <button class="icon-btn tk-act tk-primary" aria-label={actionLabel(action())} title={actionLabel(action())} disabled={!t.writable || !!writingTask()} onClick={(e) => { e.stopPropagation(); void actOnTask(project()!.id, t, { kind: action() }); }}><Icon name={ACTION_ICON[action()]} size={15} /></button>}</Show><button class="icon-btn tk-act" aria-label={tr("Task actions")} title={tr("Task actions")} aria-haspopup="menu" onClick={(e) => menu(e, t)}><Icon name="ellipsis" size={15} /></button></div>
-      </article>}</For><div class="tk-dropline" classList={{ on: lineAt() !== undefined }} style={{ translate: `0 ${lineAt() ?? 0}px` }} aria-hidden="true" /></div><Show when={!visible().length && !tasks.error()}><div class="tk-empty"><Icon name={ICON[stage()]} size={20} /><span>{!project()!.accessible ? tr("This project is unavailable on this computer.") : listed() ? EMPTY[stage()] : tr("Loading tasks…")}</span></div></Show>
-        <Show when={stage() === "done" && stageRows("done", true).length}><button class="tk-older" onClick={() => setOlder(!older())}>{older() ? tr("Hide older") : tr("Show older (%1)", stageRows("done", true).length)}</button></Show>
+      </article>}</For><div class="tk-dropline" classList={{ on: lineAt() !== undefined }} style={{ translate: `0 ${lineAt() ?? 0}px` }} aria-hidden="true" /></div><Show when={!visible().length && !tasks.error()}><div class="tk-empty"><Icon name={ICON[stage()]} size={20} /><span>{!project()!.accessible ? tr("This project is unavailable on this computer.") : searchBlocked() ? tr("This session has no stable identity. Turn off Only this session to search the project.") : listed() ? query() ? tr("No tasks match your search") : EMPTY[stage()] : tr("Loading tasks…")}</span></div></Show>
+        <Show when={!searchBlocked() && stage() === "done" && stageRows("done", true).length}><button class="tk-older" onClick={() => setOlder(!older())}>{older() ? tr("Hide older") : tr("Show older (%1)", stageRows("done", true).length)}</button></Show>
         <Show when={at() + TASK_PAGE >= visible().length && !tasks.error()}><For each={moreStages()}>{(s) => <Show when={!reading(s)} fallback={<div class="act-older hint tk-more-reading">{tr("Reading more tasks…")}</div>}>
           <button type="button" class="btn small ghost tk-more" onClick={() => void loadMore(s)}>{only() ? tr("%1 more in this stage", remaining(s)) : stage() === "current" ? tr("Show more: %1", stageLabel(s)) : tr("Show more")}</button>
         </Show>}</For></Show>

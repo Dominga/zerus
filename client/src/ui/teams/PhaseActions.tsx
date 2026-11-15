@@ -73,6 +73,14 @@ export function PhaseActions(props: { draft: PhaseDraft; view: TeamView; busy: b
   };
   const open = (kind: Review["kind"]) => {
     if (!enabled() || props.draft.publication) return;
+    const roster = props.view.members;
+    if (kind === "approve" && props.view.bar.status === "planning" && (
+      roster.length !== props.view.bar.counts.members.total
+      || new Set(roster.map((member) => member.id)).size !== roster.length
+      || roster.some((member) => !member.id)
+    )) {
+      setMessage(tr("The full roster is unavailable. Read again before confirming members and working folders.")); return;
+    }
     if (props.view.bar.revision !== props.draft.revision) { setMessage(tr("The team and phase revisions differ. Read again before reviewing the roster.")); return; }
     setMessage(""); setReview({ kind, draft: structuredClone(props.draft), view: structuredClone(props.view) });
   };

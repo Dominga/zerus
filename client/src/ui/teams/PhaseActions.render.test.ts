@@ -67,6 +67,19 @@ it("does not combine a phase with a roster from another revision", () => {
   expect(f.node.querySelector("dialog")).toBeNull(); expect(f.node.textContent).toContain("revisions differ"); expect(f.run).not.toHaveBeenCalled();
 });
 
+it.each(["missing", "duplicate", "empty"])("does not confirm an incomplete initial roster: %s", (fault) => {
+  const f = fixture("revised", (view) => {
+    // Fault injection on the real writer's projected roster, not normal rows.
+    if (fault === "missing") view.members.pop();
+    else if (fault === "empty") view.members[1].id = "";
+    else view.members[1].id = view.members[0].id;
+  });
+  button(f.node, "[data-phase-approve]").click();
+  expect(f.node.querySelector("dialog")).toBeNull();
+  expect(f.node.textContent).toContain("full roster is unavailable");
+  expect(f.run).not.toHaveBeenCalled();
+});
+
 it("undoes only the displayed rejection episode", async () => {
   const f = fixture("rejected"); button(f.node, "[data-phase-undo]").click();
   await vi.waitFor(() => expect(f.run).toHaveBeenCalledTimes(1));

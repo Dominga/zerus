@@ -184,6 +184,29 @@ fn publication_fixture_equals_real_command_task_and_archive_writers() {
 }
 
 #[test]
+fn initial_review_reads_all_two_hundred_members_and_the_separate_lead() {
+    let h = Harness::new();
+    let mut create = serde_json::to_value(crate::teams::ops::tests::create()).unwrap();
+    create["op"] = "start_planning".into();
+    create["goal"] = "Review every member before their working folders are created.".into();
+    create["bundle"]["template"]["settings"]["caps"]["max_members"] = 200.into();
+    create["bundle"]["template"]["roster"] = json!([
+        {"role":"developer","count":199},
+        {"role":"reviewer","count":1}
+    ]);
+    h.apply(&person(), serde_json::from_value(create).unwrap());
+    let (status, exit) = h.cli(&Caller::Person, &format!("status --team {TEAM}"), "");
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(status["counts"]["members"]["total"], 201);
+    assert_eq!(status["members"].as_array().unwrap().len(), 201);
+    let (queue, exit) = h.cli(&Caller::Person, &format!("queue --team {TEAM}"), "");
+    assert_eq!(exit, 0, "{queue}");
+    let view = zerus_client_core::teams::view::team(&status, &queue);
+    assert_eq!(view.members.len(), 201);
+    assert_eq!(view.bar.counts.members.total, 201);
+}
+
+#[test]
 #[ignore = "writes the publication fixture through the real product writers"]
 fn regenerate_publication_fixture() {
     std::fs::write(

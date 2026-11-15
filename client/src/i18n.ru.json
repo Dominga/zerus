@@ -3763,6 +3763,7 @@
   "The fork is placed after its original and opens Activity": "Ответвление размещается после исходной сессии и открывает вкладку «Активность»",
   "The freest account": "Самая свободная учётная запись",
   "The fresh project catalog or computer configuration could not be verified. Reads retry automatically; the original import will not be applied again.": "Не удалось проверить свежий каталог проектов или конфигурацию компьютера. Чтение повторяется автоматически; исходный импорт повторно применяться не будет.",
+  "The full roster is unavailable. Read again before confirming members and working folders.": "Не удалось прочитать полный состав команды. Прочитайте данные ещё раз перед подтверждением участников и рабочих папок.",
   "The historical downloaded files report is deferred. Retry keeps the original report identity.": "Исторический отчёт о скачанных файлах отложен. Повторная попытка сохраняет исходный идентификатор отчёта.",
   "The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent.": "Исторический отчёт о скачанных файлах требует проверки. Неподтверждённая публикация будет только проверяться, но никогда не будет отправлена повторно.",
   "The historical downloaded files report was not sent because local preparation failed.": "Исторический отчёт о скачанных файлах не отправлен, потому что локальная подготовка не удалась.",

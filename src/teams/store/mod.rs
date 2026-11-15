@@ -29,6 +29,7 @@ mod progress;
 mod recorded_timings;
 mod records;
 pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
+mod roster;
 pub(crate) mod rows;
 mod stage;
 pub(crate) mod timers;

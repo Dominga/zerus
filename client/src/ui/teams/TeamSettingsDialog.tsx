@@ -1,4 +1,4 @@
-import { For, Show, createSignal, createUniqueId, onCleanup, onMount } from "solid-js";
+import { For, Show, batch, createEffect, createSignal, createUniqueId, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { newRequestId, type TeamCall, type TeamOutcome, type TeamView } from "../../store/teams";
@@ -13,7 +13,7 @@ import "./team-settings.css";
 // phase choice. Only our settings op is
 // used; fork-specific rules, models, tests and intake operations do not map here.
 export interface TeamSettingsDialogProps {
-  /** A snapshot of the view the person opened, including its revision. */
+  /** The live view; only a stale refusal admits a newer revision into the draft. */
   view: TeamView;
   busy: boolean;
   onSave: (call: TeamCall) => Promise<TeamOutcome>;
@@ -38,12 +38,17 @@ function numberLabel(key: string): string {
 }
 
 export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element {
-  const current = { ...props.view, bar: { ...props.view.bar } };
-  const initial = completeSettings(current.settings) ? structuredClone(current.settings) : undefined;
-  const [settings, setSettings] = createSignal(initial);
-  const [numbers, setNumbers] = createSignal<Record<string, string>>(initial ? Object.fromEntries([...Object.entries(initial.caps), ...Object.entries(initial.timers)].map(([key, value]) => [key, String(value)])) : {});
+  const snapshot = (view: TeamView) => ({ ...view, bar: { ...view.bar } });
+  const written = (view: TeamView) => completeSettings(view.settings) ? structuredClone(view.settings) : undefined;
+  const numberStrings = (value: TeamSettings | undefined): Record<string, string> => value ? Object.fromEntries([...Object.entries(value.caps), ...Object.entries(value.timers)].map(([key, number]) => [key, String(number)])) : {};
+  const [current, setCurrent] = createSignal(snapshot(props.view));
+  const [initial, setInitial] = createSignal(written(props.view));
+  const [settings, setSettings] = createSignal(initial());
+  const [numbers, setNumbers] = createSignal(numberStrings(initial()));
   const [busy, setBusy] = createSignal(false);
   const [stale, setStale] = createSignal(false);
+  const [reloaded, setReloaded] = createSignal(false);
+  const [discardedEdits, setDiscardedEdits] = createSignal(false);
   const [error, setError] = createSignal("");
   const title = createUniqueId();
   let dialog!: HTMLDialogElement;
@@ -64,25 +69,35 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     }
     for (const key of TIMERS) {
       // The fixed standing-resume rule has no configurable reader (.158.1).
-      if (key === "resume_limit_per_hour") { timers[key] = initial!.timers[key]; continue; }
+      if (key === "resume_limit_per_hour") { timers[key] = initial()!.timers[key]; continue; }
       const number = wholeNumber(numbers()[key], 0, 0xffffffff);
       if (number === undefined) return undefined;
       timers[key] = number;
     }
-    return { ...draft, land_allowed: initial!.land_allowed, caps, timers };
+    return { ...draft, land_allowed: initial()!.land_allowed, caps, timers };
   };
-  const changed = () => !!initial && JSON.stringify(value()) !== JSON.stringify(initial);
+  const changed = () => !!initial() && JSON.stringify(value()) !== JSON.stringify(initial());
+  createEffect(() => {
+    const fresh = props.view;
+    if (!stale() || fresh.bar.id !== current().bar.id || fresh.revision <= current().revision) return;
+    const next = written(fresh);
+    batch(() => {
+      setDiscardedEdits(changed());
+      setCurrent(snapshot(fresh)); setInitial(next); setSettings(next); setNumbers(numberStrings(next));
+      setError(""); setReloaded(true); setStale(false);
+    });
+  });
   const save = async () => {
     const next = value();
     if (locked() || !next || !changed()) return;
-    if (next.integration === "branch" && !current.bar.integration_branch) {
+    if (next.integration === "branch" && !current().bar.integration_branch) {
       setError(tr("An integration branch is required.")); return;
     }
     setBusy(true); setError("");
     try {
       // The native action checks this whole value with crates/team-plan before
       // spawning hgs. The store alone keeps uncertain intents and their IDs.
-      const outcome = await props.onSave(teamCall(current, newRequestId(), "settings", { settings: next }));
+      const outcome = await props.onSave(teamCall(current(), newRequestId(), "settings", { settings: next }));
       if (outcome.outcome === "done" || outcome.outcome === "uncertain" || outcome.outcome === "pending") props.onClose();
       else if (outcome.outcome === "failed") { setError(outcome.detail); setStale(outcome.code === "stale_revision"); }
       else setError(outcome.confirmation.text);
@@ -93,7 +108,9 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     <div class="dlg-head"><Icon name="settings" size={18} /><h2 id={title}>{tr("Team settings")}</h2><span class="grow" />
       <button type="button" class="icon-btn" aria-label={tr("Close")} disabled={busy()} onClick={close}><Icon name="x" size={16} /></button></div>
     <div class="dlg-body">
-      <p class="hint">{current.bar.name}</p>
+      <p class="hint">{current().bar.name}</p>
+      <Show when={reloaded()}><p class="notice" role="status" data-settings-reloaded>{tr("The team changed; the settings were reloaded")}
+        <Show when={discardedEdits()}><span> {tr("Your unsaved edits were replaced. Review the reloaded settings before saving.")}</span></Show></p></Show>
       <Show when={settings()} fallback={<p role="alert">{tr("This version cannot show all team settings. Update Zerus and hgs before changing them.")}</p>}>
         <fieldset class="team-settings-fields" disabled={locked()}>
           <section><h3>{tr("Delegations")}</h3><For each={DELEGATIONS}>{(key) => <label class="check team-setting-check">
@@ -120,17 +137,17 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           </section>
           <section><h3>{tr("Integration")}</h3>
             <label><span>{tr("Accepted work")}</span><select data-setting="integration" value={settings()!.integration} onChange={(event) => set("integration", event.currentTarget.value as TeamSettings["integration"])}>
-              <option value="branch" disabled={!current.bar.integration_branch}>{tr("Merge into the integration branch")}</option><option value="none">{tr("Keep each task's branch")}</option></select></label>
-            <Show when={current.bar.integration_branch}><p class="hint mono">{current.bar.integration_branch}</p></Show>
+              <option value="branch" disabled={!current().bar.integration_branch}>{tr("Merge into the integration branch")}</option><option value="none">{tr("Keep each task's branch")}</option></select></label>
+            <Show when={current().bar.integration_branch}><p class="hint mono">{current().bar.integration_branch}</p></Show>
             <label class="check"><input type="checkbox" data-setting="land_allowed" checked={settings()!.land_allowed} disabled />{tr("Allow land stages")}</label>
             <p class="hint" data-landing-note>{tr("Saved with the team; landing is not gated by this setting yet")}</p>
           </section>
         </fieldset>
         <Show when={!value()}><p class="notice danger" role="alert">{tr("Enter whole numbers within the shown limits.")}</p></Show>
       </Show>
-      <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>
-      <Show when={stale()}><p class="hint">{tr("Close and reopen settings to review the current values.")}</p></Show>
+      <Show when={stale()}><p class="hint">{tr("Waiting for the current team settings…")}</p></Show>
     </div>
+    <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>
     <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" data-initial disabled={busy()} onClick={close}>{tr("Cancel")}</button>
       <button type="button" class="btn primary" data-settings-save disabled={locked() || !value() || !changed()} onClick={() => void save()}>{tr("Save")}</button></div>
   </dialog>;

@@ -91,11 +91,51 @@ it("keeps the revision and unedited values that were shown when a refreshed view
   await f.submit(); expect(f.calls[0].expected_revision).toBe(16); expect(f.calls[0].action.settings).toEqual({ ...written(), routing: "lead" });
 });
 
-it("shows a stale refusal verbatim and disables another write until the dialog is reopened", async () => {
-  const f = setup({ outcome: "failed", code: "stale_revision", detail: "The team changed. Read the team before sending it again.", request_id: "stale" });
-  f.change("routing", "lead"); await f.submit(); await f.submit();
-  expect(f.calls).toHaveLength(1); expect(f.close).not.toHaveBeenCalled();
-  expect(f.host.querySelector("[data-settings-error]")?.textContent).toBe("The team changed. Read the team before sending it again.");
+// Adapted from the independent review158 ui-contract probe; exercise the
+// workspace's live-view hook as well as the dialog's stale-reload state.
+it("rereads a stale dialog from the refreshed workspace without replaying or merging unsaved edits", async () => {
+  const host = document.createElement("div"); document.body.append(host);
+  const [shown, show] = createSignal(view());
+  const calls: TeamCall[] = [];
+  const save = vi.fn(async (call: TeamCall): Promise<TeamOutcome> => { calls.push(call); return { outcome: "failed", code: "stale_revision", detail: "The team changed. Read the team before sending it again.", request_id: call.request_id }; });
+  dispose = render(() => createComponent(TeamWorkspace, { get view() { return shown(); }, busy: false, failure: null, onAction: () => {}, onPage: () => {}, onAddTask: () => {}, onSettingsSave: save }), host);
+  host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!.click();
+  const change = (value: string) => { const select = host.querySelector<HTMLSelectElement>("[data-setting=routing]")!; select.value = value; select.dispatchEvent(new Event("change", { bubbles: true })); };
+  const submit = async () => { host.querySelector<HTMLButtonElement>("[data-settings-save]")!.click(); await tick(); };
+  change("lead"); await submit(); await submit();
+  expect(calls).toHaveLength(1);
+  expect(host.querySelector("[data-settings-error]")?.textContent).toBe("The team changed. Read the team before sending it again.");
+  expect(host.querySelector<HTMLFieldSetElement>("fieldset")!.disabled).toBe(true);
+  const newer = view(); newer.revision = 99; newer.settings!.caps.max_open_tasks = 99;
+  show(newer); await tick();
+  expect(calls).toHaveLength(1);
+  expect(host.querySelector<HTMLInputElement>("[data-setting=max_open_tasks]")!.value).toBe("99");
+  expect(host.querySelector<HTMLSelectElement>("[data-setting=routing]")!.value).toBe(written().routing);
+  expect(host.querySelector("[data-settings-error]")).toBeNull();
+  expect(host.querySelector("[data-settings-reloaded]")?.textContent).toContain("The team changed; the settings were reloaded");
+  expect(host.querySelector("[data-settings-reloaded]")?.textContent).toContain("Your unsaved edits were replaced.");
+  expect(host.querySelector<HTMLFieldSetElement>("fieldset")!.disabled).toBe(false);
+  expect(host.querySelector<HTMLButtonElement>("[data-settings-save]")!.disabled).toBe(true);
+  // Another ordinary read must not replace the now editable fresh draft.
+  change("lead"); const later = view(); later.revision = 100; later.settings!.caps.max_open_tasks = 100; show(later); await tick();
+  expect(calls).toHaveLength(1); await submit();
+  expect(calls).toHaveLength(2); expect(calls[1].request_id).not.toBe(calls[0].request_id);
+  expect(calls[1].expected_revision).toBe(99);
+  expect(calls[1].action.settings).toEqual({ ...newer.settings, routing: "lead" });
+});
+
+it("waits through same-revision, older and other-team reads after a stale refusal", async () => {
+  const f = setup({ outcome: "failed", code: "stale_revision", detail: "Changed", request_id: "stale" });
+  f.change("routing", "lead"); await f.submit();
+  const same = view(); same.settings!.caps.max_open_tasks = 99;
+  const older = { ...same, revision: 15 };
+  const other = { ...same, revision: 99, bar: { ...same.bar, id: "another-team" } };
+  for (const fresh of [same, older, other]) {
+    f.setCurrent(fresh); await tick();
+    expect(f.input("max_open_tasks").value).toBe(String(written().caps.max_open_tasks));
+    expect(f.host.querySelector<HTMLFieldSetElement>("fieldset")!.disabled).toBe(true);
+    await f.submit(); expect(f.calls).toHaveLength(1);
+  }
 });
 
 it.each(["uncertain", "pending"] as const)("hands %s back to the existing store controls without an automatic replay", async (outcome) => {

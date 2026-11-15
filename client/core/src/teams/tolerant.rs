@@ -469,7 +469,10 @@ mod tests {
     // an unknown field must disable replacement instead of disappearing on Save.
     fn board_with_settings_admission(value: &Value, queue: &Value) -> Value {
         let mut view = team(value, queue);
-        assert_eq!(view.settings.is_some(), value["team"]["settings"].get("added_later").is_none());
+        assert_eq!(
+            view.settings.is_some(),
+            value["team"]["settings"].get("added_later").is_none()
+        );
         view.settings = None;
         serde_json::to_value(view).unwrap()
     }

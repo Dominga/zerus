@@ -107,8 +107,8 @@ export function TeamWorkspace(props: {
     <div class="team-tab" data-team-tab>
       <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
         onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked} />
-      <Show when={settingsView()} keyed>{(snapshot) => <TeamSettingsDialog view={snapshot} busy={props.busy || !!props.settingsBlocked}
-        onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} />}</Show>
+      <Show when={settingsView()}><TeamSettingsDialog view={props.view} busy={props.busy || !!props.settingsBlocked}
+        onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} /></Show>
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>
@@ -275,7 +275,7 @@ export function TeamTab() {
       <div class="team-loading" role="status" data-team-waiting>
         <span class="dim">{binding().state === "none" ? tr("This session is not a team lead.") : tr("Finding the team of this session…")}</span>
       </div>
-    }>{(current) => <TeamWorkspace view={current()} busy={teams.busy()} failure={readFailure()} actionFailure={actionReason(source())}
+    }>{(current) => <TeamWorkspace view={current()} busy={teams.busy(current().bar.id)} failure={readFailure()} actionFailure={actionReason(source())}
       onSettingsSave={(call) => teams.run(call, source())}
       settingsBlocked={teams.unresolved().some((entry) => entry.call.team === current().bar.id && entry.call.action.kind === "settings")}
       onAction={act} onPage={(cursor) => void teams.page(`team:${current().bar.id}`, cursor)} onAddTask={() => setPage("projects")} />}</Show>

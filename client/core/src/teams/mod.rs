@@ -39,8 +39,8 @@ pub mod catalog;
 pub mod model;
 pub mod poller;
 pub mod read;
-pub mod settings;
 mod refusal;
+pub mod settings;
 pub mod tolerant;
 pub mod view;
 

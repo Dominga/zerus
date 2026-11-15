@@ -10,7 +10,7 @@ import type { TeamFailure, TeamOfSession, TeamView, UnresolvedCall } from "../..
 
 const f = vi.hoisted(() => ({
   selected: (() => undefined) as () => { key: string; computer: string; launchId: string; sessionId: string; runId: string } | undefined,
-  choose: (_row: unknown) => {}, lookup: vi.fn(), close: vi.fn(), open: vi.fn(), run: vi.fn(), check: vi.fn(), dismiss: vi.fn(), clear: vi.fn(), probe: vi.fn(), hidden: vi.fn(),
+  choose: (_row: unknown) => {}, lookup: vi.fn(), close: vi.fn(), open: vi.fn(), run: vi.fn(), check: vi.fn(), dismiss: vi.fn(), clear: vi.fn(), probe: vi.fn(), hidden: vi.fn(), busy: vi.fn((_team?: string) => false),
   setBinding: (_value: TeamOfSession) => {}, setTeam: (_value: TeamView | undefined) => {}, setFailure: (_value: TeamFailure | null) => {}, setUnresolved: (_value: UnresolvedCall[]) => {},
 }));
 vi.mock("../../store/ui", async () => {
@@ -29,13 +29,13 @@ vi.mock("../../store/teams", async () => {
     probe: f.probe, hidden: f.hidden, teamOfSession: (identity: unknown) => { f.lookup(identity); return binding(); },
     team, failure, failureFor: (source: string) => failure()?.source === source ? failure() : null, readFailureFor: (key: string) => failure()?.key === key ? failure() : null, unresolved,
     closeTeam: async () => { f.close(); setTeam(undefined); }, openTeam: async (id: string) => { f.open(id); },
-    run: f.run, check: f.check, dismiss: f.dismiss, clearFailure: f.clear, busy: () => false, page: vi.fn(), confirmation: () => null, cancelConfirmation: vi.fn(),
+    run: f.run, check: f.check, dismiss: f.dismiss, clearFailure: f.clear, busy: f.busy, page: vi.fn(), confirmation: () => null, cancelConfirmation: vi.fn(),
   } };
 });
 vi.mock("../sessions/SessionCard", () => ({ AgentTile: () => null }));
 import { TeamTab } from "./TeamTab";
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; f.choose(undefined); f.setBinding({ state: "unknown" }); f.setTeam(undefined); f.setFailure(null); f.setUnresolved([]); document.body.replaceChildren(); vi.clearAllMocks(); });
+afterEach(() => { dispose?.(); dispose = undefined; f.choose(undefined); f.setBinding({ state: "unknown" }); f.setTeam(undefined); f.setFailure(null); f.setUnresolved([]); document.body.replaceChildren(); vi.clearAllMocks(); f.busy.mockImplementation(() => false); });
 const select = (id: string) => f.choose({ key: id, computer: "workstation", launchId: `launch-${id}`, sessionId: "not-a-launch-id", runId: `run-${id}` });
 function setup() { const host = document.createElement("div"); document.body.append(host); dispose = render(() => createComponent(TeamTab, {}), host); return host; }
 
@@ -68,4 +68,20 @@ it("closes a settings draft on a session change and never sends it to the next t
   host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!.click();
   expect(host.querySelector("[data-team-settings]")).not.toBeNull(); select("b");
   expect(host.querySelector("[data-team-settings]")).toBeNull(); expect(f.run).not.toHaveBeenCalled();
+});
+
+it("uses the displayed team's in-flight lock for Settings and its open dialog", async () => {
+  select("a"); f.setBinding({ state: "lead", team: teamView.bar.id });
+  // Another team is in flight, so the legacy global accessor is busy.
+  f.busy.mockImplementation((id?: string) => id === undefined || id === "other-team");
+  const host = setup(); await vi.waitFor(() => expect(f.open).toHaveBeenCalled());
+  f.setTeam({ ...teamView, settings: writtenSettings() });
+  await vi.waitFor(() => expect(host.querySelector("[data-team-settings-open]")).not.toBeNull());
+  expect(f.busy).toHaveBeenCalledWith(teamView.bar.id);
+  const open = host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!;
+  expect(open.disabled).toBe(false); open.click();
+  const routing = host.querySelector<HTMLSelectElement>("[data-setting=routing]")!;
+  routing.value = "lead"; routing.dispatchEvent(new Event("change", { bubbles: true }));
+  expect(host.querySelector<HTMLButtonElement>("[data-settings-save]")!.disabled).toBe(false);
+  expect(f.run).not.toHaveBeenCalled();
 });

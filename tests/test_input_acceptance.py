@@ -9,6 +9,7 @@ import unittest
 import test_input as fixture
 
 
+@unittest.skipUnless(os.name == 'posix' and fixture.TMUX, 'Requires a private Unix tmux fixture')
 class InputAcceptance(unittest.TestCase):
     def setUp(self):
         self.f = fixture.InputTransport('test_first_message_with_image_starts_lazy_conversation')
@@ -52,6 +53,11 @@ class InputAcceptance(unittest.TestCase):
         self.assertEqual(record['input_acceptance']['digest'], self.receipt['digest'])
         self.assertEqual(self.receipt_path.read_bytes(), self.original)
         self.assertEqual(self.f.send(self.payload), self.receipt)
+
+    def test_a_termination_fence_never_admits_a_reconciliation_write(self):
+        self.write([self.header, self.row])
+        self.record['terminating'] = {}
+        self.assert_unknown()
 
     def test_codex_non_user_partial_early_and_foreign_conversation_are_unknown(self):
         for role in ('assistant', 'tool', 'system'):

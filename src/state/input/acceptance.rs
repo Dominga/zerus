@@ -214,6 +214,8 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let agent = string(record, "agent");
     if !matches!(agent, "codex" | "kimi")
         || !input_unconfirmed(record)
+        || terminating::pending(record)
+        || string(record, "run_id").is_empty()
         || string(record, "conversation_id").is_empty()
         || !string(record, "expected_id").is_empty()
         || record["conversation_state"] == "unknown"

@@ -225,7 +225,10 @@ public final class TaskEditDraftFiles: @unchecked Sendable {
             count += 1; try draftRequire(count <= maxEntries)
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             try draftRequire(attributes[.type] as? FileAttributeType == .typeRegular)
-            if url != destination { bytes += (attributes[.size] as? NSNumber)?.int64Value ?? maxBytes }
+            // Enumeration can normalize the parent URL differently. Slot names
+            // are unique within this checked directory; a replacement charges
+            // its new ciphertext below, without charging the old one again.
+            if url.lastPathComponent != destination.lastPathComponent { bytes += (attributes[.size] as? NSNumber)?.int64Value ?? maxBytes }
             try draftRequire(bytes <= maxBytes)
         }
         try draftRequire(!enumerationFailed)

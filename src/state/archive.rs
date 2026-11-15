@@ -128,11 +128,15 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 
 fn remove_synced_inner(path: &Path) -> Result<()> {
     storage::cut_write()?;
+    let catalog = archive_catalog::before_removal(path);
     match fs::remove_file(path) {
         Ok(()) => {
             crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
                 .map_err(|error| error.to_string())?;
             super::archive_references::forget(path);
+            if let Some(db) = catalog {
+                archive_catalog::removed(db, path);
+            }
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -160,7 +164,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
     // A caller's older copy must not retire the same binding after Terminate
     // fenced it. The caller holds the writer lock across both reads and save.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if storage::current_of(record)?.is_some_and(|current| retirement_fenced(record,&current)) {
+    if storage::current_of(record)?.is_some_and(|current| retirement_fenced(record, &current)) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
     if clear_context::cleanup_pending(record) {
@@ -168,7 +172,7 @@ pub(super) fn save(record: &Value) -> Result<String> {
             "Restored Clear archive cleanup is unfinished; retain the binding for review".into(),
         );
     }
-    let db = archive_catalog::catalog()?;
+    let db = archive_catalog::writer_catalog()?;
     let existing = verified_existing(&db, record)?;
     let id = if let Some(existing) = existing {
         existing
@@ -184,11 +188,12 @@ pub(super) fn save(record: &Value) -> Result<String> {
         // own path), and its launch names a terminal anew (P3b).
         archived.as_object_mut().unwrap().remove("layout");
         archived.as_object_mut().unwrap().remove("terminal_name");
-        atomic_record(&path(&id)?, &mut archived)?;
+        let path = path(&id)?;
+        atomic_record(&path, &mut archived)?;
         // Request bounded metadata catch-up after publication. The exact
         // native archive ID remains readable while coverage is incomplete;
         // unavailable indexed membership never means the archive is absent.
-        let _ = archive_catalog::catalog();
+        archive_catalog::published(db, &path);
         id
     };
     // The archived session's own record goes, never its label's holder: a
@@ -205,7 +210,6 @@ pub(super) fn save(record: &Value) -> Result<String> {
     worktree_lock::left(record);
     Ok(id)
 }
-
 pub(super) fn equivalent(record: &Value, archived: &[Value]) -> bool {
     archived.iter().any(|entry| {
         entry["name"] == record["name"]

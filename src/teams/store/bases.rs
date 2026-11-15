@@ -3,8 +3,8 @@ use super::*;
 
 /// Reserved writer-fence namespace, independent of the ordinary layout sequence.
 /// Its low bits retain the layout so later migrations still run and keep the fence.
-pub(crate) const PINNED_LAYOUT_FLAG: u32 = 1 << 31;
-pub(crate) const PINNED_EXTENSION: u32 = PINNED_LAYOUT_FLAG | timers::EXTENSION;
+pub(crate) const PINNED_LAYOUT_FLAG: u32 = versions::PINNED_LAYOUT_FLAG;
+pub(crate) const PINNED_EXTENSION: u32 = versions::PINNED_EXTENSION;
 
 // The capability name is stable; its suffix is not the layout number.
 pub(crate) fn register_writer(db: &Connection) -> Result<()> {

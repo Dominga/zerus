@@ -6162,10 +6162,36 @@ Launch refusals and unknown outcomes retain their ordinary notices and listed
 decisions, without granting task or integration authority. Approval and
 publication are unavailable in this slice.
 
-Starting the first planned team atomically raises the private Teams execution
-schema to 3. Queue-only stores remain at 2; this engine reads both. Older
-engines refuse fresh opens of a store marked 3, so all Teams commands and its
-desktop service on that computer need the M2-capable engine thereafter.
+**Private Teams store version allocations.** Reserve every new core layout,
+timer extension layout or writer-fence number in
+`src/teams/store/versions.rs` before implementing its migration. That registry
+is the sole source of numeric bindings; SQL creation, open/admission checks,
+planning and extension writers consume its constants. Never choose a number
+independently in a feature branch. Keep historical allocations permanently.
+
+Core marks are 0 for an uninitialized database, 1 for the refused pre-release
+layout, 2 for legacy queue storage and 3 for planning. Core 4 is the published
+native Person evidence layout (.31, PR #2451). Core 5 is reserved for publication (.161),
+6 for rework (.161), and 7 for the native S2 floor (.31). Those reservations
+implement no migration and remain refused by this build. Their TODOs belong
+to those PRs: enabling a slot must update the current mark, its real migration and the
+older-store controls together, in the registry as well as its writers.
+
+Published timer layouts occupy 8 through 12. The base-pin writer fence uses
+bit 31 in `timers_extension.version`, retaining the ordinary layout in the
+low bits; its current combined mark is `0x8000000c`. It never occupies a core
+`PRAGMA user_version` or takes the next ordinary layout number. Registry tests
+check all allocations for collisions and exercise every shipped migration
+entry point, both with and without that fence. Reserved layouts are checked
+for refusal, without pretending that their migrations already exist.
+
+Planning historically used execution schema 3, while queue-only stores used
+schema 2. The native Person engine upgrades both to core 4 on an ordinary
+open, under the writer lock. New queue and planning stores also use 4.
+Existing native identities and receipts are preserved; partial or corrupt
+native metadata is refused instead of repaired. Older engines refuse a store
+marked 4, so all Teams commands and the desktop service on that computer need
+the native-Person-capable engine thereafter.
 
 **Planned drafts.** The Team tab's Layers view reads bounded draft phases;
 approval is shown unavailable until publication is implemented. `phases`

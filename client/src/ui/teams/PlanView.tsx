@@ -7,7 +7,7 @@ import type { TeamCard, TeamDependency, TeamView } from "../../store/teams";
 import { teamPlanPreferences } from "../../store/ui";
 import { sectionCollapsed, type TeamPlanPreferences } from "../../store/teamPlan";
 import { PlanToolbar } from "./PlanToolbar";
-import { fitPlanZoom, planMatches, planOrigins, planProblem, planTone } from "./planToolbar";
+import { fitPlanZoom, planMatches, planOrigins, planProblem, planTone } from "./planFilters";
 import { chain, phasePlans } from "./plan";
 import { orthoPath, routeEdges } from "./planLayout";
 import { canSetDeps, dependencyEditCause, taskState } from "./planTasks";

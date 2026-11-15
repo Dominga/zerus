@@ -18,6 +18,7 @@ mod maintenance;
 pub(super) mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native_work;
+mod non_delivery;
 mod observe;
 mod ports;
 mod presence;
@@ -105,6 +106,17 @@ impl Runtime {
             return Ok(());
         };
         if team.home != self.machine {
+            return Ok(());
+        }
+        self.non_deliveries(store, &team, now)?;
+        if team.status == TeamStatus::Planning {
+            // Planning has no task/reopen/stage/integration work. Its durable
+            // goal uses the existing lead inbox and witnessed doorbell route.
+            self.observe(store, ports, &team, now, safety)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if store.planning(id)?.is_some_and(|p| !p.paused) {
+                self.team_entry(store, ports, &team, now)?;
+            }
             return Ok(());
         }
         if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {

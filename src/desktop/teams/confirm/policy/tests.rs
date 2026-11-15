@@ -38,6 +38,7 @@ pub(in crate::desktop::teams::confirm) fn sample() -> (Binding, Facts, Snapshot)
         member,
         binding: binding.clone(),
         preview: true,
+        planning_paused: false,
     };
     let question = json!({"source":"claude_folder_trust","question_id":"trust-1","question_hash":"ab".repeat(32),"run_id":"run-1","conversation_id":"","can_answer":true,"answer_transport":"claude_tui","questions":[{"id":"trust","question":"Trust this folder?","body":"/workspace/generated-member\n\nDisclosure","multi_select":false,"allow_other":false,"options":[{"id":"trust_0","label":"No, exit"},{"id":"trust_1","label":"Yes, I trust this folder"}]}]});
     let snapshot = Snapshot {

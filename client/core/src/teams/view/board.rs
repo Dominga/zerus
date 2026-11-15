@@ -62,6 +62,11 @@ fn stage_card(node: &Value) -> StageCard {
         role: name(node, "role"),
         state: or_default(node, "state", "draft"),
         assignee: name(node, "assignee"),
+        holder: node
+            .get("holder")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.chars().take(NAME_CHARS + 1).count() <= NAME_CHARS)
+            .map(str::to_owned),
         implementer: name(node, "implementer"),
         kind: stage.and_then(stage_kind),
         target: stage.and_then(|stage| optional_count(stage, "target")),
@@ -203,6 +208,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
     let (groups, truncated) = board(array(queue, "rows"));
     let revision = count(team, "revision");
     TeamView {
+        planning: super::planning::project(status),
         plan: None,
         bar: TeamBar {
             id: name(team, "id"),

@@ -48,7 +48,7 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
     } else {
         None
     };
-    Ok(json!({
+    let mut reply = json!({
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": view,
@@ -60,7 +60,11 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
         "service_items": crate::desktop::teams::service_items(&config.state, &team, running, input::now_ms()),
         "key_refusals": store.key_refusal_page(&team)?,
         "cancel_refusals": cancel_refusals,
-    }))
+    });
+    if row.status == TeamStatus::Planning {
+        reply["planning"] = serde_json::to_value(store.planning(&team)?).map_err(storage)?;
+    }
+    Ok(reply)
 }
 
 /// One page of the queue, the lead inbox, the owner cards or the journal.
@@ -70,8 +74,24 @@ pub(super) fn list(
     command: &str,
     args: &[String],
 ) -> Result<Value, Problem> {
-    let options = Options::parse(args, &["--team", "--limit", "--after"], &[])?;
+    let flags: &[&str] = if command == "journal" {
+        &["--recorded-timings"]
+    } else {
+        &[]
+    };
+    let options = Options::parse(
+        args,
+        &["--team", "--limit", "--after", "--timing-seqs"],
+        flags,
+    )?;
     options.nothing_else(command)?;
+    if options.get("--timing-seqs").is_some()
+        && (command != "journal" || !options.has("--recorded-timings"))
+    {
+        return Err(input::invalid(
+            "Selected timing sequences require journal --recorded-timings.",
+        ));
+    }
     let store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
     let team = actor::target_team(&store, &identity, options.team()?)?;
@@ -92,6 +112,31 @@ pub(super) fn list(
         }
         "inbox" => page(&identity, &team, store.inbox(&team, limit, cursor)?),
         "cards" => page(&identity, &team, store.cards(&team, limit, cursor)?),
+        "journal" if options.has("--recorded-timings") => {
+            let recorded = if let Some(ids) = options.get("--timing-seqs") {
+                if ids.len() > 200 * 17 {
+                    return Err(input::invalid("Too many selected timing sequences."));
+                }
+                let ids: Vec<u64> = if ids == "none" {
+                    Vec::new()
+                } else {
+                    ids.split(',')
+                        .map(|id| {
+                            id.parse::<u64>()
+                                .ok()
+                                .filter(|n| n.to_string() == id)
+                                .ok_or_else(|| input::invalid("Invalid selected timing sequence."))
+                        })
+                        .collect::<Result<_, _>>()?
+                };
+                store.recorded_selected_journal(&team, limit, cursor, &ids)?
+            } else {
+                store.recorded_journal(&team, limit, cursor)?
+            };
+            let mut reply = page(&identity, &team, recorded.page)?;
+            reply["timings"] = json!({"schema": 1, "revision": recorded.revision});
+            Ok(reply)
+        }
         "journal" => page(&identity, &team, store.journal(&team, limit, cursor)?),
         _ => Err(super::unknown(command)),
     }
@@ -266,14 +311,18 @@ pub(super) fn current(config: &Config, caller: &Caller, args: &[String]) -> Resu
         .member(&team, &member)?
         .ok_or_else(|| Problem::new(code::UNKNOWN_MEMBER, "Member does not exist."))?;
     let team_row = store.team(&team)?.ok_or_else(|| not_found_team(&team))?;
-    Ok(json!({
+    let mut reply = json!({
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": team,
         "revision": team_row.revision,
         "member": row,
         "nodes": held(&store, &team, &member)?,
-    }))
+    });
+    if member == team_row.lead && team_row.status == TeamStatus::Planning {
+        reply["planning"] = json!({"goal":team_row.goal,"state":store.planning(&team)?});
+    }
+    Ok(reply)
 }
 
 /// A member's own live nodes. The queue is bounded by the team's cap, and this

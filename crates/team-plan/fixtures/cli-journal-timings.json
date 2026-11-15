@@ -1,0 +1,479 @@
+{
+  "actor": {
+    "interim": true,
+    "kind": "person",
+    "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+    "origin": "cli_interim",
+    "person": "local"
+  },
+  "next": null,
+  "ok": true,
+  "rows": [
+    {
+      "actor": {
+        "kind": "person",
+        "origin": "cli_interim",
+        "person": "local"
+      },
+      "at_ms": 1700000000000,
+      "kind": "create",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009001",
+      "seq": 1,
+      "text": "create at revision 1",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "set_member_session",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "member:lead"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009002",
+      "seq": 2,
+      "text": "set_member_session at revision 2",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "set_member_session",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "member:m1"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009003",
+      "seq": 3,
+      "text": "set_member_session at revision 3",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "set_member_session",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "member:m3"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009004",
+      "seq": 4,
+      "text": "set_member_session at revision 4",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "person",
+        "origin": "cli_interim",
+        "person": "local"
+      },
+      "at_ms": 1700000000000,
+      "kind": "add_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "task:00000000-0000-4000-8000-000000000001"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009005",
+      "seq": 5,
+      "text": "add_task at revision 5",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009006",
+      "seq": 6,
+      "text": "observe_task at revision 6",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "handout_intent",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1",
+        "member:m1",
+        "effect:00000000-0000-4000-8000-000000011001"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009007",
+      "seq": 7,
+      "text": "handout_intent at revision 7",
+      "timing": {
+        "effect": {
+          "first_outcome_recorded_ms": 1700000000000,
+          "generation": 1,
+          "kind": "handout",
+          "member": "m1",
+          "node": 1,
+          "request_id": "00000000-0000-4000-8000-000000011001",
+          "reserved_ms": 1700000000000,
+          "state": "observed_done"
+        },
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "handout_outcome",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "effect:00000000-0000-4000-8000-000000011001"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009008",
+      "seq": 8,
+      "text": "handout_outcome at revision 8: submitted",
+      "timing": {
+        "effect": {
+          "first_outcome_recorded_ms": 1700000000000,
+          "generation": 1,
+          "kind": "handout",
+          "member": "m1",
+          "node": 1,
+          "request_id": "00000000-0000-4000-8000-000000011001",
+          "reserved_ms": 1700000000000,
+          "state": "observed_done"
+        },
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009009",
+      "seq": 9,
+      "text": "observe_task at revision 9",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900a",
+      "seq": 10,
+      "text": "observe_task at revision 10",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900b",
+      "seq": 11,
+      "text": "observe_task at revision 11",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "record_report",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:1",
+        "member:m1"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900c",
+      "seq": 12,
+      "text": "record_report at revision 12",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "stage_task_intent",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:2",
+        "effect:00000000-0000-4000-8000-000000010000"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900d",
+      "seq": 13,
+      "text": "stage_task_intent at revision 13",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": "record_missing",
+        "stage": {
+          "created_ms": 1700000000000,
+          "generation": 1,
+          "node": 2,
+          "state": "created",
+          "target": 1
+        },
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "stage_task_outcome",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "effect:00000000-0000-4000-8000-000000010000"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900e",
+      "seq": 14,
+      "text": "stage_task_outcome at revision 14",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": "record_missing",
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:2"
+      ],
+      "request_id": "00000000-0000-4000-8000-00000000900f",
+      "seq": 15,
+      "text": "observe_task at revision 15",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": {
+          "created_ms": 1700000000000,
+          "generation": 1,
+          "node": 2,
+          "state": "created",
+          "target": 1
+        },
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "handout_intent",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:2",
+        "member:m3",
+        "effect:00000000-0000-4000-8000-000000010001"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009010",
+      "seq": 16,
+      "text": "handout_intent at revision 16",
+      "timing": {
+        "effect": {
+          "first_outcome_recorded_ms": 1700000000000,
+          "generation": 1,
+          "kind": "handout",
+          "member": "m3",
+          "node": 2,
+          "request_id": "00000000-0000-4000-8000-000000010001",
+          "reserved_ms": 1700000000000,
+          "state": "submitted"
+        },
+        "effect_unavailable": null,
+        "stage": {
+          "created_ms": 1700000000000,
+          "generation": 1,
+          "node": 2,
+          "state": "created",
+          "target": 1
+        },
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "handout_outcome",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "effect:00000000-0000-4000-8000-000000010001"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009011",
+      "seq": 17,
+      "text": "handout_outcome at revision 17: submitted",
+      "timing": {
+        "effect": {
+          "first_outcome_recorded_ms": 1700000000000,
+          "generation": 1,
+          "kind": "handout",
+          "member": "m3",
+          "node": 2,
+          "request_id": "00000000-0000-4000-8000-000000010001",
+          "reserved_ms": 1700000000000,
+          "state": "submitted"
+        },
+        "effect_unavailable": null,
+        "stage": null,
+        "stage_unavailable": null
+      }
+    },
+    {
+      "actor": {
+        "kind": "service",
+        "person": "local",
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "at_ms": 1700000000000,
+      "kind": "observe_task",
+      "refs": [
+        "team:00000000-0000-4000-8000-00000000beef",
+        "node:2"
+      ],
+      "request_id": "00000000-0000-4000-8000-000000009012",
+      "seq": 18,
+      "text": "observe_task at revision 18",
+      "timing": {
+        "effect": null,
+        "effect_unavailable": null,
+        "stage": {
+          "created_ms": 1700000000000,
+          "generation": 1,
+          "node": 2,
+          "state": "created",
+          "target": 1
+        },
+        "stage_unavailable": null
+      }
+    }
+  ],
+  "team": "00000000-0000-4000-8000-00000000beef",
+  "timings": {
+    "revision": 18,
+    "schema": 1
+  }
+}

@@ -14,7 +14,9 @@ mod editing;
 pub mod graph;
 pub use editing::MemberRole;
 pub mod list;
+pub mod phase_metrics;
 pub mod phases;
+pub mod planning;
 
 pub use board::team;
 pub use list::{list, waiting};
@@ -443,6 +445,10 @@ pub struct StageCard {
     pub state: String,
     /// The member the stage is assigned to: who does the stage.
     pub assignee: String,
+    /// A verified delivered holder already present in the CLI row. Omitted
+    /// for older replies, no holder, or an invalid/unbounded member name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
     /// The member who implemented the task the stage checks (the plan's
     /// binding decision). Never the stage's own worker.
     pub implementer: String,
@@ -562,6 +568,8 @@ pub struct TeamBar {
 /// `hgs team status` and `hgs team queue` for the Team tab.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TeamView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning: Option<planning::PlanningState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<phases::PhasePane>,
     pub bar: TeamBar,

@@ -16,6 +16,7 @@ mod journal;
 pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
+mod planning;
 mod provider_settings;
 mod queue;
 #[cfg(test)]

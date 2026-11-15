@@ -31,10 +31,18 @@ pub struct DrawerRead {
     pub team: String,
     pub kind: DrawerKind,
     pub after: Option<String>,
+    #[serde(default)]
+    pub recorded_timings: bool,
+    #[serde(default)]
+    pub timing_seqs: Option<Vec<u64>>,
+    #[serde(default)]
+    pub timing_next: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DrawerRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<super::recorded_timings::RecordedFacts>,
     pub seq: u64,
     pub kind: String,
     pub by: String,
@@ -52,6 +60,8 @@ pub struct DrawerRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct DrawerPage {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub timings: Option<super::recorded_timings::TimingSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline: Option<super::timeline::RecordedCoverage>,
     pub team: String,
     pub kind: DrawerKind,
@@ -68,8 +78,45 @@ fn base(asked: &DrawerRead) -> TeamRead {
 }
 
 pub fn invocation(asked: &DrawerRead) -> Result<Invocation, TeamError> {
+    if asked.recorded_timings && asked.kind != DrawerKind::Feed {
+        return Err(invalid("Recorded timings require the journal."));
+    }
+    if let Some(seqs) = &asked.timing_seqs {
+        if !asked.recorded_timings
+            || seqs.len() > PAGE as usize
+            || seqs
+                .iter()
+                .any(|id| *id == 0 || *id > 9_007_199_254_740_991)
+            || seqs.windows(2).any(|ids| ids[0] >= ids[1])
+        {
+            return Err(invalid("Invalid selected timing event identities."));
+        }
+        read::invocation(&TeamRead::Queue {
+            team: asked.team.clone(),
+            after: asked.timing_next.clone(),
+        })?;
+    } else if asked.timing_next.is_some() {
+        return Err(invalid("No selected event window for this cursor."));
+    }
     let mut call = read::invocation(&base(asked))?;
     call.args[1] = asked.kind.command().into();
+    if asked.recorded_timings {
+        call.args.insert(2, "--recorded-timings".into());
+    }
+    if let Some(seqs) = &asked.timing_seqs {
+        call.args.insert(
+            2,
+            if seqs.is_empty() {
+                "none".into()
+            } else {
+                seqs.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+        call.args.insert(2, "--timing-seqs".into());
+    }
     Ok(call)
 }
 
@@ -83,6 +130,11 @@ pub fn decode(asked: &DrawerRead, exit: Exit) -> Result<DrawerPage, TeamError> {
     invocation(asked)?;
     // All three CLI pages share the queue's envelope, refusal and team guard.
     let reply = read::decode(&base(asked), exit)?;
+    let timings = if asked.recorded_timings {
+        Some(super::recorded_timings::snapshot(&reply["timings"])?)
+    } else {
+        None
+    };
     let rows = reply["rows"]
         .as_array()
         .ok_or_else(|| invalid("No drawer rows."))?;
@@ -175,6 +227,11 @@ pub fn decode(asked: &DrawerRead, exit: Exit) -> Result<DrawerPage, TeamError> {
             None
         };
         projected.push(DrawerRow {
+            timing: if asked.recorded_timings {
+                Some(super::recorded_timings::facts(&row["timing"])?)
+            } else {
+                None
+            },
             seq,
             kind: view::cut(kind, NAME_CHARS),
             by: view::cut(by, NAME_CHARS),
@@ -190,6 +247,16 @@ pub fn decode(asked: &DrawerRead, exit: Exit) -> Result<DrawerPage, TeamError> {
             card,
         });
     }
+    let next = if let Some(seqs) = &asked.timing_seqs {
+        if projected.iter().map(|row| row.seq).ne(seqs.iter().copied()) {
+            return Err(invalid(
+                "Selected journal events changed; read the page again.",
+            ));
+        }
+        asked.timing_next.clone()
+    } else {
+        next
+    };
     let timeline = if asked.kind == DrawerKind::Feed {
         Some(super::timeline::coverage(
             &projected,
@@ -200,6 +267,7 @@ pub fn decode(asked: &DrawerRead, exit: Exit) -> Result<DrawerPage, TeamError> {
         None
     };
     Ok(DrawerPage {
+        timings,
         timeline,
         team: asked.team.clone(),
         kind: asked.kind,

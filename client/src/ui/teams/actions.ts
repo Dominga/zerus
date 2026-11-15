@@ -39,9 +39,10 @@ export const liveTask = (state: string) => state !== "accepted" && state !== "ca
 export function barActions(view: TeamView): BarAction[] {
   const status = view.bar.status;
   const actions: BarAction[] = [];
+  if (status === "planning" && view.planning?.known) actions.push({ id: view.planning.paused ? "resume" : "pause", text: view.planning.paused ? tr("Resume planning") : tr("Pause planning") });
   if (status === "running") actions.push({ id: "pause", text: tr("Pause") });
   if (status === "paused") actions.push({ id: "resume", text: tr("Resume") });
-  if (activeTeam(status)) actions.push({ id: "stop", text: tr("Stop"), danger: true });
+  if (activeTeam(status) || status === "planning") actions.push({ id: "stop", text: tr("Stop"), danger: true });
   if (status === "stopped" || status === "finished") actions.push({ id: "archive", text: tr("Archive"), danger: true });
   return actions;
 }

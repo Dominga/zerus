@@ -6,6 +6,7 @@ use crate::teams::ops::{
     Operation,
 };
 use serde_json::json;
+mod planning;
 
 struct World {
     h: Harness,
@@ -17,7 +18,9 @@ struct World {
 }
 impl World {
     fn new() -> Self {
-        let h = crate::desktop::teams::tests::bound151_fixture();
+        Self::from_harness(crate::desktop::teams::tests::bound151_fixture())
+    }
+    fn from_harness(h: Harness) -> Self {
         let config = crate::config::Config {
             home: h.temp.path().to_string_lossy().into(),
             dir: h.temp.path().join("config"),
@@ -90,6 +93,12 @@ impl Ports for World {
             member: self.h.store.member(TEAM, "lead").unwrap().unwrap(),
             binding: self.b.clone(),
             preview: true,
+            planning_paused: self
+                .h
+                .store
+                .planning(TEAM)
+                .unwrap()
+                .is_some_and(|p| p.paused),
         })
     }
     fn observe(&mut self, _: &Binding) -> Result<Snapshot> {
@@ -112,8 +121,12 @@ impl Ports for World {
         if !self.ledger.lead_brief_needed(b)? {
             return Ok(None);
         }
-        self.ledger
-            .pending_lead_brief(b, &self.s, &self.h.store.team(TEAM).unwrap().unwrap())
+        self.ledger.pending_lead_brief(
+            b,
+            &self.s,
+            &self.h.store.team(TEAM).unwrap().unwrap(),
+            self.h.store.planning(TEAM).unwrap().as_ref(),
+        )
     }
     fn claim(&mut self, p: &Plan, epoch: &str, now: i64) -> Result<Claim> {
         self.ledger.claim(p, epoch, now)

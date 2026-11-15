@@ -8,15 +8,15 @@ import { Icon } from "../lib/icons";
 // (M2) and are not here.
 
 /** The intro's steps. */
-export function NewTeamIntroSteps(): JSX.Element {
+export function NewTeamIntroSteps(props: { planning?: boolean } = {}): JSX.Element {
   return (
     <div class="nt-intro-guide" data-intro-steps>
       <h3>{tr("How a team works")}</h3>
       <ol>
-        <li>{tr("A lead takes the tasks you send and hands them to the members with the right role.")}</li>
+        <li>{props.planning ? tr("The lead starts in its own worktree to prepare your plan.") : tr("A lead takes the tasks you send and hands them to the members with the right role.")}</li>
         <li>{tr("Every task runs through its pipeline, for example an implementation and a review.")}</li>
         <li>{tr("Accepted work is merged into one integration branch; you follow it in the Team tab.")}</li>
-        <li>{tr("Nothing runs before you press Create team.")}</li>
+        <li>{props.planning ? tr("Nothing starts until you press Start planning.") : tr("Nothing runs before you press Create team.")}</li>
       </ol>
     </div>
   );

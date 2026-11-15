@@ -672,3 +672,42 @@ fn local_preflight_refusals_do_not_claim_an_unknown_native_edit() {
         Err(TaskEditError::Refused(_))
     ));
 }
+
+#[test]
+fn qualification_exposes_only_its_original_captured_view_before_network() {
+    let f = Fixture::new();
+    let q = f.qualification();
+    let id = q.request().request_id;
+    let mut copied = q.view();
+    assert_eq!(copied.text, "Original requirement");
+    copied.text = "A renderer changed its own copy".into();
+    assert_eq!(q.view().text, "Original requirement");
+    assert_eq!(q.request().request_id, id);
+    assert_eq!(
+        f.api.get(f.task.uuid().into()).unwrap().text,
+        "Original requirement"
+    );
+}
+
+#[test]
+fn replacing_a_local_validation_attempt_cannot_keep_old_edits_or_reset_a_frozen_request() {
+    let f = Fixture::new();
+    let q = f.qualification();
+    let draft = q.clone().accept(f.proof(&q.request())).unwrap();
+    draft
+        .content("".into(), "Old partial form".into(), vec![], vec![])
+        .unwrap();
+    assert!(draft.comment("".into(), vec![]).is_err());
+    draft.reset_edits().unwrap();
+    draft
+        .comment("Only this reviewed comment".into(), vec![])
+        .unwrap();
+    let frozen: Value = serde_json::from_str(&draft.freeze().unwrap()).unwrap();
+    assert_eq!(frozen["edits"].as_array().unwrap().len(), 1);
+    assert_eq!(frozen["edits"][0]["kind"], "comment");
+    assert!(draft.reset_edits().is_err());
+    assert_eq!(
+        f.api.get(f.task.uuid().into()).unwrap().text,
+        "Original requirement"
+    );
+}

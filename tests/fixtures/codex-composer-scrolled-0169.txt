@@ -1,0 +1,35 @@
+[1;2m[38;2;238;238;238m[48;2;68;68;68m› [0m[38;2;238;238;238m[48;2;68;68;68mPrivate long-turn fixture[39m
+[49m  Private history row 125: native scroll investigation.
+  Private history row 126: native scroll investigation.
+  Private history row 127: native scroll investigation.
+  Private history row 128: native scroll investigation.
+  Private history row 129: native scroll investigation.
+  Private history row 130: native scroll investigation.
+  Private history row 131: native scroll investigation.
+  Private history row 132: native scroll investigation.
+  Private history row 133: native scroll investigation.
+  Private history row 134: native scroll investigation.
+  Private history row 135: native scroll investigation.
+  Private history row 136: native scroll investigation.
+  Private history row 137: native scroll investigation.
+  Private history row 138: native scroll investigation.
+  Private history row 139: native scroll investigation.
+  Private history row 140: native scroll investigation.
+  Private history row 141: native scroll investigation.
+  Private history row 142: native scroll investigation.
+  Private history row 143: native scroll investigation.
+  Private history row 144: native scroll investigation.
+  Private history row 145: native scroll investigation.
+  Private history row 146: native scroll investigation.
+  Private history row 147: native scroll investigation.
+  Private history row 148: native scroll investigation.
+  Private history row 149: native scroll investigation.
+  Private history row 150: native scroll investigation.
+  Private history row 151: native scroll investigation.
+  Private history row 152: native scroll investigation.
+                                           [38;2;99;168;248m ↓ Back to bottom · esc[39m
+
+[1m›[0m [2mAsk Codex to do anything[0m
+
+  [38;2;246;226;183mGPT-6.1-Sol default[39m · [38;2;171;223;167m~[39m
+  [1menter/esc[0;2m latest[0m · [1m?[0m shortcuts                                                    ⚠ [38;2;196;167;103m2 warnings[39m · [1mf2[0m to view

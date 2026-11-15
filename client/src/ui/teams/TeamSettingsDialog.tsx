@@ -52,6 +52,17 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [reloaded, setReloaded] = createSignal(false);
   const [discardedEdits, setDiscardedEdits] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [errorField, setErrorField] = createSignal<string>();
+  const knownField = (field?: string) => [...CAPS.map((key) => `settings.caps.${key}`), ...TIMERS.map((key) => `settings.timers.${key}`)].includes(field ?? "") ? field : undefined;
+  const fieldError = (section: "caps" | "timers", key: string) => {
+    if (errorField() === `settings.${section}.${key}`) return error();
+    const maximum = section === "caps" ? capMax(key as typeof CAPS[number]) : 0xffffffff;
+    return wholeNumber(numbers()[key], section === "caps" ? 1 : 0, maximum) === undefined ? tr("Enter whole numbers within the shown limits.") : "";
+  };
+  const editNumber = (section: "caps" | "timers", key: string, text: string) => batch(() => {
+    setNumbers({ ...numbers(), [key]: text });
+    if (errorField() === `settings.${section}.${key}`) { setError(""); setErrorField(undefined); }
+  });
   const title = createUniqueId();
   let dialog!: HTMLDialogElement;
   const origin = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -86,22 +97,23 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     batch(() => {
       setDiscardedEdits(changed());
       setCurrent(snapshot(fresh)); setInitial(next); setSettings(next); setNumbers(numberStrings(next));
-      setError(""); setReloaded(true); setStale(false);
+      setError(""); setErrorField(undefined); setReloaded(true); setStale(false);
     });
   });
   const save = async () => {
     const next = value();
     if (locked() || !next || !changed()) return;
+    setErrorField(undefined);
     if (next.integration === "branch" && !current().bar.integration_branch) {
       setError(tr("An integration branch is required.")); return;
     }
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setErrorField(undefined);
     try {
       // The native action checks this whole value with crates/team-plan before
       // spawning hgs. The store alone keeps uncertain intents and their IDs.
       const outcome = await props.onSave(teamCall(current(), newRequestId(), "settings", { settings: next }));
       if (outcome.outcome === "done" || outcome.outcome === "uncertain" || outcome.outcome === "pending") props.onClose();
-      else if (outcome.outcome === "failed") { setError(outcome.detail); setStale(outcome.code === "stale_revision"); }
+      else if (outcome.outcome === "failed") { setError(outcome.detail); setErrorField(knownField(outcome.field)); setStale(outcome.code === "stale_revision"); }
       else setError(outcome.confirmation.text);
     } finally { setBusy(false); }
   };
@@ -120,12 +132,14 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
             <span>{delegationWords(key).name}<small class="hint">{delegationWords(key).sentence}</small></span>
           </label>}</For></section>
           <section><h3>{tr("Task limits")}</h3><div class="team-settings-grid"><For each={CAPS}>{(key) => <label>
-            <span>{numberLabel(key)}</span><TextInput type="number" min={1} max={capMax(key)} step={1} aria-invalid={wholeNumber(numbers()[key], 1, capMax(key)) === undefined} data-setting={key} value={numbers()[key]} onInput={(event) => setNumbers({ ...numbers(), [key]: event.currentTarget.value })} />
+            <span id={`${title}-${key}-label`}>{numberLabel(key)}</span><TextInput aria-labelledby={`${title}-${key}-label`} type="number" min={1} max={capMax(key)} step={1} aria-invalid={!!fieldError("caps", key)} aria-describedby={fieldError("caps", key) ? `${title}-${key}-error` : undefined} data-setting={key} value={numbers()[key]} onInput={(event) => editNumber("caps", key, event.currentTarget.value)} />
             <small class="hint">{tr("From %1 to %2", 1, capMax(key))}</small>
+            <Show when={fieldError("caps", key)}>{(message) => <small class="danger" role="alert" id={`${title}-${key}-error`}>{message()}</small>}</Show>
           </label>}</For></div></section>
           <section><h3>{tr("Timers")}</h3><div class="team-settings-grid"><For each={TIMERS}>{(key) => <label>
-            <span>{numberLabel(key)}</span><TextInput type="number" min={0} max={0xffffffff} step={1} disabled={key === "resume_limit_per_hour"} aria-invalid={wholeNumber(numbers()[key], 0, 0xffffffff) === undefined} data-setting={key} value={numbers()[key]} onInput={(event) => setNumbers({ ...numbers(), [key]: event.currentTarget.value })} />
+            <span id={`${title}-${key}-label`}>{numberLabel(key)}</span><TextInput aria-labelledby={`${title}-${key}-label`} type="number" min={0} max={0xffffffff} step={1} disabled={key === "resume_limit_per_hour"} aria-invalid={!!fieldError("timers", key)} aria-describedby={fieldError("timers", key) ? `${title}-${key}-error` : undefined} data-setting={key} value={numbers()[key]} onInput={(event) => editNumber("timers", key, event.currentTarget.value)} />
             <small class="hint">{key === "resume_limit_per_hour" ? tr("Fixed at 3 per hour") : tr("From %1 to %2", 0, 0xffffffff)}</small>
+            <Show when={fieldError("timers", key)}>{(message) => <small class="danger" role="alert" id={`${title}-${key}-error`}>{message()}</small>}</Show>
           </label>}</For></div></section>
           <section><h3>{tr("Workflow")}</h3>
             <label class="check"><input type="checkbox" checked={settings()!.queue} disabled />{tr("The team takes tasks as they come")}</label>
@@ -145,12 +159,11 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
             <p class="hint" data-landing-note>{tr("Saved with the team; landing is not gated by this setting yet")}</p>
           </section>
         </fieldset>
-        <Show when={!value()}><p class="notice danger" role="alert">{tr("Enter whole numbers within the shown limits.")}</p></Show>
       </Show>
       <ProviderSettings view={props.view} home={props.providerHome} locked={locked()} onSave={props.onSave} />
       <Show when={stale()}><p class="hint">{tr("Waiting for the current team settings…")}</p></Show>
     </div>
-    <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>
+    <Show when={error() && !errorField()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>
     <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" data-initial disabled={busy()} onClick={close}>{tr("Cancel")}</button>
       <button type="button" class="btn primary" data-settings-save disabled={locked() || !value() || !changed()} onClick={() => void save()}>{tr("Save")}</button></div>
   </dialog>;

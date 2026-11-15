@@ -38,11 +38,15 @@ mod drafts;
 pub mod editing;
 pub mod input;
 pub mod intents;
+#[cfg(test)]
+mod planning;
 pub mod types;
 pub mod wire;
 
 #[cfg(test)]
 mod dependencies;
+#[cfg(test)]
+mod settings_fields;
 #[cfg(test)]
 mod tests;
 

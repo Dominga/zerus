@@ -383,3 +383,71 @@ fn disposition_admission_enforces_query_only_and_excludes_a_concurrent_writer() 
     drop(held);
     db.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
 }
+
+#[test]
+fn preview_off_disposition_recognizes_planning_stores_but_refuses_a_future_fence() {
+    for status in ["running", "stopped", "future"] {
+        let mut f = Fixture::new();
+        let task = f.add();
+        let id = unknown(&f, &task, None);
+        let mut value = serde_json::to_value(fixtures::create()).unwrap();
+        value["op"] = json!("start_planning");
+        value["name"] = json!("Planning control");
+        value["home"] = json!(f.machine);
+        value["goal"] = json!("Prepare a separate plan.");
+        value["integration_branch"] = json!("teams/planning-control");
+        let plan = uuid::Uuid::new_v4().to_string();
+        f.h.run_for(
+            &plan,
+            &fixtures::person(),
+            serde_json::from_value(value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            f.h.store
+                .db
+                .as_ref()
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            3
+        );
+        if status == "stopped" {
+            f.h.run(&fixtures::person(), ops::Operation::Stop).unwrap();
+        }
+        if status == "future" {
+            // A future-version fault, not an ordinary store row.
+            f.h.store
+                .db
+                .as_ref()
+                .unwrap()
+                .pragma_update(None, "user_version", 4)
+                .unwrap();
+        }
+        std::fs::remove_file(f.h.temp.path().join("teams/preview")).unwrap();
+        let revision = f.document(&task).revision();
+        let facts = team_facts(&f);
+        let out = cancel(&f, &task, &id);
+        assert_eq!(out["ok"], status == "stopped", "{status}: {out}");
+        assert_eq!(team_facts(&f), facts);
+        assert!(!f.h.temp.path().join("teams/preview").exists());
+        let doc = f.document(&task);
+        if status == "stopped" {
+            assert!(doc.held().unwrap().is_none());
+        } else {
+            assert_eq!(doc.revision(), revision);
+            assert_eq!(doc.held().unwrap().unwrap().id, id);
+            assert!(
+                out["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if status == "future" {
+                        "migration"
+                    } else {
+                        "stop or archive"
+                    }),
+                "{out}"
+            );
+        }
+    }
+}

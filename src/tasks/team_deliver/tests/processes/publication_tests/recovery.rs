@@ -183,7 +183,7 @@ fn published_dependencies_still_constrain_a_later_draft() {
     .unwrap();
     let requests = f.h.store.publication_work(TEAM).unwrap();
     for r in &requests {
-        write(&f, &r).unwrap();
+        write(&f, r).unwrap();
     }
     let p =
         f.h.store

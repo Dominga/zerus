@@ -1,9 +1,12 @@
 //! Indexed base reads. A missing pin never adopts the team's newer default.
 use super::*;
 
-/// Opt-in layout fence: ordinary stores stay at 12 until their first advance.
-pub(crate) const PINNED_EXTENSION: u32 = 13;
+/// Reserved writer-fence namespace, independent of the ordinary layout sequence.
+/// Its low bits retain the layout so later migrations still run and keep the fence.
+pub(crate) const PINNED_LAYOUT_FLAG: u32 = 1 << 31;
+pub(crate) const PINNED_EXTENSION: u32 = PINNED_LAYOUT_FLAG | timers::EXTENSION;
 
+// The capability name is stable; its suffix is not the layout number.
 pub(crate) fn register_writer(db: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
     db.create_scalar_function(

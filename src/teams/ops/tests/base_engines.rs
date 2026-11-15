@@ -77,7 +77,11 @@ fn advance_base_two_engines_new_advances_and_preserves_unpinned_rows() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(mark, 13, "the first advance must raise the private fence");
+    assert_eq!(
+        mark,
+        crate::teams::store::bases::PINNED_EXTENSION,
+        "the first advance must raise the private fence",
+    );
 }
 
 #[test]

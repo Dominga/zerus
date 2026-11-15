@@ -38,10 +38,10 @@ fn advance_base_raises_the_private_mark_only_with_a_successful_advance() {
         .execute_batch("DROP TRIGGER refuse_advance_journal")
         .unwrap();
     f.apply(&mut h, &person(), &req).unwrap();
-    assert_eq!(mark(&h), 13);
+    assert_eq!(mark(&h), crate::teams::store::bases::PINNED_EXTENSION);
     h.store = Store::open(h.temp.path()).unwrap();
     f.apply(&mut h, &person(), &req).unwrap();
-    assert_eq!(mark(&h), 13);
+    assert_eq!(mark(&h), crate::teams::store::bases::PINNED_EXTENSION);
 }
 
 #[test]

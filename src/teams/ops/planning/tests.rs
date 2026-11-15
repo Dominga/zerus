@@ -188,17 +188,22 @@ fn export_planning_compatibility_fixture() {
     std::fs::write(state.join("teams/preview"), "on\n").unwrap();
     let mode = std::env::var("ZERUS_PLANNING_COMPAT_MODE").unwrap();
     let mut store = Store::open(&state).unwrap();
-    let mut req = request(
-        0,
-        if mode == "base" {
-            create()
-        } else {
-            assert_eq!(mode, "plan");
-            start()
-        },
-    );
+    let operation = match mode.as_str() {
+        "base" => create(),
+        "plan" => start(),
+        "pause" => Operation::Pause,
+        _ => panic!("Unknown private fixture mode"),
+    };
+    let revision = if mode == "pause" {
+        store.team(TEAM).unwrap().unwrap().revision
+    } else {
+        0
+    };
+    let mut req = request(revision, operation);
     req.request_id = if mode == "base" {
         "00000000-0000-4000-8000-00000000fba1"
+    } else if mode == "pause" {
+        "00000000-0000-4000-8000-00000000fba3"
     } else {
         "00000000-0000-4000-8000-00000000fba2"
     }

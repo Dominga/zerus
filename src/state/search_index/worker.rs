@@ -181,7 +181,7 @@ fn step(store: &mut Store, state: &Path, cancel: &AtomicBool) -> Result<()> {
 /// A small cold computer may finish preparation during its first search. Large
 /// inventories leave immediately for bounded fallback; their helper continues.
 pub(in crate::state) fn wait_small(state: &Path) {
-    let until = Instant::now() + Duration::from_millis(1500);
+    let until = Instant::now() + Duration::from_secs(2);
     while Instant::now() < until {
         if let Some(db) = metadata_cache::open(state) {
             let totals: Option<(i64, i64)> = db
@@ -216,6 +216,92 @@ pub(in crate::state) fn wait_small(state: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn metadata_fixture(count: usize) -> (tempfile::TempDir, Store) {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        for n in 0..count {
+            let name = format!("codex/example/page-{n}");
+            let record = json!({"version":1,"name":name,"agent":"codex","run_id":format!("run-{n}"),"conversation_id":uuid::Uuid::new_v4().to_string()});
+            fs::write(
+                state.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+        let store = Store::open(&state.join("content-search-v1")).unwrap();
+        store
+            .discover(
+                state,
+                &DiscoveryBudget::interactive(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        (temp, store)
+    }
+    #[test]
+    fn preparation_does_not_rewrite_untaken_metadata_rows() {
+        use std::{
+            collections::BTreeSet,
+            sync::{Arc, Mutex},
+        };
+        let (temp, mut store) = metadata_fixture(50);
+        let touched = Arc::new(Mutex::new(BTreeSet::new()));
+        let collect = touched.clone();
+        store.index.connection().update_hook(Some(
+            move |_: rusqlite::hooks::Action, _: &str, table: &str, id: i64| {
+                if table == "catalog_queue" {
+                    collect.lock().unwrap().insert(id);
+                }
+            },
+        ));
+        let mut budget = Budget::interactive();
+        budget.files = 8;
+        let progress = store
+            .prepare_metadata(temp.path(), &budget, &AtomicBool::new(false))
+            .unwrap();
+        store
+            .index
+            .connection()
+            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+        assert!(progress.visited_paths > 0);
+        assert!(
+            touched.lock().unwrap().len() <= progress.visited_paths,
+            "preparation dirtied rows outside its page"
+        );
+    }
+    #[test]
+    fn an_already_prepared_catalog_does_not_commit_unchanged_readiness() {
+        let (temp, mut store) = metadata_fixture(30);
+        for _ in 0..8 {
+            store
+                .prepare_metadata(temp.path(), &Budget::interactive(), &AtomicBool::new(false))
+                .unwrap();
+            if store.catalog_status().unwrap()["decoder_pending"] == false {
+                break;
+            }
+        }
+        assert_eq!(store.catalog_status().unwrap()["decoder_pending"], false);
+        let observer = Connection::open_with_flags(
+            temp.path().join("content-search-v1/index.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let version = || {
+            observer
+                .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = version();
+        store
+            .prepare_metadata(temp.path(), &Budget::interactive(), &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            version(),
+            before,
+            "a read-only preparation pass changed durable data"
+        );
+    }
+
     #[test]
     fn an_overlapping_index_writer_does_not_abandon_the_worker() {
         let temp = tempfile::tempdir().unwrap();
@@ -295,7 +381,7 @@ mod tests {
         }));
         let result = store.prepare_metadata(state, &Budget::interactive(), &cancel);
         store.index.connection().commit_hook(None::<fn() -> bool>);
-        assert_eq!(result.unwrap().visited_paths, 16);
+        assert_eq!(result.unwrap().visited_paths, 30);
         assert!(
             commits.load(Ordering::Relaxed) <= 8,
             "metadata performed {} durable commits for one bounded slice",

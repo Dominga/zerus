@@ -22,6 +22,16 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
   transcript.write_text(json.dumps(dict(type='event_msg',timestamp='2026-11-14T10:00:00Z',payload=dict(type='agent_message',id='result',message='public benchmark needle' if n==count-1 else 'ordinary public message',phase='final')))+'\n')
   record=dict(version=1,agent='codex',name=f'codex/example/session-{n:05}',run_id=f'run-{n}',conversation_id=conv,transcript=str(transcript),updated=n,created=n,cwd='/srv/example',prompt='p'*4096,last_message='a'*4096,shell_jobs=dict(job=dict(output='x'*size)))
   (state/(hashlib.sha256(record['name'].encode()).hexdigest()+'.json')).write_text(json.dumps(record,separators=(',',':'),sort_keys=True))
+ # Model existing durable records, not an unflushed multi-GB bulk import.
+ def settle(path):
+  with path.open('rb+') as handle:os.fsync(handle.fileno())
+ from concurrent.futures import ThreadPoolExecutor
+ with ThreadPoolExecutor(max_workers=4) as pool:
+  list(pool.map(settle,[*state.glob('*.json'),*root.glob('*.jsonl')]))
+ for directory in [state,root]:
+  descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+  try:os.fsync(descriptor)
+  finally:os.close(descriptor)
  results=[]
  def call(label,args,timeout=30):
   start=time.monotonic();io={};usage=None;usage_path=root/(label+'.usage')
@@ -50,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
   try:
    with (state/'content-search-v1/worker.json').open() as handle:worker=json.loads(handle.read(4096))
   except (OSError,ValueError):worker=None
-  item=dict(worker_status=worker,label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source=peak_source,reply=value)
+  item=dict(fixture_durable=True,worker_status=worker,label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source=peak_source,reply=value)
   results.append(item);print(json.dumps(item),flush=True);return value
  try:
   if order=='legacy-first':

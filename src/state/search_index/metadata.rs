@@ -55,6 +55,7 @@ pub(super) struct Reader {
     foreground: bool,
 }
 const RAW_BYTES: usize = 64 << 20;
+const BATCH_BYTES: usize = 256 << 20;
 
 struct TimedRead<'a> {
     file: &'a mut fs::File,
@@ -189,7 +190,11 @@ impl Reader {
         let record = if let Some(record) = cached {
             record
         } else {
-            let raw_limit = if self.foreground { 4 << 20 } else { RAW_BYTES };
+            let raw_limit = if self.foreground {
+                4 << 20
+            } else {
+                BATCH_BYTES
+            };
             if metadata.len() as usize > raw_limit {
                 return Ok(Record::OverBudget);
             }
@@ -249,6 +254,9 @@ impl Reader {
             > RECORD_BYTES
         {
             return Err("Session search metadata exceeds its budget".into());
+        }
+        if self.entries.len() >= 32 {
+            self.entries.pop_first();
         }
         self.entries.insert(
             path.to_owned(),
@@ -623,5 +631,63 @@ mod tests {
                 .expect_ready()["version"],
             2
         );
+    }
+    #[test]
+    fn one_reader_does_not_retain_a_file_handle_for_every_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = Reader::default();
+        let mut progress = Progress::default();
+        let budget = Budget {
+            files: 256,
+            directory_entries: 2000,
+            records: 512,
+            bytes: 4 << 20,
+            deadline: Instant::now() + Duration::from_secs(2),
+        };
+        for n in 0..200 {
+            let path = temp.path().join(format!("{n}.json"));
+            fs::write(
+                &path,
+                json!({"version":1,"name":format!("session-{n}")}).to_string(),
+            )
+            .unwrap();
+            let record = reader
+                .read(&path, &mut progress, &budget, 0)
+                .unwrap()
+                .expect_ready();
+            assert_eq!(record["name"], format!("session-{n}"));
+        }
+        assert!(
+            reader.entries.len() <= 32,
+            "a foreground scan exhausts small descriptor limits"
+        );
+    }
+    #[test]
+    fn bounded_preparation_can_use_more_than_one_record_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = Reader::default();
+        let mut progress = Progress::default();
+        let body =
+            json!({"version":1,"shell_jobs":{"job":{"output":"x".repeat(9<<20)}}}).to_string();
+        for n in 0..8 {
+            let path = temp.path().join(format!("large-{n}.json"));
+            fs::write(&path, &body).unwrap();
+            // Isolate the aggregate raw ceiling from scheduler delays.
+            let budget = Budget {
+                files: 32,
+                directory_entries: 2000,
+                records: 512,
+                bytes: 4 << 20,
+                deadline: Instant::now() + Duration::from_secs(2),
+            };
+            assert_eq!(
+                reader
+                    .read(&path, &mut progress, &budget, 0)
+                    .unwrap()
+                    .expect_ready()["version"],
+                1
+            );
+        }
+        assert_eq!(progress.metadata_io, body.len() * 8);
     }
 }

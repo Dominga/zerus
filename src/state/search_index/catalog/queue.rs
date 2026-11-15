@@ -93,7 +93,7 @@ impl Store {
         self.catalog_schema()?;
         // Revisit older decoder refusals and seed the compact cache in bounded
         // batches. A failed parse in this decoder version remains unavailable.
-        self.index.connection().execute("UPDATE catalog_queue SET done=0,skipped=0,identity=NULL WHERE id IN(SELECT id FROM catalog_queue WHERE reader_version<? ORDER BY reader_version,id LIMIT 32)", [metadata_cache::VERSION]).map_err(|e| e.to_string())?;
+        self.index.connection().execute("UPDATE catalog_queue SET done=0,skipped=0,identity=NULL WHERE id IN(SELECT id FROM (SELECT id,done,skipped,identity FROM catalog_queue WHERE reader_version<? ORDER BY reader_version,id LIMIT 32) WHERE done<>0 OR skipped<>0 OR identity IS NOT NULL)", [metadata_cache::VERSION]).map_err(|e| e.to_string())?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
         let mut reader = metadata::Reader::cached(state);
@@ -374,7 +374,7 @@ impl Store {
     }
     fn queue_page(&self, after: i64, metadata_only: bool) -> Result<Vec<(i64, PathBuf, String)>> {
         let sql = if metadata_only {
-            "SELECT id,path,kind FROM catalog_queue WHERE reader_version<? AND id>=? ORDER BY reader_version,id LIMIT 16"
+            "SELECT id,path,kind FROM catalog_queue WHERE reader_version<? AND id>=? ORDER BY reader_version,id LIMIT 32"
         } else {
             "SELECT id,path,kind FROM catalog_queue WHERE done=0 AND id>? ORDER BY id LIMIT 16"
         };

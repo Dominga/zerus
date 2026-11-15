@@ -27,6 +27,7 @@ import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
+import "../styles/team-scroll.css";
 
 // The Team workspace adapts the fork's team bar, members, paged Board, task
 // detail and decisions. Graph and Layers share the core's projection. Feed,

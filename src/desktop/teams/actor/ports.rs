@@ -81,6 +81,14 @@ pub(in crate::desktop::teams) trait Ports {
     ) -> Result<TaskReply> {
         Err(unavailable())
     }
+    fn stage(
+        &mut self,
+        _team: &Team,
+        _effect: &crate::teams::store::StageTaskEffect,
+        _original: &str,
+    ) -> Result<TaskReply> {
+        Err(unavailable())
+    }
     fn clear_stage(
         &mut self,
         _team: &Team,

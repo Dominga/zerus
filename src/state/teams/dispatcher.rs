@@ -8615,6 +8615,23 @@ fn hand_out_now(
         }
         Ok(())
     })?;
+    // Owner, 2026-11-15: an unconfirmed hand-out sat on its card while the lead
+    // waited for a report that could not come. The lead hears of it at once:
+    // the member may never have got the task (its paste may still sit in the
+    // member's input, which the next delivery finishes), and only the person
+    // settles it (`hgs team check`).
+    if let Sent::Uncertain(error) = &outcome {
+        if let Some(team) = store.load(team_id)? {
+            let role = team.role_of(member_id);
+            let short: String = error.chars().take(300).collect();
+            tell_lead(
+                store,
+                &team,
+                "handout_unconfirmed",
+                &format!("[Zerus team \u{b7} from: Zerus \u{b7} task: #{task_id}] The hand-out of task #{task_id} to {role} is unconfirmed: {short}. The member may not have it; do not wait for its report. Ask the owner to check the member's Terminal and settle it (delivered or not delivered)."),
+            );
+        }
+    }
     Ok(())
 }
 

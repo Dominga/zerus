@@ -42,7 +42,10 @@ fn child(case: &str) {
         .join("tmux")
         .join(format!("tmux-{}", u32::MAX))
         .join("default");
-    assert!(socket.as_os_str().len() < 104, "tmux socket path: {socket:?}");
+    assert!(
+        socket.as_os_str().len() < 104,
+        "tmux socket path: {socket:?}"
+    );
     for dir in ["state", "cfg", "tmux"] {
         crate::platform::private_dir(&root.path().join(dir)).unwrap();
     }

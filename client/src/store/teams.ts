@@ -49,6 +49,7 @@ export interface TeamStage { holder?: string | null; node: number; index: number
 export interface TeamTaskRef { project: string; uuid: string }
 export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
+  assigned_base?: string | null;
   /** Authoritative store fact; absent on older reads keeps editing disabled. */
   deps_editable?: boolean | null;
   deps?: TeamDependency[]; phase?: number | null; origin?: number | null; layer?: number | null;
@@ -75,6 +76,7 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  planning?: { known: boolean; paused: boolean; goal: string } | null;
   plan?: PhasePane | null;
   /** Complete bounded goal for the editor, distinct from the bar preview. */
   edit_goal?: string | null;
@@ -164,6 +166,7 @@ export interface TeamCatalogTemplate {
 }
 export interface TeamCatalog { roles: TeamCatalogRole[]; pipelines: TeamCatalogPipeline[]; templates: TeamCatalogTemplate[]; planning_rules: string[] }
 export interface TeamProjectFacts { git: boolean; head: string; branch: string; reason: string }
+export interface TeamBaseFacts { team: string; revision: number; base_commit: string; refs: { reference: string; commit: string }[] }
 
 /** The data the views need from the platform; a test passes its own. */
 export interface TeamsTransport {
@@ -177,6 +180,7 @@ export interface TeamsTransport {
   catalog(): Promise<unknown>;
   saveTemplate(template: TeamCatalogTemplate): Promise<void>;
   project(path: string): Promise<unknown>;
+  base?(team: string): Promise<TeamBaseFacts>;
   /** Turns this computer's Teams preview on or off (`hgs team preview`). */
   preview(on: boolean): Promise<unknown>;
 }
@@ -200,6 +204,7 @@ export function tauriTeams(): TeamsTransport {
     async catalog() { live(); return invoke<unknown>("teams_catalog"); },
     async saveTemplate(template) { live(); await invoke("teams_template_save", { template }); },
     async project(path) { live(); return invoke<unknown>("teams_project", { path }); },
+    async base(team) { live(); return invoke<TeamBaseFacts>("teams_base", { team }); },
     async preview(on) { live(); return invoke<unknown>("teams_preview", { on }); },
   };
 }
@@ -754,6 +759,10 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     const git = reply.git ?? reply.state === "ok";
     return { git, head: reply.head ?? "", branch: reply.branch ?? "", reason: git ? "" : "not a Git repository" };
   }
+  async function base(team: string): Promise<TeamBaseFacts> {
+    if (!transport.base) throw new Error("The team base read is unavailable.");
+    return transport.base(team);
+  }
 
   // ------------------------------------------------------------- actions
 
@@ -860,7 +869,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const listNext = () => chainOf(listPagesBy()).next;
 
   return {
-    list, listPage, firstListPage, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending,
+    list, listPage, firstListPage, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending, base,
     waitingView, waitingCount, waitingLater, apply, probe, recheck, hidden, openTeam, closeTeam, tasksChanged, page, openWaiting, pageWaiting, firstWaitingPage, decide, revisionOf,
     teamOfSession, summaryOf, unresolvedOf, failureFor, readFailureFor, preview, openNewTeam, closeNewTeam, reloadCatalog, createIntent, claimCreate, saveTemplate, project, run, runAgain, confirm, cancelConfirmation, check, dismiss, clearFailure,
   };

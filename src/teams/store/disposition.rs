@@ -15,17 +15,14 @@ impl Store {
         }
         let store = Self::existing_unmigrated(state)?;
         if let Some(db) = &store.db {
-            as_is(db)?;
-            let present: u32 = db.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE (type='table' AND name IN ('person_gesture_store','person_gestures')) OR (type='trigger' AND name IN ('person_gesture_store_immutable','person_gesture_store_kept','person_gestures_immutable'))",
-                [], |r| r.get(0),
-            ).map_err(storage)?;
-            if present != 5 {
-                return Err(Problem::new(
-                    code::INVALID_STATE,
-                    "Native Person evidence is incomplete; no team data was changed.",
-                ));
+            let version: u32 = db
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .map_err(storage)?;
+            if version != SCHEMA_VERSION {
+                return Err(Problem::new(code::INVALID_STATE, MIGRATE));
             }
+            as_is(db)?;
+            native_person::validate(db)?;
         }
         Ok(store)
     }
@@ -47,7 +44,7 @@ pub(super) fn as_is(db: &Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(storage)?;
-    if version != SCHEMA_VERSION {
+    if !matches!(version, 2 | SCHEMA_VERSION) {
         return Err(Problem::new(code::INVALID_STATE, MIGRATE));
     }
     timers::as_is(db)?;

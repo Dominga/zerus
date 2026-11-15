@@ -34,4 +34,40 @@
     <string name="saved_execution_not_started">Не начато</string>
     <string name="saved_execution_delivery_unknown">Результат доставки неизвестен</string>
     <string name="saved_execution_unconfirmed">Начало не подтверждено</string>
+
+    <!-- Task content edits and private drafts. -->
+    <string name="task_edit_title">Заголовок</string>
+    <string name="task_edit_requirement">Условие задачи</string>
+    <string name="task_edit_open">Изменить задачу</string>
+    <string name="task_edit_prepare">Проверяем задачу на её компьютере…</string>
+    <string name="task_edit_unavailable">Эту задачу пока нельзя изменить с телефона.</string>
+    <string name="task_edit_update_host">Обновите Zerus на компьютере задачи, чтобы изменить её.</string>
+    <string name="task_edit_keep_target">Сохранить выбранную сессию</string>
+    <string name="task_edit_target">Сессия</string>
+    <string name="task_edit_any">Любая сессия</string>
+    <string name="task_edit_top">Переместить перед первой задачей</string>
+    <string name="task_edit_comment">Комментарий</string>
+    <string name="task_edit_save">Сохранить изменения</string>
+    <string name="task_edit_saving">Сохраняем на исходном компьютере…</string>
+    <string name="task_edit_saved">Сохранено на компьютере задачи.</string>
+    <string name="task_edit_storage_failed">Не удалось сохранить черновик. Новый запрос задачи не отправлен.</string>
+    <string name="task_edit_draft_kept">Черновик сохранён для проверки.</string>
+    <string name="task_edit_saved_draft">Сохранённый черновик</string>
+    <string name="task_edit_unknown">Доставка не подтверждена. Обновите задачу для проверки; этот черновик не будет отправлен повторно.</string>
+    <string name="task_edit_discard">Удалить черновик</string>
+    <string name="task_edit_discard_question">Удалить этот неотправленный или отклонённый черновик? Сохранённые изменения будут потеряны.</string>
+    <string name="task_edit_cancel">Отмена</string>
+    <string name="task_edit_close">Закрыть</string>
+    <string name="task_edit_refresh">Обновить задачу</string>
+    <string name="task_media_attach">Прикрепить файлы</string>
+    <string name="task_media_comment_attach">Прикрепить к комментарию</string>
+    <string name="task_media_remove">Убрать вложение</string>
+    <string name="task_media_preview">Просмотреть вложение</string>
+    <string name="task_media_loading">Открываем вложение…</string>
+    <string name="task_media_limit">В задаче может быть до 8 файлов: до 10 МиБ каждый и до 20 МиБ всего.</string>
+    <string name="task_media_import_failed">Не удалось прикрепить файлы. Исходный черновик сохранён.</string>
+    <string name="task_media_picker_changed">Редактор задачи изменился во время выбора файлов. Исходный черновик сохранён.</string>
+    <string name="task_media_files">Вложения</string>
+    <string name="task_media_open_failed">Не удалось открыть вложение задачи. Обновите задачу и попробуйте ещё раз.</string>
+    <string name="task_edit_refresh_failed">Задача сохранена. Обновите проект, чтобы увидеть изменения.</string>
 </resources>

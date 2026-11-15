@@ -266,6 +266,35 @@ this closure; `--no-deps` metadata does not.
 
 ## Qualification and review
 
+### Platform drafts and transport
+
+Android and iOS retain encrypted drafts under the original
+connection/swarm/project/task, physical machine and host identity. The original
+qualification and final edit UUIDs never change. User changes have a monotonic
+local sequence: an older typing or picker callback cannot replace newer input,
+and freezing requires the exact sequence being saved. Retain the original view
+separately from those changes. Never obtain routing from the current selection
+after an await.
+
+Pending and unknown records cannot reserve another request. Saved records are
+data for review; they never recreate a live FFI edit handle. Keep their frozen
+manifest and original pending bytes across restart. Known completion may release
+its exact draft; explicit person-confirmed discard may remove an unsubmitted
+or verified-refused draft. Neither path clears pending or unknown delivery.
+Draft storage has no automatic expiry or eviction: at most 32 records, 64 MiB
+per record and 256 MiB overall. A quota or durability error stops transport and
+keeps existing bytes.
+
+The transport keeps the original encrypted request until the live FFI handle
+has verified its result. Private identity JSON exists only for that in-process
+verification; it is never sent to the relay, logged or saved in a draft. A
+post-network failure remains unknown. An admitted edit route requires the
+exact computer's advertisement and authenticated local route; relay-wide or
+forwarded capabilities cannot select this lane. Do not repost an existing
+request or fall back to ordinary exchange after its refusal or unknown result.
+
+### Required evidence
+
 Implement the spec, native/connector verification and FFI lane in one PR where
 practical, then Android/iOS wiring in the next. Arrange early G1 review of this
 contract and final review of the exact source. No hosted run is a gate.
@@ -288,3 +317,8 @@ changes, Android unit tests/lint/unsigned assemble, and private headless Mac
 Rust/ZerusKit tests plus an unsigned simulator build. Use only private stores,
 profiles and sockets. No owner sessions, devices, signing, installations,
 relay deployment or automatic task controls.
+
+Typing checkpoints coalesce into one pending private writer. Save, attachment picking and Close
+flush the exact current form sequence before proceeding. A local validation refusal keeps the
+original live form editable; a frozen, submitted or unknown outcome stays held for review.
+Changing the selected project while a request is running never changes its captured route.

@@ -1,0 +1,11 @@
+/* Opt into WebKit's styled scrollbars instead of the fading GTK overlay.
+    Keep this in components so base.css's Linux popup rule can still hide them. */
+@layer components {
+  .team-canvas, .team-board, .team-lane-body, .team-plan-scroll, .phase-layers { --team-scrollbar-size: 14px; scrollbar-width: auto; scrollbar-color: auto; }
+  .team-canvas::-webkit-scrollbar, .team-board::-webkit-scrollbar, .team-lane-body::-webkit-scrollbar, .team-plan-scroll::-webkit-scrollbar, .phase-layers::-webkit-scrollbar { height: var(--team-scrollbar-size); }
+  .team-canvas::-webkit-scrollbar-track, .team-board::-webkit-scrollbar-track, .team-lane-body::-webkit-scrollbar-track, .team-plan-scroll::-webkit-scrollbar-track, .phase-layers::-webkit-scrollbar-track { background: var(--z-color-surface); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); }
+  .team-canvas::-webkit-scrollbar-thumb, .team-board::-webkit-scrollbar-thumb, .team-lane-body::-webkit-scrollbar-thumb, .team-plan-scroll::-webkit-scrollbar-thumb, .phase-layers::-webkit-scrollbar-thumb { background: var(--z-color-muted); border: 2px solid var(--z-color-surface); border-radius: var(--z-radius-md); }
+  /* Keep the track inside the clipped or auto-height parent, including its hit area. */
+  .team-lane-body, .team-plan-scroll { margin-bottom: var(--team-scrollbar-size); }
+  .team-plan-phase { display: flow-root; }
+}

@@ -79,6 +79,7 @@
     "rows": [
       {
         "admitted": true,
+        "assigned_base": null,
         "deps_editable": true,
         "holder": null,
         "id": 1,
@@ -102,6 +103,7 @@
       },
       {
         "admitted": true,
+        "assigned_base": "0123456789abcdef0123456789abcdef01234567",
         "deps_editable": false,
         "holder": "m1",
         "id": 2,

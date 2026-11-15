@@ -2,6 +2,7 @@
   "accept",
   "add_member",
   "admit",
+  "advance_base",
   "archive",
   "archive_member",
   "ask",
@@ -23,8 +24,10 @@
   "set_deps",
   "set_goal",
   "settings",
+  "start_planning",
   "stop",
   "stop_member",
   "submit_draft_phase",
-  "swap_member"
+  "swap_member",
+  "validation_config"
 ]

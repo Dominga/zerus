@@ -8,6 +8,11 @@ impl Runtime {
         team: &Team,
         now: i64,
     ) -> Result<bool> {
+        // Base advancement changes future hand-outs/member selections, never
+        // the integration branch's existing or already-reserved origin.
+        let mut origin = team.clone();
+        origin.base_commit = store.creation_base(&team.id)?;
+        let team = &origin;
         self.selected = None;
         let Some(mut row) = self.ledger().get(&team.id, BRANCH)? else {
             let mut row = Row::new(team, BRANCH, &self.epoch, State::Retry);

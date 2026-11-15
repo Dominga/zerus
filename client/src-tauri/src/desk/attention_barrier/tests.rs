@@ -26,6 +26,7 @@ fn round(
             focused: false,
             optional_questions: &mut || false,
             marks: &mut || None,
+            drafts: &mut || panic!("no draft input"),
             notice_id: &mut || "notice-example".into(),
         },
     )

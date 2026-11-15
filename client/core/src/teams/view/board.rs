@@ -82,6 +82,7 @@ fn is_stage(node: &Value) -> bool {
 
 fn card(node: &Value) -> QueueCard {
     QueueCard {
+        assigned_base: optional_name(node, "assigned_base"),
         deps_editable: node.get("deps_editable").and_then(Value::as_bool),
         node: count(node, "id"),
         deps: graph::dependencies(node),
@@ -208,6 +209,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
     let (groups, truncated) = board(array(queue, "rows"));
     let revision = count(team, "revision");
     TeamView {
+        planning: super::planning::project(status),
         plan: None,
         bar: TeamBar {
             id: name(team, "id"),

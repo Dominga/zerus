@@ -1051,8 +1051,9 @@ carry it as well; their tool and permission approvals, listed as pending
 questions, count as approvals. A supervised child is quiet
 only when its host reports `human_request: false` and the row itself shows no
 such approval or sign-in; a host that does not report it keeps every request
-visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
-count, and gray badges and edge, while its status, Activity, unread reply,
+visible. A quiet child behaves like a muted session: no system notification or
+attention contribution to the rail, tray, menu bar or project header counts,
+and gray badges and edge, while its status, Activity, unread reply,
 questions and approvals stay as they are. Nothing is marked read. Unlike a
 muted session, it leaves the **Needs attention** filter, and **Active** unless
 it is working, in Background, Scheduled or has a draft: its unread reply, retry
@@ -1634,11 +1635,13 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
 The tray has two counters: **active** sessions (the session list's Active filter:
-working or Background, Scheduled or Waiting, or needing attention, a subagent
-that asks included) and **Needs attention**. Attention includes input, approvals,
-errors and unread main-agent replies. An offline host adds only its Review later
-sessions to either counter; a dot marks incomplete data. The tooltip keeps the
-total number of sessions.
+working or Background, Scheduled or Waiting, needing attention, or a local draft)
+and **Needs attention**. A quiet supervised child's attention waits for its parent;
+its work, schedules, waits, drafts and the person's Review later mark still count
+as Active. Attention includes input, approvals, errors and unread main-agent replies.
+An offline host adds its Review later sessions to either counter and its local
+drafts to Active; a dot marks incomplete data. The tooltip keeps the total number
+of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:
@@ -5956,10 +5959,12 @@ hgs team template show|export|remove TEMPLATE
 hgs team template save < template.json
 hgs team template import < bundle.json
 hgs team create --template TEMPLATE < request.json
+hgs team start-planning --template TEMPLATE < request.json
 hgs team list [--limit 1..200] [--after CURSOR]
 hgs team waiting [--limit 1..200] [--after CURSOR]
 hgs team status [--team TEAM] [--bundle]
 hgs team inbox|queue|cards|journal [--team TEAM] [--limit 1..200] [--after CURSOR]
+hgs team journal [--team TEAM] [--limit 1..200] [--after CURSOR] --recorded-timings
 hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
@@ -5967,6 +5972,21 @@ hgs team pause-member|resume-member|stop-member|archive-member < request.json
 hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
+
+The optional `journal --recorded-timings` read joins only the effect and stage
+records referenced by that page, using indexed point lookups in the same
+SQLite snapshot. Its `timings` marker gives schema 1 and the team revision of
+that read. Event membership keeps the original journal cursor; mutable outcome
+facts describe each read's revision, not historical work intervals. Reservation,
+first recorded outcome and stage creation are bookkeeping timestamps, never
+native work or test duration. No timing writer or executable provider is added.
+The desktop Timeline requests facts for its displayed event IDs with the bounded
+`--timing-seqs` option, preserving its original page and Next cursor even as
+new events arrive; it can also stay in Events only.
+Export page saves only the displayed bounded page through the native Save
+dialog; unknown computer/phase identity and incomplete-history coverage remain
+explicit in its versioned JSON. It reads no additional history and never
+reposts an unconfirmed export automatically.
 
 Every command prints one JSON object. A refusal is
 `{"ok":false,"error":{"code","message","refs"}}` with exit 1; callers match on
@@ -6023,6 +6043,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `preview status`, `list` | yes | yes | yes | none |
 | `catalog ...`, `template ...` | yes | | | the catalog, template or bundle JSON |
 | `create --template` | yes | | | `project`, `name`, `goal`, `home`, `integration_branch`, `base_commit`, optional `expected_template` and `delegations` |
+| `start-planning --template` | yes | | | Same confirmed fields as `create`; a nonblank `goal` is required. Starts only the lead in Planning. |
 | `waiting` | yes | | | none |
 | `status` | yes | yes | yes | none |
 | `inbox`, `queue`, `cards`, `journal` | yes | yes | | none |
@@ -6082,6 +6103,27 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+**Planned startup.** `start-planning` is a separate person-only creation intent;
+`create` keeps its queue-team behavior and request shape. It saves the confirmed
+template and permissions, goal, not-created roster and a durable team-wide
+planning inbox notice. Only the lead's own worktree and session may start.
+Other members, the integration branch, task stages and hand-outs wait for initial
+plan approval. The lead reads its original goal through `current` and `inbox`.
+The existing guarded doorbell points to that inbox, including for DeepSeek;
+an unknown delivery is never automatically repeated.
+
+Pause stops new planning launches, standing confirmations and doorbells; it
+does not stop the lead's current native turn. Resume returns to Planning, never
+Running, and a lead cannot remove the person's pause. Stop ends the team.
+Launch refusals and unknown outcomes retain their ordinary notices and listed
+decisions, without granting task or integration authority. Approval and
+publication are unavailable in this slice.
+
+Starting the first planned team atomically raises the private Teams execution
+schema to 3. Queue-only stores remain at 2; this engine reads both. Older
+engines refuse fresh opens of a store marked 3, so all Teams commands and its
+desktop service on that computer need the M2-capable engine thereafter.
 
 **Planned drafts.** The Team tab's Layers view reads bounded draft phases;
 approval is shown unavailable until publication is implemented. `phases`
@@ -6376,6 +6418,29 @@ reads. In **Settings > Approvals**, only a confirmed folder-trust grant says
 **Trusted for ... and its subfolders on this account**; failed, cancelled,
 unconfirmed and unknown outcomes say it was requested but not confirmed.
 Resume and other ordinary approval rows do not claim that trust grant.
+
+### Tests/Builds provider inspection and selection
+
+`hgs team validation-config --json` takes `{ "team": "UUID" }` on stdin.
+The person or exact team lead may read it. Add `override_config` (the version-1
+JSON equivalent of `.zerus/tests.toml`, or `null`) to check a candidate without
+saving or executing it. The bounded `inspection` reply includes `schema`, team,
+revision, project/home, native checkout, file/detected/none source, source digest,
+effective config digest, provider metadata, diagnostics, current saved selection
+and unsupported capabilities. Invalid project/configuration facts are explicit
+`valid: false` diagnostics, never empty successful validation.
+
+`hgs team validation-settings --json` is **person only**. It takes the normal
+`team`, `request_id`, `expected_revision` envelope and `selection` containing the
+reviewed `source_digest`, `digest` and `override_config`. The operation recomputes
+these under the writer transaction, refuses `config_changed` or `stale_revision`,
+and atomically records the selection, revision, journal and exact request receipt.
+Replay keeps the original receipt; a changed request never borrows its UUID.
+Selections live in additive `validation_settings` companion storage, leaving the
+strict legacy settings object and schema version unchanged. They grant no runner,
+mandatory validation or automatic task-dispatch authority. Ordinary settings
+writes preserve the companion choice.
+
 
 ## Machines and accounts
 
@@ -9610,6 +9675,49 @@ clang -Wno-deprecated-declarations tests/test_macos_session_protocol.c \
 Process coverage includes exact call identity, background tasks, stale generations,
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
+
+### `hgs team base` and `hgs team advance-base`
+
+`hgs team base --team UUID --json` is an explicit person-only read on the
+team's home computer. It returns `team`, `revision`, `base_commit` and at most
+two `refs` entries (`reference`, `commit`): the direct local
+`refs/heads/main` and locally fetched `refs/remotes/origin/main` that exist.
+It performs no network operation. The desktop reads this only when the
+Advance base form opens, not in its polling loop.
+
+`hgs team advance-base --json` reads the ordinary operation envelope on stdin:
+`request_id`, `team`, `expected_revision`, and `commit` (a full lowercase Git
+commit hash). Only a person may advance a running or paused team with branch
+integration; leads, members, other sessions and the service are refused.
+The trusted local project placement and Git facts are read inside the store
+write transaction, after exact receipt replay and revision validation.
+The commit must exist, strictly descend from the current base, and be an
+ancestor of or equal to at least one of `refs/heads/main` and
+`refs/remotes/origin/main`. Neither HEAD nor a remote/network fallback is used;
+the two literal names are read in one snapshot without revision-name guessing,
+and prefix descendants or branches named like those refs are excluded.
+Refusals name the checked main refs. The revision and journal advance together,
+and the journal names the admitting ref. Ordinary `stale_revision`,
+`store_busy` and `storage_failed` receipt and retry semantics apply.
+
+No Git ref or object is written by advancing the default. The integration
+branch history and existing member branches are preserved. Each hand-out or
+reopen reservation records its own base: new prompts use the current default,
+while previous generations retain their assigned base for both prompt recovery
+and integration ancestry/admission. Queue rows add `assigned_base` (null before
+hand-out). Members start from the integration branch and merge their given
+base into their own branch. New member launches use the current default;
+existing and already-reserved launches keep their original checkout plan.
+
+The first successful advance atomically raises the private Teams compatibility
+mark, refusing older engines at store open. Narrow per-team SQLite guards also
+refuse already-open older engines' hand-out/effect and integration row writes;
+the newer engine registers their connection capability. A refusal rolls back
+the operation without partial rows (older callers may report `storage_failed`
+with the newer-writer cause). Pre-advance unpinned rows retain the original
+base through the indexed high-water, and the new engine continues to pin
+future hand-outs. Unadvanced teams and unrelated writes on existing connections
+remain outside those row guards.
 
 ### Team catalog editor receipts
 

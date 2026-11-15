@@ -14,6 +14,7 @@ export function inboxKind(kind: string): string {
     case "report": return tr("Report");
     case "question": return tr("Question");
     case "permission": return tr("Permission");
+    case "planning_goal": return tr("Planning goal");
     default: return kind;
   }
 }

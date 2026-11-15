@@ -15,6 +15,7 @@
 //! lock for several seconds, once. Another process opening the store
 //! meanwhile waits for it, up to a minute, instead of the usual two seconds.
 use super::*;
+use crate::teams::store::bases::PINNED_LAYOUT_FLAG;
 use std::time::Duration;
 mod legacy_holds;
 use legacy_holds::legacy_owners;
@@ -23,7 +24,8 @@ use legacy_holds::legacy_owners;
 /// reached the integration branch, with the timers. Every lower value was
 /// written only by unmerged development builds of this package.
 pub(crate) const BASE: u32 = 8;
-/// The current layout: the base and the steps after it.
+/// The current layout: the base and the steps after it. Layout numbers must
+/// remain below PINNED_LAYOUT_FLAG, which reserves a separate writer fence.
 pub(crate) const EXTENSION: u32 = 12;
 /// Each layout that reached the integration branch, with the step that
 /// brings a store marked with it to the next; the steps run in order up to
@@ -34,6 +36,25 @@ const STEPS: &[(u32, Step)] = &[
     (10, hold_owners),
     (11, key_refusal_order),
 ];
+// Core layouts and every timer step destination stay outside the fence range.
+const _: () = {
+    assert!(crate::teams::store::SCHEMA_VERSION < PINNED_LAYOUT_FLAG);
+    assert!(BASE < PINNED_LAYOUT_FLAG);
+    assert!(EXTENSION < PINNED_LAYOUT_FLAG);
+    let mut i = 0;
+    while i < STEPS.len() {
+        assert!(STEPS[i].0 < PINNED_LAYOUT_FLAG - 1);
+        i += 1;
+    }
+};
+#[cfg(test)]
+pub(in crate::teams::store) fn published_layouts() -> Vec<u32> {
+    STEPS
+        .iter()
+        .map(|(from, _)| *from)
+        .chain([EXTENSION])
+        .collect()
+}
 /// One step from a merged layout to the next, inside the transition.
 type Step = fn(&Connection) -> Result<()>;
 /// Layout 8 to 9: the lead's answers reach their members.
@@ -243,6 +264,7 @@ pub(in crate::teams::store) fn after_fence() -> Result<()> {
 /// writes with: the common batches, the read index conversion and the
 /// transition.
 pub(in crate::teams::store) fn fence(db: &Connection) -> Result<()> {
+    super::super::execution_fence(db)?;
     marked(db).map(|_| ())
 }
 /// The preview-off disposition reader cannot migrate an earlier layout.
@@ -256,7 +278,11 @@ pub(in crate::teams::store) fn as_is(db: &Connection) -> Result<()> {
     Ok(())
 }
 pub(in crate::teams::store) fn extend(db: &Connection) -> Result<()> {
-    if marked(db)? == Mark::Current {
+    extend_layout(db, EXTENSION, STEPS)
+}
+
+fn extend_layout(db: &Connection, current: u32, steps: &[(u32, Step)]) -> Result<()> {
+    if marked_layout(db, current, steps)? == Mark::Current {
         // The current layout's idempotent index, kept here instead of a
         // newer mark so an older build still opens the upgraded store
         // (zerus-63rru.52 round 2): a store at this layout that predates
@@ -278,9 +304,9 @@ pub(in crate::teams::store) fn extend(db: &Connection) -> Result<()> {
         "SAVEPOINT timers;"
     });
     let result = begun.map_err(begin_error).and_then(|()| {
-        let result = marked(db).and_then(|mark| match mark {
+        let result = marked_layout(db, current, steps).and_then(|mark| match mark {
             Mark::Current => Ok(()),
-            mark => transition(db, mark),
+            mark => transition(db, mark, current, steps),
         });
         let end = match (&result, own) {
             (Ok(()), true) => "COMMIT;",
@@ -302,7 +328,7 @@ pub(in crate::teams::store) fn extend(db: &Connection) -> Result<()> {
 enum Mark {
     /// A store from before the extension.
     Absent,
-    /// An earlier layout that reached the integration branch.
+    /// An earlier merged layout, including its optional writer-fence bit.
     Merged(u32),
     Current,
 }
@@ -310,16 +336,22 @@ enum Mark {
 /// is refused as a newer schema is; any other value was written only by an
 /// unmerged development build and is refused too. Nothing is written.
 fn marked(db: &Connection) -> Result<Mark> {
-    match version(db)? {
-        None => Ok(Mark::Absent),
-        Some(EXTENSION) => Ok(Mark::Current),
-        // The same refusal as a newer core schema's.
-        Some(v) if v > EXTENSION => Err(Problem::new(
+    marked_layout(db, EXTENSION, STEPS)
+}
+
+fn marked_layout(db: &Connection, current: u32, steps: &[(u32, Step)]) -> Result<Mark> {
+    let Some(raw) = version(db)? else {
+        return Ok(Mark::Absent);
+    };
+    let layout = raw & !PINNED_LAYOUT_FLAG;
+    match layout {
+        v if v == current => Ok(Mark::Current),
+        v if v > current => Err(Problem::new(
             code::INVALID_STATE,
             "store schema is newer than this version of Zerus",
         )),
-        Some(v) if STEPS.iter().any(|(from, _)| *from == v) => Ok(Mark::Merged(v)),
-        Some(_) => Err(Problem::new(
+        v if steps.iter().any(|(from, _)| *from == v) => Ok(Mark::Merged(raw)),
+        _ => Err(Problem::new(
             code::INVALID_STATE,
             "store schema was written by an unmerged development build of Zerus, and this version does not open it",
         )),
@@ -343,8 +375,8 @@ fn version(db: &Connection) -> Result<Option<u32>> {
     .optional()
     .map_err(storage)
 }
-fn transition(db: &Connection, mark: Mark) -> Result<()> {
-    let from = match mark {
+fn transition(db: &Connection, mark: Mark, current: u32, steps: &[(u32, Step)]) -> Result<()> {
+    let (from, fence) = match mark {
         Mark::Absent => {
             // Triggers exist before any backfill reads, so a write that
             // commits after this transaction is seen by them, and none can
@@ -355,12 +387,12 @@ fn transition(db: &Connection, mark: Mark) -> Result<()> {
             backfill_teams(db)?;
             backfill_released(db)?;
             backfill_stopped(db)?;
-            BASE
+            (BASE, 0)
         }
-        Mark::Merged(from) => from,
+        Mark::Merged(raw) => (raw & !PINNED_LAYOUT_FLAG, raw & PINNED_LAYOUT_FLAG),
         Mark::Current => return Ok(()),
     };
-    for (_, step) in STEPS.iter().filter(|(layout, _)| *layout >= from) {
+    for (_, step) in steps.iter().filter(|(layout, _)| *layout >= from) {
         step(db)?;
     }
     #[cfg(test)]
@@ -369,7 +401,7 @@ fn transition(db: &Connection, mark: Mark) -> Result<()> {
     }
     db.execute(
         "INSERT INTO timers_extension(id,version) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version",
-        [EXTENSION],
+        [current | fence],
     )
     .map_err(storage)?;
     #[cfg(test)]
@@ -461,3 +493,6 @@ fn backfill_stopped(db: &Connection) -> Result<()> {
     }
 }
 const STOPPED: &str = "INSERT OR IGNORE INTO key_clear_work(team,node,kind) SELECT n.team,n.id,'stop' FROM nodes n JOIN node_identity i ON i.team=n.team AND i.id=n.id LEFT JOIN stage_tasks s ON s.team=n.team AND s.node=n.id WHERE n.team=?1 AND (i.task_uuid<>'' OR s.request_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.team=n.team AND d.node=n.id AND d.state<>'settled' AND d.kind='cancel') AND NOT EXISTS(SELECT 1 FROM task_observations o WHERE o.team=n.team AND o.node=n.id AND json_extract(o.data,'$.key') IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM key_clears k WHERE k.team=n.team AND k.node=n.id)";
+
+#[cfg(test)]
+mod base_tests;

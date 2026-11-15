@@ -1,0 +1,55 @@
+{
+  "actor": {
+    "interim": true,
+    "kind": "person",
+    "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+    "origin": "cli_interim",
+    "person": "local"
+  },
+  "inspection": {
+    "checkout": "/workspace/example-project",
+    "diagnostics": [],
+    "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "home": "00000000-0000-4000-8000-0000000000aa",
+    "override_config": null,
+    "project": "example-project",
+    "providers": [
+      {
+        "disabled": false,
+        "kind": "build",
+        "name": "cargo-build",
+        "provider": "cargo",
+        "reports": [],
+        "scopes": [
+          "full"
+        ]
+      },
+      {
+        "disabled": false,
+        "kind": "test",
+        "name": "cargo-test",
+        "provider": "cargo",
+        "reports": [],
+        "scopes": [
+          "full"
+        ]
+      }
+    ],
+    "revision": 1,
+    "saved": null,
+    "saved_current": false,
+    "schema": 1,
+    "source": "detected",
+    "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "team": "00000000-0000-4000-8000-00000000beef",
+    "unsupported": [
+      "direct_runner",
+      "executable_templates",
+      "validation_requests",
+      "result_import",
+      "mandatory_gates"
+    ],
+    "valid": true
+  },
+  "ok": true
+}

@@ -64,6 +64,7 @@ pub(super) struct Facts {
     pub member: Member,
     pub binding: Binding,
     pub preview: bool,
+    pub planning_paused: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

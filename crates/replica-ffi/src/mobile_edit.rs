@@ -55,6 +55,9 @@ fn refused(message: &str) -> TaskEditError {
     TaskEditError::Refused(message.into())
 }
 
+fn unverified() -> TaskEditError {
+    TaskEditError::Unknown("The original task edit result could not be verified; its outcome is unknown. Your draft was kept and will not execute again. Sync this task for review.".into())
+}
 fn invalid() -> TaskEditError {
     refused("The original task edit proof is unavailable or changed; your draft was kept.")
 }
@@ -111,7 +114,7 @@ impl Source {
     }
     /// The app supplies the fresh pinned roster and two indexed historical
     /// head lookups from this same private connection. No relay DTO is a roster.
-    fn result(&self, proof: &mut TaskEditProof, request_id: &str) -> Result<Value> {
+    fn authenticated_result(&self, proof: &mut TaskEditProof, request_id: &str) -> Result<Value> {
         let private_json = Zeroizing::new(std::mem::take(&mut proof.identity_json));
         if proof.connection_id != self.connection {
             return Err(invalid());
@@ -176,6 +179,14 @@ impl Source {
         {
             return Err(invalid());
         }
+        Ok(native.clone())
+    }
+    fn result(&self, proof: &mut TaskEditProof, request_id: &str) -> Result<Value> {
+        // A request is already outstanding here. Failure to authenticate any
+        // part of its evidence cannot prove a refusal before the native edit.
+        let native = self
+            .authenticated_result(proof, request_id)
+            .map_err(|_| unverified())?;
         match native["state"].as_str() {
             Some("completed") => {},
             Some("refused") => {
@@ -291,10 +302,10 @@ impl TaskEditQualification {
     pub fn accept(self: Arc<Self>, mut proof: TaskEditProof) -> Result<Arc<TaskEditDraft>> {
         let result = self.source.result(&mut proof, &self.request.request_id)?;
         if result["task"] != self.reference {
-            return Err(invalid());
+            return Err(unverified());
         }
         let receipt: Receipt =
-            serde_json::from_value(result["receipt"].clone()).map_err(|_| invalid())?;
+            serde_json::from_value(result["receipt"].clone()).map_err(|_| unverified())?;
         if receipt.version != 1
             || receipt.workspace != self.source.workspace
             || receipt.phone_device != self.source.phone.device_id
@@ -317,7 +328,7 @@ impl TaskEditQualification {
             || receipt.baseline.version.is_empty()
             || !replica::version_includes(&receipt.baseline.version, &self.baseline.version)
         {
-            return Err(invalid());
+            return Err(unverified());
         }
         let store = self.store.store()?;
         let task = store.find(&self.reference)?;

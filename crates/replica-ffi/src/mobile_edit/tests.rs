@@ -546,3 +546,129 @@ fn replacing_the_phone_store_after_qualification_cannot_rehome_a_frozen_draft() 
         f.task.revision()
     );
 }
+
+#[test]
+fn corrupt_post_commit_result_is_unknown_not_verified_refusal() {
+    let f = Fixture::new();
+    let q = f.qualification();
+    let draft = q.clone().accept(f.proof(&q.request())).unwrap();
+    draft
+        .comment("Committed before proof corruption".into(), vec![])
+        .unwrap();
+    let frozen = draft.freeze().unwrap();
+    let request = draft.next_request().unwrap().unwrap();
+    let mut proof = f.proof(&request); // Real native endpoint commits first.
+    let store = ProjectStore::open(&f.root.path().join("native-replica"), "project-1").unwrap();
+    assert_eq!(
+        store
+            .load(f.task.uuid())
+            .unwrap()
+            .view()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| e.text == "Committed before proof corruption")
+            .count(),
+        1
+    );
+    drop(store);
+    proof.result = "{}".into();
+    let error = draft
+        .accept(proof)
+        .expect_err("corrupt proof cannot complete");
+    assert!(draft.next_request().is_err(), "guard must stay closed");
+    assert_eq!(draft.freeze().unwrap(), frozen);
+    assert!(
+        matches!(error, TaskEditError::Unknown(_)),
+        "a committed edit with corrupt proof was classified as {error:?}"
+    );
+}
+
+#[test]
+fn foreign_or_incomplete_post_commit_evidence_is_unknown_and_keeps_the_original_draft() {
+    for change in [
+        "connection",
+        "signature",
+        "membership_head",
+        "task",
+        "manifest_hash",
+        "missing_hash",
+    ] {
+        let f = Fixture::new();
+        let q = f.qualification();
+        let draft = q.clone().accept(f.proof(&q.request())).unwrap();
+        draft
+            .comment("A committed original comment".into(), vec![])
+            .unwrap();
+        let frozen = draft.freeze().unwrap();
+        let request = draft.next_request().unwrap().unwrap();
+        let original = f.envelope(&request);
+        let mut native = f.endpoint.execute(&original, 900).unwrap();
+        assert_eq!(native["state"], "completed");
+        match change {
+            "task" => native["result"]["task"] = json!(replica::ids::new_uuid()),
+            "manifest_hash" => native["result"]["manifest_sha256"] = json!("0".repeat(64)),
+            "missing_hash" => {
+                native["result"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("manifest_sha256");
+            }
+            _ => {}
+        }
+        let mut proof = f.proof_with_native(original, native);
+        match change {
+            "connection" => proof.connection_id = "a-different-connection".into(),
+            "signature" => {
+                let mut result: EncryptedEnvelope = serde_json::from_str(&proof.result).unwrap();
+                result.signature = crypto::encode(&[3; 64]);
+                proof.result = serde_json::to_string(&result).unwrap();
+            }
+            "membership_head" => proof.result_head = crypto::encode(&[3; 32]),
+            _ => {}
+        }
+        let error = draft
+            .accept(proof)
+            .expect_err("unverified evidence cannot settle an original");
+        assert!(
+            matches!(error, TaskEditError::Unknown(_)),
+            "{change} incorrectly became {error:?}"
+        );
+        assert!(draft.next_request().is_err());
+        assert_eq!(draft.freeze().unwrap(), frozen);
+        let store = ProjectStore::open(&f.root.path().join("native-replica"), "project-1").unwrap();
+        assert_eq!(
+            store
+                .load(f.task.uuid())
+                .unwrap()
+                .view()
+                .unwrap()
+                .log
+                .iter()
+                .filter(|entry| entry.text == "A committed original comment")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn local_preflight_refusals_do_not_claim_an_unknown_native_edit() {
+    let f = Fixture::new();
+    let mut route = f.route();
+    route.connection_id = String::new();
+    assert!(matches!(
+        f.api.clone().qualify_edit(f.task.uuid().into(), route),
+        Err(TaskEditError::Refused(_))
+    ));
+    let q = f.qualification();
+    let draft = q.clone().accept(f.proof(&q.request())).unwrap();
+    assert!(matches!(
+        draft.comment(String::new(), vec![]),
+        Err(TaskEditError::Refused(_))
+    ));
+    assert!(matches!(
+        draft.next_request(),
+        Err(TaskEditError::Refused(_))
+    ));
+}

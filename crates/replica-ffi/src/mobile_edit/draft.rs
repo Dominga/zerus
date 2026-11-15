@@ -261,33 +261,33 @@ impl TaskEditDraft {
         Ok(Some(request))
     }
     pub fn accept(&self, mut proof: TaskEditProof) -> Result<TaskEditProgress> {
-        let mut state = self.state()?;
+        let mut state = self.state().map_err(|_| unverified())?;
         let pending = state.pending.as_ref().ok_or_else(invalid)?;
         let result = self
             .qualification
             .source
             .result(&mut proof, &pending.request_id)?;
         if result["task"] != self.view.task {
-            return Err(invalid());
+            return Err(unverified());
         }
         let complete = state.expected.as_ref().is_none_or(|ack| ack.complete);
         if complete {
             if result["edited"] != true || result["manifest_sha256"] != state.hash {
-                return Err(invalid());
+                return Err(unverified());
             }
         } else if result["edited"] == true {
-            return Err(invalid());
+            return Err(unverified());
         }
         if let Some(expected) = &state.expected {
             let ack: replica::phone::UploadAck =
-                serde_json::from_value(result["upload"].clone()).map_err(|_| invalid())?;
+                serde_json::from_value(result["upload"].clone()).map_err(|_| unverified())?;
             if &ack != expected {
-                return Err(invalid());
+                return Err(unverified());
             }
             let Some(Transfer::Upload(upload)) = &mut state.transfer else {
-                return Err(invalid());
+                return Err(unverified());
             };
-            upload.accept(&ack)?;
+            upload.accept(&ack).map_err(|_| unverified())?;
         }
         state.pending = None;
         state.expected = None;

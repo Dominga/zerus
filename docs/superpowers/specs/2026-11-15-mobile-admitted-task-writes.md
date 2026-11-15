@@ -247,13 +247,22 @@ acknowledgements. Only the retained final edit UUID may commit. A final result
 must bind the exact frozen manifest hash as well as its original envelope.
 
 `TaskEditError` distinguishes verified native Refused from Unknown and local
-failure without changing the existing `ReplicaError` API. A missing or invalid
-result never advances a part. `hold_unknown` closes further sends while keeping
+failure without changing the existing `ReplicaError` API. Unverifiable
+post-network proof is Unknown, even after a host commit; only the authenticated
+native refused state establishes a native refusal. Local preflight refusals
+remain distinct. A missing or invalid result never advances a part. `hold_unknown` closes further sends while keeping
 the original frozen bytes; accepting a later authenticated result may settle
 that same request but never creates a new one. The canonical phone cache stays
 read-only until bounded document exchange receives the host's changed state.
 Platform draft persistence and both-phone presentation are the next wiring
 slice; this FFI API does not enable a UI or task execution controls by itself.
+
+Native build fingerprints and remote source bundles cover the complete local
+Cargo manifest-resolution closure, including dev/build and target tables.
+Cargo needs those manifests even for a production library build. Supplying the
+native test dependencies in a source bundle does not link their admission APIs
+into the production phone library. Full locked metadata resolution qualifies
+this closure; `--no-deps` metadata does not.
 
 ## Qualification and review
 

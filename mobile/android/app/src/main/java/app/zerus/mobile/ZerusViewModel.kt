@@ -2703,6 +2703,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var tasksKey by mutableStateOf<ProjectKey?>(null); private set
     var tasksChosen by mutableStateOf<ChosenSession?>(null); private set
     var taskListing by mutableStateOf<List<TaskInfo>>(emptyList()); private set
+    /** The selected project's retained local listing failed its latest refresh. Never native freshness. */
+    var taskExecutionStale by mutableStateOf(false); private set
     var taskTab by mutableStateOf(TaskTab.TODO)
     var tasksOnlyThisSession by mutableStateOf(false); private set
     /** The snackbar's next message on the Tasks screen. */
@@ -2761,13 +2763,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         loadDone(more = false)
     }
     private fun showTasks(key: ProjectKey, chosen: ChosenSession, selectDefault: Boolean = true) {
-        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); doneRows = emptyList(); doneNext = null
+        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); taskExecutionStale = false; doneRows = emptyList(); doneNext = null
         doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false; taskNotice = null
         refreshTasks(selectDefault)
         loadDone(more = false)
         launchProjectSync(key)
     }
-    fun closeTasks() { tasksKey = null; taskNotice = null }
+    fun closeTasks() { tasksKey = null; taskNotice = null; taskExecutionStale = false }
     /** Done lists from a computer each time it is opened, so tasks accepted since show. */
     fun selectTaskTab(tab: TaskTab) {
         taskTab = tab
@@ -2788,10 +2790,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 catch (e: Exception) { failure = e.message.orEmpty(); if (attempt == 0) delay(500) }
             }
             val listing = read ?: run {
+                if (tasksKey == key) taskExecutionStale = true
                 if (tasksKey == key && (selectDefault || taskListing.isEmpty())) taskNotice = failure.ifBlank { "The tasks could not be read." }
                 return@launch
             }
             if (tasksKey != key) return@launch
+            taskExecutionStale = false
             taskListing = listing.tasks
             reviewCounts = reviewCounts + (key to listing.tasks.count { it.stage == TaskStage.REVIEW })
             if (selectDefault) taskTab = TasksPresentation.defaultTab(TasksPresentation.counts(listing.tasks, tasksChosen, tasksOnlyThisSession))

@@ -504,3 +504,31 @@ This qualification does not activate `.4.8`: `TASK_CONTROLS` stays false and the
 non-Linux authority guard-export paths still refuse. A cross-check or ordinary
 GUI preview alone never qualifies the native path. No live agent or owner
 display is needed or used for these controls.
+
+### Mobile saved execution reader (`zerus-cg5h.4.9.3`)
+
+The additive optional `TaskInfo.execution` record carries saved evidence only:
+one current attempt, exact saved identities, generation and requirement revisions,
+recorded phase/times and boolean conflict, unknown-delivery and unexplained-history
+flags. It carries no frozen input, native process proof, history-sized arrays,
+executor-slot claim or control capability. Invalid, unsupported or overbound
+projections are unavailable rather than truncated or rounded into another identity.
+Adding this reader never changes `TaskInfo.writable` or phone write admission.
+
+Android and iOS present these facts in the selected task's **Saved execution**
+section. Submission remains begin-unconfirmed; saved begin/pause/ready events are
+labelled as recorded facts. Unknown delivery in another generation remains visible
+beside the current record. Explicit legacy history remains distinct from absent
+execution data. Both views state that live execution state and executor queue
+information are unavailable, and contain no execution actions or polling.
+
+A failed local-list refresh marks the retained selected-project evidence stale.
+That marker is scoped to the same project and clears on a successful local read;
+it proves neither freshness nor failure of native execution or remote work. The
+shared `mobile/android/app/src/test/resources/task-saved-execution.json` contract
+pins the saved phases, uncertainty, legacy/absent/future and malformed cases for
+the FFI and both client readers. Labels use the English/Russian resource catalogs.
+
+This read-only slice follows admitted qualified-write PR #2436 and precedes its
+separate media/identity row integration. Qualified edits, native current-turn
+association, live freshness and executor queues retain their own contracts.

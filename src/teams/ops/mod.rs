@@ -18,6 +18,7 @@ pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
 mod planning;
+mod provider_settings;
 mod queue;
 #[cfg(test)]
 pub(crate) use queue::injected;
@@ -31,9 +32,10 @@ mod unstaffed;
 pub use unstaffed::{unstaffed_changes, unstaffed_of, unstaffed_stages};
 mod validation;
 use super::store::{self, rows, DecisionState, Store};
-#[allow(unused_imports)]
-pub use apply::apply;
+#[cfg(test)]
 pub(crate) use apply::apply_with_repository;
+#[allow(unused_imports)]
+pub use apply::{apply, apply_with_config};
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

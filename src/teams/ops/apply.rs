@@ -9,20 +9,44 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
-    apply_with_repository(store, actor, request, now, &|_| {
-        Err(invalid(
-            "A trusted local repository resolver is required to advance the base.",
-        ))
+    apply_with_config(store, actor, request, now, None)
+}
+
+/// Native configuration supplies the placement reader, never a request path.
+/// Repository and provider reads run under the transaction after receipt replay.
+pub fn apply_with_config(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, config, &|team| {
+        let config = config.ok_or_else(|| {
+            invalid("A trusted local repository resolver is required to advance the base.")
+        })?;
+        crate::desktop::teams::repository(config, team)
     })
 }
 
-/// The CLI supplies its own placement reader, never a renderer/request path.
-/// It runs under the writer transaction, after replay, authority and revision.
+/// Tests supply a private repository through the same transaction and guards.
+#[cfg(test)]
 pub(crate) fn apply_with_repository(
     store: &mut Store,
     actor: &Actor,
     request: &Request,
     now: i64,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, None, repository)
+}
+
+fn apply_with_context(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
     repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
 ) -> Result<Reply> {
     validate_request(request, now)?;
@@ -63,7 +87,7 @@ pub(crate) fn apply_with_repository(
         event: None,
         superseded: None,
     };
-    let result = run(&mut ctx, request, current.is_some(), repository);
+    let result = run(&mut ctx, request, current.is_some(), config, repository);
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
@@ -140,6 +164,7 @@ fn run(
     ctx: &mut Context<'_>,
     request: &Request,
     existed: bool,
+    config: Option<&crate::config::Config>,
     repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
 ) -> Result<Reply> {
     if ctx.team.revision != request.expected_revision {
@@ -156,7 +181,7 @@ fn run(
     if matches!(ctx.op, Operation::AdvanceBase { .. }) {
         base::advance(ctx, repository)?;
     } else {
-        dispatch(ctx)?;
+        dispatch(ctx, config)?;
     }
     ctx.reply.revision = ctx
         .team
@@ -199,7 +224,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
     .map_err(storage)?;
     Ok(())
 }
-fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
+fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
         Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
@@ -213,6 +238,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::Resume => team::resume(ctx),
         Operation::Stop => team::stop(ctx),
         Operation::Archive => team::archive(ctx),
+        Operation::SetValidationConfig { .. } => provider_settings::select(ctx, config),
         Operation::ChangeSettings { .. } => team::change_settings(ctx),
         Operation::SetMemberSession { .. } => members::set_session(ctx),
         Operation::SetMemberHandle { .. } => members::set_handle(ctx),

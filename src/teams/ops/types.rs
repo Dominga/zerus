@@ -446,6 +446,9 @@ pub enum Operation {
         card: u64,
         decision: String,
     },
+    SetValidationConfig {
+        selection: zerus_team_plan::validation::Selection,
+    },
     ChangeSettings {
         settings: Settings,
     },

@@ -41,6 +41,7 @@ pub mod drawers;
 pub mod model;
 pub mod poller;
 pub mod profile_export;
+pub mod providers;
 pub mod read;
 pub mod recorded_timings;
 mod refusal;

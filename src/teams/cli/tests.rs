@@ -20,6 +20,7 @@ mod phases;
 mod planning;
 mod progress;
 mod progress157;
+mod providers;
 mod reads;
 mod recorded_timings;
 mod session_groups;

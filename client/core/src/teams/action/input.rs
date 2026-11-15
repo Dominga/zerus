@@ -75,6 +75,7 @@ impl TeamAction {
             Self::StopMember { .. } => "stop-member",
             Self::ArchiveMember { .. } => "archive-member",
             Self::Settings { .. } => "settings",
+            Self::ValidationConfig { .. } => "validation-settings",
             Self::Decide { .. } => "decide",
             Self::Admit { .. } => "admit",
             Self::Route { .. } => "route",
@@ -158,6 +159,7 @@ impl TeamAction {
             | Self::ResumeMember { member }
             | Self::StopMember { member }
             | Self::ArchiveMember { member } => json!({"member": member}),
+            Self::ValidationConfig { selection } => json!({"selection":selection}),
             Self::Settings { settings } => json!({"settings": settings}),
             Self::AdvanceBase { commit } => json!({"commit": commit}),
             Self::Decide { card, decision } => json!({"card": card, "decision": decision}),
@@ -240,6 +242,7 @@ impl TeamAction {
                 }
             }
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
+            Self::ValidationConfig { selection } => selection.check(),
             Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
                 .map_err(|problem| problem.message),
             Self::PauseMember { member }

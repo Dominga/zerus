@@ -28,5 +28,6 @@
   "stop",
   "stop_member",
   "submit_draft_phase",
-  "swap_member"
+  "swap_member",
+  "validation_config"
 ]

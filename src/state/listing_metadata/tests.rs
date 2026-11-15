@@ -121,7 +121,7 @@ fn linked_shared_or_unreadable_markers_cannot_enable_advisory_io() {
                 symlink(&other, &marker).unwrap();
             }
             "shared" => fs::hard_link(&marker, &other).unwrap(),
-            _ => fs::set_permissions(&marker, fs::Permissions::from_mode(0)).unwrap(),
+            _ => fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap(),
         }
         assert!(!enabled(root.path()), "{mode}");
         let value = record();

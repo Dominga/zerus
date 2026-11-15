@@ -587,12 +587,27 @@ impl ProjectStore {
         self.import_phone_updates(updates, &BTreeSet::new())
     }
 
+    /// Ordinary phone ingress cannot write a native sealed task. This source
+    /// comes from the receiver entry point, never from serialized fields.
+    pub(crate) fn import_mobile_updates(&self, updates: Vec<Update>) -> Result<Imported> {
+        self.import_with_origin(updates, &BTreeSet::new(), true)
+    }
+
     /// A fresh phone fetch may replace a healthy shallow copy only when
     /// the incoming whole state covers every locally saved operation.
     pub(crate) fn import_phone_updates(
         &self,
         updates: Vec<Update>,
         refresh: &BTreeSet<String>,
+    ) -> Result<Imported> {
+        self.import_with_origin(updates, refresh, false)
+    }
+
+    fn import_with_origin(
+        &self,
+        updates: Vec<Update>,
+        refresh: &BTreeSet<String>,
+        mobile: bool,
     ) -> Result<Imported> {
         let mut imported = Imported::default();
         for update in updates {
@@ -607,7 +622,7 @@ impl ProjectStore {
                         self.refresh_phone_task(uuid, &update.bytes)
                             .map_err(Refusal::from)
                     } else {
-                        self.import_task(uuid, &update.bytes)
+                        self.import_task(uuid, &update.bytes, mobile)
                     },
                 ),
             };
@@ -639,7 +654,12 @@ impl ProjectStore {
         Ok(true)
     }
 
-    fn import_task(&self, uuid: &str, bytes: &[u8]) -> std::result::Result<bool, Refusal> {
+    fn import_task(
+        &self,
+        uuid: &str,
+        bytes: &[u8],
+        mobile: bool,
+    ) -> std::result::Result<bool, Refusal> {
         if !ids::is_uuid(uuid) {
             return Err(Error::new(format!("{uuid:?} is not a task UUID")).into());
         }
@@ -720,10 +740,17 @@ impl ProjectStore {
         // Preflight before moving even a damaged canonical copy aside. A
         // refused fresh seal or frozen update must preserve every local file.
         self.check_cutover_save(&mut task, true)?;
+        if mobile {
+            self.check_mobile_received(&task)?;
+        }
         if replacing {
             self.set_aside(uuid)?;
         }
-        self.save_received(&mut task)?;
+        if mobile {
+            self.save_mobile_received(&mut task)?;
+        } else {
+            self.save_received(&mut task)?;
+        }
         Ok(true)
     }
 
@@ -1306,7 +1333,10 @@ mod tests {
         drop(store);
         let (fresh, kept) = soon(dir.path(), move |store| {
             let fresh = store.fresh_version(&uuid).is_some();
-            (fresh, store.import_task(&uuid, &peer).unwrap_err().kept)
+            (
+                fresh,
+                store.import_task(&uuid, &peer, false).unwrap_err().kept,
+            )
         });
         assert!(!fresh);
         assert_eq!(kept, Some(Keep::Marked));
@@ -1329,7 +1359,7 @@ mod tests {
             });
             drop(store);
             let refused = soon(dir.path(), move |store| {
-                store.import_task(&uuid, &peer).err()
+                store.import_task(&uuid, &peer, false).err()
             });
             let refused = refused.expect("refused");
             if !snapshot {

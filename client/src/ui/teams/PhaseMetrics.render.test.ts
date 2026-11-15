@@ -25,7 +25,7 @@ it("shows operation-written path and parallelism as separate core-projected chip
   expect(host.querySelector('[data-phase-parallelism]')!.textContent).toBe('Parallelism 1.4');
   expect(host.querySelector('[data-phase-path]')!.parentElement).toBe(host.querySelector('[data-phase-parallelism]')!.parentElement);
   expect(host.querySelector('[data-phase-warnings]')).toBeNull();
-  expect(host.textContent).not.toContain(' · ');
+  expect(host.textContent).not.toContain(String.fromCodePoint(0x00b7));
 });
 
 it("mounts the core metrics in the actual phase header without sending any action", async () => {

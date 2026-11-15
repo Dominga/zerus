@@ -101,6 +101,13 @@ it.each(["dialog", "menu"])("an open %s owns Escape even when focus remains on t
   expect(host.querySelector("[data-team-detail]")).not.toBeNull(); quiet();
 });
 
+it("a popover inside a closed native dialog does not steal the preview's Escape", () => {
+  const { host, select, quiet } = setup(); select();
+  const closed = document.createElement("dialog"), popover = document.createElement("div");
+  popover.setAttribute("role", "dialog"); closed.append(popover); document.body.append(closed);
+  escape(host.querySelector("[data-team-detail] h3")!); dismissed(host); quiet();
+});
+
 it("does not take an already handled or composing Escape", () => {
   const { host, select, quiet } = setup(); select();
   const target = host.querySelector("[data-team-detail] h3")!;

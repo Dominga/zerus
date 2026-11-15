@@ -132,7 +132,9 @@ export function TeamWorkspace(props: {
     if (event.key !== "Escape" || event.defaultPrevented || composing(event)) return;
     const target = event.target;
     if (!(target instanceof Element) || target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
-    if (document.querySelector('dialog[open],[aria-modal="true"],[role="dialog"],[role="menu"]')) return;
+    const overlay = [...document.querySelectorAll('dialog[open],[aria-modal="true"],[role="dialog"],[role="menu"]')]
+      .some((element) => !element.closest('dialog:not([open]),[hidden],[aria-hidden="true"]'));
+    if (overlay) return;
     // This native listener runs before the graph's delegated Escape handler.
     // Let that handler cancel its current link/edge gesture on the first key.
     const graph = target.closest("[data-team-graph]");

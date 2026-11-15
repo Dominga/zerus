@@ -989,6 +989,17 @@ another computer). Neither the listing nor the launch waits on the shared
 catalog: the link's machine identity is read once a caller is proven, without
 the catalog lock, and a launch without a readable identity records no parent.
 
+The live session context menu offers **Add to favorites** and **Remove from
+favorites**, including independent child sessions. A small star marks a favorite.
+Favorites stay in their existing project and parent hierarchy through collapsed
+groups, retaining only necessary ancestor context; siblings stay collapsed. They
+never override state, search, machine, project, account or folder filters or
+change status and filter counts. The local `sessions/favorites` preference uses
+canonical machine UUID plus durable session ID, surviving rename and restart
+without transferring to a reused name or row key. It keeps at most 2048 identities,
+oldest first; a row without those IDs cannot be favorited. Native internal
+subagents have no independent favorite preference in this version.
+
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all

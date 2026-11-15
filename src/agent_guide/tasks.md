@@ -3,6 +3,7 @@ Tasks (hgs guide tasks)
 Own session/project; REF: T-xxxxxx or PROJECT/T-xxxxxx; stdin text; --json: task.
 
   hgs task list [--stage review|active|todo|backlog|done]
+  hgs task list --stage S --limit 1..200 [--query TEXT] [--after CURSOR]
   hgs task get REF
   hgs task add [--backlog] [--position N] [--title TEXT [--request-id UUID]]
   hgs task add --start

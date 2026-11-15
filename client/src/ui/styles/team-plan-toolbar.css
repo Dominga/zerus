@@ -15,6 +15,6 @@
 .team-plan-zoom { min-width: 52px; font-variant-numeric: tabular-nums; }
 .team-plan-section-toggle { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: transparent; color: inherit; border: 0; padding: 8px 0; cursor: pointer; }
 .team-plan-scale-space { position: relative; overflow: hidden; }
-.team-plan-scaled { min-width: 0; transform-origin: top left; }
+.team-plan-canvas.team-plan-scaled { min-width: 0; transform-origin: top left; }
 .team-plan-node[data-plan-tone="notstarted"] { border-left: 4px solid #a5abb5; }
 .team-plan-node[data-plan-problem="true"] { border-color: var(--z-color-warning, #c18a35); }

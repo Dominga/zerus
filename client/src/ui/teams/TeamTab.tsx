@@ -17,15 +17,15 @@ import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
 import { followTeamScope, type TeamScope } from "./team-tab-scope";
 import { TeamTaskCard } from "./TeamTaskCard";
+import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
+import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
-// The Team tab (the fork's TeamWorkspace, adapted to M1): the team bar, the
-// member column and the Board with the queue as its own group, each card with
-// its stages, a card's detail and decisions, Add task and the next page. The
-// graph, the phase header, the editor, the feed, proposals and the profile are
-// not part of M1 and are not here. Data comes only from the store's followed
-// team view; every action is one intent through the store.
+// The Team workspace adapts the fork's team bar, members, paged Board, task
+// detail and decisions. Feed, Inbox, Reports and Cards read bounded pages;
+// Lead chat uses the bound lead's ordinary guarded composer. The Board uses
+// the store's followed team view, and team actions use its existing intents.
 
 function columnLabel(column: BoardColumn): string {
   switch (column.key) {
@@ -56,6 +56,7 @@ export function TeamWorkspace(props: {
   onAddTask: () => void;
 }) {
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
+  const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
   const [openNotice, setOpenNotice] = createSignal("");
@@ -67,6 +68,7 @@ export function TeamWorkspace(props: {
   // Only another team resets the selection: a refreshed view of the same team
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
+  createEffect(on(teamId, () => setDrawer(null), { defer: true }));
   createEffect(on(teamId, () => { setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
@@ -102,7 +104,8 @@ export function TeamWorkspace(props: {
   const send = (kind: string, fields: Record<string, unknown> = {}) => { props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
-      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)} />
+      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)} drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
+      <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>

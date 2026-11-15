@@ -3,6 +3,162 @@ use std::fs;
 mod bench;
 mod writers;
 
+fn enable(root: &Path) {
+    let root = checked(Directory::open(&crate::platform::canonical(root).unwrap())).unwrap();
+    checked(root.ensure_child("listing-metadata"))
+        .unwrap()
+        .replace_file("enabled", b"1\n")
+        .unwrap();
+}
+fn fixture() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    enable(root.path());
+    root
+}
+
+#[test]
+fn publication_removal_and_repair_require_explicit_opt_in() {
+    for operation in ["write", "remove", "repair"] {
+        let root = tempfile::tempdir().unwrap();
+        let path = path(root.path());
+        let value = record();
+        storage::atomic(&path, &value.to_string()).unwrap();
+        let mut calls = 0;
+        match operation {
+            "write" => {
+                let result: Result<()> = write_at(root.path(), &path, &value, || {
+                    calls += 1;
+                    storage::atomic(&path, &value.to_string())?;
+                    Err("original unknown outcome".into())
+                });
+                assert_eq!(result.unwrap_err(), "original unknown outcome");
+                assert_eq!(calls, 1);
+            }
+            "remove" => {
+                remove_at(root.path(), &path, || {
+                    calls += 1;
+                    fs::remove_file(&path).map_err(|e| e.to_string())
+                })
+                .unwrap();
+                assert_eq!(calls, 1);
+                assert!(!path.exists());
+            }
+            _ => {
+                let mut work = None;
+                let step = background_at(root.path(), &mut work).unwrap();
+                assert_eq!((step.entries, step.rows, step.bytes), (0, 0, 0));
+                assert!(!step.complete, "disabled display evidence is unavailable");
+                assert!(work.is_none());
+            }
+        }
+        assert!(
+            !root.path().join("listing-metadata").exists(),
+            "default-off {operation} must not create advisory state"
+        );
+    }
+}
+
+#[test]
+fn invalid_opt_in_or_the_kill_switch_preserves_an_existing_cache_unchanged() {
+    for mode in ["absent", "invalid", "disabled", "directory"] {
+        let root = fixture();
+        let store = Store::open(root.path()).unwrap();
+        drop(store);
+        let marker = root.path().join("listing-metadata/enabled");
+        match mode {
+            "absent" => fs::remove_file(&marker).unwrap(),
+            "invalid" => fs::write(&marker, b"0\n").unwrap(),
+            "disabled" => fs::write(root.path().join("listing-metadata/disabled"), b"").unwrap(),
+            _ => {
+                fs::remove_file(&marker).unwrap();
+                fs::create_dir(&marker).unwrap();
+            }
+        }
+        let path = path(root.path());
+        let value = record();
+        write_at(root.path(), &path, &value, || {
+            storage::atomic(&path, &value.to_string())
+        })
+        .unwrap();
+        remove_at(root.path(), &path, || {
+            fs::remove_file(&path).map_err(|e| e.to_string())
+        })
+        .unwrap();
+        let step = background_at(root.path(), &mut None).unwrap();
+        assert_eq!((step.entries, step.rows, step.bytes), (0, 0, 0));
+        assert!(!step.complete);
+        assert!(!root
+            .path()
+            .join("listing-metadata/coverage-lost.json")
+            .exists());
+        let db = rusqlite::Connection::open_with_flags(
+            root.path().join("listing-metadata/index.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let changes: (i64, i64, i64) = db
+            .query_row(
+                "SELECT writes,(SELECT count(*) FROM intents),(SELECT count(*) FROM sources) FROM meta",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(changes, (0, 0, 0), "{mode}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn linked_shared_or_unreadable_markers_cannot_enable_advisory_io() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for mode in ["symlink", "shared", "unreadable"] {
+        let root = fixture();
+        let marker = root.path().join("listing-metadata/enabled");
+        let other = root.path().join("listing-metadata/other");
+        match mode {
+            "symlink" => {
+                fs::rename(&marker, &other).unwrap();
+                symlink(&other, &marker).unwrap();
+            }
+            "shared" => fs::hard_link(&marker, &other).unwrap(),
+            _ => fs::set_permissions(&marker, fs::Permissions::from_mode(0)).unwrap(),
+        }
+        assert!(!enabled(root.path()), "{mode}");
+        let value = record();
+        let path = path(root.path());
+        write_at(root.path(), &path, &value, || {
+            storage::atomic(&path, &value.to_string())
+        })
+        .unwrap();
+        assert!(
+            !root.path().join("listing-metadata/index.sqlite3").exists(),
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn opting_out_discards_in_progress_repair_without_more_background_io() {
+    let root = fixture();
+    let mut value = record();
+    value.as_object_mut().unwrap().remove("shell_jobs");
+    for n in 0..300 {
+        value["name"] = json!(format!("codex/example/opt-out-{n}"));
+        let path = root.path().join(format!(
+            "{}.json",
+            storage::label_key(string(&value, "name"))
+        ));
+        storage::atomic(&path, &value.to_string()).unwrap();
+    }
+    let mut work = None;
+    let first = background_at(root.path(), &mut work).unwrap();
+    assert!(!first.done && work.is_some());
+    fs::remove_file(root.path().join("listing-metadata/enabled")).unwrap();
+    let step = background_at(root.path(), &mut work).unwrap();
+    assert_eq!((step.entries, step.rows, step.bytes), (0, 0, 0));
+    assert!(!step.complete && work.is_none());
+}
+
 fn record() -> Value {
     json!({"version":1,"name":"codex/example/one","agent":"codex",
         "session_id":"11111111-1111-4111-8111-111111111111",
@@ -17,7 +173,7 @@ fn record() -> Value {
 
 #[test]
 fn canonical_publication_has_a_durable_pre_file_display_intent() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = root
         .path()
         .join(format!("{}.json", storage::label_key("codex/example/one")));
@@ -42,7 +198,7 @@ fn canonical_publication_has_a_durable_pre_file_display_intent() {
 
 #[test]
 fn canonical_publication_settles_only_small_public_display_inputs() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = root
         .path()
         .join(format!("{}.json", storage::label_key("codex/example/one")));
@@ -97,7 +253,7 @@ fn cached(root: &Path) -> Value {
 
 #[test]
 fn public_seed_keeps_identity_and_display_status_parity_without_private_payloads() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let key = Key::at(root.path(), &path(root.path())).unwrap();
     let mut value = record();
     value["account_id"] = json!("fixture-account");
@@ -142,7 +298,7 @@ fn public_seed_keeps_identity_and_display_status_parity_without_private_payloads
 
 #[test]
 fn an_unknown_canonical_outcome_keeps_the_last_projection_and_pending_intent() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let mut value = record();
     write_at(root.path(), &path, &value, || {
@@ -172,7 +328,7 @@ fn an_unknown_canonical_outcome_keeps_the_last_projection_and_pending_intent() {
 #[test]
 fn corrupt_disabled_busy_or_oversized_advisory_state_never_fails_or_replays_canonical_io() {
     for failure in ["corrupt", "disabled", "busy", "oversized"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = fixture();
         let path = path(root.path());
         let mut value = record();
         let store = Store::open(root.path()).unwrap();
@@ -207,11 +363,12 @@ fn corrupt_disabled_busy_or_oversized_advisory_state_never_fails_or_replays_cano
             serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
             value
         );
-        assert!(
+        assert_eq!(
             root.path()
                 .join("listing-metadata/coverage-lost.json")
                 .is_file(),
-            "{failure}"
+            failure != "disabled",
+            "{failure}: explicit disablement must not write coverage markers"
         );
         drop(held);
     }
@@ -219,7 +376,7 @@ fn corrupt_disabled_busy_or_oversized_advisory_state_never_fails_or_replays_cano
 
 #[test]
 fn every_binding_layout_is_eligible_but_archives_routes_and_wrong_identities_are_not() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let mut value = record();
     for directory in storage::BINDING_DIRS {
         let id = directory.ends_with("sessions");
@@ -265,7 +422,7 @@ fn repair_to_end(root: &Path) -> repair::Stats {
 
 #[test]
 fn background_repair_reads_legacy_sources_once_and_never_rewrites_them() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let mut originals = Vec::new();
     for n in 0..70 {
         let mut value = record();
@@ -309,7 +466,7 @@ fn background_repair_reads_legacy_sources_once_and_never_rewrites_them() {
 
 #[test]
 fn repair_observes_an_unknown_write_and_a_lost_deletion_without_replaying_either() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let mut value = record();
     write_at(root.path(), &path, &value, || {
@@ -347,7 +504,7 @@ fn repair_observes_an_unknown_write_and_a_lost_deletion_without_replaying_either
 
 #[test]
 fn incomplete_or_unreadable_coverage_retains_last_known_rows_and_never_publishes_absence() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     write_at(root.path(), &path, &value, || {
@@ -376,7 +533,7 @@ fn cached_after_drop(store: Store, root: &Path) -> Value {
 
 #[test]
 fn paged_generation_is_stable_while_new_canonical_records_arrive() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     for n in 0..150 {
         let mut value = record();
         value["name"] = json!(format!("codex/example/s-{n}"));
@@ -432,7 +589,7 @@ fn paged_generation_is_stable_while_new_canonical_records_arrive() {
 
 #[test]
 fn failed_json_reads_are_charged_to_the_same_raw_byte_budget() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     for n in 0..6 {
         let path = root.path().join(format!(
             "{}.json",
@@ -457,7 +614,7 @@ fn failed_json_reads_are_charged_to_the_same_raw_byte_budget() {
 
 #[test]
 fn enumerating_non_record_files_is_bounded_and_restarts_after_a_crash() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     for n in 0..600 {
         fs::write(root.path().join(format!("unrelated-{n}")), b"").unwrap();
     }
@@ -484,7 +641,7 @@ fn enumerating_non_record_files_is_bounded_and_restarts_after_a_crash() {
 #[test]
 fn a_corrupt_or_partially_created_display_store_rebuilds_in_background_only() {
     for contents in [b"corrupt sqlite header".as_slice(), b"".as_slice()] {
-        let root = tempfile::tempdir().unwrap();
+        let root = fixture();
         let path = path(root.path());
         let value = record();
         write_at(root.path(), &path, &value, || {
@@ -503,7 +660,7 @@ fn a_corrupt_or_partially_created_display_store_rebuilds_in_background_only() {
 
 #[test]
 fn failed_canonical_publication_is_observed_as_absent_without_recreating_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     let mut calls = 0;
@@ -527,7 +684,7 @@ fn failed_canonical_publication_is_observed_as_absent_without_recreating_it() {
 #[test]
 fn repair_never_waits_for_or_acquires_the_canonical_writer() {
     use fs2::FileExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     storage::atomic(&path, &value.to_string()).unwrap();
@@ -546,7 +703,7 @@ fn repair_never_waits_for_or_acquires_the_canonical_writer() {
 
 #[test]
 fn an_unfinished_rename_journal_keeps_display_coverage_incomplete_after_a_crash() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     storage::atomic(&path, &value.to_string()).unwrap();
@@ -568,6 +725,7 @@ fn a_changed_root_alias_cannot_attach_new_seed_data_to_an_old_canonical_file() {
     let b = parent.path().join("b");
     private_dir(&a).unwrap();
     private_dir(&b).unwrap();
+    enable(&a);
     let alias = parent.path().join("selected");
     std::os::unix::fs::symlink(&a, &alias).unwrap();
     let at = path(&alias);
@@ -592,7 +750,7 @@ fn a_changed_root_alias_cannot_attach_new_seed_data_to_an_old_canonical_file() {
 
 #[test]
 fn an_unknown_future_cache_schema_is_unavailable_without_failing_canonical_io() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     let store = Store::open(root.path()).unwrap();
@@ -621,7 +779,7 @@ fn an_unknown_future_cache_schema_is_unavailable_without_failing_canonical_io() 
 
 #[test]
 fn repeated_repairs_keep_only_bounded_generations_instead_of_growing_history() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     for n in 0..150 {
         let mut value = record();
         value["name"] = json!(format!("codex/example/bounded-{n}"));
@@ -647,7 +805,7 @@ fn repeated_repairs_keep_only_bounded_generations_instead_of_growing_history() {
 
 #[test]
 fn replacing_the_cache_epoch_mid_enumeration_restarts_the_directory_cursor() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     for n in 0..600 {
         let mut value = record();
         value.as_object_mut().unwrap().remove("shell_jobs");
@@ -662,6 +820,7 @@ fn replacing_the_cache_epoch_mid_enumeration_restarts_the_directory_cursor() {
     let first = background_at(root.path(), &mut work).unwrap();
     assert!(!first.done);
     fs::remove_dir_all(root.path().join("listing-metadata")).unwrap();
+    enable(root.path());
     let mut done = false;
     for _ in 0..128 {
         let step = background_at(root.path(), &mut work).unwrap();
@@ -682,7 +841,7 @@ fn replacing_the_cache_epoch_mid_enumeration_restarts_the_directory_cursor() {
 
 #[test]
 fn valid_json_corruption_cannot_be_returned_as_fresh_display_data() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     write_at(root.path(), &path, &value, || {
@@ -706,7 +865,7 @@ fn valid_json_corruption_cannot_be_returned_as_fresh_display_data() {
 
 #[test]
 fn a_full_advisory_intent_queue_still_allows_the_original_canonical_write() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     let store = Store::open(root.path()).unwrap();
@@ -728,7 +887,7 @@ fn a_full_advisory_intent_queue_still_allows_the_original_canonical_write() {
 
 #[test]
 fn canonical_deletion_is_reserved_before_removal_and_settles_one_tombstone() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let value = record();
     write_at(root.path(), &path, &value, || {
@@ -774,7 +933,7 @@ fn canonical_deletion_is_reserved_before_removal_and_settles_one_tombstone() {
 
 #[test]
 fn unsupported_display_inputs_still_reserve_an_unknown_change_before_canonical_io() {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture();
     let path = path(root.path());
     let mut value = record();
     value["layout_transition"] = json!({"version":1});

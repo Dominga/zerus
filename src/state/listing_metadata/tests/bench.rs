@@ -39,6 +39,7 @@ fn canonical_write_scale() {
     let root = PathBuf::from(std::env::var_os("ZERUS_LISTING_SCALE_ROOT").unwrap());
     assert!(root.join(".listing-metadata-scale-fixture").is_file());
     assert!(!root.join("listing-metadata").exists());
+    enable(&root);
     let counts: Vec<usize> = std::env::var("ZERUS_LISTING_SCALE_COUNTS")
         .unwrap()
         .split(',')

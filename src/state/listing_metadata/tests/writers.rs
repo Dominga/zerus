@@ -39,6 +39,7 @@ fn writer_fixture() {
     }
     let root = root();
     private_dir(&root).unwrap();
+    enable(&root);
     let mut expected = 0;
     let mut providers = Vec::new();
     for folder in storage::BINDING_DIRS {

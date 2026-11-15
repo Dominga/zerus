@@ -6,6 +6,14 @@ row parity, live-writer catch-up and bounded bootstrap scheduling. These numbers
 qualify the storage/publisher slice. They do not measure a switched `hgs ls`,
 watch status projection, native provider overlays or GUI rendering.
 
+The final first slice is default-off: publication and repair require the explicit
+private opt-in described in the design. Without it the publisher only checks
+marker metadata and runs its original canonical callback; it never projects a
+record or opens SQLite. The full-size table below measures the enabled engine
+before that activation guard was added (functional source `eac16cfde`). The PR
+also reports a fresh explicit-opt-in 64/128 smoke check after the guard. Do not
+read the enabled-engine costs as overhead paid by default in this slice.
+
 The original full-record bottleneck is recorded in
 [the session scale audit](2026-11-15-session-scale.md). Canonical JSON and all
 existing action, lifecycle, ownership and custody checks remain authoritative.

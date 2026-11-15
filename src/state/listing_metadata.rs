@@ -17,6 +17,34 @@ use model::{Key, Seed};
 pub(super) use repair::background_at;
 use store::Store;
 
+// No reader consumes this cache yet. Absent opt-in costs one metadata lookup,
+// with no directory creation, projection, SQLite, lock or coverage write.
+fn enabled(root: &Path) -> bool {
+    let marker = root.join("listing-metadata/enabled");
+    if !std::fs::symlink_metadata(&marker)
+        .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink() && m.len() == 2)
+    {
+        return false;
+    }
+    let inspect = || -> anyhow::Result<bool> {
+        use std::io::Read;
+        let root = checked(Directory::open(&crate::platform::canonical(root)?))?;
+        let dir = checked(root.child("listing-metadata"))?;
+        match std::fs::symlink_metadata(dir.path.join("disabled")) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+        let file = checked(dir.read_private("enabled"))?;
+        let mut bytes = Vec::new();
+        file.take(3).read_to_end(&mut bytes)?;
+        checked(dir.verify())?;
+        checked(root.verify())?;
+        Ok(bytes == b"1\n")
+    };
+    inspect().unwrap_or(false)
+}
+
 fn checked<T>(value: Result<T>) -> anyhow::Result<T> {
     value.map_err(anyhow::Error::msg)
 }
@@ -54,6 +82,9 @@ pub(super) fn write_at<T>(
     if super::effort::picker_entered() {
         return source();
     }
+    if !enabled(root) {
+        return source();
+    }
     publish(root, &key, Some(record), source)
 }
 pub(super) fn remove_at<T>(
@@ -66,6 +97,9 @@ pub(super) fn remove_at<T>(
     };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if super::effort::picker_entered() {
+        return source();
+    }
+    if !enabled(root) {
         return source();
     }
     publish(root, &key, None, source)

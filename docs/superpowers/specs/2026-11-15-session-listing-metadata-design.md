@@ -119,6 +119,22 @@ the coordinator explicitly releases the fence hold.
 
 ## Slice 1 implementation boundary
 
+This slice is default-off: neither publication nor repair runs without an
+explicit private `listing-metadata/enabled` file containing exactly `1\n`.
+Missing, unreadable or invalid opt-in leaves canonical writes unchanged and
+creates no index, lock or coverage marker. `listing-metadata/disabled` takes
+precedence. Tests and benchmarks opt in only in their private roots. The later
+reader slice owns deliberate activation after coverage/parity qualification.
+The default-off check observes only marker metadata; it does not project a
+record, open SQLite or inspect binding files.
+
+Reader activation also requires exact publication provenance: observing a
+file stamp after the canonical callback is insufficient when another writer
+can replace that file before settlement. The independent overlap control for
+zerus-63r5s.4 demonstrates an old seed paired with a newer file stamp becoming
+fresh after repair. Default-off prevents production use now; it does not solve
+that opted-in race. Slice .2 must depend on its correction and regression.
+
 The store is local display evidence with no machine-ID dependency. Canonical
 records keep their existing schema and bytes. Outstanding intents and the
 coverage-lost marker never grant authority, and do not authorize replay. A

@@ -443,6 +443,10 @@ pub(in crate::state) fn background_at(
     root: &Path,
     state: &mut Option<Background>,
 ) -> anyhow::Result<Stats> {
+    if !enabled(root) {
+        *state = None;
+        return Ok(Stats::default());
+    }
     let canonical = crate::platform::canonical(root)?;
     if state.as_ref().is_none_or(|work| work.root != canonical) {
         *state = Some(Background {

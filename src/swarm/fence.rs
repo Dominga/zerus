@@ -2350,6 +2350,9 @@ printf '{{"node_id":"{PEER}"}}'
             catalog.data.peers.clear();
             catalog.save().unwrap();
         }
+        ProjectStore::open(&config.state.join("replica"),"a-idle").unwrap();
+        super::super::transport::sync(config).unwrap();
+        assert!(held(&members,"a",&uuid).unwrap().cutover_seal().unwrap().is_none(),"the first invocation visits the idle earlier project");
         super::super::transport::sync(config).unwrap();
         let ready=held(&members,"a",&uuid).unwrap();
         let seal=ready.cutover_seal().unwrap().expect("manual sync used the protocol-only entry");

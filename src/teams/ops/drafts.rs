@@ -29,8 +29,11 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         .map_err(storage)?;
     let old_nodes = if let Some(wanted) = generation {
         let p = old.as_ref().ok_or_else(missing)?;
-        if p.kind != PhaseKind::Plan || p.state != PhaseState::Draft {
-            return Err(invalid("Only a draft planned phase can be edited."));
+        if p.kind != PhaseKind::Plan || !matches!(p.state, PhaseState::Draft | PhaseState::Rejected) {
+            return Err(invalid("Only a draft or rejected planned phase can be edited."));
+        }
+        if store::publication::publication(ctx.db, &ctx.team.id, phase)?.is_some() {
+            return Err(invalid("Publication has frozen this draft."));
         }
         let actual: Option<u64> = ctx
             .db
@@ -77,6 +80,7 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         barrier: false,
         paused: false,
     });
+    record.state = PhaseState::Draft;
     record.title = draft.title.clone();
     record.barrier = draft.barrier;
     let next_node: u32 = ctx
@@ -128,6 +132,7 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
             )
             .map_err(storage)?;
     }
+    ctx.db.execute("UPDATE phase_reviews SET rejection=NULL,comment=NULL WHERE team=?1 AND phase=?2",params![ctx.team.id,phase]).map_err(storage)?;
     ctx.db
         .execute(
             "UPDATE teams SET next_node=?2 WHERE id=?1",

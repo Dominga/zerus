@@ -7,6 +7,10 @@ pub(super) fn pending(store: &Store, task: &TaskRef, team: &str) -> Result<bool>
     store.db.as_ref().map_or(Ok(false), |db| {
         db.query_row(PENDING, params![task.uuid, team], |r| r.get(0))
             .map_err(storage)
+            .and_then(|stage: bool| {
+                if stage { return Ok(true); }
+                db.query_row("SELECT EXISTS(SELECT 1 FROM phase_publication_nodes n JOIN phase_publications p ON p.id=n.publication JOIN teams t ON t.id=n.team WHERE n.task_uuid=?1 AND n.team=?2 AND p.state='reserved' AND n.cleared=0 AND t.status IN ('\"planning\"','\"running\"','\"paused\"'))", params![task.uuid,team], |r|r.get(0)).map_err(storage)
+            })
     })
 }
 

@@ -25,7 +25,7 @@ pub(super) fn as_is(db: &Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(storage)?;
-    if !matches!(version, 2 | SCHEMA_VERSION) {
+    if !matches!(version, 2 | 3 | SCHEMA_VERSION) {
         return Err(Problem::new(code::INVALID_STATE, MIGRATE));
     }
     timers::as_is(db)?;

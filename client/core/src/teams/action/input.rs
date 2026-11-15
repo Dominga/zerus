@@ -57,6 +57,10 @@ impl TeamAction {
     /// The operation: `hgs team <op> --json`.
     pub fn op(&self) -> &'static str {
         match self {
+            Self::ApprovePhase { .. } => "approve-phase",
+            Self::RejectPhase { .. } => "reject-phase",
+            Self::UndoRejectPhase { .. } => "undo-reject-phase",
+            Self::AcceptPhase { .. } => "accept-phase",
             Self::StartPlanning { .. } => "start-planning",
             Self::SubmitDraftPhase { .. } => "submit-draft-phase",
             Self::EditDraftPhase { .. } => "edit-draft-phase",
@@ -97,6 +101,10 @@ impl TeamAction {
     /// The fields the operation sends besides the envelope's.
     pub fn input(&self) -> Map<String, Value> {
         let value = match self {
+            Self::ApprovePhase { phase,generation,confirm_initial } => json!({"phase":phase,"generation":generation,"confirm_initial":confirm_initial}),
+            Self::RejectPhase { phase,generation,comment } => json!({"phase":phase,"generation":generation,"comment":comment}),
+            Self::UndoRejectPhase { phase,generation,rejection } => json!({"phase":phase,"generation":generation,"rejection":rejection}),
+            Self::AcceptPhase { phase,publication } => json!({"phase":phase,"publication":publication}),
             Self::SubmitDraftPhase { phase, draft } => json!({"phase":phase,"draft":draft}),
             Self::EditDraftPhase {
                 phase,
@@ -200,6 +208,7 @@ impl TeamAction {
     /// Checks what the call sends before anything runs.
     pub fn check(&self) -> Result<(), String> {
         match self {
+            Self::ApprovePhase { .. } | Self::RejectPhase { .. } | Self::UndoRejectPhase { .. } | Self::AcceptPhase { .. } => super::phases::check(self),
             Self::SubmitDraftPhase { phase, draft } => super::drafts::check(*phase, draft),
             Self::EditDraftPhase {
                 phase,

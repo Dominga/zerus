@@ -176,6 +176,13 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
+        Operation::ApprovePhase { .. } => publication::approve(ctx),
+        Operation::RejectPhase { .. } => publication::reject(ctx),
+        Operation::UndoRejectPhase { .. } => publication::undo(ctx),
+        Operation::ReconcilePublication { .. } => publication::publish(ctx),
+        Operation::PublicationTaskProblem { .. } => publication::problem(ctx),
+        Operation::ReconcilePhase { .. } => publication::reconcile(ctx),
+        Operation::AcceptPhase { .. } => publication::accept(ctx),
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),

@@ -32,7 +32,7 @@ pub(super) fn start(ctx: &mut Context<'_>) -> Result<()> {
     // effect. An already-open old writer cannot resume Planning: planning
     // pauses deliberately never use its legacy Paused -> Running transition.
     ctx.db
-        .pragma_update(None, "user_version", store::SCHEMA_VERSION)
+        .pragma_update(None, "user_version", 3)
         .map_err(storage)?;
     ctx.db
         .execute(

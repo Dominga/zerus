@@ -1,7 +1,9 @@
 [
   "accept",
+  "accept_phase",
   "add_member",
   "admit",
+  "approve_phase",
   "archive",
   "archive_member",
   "ask",
@@ -13,6 +15,7 @@
   "pause",
   "pause_member",
   "reassign",
+  "reject_phase",
   "release",
   "rename_team",
   "reply",
@@ -27,5 +30,6 @@
   "stop",
   "stop_member",
   "submit_draft_phase",
-  "swap_member"
+  "swap_member",
+  "undo_reject_phase"
 ]

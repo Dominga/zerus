@@ -10,6 +10,9 @@ pub(super) fn set(ctx: &mut Context<'_>) -> Result<()> {
     ctx.active()?;
     ctx.undecided(*node)?;
     let mut target = ctx.live_node(*node)?;
+    if target.source == NodeSource::Planned {
+        return Err(invalid("Approved plan changes require a logged plan edit."));
+    }
     if target.kind == NodeKind::Stage {
         return Err(invalid("A pipeline stage's dependencies cannot be edited."));
     }

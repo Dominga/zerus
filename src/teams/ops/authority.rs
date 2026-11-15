@@ -18,6 +18,13 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
     let lead = matches!(actor, Actor::Session { team: id, member, .. } if id == &team.id && member == &team.lead);
     let member = matches!(actor, Actor::Session { team: id, member, .. } if id == &team.id && member != &team.lead);
     let allowed = match op {
+        Operation::ApprovePhase { .. } => person || service,
+        Operation::ReconcilePublication { .. }
+        | Operation::PublicationTaskProblem { .. }
+        | Operation::ReconcilePhase { .. } => service,
+        Operation::RejectPhase { .. }
+        | Operation::UndoRejectPhase { .. }
+        | Operation::AcceptPhase { .. } => person,
         Operation::Verdict { .. } => member,
         Operation::CloseCard { .. } => service,
         Operation::ObserveTask { .. }

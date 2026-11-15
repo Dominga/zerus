@@ -1376,7 +1376,11 @@ fn every_action_the_view_sends_is_still_read() {
 fn the_action_kinds_are_the_shared_list() {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
-            TeamAction::Create { .. }
+            TeamAction::ApprovePhase { .. }
+            | TeamAction::RejectPhase { .. }
+            | TeamAction::UndoRejectPhase { .. }
+            | TeamAction::AcceptPhase { .. }
+            | TeamAction::Create { .. }
             | TeamAction::StartPlanning { .. }
             | TeamAction::SubmitDraftPhase { .. }
             | TeamAction::EditDraftPhase { .. }
@@ -1409,6 +1413,10 @@ fn the_action_kinds_are_the_shared_list() {
     }
     let member = || "m1".to_owned();
     let samples = vec![
+        TeamAction::ApprovePhase { phase:1,generation:1,confirm_initial:true },
+        TeamAction::RejectPhase { phase:1,generation:1,comment:"Revise".into() },
+        TeamAction::UndoRejectPhase { phase:1,generation:1,rejection:TEAM.into() },
+        TeamAction::AcceptPhase { phase:1,publication:TEAM.into() },
         serde_json::from_value::<TeamAction>({
             let mut value = serde_json::to_value(create(None, Integration::Branch).action).unwrap();
             value["kind"] = "start_planning".into();

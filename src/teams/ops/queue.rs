@@ -186,6 +186,9 @@ pub(super) fn admit(ctx: &mut Context<'_>) -> Result<()> {
     };
     ctx.active()?;
     let n = ctx.live_node(*node)?;
+    if n.source == NodeSource::Planned {
+        return Err(invalid("Approved plan changes require a logged plan edit."));
+    }
     if n.admitted {
         return Err(invalid("Task is already admitted."));
     }
@@ -213,6 +216,9 @@ pub(super) fn route(ctx: &mut Context<'_>) -> Result<()> {
     ctx.active()?;
     ctx.undecided(*node)?;
     let mut n = ctx.live_node(*node)?;
+    if n.source == NodeSource::Planned {
+        return Err(invalid("Approved plan changes require a logged plan edit."));
+    }
     // Route places a task for the lead; a stage's role is its pipeline's
     // and its member is chosen by the hand-out (zerus-63rru.84). Whatever
     // its state, the stage's own paths are Reassign and the person's

@@ -15,6 +15,8 @@ pub(crate) mod drafts;
 pub(crate) mod editing;
 mod holder;
 pub(crate) mod planning;
+pub(crate) mod publication;
+pub(crate) mod phase_snapshot;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 pub use decision_state::DecisionState;
@@ -37,7 +39,7 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -314,7 +316,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if matches!(version, 2 | SCHEMA_VERSION) {
+    if matches!(version, 2 | 3 | SCHEMA_VERSION) {
         return schema_extensions(db);
     }
     let tx = db
@@ -331,7 +333,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        2 | SCHEMA_VERSION => None,
+        2 | 3 | SCHEMA_VERSION => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
@@ -383,6 +385,7 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     card_parameters(db)?;
     drafts::extend(db)?;
     planning::extend(db)?;
+    publication::extend(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }

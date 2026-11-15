@@ -29,6 +29,7 @@ mod reports;
 mod retry;
 mod schedule;
 mod tasks;
+mod publication;
 mod project_limit;
 mod terminal;
 #[cfg(test)]
@@ -107,6 +108,8 @@ impl Runtime {
         if team.home != self.machine {
             return Ok(());
         }
+        self.publications(store, ports, &team, now)?;
+        let Some(team) = store.team(id)? else { return Ok(()) };
         if team.status == TeamStatus::Planning {
             // Planning has no task/reopen/stage/integration work. Its durable
             // goal uses the existing lead inbox and witnessed doorbell route.
@@ -142,6 +145,7 @@ impl Runtime {
                 return Ok(());
             }
             self.finish(store, ports, &team, now)?;
+            self.phase_completion(store, &team, now)?;
             self.recover(store, ports, &team, now)?;
             self.reopens(store, ports, &team, now)?;
             self.handouts(store, ports, &team, now)?;

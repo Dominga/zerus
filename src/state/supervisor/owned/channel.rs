@@ -130,8 +130,8 @@ pub(super) fn query(
         .ok_or_else(|| io::Error::other("selected observer image unavailable"))?;
     let mut stream = connect(path, until)?;
     stream.set_nonblocking(true)?;
-    if super::native::image_of(owner) != Some(selected)
-        || super::native::peer_pid(&stream) != Some(owner)
+    if super::native::peer_pid(&stream) != Some(owner)
+        || super::native::image_of(owner) != Some(selected)
         || !super::native::birth(owner).is_some_and(|actual| actual == birth)
     {
         return Err(io::Error::other("original native peer changed"));
@@ -145,8 +145,8 @@ pub(super) fn query(
     let data = read(&mut stream, until)?;
     let reply: Value = serde_json::from_slice(&data)?;
     if reply["binding"] != *binding
-        || super::native::image_of(owner) != Some(selected)
         || super::native::peer_pid(&stream) != Some(owner)
+        || super::native::image_of(owner) != Some(selected)
         || !super::native::birth(owner).is_some_and(|actual| actual == birth)
     {
         return Err(io::Error::other("original observation binding changed"));

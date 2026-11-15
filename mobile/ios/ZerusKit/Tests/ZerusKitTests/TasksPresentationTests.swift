@@ -236,4 +236,27 @@ final class TasksPresentationTests: XCTestCase {
         guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [old]) else { return XCTFail("Archived rows cannot resolve live routes") }
     }
 
+    func testDuplicatePhysicalComputerBindingsCannotResolveImmutableTask() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:original")
+        let alias = Machine(connectionId: "workspace-a", id: "alias", name: "Alias", online: true, machineId: "node-1")
+        let live = session("codex/api", "computer-1", ["launch_id": "original"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), [here, alias], sessions: [live]) else { return XCTFail("Physical binding must be unique") }
+    }
+    func testStrongSelectionHighlightsOriginalAfterRenameOnly() {
+        let ref = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "launch_id:original")
+        let row = task(.todo, .session(session: ref))
+        XCTAssertTrue(TasksPresentation.highlighted(row, chosen: ChosenSession(name: "codex/current-label", computerId: "computer-1", machineId: "node-1", sessionId: ref.sessionId)))
+        XCTAssertFalse(TasksPresentation.highlighted(row, chosen: ChosenSession(name: ref.session, computerId: "computer-1", machineId: "node-1", sessionId: "launch_id:replacement")))
+    }
+    func testChipSelectionUsesIdentityInsteadOfCaption() {
+        let old = ChosenSession(name: "codex/api", computerId: "computer-1", machineId: "node-1", sessionId: "launch_id:original")
+        XCTAssertTrue(TasksPresentation.sameSelection(ChosenSession(name: "codex/renamed", computerId: "computer-1", machineId: "node-1", sessionId: old.sessionId), old))
+        XCTAssertFalse(TasksPresentation.sameSelection(ChosenSession(name: old.name, computerId: "computer-1", machineId: "node-1", sessionId: "launch_id:replacement"), old))
+    }
+    func testCurrentLabelsDoNotRewriteStoredTaskKey() {
+        let ref = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "launch_id:original"), row = task(.todo, .session(session: ref))
+        XCTAssertEqual(TasksPresentation.sessionLabel(row, current: { _ in "codex/current-label" }), "current-label")
+        XCTAssertEqual(row.target, .session(session: ref))
+    }
+
 }

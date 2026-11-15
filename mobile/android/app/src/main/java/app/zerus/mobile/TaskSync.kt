@@ -299,7 +299,7 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                     receipt.string("error").ifBlank { "The computer did not answer the task exchange." }
                 }
                 val result = receipt.optJSONObject("result") ?: error("The computer's answer has no result.")
-                evidence.accept(withContext(Dispatchers.IO) { exchange.accept(result.toString()) })
+                withContext(Dispatchers.IO) { evidence.accept(exchange.accept(result.toString())) }
             }
         } finally { exchange.close() }
     }

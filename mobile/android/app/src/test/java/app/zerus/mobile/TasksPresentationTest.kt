@@ -235,4 +235,27 @@ class TasksPresentationTest {
         assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = listOf(archived)) is RouteState.Blocked)
     }
 
+    @Test fun duplicatePhysicalComputerBindingsCannotResolveAnImmutableTask() {
+        val ref = SessionRef("node-1", "codex/api", "launch_id:original")
+        val live = session("codex/api", raw = """{"launch_id":"original"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(ref)), machines = listOf(here, here.copy(id = "alias")), sessions = listOf(live)) is RouteState.Blocked)
+    }
+    @Test fun strongSelectionHighlightsTheOriginalAfterRenameOnly() {
+        val ref = SessionRef("node-1", "codex/old-label", "launch_id:original")
+        val original = task(TaskStage.TODO, TaskTarget.Session(ref))
+        assertTrue(TasksPresentation.highlighted(original, chosen.copy(name = "codex/current-label", sessionId = ref.sessionId)))
+        assertFalse(TasksPresentation.highlighted(original, chosen.copy(name = ref.session, sessionId = "launch_id:replacement")))
+    }
+    @Test fun chipSelectionUsesOpaqueIdentityInsteadOfTheCaption() {
+        val original = chosen.copy(sessionId = "launch_id:original")
+        assertTrue(TasksPresentation.sameSelection(original.copy(name = "codex/renamed"), original))
+        assertFalse(TasksPresentation.sameSelection(original.copy(sessionId = "launch_id:replacement"), original))
+    }
+    @Test fun currentLabelsDoNotRewriteTheStoredTaskKey() {
+        val ref = SessionRef("node-1", "codex/old-label", "launch_id:original")
+        val row = task(TaskStage.TODO, TaskTarget.Session(ref))
+        assertEquals("current-label", TasksPresentation.sessionLabel(row, current = { "codex/current-label" }))
+        assertEquals(ref, (row.target as TaskTarget.Session).session)
+    }
+
 }

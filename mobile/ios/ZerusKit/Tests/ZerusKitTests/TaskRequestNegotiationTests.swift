@@ -207,5 +207,23 @@ final class TaskRequestNegotiationTests: XCTestCase {
         }
     }
 
+    func testGenuineLegacySessionKeyChoosesSchemaOneUpFront() async throws {
+        try await world { w in
+            let result = await w.sync.send(w.connection, w.key, name: "Fixture", computerId: "computer-1", task: w.task, session: "codex/legacy")
+            XCTAssertEqual(result, .done)
+            let payload = try XCTUnwrap(w.payloads("task_send").only)
+            XCTAssertEqual(payload.int("schema"), 1); XCTAssertNil(payload["session_id"])
+        }
+    }
+    func testAdvertisedOpaqueUploadWorksOnUnchangedLegacyExchangeRoute() async throws {
+        try await world(features: [hostKey: ["task_media_upload_v1"]], protocolVersion: 1) { w in
+            let data = try await largeMedia(w), computer = w.computer, task = w.task
+            w.beforeSend.withLock { $0 = { try Self.verifyMedia(computer, task, data) } }
+            let result = await send(w); XCTAssertEqual(result, .done)
+            XCTAssertGreaterThanOrEqual(uploadFrames(w).count, 2)
+            XCTAssertEqual(w.payloads("task_send").first?.int("schema"), 1)
+        }
+    }
+
 }
 private extension Array { var only: Element? { count == 1 ? first : nil } }

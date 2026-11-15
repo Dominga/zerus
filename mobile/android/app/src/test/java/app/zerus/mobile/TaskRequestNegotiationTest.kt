@@ -171,4 +171,16 @@ class TaskRequestNegotiationTest {
         }
     }
 
+    @Test fun aGenuineLegacySessionKeyUsesSchemaOneUpFront() = world { w ->
+        assertEquals(TaskOutcome.Done, w.sync.send(w.connection, w.project, "Fixture", "computer-1", w.task, "codex/legacy"))
+        val payload = w.calls.single { it.getString("operation") == "task_send" }.getJSONObject("payload")
+        assertEquals(1, payload.getInt("schema")); assertFalse(payload.has("session_id"))
+    }
+    @Test fun advertisedOpaqueUploadsWorkThroughTheUnchangedLegacyExchangeRoute() = world(mapOf(hostKey to setOf("task_media_upload_v1")), protocol = 1) { w ->
+        val data = largeMedia(w)
+        w.beforeSend = { verifyMedia(w, data) }
+        assertEquals(TaskOutcome.Done, send(w)); assertTrue(uploadFrames(w).size >= 2)
+        assertEquals(1, w.calls.single { it.getString("operation") == "task_send" }.getJSONObject("payload").getInt("schema"))
+    }
+
 }

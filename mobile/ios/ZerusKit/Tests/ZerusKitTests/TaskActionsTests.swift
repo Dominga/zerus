@@ -334,4 +334,27 @@ final class TaskActionsTests: XCTestCase {
         XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 66)
     }
 
+    func testLocallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() async throws {
+        for project in [false, true] {
+            let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+            computer.update {
+                $0.modifyExchange = { answer in
+                    let bad: JSON = ["task": project ? .null : .string(task.uuid), "bytes": .string(Data("invalid-private-task-snapshot".utf8).base64EncodedString())]
+                    return answer.putting("updates", .array((answer["updates"]?.array ?? []) + [bad]))
+                }
+                $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+            }
+            let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+            guard case .refused = result else { return XCTFail("A locally refused selected document is not native action authority") }
+            XCTAssertFalse(computer.operations.contains("task_send"))
+        }
+    }
+    func testForeignConnectionCannotUseOriginalProjectForAction() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+        let foreign = ProjectKey(connectionId: "workspace-b", swarmId: key.swarmId, id: key.id)
+        let result = await sync.send(connection, foreign, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = result else { return XCTFail("Original connection and project scope are required") }
+        XCTAssertTrue(computer.operations.isEmpty)
+    }
+
 }

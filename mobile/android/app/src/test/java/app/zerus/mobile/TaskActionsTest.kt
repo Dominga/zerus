@@ -331,4 +331,22 @@ class TaskActionsTest {
         assertTrue(refused.all(sync::held)); assertEquals(66, computer.operations().count { it == "task_send" })
     }
 
+    @Test fun locallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() {
+        for (project in listOf(false, true)) world { computer, connection, _, sync ->
+            val task = added(computer.store, "Selected requirement")
+            computer.modifyExchange = { answer -> answer.getJSONArray("updates").put(JSONObject()
+                .put("task", if (project) JSONObject.NULL else task.uuid)
+                .put("bytes", java.util.Base64.getEncoder().encodeToString("invalid-private-task-snapshot".toByteArray()))) }
+            computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+            assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+            assertFalse(computer.operations().contains("task_send"))
+        }
+    }
+    @Test fun aForeignConnectionCannotUseTheOriginalProjectForAnAction() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement")
+        val foreign = key.copy(connectionId = "workspace-b")
+        assertTrue(sync.send(connection, foreign, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertTrue(computer.operations().isEmpty())
+    }
+
 }

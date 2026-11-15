@@ -291,6 +291,13 @@ mod cases {
     fn selection_is_revisioned_journaled_replayed_and_preserved_by_old_settings() {
         let h = Harness::new();
         h.create();
+        let core_before: u32 = h
+            .store()
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         let root = project(&h);
         file(&root, FILE);
         let sel = selection(&read(&h, &Caller::Person, json!({})));
@@ -330,7 +337,7 @@ mod cases {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            2
+            core_before
         );
         assert_eq!(
             h.store()

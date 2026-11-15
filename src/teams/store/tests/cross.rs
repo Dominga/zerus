@@ -220,6 +220,6 @@ fn opening_an_older_version_two_store_creates_missing_cross_team_indexes() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        2
+        crate::teams::store::SCHEMA_VERSION
     );
 }

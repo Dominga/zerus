@@ -451,7 +451,7 @@ pub use cancels::PendingCancel;
 pub(super) use schema::AFTER_FENCE;
 #[cfg(test)]
 pub(super) use schema::{
-    after_fence, migration_steps, observe_migrations, take_migration_calls, EXTENSION,
+    after_fence, migration_steps, observe_migrations, published_layouts, take_migration_calls, EXTENSION,
 };
 pub(super) use schema::{as_is, extend, fence};
 #[cfg(test)]

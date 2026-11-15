@@ -14,7 +14,7 @@ allocations! {
     RETIRED_PREVIEW = 1;
     CORE_LEGACY = 2;
     CORE_PLANNING = 3;
-    /// TODO(zerus-63rru.31, PR #2451): implement the combined native Person migration.
+    /// Published by zerus-63rru.31 / PR #2451; store::SCHEMA_VERSION uses this native layout.
     CORE_NATIVE_PERSON = 4;
     /// TODO(zerus-63rru.161 publication): implement, register and qualify this migration.
     CORE_PUBLICATION = 5;
@@ -33,7 +33,7 @@ allocations! {
 
 // TODO(reserved PRs above): promote only with the real older-store migration
 // and its writer tests. Update these aliases and the controls below in that PR.
-pub(crate) const CORE_CURRENT: u32 = CORE_PLANNING;
+pub(crate) const CORE_CURRENT: u32 = CORE_NATIVE_PERSON;
 pub(crate) const TIMER_CURRENT: u32 = TIMER_KEY_REFUSAL_ORDER;
 
 #[cfg(test)]
@@ -51,12 +51,7 @@ mod tests {
         TIMER_HOLD_OWNERS,
         TIMER_KEY_REFUSAL_ORDER,
     ];
-    const RESERVED_CORE: &[u32] = &[
-        CORE_NATIVE_PERSON,
-        CORE_PUBLICATION,
-        CORE_REWORK,
-        CORE_NATIVE_FLOOR,
-    ];
+    const RESERVED_CORE: &[u32] = &[CORE_PUBLICATION, CORE_REWORK, CORE_NATIVE_FLOOR];
 
     #[test]
     fn teams_store_version_registry_wiring() {
@@ -123,7 +118,9 @@ mod tests {
                 0x8000_000c
             ]
         );
-        assert_eq!(CORE_CURRENT, CORE_PLANNING);
+        assert_eq!(CORE_CURRENT, CORE_NATIVE_PERSON);
+        assert_eq!(super::super::LEGACY_QUEUE_LAYOUT, CORE_LEGACY);
+        assert_eq!(super::super::LEGACY_PLANNING_LAYOUT, CORE_PLANNING);
         assert_eq!(TIMER_CURRENT, TIMER_KEY_REFUSAL_ORDER);
         assert_eq!(super::super::SCHEMA_VERSION, CORE_CURRENT);
         assert_eq!(timers::EXTENSION, TIMER_CURRENT);
@@ -147,29 +144,94 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    // Product-written queue/planning data. Removing only the newer native
+    // metadata models legacy 2/3; retaining it models the old native layout 3.
     #[test]
     fn teams_store_version_registry_core_steps_reach_every_shipped_older_layout() {
-        for from in [UNINITIALIZED, CORE_LEGACY, CORE_PLANNING] {
+        for (from, keep_native) in [
+            (UNINITIALIZED, false),
+            (CORE_LEGACY, false),
+            (CORE_PLANNING, false),
+            (CORE_PLANNING, true),
+            (CORE_NATIVE_PERSON, true),
+        ] {
             let mut h = if from == UNINITIALIZED {
                 Harness::empty()
             } else {
                 Harness::new()
             };
-            if from == UNINITIALIZED {
-                assert!(h.store.db.is_none());
-            } else {
-                assert_eq!(core(&h), CORE_LEGACY);
-            }
-            if from == CORE_PLANNING {
-                h.run_for(TEAM_B, &person(), planning(TEAM_B)).unwrap();
-                assert_eq!(core(&h), CORE_PLANNING);
+            let mut nonce = None;
+            if from != UNINITIALIZED {
+                assert_eq!(core(&h), CORE_CURRENT);
+                if from == CORE_PLANNING {
+                    h.run_for(TEAM_B, &person(), planning(TEAM_B)).unwrap();
+                }
+                let db = h.store.db.as_ref().unwrap();
+                if keep_native {
+                    nonce = Some(
+                        db.query_row(
+                            "SELECT nonce FROM person_gesture_store WHERE id=1",
+                            [],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    );
+                } else {
+                    db.execute_batch("DROP TRIGGER person_gesture_store_immutable; DROP TRIGGER person_gesture_store_kept; DROP TRIGGER person_gestures_immutable; DROP TABLE person_gestures; DROP TABLE person_gesture_store;").unwrap();
+                }
+                db.pragma_update(None, "user_version", from).unwrap();
+                assert_eq!(core(&h), from);
+                h.store = Store::open(h.temp.path()).unwrap();
+                assert_eq!(core(&h), CORE_CURRENT, "upgrade from {from}");
             }
             let team = "00000000-0000-4000-8000-00000000cafe";
             h.run_for(team, &person(), planning(team)).unwrap();
-            assert_eq!(core(&h), CORE_PLANNING, "from {from}");
+            assert_eq!(core(&h), CORE_CURRENT, "from {from}");
             h.store = Store::open(h.temp.path()).unwrap();
-            assert_eq!(core(&h), CORE_PLANNING, "reopen from {from}");
+            assert_eq!(core(&h), CORE_CURRENT, "reopen from {from}");
+            if let Some(nonce) = nonce {
+                let actual = h
+                    .store
+                    .db
+                    .as_ref()
+                    .unwrap()
+                    .query_row(
+                        "SELECT nonce FROM person_gesture_store WHERE id=1",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap();
+                assert_eq!(actual, nonce, "native identity survives from {from}");
+            }
         }
+    }
+
+    #[test]
+    fn teams_store_version_registry_initial_sql_and_native_upgrade_use_allocated_marks() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, Mutex};
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let observed = writes.clone();
+        // Observe the production initializer, including its temporary legacy
+        // mark inside the transaction; insert no application rows by hand.
+        db.authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Pragma {
+                pragma_name: "user_version",
+                pragma_value: Some(value),
+            } = context.action
+            {
+                observed.lock().unwrap().push(value.parse::<u32>().unwrap());
+            }
+            Authorization::Allow
+        }));
+        super::super::initialize(&mut db).unwrap();
+        assert_eq!(*writes.lock().unwrap(), [CORE_LEGACY, CORE_NATIVE_PERSON]);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            CORE_CURRENT
+        );
     }
 
     // Application rows come from Create. Only the schema mark is deliberately
@@ -250,8 +312,8 @@ mod tests {
                 assert_eq!(marker(), TIMER_CURRENT | flag);
                 assert_eq!(
                     core(&h),
-                    CORE_LEGACY,
-                    "extension never raises the core mark"
+                    CORE_CURRENT,
+                    "extension never changes the native core mark"
                 );
                 timers::observe_migrations();
                 h.store = Store::open(h.temp.path()).unwrap();

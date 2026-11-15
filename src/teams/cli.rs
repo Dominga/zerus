@@ -26,8 +26,15 @@ pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog 
 /// The running command. `args` are the words after `team`; `provided` is a
 /// test's stdin, and `None` reads this command's own stdin when it needs one.
 pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
+    let words = input::words(args);
+    // No CLI invocation can carry the window's opaque original-child permit.
+    // Refuse before caller inspection; detach, markers and state-root changes
+    // cannot affect this terminal-only boundary.
+    if words.first().is_some_and(|word| word == "decide") {
+        return refusal(crate::desktop::teams::person_gesture::required());
+    }
     let caller = crate::teams::caller::caller(config);
-    run(config, &caller, &input::words(args), None)
+    run(config, &caller, &words, None)
 }
 
 fn run(

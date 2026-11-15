@@ -410,7 +410,7 @@ fn preview_off_disposition_recognizes_planning_stores_but_refuses_a_future_fence
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            3
+            crate::teams::store::SCHEMA_VERSION
         );
         if status == "stopped" {
             f.h.run(&fixtures::person(), ops::Operation::Stop).unwrap();
@@ -421,7 +421,11 @@ fn preview_off_disposition_recognizes_planning_stores_but_refuses_a_future_fence
                 .db
                 .as_ref()
                 .unwrap()
-                .pragma_update(None, "user_version", 4)
+                .pragma_update(
+                    None,
+                    "user_version",
+                    crate::teams::store::SCHEMA_VERSION + 1,
+                )
                 .unwrap();
         }
         std::fs::remove_file(f.h.temp.path().join("teams/preview")).unwrap();

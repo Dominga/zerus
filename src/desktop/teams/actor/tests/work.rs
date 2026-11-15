@@ -498,7 +498,7 @@ fn finishing_cutover_retries_with_backoff_and_unchanged_wakes_do_not_repeat_done
 }
 fn apply(store: &mut Store, who: &crate::teams::ops::Actor, op: Operation) {
     let revision = store.team(TEAM).unwrap().unwrap().revision;
-    crate::teams::ops::apply(store, who, &request(revision, op), 1234).unwrap();
+    crate::teams::ops::tests::apply_fixture(store, who, &request(revision, op), 1234).unwrap();
 }
 fn observation(store: &mut Store, stage: TaskStage) {
     let old = store.task_observation(TEAM, 1).unwrap().unwrap();

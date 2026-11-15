@@ -77,6 +77,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop deferred send ABI: desktop-deferred-send-v1
        Desktop question route: route-questions-v1
        Desktop deferred answer ABI: desktop-deferred-answer-v1
+       Desktop Teams Person ABI: desktop-team-person-v1
        Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1
        Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1
        Desktop deferred session resume ABI: desktop-deferred-session-resume-v1
@@ -548,6 +549,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
         zerus_client_core::desktop::question_route::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
+        zerus_client_core::desktop::team_person::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::session_resume::HELP_MARKER,

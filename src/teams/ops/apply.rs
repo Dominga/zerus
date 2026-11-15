@@ -49,7 +49,48 @@ fn apply_with_context(
     config: Option<&crate::config::Config>,
     repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
 ) -> Result<Reply> {
+    apply_inputs(store, actor, request, now, config, repository, None)
+}
+
+pub(crate) fn apply_with_gesture(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+) -> Result<Reply> {
+    // This closed V1 intent is only DecideCard. It never resolves a repository.
+    apply_inputs(
+        store,
+        actor,
+        request,
+        now,
+        None,
+        &|_| {
+            Err(invalid(
+                "A trusted local repository resolver is required to advance the base.",
+            ))
+        },
+        admission,
+    )
+}
+
+fn apply_inputs(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+) -> Result<Reply> {
     validate_request(request, now)?;
+    if matches!(actor, Actor::Person { .. })
+        && matches!(request.operation, Operation::DecideCard { .. })
+        && admission.is_none()
+    {
+        return Err(crate::desktop::teams::person_gesture::required());
+    }
     store.refresh()?;
     prepare_first(store, actor, request)?;
     let state = store.state().to_owned();
@@ -60,6 +101,18 @@ fn apply_with_context(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
     store::execution_fence(&tx)?;
+    let gesture = admission
+        .map(|admission| admission.consume(&tx, &state, actor, request))
+        .transpose()?;
+    if let Some(intent) = &gesture {
+        if let Some(saved) = replay(&tx, actor, request)? {
+            crate::desktop::teams::person_gesture::original(&tx, intent)?;
+            return saved;
+        }
+        // Bound the native point-read bodies before the common kernel reads
+        // its team. The snapshot cannot change under this writer transaction.
+        crate::desktop::teams::person_gesture::fresh(&tx, intent)?;
+    }
     let current = rows::team(&tx, &request.team)?;
     let team = current
         .clone()
@@ -94,6 +147,9 @@ fn apply_with_context(
         return result;
     }
     save(&tx, actor, request, &result)?;
+    if let Some(intent) = &gesture {
+        crate::desktop::teams::person_gesture::record(&tx, intent)?;
+    }
     tx.commit().map_err(storage)?;
     result
 }
@@ -137,7 +193,11 @@ fn verify_actor(db: &Connection, actor: &Actor, team: &Team) -> Result<()> {
     }
     Ok(())
 }
-fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Result<Reply>>> {
+pub(crate) fn replay(
+    db: &Connection,
+    actor: &Actor,
+    request: &Request,
+) -> Result<Option<Result<Reply>>> {
     let saved: Option<(String, String, String)> = db
         .query_row(
             "SELECT actor,content,result FROM requests WHERE id=?1",

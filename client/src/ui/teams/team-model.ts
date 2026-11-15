@@ -32,10 +32,8 @@ export function memberStatus(member: MemberView): MemberStatus {
   return { state, label: tr(state === "not_created" ? "not created" : state), tone: memberStateColor(state), lead: member.lead };
 }
 
-/** The team's own status as a word and a tone. */
-export function stateLabel(state: string): string {
-  return tr(state === "not_created" ? "not created" : state);
-}
+/** One status vocabulary shared with the session strip and Teams list. */
+export { teamStatusLabel as stateLabel } from "./team-status";
 
 export function stateTone(state: string): Tone {
   switch (state) {

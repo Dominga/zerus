@@ -13,6 +13,9 @@ pub(super) fn set(ctx: &mut Context<'_>) -> Result<()> {
     if target.kind == NodeKind::Stage {
         return Err(invalid("A pipeline stage's dependencies cannot be edited."));
     }
+    if !store::dependency_edit::editable(ctx.db, &ctx.team.id, *node)? {
+        return Err(invalid(store::dependency_edit::PRESTART_CAUSE));
+    }
     if deps.len() > 200 {
         return Err(over("Too many dependencies."));
     }

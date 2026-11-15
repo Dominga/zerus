@@ -9,6 +9,7 @@ mod cross;
 mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
+pub(crate) mod dependency_edit;
 mod holder;
 mod disposition;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};

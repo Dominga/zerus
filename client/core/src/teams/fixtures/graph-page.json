@@ -11,6 +11,7 @@
   "rows": [
     {
       "admitted": true,
+      "deps_editable": true,
       "holder": null,
       "id": 1,
       "kind": "task",
@@ -39,6 +40,7 @@
           "node": 1
         }
       ],
+      "deps_editable": true,
       "holder": null,
       "id": 2,
       "kind": "task",
@@ -69,6 +71,7 @@
           "node": 4
         }
       ],
+      "deps_editable": true,
       "holder": null,
       "id": 3,
       "kind": "task",

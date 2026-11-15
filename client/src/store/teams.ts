@@ -45,6 +45,8 @@ export interface TeamStage { node: number; index: number; role: string; state: s
 export interface TeamTaskRef { project: string; uuid: string }
 export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
+  /** Authoritative store fact; absent on older reads keeps editing disabled. */
+  deps_editable?: boolean | null;
   deps?: TeamDependency[]; phase?: number | null; origin?: number | null; layer?: number | null;
   node: number; title: string; state: string; task: TeamTaskRef | null; role: string; pipeline: string;
   assignee: string; implementer: string; rank: string; round: number; held: boolean; admitted: boolean;

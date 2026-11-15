@@ -1337,7 +1337,10 @@ fn the_action_kinds_are_the_shared_list() {
             decision: "approve".into(),
         },
         TeamAction::Admit { node: 1 },
-        TeamAction::SetDeps { node: 1, deps: Vec::new() },
+        TeamAction::SetDeps {
+            node: 1,
+            deps: Vec::new(),
+        },
         TeamAction::Route {
             node: 1,
             role: "r".into(),

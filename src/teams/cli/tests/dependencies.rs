@@ -72,3 +72,47 @@ fn set_deps_cli_is_person_only_and_queue_carries_both_kinds_and_off_page_edges()
     .unwrap();
     assert_eq!(status, pinned);
 }
+
+#[test]
+fn queue_edit_eligibility_rejects_reserved_and_historical_effects_on_pending_nodes() {
+    let h = Harness::new();
+    h.create();
+    h.bind("m1", M1_SESSION);
+    let a = h.add(1);
+    let b = h.add(2);
+    let effect = uuid::Uuid::new_v4().to_string();
+    h.apply(
+        &service(),
+        Operation::HandoutIntent {
+            node: b,
+            member: "m1".into(),
+            effect_request_id: effect.clone(),
+        },
+    );
+    let read = || {
+        let (queue, exit) = h.cli(&Caller::Person, &format!("queue --team {TEAM}"), "");
+        assert_eq!(exit, 0, "{queue}");
+        assert_eq!(queue["rows"][0]["deps_editable"], true);
+        assert_eq!(queue["rows"][1]["state"], "pending");
+        assert_eq!(queue["rows"][1]["deps_editable"], false);
+    };
+    read();
+    h.apply(
+        &service(),
+        Operation::HandoutOutcome {
+            effect_request_id: effect,
+            outcome: crate::teams::ops::HandoutOutcome::Refused {
+                reason: "Fixture refusal.".into(),
+            },
+        },
+    );
+    read();
+    let input = json!({"request_id":uuid::Uuid::new_v4().to_string(), "team":TEAM, "expected_revision":h.revision(), "node":b, "deps":[{"node":a}]}).to_string();
+    let (reply, exit) = h.cli(&Caller::Person, "set-deps", &input);
+    assert_eq!((exit, code(&reply)), (1, "invalid_state"));
+    assert_eq!(
+        reply["error"]["message"],
+        "Dependencies can only be edited before this task starts or has an attempt or hand-out recorded."
+    );
+    assert_eq!(h.cli(&Caller::Person, "set-deps", &input), (reply, 1));
+}

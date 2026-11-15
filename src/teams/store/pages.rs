@@ -29,10 +29,11 @@ fn row_facts(table: &str) -> String {
     // stop sequence stamped on the decisions the stop itself wrote: a
     // cancel or key clear recorded for an earlier live decision is never
     // shown as this stop's, whatever its text (zerus-63rru.52 round 3).
-    format!(
+    let facts = format!(
         "{holder},(SELECT d.kind FROM decisions d WHERE d.team={table}.team AND d.node={table}.id AND d.state<>'settled'),(SELECT d.state FROM decisions d WHERE d.team={table}.team AND d.node={table}.id AND d.state<>'settled'),(SELECT i.text FROM inbox i WHERE i.team={table}.team AND i.node={table}.id AND i.kind LIKE 'unstaffed:%' AND i.reply IS NULL ORDER BY i.seq DESC LIMIT 1),(SELECT o.state FROM cancel_outcomes o JOIN decisions d ON d.seq=o.decision AND d.stop=(SELECT stop_seq FROM teams WHERE id={table}.team) WHERE o.team={table}.team AND o.node={table}.id ORDER BY o.decision DESC LIMIT 1),(SELECT o.reason FROM cancel_outcomes o JOIN decisions d ON d.seq=o.decision AND d.stop=(SELECT stop_seq FROM teams WHERE id={table}.team) WHERE o.team={table}.team AND o.node={table}.id ORDER BY o.decision DESC LIMIT 1),(SELECT CASE WHEN EXISTS(SELECT 1 FROM cancel_outcomes o JOIN decisions d ON d.seq=o.decision AND d.stop=(SELECT stop_seq FROM teams WHERE id={table}.team) WHERE o.team={table}.team AND o.node={table}.id AND o.state IN ('cancelled','released')) THEN k.state END FROM key_clears k WHERE k.team={table}.team AND k.node={table}.id),(SELECT CASE WHEN EXISTS(SELECT 1 FROM cancel_outcomes o JOIN decisions d ON d.seq=o.decision AND d.stop=(SELECT stop_seq FROM teams WHERE id={table}.team) WHERE o.team={table}.team AND o.node={table}.id AND o.state IN ('cancelled','released')) THEN k.reason END FROM key_clears k WHERE k.team={table}.team AND k.node={table}.id),(SELECT EXISTS(SELECT 1 FROM decisions d WHERE d.team={table}.team AND d.node={table}.id AND d.kind='cancel' AND d.state='pending' AND d.stop=(SELECT stop_seq FROM teams WHERE id={table}.team))),(SELECT stop_seq FROM teams WHERE id={table}.team)",
         table = table
-    )
+    );
+    format!("{facts},{}", super::dependency_edit::eligible_sql(table))
 }
 
 fn start(
@@ -275,6 +276,7 @@ impl Store {
                         let pending: Option<String> = r.get(8)?;
                         let state: Option<DecisionState> = r.get(9)?;
                         Ok(QueueRow {
+                            deps_editable: r.get(17)?,
                             node: rows::node_row(r)?,
                             holder: r.get(7)?,
                             pending_replaceable: pending

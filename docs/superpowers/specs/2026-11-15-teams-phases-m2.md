@@ -95,6 +95,11 @@ allocations live in `src/teams/store/layout.rs`, with the allocation uniqueness
 control; timer layouts 8 through 12 and raw pinned mark 2147483660 are separate.
 The supported ceiling is not the ordinary-open migration target.
 
+Execution floors are monotonic, so activation must preserve their cumulative
+semantics: an engine writing native floor 7 must already understand rework 6.
+Raising 6 cannot fence an older engine that has already written 7. Keep that
+activation order, or reserve and qualify a later combined floor first.
+
 ## Operations and authority
 
 These names are proposed additions, not commands that exist today. Each takes

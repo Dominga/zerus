@@ -9,7 +9,7 @@ use crate::readmarks::{Queued, ReadMark};
 use crate::text::Text;
 use crate::{Change, ComputerId, ComputerStatus, ViewRow};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One computer as the menu bar knows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -391,11 +391,35 @@ pub fn escape(text: &str) -> String {
 pub struct Desk {
     computers: BTreeMap<ComputerId, Computer>,
     marks: DeviceMarks,
+    draft_keys: BTreeSet<String>,
     update_version: Option<String>,
     restart_required: bool,
 }
 
 impl Desk {
+    /// The window's bounded nonempty-draft projection, including native
+    /// subagent drafts that keep their parent in Active (`catalog.ts`).
+    pub fn set_draft_keys(&mut self, keys: &[String]) -> bool {
+        let mut next: BTreeSet<String> = keys.iter().cloned().collect();
+        next.extend(keys.iter().filter_map(|key| {
+            let parts: Vec<_> = key.split('\n').collect();
+            (parts.len() == 4).then(|| parts[..2].join("\n"))
+        }));
+        if self.draft_keys == next {
+            return false;
+        }
+        self.draft_keys = next;
+        true
+    }
+
+    fn has_draft(&self, computer: &ComputerId, row: &ViewRow) -> bool {
+        let part = crate::drafts::session_part(&row.name, row.session_id.as_deref());
+        self.draft_keys.contains(&format!("{}\n{part}", computer.0))
+            || self
+                .draft_keys
+                .contains(&format!("{}\n{}", computer.0, row.name))
+    }
+
     /// The update entries shown between Open Zerus and the fleet.
     pub fn set_updates(&mut self, version: Option<String>, restart_required: bool) -> bool {
         if self.update_version == version && self.restart_required == restart_required {
@@ -535,21 +559,17 @@ impl Desk {
     }
 
     /// Active sessions, the list's Active filter (`store/attention.ts`
-    /// `isActive`): working or Background, Scheduled or Waiting on a current
+    /// `filterActive`): working or Background, Scheduled or Waiting on a current
     /// computer, or needing attention (Review later anywhere, a request or a
-    /// subagent that asks only on a current computer). Drafts live in the window, which the tray does
-    /// not see. The tray shows this instead of every listed session (owner
-    /// 2026-11-07).
+    /// subagent that asks only on a current computer), or a local draft.
+    /// Quiet children leave their attention to their parent, while their
+    /// work, drafts and the person's Review later mark still count.
     pub fn active(&self) -> usize {
         self.computers
             .iter()
             .filter(|(_, c)| c.listed)
             .map(|(id, c)| {
-                let current = if id.is_local() {
-                    !matches!(c.status, ComputerStatus::Reconnecting { .. })
-                } else {
-                    c.fresh()
-                };
+                let current = c.fresh();
                 c.rows
                     .values()
                     .filter(|row| {
@@ -561,13 +581,16 @@ impl Desk {
                             row.status.as_str()
                         };
                         row.state != "archived"
-                            && (row.notify.review_later
+                            && (self.has_draft(id, row)
+                                || row.notify.review_later
                                 || (current
                                     && (matches!(
                                         status,
                                         "working" | "background" | "scheduled" | "waiting"
-                                    ) || needs_attention(row)
-                                        || (row.child_attention && !row.notify.acknowledged))))
+                                    ) || (!row.quiet
+                                        && (needs_attention(row)
+                                            || (row.child_attention
+                                                && !row.notify.acknowledged))))))
                     })
                     .count()
             })

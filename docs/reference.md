@@ -1051,8 +1051,9 @@ carry it as well; their tool and permission approvals, listed as pending
 questions, count as approvals. A supervised child is quiet
 only when its host reports `human_request: false` and the row itself shows no
 such approval or sign-in; a host that does not report it keeps every request
-visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
-count, and gray badges and edge, while its status, Activity, unread reply,
+visible. A quiet child behaves like a muted session: no system notification or
+attention contribution to the rail, tray, menu bar or project header counts,
+and gray badges and edge, while its status, Activity, unread reply,
 questions and approvals stay as they are. Nothing is marked read. Unlike a
 muted session, it leaves the **Needs attention** filter, and **Active** unless
 it is working, in Background, Scheduled or has a draft: its unread reply, retry
@@ -1634,11 +1635,13 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
 The tray has two counters: **active** sessions (the session list's Active filter:
-working or Background, Scheduled or Waiting, or needing attention, a subagent
-that asks included) and **Needs attention**. Attention includes input, approvals,
-errors and unread main-agent replies. An offline host adds only its Review later
-sessions to either counter; a dot marks incomplete data. The tooltip keeps the
-total number of sessions.
+working or Background, Scheduled or Waiting, needing attention, or a local draft)
+and **Needs attention**. A quiet supervised child's attention waits for its parent;
+its work, schedules, waits, drafts and the person's Review later mark still count
+as Active. Attention includes input, approvals, errors and unread main-agent replies.
+An offline host adds its Review later sessions to either counter and its local
+drafts to Active; a dot marks incomplete data. The tooltip keeps the total number
+of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:
@@ -6467,6 +6470,29 @@ reads. In **Settings > Approvals**, only a confirmed folder-trust grant says
 **Trusted for ... and its subfolders on this account**; failed, cancelled,
 unconfirmed and unknown outcomes say it was requested but not confirmed.
 Resume and other ordinary approval rows do not claim that trust grant.
+
+### Tests/Builds provider inspection and selection
+
+`hgs team validation-config --json` takes `{ "team": "UUID" }` on stdin.
+The person or exact team lead may read it. Add `override_config` (the version-1
+JSON equivalent of `.zerus/tests.toml`, or `null`) to check a candidate without
+saving or executing it. The bounded `inspection` reply includes `schema`, team,
+revision, project/home, native checkout, file/detected/none source, source digest,
+effective config digest, provider metadata, diagnostics, current saved selection
+and unsupported capabilities. Invalid project/configuration facts are explicit
+`valid: false` diagnostics, never empty successful validation.
+
+`hgs team validation-settings --json` is **person only**. It takes the normal
+`team`, `request_id`, `expected_revision` envelope and `selection` containing the
+reviewed `source_digest`, `digest` and `override_config`. The operation recomputes
+these under the writer transaction, refuses `config_changed` or `stale_revision`,
+and atomically records the selection, revision, journal and exact request receipt.
+Replay keeps the original receipt; a changed request never borrows its UUID.
+Selections live in additive `validation_settings` companion storage, leaving the
+strict legacy settings object and schema version unchanged. They grant no runner,
+mandatory validation or automatic task-dispatch authority. Ordinary settings
+writes preserve the companion choice.
+
 
 ## Machines and accounts
 

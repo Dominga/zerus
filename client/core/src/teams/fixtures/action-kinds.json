@@ -31,5 +31,6 @@
   "stop_member",
   "submit_draft_phase",
   "swap_member",
-  "undo_reject_phase"
+  "undo_reject_phase",
+  "validation_config"
 ]

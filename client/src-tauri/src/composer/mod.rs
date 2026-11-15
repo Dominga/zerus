@@ -706,6 +706,9 @@ pub(crate) struct Shared {
     pub(crate) deps: Deps,
     /// Counts `changed` calls.
     changes: AtomicU64,
+    /// The tray reads the same bounded keys as the window, after the hub
+    /// lock is released; this callback only wakes its worker.
+    pub(crate) draft_listener: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Wakes the ticker, which sleeps while no composer is open.
     opened: Condvar,
     /// The selected desktop service's deferred send route, if any.
@@ -770,6 +773,7 @@ impl Composers {
             cache: files::Cache::new(config.cache),
             deps,
             changes: AtomicU64::new(0),
+            draft_listener: Default::default(),
             opened: Condvar::new(),
             deferred: Mutex::new(None),
             compact: Mutex::new(None),
@@ -795,6 +799,9 @@ impl Composers {
     pub(crate) fn changed(&self) {
         self.0.changes.fetch_add(1, Ordering::SeqCst);
         (self.0.deps.notify)();
+        if let Some(listener) = self.0.draft_listener.get() {
+            listener();
+        }
     }
 
     /// `changed` for another owner to call (the write marks' hook,
@@ -1520,6 +1527,20 @@ impl Composers {
         if hub.keys_taken.replace(changes) == Some(changes) {
             return None;
         }
+        let keys = Self::draft_keys_of(&hub);
+        if hub.sent_keys.as_ref() == Some(&keys) {
+            return None;
+        }
+        hub.sent_keys = Some(keys.clone());
+        Some(keys)
+    }
+
+    /// The same projection without consuming the window's change cursor.
+    pub(crate) fn draft_keys(&self) -> Vec<String> {
+        Self::draft_keys_of(&self.lock())
+    }
+
+    fn draft_keys_of(hub: &Hub) -> Vec<String> {
         let mut keys: BTreeSet<String> = hub.stored_keys.iter().cloned().collect();
         for (key, composer) in &hub.composers {
             if composer.loaded && composer.has_content() && !composer.sending {
@@ -1528,12 +1549,7 @@ impl Composers {
                 keys.remove(key);
             }
         }
-        let keys: Vec<String> = keys.into_iter().collect();
-        if hub.sent_keys.as_ref() == Some(&keys) {
-            return None;
-        }
-        hub.sent_keys = Some(keys.clone());
-        Some(keys)
+        keys.into_iter().collect()
     }
 
     /// Records the followed session's Activity state from a batch; a batch
@@ -2773,6 +2789,32 @@ pub(crate) mod tests {
             "unchanged keys are not sent again"
         );
         c.edit(view.handle, 2, view.text_epoch, String::new(), 0, 0);
+        assert_eq!(c.take_draft_keys(), Some(vec![]));
+    }
+
+    #[test]
+    fn tray_draft_snapshots_never_consume_the_windows_updates() {
+        let root = dir("tray-keys");
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        let _ = c.take_draft_keys();
+        let (sender, wake) = std::sync::mpsc::channel();
+        c.0.draft_listener
+            .set(Arc::new(move || {
+                let _ = sender.send(());
+            }))
+            .ok()
+            .unwrap();
+        c.edit(view.handle, 1, view.text_epoch, "x".into(), 1, 1);
+        wake.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(c.draft_keys(), vec![KEY.to_owned()]);
+        assert_eq!(c.draft_keys(), vec![KEY.to_owned()]);
+        assert_eq!(c.take_draft_keys(), Some(vec![KEY.to_owned()]));
+        assert_eq!(c.take_draft_keys(), None);
+        c.edit(view.handle, 2, view.text_epoch, String::new(), 0, 0);
+        assert!(c.draft_keys().is_empty());
         assert_eq!(c.take_draft_keys(), Some(vec![]));
     }
 

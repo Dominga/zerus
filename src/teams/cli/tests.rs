@@ -20,6 +20,7 @@ mod phases;
 mod planning;
 mod progress;
 mod progress157;
+mod providers;
 #[cfg(unix)]
 mod publication;
 mod reads;

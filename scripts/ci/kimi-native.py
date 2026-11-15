@@ -52,6 +52,12 @@ METHODS = (
     'test_kimi_questions_native.NativeKimiQuestions.test_tall_question_in_an_unviewed_80x24_pane_grows_until_answerable',
     'test_kimi_questions_native.NativeKimiQuestions.test_tall_question_with_an_attached_client_is_never_resized',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_answers_without_growth',
+    # sa9qn.34: ordinary child questions retain exact native identity and
+    # original answer receipts across choices, multiple parts and duplicates.
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_question_exact_identity_and_receipt_prevent_replay',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_background_question_never_claims_to_be_blocking',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_multiple_choice_question_uses_the_same_native_identity',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_multi_part_question_uses_the_same_native_identity',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_long_other_is_confirmed_from_the_complete_review',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_explicit_retry_resumes_the_existing_other_editor',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_foreign_other_is_preserved_without_submission',

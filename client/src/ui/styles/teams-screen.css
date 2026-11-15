@@ -1,0 +1,30 @@
+@layer components {
+  .teams-screen { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 20px; overflow: auto; background: var(--z-color-pane); }
+  .teams-screen-head { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; flex: none; }
+  .teams-screen-head > div { flex: 1 1 10rem; min-width: 0; }
+  .teams-screen-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; }
+  .teams-screen-head p { margin-top: 4px; font-size: var(--fs-sm); }
+  .teams-screen-head > button { flex: none; }
+  .teams-list { display: flex; flex-direction: column; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .teams-list > li { min-width: 0; }
+  .teams-row { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 9px; padding: 13px; text-align: left; color: var(--z-color-text); background: var(--z-color-card); border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); }
+  .teams-row:hover { background: var(--z-color-card-hover); }
+  .teams-row:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .teams-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  .teams-row-head > svg { flex: none; color: var(--z-color-accent); }
+  .teams-row-name { flex: 1 1 10rem; min-width: 0; font-size: var(--fs-md); overflow-wrap: anywhere; }
+  .teams-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; min-width: 0; color: var(--z-color-text-2); font-size: var(--fs-sm); }
+  .teams-row-meta > span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+  .teams-row-meta svg { flex: none; align-self: center; }
+  .teams-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+  .teams-task-progress { display: inline-flex; align-items: center; gap: 7px; }
+  .teams-progress-track { display: inline-block; width: 70px; height: 4px; overflow: hidden; border-radius: 3px; background: var(--z-color-border); }
+  .teams-progress-track > span { display: block; height: 100%; background: var(--z-color-accent); }
+  .teams-stuck { color: var(--z-color-warn); }
+  .teams-questions { color: var(--z-color-accent); }
+  .teams-member-count { color: var(--z-color-text-2); }
+  .teams-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 36px 12px; text-align: center; }
+  .teams-empty h2 { font-size: var(--fs-lg); }
+  .teams-empty p, .teams-reading { font-size: var(--fs-sm); }
+  .teams-pages { display: flex; flex-wrap: wrap; gap: 8px; }
+}

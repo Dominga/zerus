@@ -16,5 +16,6 @@ mod reads;
 mod session_groups;
 mod status_items;
 mod storage_failure;
+mod teams_screen;
 mod verdict;
 mod writes;

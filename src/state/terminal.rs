@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const MAX_SCREEN: usize = 128 * 1024;
+pub(crate) mod acknowledgment;
 #[cfg(test)]
 mod wrapped_tests;
 const KEYS: &[&str] = &[
@@ -319,7 +320,13 @@ fn composer_state(record: &Value, metadata: &Value) -> Value {
     } else {
         ""
     };
-    json!({"state": state, "text": text, "clearable": reason.is_empty(), "reason": reason})
+    let mut answer = json!({"state": state, "text": text, "clearable": reason.is_empty(), "reason": reason});
+    if state == "empty" && metadata["input_mode"] == true {
+        if let Ok(pending) = acknowledgment::pending(record) {
+            answer["recovery"] = json!(pending);
+        }
+    }
+    answer
 }
 
 /// A message to this session is still in its proof window (zerus-wkj9l.1).

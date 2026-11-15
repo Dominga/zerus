@@ -38,7 +38,7 @@ keeps the switch disabled and shows its reason. **Read again** requests a fresh
 answer even when the followed views and their contents have not changed.
 
 Turning it on adds a marker file to this computer's `hgs` state directory and
-makes the desktop show **New team** and **Waiting for you** in the rail, the
+makes the desktop show **Teams** and **Waiting for you** in the rail, the
 **Team** tab on a lead's session, **Send to team** on the task board and a team
 chooser in the New task form. An `hgs task` command that touches a team, with
 `--team` or on a task whose team key guards it, then proves its caller as
@@ -55,7 +55,21 @@ team lives on another computer still refuses agents.
 
 ## Starting a team
 
-Press **New team** in the rail. The dialog starts from a **Template**:
+Open **Teams** in the rail, after Accounts and beside **Waiting for you**.
+This screen lists this computer's teams from the existing followed list read;
+it adds no polling. Each row shows the project, status, lead, accepted-task
+progress, Stuck marker, unanswered questions and member count when available.
+Counts with `+` are lower bounds. **More teams** reads one bounded cursor page;
+**First page** returns to the beginning. Browsing retains one current page and
+does not grow the bounded session lookup cache.
+
+Select a row to open its bound lead session's **Team** tab. The binding uses
+the computer's machine identity and launch or run identity. If the lead is
+missing from the session list or has changed, the screen explains that instead
+of opening a similarly named session.
+
+Press **New team** in the screen header or its empty state. The `team.new`
+command also remains available. The dialog starts from a **Template**:
 
 | Template | Roster besides the lead | Default pipeline | A queued task starts |
 |---|---|---|---|

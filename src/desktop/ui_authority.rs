@@ -654,6 +654,13 @@ enum Freshness {
     Fixture,
 }
 impl Validated {
+    pub fn input_acknowledgment(&self) -> Result<&zerus_client_core::input_acknowledgment::Acknowledgment> {
+        self.check()?;
+        let Request::InputAcknowledge { acknowledgment } = &self.0 else {
+            anyhow::bail!("not an input acknowledgment");
+        };
+        Ok(acknowledgment)
+    }
     pub fn id(&self) -> &str {
         self.0.id()
     }
@@ -695,6 +702,7 @@ impl Validated {
             !matches!(
                 self.0,
                 Request::DesktopOwnership { .. }
+                    | Request::InputAcknowledge { .. }
                     | Request::DesktopOwnershipObserve { .. }
                     | Request::NotificationControl { .. }
                     | Request::CacheMaintenance { .. }
@@ -1724,6 +1732,7 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    InputAcknowledge,
     WorktreeProgramStop,
     WorktreeProgramCleanup,
     TerminationOutcome,
@@ -1753,6 +1762,7 @@ impl From<&Request> for OrderedOperation {
     fn from(request: &Request) -> Self {
         use zerus_client_core::desktop::notification_control::Command;
         match request {
+            Request::InputAcknowledge { .. } => Self::InputAcknowledge,
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::WorktreeProgramStop { .. } => Self::WorktreeProgramStop,
@@ -3470,6 +3480,21 @@ mod tests {
             notification: None,
             application: "com.hgdev.hgs-tray".into(),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn input_acknowledgment_is_only_exposed_through_its_typed_native_boundary() {
+        let ack = zerus_client_core::input_acknowledgment::Acknowledgment {
+            request_id:id(103),name:"claude/example/review".into(),expected_run_id:"run".into(),expected_conversation_id:"conversation".into(),
+            original_request_id:id(104),pending_at:10.0,terminal_binding_id:"a".repeat(64),expires_at:15.0,
+        };
+        let request = Request::InputAcknowledge { acknowledgment: Box::new(ack.clone()) };
+        let permit = live_authorized(request.clone(),1).into_request(&mut Order::default()).unwrap();
+        assert_eq!(permit.input_acknowledgment().unwrap(), &ack);
+        assert!(permit.into_request().is_err(), "generic handlers cannot consume person input authority");
+        let wrong = live_authorized(Request::ActivationWait {request_id:id(105)},1).into_request(&mut Order::default()).unwrap();
+        assert!(wrong.input_acknowledgment().is_err());
     }
 
     #[test]

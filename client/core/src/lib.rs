@@ -33,6 +33,7 @@ pub mod fleet;
 pub mod fsx;
 pub mod git;
 pub mod image;
+pub mod input_acknowledgment;
 pub mod input_queue;
 pub mod keep_warm;
 pub mod launch;

@@ -711,7 +711,7 @@ public enum SessionActionsMenu {
             archived || !facts.target.agentId.isEmpty ? [] : [readItem(facts)],
             [SessionMenuItem(SessionNotificationPreferences.operation,SessionNotificationPreferences.label(SessionNotificationPreferences.parse(facts.row,facts.target)),
                 reason:notificationReason(facts),hint:"Applies to this conversation on all devices.")],
-            // The person's per-child question route switch (zerus-sa9qn.33): live Claude children only.
+            // The person's per-child question route switch (zerus-sa9qn.33): qualified children only.
             SessionQuestionRouting.applies(facts.target,facts.row) ? [SessionMenuItem(SessionQuestionRouting.operation,SessionQuestionRouting.label(facts.row),
                 reason:questionRoutingReason(facts),hint:SessionQuestionRouting.hint)] : [],
             lifecycle,

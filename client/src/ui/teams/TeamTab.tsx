@@ -3,7 +3,8 @@ import { tr } from "../../i18n";
 import { selected, setPage } from "../../store/ui";
 import { machineCards } from "../../store/machines";
 import { newRequestId, teams, type TeamCall, type UnresolvedCall } from "../../store/teams";
-import { rowIdentity } from "./session-binding";
+import { rowIdentity, rowIsSession } from "./session-binding";
+import { navigationTeamFor } from "./lead-navigation";
 import { teamCall, type TaskButton } from "./actions";
 import { MemberCard } from "./MemberCard";
 import { TeamBar } from "./team-bar";
@@ -223,6 +224,8 @@ export function TeamUncertain(props: { detail: string; busy: boolean; onCheck: (
 function selectedLeadBinding() {
   const row = selected();
   if (!row) return { state: "none" as const };
+  const opened = navigationTeamFor(row);
+  if (opened) return { state: "lead" as const, team: opened };
   const identity = rowIdentity(row);
   // Without the computer's machine UUID no binding can be verified: no lookup.
   return identity.machine ? teams.teamOfSession(identity) : { state: "unknown" as const };
@@ -254,9 +257,14 @@ export function TeamTab() {
     }
   }));
   onCleanup(() => { teams.clearFailure(source()); });
+  const leadChanged = createMemo(() => {
+    const row = selected(), current = target(), ready = scope.ready(), shown = teams.team();
+    return !!row && !!shown && !!navigationTeamFor(row) && ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team
+      && !rowIsSession(row, shown.members.find((member) => member.id === shown.bar.lead)?.session);
+  });
   const view = createMemo(() => {
     const current = target(), ready = scope.ready(), shown = teams.team();
-    return ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team ? shown : undefined;
+    return !leadChanged() && ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team ? shown : undefined;
   });
   const readFailure = () => target().team ? teams.readFailureFor(`team:${target().team}`) : null;
   const act = (kind: string, fields: Record<string, unknown> = {}) => {
@@ -269,7 +277,7 @@ export function TeamTab() {
     <Show when={scope.failure()}>{(reason) => <div class="notice danger team-notice" role="alert"><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
     <Show when={view()} fallback={
       <div class="team-loading" role="status" data-team-waiting>
-        <span class="dim">{binding().state === "none" ? tr("This session is not a team lead.") : tr("Finding the team of this session…")}</span>
+        <span class="dim">{leadChanged() ? tr("The team's lead session has changed. Open it from Teams again.") : binding().state === "none" ? tr("This session is not a team lead.") : tr("Finding the team of this session…")}</span>
       </div>
     }>{(current) => <TeamWorkspace view={current()} busy={teams.busy()} failure={readFailure()} actionFailure={actionReason(source())}
       onAction={act} onPage={(cursor) => void teams.page(`team:${current().bar.id}`, cursor)} onAddTask={() => setPage("projects")} />}</Show>

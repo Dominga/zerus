@@ -135,7 +135,7 @@ internal class TaskEditDraftFiles(
     }
     fun edit(scope: TaskEditDraftScope, draftId: String, sequence: Long, changes: String): TaskEditSavedDraft = synchronized(LOCK) {
         val previous = original(scope, draftId)
-        if (previous.state == TaskEditDraftState.Editing && previous.qualified && sequence == previous.changeSequence && changes == previous.changes) return@synchronized previous
+        if (previous.state == TaskEditDraftState.Editing && previous.qualified && sequence == previous.changeSequence && changes == previous.changes) return@synchronized write(previous)
         check(previous.state == TaskEditDraftState.Editing && previous.qualified && sequence > previous.changeSequence) {
             "This task draft changed or transport already started. The newer draft was kept."
         }

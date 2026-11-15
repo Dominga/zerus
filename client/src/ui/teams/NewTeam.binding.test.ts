@@ -130,7 +130,7 @@ it("starts only a planning intent with the writer-derived catalog, required goal
   await vi.waitFor(() => expect(f.acts).toHaveLength(1));
   expect(f.acts[0].action).toMatchObject({kind:"start_planning",goal:planningSource.view.planning.goal,delegations:permissions});
   expect(f.acts[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
-  expect(store.createIntent()).toBeNull();
+  await vi.waitFor(() => expect(store.createIntent()).toBeNull());
 });
 
 it("sends the checkboxes as they are for every combination that differs from the template", async () => {

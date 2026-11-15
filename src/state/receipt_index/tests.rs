@@ -1094,6 +1094,13 @@ fn a_guarded_cache_with_a_cut_change_upgrade_recovers_its_frontier() {
         .unwrap();
     assert_eq!(indexes, 3);
     let scope = scope("wanted", "run", "");
+    // Rebuilding a schema's counters cannot itself verify its original fields.
+    // The background original walk clears this explicit upgrade requirement.
+    assert_eq!(
+        recovered.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
+        false
+    );
+    assert_eq!(migration::worker(temp.path()).unwrap(), 0);
     assert_eq!(
         recovered.page(&scope, "", 100, true).unwrap().metadata["migration_complete"],
         true

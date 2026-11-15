@@ -151,6 +151,18 @@ class CodexAsync(unittest.TestCase):
         payload=dict(request_id=request_id or str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=[answer or dict(question_id='q_0',text='Accepted answer')])
         result=subprocess.run([str(fixtures.HGS),'answer',self.name,'--json'],input=json.dumps(payload),env=self.env,text=True,capture_output=True,timeout=15)
         return result,payload
+    def test_an_exact_answer_receipt_remains_readable_when_priority_is_unavailable(self):
+        card=self.request()
+        result,payload=self.answer(card)
+        self.assertEqual(result.returncode,0,result.stderr)
+        before=self.received()
+        path=self.state/'receipt-index-priority.lock'
+        path.unlink(missing_ok=True);path.mkdir()
+        replay,_=self.answer(card,request_id=payload['request_id'])
+        self.assertEqual(replay.returncode,0,replay.stderr)
+        self.assertEqual(replay.stdout,result.stdout)
+        self.assertEqual(self.received(),before)
+
     def test_questions_before_recent_tail_are_recovered_and_legacy_cache_migrates(self):
         # No prior inspection: the pending question is already outside 8 MiB.
         self.append(dict(type='response_item',timestamp='2026-10-07T15:00:00Z',payload=dict(type='function_call',name='request_user_input_async',call_id='call_one',arguments=json.dumps(dict(questions=[dict(title='Which option?',options=self.options)])))))

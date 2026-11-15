@@ -498,7 +498,7 @@ impl Catalog {
             let has_change = columns.iter().any(|column| column == "change");
             let unseeded = if has_change {
                 sql(db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)",
+                    "SELECT EXISTS(SELECT 1 FROM receipt_sources s WHERE EXISTS(SELECT 1 FROM receipt_rows r WHERE r.source=s.source AND r.change=0))",
                     [],
                     |row| row.get::<_, bool>(0),
                 ))?
@@ -512,7 +512,7 @@ impl Catalog {
                     |row| row.get(0),
                 ))?;
                 let maximum: i64 = sql(db.query_row(
-                    "SELECT COALESCE(MAX(change),0) FROM receipt_rows",
+                    "SELECT COALESCE(MAX((SELECT MAX(change) FROM receipt_rows r WHERE r.source=s.source)),0) FROM receipt_sources s",
                     [],
                     |row| row.get(0),
                 ))?;
@@ -642,6 +642,27 @@ impl Catalog {
         // the exact witness once here; if that is busy or fails, readers stay
         // unknown and request the worker, which re-witnesses on every run.
         if create && !catalog.witness_present() {
+            // A changed/missing schema token cannot certify cached projection
+            // fields merely by recounting them. Retain a durable original-walk
+            // requirement, including when another foreground writer opens first.
+            let populated: bool = sql(catalog.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM receipt_rows LIMIT 1)",
+                [],
+                |row| row.get(0),
+            ))?;
+            if populated {
+                let transaction = sql(rusqlite::Transaction::new_unchecked(
+                    &catalog.db,
+                    rusqlite::TransactionBehavior::Immediate,
+                ))?;
+                for source in Source::ALL {
+                    catalog.error(source, "@source", "index_schema_unverified")?;
+                }
+                sql(catalog
+                    .db
+                    .execute("UPDATE receipt_sources SET complete=0", []))?;
+                sql(transaction.commit())?;
+            }
             let _ = catalog.witness();
         }
         Ok(catalog)
@@ -650,7 +671,10 @@ impl Catalog {
         // Sequence allocation and the row write must be visible together: a
         // reader that sees a higher change_seq must also see every lower row.
         if self.db.is_autocommit() {
-            let transaction = sql(self.db.unchecked_transaction())?;
+            let transaction = sql(rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            ))?;
             self.remember_row(source, path, value)?;
             sql(transaction.commit())?;
             Ok(())
@@ -806,7 +830,11 @@ impl Catalog {
             1000,
             Some(move || deadline.is_some_and(|d| Instant::now() >= d)),
         );
-        let verified = self.coverage_verified();
+        let verified = if scope.source == Source::Question {
+            self.coverage_verified_for(Some(Source::Question))
+        } else {
+            self.coverage_verified()
+        };
         let protocol = rowset_protocol(&self.db);
         let work = Arc::new(AtomicUsize::new(0));
         let counter = work.clone();
@@ -1040,10 +1068,16 @@ impl Catalog {
     /// originals from masquerading as complete coverage. It neither walks the
     /// directory nor writes: the caller requests the background worker.
     fn coverage_verified(&self) -> bool {
+        self.coverage_verified_for(None)
+    }
+    fn coverage_verified_for(&self, source: Option<Source>) -> bool {
         if !rowset_protocol(&self.db) {
             return false;
         }
-        if !self.witness_current() {
+        if !source.map_or_else(
+            || self.witness_current(),
+            |s| self.source_witness_current(s.key()),
+        ) {
             return false;
         }
         // A row without a sequence, or a frontier behind MAX(change), means a
@@ -1055,12 +1089,12 @@ impl Catalog {
         let consistent: bool = self
             .db
             .query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources s WHERE EXISTS
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources s WHERE (?1='' OR s.source=?1) AND EXISTS
                      (SELECT 1 FROM receipt_rows r WHERE r.source=s.source AND r.change=0))
                    AND COALESCE((SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'),0)
                        >= COALESCE((SELECT MAX((SELECT MAX(change) FROM receipt_rows r WHERE r.source=s.source))
-                                      FROM receipt_sources s),0)",
-                [],
+                                      FROM receipt_sources s WHERE (?1='' OR s.source=?1)),0)",
+                [source.map_or("", Source::key)],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -1488,7 +1522,11 @@ impl Catalog {
         // The pinned changed page retains the row-set protocol check through
         // coverage_verified(): a cache without its invalidation guards proves
         // no coverage.
-        let verified = self.coverage_verified();
+        let verified = if scope.source == Source::Question {
+            self.coverage_verified_for(Some(Source::Question))
+        } else {
+            self.coverage_verified()
+        };
         let ready = verified
             && complete
             && current_directory
@@ -1807,7 +1845,10 @@ pub(in crate::state) fn remember_committed(
         let (state, filename) = receipt_location(path, source)?;
         let catalog = Catalog::open(&state, true)?;
         let registered = (|| -> Result<()> {
-            let transaction = sql(catalog.db.unchecked_transaction())?;
+            let transaction = sql(rusqlite::Transaction::new_unchecked(
+                &catalog.db,
+                rusqlite::TransactionBehavior::Immediate,
+            ))?;
             let prior: (String, bool, i64, i64) = sql(catalog.db.query_row(
                 "SELECT stamp,complete,indexed,errors FROM receipt_sources WHERE source=?",
                 [source.key()],

@@ -1,22 +1,42 @@
 //! A person's answer may wait for a worker batch, within one request budget.
 //! Inspection and ordinary cache writers retain their own short busy timeouts.
 use super::*;
-use std::{cell::Cell, marker::PhantomData, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    marker::PhantomData,
+    rc::Rc,
+};
 
 const LIMIT: Duration = Duration::from_millis(750);
 thread_local! {
     static UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+    static QUESTIONS: RefCell<Option<(PathBuf, f64)>> = const { RefCell::new(None) };
 }
 
 #[must_use]
 pub(crate) struct Wait {
     previous: Option<Instant>,
+    previous_questions: Option<(PathBuf, f64)>,
+    _priority: Option<Guard>,
     // The SQLite callback and restoration both belong to this thread.
     _thread: PhantomData<Rc<()>>,
 }
 impl Wait {
     pub(crate) fn new() -> Self {
         Self::until(Instant::now() + LIMIT)
+    }
+    #[cfg(test)]
+    pub(crate) fn for_answer(state: &Path) -> Result<Self> {
+        let mut wait = Self::new();
+        wait.prioritize(state)?;
+        Ok(wait)
+    }
+    pub(crate) fn prioritize(&mut self, state: &Path) -> Result<()> {
+        // Keep the worker handed off through all nested receipt checks and
+        // canonical publication, not only one discovery walk. A cached exact
+        // receipt remains readable before acquiring this optimization's lock.
+        self._priority = migration::priority(state, false)?;
+        Ok(())
     }
     fn until(deadline: Instant) -> Self {
         let previous = UNTIL.with(|until| {
@@ -26,6 +46,12 @@ impl Wait {
         });
         Self {
             previous,
+            previous_questions: if previous.is_none() {
+                QUESTIONS.with(|value| value.borrow_mut().take())
+            } else {
+                None
+            },
+            _priority: None,
             _thread: PhantomData,
         }
     }
@@ -33,6 +59,27 @@ impl Wait {
 impl Drop for Wait {
     fn drop(&mut self) {
         UNTIL.with(|until| until.set(self.previous));
+        if self.previous.is_none() {
+            QUESTIONS.with(|value| *value.borrow_mut() = self.previous_questions.take());
+        }
+    }
+}
+
+// One root per native answer, cleared when its outer admission scope ends.
+// This only permits metadata reconciliation after this same request already
+// parsed the family. It never skips discovery, original stamps or coverage.
+pub(super) fn question_reconciled(state: &Path) -> Option<f64> {
+    QUESTIONS.with(|value| {
+        value
+            .borrow()
+            .as_ref()
+            .filter(|(root, _)| root == state)
+            .map(|(_, at)| *at)
+    })
+}
+pub(super) fn reconciled_question(state: &Path, at: f64) {
+    if UNTIL.with(Cell::get).is_some() && question_reconciled(state).is_none() {
+        QUESTIONS.with(|value| *value.borrow_mut() = Some((state.to_owned(), at)));
     }
 }
 
@@ -117,5 +164,28 @@ mod tests {
         let reader = Catalog::open(temp.path(), false).unwrap();
         assert_eq!(timeout(&reader.db), 20);
         assert!(reader.db.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    #[test]
+    fn the_whole_answer_holds_priority_and_its_first_validation_time() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(question_reconciled(temp.path()).is_none());
+        let answer = Wait::for_answer(temp.path()).unwrap();
+        assert!(migration::priority(temp.path(), true).unwrap().is_none());
+        let first = now() - 1.0;
+        reconciled_question(temp.path(), first);
+        {
+            let _nested = Wait::new();
+            reconciled_question(temp.path(), now());
+            assert_eq!(question_reconciled(temp.path()), Some(first));
+        }
+        assert_eq!(question_reconciled(temp.path()), Some(first));
+        drop(answer);
+        assert!(question_reconciled(temp.path()).is_none());
+        assert!(migration::priority(temp.path(), true).unwrap().is_some());
     }
 }

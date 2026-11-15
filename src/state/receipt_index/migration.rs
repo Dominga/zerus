@@ -1,7 +1,9 @@
 //! One coalesced worker per state root; each transaction has a count/time budget.
-//! Restart reopens discovery in the background and retains every committed row
-//! and sequence. No directory walk (including restart work) runs in inspection.
+//! Restart retains committed locators and a fenced row cursor. Discovery
+//! resumes with metadata checks rather than reparsing its committed prefix.
+//! No directory walk (including restart work) runs in inspection.
 use super::*;
+mod progress;
 use fs2::FileExt;
 use std::fs::ReadDir;
 #[cfg(not(test))]
@@ -51,6 +53,32 @@ fn try_guard(path: &Path) -> Result<Option<Guard>> {
         Err(_) => Err("Receipt index worker lock is unavailable".into()),
     }
 }
+fn busy(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DatabaseBusy)
+}
+pub(super) fn priority(state: &Path, worker: bool) -> Result<Option<Guard>> {
+    let path = state.join("receipt-index-priority.lock");
+    if worker {
+        return try_guard(&path);
+    }
+    private_dir(state)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    crate::platform::private_open(&mut options);
+    crate::platform::no_follow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|_| "Receipt admission lock is unavailable")?;
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err("Receipt admission lock is unavailable".into());
+    }
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(Some(Guard::held(file))),
+        Err(error) if crate::platform::lock_contended(&error) => Ok(None),
+        Err(_) => Err("Receipt admission lock is unavailable".into()),
+    }
+}
+
 pub(super) fn request(state: &Path) {
     // A libtest image is not an hgs helper. Actual detached-worker coverage
     // uses the separately built CLI and a private state root.
@@ -82,14 +110,15 @@ fn request_worker(state: &Path) {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
-        let last = options
+        let hint = options
             .open(&attempt)
             .ok()
             .filter(|file| file.metadata().is_ok_and(|m| m.is_file()))
             .and_then(|file| serde_json::from_reader::<_, Value>(file.take(4096)).ok())
-            .and_then(|value| value["at"].as_f64())
-            .unwrap_or(0.0);
-        if now() - last < 5.0 {
+            .unwrap_or(Value::Null);
+        let last = hint["at"].as_f64().unwrap_or(0.0);
+        let retry = hint["retry_after"].as_f64().unwrap_or(0.0) - now();
+        if now() - last < 5.0 || (retry > 0.0 && retry <= 60.0) {
             return Ok(());
         }
         atomic(&attempt, &json!({"at":now()}).to_string())?;
@@ -137,6 +166,9 @@ struct Walk {
     walk_errors: bool,
     attempts: u32,
     catchup: Option<CatchUp>,
+    // Repair invalidated projections by parsing originals; ordinary background
+    // discovery can reuse only an unchanged, old original stamp.
+    reparse: bool,
 }
 /// zerus-kj3mb: a listing after a walk that the directory or row set changed
 /// under. It re-reads only unknown, changed or recently modified originals,
@@ -227,15 +259,25 @@ pub(super) struct Migration {
     walk: Option<Walk>,
     // Catch-up entries per unit of the step budget (LIGHT; tests lower it).
     light: usize,
+    background: bool,
+    incremental: bool,
+    reuse_since: Option<f64>,
+    _priority: Option<Guard>,
 }
 impl Migration {
+    #[cfg(test)]
     pub(super) fn new(state: &Path) -> Result<Self> {
         // Restart reconciles originals even when cached directory metadata
         // claims completion. A lost locator is not a change to its directory.
         Self::with_sources(state, Source::ALL.to_vec(), true)
     }
     pub(super) fn questions(state: &Path) -> Result<Self> {
-        Self::with_sources(state, vec![Source::Question], true)
+        let priority = priority(state, false)?;
+        let mut migration = Self::with_sources(state, vec![Source::Question], true)?;
+        migration._priority = priority;
+        migration.reuse_since = admission::question_reconciled(state);
+        migration.incremental = migration.reuse_since.is_some();
+        Ok(migration)
     }
     fn with_sources(state: &Path, sources: Vec<Source>, force: bool) -> Result<Self> {
         let catalog = Catalog::open(state, true)?;
@@ -251,18 +293,67 @@ impl Migration {
             next_source: 0,
             walk: None,
             light: LIGHT,
+            background: false,
+            incremental: false,
+            reuse_since: None,
+            _priority: None,
+        })
+    }
+    fn background(state: &Path) -> Result<Self> {
+        let mut migration = Self::with_sources(state, Source::ALL.to_vec(), false)?;
+        migration.background = true;
+        migration.incremental = true;
+        // Bound the bulk writer cache at 16 MiB. The default 2 MiB cache
+        // churns the many receipt indexes at large histories; FULL durability
+        // and the canonical original publication remain unchanged.
+        sql(migration
+            .catalog
+            .db
+            .execute_batch("PRAGMA cache_size=-16384"))?;
+        // Capture age before refreshing the row-set tokens. A periodic census
+        // compares file stamps, rather than parsing every unchanged original.
+        migration.force = migration.catalog.verification_due();
+        if !migration.catalog.witness_current() {
+            migration.catalog.witness()?;
+        }
+        progress::restore(&mut migration)?;
+        Ok(migration)
+    }
+    fn unchanged(catalog: &Catalog, source: Source, path: &Path, at: f64) -> bool {
+        let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
+            return false;
+        };
+        file_state(path).is_some_and(|(stamp, modified)| {
+            modified < at - COARSE_CLOCK
+                && catalog
+                    .cached_row(source, id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|row| row.stamp == stamp)
         })
     }
     /// A bounded slice. Holding ReadDir across slices avoids rescanning a
     /// prefix on every batch; committed locators survive process interruption.
     pub(super) fn step(&mut self) -> Result<bool> {
+        let transaction = match rusqlite::Transaction::new_unchecked(
+            &self.catalog.db,
+            rusqlite::TransactionBehavior::Immediate,
+        ) {
+            Ok(transaction) => transaction,
+            // No iterator/cursor has advanced yet. Keep the physical worker and
+            // its retained walk; foreground checks keep their one bounded wait.
+            Err(error) if self.background && busy(&error) => return Ok(false),
+            Err(error) => return sql(Err(error)),
+        };
         let deadline = Instant::now() + SLICE;
-        let transaction = sql(self.catalog.db.unchecked_transaction())?;
         let mut examined = 0;
         let mut light = 0;
         while examined < BATCH && Instant::now() < deadline {
             if self.walk.is_none() {
                 let Some(source) = self.sources.get(self.next_source).copied() else {
+                    if self.background {
+                        progress::save(self)?;
+                    }
                     sql(transaction.commit())?;
                     return Ok(true);
                 };
@@ -289,7 +380,14 @@ impl Migration {
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional())?;
+                let errors: i64 = sql(self.catalog.db.query_row(
+                    "SELECT errors FROM receipt_sources WHERE source=?",
+                    [source.key()],
+                    |row| row.get(0),
+                ))?;
                 if !self.force
+                    && errors == 0
+                    && self.catalog.source_witness_current(source.key())
                     && prior
                         .as_ref()
                         .is_some_and(|(stamp, complete)| *complete && *stamp == started)
@@ -297,17 +395,22 @@ impl Migration {
                     continue;
                 }
 
-                sql(self.catalog.db.execute(
-                    "UPDATE receipt_sources SET complete=0 WHERE source=?",
-                    [source.key()],
-                ))?;
+                let covered = prior
+                    .as_ref()
+                    .is_some_and(|(stamp, complete)| *complete && *stamp == started)
+                    && self.catalog.source_witness_current(source.key());
+                if !covered {
+                    sql(self.catalog.db.execute(
+                        "UPDATE receipt_sources SET complete=0 WHERE source=?",
+                        [source.key()],
+                    ))?;
+                }
                 sql(self.catalog.db.execute("DELETE FROM receipt_walk_seen", []))?;
                 let entries = if started == "absent" {
                     None
                 } else {
                     Some(fs::read_dir(&directory).map_err(|_| "Receipt source is unavailable")?)
                 };
-                let covered = prior.is_some_and(|(stamp, complete)| complete && stamp == started);
                 let (epoch, count_at_start, schema) = source_witness(&self.catalog, source)?;
                 let witness_error: bool = sql(self.catalog.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM receipt_errors WHERE source=? AND name='@witness')",
@@ -330,10 +433,11 @@ impl Migration {
                     count_at_start,
                     schema,
                     witness_error,
-                    at: now(),
+                    at: self.reuse_since.unwrap_or_else(now),
                     walk_errors,
                     attempts: 0,
                     catchup: None,
+                    reparse: !self.incremental || errors > 0,
                 });
             }
             let walk = self.walk.as_mut().unwrap();
@@ -452,7 +556,14 @@ impl Migration {
             if let Some(entries) = walk.entries.as_mut() {
                 match entries.next() {
                     Some(Ok(entry)) => {
-                        examined += 1;
+                        if self.incremental {
+                            light += 1;
+                            if light % self.light == 0 {
+                                examined += 1;
+                            }
+                        } else {
+                            examined += 1;
+                        }
                         let filename = entry.file_name();
                         let Some(filename) =
                             filename.to_str().filter(|name| name.ends_with(".json"))
@@ -479,18 +590,25 @@ impl Migration {
                                 [walk.source.key()],
                             ))?;
                         }
-                        let loaded = read_original(&entry.path());
-                        match loaded {
-                            Ok(value) => {
-                                if self
-                                    .catalog
-                                    .remember(walk.source, &entry.path(), &value)
-                                    .is_err()
-                                {
-                                    self.catalog.error(walk.source, filename, "corrupt")?;
-                                }
+                        let unchanged = !walk.reparse
+                            && Self::unchanged(&self.catalog, walk.source, &entry.path(), walk.at);
+                        if !unchanged {
+                            if self.incremental {
+                                examined += 1;
                             }
-                            Err(reason) => self.catalog.error(walk.source, filename, reason)?,
+                            let loaded = read_original(&entry.path());
+                            match loaded {
+                                Ok(value) => {
+                                    if self
+                                        .catalog
+                                        .remember(walk.source, &entry.path(), &value)
+                                        .is_err()
+                                    {
+                                        self.catalog.error(walk.source, filename, "corrupt")?;
+                                    }
+                                }
+                                Err(reason) => self.catalog.error(walk.source, filename, reason)?,
+                            }
                         }
                         sql(self
                             .catalog
@@ -528,7 +646,14 @@ impl Migration {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional())?;
             if let Some((id, seen)) = row {
-                examined += 1;
+                if self.incremental {
+                    light += 1;
+                    if light % self.light == 0 {
+                        examined += 1;
+                    }
+                } else {
+                    examined += 1;
+                }
                 walk.indexed += 1;
                 walk.after = Some(id.clone());
                 if seen {
@@ -543,6 +668,12 @@ impl Migration {
                     .state
                     .join(walk.source.directory())
                     .join(&filename);
+                if !walk.reparse && Self::unchanged(&self.catalog, walk.source, &path, walk.at) {
+                    continue;
+                }
+                if self.incremental {
+                    examined += 1;
+                }
                 match read_original(&path) {
                     Ok(value) => {
                         if self.catalog.remember(walk.source, &path, &value).is_err() {
@@ -602,6 +733,9 @@ impl Migration {
                 self.walk = None;
             }
         }
+        if self.background {
+            progress::save(self)?;
+        }
         sql(transaction.commit())?;
         Ok(false)
     }
@@ -611,7 +745,13 @@ impl Migration {
 /// waiting on worker scheduling, one short budget at a time.
 pub(super) fn advance(state: &Path, budget: Duration) -> Result<bool> {
     let deadline = Instant::now() + budget;
-    let mut migration = Migration::new(state)?;
+    let Some(_guard) = try_guard(&state.join("receipt-index-worker.lock"))? else {
+        return Ok(false);
+    };
+    if priority(state, true)?.is_none() {
+        return Ok(false);
+    }
+    let mut migration = Migration::background(state)?;
     loop {
         if migration.step()? {
             return Ok(true);
@@ -623,17 +763,47 @@ pub(super) fn advance(state: &Path, budget: Duration) -> Result<bool> {
 }
 
 pub(super) fn worker(state: &Path) -> Result<i32> {
+    let result = run_worker(state);
+    if result.is_err() {
+        // A genuinely unavailable cache stays unknown. Do not turn a durable
+        // error into a five-second process storm; this is only a scheduling hint.
+        let _ = atomic(
+            &state.join("receipt-index-attempt.json"),
+            &json!({"at":now(), "retry_after":now()+60.0}).to_string(),
+        );
+    }
+    result
+}
+fn run_worker(state: &Path) -> Result<i32> {
     let Some(_guard) = try_guard(&state.join("receipt-index-worker.lock"))? else {
         return Ok(0);
     };
-    let mut migration = Migration::new(state)?;
-    // Every worker request re-witnesses the exact row set first, so a stale
-    // token (old, foreign schema or past WITNESS_DELTA) converges here.
-    migration.catalog.witness()?;
-    while !migration.step()? {
+    let until = Instant::now() + Duration::from_secs(30);
+    let mut migration = loop {
+        if priority(state, true)?.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        match Migration::background(state) {
+            Ok(migration) => break migration,
+            Err(error) if error.contains("SQLite DatabaseBusy") && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    loop {
+        // Foreground authority checks announce themselves before opening SQLite.
+        // Never hold this probe while acquiring SQLite, avoiding lock inversion.
+        let allowed = {
+            let probe = priority(state, true)?;
+            probe.is_some()
+        };
+        if allowed && migration.step()? {
+            return Ok(0);
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
-    Ok(0)
 }
 
 #[cfg(test)]

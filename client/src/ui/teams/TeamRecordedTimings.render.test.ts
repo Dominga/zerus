@@ -20,6 +20,7 @@ it("shows product effect and stage times as recorded bookkeeping at the read rev
   const host = mount(() => createComponent(TeamTimeline, { page }));
   expect(host.querySelector('[data-recorded-revision]')?.textContent).toContain(String(page.timings!.revision));
   expect(host.textContent).toContain("Reservation recorded"); expect(host.textContent).toContain("Stage creation recorded");
+  expect(host.textContent).toContain("Recorded stage state");
   expect(host.textContent).toContain("Delivery bookkeeping elapsed"); expect(host.textContent).toContain("not measured work or test duration");
   expect(host.querySelector("input, textarea, button")).toBeNull();
 });

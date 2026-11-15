@@ -19,7 +19,7 @@ export function TeamRecordedTimings(props: { facts: RecordedFacts }) {
       <Show when={props.facts.stage}>{(stage) => <dl>
         <dt>{tr("Stage / target / generation")}</dt><dd>{stage().node} / {stage().target} / {stage().generation}</dd>
         <dt>{tr("Stage creation recorded")}</dt><dd>{stamp(stage().created_ms)}</dd>
-        <dt>{tr("Recorded creation state")}</dt><dd>{stage().state}</dd>
+        <dt>{tr("Recorded stage state")}</dt><dd>{stage().state}</dd>
       </dl>}</Show>
       <Show when={props.facts.effect_unavailable || props.facts.stage_unavailable}><p>{tr("Some referenced timing facts are unavailable.")}</p></Show>
       <p class="dim">{tr("These are recorded delivery and stage facts, not measured work or test duration.")}</p>

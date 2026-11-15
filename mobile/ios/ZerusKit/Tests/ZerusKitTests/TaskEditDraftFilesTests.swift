@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Synchronization
 import XCTest
 @testable import ZerusKit
 
@@ -179,6 +180,54 @@ final class TaskEditDraftFilesTests: XCTestCase {
         let replacement = try files(bytes: size + 32).settle(scope, draftId: draft.draftId, requestId: edit, outcome: .unknown)
         XCTAssertEqual(replacement.state, .unknown)
         XCTAssertLessThanOrEqual(try Int64(Data(contentsOf: XCTUnwrap(blobs().first)).count), size + 32)
+    }
+
+    func testAnIdempotentFormRetryCannotHideAnEarlierDurabilityFailure() throws {
+        let store = files(), draft = try create(store)
+        _ = try store.reserve(scope, draftId: draft.draftId, requestId: qualification, payload: "qualification")
+        _ = try store.settle(scope, draftId: draft.draftId, requestId: qualification, outcome: .acknowledged)
+        let failing = files(sync: { throw ZerusError.invalid("Forced private form sync failure") })
+        XCTAssertThrowsError(try failing.edit(scope, draftId: draft.draftId, sequence: 1, changes: "retained form"))
+        XCTAssertEqual(try store.read(scope)?.changes, "retained form")
+        XCTAssertThrowsError(try failing.edit(scope, draftId: draft.draftId, sequence: 1, changes: "retained form"))
+        XCTAssertEqual(try store.read(scope)?.original, original)
+    }
+
+    @MainActor func testBlockedPrivateSyncKeepsOnlyOneActiveAndTheLatestPendingCheckpoint() async throws {
+        let blocked = Mutex(false), entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let store = files(sync: {
+            if blocked.withLock({ $0 }) {
+                entered.signal()
+                guard release.wait(timeout: .now() + 10) == .success else { throw ZerusError.invalid("Private checkpoint sync gate was not released") }
+            }
+        })
+        let key = scope, record = try create(store)
+        _ = try store.reserve(key, draftId: record.draftId, requestId: qualification, payload: "qualification")
+        _ = try store.settle(key, draftId: record.draftId, requestId: qualification, outcome: .acknowledged)
+        var calls: [Int64] = [], done = 0
+        let writer = TaskEditCheckpoints(debounce: .zero, write: { value in
+            calls.append(value.sequence)
+            defer { done += 1 }
+            _ = try await taskEditIO { try store.edit(key, draftId: record.draftId, sequence: value.sequence, changes: value.changes) }
+        })
+        blocked.withLock { $0 = true }
+        writer.offer(TaskEditCheckpoint(sequence: 1, changes: "first"))
+        let started = await Task.detached { entered.wait(timeout: .now() + 10) == .success }.value
+        XCTAssertTrue(started)
+        for sequence in Int64(2)...8 {
+            writer.offer(TaskEditCheckpoint(sequence: sequence, changes: "change \(sequence)"))
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let flushing = Task { try await writer.flush(TaskEditCheckpoint(sequence: 8, changes: "change 8")) }
+        await Task.yield(); flushing.cancel()
+        XCTAssertEqual(calls, [1], "Cancelled debounce jobs submitted extra private writes while sync was blocked")
+        blocked.withLock { $0 = false }; release.signal()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while done < calls.count && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertEqual(done, calls.count, "Private checkpoint callbacks did not physically settle")
+        _ = try? await flushing.value
+        try await writer.flush(TaskEditCheckpoint(sequence: 8, changes: "change 8")); writer.close()
+        XCTAssertEqual(try store.read(key)?.changes, "change 8")
     }
 
 }

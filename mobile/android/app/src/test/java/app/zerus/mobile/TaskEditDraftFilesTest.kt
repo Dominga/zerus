@@ -211,4 +211,14 @@ class TaskEditDraftFilesTest {
         refuses { store.discardUnsubmitted(scope, next.draftId) }
         assertEquals(TaskEditDraftState.Unknown, store.read(scope)!!.state)
     }
+    @Test fun anIdempotentFormRetryCannotHideTheEarlierDurabilityFailure() {
+        val root = temporary.newFolder()
+        val store = files(root); val draft = qualified(store)
+        val failing = files(root, sync = { error("Forced private form sync failure") })
+        refuses { failing.edit(scope, draft.draftId, 1, "retained form") }
+        assertEquals("retained form", store.read(scope)!!.changes)
+        refuses { failing.edit(scope, draft.draftId, 1, "retained form") }
+        assertEquals(original, store.read(scope)!!.original)
+    }
+
 }

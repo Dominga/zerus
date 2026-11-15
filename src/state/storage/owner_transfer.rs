@@ -378,9 +378,24 @@ impl<'a> Held<'a> {
     }
 
     fn write_new(&self, directory: &Directory, name: &str, bytes: &[u8]) -> Result<()> {
+        self.write_new_observed(directory, name, bytes, None)
+    }
+
+    fn write_new_observed(
+        &self,
+        directory: &Directory,
+        name: &str,
+        bytes: &[u8],
+        publication: Option<&mut crate::state::listing_metadata::Publication>,
+    ) -> Result<()> {
         self.verify()?;
         cut_write()?;
-        directory.write_new(name, bytes)?;
+        crate::state::listing_metadata::Publication::write_new(
+            publication,
+            directory,
+            name,
+            bytes,
+        )?;
         self.verify()?;
         if read(directory, name, bytes.len())?.as_deref() != Some(bytes) {
             return Err("Metadata publication is unconfirmed".into());
@@ -550,10 +565,15 @@ pub(in crate::state) fn begin(writer: &Guard, original: &Value, until: Instant) 
         &held.state.path,
         &held.state.path.join(&legacy),
         &current,
-        || {
+        |publication| {
             held.verify()?;
             cut_write()?;
-            held.state.replace_file(&legacy, &encoded(&current)?)
+            crate::state::listing_metadata::Publication::replace(
+                publication,
+                &held.state,
+                &legacy,
+                &encoded(&current)?,
+            )
         },
     )?;
     let protection = worktree_lock::Protection::for_legacy_move(&mut current)?;
@@ -639,12 +659,12 @@ fn commit(
             &held.state.path,
             &held.sessions.path.join(&id_file),
             &after,
-            || {
+            |publication| {
                 domain.verify()?;
                 if let Some(protection) = protection {
                     protection.verify()?;
                 }
-                held.write_new(&held.sessions, &id_file, &encoded(&after)?)
+                held.write_new_observed(&held.sessions, &id_file, &encoded(&after)?, publication)
             },
         )?,
         Some(current) if current == after => (),

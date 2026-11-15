@@ -128,12 +128,27 @@ reader slice owns deliberate activation after coverage/parity qualification.
 The default-off check observes only marker metadata; it does not project a
 record, open SQLite or inspect binding files.
 
-Reader activation also requires exact publication provenance: observing a
-file stamp after the canonical callback is insufficient when another writer
-can replace that file before settlement. The independent overlap control for
-zerus-63r5s.4 demonstrates an old seed paired with a newer file stamp becoming
-fresh after repair. Default-off prevents production use now; it does not solve
-that opted-in race. Slice .2 must depend on its correction and regression.
+Reader activation requires exact publication provenance. Slice .4 replaces a
+post-callback pathname stamp with evidence captured inside the actual canonical
+publication. A snapshot of the private written staging file precedes rename;
+the returned original file and its post-publication stamp must still match it.
+Settlement verifies that retained object and the selected target before using
+that stamp. Another writer's later file cannot certify the earlier seed.
+
+The optional observation never supplies authority or changes the canonical
+callback's result. Missing, changed, wrong-target or reused evidence leaves a
+pending intent; bounded repair observes the canonical bytes without replay.
+Original picker keepers still bypass advisory work. Opaque guarded Effects
+provide no witness, and Windows Directory publishers retain their original
+handle-sharing contract without adding observation; their rows are certified
+only by bounded repair. Ordinary atomic writers observe their private tempfile.
+
+Seed envelope version 2 invalidates version 1 rows and generations, which could
+already contain a seed paired with another writer's stamp. Old rows require a
+bounded canonical read before reuse; old generations return unavailable rather
+than silently dropping rows. Canonical record version/schema and SQLite schema
+stay unchanged. Current readers remain disabled; .2 still needs complete row
+parity, continuous-writer catch-up and independent bootstrap scheduling.
 
 The store is local display evidence with no machine-ID dependency. Canonical
 records keep their existing schema and bytes. Outstanding intents and the

@@ -13,7 +13,8 @@ import time
 import unittest
 import uuid
 
-from test_dsh_shell_identity import DirectlyStarted, HostStartedByHgs, Hosted, DSH, HGS, fixture
+import test_dsh_shell_identity as identity_base
+from test_dsh_shell_identity import DirectlyStarted, Hosted, DSH, HGS, fixture
 
 REFUSED = 'unregistered DeepSeek agent host'
 
@@ -129,8 +130,8 @@ class UnregisteredHostWithNodeOptions(UnregisteredHostBelowItsLauncher):
 
 
 class RegisteredHostWithDamagedRecord(Hosted, unittest.TestCase):
-    setUpClass = classmethod(HostStartedByHgs.setUpClass.__func__)
-    tearDownClass = classmethod(HostStartedByHgs.tearDownClass.__func__)
+    setUpClass = classmethod(identity_base.HostStartedByHgs.setUpClass.__func__)
+    tearDownClass = classmethod(identity_base.HostStartedByHgs.tearDownClass.__func__)
 
     def test_own_hosted_proof_is_unchanged_by_an_unrelated_bad_record(self):
         ref, target = self.task(), self.launch()

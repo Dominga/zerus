@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
-import { selected } from "../../store/ui";
+import { selected, setPage } from "../../store/ui";
 import { machineCards } from "../../store/machines";
 import {
   teams, type TeamCall, type TeamCatalog, type TeamCatalogTemplate, type TeamProjectFacts,
@@ -127,6 +127,7 @@ export interface NewTeamProps {
   /** Reads the catalog again, after the command line said the template changed. */
   onReloadCatalog?: () => Promise<unknown>;
   onClose: () => void;
+  onOpenCatalog?: () => void;
   /** This dialog's refusal kept by the store: one that arrived while it was
    * closed, or a Dismiss the core refused. */
   failure?: string;
@@ -299,6 +300,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       <Show when={props.catalogError}><div class="notice danger nt-error" role="alert"><Icon name="triangle-alert" size={16} /><span>{withoutCode(props.catalogError!)}</span></div></Show>
       <fieldset class="nt-templates">
         <legend>{tr("Template")}</legend>
+        <Show when={props.onOpenCatalog}><button type="button" class="btn ghost small" disabled={locked()} onClick={() => props.onOpenCatalog?.()}>{tr("Catalog")}</button></Show>
         <div class="nt-template-list">
           <For each={props.catalog?.templates ?? []}>
             {(candidate) => (
@@ -445,6 +447,7 @@ export function NewTeamDialog() {
               if (outcome.outcome === "done") close();
               return outcome;
             }}
+            onOpenCatalog={() => { close(); setPage("team-catalog"); }}
             onSaveTemplate={(template) => teams.saveTemplate(template)}
             onReloadCatalog={() => teams.reloadCatalog()}
             onClose={close}

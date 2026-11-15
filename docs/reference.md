@@ -9446,3 +9446,28 @@ clang -Wno-deprecated-declarations tests/test_macos_session_protocol.c \
 Process coverage includes exact call identity, background tasks, stale generations,
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
+
+### Team catalog editor receipts
+
+The desktop Teams catalog edits roles, pipelines and templates from `team-plan`.
+Imports stay in the draft until Save; Revert reads the current personal catalog.
+Built-in entries are inherited, and removing an override reveals the built-in
+entry again. Existing teams keep their launch snapshots.
+
+`hgs team catalog snapshot --json` is a bounded, person-only read of the personal
+catalog, the built-ins and their merged view. Its opaque `revision` fingerprints
+the complete personal catalog and the built-in catalog of that CLI. The editor opts into guarded `catalog import`
+with `{schema:1, request_id, expected_revision, catalog}`. The editor
+limits the exact stored pretty JSON plus its final newline to 240,000 bytes;
+a successful save therefore stays within the next snapshot read bound. Legacy bare-catalog
+imports and template commands keep their existing forms. Catalog writers share
+one lock; a changed revision refuses before publication. A duplicate request
+with identical content returns its stored outcome, while different content
+under that UUID refuses.
+
+A private point journal reserves uncertainty before the catalog is published.
+`hgs team catalog receipt UUID --json` only reads that outcome: an interrupted
+save remains uncertain and is never replayed. The desktop keeps the original
+intent and offers Check result, or an explicit confirmed discard of the draft
+followed by a fresh read. No catalog action launches a team or changes a
+running team's permissions.

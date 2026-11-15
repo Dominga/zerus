@@ -55,7 +55,10 @@ class TaskEditTransportTest {
                 }
                 text.toString()
             }
-            return JSONObject(reply.get(15, TimeUnit.SECONDS))
+            return try { JSONObject(reply.get(15, TimeUnit.SECONDS)) }
+            catch (error: java.util.concurrent.TimeoutException) {
+                throw IllegalStateException("Private native task fixture did not answer $command within 15 seconds; child alive=${process.isAlive}; stderr=${errorLog.readText().takeLast(2048)}", error)
+            }
         }
         override fun close() {
             writer.close()

@@ -724,7 +724,8 @@ tool approvals.
   the decision.
 - After this first migration slice, all other Person operations remain interim:
   creating and editing teams, Start planning, draft phase submission/editing,
-  settings and membership, dependency changes, queue and phase decisions,
+  settings (including validation-provider overrides) and membership,
+  dependency changes, queue and phase decisions,
   intake, preview and catalog/template changes. Future phase approval,
   acceptance and advance-base operations also remain interim until the
   following slice explicitly admits them. They move to native

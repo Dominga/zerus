@@ -291,7 +291,7 @@ mod cases {
     fn selection_is_revisioned_journaled_replayed_and_preserved_by_old_settings() {
         let h = Harness::new();
         h.create();
-        let core_before: u32 = h
+        let core_version: u32 = h
             .store()
             .db
             .as_ref()
@@ -337,7 +337,8 @@ mod cases {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            core_before
+            core_version,
+            "validation overrides preserve the already established core floor"
         );
         assert_eq!(
             h.store()

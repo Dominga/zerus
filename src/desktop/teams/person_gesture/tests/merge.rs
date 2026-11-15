@@ -234,3 +234,35 @@ fn current_native_leaf_is_never_rebuilt_even_when_wholly_missing() {
         0
     );
 }
+
+#[test]
+fn configured_mutation_entry_never_substitutes_configuration_for_a_gesture() {
+    for configured in [false, true] {
+        let (mut h, request) = sample();
+        let config = crate::config::Config {
+            home: h.temp.path().to_string_lossy().into_owned(),
+            dir: h.temp.path().join("config"),
+            state: h.store.state().to_owned(),
+            selves: vec!["fixture-local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let error = ops::apply_with_config(
+            &mut h.store,
+            &actor(),
+            &request,
+            1234,
+            configured.then_some(&config),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code, "person_gesture_required",
+            "configured={configured}"
+        );
+        unchanged(&h, &request);
+    }
+}

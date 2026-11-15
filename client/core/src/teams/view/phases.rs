@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use zerus_team_plan::{draft::DraftNode, model::Phase};
 
 use super::graph::{self, PlanGraph};
+use super::phase_metrics::{self, PhaseMetrics, Unavailable};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseList {
@@ -45,6 +46,7 @@ pub struct PhaseDraft {
     pub next_node: u32,
     pub nodes: Vec<DraftNode>,
     pub graph: PlanGraph,
+    pub metrics: PhaseMetrics,
     pub complete: bool,
     pub editable: bool,
     pub unknown_fields: bool,
@@ -135,12 +137,25 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
         return Err("The phase read has incomplete or conflicting draft identities.".into());
     }
     let nodes = out.nodes.iter().map(|n| n.node(wanted)).collect::<Vec<_>>();
+    let metrics = if !unknown.is_empty() {
+        PhaseMetrics::unavailable(Unavailable::UnknownFields)
+    } else if !matches!(
+        out.phase.state,
+        zerus_team_plan::PhaseState::Draft | zerus_team_plan::PhaseState::Rejected
+    ) {
+        // .161 slice 3 owns the complete live+archive snapshot. Until it is
+        // present, never substitute retained draft nodes or an EOF queue page.
+        PhaseMetrics::unavailable(Unavailable::LiveSnapshotUnavailable)
+    } else {
+        phase_metrics::project(&nodes, out.complete)
+    };
     Ok(PhaseDraft {
         phase: out.phase,
         revision: out.revision,
         generation: out.generation,
         next_node: out.next_node,
         graph: graph::project(&nodes, out.complete),
+        metrics,
         nodes: out.nodes,
         complete: out.complete,
         editable: out.editable && unknown.is_empty(),

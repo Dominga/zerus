@@ -7,6 +7,7 @@ const BYTES: usize = 512 << 10;
 pub(super) struct Cursor {
     epoch: String,
     generation: i64,
+    high_water: i64,
     after: String,
 }
 pub(super) struct Page {
@@ -30,32 +31,43 @@ impl Store {
                 "Listing metadata cursor is stale"
             );
         }
-        let (dirs, gap): (String, String) = self.db.query_row(
-            "SELECT dirs,gap FROM generations WHERE generation=?1 AND complete=1",
+        let (dirs, gap, high_water): (String, String, i64) = self.db.query_row(
+            "SELECT dirs,gap,high_water FROM generations WHERE generation=?1 AND complete=1",
             [generation],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let fresh = ready
+        if let Some(c) = cursor {
+            anyhow::ensure!(c.high_water == high_water, "Display snapshot cut changed");
+        }
+        let mut fresh = ready
             && generation == active
             && repair::directories(self)? == dirs
             && repair::gap_stamp(self)? == gap;
         let after = cursor.map_or("", |c| c.after.as_str());
-        let mut statement=self.db.prepare_cached("SELECT source,CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128")?;
+        let mut statement=self.db.prepare_cached("SELECT source,CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128")?;
         let mut query = statement.query(params![generation, after])?;
         let mut rows = Vec::new();
         let mut bytes = 0;
+        let until = Instant::now() + Duration::from_millis(250);
         while let Some(row) = query.next()? {
+            anyhow::ensure!(
+                Instant::now() < until,
+                "Display page verification timed out"
+            );
             let source: String = row.get(0)?;
             let seed: String = row.get(1)?;
+            let stamp: String = row.get(2)?;
             anyhow::ensure!(
-                source.len() <= 256 && seed.len() <= model::SEED_BYTES,
+                source.len() <= 256 && seed.len() <= model::SEED_BYTES && stamp.len() <= 1024,
                 "Invalid display page row"
             );
-            if bytes + source.len() + seed.len() > BYTES {
+            if bytes + source.len() + seed.len() + stamp.len() > BYTES {
                 break;
             }
-            bytes += source.len() + seed.len();
-            let value = Seed::decode(&Key(source.clone()), &seed)?;
+            bytes += source.len() + seed.len() + stamp.len();
+            let key = Key(source.clone());
+            let value = Seed::decode(&key, &seed)?;
+            fresh &= self.source_stamp(&key).ok().flatten().as_deref() == Some(stamp.as_str());
             rows.push((source, value));
         }
         anyhow::ensure!(
@@ -72,9 +84,22 @@ impl Store {
         let next = more.then(|| Cursor {
             epoch,
             generation,
+            high_water,
             after: last.into(),
         });
         self.verify()?;
         Ok(Page { rows, next, fresh })
+    }
+}
+
+/// The public reader surface intentionally exposes no reservation, settlement,
+/// recovery or canonical effect method.
+pub(super) struct Reader(Store);
+impl Reader {
+    pub fn open(root: &Path) -> anyhow::Result<Self> {
+        Ok(Self(Store::read(root)?))
+    }
+    pub fn page(&self, cursor: Option<&Cursor>) -> anyhow::Result<Page> {
+        self.0.page(cursor)
     }
 }

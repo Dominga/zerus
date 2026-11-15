@@ -83,6 +83,10 @@ pub(crate) use task_binding_index::rows as task_binding_rows;
 mod process_index;
 // Advisory display data only; no production reader uses it in this slice.
 mod listing_metadata;
+pub(crate) use listing_metadata::control::MARKER as LISTING_METADATA_MARKER;
+pub(crate) fn listing_index(args: &[String]) -> Result<Value> {
+    listing_metadata::control::dispatch(args)
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_index_writer;
 mod labels;
@@ -1531,6 +1535,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             return Err("Unexpected archive catalog worker arguments".into());
         }
         return archive_catalog::worker();
+    }
+    if args.first().map(String::as_str) == Some("listing-metadata-worker") {
+        if args.len() != 1 { return Err("Unexpected listing metadata worker arguments".into()); }
+        return listing_metadata::worker::entry();
     }
     if args.first().map(String::as_str) == Some("task-binding-index-worker") {
         if args.len() != 1 {

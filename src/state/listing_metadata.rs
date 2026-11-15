@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 mod model;
+mod changes;
+pub(super) mod worker;
+pub(super) mod control;
 mod publication;
 mod repair;
 mod store;

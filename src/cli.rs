@@ -1155,6 +1155,11 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             println!("{result}"); Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "listing-index" => {
+            if dry { println!("hgs listing-index (display metadata only)"); return Ok(0); }
+            let value=state::listing_index(args).map_err(|e|Error::new(1,e))?;
+            println!("{value}");Ok(0)
+        }
         "watch" => crate::watch::run(&config, args, dry),
         "archives" => {
             let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");

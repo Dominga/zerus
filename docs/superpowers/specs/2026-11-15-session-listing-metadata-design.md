@@ -186,3 +186,25 @@ verified before cache reuse and paged exposure. A store epoch change invalidates
 retained directory cursors, including when a recreated store reuses scan numbers.
 A changed selected-root alias prevents metadata settlement while the canonical
 call still returns its original result. None of these data checks grants authority.
+
+## Reader readiness approval
+
+The .2 implementation starts after provenance PR #2449, merged as e2964a6f0.
+The first reader PR covers readiness prerequisites plus listing; watch remains
+.3. Its PR must contain a field/source/control parity table and end-to-end cold
+and warm `ls` measurements at20k/50k with the index enabled and disabled, plus
+enabled canonical-write p50/p95. Preserve complete legacy JSON or refuse
+truthfully within bounds.
+
+The coordinator approved a bounded native directory change feed for readiness.
+Events only enqueue candidates; a resumable census and exact native row versions
+prove coverage. Overflow, drops, watch exhaustion and restart require rescan or
+unavailable coverage. Watch namespace directories only, with bounded memory and
+one coalesced worker per configured native state root; CLI/GUI correctness does
+not depend on notification delivery. Never accept a namespace change merely
+because a known publisher ran. The feed authorizes no canonical operation.
+
+This first implementation qualifies Linux inotify. macOS FSEvents delivery/drop
+barrier qualification is tracked by zerus-63r5s.8; Windows by zerus-63r5s.7.
+Their consumer activation stays off. Conservative advisory repair remains
+available to private tests and existing opt-in publishers on those platforms.

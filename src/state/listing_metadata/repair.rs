@@ -9,6 +9,8 @@ pub(in crate::state) struct Background {
     root: PathBuf,
     epoch: Option<String>,
     iterator: Option<(i64, i64, fs::ReadDir)>,
+    changes: Option<changes::Changes>,
+    covered: bool,
 }
 #[derive(Default, Debug)]
 pub(in crate::state) struct Stats {
@@ -27,10 +29,11 @@ struct Scan {
     writes: i64,
     gap: String,
     problems: i64,
+    base: i64,
 }
 fn scan(db: &Connection) -> anyhow::Result<Option<Scan>> {
-    Ok(db.query_row("SELECT generation,phase,folder,after_key,dirs,writes,gap,problems FROM scan WHERE id=1",[],|r|Ok(Scan{
-        generation:r.get(0)?,phase:r.get(1)?,folder:r.get(2)?,after:r.get(3)?,dirs:r.get(4)?,writes:r.get(5)?,gap:r.get(6)?,problems:r.get(7)?,
+    Ok(db.query_row("SELECT generation,phase,folder,after_key,dirs,writes,gap,problems,base FROM scan WHERE id=1",[],|r|Ok(Scan{
+        generation:r.get(0)?,phase:r.get(1)?,folder:r.get(2)?,after:r.get(3)?,dirs:r.get(4)?,writes:r.get(5)?,gap:r.get(6)?,problems:r.get(7)?,base:r.get(8)?,
     })).optional()?)
 }
 // Fixed seven directory witnesses, never a full directory inventory here.
@@ -82,19 +85,19 @@ pub(super) fn gap_stamp(store: &Store) -> anyhow::Result<String> {
         .transpose()?
         .unwrap_or_default())
 }
-fn begin(store: &Store) -> anyhow::Result<Scan> {
+fn begin(store: &Store, base: i64) -> anyhow::Result<Scan> {
     let dirs = directories(store)?;
     let gap = gap_stamp(store)?;
     store
         .db
         .execute("UPDATE meta SET ready=0,serial=serial+1 WHERE id=1", [])?;
     store.db.execute(
-        "INSERT INTO generations SELECT serial,0,?1,?2 FROM meta WHERE id=1",
+        "INSERT INTO generations(generation,complete,dirs,gap) SELECT serial,0,?1,?2 FROM meta WHERE id=1",
         params![dirs, gap],
     )?;
     store.db.execute(
-        "INSERT INTO scan SELECT 1,serial,0,0,'',?1,writes,?2,0 FROM meta WHERE id=1",
-        params![dirs, gap],
+        "INSERT INTO scan SELECT 1,serial,?3,0,'',?1,writes,?2,0,?4 FROM meta WHERE id=1",
+        params![dirs, gap, if base == 0 { 0 } else { 6 }, base],
     )?;
     scan(&store.db)?.ok_or_else(|| anyhow::anyhow!("Missing display scan"))
 }
@@ -205,16 +208,20 @@ fn project(store: &Store, s: &mut Scan, key: &Key, stats: &mut Stats) -> anyhow:
                 let value: Value = serde_json::from_str(&seed)?;
                 if value["record"]["rename_shadow"] != true {
                     store.db.execute(
-                        "INSERT INTO snapshots(generation,source,seed) VALUES(?1,?2,?3)",
-                        params![s.generation, key.0, seed],
+                        "INSERT OR REPLACE INTO snapshots(generation,source,seed,stamp) VALUES(?1,?2,?3,?4)",
+                        params![s.generation, key.0, seed, stamp],
                     )?;
                 }
+            } else {
+                store.db.execute(
+                    "DELETE FROM snapshots WHERE generation=?1 AND source=?2",
+                    params![s.generation, key.0],
+                )?;
             }
         }
         Err(error) => {
             // Unknown retains its previous seed. It is NOT a tombstone and
             // this scan cannot replace a complete published generation.
-            s.problems += 1;
             let reason = error.to_string().chars().take(256).collect::<String>();
             store.db.execute("INSERT INTO sources(source,seed,stamp,revision,tombstone,issue) VALUES(?1,NULL,NULL,0,0,?2) ON CONFLICT(source) DO UPDATE SET issue=excluded.issue",params![key.0,reason])?;
         }
@@ -242,6 +249,12 @@ fn collect(store: &Store, until: Instant) -> anyhow::Result<()> {
     let failed:Option<i64>=store.db.query_row("SELECT generation FROM generations WHERE complete=0 AND generation!=?1 ORDER BY generation LIMIT 1",[scanning.unwrap_or(-1)],|r|r.get(0)).optional()?;
     let old:Option<i64>=store.db.query_row("SELECT generation FROM generations WHERE complete=1 AND generation<?1 ORDER BY generation LIMIT 1",[previous.unwrap_or(-1)],|r|r.get(0)).optional()?;
     if let Some(generation) = failed.or(old) {
+        // A retired cursor must fail, not return a truncated old generation
+        // while its rows are being collected in bounded batches.
+        store.db.execute(
+            "UPDATE generations SET complete=0 WHERE generation=?1",
+            [generation],
+        )?;
         let names=keys(store,"SELECT source FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",generation,"")?;
         for name in names {
             if Instant::now() >= until {
@@ -255,7 +268,8 @@ fn collect(store: &Store, until: Instant) -> anyhow::Result<()> {
         if Instant::now() < until {
             store.db.execute("DELETE FROM queue WHERE generation=?1 AND source IN(SELECT source FROM queue WHERE generation=?1 ORDER BY source LIMIT 128)",[generation])?;
         }
-        let remains:bool=store.db.query_row("SELECT EXISTS(SELECT 1 FROM snapshots WHERE generation=?1) OR EXISTS(SELECT 1 FROM queue WHERE generation=?1)",[generation],|r|r.get(0))?;
+        store.db.execute("DELETE FROM dirty WHERE generation=?1 AND source IN(SELECT source FROM dirty WHERE generation=?1 ORDER BY source LIMIT 128)",[generation])?;
+        let remains:bool=store.db.query_row("SELECT EXISTS(SELECT 1 FROM snapshots WHERE generation=?1) OR EXISTS(SELECT 1 FROM queue WHERE generation=?1) OR EXISTS(SELECT 1 FROM dirty WHERE generation=?1)",[generation],|r|r.get(0))?;
         if !remains {
             store
                 .db
@@ -266,6 +280,37 @@ fn collect(store: &Store, until: Instant) -> anyhow::Result<()> {
     Ok(())
 }
 impl Background {
+    fn reset_feed(&mut self) {
+        self.iterator = None;
+        self.changes = None;
+        self.covered = false;
+        self.epoch = None;
+    }
+    fn hints(
+        &mut self,
+        store: &Store,
+        s: &Scan,
+        stats: &mut Stats,
+    ) -> anyhow::Result<(bool, bool)> {
+        let Some(changes) = self.changes.as_mut() else {
+            return Ok((true, false));
+        };
+        let batch = changes.drain(STEP_ENTRIES - stats.entries)?;
+        stats.entries += batch.entries;
+        if batch.restart {
+            store.db.execute("UPDATE meta SET ready=0 WHERE id=1", [])?;
+            store.db.execute("DELETE FROM scan WHERE id=1", [])?;
+            self.reset_feed();
+            return Ok((false, true));
+        }
+        for key in batch.keys {
+            store.db.execute(
+                "INSERT OR IGNORE INTO dirty VALUES(?1,?2)",
+                params![s.generation, key.0],
+            )?;
+        }
+        Ok((batch.caught_up, false))
+    }
     fn step(&mut self) -> anyhow::Result<Stats> {
         let store = Store::open(&self.root)?;
         store.verify()?;
@@ -274,17 +319,86 @@ impl Background {
             .query_row("SELECT epoch FROM meta WHERE id=1", [], |r| r.get(0))?;
         if self.epoch.as_deref() != Some(epoch.as_str()) {
             self.iterator = None;
+            self.covered = false;
+            self.changes = match changes::Changes::new(&store.root.path) {
+                Ok(changes) => changes,
+                Err(error) => {
+                    store.db.execute("UPDATE meta SET ready=0 WHERE id=1", [])?;
+                    gap(&store.root.path);
+                    return Err(error);
+                }
+            };
+            if self.changes.is_some() {
+                // A new native stream cannot certify changes from its gap.
+                // Restart discovery, retaining only version-checked sources.
+                store.db.execute_batch("BEGIN IMMEDIATE; UPDATE meta SET ready=0 WHERE id=1; DELETE FROM scan; COMMIT;")?;
+            }
             self.epoch = Some(epoch);
         }
+        // A resident feed can remain idle without copying every snapshot on
+        // each pulse. No directory enumeration or canonical body read here.
+        let pending_scan = scan(&store.db)?.is_some();
+        let idle = if !pending_scan && self.covered {
+            let batch = self.changes.as_mut().unwrap().drain(STEP_ENTRIES)?;
+            if batch.restart {
+                store.db.execute("UPDATE meta SET ready=0 WHERE id=1", [])?;
+                self.reset_feed();
+                return Ok(Stats {
+                    entries: batch.entries,
+                    ..Stats::default()
+                });
+            }
+            let current:Option<(bool,String,String)>=store.db.query_row("SELECT m.ready,g.dirs,g.gap FROM meta m JOIN generations g ON g.generation=m.generation AND g.complete=1 WHERE m.id=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if batch.caught_up
+                && batch.keys.is_empty()
+                && current.as_ref().is_some_and(|(ready, dirs, gap)| {
+                    *ready
+                        && directories(&store).ok().as_ref() == Some(dirs)
+                        && gap_stamp(&store).ok().as_ref() == Some(gap)
+                })
+            {
+                return Ok(Stats {
+                    entries: batch.entries,
+                    done: true,
+                    complete: true,
+                    ..Stats::default()
+                });
+            }
+            Some(batch)
+        } else {
+            None
+        };
         store.db.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> anyhow::Result<Stats> {
             let until = Instant::now() + Duration::from_millis(50);
             collect(&store, until)?;
             let mut s = match scan(&store.db)? {
                 Some(s) => s,
-                None => begin(&store)?,
+                None => {
+                    let base = if self.covered {
+                        store
+                            .db
+                            .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))?
+                    } else {
+                        0
+                    };
+                    begin(&store, base)?
+                }
             };
             let mut stats = Stats::default();
+            if let Some(batch) = idle {
+                stats.entries += batch.entries;
+                for key in batch.keys {
+                    store.db.execute(
+                        "INSERT OR IGNORE INTO dirty VALUES(?1,?2)",
+                        params![s.generation, key.0],
+                    )?;
+                }
+            }
+            let (_, restart) = self.hints(&store, &s, &mut stats)?;
+            if restart {
+                return Ok(stats);
+            }
             while stats.entries < STEP_ENTRIES && stats.rows < STEP_ROWS && Instant::now() < until {
                 match s.phase {
                     0 => {
@@ -387,7 +501,103 @@ impl Background {
                             stats.entries += 1;
                         }
                     }
+                    5 => {
+                        let names=keys(&store,"SELECT source FROM dirty WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",s.generation,"")?;
+                        if names.is_empty() {
+                            s.phase = 4;
+                            continue;
+                        }
+                        for name in names {
+                            if stats.entries == STEP_ENTRIES
+                                || stats.rows == STEP_ROWS
+                                || Instant::now() >= until
+                            {
+                                break;
+                            }
+                            let key = Key(name.clone());
+                            if !project(&store, &mut s, &key, &mut stats)? {
+                                save(&store, &s)?;
+                                return Ok(stats);
+                            }
+                            store.db.execute(
+                                "DELETE FROM dirty WHERE generation=?1 AND source=?2",
+                                params![s.generation, name],
+                            )?;
+                            stats.entries += 1;
+                        }
+                    }
+                    6 => {
+                        let mut statement=store.db.prepare_cached("SELECT substr(source,1,257),CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128")?;
+                        let mut query = statement.query(params![s.base, s.after])?;
+                        let mut found = false;
+                        let mut bytes = 0;
+                        while let Some(row) = query.next()? {
+                            if stats.entries == STEP_ENTRIES
+                                || stats.rows == STEP_ROWS
+                                || Instant::now() >= until
+                            {
+                                break;
+                            }
+                            let (source, seed, stamp): (String, String, String) =
+                                (row.get(0)?, row.get(1)?, row.get(2)?);
+                            anyhow::ensure!(
+                                source.len() <= 256
+                                    && seed.len() <= model::SEED_BYTES
+                                    && stamp.len() <= 1024,
+                                "Invalid display snapshot clone"
+                            );
+                            if bytes + source.len() + seed.len() + stamp.len() > 512 << 10 {
+                                break;
+                            }
+                            found = true;
+                            bytes += source.len() + seed.len() + stamp.len();
+                            Seed::decode(&Key(source.clone()), &seed)?;
+                            store.db.execute("INSERT INTO snapshots(generation,source,seed,stamp) VALUES(?1,?2,?3,?4)",params![s.generation,source,seed,stamp])?;
+                            s.after = source;
+                            stats.entries += 1;
+                            stats.rows += 1;
+                        }
+                        if !found && stats.rows < STEP_ROWS && Instant::now() < until {
+                            s.phase = 5;
+                            s.after.clear();
+                        }
+                    }
                     4 => {
+                        let native = self.changes.is_some();
+                        let (caught_up, restart) = self.hints(&store, &s, &mut stats)?;
+                        if restart {
+                            return Ok(stats);
+                        }
+                        let dirty: bool = store.db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM dirty WHERE generation=?1)",
+                            [s.generation],
+                            |r| r.get(0),
+                        )?;
+                        if dirty {
+                            s.phase = 5;
+                            continue;
+                        }
+                        if !caught_up {
+                            break;
+                        }
+                        let dirs = directories(&store)?;
+                        let gap = gap_stamp(&store)?;
+                        let (caught_up, restart) = self.hints(&store, &s, &mut stats)?;
+                        if restart {
+                            return Ok(stats);
+                        }
+                        let dirty: bool = store.db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM dirty WHERE generation=?1)",
+                            [s.generation],
+                            |r| r.get(0),
+                        )?;
+                        if dirty {
+                            s.phase = 5;
+                            continue;
+                        }
+                        if !caught_up || directories(&store)? != dirs || gap_stamp(&store)? != gap {
+                            break;
+                        }
                         let writes: i64 =
                             store
                                 .db
@@ -399,14 +609,18 @@ impl Background {
                             [],
                             |r| r.get(0),
                         )?;
+                        let issues: bool = store.db.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM sources WHERE issue IS NOT NULL)",
+                            [],
+                            |r| r.get(0),
+                        )?;
                         stats.complete = s.problems == 0
+                            && !issues
                             && !pending
-                            && writes == s.writes
-                            && directories(&store)? == s.dirs
-                            && gap_stamp(&store)? == s.gap;
+                            && (native || (writes == s.writes && dirs == s.dirs && gap == s.gap));
                         store.db.execute(
-                            "UPDATE generations SET complete=?2 WHERE generation=?1",
-                            params![s.generation, i64::from(stats.complete)],
+                            "UPDATE generations SET complete=?2,dirs=?3,gap=?4,high_water=(SELECT revision FROM meta WHERE id=1) WHERE generation=?1",
+                            params![s.generation, i64::from(stats.complete), dirs, gap],
                         )?;
                         if stats.complete {
                             store.db.execute(
@@ -416,6 +630,7 @@ impl Background {
                         }
                         store.db.execute("DELETE FROM scan WHERE id=1", [])?;
                         stats.done = true;
+                        self.covered = stats.complete && native;
                         break;
                     }
                     _ => anyhow::bail!("Unknown display repair phase"),
@@ -453,6 +668,8 @@ pub(in crate::state) fn background_at(
             root: canonical,
             epoch: None,
             iterator: None,
+            changes: None,
+            covered: false,
         });
     }
     let mut result = state.as_mut().unwrap().step();
@@ -462,7 +679,7 @@ pub(in crate::state) fn background_at(
             *state = None;
         }
     }
-    if result.is_err() || result.as_ref().is_ok_and(|s| s.done) {
+    if result.is_err() || (result.as_ref().is_ok_and(|s| s.done) && !changes::qualified()) {
         *state = None;
     }
     result

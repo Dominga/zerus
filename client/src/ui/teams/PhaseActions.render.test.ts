@@ -35,6 +35,7 @@ it("reviews the original generation, roster and folders and keeps its revision w
   const f = fixture(); button(f.node, "[data-phase-approve]").click();
   expect(f.node.textContent).toContain("This initial approval also confirms the roster");
   expect(f.node.textContent).toContain("folder is not created yet");
+  expect(f.node.textContent).toContain("example-planning-account");
   expect(f.node.textContent).toContain("The regression is covered through the real writer");
   const newer = stage("revised"); newer.bar.revision += 100; newer.plan!.draft!.revision += 100; newer.plan!.draft!.generation = 3; f.setView(newer);
   button(f.node, "[data-phase-review-submit]").click();

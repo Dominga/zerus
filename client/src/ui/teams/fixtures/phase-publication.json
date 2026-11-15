@@ -65,7 +65,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -106,7 +107,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -121,7 +123,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -489,7 +492,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -530,7 +534,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -545,7 +550,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -934,7 +940,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -975,7 +982,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -990,7 +998,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -1280,7 +1289,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1321,7 +1331,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -1336,7 +1347,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -1721,7 +1733,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1762,7 +1775,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -1777,7 +1791,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -2145,7 +2160,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2186,7 +2202,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -2201,7 +2218,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -2525,7 +2543,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2566,7 +2585,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -2581,7 +2601,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",
@@ -2854,7 +2875,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2895,7 +2917,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m1",
@@ -2910,7 +2933,8 @@
         {
           "account": "",
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "id": "m2",

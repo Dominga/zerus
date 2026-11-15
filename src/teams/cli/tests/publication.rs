@@ -34,6 +34,13 @@ fn produced() -> Value {
     create["goal"] = "Deliver the reviewed foundation.".into();
     create["bundle"]["template"]["settings"]["integration"] = "none".into();
     create["bundle"]["pipelines"][0]["stages"] = json!([]);
+    let developer = create["bundle"]["roles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|role| role["id"] == "developer")
+        .unwrap();
+    developer["account"] = json!({"mode":"named","account":"example-planning-account"});
     h.apply(&person(), serde_json::from_value(create).unwrap());
     h.bind("lead", LEAD_SESSION);
     let mut draft = crate::teams::ops::publication::tests::input(&[1, 2]);

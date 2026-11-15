@@ -46,7 +46,7 @@ function ReviewDialog(props: { review: Review; close: () => void; run: (call: Te
           <p>{tr("Project: %1", frozen.view.bar.project)}</p><p>{tr("Integration branch: %1", frozen.view.bar.integration_branch || tr("None"))}</p>
           <ul><For each={frozen.view.members}>{(member) => <li>
             <b>{member.id}</b>: {member.role} / {member.agent} / {member.model || tr("Default model")}
-            <p class="dim">{member.account || (member.account_choice?.mode === "fixed" ? member.account_choice.account : tr("Account selected at start"))}</p>
+            <p class="dim">{member.account || (member.account_choice?.mode === "named" ? member.account_choice.account : tr("Account selected at start"))}</p>
             <p class="dim">{member.state === "not_created" ? tr("New managed worktree; its folder is not created yet.") : tr("Keeps the member's existing working folder.")}</p>
           </li>}</For></ul>
         </Show>

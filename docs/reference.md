@@ -6121,15 +6121,19 @@ Pause stops new planning launches, standing confirmations and doorbells; it
 does not stop the lead's current native turn. Resume returns to Planning, never
 Running, and a lead cannot remove the person's pause. Stop ends the team.
 Launch refusals and unknown outcomes retain their ordinary notices and listed
-decisions, without granting task or integration authority. Approval and
-publication are unavailable in this slice.
+decisions, without granting task or integration authority. Initial approval
+and publication use the planned-phase operations below.
 
-Starting the first planned team atomically raises the private Teams execution
-schema to 3; reserving the first phase publication raises it to 4. Queue-only
-stores remain at 2, and this engine reads 2, 3 and 4. Starting another planning
-team never lowers an existing floor. A pre-planning engine refuses 3, and a
-planning-only engine refuses 4, including final native effect admission. All
-Teams commands and the desktop service on that computer must support its floor.
+Private Teams core layouts are allocated as 2 for legacy queue stores, 3 for
+planning, 4 for native Person evidence, 5 for publication and 6 reserved for
+rework. Ordinary opens migrate legacy 2/3 stores to native layout 4, preserving
+its validated nonce and receipts. Reserving publication alone raises the floor
+to 5 under the operation's lock. Starting another planning team never lowers
+an existing floor. This engine supports through 5 and refuses 6. An older
+native-4 engine refuses publication stores, including retained handles and
+final native effect admission. Timer extension layouts use a separate
+namespace. All Teams commands and the desktop service on that computer must
+support the core floor.
 
 **Planned drafts and publication.** The Team tab's Layers view reads bounded
 draft phases and the live-and-archived nodes of published phases. `phases`

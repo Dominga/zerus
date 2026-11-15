@@ -267,7 +267,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -308,7 +309,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -319,7 +321,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -669,7 +672,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -710,7 +714,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -721,7 +726,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -994,7 +1000,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1035,7 +1042,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1046,7 +1054,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1378,7 +1387,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1419,7 +1429,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1430,7 +1441,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1842,7 +1854,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1883,7 +1896,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -1894,7 +1908,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2195,7 +2210,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2236,7 +2252,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2247,7 +2264,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2501,7 +2519,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2542,7 +2561,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2553,7 +2573,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2850,7 +2871,8 @@
       "member_roles": [
         {
           "account": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2891,7 +2913,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",
@@ -2902,7 +2925,8 @@
         },
         {
           "account_choice": {
-            "mode": "freest"
+            "account": "example-planning-account",
+            "mode": "named"
           },
           "agent": "claude",
           "effort": "",

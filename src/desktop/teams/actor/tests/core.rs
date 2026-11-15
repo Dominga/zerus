@@ -1043,3 +1043,5 @@ fn a_refused_reopen_opens_the_failure_gate_the_hand_back_witness_reads() {
     });
     assert!(settled.gate.is_some(), "{settled:?}");
 }
+
+mod cutover_delivery;

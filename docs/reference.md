@@ -5082,7 +5082,13 @@ input was refused before anything was offered to the terminal, which settles
 the attempt as not admitted; a new action with a new ID may send it);
 `cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
 reserved or sent); or `uncertain` (the input may have arrived; it is never sent
-again). Repeating a request ID, a restart or `--recover-only` only reads that
+again). For a team's hand-out, `cutting_over` settles the effect as not
+delivered (`refused`) and frees both task and member. After the normal refusal
+backoff the service may create a new hand-out with a new effect ID; it never
+replays the old effect. No `delivery_uncertain` item is opened for this proof
+of non-delivery. Older such effects are reconciled in bounded passes, closing
+only the false item identified by the original outcome receipt. Unknown or
+uncertain effects remain occupied and their items remain open. Repeating a request ID, a restart or `--recover-only` only reads that
 request's receipt and never submits, even when no receipt exists. Managed native starts require the current causal cutover even when the older
 bootstrap would have selected a legacy route. Missing/unproven migration
 history stays a task-specific refusal; it never authorizes a legacy offer.

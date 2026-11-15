@@ -10,6 +10,7 @@ mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
 mod holder;
+pub(in crate::teams) mod non_delivery;
 pub(crate) mod editing;
 mod disposition;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
@@ -491,10 +492,11 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 3] = [
+const COMMON_SCHEMA: [&str; 4] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
     include_str!("read-indexes.sql"),
+    include_str!("non-delivery-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied
 /// once per store, when the table is absent, so the ordinary open performs

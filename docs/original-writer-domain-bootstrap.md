@@ -1,9 +1,9 @@
 # Original writer-domain bootstrap
 
-Proposed next `zerus-jmxyf.7` slice, `zerus-jmxyf.7.2.10`, based on main
+Approved `zerus-jmxyf.7` prerequisite, `zerus-jmxyf.7.2.10`, based on main
 `06e978973` and REV2 SHA-256
 `592bd8393057e723f6655fa735ef7c0d24df7a605e1dc20b9191e44d55b2adb9`.
-This is a design for coordinator review before implementation. The separate
+The coordinator approved this design before implementation. The separate
 layout-transition refusal in `zerus-jmxyf.7.2.9.1` goes first.
 
 ## Why this comes next
@@ -39,6 +39,8 @@ relaunch/fallback/physical-spawn refusal boundaries.
 Introduce a private, non-cloneable original domain resource produced only by
 successful exclusive creation under that original writer/source. Retain the
 original native directory/file identities in the actual supervisor owner.
+Consume the live creation source's single attempt even on refusal; restoring
+its configuration cannot replay that attempt.
 Serialized IDs, native identities and peer observations remain data; they
 cannot recreate the resource or authorize input, signal, archive or cleanup.
 Drop closes owned handles and never deletes or repairs domain files.
@@ -69,8 +71,11 @@ for an existing run gate while holding the global writer. Any contention on an
 unexpected pre-existing object refuses. Later actual writers and the marker
 factory retain their existing run-before-state-writer order.
 
-Capture one monotonic creation deadline, at most 30 seconds and no longer than
-the caller's original remaining startup budget. Do not renew it between phases.
+Capture one monotonic creation deadline, at most 30 seconds, immediately at
+`owned::spawn` entry, before source capture and the bounded existing-writer wait.
+The current static spawn signature carries no caller deadline. The coordinator
+approved this allocation on 2026-11-15; existing provider startup bounds stay
+unchanged. Do not renew the creation deadline between phases.
 Require positive file/directory durability and original-object readback before
 returning the resource or starting the native child. A late/uncertain write
 keeps the original reservation and any partial namespace, returns no successful

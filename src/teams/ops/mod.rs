@@ -16,9 +16,9 @@ mod integration;
 mod journal;
 pub(crate) mod lead_queue;
 mod members;
+mod phase_review;
 mod pipeline;
 mod planning;
-mod phase_review;
 pub(crate) mod publication;
 mod queue;
 #[cfg(test)]

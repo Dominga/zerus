@@ -18,10 +18,10 @@ mod member_sessions;
 mod phase_metrics;
 mod phases;
 mod planning;
-#[cfg(unix)]
-mod publication;
 mod progress;
 mod progress157;
+#[cfg(unix)]
+mod publication;
 mod reads;
 mod recorded_timings;
 mod session_groups;

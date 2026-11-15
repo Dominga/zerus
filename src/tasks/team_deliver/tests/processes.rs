@@ -167,9 +167,10 @@ fn entry() {
         let args: Vec<String> = serde_json::from_str(&std::env::var("HGS_TEAM_DELIVER_ARGS").unwrap()).unwrap();
         crate::state::dsh::launched_binding_for_test(&args[0], &config.state, Some(&args[1])).map_err(fail)
     } else if mode == "planned-write" {
-        let args: Vec<String> = serde_json::from_str(&std::env::var("HGS_TEAM_DELIVER_ARGS").unwrap()).unwrap();
-        super::super::planned::write(&config,&args[0],args[1].parse().unwrap(),&args[2],false)
-            .map(|state|json!({"state":state}))
+        let args: Vec<String> =
+            serde_json::from_str(&std::env::var("HGS_TEAM_DELIVER_ARGS").unwrap()).unwrap();
+        super::super::planned::write(&config, &args[0], args[1].parse().unwrap(), &args[2], false)
+            .map(|state| json!({"state":state}))
     } else if mode == "init" {
         crate::swarm::dispatch(&config, &["initialize".into()], false).map(|_| json!({}))
     } else if mode == "tmux-env" {
@@ -1178,8 +1179,8 @@ fn service_requests_refuse_unknown_authority_fields_without_writing() {
 }
 
 mod clear_tests;
-mod stage_tests;
 mod publication_tests;
+mod stage_tests;
 mod terminal_clear_tests;
 
 mod review_tests;

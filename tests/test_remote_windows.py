@@ -514,7 +514,7 @@ class WindowsNativeTransport(unittest.TestCase):
                 self.assertTrue(kernel.CloseHandle(publisher))
             self.assertEqual(json.loads(ready.read_bytes()), value)
 
-    def run_decoder(self, shell, lease=False, code=0, slow=False, sustained=False, renew=True):
+    def run_decoder(self, shell, lease=False, code=0, slow=False, sustained=False, renew=True, short=False):
         import base64
         import shutil
         import struct
@@ -617,6 +617,20 @@ class WindowsNativeTransport(unittest.TestCase):
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
                 if not slow: self.assertEqual(value['argv'], words)
+                if short:
+                    # A control line far below the helper's 4 KiB stdin buffer
+                    # (watch ping/subscribe, a terminal key) must arrive before
+                    # EOF, and nothing (such as an encoding preamble) before it.
+                    marker = b'{"op":"ping","id":1}\n'
+                    child.stdin.write(struct.pack('<I', len(marker))+marker); child.stdin.flush()
+                    while True:
+                        received = b''.join(bytes.fromhex(row['hex']) for row in decoder_rows(record) if 'hex' in row)
+                        self.assertTrue(marker.startswith(received), f'short frame bytes changed: {received!r}')
+                        if received == marker: break
+                        status = child.poll()
+                        self.assertIsNone(status, (root/'stderr').read_bytes() if status is not None else None)
+                        self.assertLess(time.monotonic(), deadline, 'a short frame stayed in the helper stdin buffer')
+                        time.sleep(.02)
                 if sustained:
                     # An exact input record proves the decoder has consumed the
                     # frame and renewed its own clock, after Add-Type. No ping
@@ -733,6 +747,10 @@ class WindowsNativeTransport(unittest.TestCase):
     def test_async_ssh_stdin_keeps_a_live_stream_through_repeated_lease_renewal(self):
         for shell in ('powershell', 'cmd'):
             with self.subTest(shell=shell): self.run_decoder(shell, sustained=True)
+
+    def test_a_short_control_line_reaches_the_native_helper_before_eof(self):
+        for shell in ('powershell', 'cmd'):
+            with self.subTest(shell=shell): self.run_decoder(shell, short=True)
 
     def test_sustained_render_without_renewals_expires_on_the_original_lease(self):
         for shell in ('powershell', 'cmd'):

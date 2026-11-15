@@ -8,6 +8,9 @@ Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility" -ErrorAction 
 function q([string]$s) {'"'+[regex]::Replace($s,'(\\*)("|$)',{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){$b+$b+'\"'}else{$b+$b}})+'"'}
 $i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=[IO.Path]::Combine($env:USERPROFILE,'.local\bin\hgs.exe');$i.Arguments=(@(foreach($v in $a){q $v}))-join ' ';$i.UseShellExecute=$false
 $pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardInput=$pipe;$i.RedirectStandardOutput=$pipe;$i.RedirectStandardError=$pipe
+# Windows PowerShell 5.1 queues the stdin encoding's preamble (a UTF-8 BOM)
+# ahead of the first frame, which turns the first control line into garbage.
+if($pipe){try{[Console]::InputEncoding=[Text.UTF8Encoding]::new($false)}catch{}}
 $p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){throw 'start refused'}
 if($pipe){
 $o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
@@ -28,18 +31,20 @@ return new FileStream(new SafeFileHandle(h,false),FileAccess.Read,1,(mode&48)==0
 }
 }
 '@
-$s=[HgsSshInput]::Open();$b=[byte[]]::new(65536);$n=4;$pos=0;$header=$true;$closed=$false;$w=$null;$clock=[Diagnostics.Stopwatch]::StartNew();$r=$s.ReadAsync($b,0,4)
+$s=[HgsSshInput]::Open();$b=[byte[]]::new(65536);$n=4;$pos=0;$header=$true;$closed=$false;$w=$null;$flush=$false;$clock=[Diagnostics.Stopwatch]::StartNew();$r=$s.ReadAsync($b,0,4)
 # Keep servicing the lease while output waits for a healthy slow consumer.
 while($true){
 $ended=$p.WaitForExit(20);if($ended -and $o.IsCompleted -and $e.IsCompleted){break};if($ended){[Threading.Thread]::Sleep(20)}
 if($o.IsFaulted -or $e.IsFaulted -or $clock.ElapsedMilliseconds -gt 15000){throw 'connection lost'}
-if($null -ne $w){if(-not$w.IsCompleted){continue};if(-not$ended){[void]$w.GetAwaiter().GetResult()};$w=$null;$r=$s.ReadAsync($b,0,4)}
+# The child's stdin is a 4 KiB buffered FileStream on Windows PowerShell 5.1:
+# flush each frame, or a short control line (watch, terminal) waits for EOF.
+if($null -ne $w){if(-not$w.IsCompleted){continue};if(-not$ended){[void]$w.GetAwaiter().GetResult()};if($flush -and -not$ended){$flush=$false;$w=$p.StandardInput.BaseStream.FlushAsync();continue};$flush=$false;$w=$null;$r=$s.ReadAsync($b,0,4)}
 if(-not$r.IsCompleted){continue}
 $count=$r.GetAwaiter().GetResult();if($count -eq 0){throw 'connection closed'};$clock.Restart();$pos+=$count
 if($pos -lt $n){$r=$s.ReadAsync($b,$pos,$n-$pos);continue}
 $pos=0
 if($header){$len=[BitConverter]::ToUInt32($b,0);if($len -eq [uint32]::MaxValue){$r=$s.ReadAsync($b,0,4);continue};if($len -eq 0){if($closed){throw 'duplicate EOF'};if(-not$ended){$p.StandardInput.Close()};$closed=$true;$r=$s.ReadAsync($b,0,4);continue};if($closed -or $len -gt 65536){throw 'invalid frame'};$n=[int]$len;$header=$false;$r=$s.ReadAsync($b,0,$n)}
-else{if($ended){$r=$s.ReadAsync($b,0,4)}else{$w=$p.StandardInput.BaseStream.WriteAsync($b,0,$n)};$n=4;$header=$true}
+else{if($ended){$r=$s.ReadAsync($b,0,4)}else{$w=$p.StandardInput.BaseStream.WriteAsync($b,0,$n);$flush=$true};$n=4;$header=$true}
 }
 [void]$o.GetAwaiter().GetResult();[void]$e.GetAwaiter().GetResult()
 }else{$p.WaitForExit()}

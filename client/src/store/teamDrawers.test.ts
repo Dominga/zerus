@@ -52,3 +52,32 @@ it("a read failure remains visible and never becomes an empty success or a retry
   expect(calls).toBe(1); expect(model.error).toContain("storage_failed"); expect(model.page).toBeUndefined();
   await settle(); expect(calls).toBe(1);
 });
+
+it("a timing read preserves the selected opaque cursor and has an explicit events-only fallback", async () => {
+  const calls: DrawerRead[] = []; const feed = pages.feed as DrawerPage;
+  const model = new TeamDrawerRead(async (read) => {
+    calls.push(read);
+    if (read.recorded_timings) throw new Error("unknown option: --recorded-timings");
+    return { ...feed, after: read.after, next: read.after ? null : "t1.original" };
+  });
+  model.open(feed.team, "feed"); await settle(); model.next(); await settle(); model.timings(true); await settle();
+  expect(calls.at(-1)).toMatchObject({ team: feed.team, kind: "feed", after: "t1.original", recorded_timings: true, timing_seqs: feed.rows.map((row) => row.seq) });
+  expect(model.error).toContain("unknown option"); expect(model.page?.after).toBe("t1.original");
+  expect(calls).toHaveLength(3); model.timings(false); await settle();
+  expect(calls).toHaveLength(3); expect(model.timingsRequested()).toBe(false); expect(model.error).toBe("");
+});
+
+it("handwritten missing or future timing projections fail as unavailable rather than empty facts", async () => {
+  for (const timings of [undefined, { schema: 2, revision: 1 }]) {
+    const feed = pages.feed as DrawerPage; const model = new TeamDrawerRead(async (read) => ({ ...feed, after: read.after, timings: read.recorded_timings ? timings : undefined }));
+    model.open(feed.team, "feed"); await settle(); model.timings(true); await settle();
+    expect(model.error).not.toBe(""); expect(model.page?.rows).toEqual(feed.rows);
+  }
+});
+
+it("handwritten continuation envelope binds timing joins to the already displayed event IDs", async () => {
+  const calls: DrawerRead[] = []; const feed = pages.feed as DrawerPage;
+  const model = new TeamDrawerRead(async (read) => { calls.push(read); return { ...feed, after: read.after, next: "t1.original-window" }; });
+  model.open(feed.team, "feed"); await settle(); model.timings(true); await settle();
+  expect(calls.at(-1)).toMatchObject({ timing_seqs: feed.rows.map((row) => row.seq), timing_next: "t1.original-window" });
+});

@@ -168,9 +168,6 @@ fn an_open_delivery_of_the_current_generation_takes_the_handover_route() {
         Some(HandoutOutcome::Uncertain {
             reason: "Lost receipt".into(),
         }),
-        Some(HandoutOutcome::CuttingOver {
-            reason: "The project is moving".into(),
-        }),
     ] {
         let mut h = Harness::new();
         let (lead, node) = team(&mut h);
@@ -236,17 +233,21 @@ fn earlier_generations_and_a_remembered_attempt_do_not_hold_a_reassign() {
 /// A refused hand-out alone is settled at once, as today.
 #[test]
 fn a_refused_hand_out_alone_is_reassigned_at_once() {
-    let mut h = Harness::new();
-    let (lead, node) = team(&mut h);
-    let id = h.intent(node, "m1");
-    h.outcome(
-        &id,
+    for outcome in [
         HandoutOutcome::Refused {
             reason: "Verified no start".into(),
         },
-    );
-    assert_eq!(reassign(&mut h, &lead, node), DecisionState::Settled);
-    handed_out_to_m2(&mut h, node);
+        HandoutOutcome::CuttingOver {
+            reason: "The project is moving; nothing was sent".into(),
+        },
+    ] {
+        let mut h = Harness::new();
+        let (lead, node) = team(&mut h);
+        let id = h.intent(node, "m1");
+        h.outcome(&id, outcome);
+        assert_eq!(reassign(&mut h, &lead, node), DecisionState::Settled);
+        handed_out_to_m2(&mut h, node);
+    }
 }
 
 /// A delivered hand-out running, In review or Done (waiting for its

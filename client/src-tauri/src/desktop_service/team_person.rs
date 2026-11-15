@@ -80,6 +80,7 @@ fn failed(call: &TeamCall, code: &str, detail: &str) -> TeamOutcome {
         request_id: call.request_id.clone(),
         code: code.into(),
         detail: detail.into(),
+        field: None,
     }
 }
 fn unknown(call: &TeamCall) -> TeamOutcome {

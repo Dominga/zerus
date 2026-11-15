@@ -132,6 +132,8 @@ mod task_start;
 #[cfg(feature = "live")]
 mod team_drawers;
 #[cfg(feature = "live")]
+mod team_profile_export;
+#[cfg(feature = "live")]
 mod teams;
 #[cfg(feature = "live")]
 mod terminal;
@@ -759,6 +761,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(teams::Teams::new());
                 app.manage(team_drawers::DrawerReader::default());
+                app.manage(team_profile_export::ProfileExporter::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -1740,6 +1743,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_page,
         teams::teams_phases,
         team_drawers::teams_drawer_page,
+        team_profile_export::team_profile_export,
         teams::team_action,
         teams::team_action_again,
         teams::team_intent_dismiss,

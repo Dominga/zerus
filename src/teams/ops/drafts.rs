@@ -134,6 +134,7 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
             params![ctx.team.id, next_node],
         )
         .map_err(storage)?;
+    ctx.db.execute("UPDATE inbox SET state='closed' WHERE team=?1 AND kind='planning_goal' AND state='open'", [&ctx.team.id]).map_err(storage)?;
     Ok(())
 }
 

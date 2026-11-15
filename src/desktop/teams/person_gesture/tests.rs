@@ -240,7 +240,7 @@ fn version_two_migrates_atomically_without_changing_existing_team_or_card_rows()
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        3
+        crate::teams::store::SCHEMA_VERSION
     );
     h.store = Store::open(h.temp.path()).unwrap();
     assert_eq!(
@@ -509,3 +509,5 @@ fn store_nonce_and_original_native_evidence_are_immutable() {
     assert_eq!(identity(db, h.store.state()).unwrap(), before);
     original(db, &original_intent).unwrap();
 }
+
+mod merge;

@@ -12,6 +12,7 @@ import { render } from "solid-js/web";
 import type { TeamCall, TeamCatalog } from "../../store/teams";
 import type { NewTeamInput } from "./NewTeam";
 import unknownPermission from "../../../core/src/teams/fixtures/form-catalog-unknown-permission.json";
+import planningSource from "./fixtures/planning-start.json";
 
 const FIVE = ["accept_results", "answer_members", "confirm_trust", "resume_exited", "merge_accepted"] as const;
 type Five = Record<(typeof FIVE)[number], boolean>;
@@ -112,6 +113,24 @@ it("a second window cannot grant permissions different from those shown (the rev
   expect((second.action as Record<string, unknown>).expected_template).toBe(D2);
   expect(second.request_id).not.toBe(f.acts[0].request_id);
   expect(f.grants[0]).toEqual(now);
+});
+
+it("starts only a planning intent with the writer-derived catalog, required goal and shown permissions", async () => {
+  f.catalog = structuredClone(planningSource.catalog) as unknown as TeamCatalog;
+  const host = await open();
+  host.querySelector<HTMLInputElement>("[data-start-planning]")!.click();
+  expect(host.textContent).toContain("Only the lead starts");
+  expect(button(host, "Start planning").disabled).toBe(true);
+  const goal = host.querySelector<HTMLInputElement>('input[placeholder="What should the team work on?"]')!;
+  goal.value = planningSource.view.planning.goal;
+  goal.dispatchEvent(new Event("input", { bubbles: true }));
+  const permissions = shown(host);
+  expect(button(host, "Start planning").disabled).toBe(false);
+  button(host, "Start planning").click();
+  await vi.waitFor(() => expect(f.acts).toHaveLength(1));
+  expect(f.acts[0].action).toMatchObject({kind:"start_planning",goal:planningSource.view.planning.goal,delegations:permissions});
+  expect(f.acts[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
+  await vi.waitFor(() => expect(store.createIntent()).toBeNull());
 });
 
 it("sends the checkboxes as they are for every combination that differs from the template", async () => {

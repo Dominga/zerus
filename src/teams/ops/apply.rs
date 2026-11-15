@@ -35,6 +35,7 @@ pub(crate) fn apply_with_gesture(
         .ok_or_else(missing)?
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
+    store::execution_fence(&tx)?;
     let gesture = admission
         .map(|admission| admission.consume(&tx, &state, actor, request))
         .transpose()?;
@@ -158,7 +159,12 @@ fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply>
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
-    if existed && matches!(ctx.op, Operation::Create { .. }) {
+    if existed
+        && matches!(
+            ctx.op,
+            Operation::Create { .. } | Operation::StartPlanning { .. }
+        )
+    {
         return Err(invalid("Team already exists."));
     }
     dispatch(ctx)?;
@@ -211,6 +217,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::RenameTeam { .. } => editing::rename(ctx),
         Operation::SetGoal { .. } => editing::goal(ctx),
         Operation::Create { .. } => team::create(ctx),
+        Operation::StartPlanning { .. } => planning::start(ctx),
         Operation::Pause => team::pause(ctx),
         Operation::Resume => team::resume(ctx),
         Operation::Stop => team::stop(ctx),

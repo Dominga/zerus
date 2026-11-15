@@ -5112,7 +5112,13 @@ input was refused before anything was offered to the terminal, which settles
 the attempt as not admitted; a new action with a new ID may send it);
 `cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
 reserved or sent); or `uncertain` (the input may have arrived; it is never sent
-again). Repeating a request ID, a restart or `--recover-only` only reads that
+again). For a team's hand-out, `cutting_over` settles the effect as not
+delivered (`refused`) and frees both task and member. After the normal refusal
+backoff the service may create a new hand-out with a new effect ID; it never
+replays the old effect. No `delivery_uncertain` item is opened for this proof
+of non-delivery. Older such effects are reconciled in bounded passes, closing
+only the false item identified by the original outcome receipt. Unknown or
+uncertain effects remain occupied and their items remain open. Repeating a request ID, a restart or `--recover-only` only reads that
 request's receipt and never submits, even when no receipt exists. Managed native starts require the current causal cutover even when the older
 bootstrap would have selected a legacy route. Missing/unproven migration
 history stays a task-specific refusal; it never authorizes a legacy offer.
@@ -5950,10 +5956,12 @@ hgs team template show|export|remove TEMPLATE
 hgs team template save < template.json
 hgs team template import < bundle.json
 hgs team create --template TEMPLATE < request.json
+hgs team start-planning --template TEMPLATE < request.json
 hgs team list [--limit 1..200] [--after CURSOR]
 hgs team waiting [--limit 1..200] [--after CURSOR]
 hgs team status [--team TEAM] [--bundle]
 hgs team inbox|queue|cards|journal [--team TEAM] [--limit 1..200] [--after CURSOR]
+hgs team journal [--team TEAM] [--limit 1..200] [--after CURSOR] --recorded-timings
 hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
@@ -5961,6 +5969,21 @@ hgs team pause-member|resume-member|stop-member|archive-member < request.json
 hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
+
+The optional `journal --recorded-timings` read joins only the effect and stage
+records referenced by that page, using indexed point lookups in the same
+SQLite snapshot. Its `timings` marker gives schema 1 and the team revision of
+that read. Event membership keeps the original journal cursor; mutable outcome
+facts describe each read's revision, not historical work intervals. Reservation,
+first recorded outcome and stage creation are bookkeeping timestamps, never
+native work or test duration. No timing writer or executable provider is added.
+The desktop Timeline requests facts for its displayed event IDs with the bounded
+`--timing-seqs` option, preserving its original page and Next cursor even as
+new events arrive; it can also stay in Events only.
+Export page saves only the displayed bounded page through the native Save
+dialog; unknown computer/phase identity and incomplete-history coverage remain
+explicit in its versioned JSON. It reads no additional history and never
+reposts an unconfirmed export automatically.
 
 Every command prints one JSON object. A refusal is
 `{"ok":false,"error":{"code","message","refs"}}` with exit 1; callers match on
@@ -6017,6 +6040,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `preview status`, `list` | yes | yes | yes | none |
 | `catalog ...`, `template ...` | yes | | | the catalog, template or bundle JSON |
 | `create --template` | yes | | | `project`, `name`, `goal`, `home`, `integration_branch`, `base_commit`, optional `expected_template` and `delegations` |
+| `start-planning --template` | yes | | | Same confirmed fields as `create`; a nonblank `goal` is required. Starts only the lead in Planning. |
 | `waiting` | yes | | | none |
 | `status` | yes | yes | yes | none |
 | `inbox`, `queue`, `cards`, `journal` | yes | yes | | none |
@@ -6076,6 +6100,27 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+**Planned startup.** `start-planning` is a separate person-only creation intent;
+`create` keeps its queue-team behavior and request shape. It saves the confirmed
+template and permissions, goal, not-created roster and a durable team-wide
+planning inbox notice. Only the lead's own worktree and session may start.
+Other members, the integration branch, task stages and hand-outs wait for initial
+plan approval. The lead reads its original goal through `current` and `inbox`.
+The existing guarded doorbell points to that inbox, including for DeepSeek;
+an unknown delivery is never automatically repeated.
+
+Pause stops new planning launches, standing confirmations and doorbells; it
+does not stop the lead's current native turn. Resume returns to Planning, never
+Running, and a lead cannot remove the person's pause. Stop ends the team.
+Launch refusals and unknown outcomes retain their ordinary notices and listed
+decisions, without granting task or integration authority. Approval and
+publication are unavailable in this slice.
+
+Starting the first planned team atomically raises the private Teams execution
+schema to 3. Queue-only stores remain at 2; this engine reads both. Older
+engines refuse fresh opens of a store marked 3, so all Teams commands and its
+desktop service on that computer need the M2-capable engine thereafter.
 
 **Planned drafts.** The Team tab's Layers view reads bounded draft phases;
 approval is shown unavailable until publication is implemented. `phases`

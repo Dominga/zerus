@@ -570,6 +570,7 @@ fn an_outcome_of_each_kind() {
         TeamOutcome::Failed {
             detail: "The team moved.".into(),
             code: "stale_revision".into(),
+            field: None,
             request_id: ID.into(),
         }
     );
@@ -930,6 +931,7 @@ fn a_storage_failure_is_uncertain_with_the_same_request_id() {
         TeamOutcome::Failed {
             detail: "The node is not reported.".into(),
             code: "invalid_state".into(),
+            field: None,
             request_id: ID.into(),
         }
     );
@@ -1206,6 +1208,7 @@ fn a_changed_template_is_a_refusal_the_intent_settles_never_uncertain() {
             TeamOutcome::Failed {
                 detail: "The template changed since it was shown. Review it again.".into(),
                 code: "template_changed".into(),
+                field: None,
                 request_id: ID.into(),
             },
             "exit {code}"
@@ -1249,6 +1252,7 @@ fn a_busy_store_is_a_refusal_nothing_was_written() {
         TeamOutcome::Failed {
             detail: "The team store is busy. Nothing was written; try again.".into(),
             code: "store_busy".into(),
+            field: None,
             request_id: ID.into(),
         }
     );
@@ -1377,6 +1381,7 @@ fn the_action_kinds_are_the_shared_list() {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
             TeamAction::Create { .. }
+            | TeamAction::StartPlanning { .. }
             | TeamAction::SubmitDraftPhase { .. }
             | TeamAction::EditDraftPhase { .. }
             | TeamAction::AddMember { .. }
@@ -1408,6 +1413,12 @@ fn the_action_kinds_are_the_shared_list() {
     }
     let member = || "m1".to_owned();
     let samples = vec![
+        serde_json::from_value::<TeamAction>({
+            let mut value = serde_json::to_value(create(None, Integration::Branch).action).unwrap();
+            value["kind"] = "start_planning".into();
+            value
+        })
+        .unwrap(),
         TeamAction::SubmitDraftPhase {
             phase: 1,
             draft: zerus_team_plan::draft::DraftInput {

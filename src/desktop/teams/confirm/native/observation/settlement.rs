@@ -148,6 +148,7 @@ impl Ports for WriterPorts {
             member: self.store.member(&b.team, &b.member).unwrap().unwrap(),
             binding: b.clone(),
             preview: true,
+            planning_paused: false,
         })
     }
     fn observe(&mut self, b: &Binding) -> Result<Snapshot> {

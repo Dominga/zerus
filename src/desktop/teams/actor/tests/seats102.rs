@@ -209,7 +209,7 @@ fn shape(outcome: &HandoutOutcome) -> (&'static str, &'static str) {
     match outcome {
         HandoutOutcome::Submitted { .. } => ("submitted", "submitted"),
         HandoutOutcome::Refused { .. } => ("refused", "refused"),
-        HandoutOutcome::CuttingOver { .. } => ("cutting_over", "cutting_over"),
+        HandoutOutcome::CuttingOver { .. } => ("refused", "cutting_over"),
         HandoutOutcome::Uncertain { .. } => ("uncertain", "uncertain"),
         HandoutOutcome::HandedBack { .. } => ("refused", "handed_back"),
     }
@@ -435,13 +435,17 @@ fn the_terminal_team_records_every_retained_reply_shape_without_replaying() {
     type Builder = fn(&str) -> Value;
     type Case = (&'static str, Builder, Option<(&'static str, &'static str)>);
     let cases: [Case; 7] = [
-        ("submitted", submitted_reply, Some(("submitted", "submitted"))),
+        (
+            "submitted",
+            submitted_reply,
+            Some(("submitted", "submitted")),
+        ),
         ("refused", refused_reply, Some(("refused", "refused"))),
         ("final", final_reply, Some(("refused", "handed_back"))),
         (
             "cutting_over",
             cutting_over_reply,
-            Some(("cutting_over", "cutting_over")),
+            Some(("refused", "cutting_over")),
         ),
         ("uncertain", uncertain_reply, None),
         ("pending", pending_reply, None),

@@ -2,6 +2,8 @@
 //! that imports `loro`: hgs and the mobile apps use its typed operations, so
 //! a Loro upgrade or a schema change happens here once.
 mod attachment;
+mod cutover;
+mod cutover_root;
 mod error;
 pub mod execution;
 pub mod ids;
@@ -16,7 +18,8 @@ mod sync;
 mod task;
 
 pub use attachment::{
-    TaskAttachment, MAX_ATTACHMENT, MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL, TASK_SCHEMA,
+    check_attachments as validate_attachments, TaskAttachment, MAX_ATTACHMENT, MAX_ATTACHMENTS,
+    MAX_ATTACHMENT_TOTAL, TASK_SCHEMA,
 };
 
 /// The largest serialized task document the phone can assemble: one current
@@ -58,4 +61,4 @@ pub use sync::{
 };
 #[cfg(not(feature = "test-without-team"))]
 pub use task::TaskTeam;
-pub use task::{NewTask, Settled, Settlement, TaskDoc};
+pub use task::{Capture, CutoverSeal, NewTask, NotCutOver, Settled, Settlement, TaskDoc};

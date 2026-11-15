@@ -142,7 +142,7 @@ function App() {
       <Section title="Members in each state" note="active, paused, not created and removed, with the lead marked.">
         <div class="smoke-members"><For each={members}>{(member) => <MemberCard member={member} teamStatus="running" busy={false} onAction={() => {}} />}</For></div>
       </Section>
-      <Section title="Teams off"><p class="smoke-off dim">With the preview off, the rail's New team button, the team.new command and the Team tab have no entry point.</p></Section>
+      <Section title="Teams off"><p class="smoke-off dim">With the preview off, the rail's Teams and Waiting entries, the team.new command and the Team tab have no entry point.</p></Section>
     </Show>
     <Show when={show("new")}>
       <Section title="New team" form note="The real dialog frame. Use ready=1 to check the synthetic Git folder."><FormPreview /></Section>

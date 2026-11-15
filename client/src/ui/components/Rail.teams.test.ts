@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
 // The Teams entry points: no rail button and no command dialog while Teams are
 // off or hgs cannot run; the button appears once the core says Teams exist.
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
-const f = vi.hoisted(() => ({ setAvailable: (_: boolean | undefined) => {} }));
-vi.mock("../../store/ui", () => ({ page: () => "sessions", setPage: vi.fn(), counts: () => ({ attention: 0 }), setMenu: vi.fn(), logoMotion: () => "none" }));
+const f = vi.hoisted(() => ({ setAvailable: (_: boolean | undefined) => {}, page: vi.fn() }));
+vi.mock("../../store/ui", () => ({ page: () => "sessions", setPage: f.page, counts: () => ({ attention: 0 }), setMenu: vi.fn(), logoMotion: () => "none" }));
 vi.mock("../../skin/runtime", () => ({ skin: () => ({ layout: { rail: "icons" } }) }));
 vi.mock("../../store/windowLayer", () => ({ windowLayer: () => ({ on: false, supported: true, hint: "" }), setWindowLayer: vi.fn() }));
 vi.mock("../sessions/mark-entries", () => ({ markAllEntry: () => ({ label: "Mark all read" }) }));
@@ -24,6 +24,7 @@ vi.mock("../../store/teams", async () => {
 import { Rail } from "./Rail";
 
 let dispose: (() => void) | undefined;
+beforeEach(() => { f.setAvailable(undefined); f.page.mockClear(); });
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
 const setup = () => {
   const host = document.createElement("div");
@@ -31,18 +32,26 @@ const setup = () => {
   dispose = render(() => createComponent(Rail, {}), host);
   return host;
 };
-const newTeam = (host: HTMLElement) =>
-  [...host.querySelectorAll("button")].find((button) => button.getAttribute("aria-label") === "New team");
+const entry = (host: HTMLElement, label: string) =>
+  [...host.querySelectorAll("button")].find((button) => button.getAttribute("aria-label") === label);
 
-it("shows no New team entry while Teams are off or not yet known", () => {
+it("hides Teams and Waiting while the preview is off or unavailable", () => {
   const host = setup();
-  expect(newTeam(host)).toBeUndefined();
+  expect(entry(host, "Teams")).toBeUndefined();
+  expect(entry(host, "Waiting for you")).toBeUndefined();
   f.setAvailable(false);
-  expect(newTeam(host)).toBeUndefined();
+  expect(entry(host, "Teams")).toBeUndefined();
+  expect(entry(host, "Waiting for you")).toBeUndefined();
 });
 
-it("shows the New team entry once the core says Teams exist", () => {
+it("puts Teams and Waiting after the main screens, with bottom controls last", () => {
   const host = setup();
   f.setAvailable(true);
-  expect(newTeam(host)).toBeDefined();
+  expect([...host.querySelectorAll("button")].map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
+    "Overview", "New session", "Sessions", "Projects", "Machines", "Accounts", "Teams", "Waiting for you",
+    "Keep Zerus above other windows", "Settings", "About",
+  ]);
+  expect(entry(host, "New team")).toBeUndefined();
+  entry(host, "Teams")!.click();
+  expect(f.page).toHaveBeenCalledWith("teams");
 });

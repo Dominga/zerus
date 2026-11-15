@@ -29,6 +29,37 @@ pub(super) fn fixture() -> TeamFixture {
     .expect("the shared queue fixture")
 }
 
+/// Manual audit support: real operation-written teams in an explicitly marked
+/// private fixture, without claiming the benchmark process is the person.
+#[test]
+#[ignore = "manual private-state scale audit"]
+fn export_scale_teams() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("ZERUS_SCALE_ROOT").expect("private fixture root"),
+    );
+    assert!(root.join(".zerus-scale-fixture").is_file());
+    let destination = root.join("state/teams");
+    assert!(
+        !destination.exists(),
+        "never replace an existing Teams store"
+    );
+    let h = Harness::new();
+    for n in 0..100 {
+        h.create_team(
+            &format!("00000000-0000-4000-8000-{n:012x}"),
+            &format!("Synthetic team {n}"),
+            &format!("zerus/team/synthetic-{n}"),
+        );
+    }
+    let database = h.state().join("teams/teams-v1.sqlite3");
+    let db = rusqlite::Connection::open(&database).unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(db);
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::copy(&database, destination.join("teams-v1.sqlite3")).unwrap();
+    std::fs::write(destination.join("preview"), "on\n").unwrap();
+}
+
 /// A fixed request ID per seed step, so every reply and fixture is stable.
 pub(super) fn uid(step: u32) -> String {
     format!("00000000-0000-4000-8000-{:012x}", 0x9000 + step)

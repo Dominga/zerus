@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { progress, stateLabel, stateTone } from "./team-model";
@@ -19,6 +19,7 @@ export function TeamBar(props: {
   settingsBlocked?: boolean;
   /** The strip's width (tests); the strip's own measured width otherwise. */
   width?: number;
+  drawers?: JSX.Element;
 }) {
   const counts = createMemo(() => progress(props.view));
   const [measured, setMeasured] = createSignal(0);
@@ -64,6 +65,7 @@ export function TeamBar(props: {
       <Show when={props.onSettings}><button type="button" class="btn small" data-team-settings-open
         disabled={props.busy || props.settingsBlocked || !["running", "paused"].includes(props.view.bar.status)}
         onClick={() => props.onSettings?.()}><Icon name="settings" size={12} />{tr("Settings")}</button></Show>
+      {props.drawers}
       <TeamBarActions view={props.view} busy={props.busy} onAction={props.onAction} />
     </header>
   );

@@ -41,7 +41,14 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         .map_or_else(|| kind(ctx.op), Ok)?;
     let mut body = match ctx.op {
         Operation::AdvanceBase { commit } => {
-            let reference: String = ctx.db.query_row("SELECT main_ref FROM base_advances WHERE team=?1 AND revision=?2", params![ctx.team.id,ctx.reply.revision], |r|r.get(0)).map_err(storage)?;
+            let reference: String = ctx
+                .db
+                .query_row(
+                    "SELECT main_ref FROM base_advances WHERE team=?1 AND revision=?2",
+                    params![ctx.team.id, ctx.reply.revision],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
             format!("Base advanced from {} to {commit} via {reference}. Earlier hand-outs keep their assigned base.",ctx.team.base_commit)
         }
         Operation::CloseCard { reason, .. } => reason.clone(),

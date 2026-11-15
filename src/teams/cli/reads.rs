@@ -22,9 +22,11 @@ pub(super) fn base(config: &Config, caller: &Caller, args: &[String]) -> Result<
     actor::person_only(&identity, "base")?;
     let id = actor::target_team(&store, &identity, options.team()?)?;
     let team = store.team(&id)?.ok_or_else(|| not_found_team(&id))?;
-    let repo = crate::desktop::teams::repository(config,&team)?;
+    let repo = crate::desktop::teams::repository(config, &team)?;
     let refs = crate::teams::integrate::main_refs(&repo)?;
-    Ok(json!({"ok":true,"actor":actor::view(&identity.actor),"team":id,"revision":team.revision,"base_commit":team.base_commit,"refs":refs}))
+    Ok(
+        json!({"ok":true,"actor":actor::view(&identity.actor),"team":id,"revision":team.revision,"base_commit":team.base_commit,"refs":refs}),
+    )
 }
 
 /// `status [--team ID] [--bundle]`: the team, its members and counts.

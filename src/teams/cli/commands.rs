@@ -64,7 +64,13 @@ pub(super) fn run(
         actor::member_session(&identity, command)?;
     }
     let request = build(variant, &request_input(provided)?)?;
-    let reply = ops::apply_with_repository(&mut store, &identity.actor, &request, input::now_ms(), &|team| crate::desktop::teams::repository(config,team))?;
+    let reply = ops::apply_with_repository(
+        &mut store,
+        &identity.actor,
+        &request,
+        input::now_ms(),
+        &|team| crate::desktop::teams::repository(config, team),
+    )?;
     reply_view(&identity.actor, &request.team, &reply)
 }
 

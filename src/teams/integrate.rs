@@ -33,8 +33,8 @@ pub struct Reported {
     pub dirty: bool,
 }
 
-mod member_refs;
 mod base;
+mod member_refs;
 pub(crate) use base::{main_refs, validate_base_advance};
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub use member_refs::member_branch_available;

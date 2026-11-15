@@ -599,10 +599,13 @@ fn the_person_pauses_resumes_stops_and_archives_a_member() {
 fn advance_base_and_its_form_read_refuse_sessions_before_their_input_or_git() {
     let h = seeded();
     for session in [LEAD_SESSION, M1_SESSION, OTHER_SESSION] {
-        for words in ["advance-base", "base --team 00000000-0000-4000-8000-00000000beef"] {
-            let (reply,exit)=h.cli(&Caller::Session(key(session)),words,"not JSON");
-            assert_eq!(exit,1);
-            assert_eq!(reply["error"]["code"],"not_allowed","{reply}");
+        for words in [
+            "advance-base",
+            "base --team 00000000-0000-4000-8000-00000000beef",
+        ] {
+            let (reply, exit) = h.cli(&Caller::Session(key(session)), words, "not JSON");
+            assert_eq!(exit, 1);
+            assert_eq!(reply["error"]["code"], "not_allowed", "{reply}");
         }
     }
 }

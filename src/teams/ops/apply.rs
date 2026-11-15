@@ -10,7 +10,9 @@ enum Saved {
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
     apply_with_repository(store, actor, request, now, &|_| {
-        Err(invalid("A trusted local repository resolver is required to advance the base."))
+        Err(invalid(
+            "A trusted local repository resolver is required to advance the base.",
+        ))
     })
 }
 

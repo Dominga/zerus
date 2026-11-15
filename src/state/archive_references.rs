@@ -160,6 +160,33 @@ fn digest(stamp: &str, metadata: &str) -> String {
     )
 }
 
+/// Pure validation used while the catalog streams its compact cache in ID
+/// order. It grants no authority; cleanup still verifies a fresh native roster.
+pub(super) fn cached_projection(
+    id: &str,
+    stamp: &str,
+    raw: &str,
+    hash: &str,
+    paths: &[String],
+) -> bool {
+    if raw.len() > META || stamp.len() > 1024 || hash.len() != 64 || digest(stamp, raw) != hash {
+        return false;
+    }
+    let Ok(_version) = serde_json::from_str::<Version>(stamp) else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_str::<Metadata>(raw) else {
+        return false;
+    };
+    metadata.version == 1 && metadata.id == id && !metadata.name.is_empty() && metadata.paths() == paths
+}
+
+pub(super) fn stamped_bytes(stamp: &str) -> Result<u64> {
+    serde_json::from_str::<Version>(stamp)
+        .map(|version| version.bytes)
+        .map_err(fail)
+}
+
 /// The search catalog is not cleanup coverage. These separate rows are verified
 /// against the complete native file roster and each exact current file version.
 pub(super) fn schema(db: &Connection) -> Result<bool> {
@@ -207,32 +234,63 @@ fn entry(db: &Connection, id: &str) -> Result<Option<(Version, Metadata, usize)>
     let bytes = stamp.len() + raw.len() + hash.len() + paths.iter().map(String::len).sum::<usize>();
     Ok(Some((ver, meta, bytes)))
 }
-pub(super) fn current(db: &Connection, path: &Path, id: &str) -> bool {
-    entry(db, id)
-        .ok()
-        .flatten()
-        .is_some_and(|(prior, _, _)| file_version(path).ok() == Some(prior))
-}
-fn capture(path: &Path) -> Result<(Metadata, Version)> {
-    let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
+fn capture_body(path: &Path) -> Result<(Value, Version, String)> {
     // Bind the compact row to bytes from the SAME opened native file, not a
     // stamp taken after an earlier pathname read. Writers hold the state lock.
     let file = open(path)?;
     let expected = version(&file)?;
-    let actual = read_record(&file, id, &expected)?;
+    let mut actual = read_value(&file, &expected)?;
+    let raw_name = string(&actual, "name").to_owned();
+    super::rename::normalize_archive(&mut actual)?;
     if file_version(path)? != expected {
         return Err(INVALID.into());
     }
-    Ok((Metadata::from_record(id, &actual)?, expected))
+    Ok((actual, expected, raw_name))
+}
+
+fn capture(path: &Path) -> Result<(Metadata, Version)> {
+    let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
+    let (record, stamp, _) = capture_body(path)?;
+    Ok((Metadata::from_record(id, &record)?, stamp))
+}
+
+/// Search and reference maintenance share one bounded, no-follow native read.
+/// The compact references and returned search input bind the same opened file.
+pub(super) struct Captured {
+    pub record: Value,
+    pub raw_name: String,
+    pub stamp: String,
+    pub bytes: u64,
+    pub reference_digest: Result<String>,
+}
+
+pub(super) fn current_stamp(path: &Path) -> Result<String> {
+    serde_json::to_string(&file_version(path)?).map_err(fail)
+}
+
+pub(super) fn reconcile_with_record(db: &Connection, path: &Path) -> Result<Captured> {
+    let id = path.file_stem().and_then(|v| v.to_str()).ok_or(INVALID)?;
+    let (record, expected, raw_name) = capture_body(path)?;
+    let stamp = serde_json::to_string(&expected).map_err(fail)?;
+    // Reference projection has its own bound and omission policy. A failure
+    // must not discard a body the independent search reader can still use.
+    let reference_digest = (|| {
+        let metadata = Metadata::from_record(id, &record)?;
+        store(db, &metadata, &expected)?;
+        let _ = updates::forget(&metadata.id);
+        let raw = serde_json::to_string(&metadata).map_err(fail)?;
+        Ok(digest(&stamp, &raw))
+    })();
+    Ok(Captured {
+        record,
+        raw_name,
+        reference_digest,
+        stamp,
+        bytes: expected.bytes,
+    })
 }
 /// Independent of search/label selection: old archives of the selected label
 /// remain restore references even when the scoped archive reader omits them.
-pub(super) fn reconcile(db: &Connection, path: &Path) -> Result<()> {
-    let (metadata, expected) = capture(path)?;
-    store(db, &metadata, &expected)?;
-    let _ = updates::forget(&metadata.id);
-    Ok(())
-}
 fn store(db: &Connection, metadata: &Metadata, expected: &Version) -> Result<()> {
     let id = &metadata.id;
     let raw = serde_json::to_string(metadata).map_err(fail)?;
@@ -294,7 +352,7 @@ struct Snapshot {
 std::thread_local! {
     static AFTER_DIRECTORY_TYPE: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
-fn directory_stamp(path: &Path) -> Result<String> {
+pub(super) fn directory_stamp(path: &Path) -> Result<String> {
     let meta = fs::symlink_metadata(path).map_err(fail)?;
     if !meta.is_dir() {
         return Err(INVALID.into());
@@ -468,6 +526,7 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
 #[cfg(all(test, unix))]
 std::thread_local! {
     static AFTER_METADATA_READ: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    pub(super) static METADATA_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Shared physical reader for archive JSON, independent of the reference cache.
@@ -496,6 +555,11 @@ fn read_value(file: &fs::File, expected: &Version) -> Result<Value> {
     file.take(RECORD as u64 + 1)
         .read_to_end(&mut data)
         .map_err(fail)?;
+    #[cfg(all(test, unix))]
+    METADATA_WORK.with(|work| {
+        let (reads, bytes) = work.get();
+        work.set((reads + 1, bytes + data.len()));
+    });
     if data.len() > RECORD || version(file)? != *expected {
         return Err(INVALID.into());
     }

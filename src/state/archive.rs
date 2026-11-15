@@ -8,19 +8,29 @@ pub(super) fn path(id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn read_archive(name: &str, id: &str) -> Result<Value> {
-    let mut record = archive_references::read_metadata(&path(id)?)
+    let record = archive_references::read_metadata(&path(id)?)
         .map_err(|error| format!("{name}: cannot read archive {id}: {error}"))?;
+    validated_record(name, id, record)
+}
+
+/// Validate an already captured native body without reopening its pathname.
+pub(super) fn validated_record(name: &str, id: &str, mut record: Value) -> Result<Value> {
     rename::normalize_archive(&mut record)?;
+    validate_record(name, id, &record)?;
+    Ok(record)
+}
+/// Shared field/identity checks for an already normalized native body.
+pub(super) fn validate_record(name: &str, id: &str, record: &Value) -> Result<()> {
     if !record.is_object()
         || record["version"] != 1
-        || string(&record, "name") != name
-        || string(&record, "archive_id") != id
-        || !AGENTS.contains(&string(&record, "agent"))
+        || string(record, "name") != name
+        || string(record, "archive_id") != id
+        || !AGENTS.contains(&string(record, "agent"))
     {
         return Err(format!("{name}: invalid archive record {id}"));
     }
-    session_id::verify(&record)?;
-    Ok(record)
+    session_id::verify(record)?;
+    Ok(())
 }
 
 pub(super) fn records() -> Result<Vec<Value>> {
@@ -106,15 +116,10 @@ fn inventory() -> Result<Inventory> {
 
 /// A search-index match is not proof that the retained archive is readable.
 /// Verify the exact body before using it instead of the current binding.
-fn verified_existing(db: &rusqlite::Connection, record: &Value) -> Result<Option<String>> {
-    let Some(id) = archive_catalog::find(db, record)? else {
-        return Ok(None);
-    };
-    let archived = read_archive(string(record, "name"), &id)?;
-    if !equivalent(record, std::slice::from_ref(&archived)) {
-        return Err("Archive identity changed; retain the saved binding for review".into());
-    }
-    Ok(Some(id))
+fn verified_existing(db: &archive_catalog::Catalog, record: &Value) -> Result<Option<String>> {
+    // find verifies a selected body and every immutable identity before it
+    // returns a positive; a negative requires complete compact native coverage.
+    archive_catalog::find(db, record)
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
@@ -176,9 +181,9 @@ pub(super) fn save(record: &Value) -> Result<String> {
         archived.as_object_mut().unwrap().remove("layout");
         archived.as_object_mut().unwrap().remove("terminal_name");
         atomic_record(&path(&id)?, &mut archived)?;
-        // The catalog above was refreshed before this file existed. Refresh it
-        // again so a reader by name and run finds this archive as soon as it is
-        // durable (zerus-63rru.56); a failure leaves that to the next reader.
+        // Request bounded metadata catch-up after publication. The exact
+        // native archive ID remains readable while coverage is incomplete;
+        // unavailable indexed membership never means the archive is absent.
         let _ = archive_catalog::catalog();
         id
     };
@@ -216,8 +221,9 @@ pub(super) fn reconcile() -> Result<()> {
 }
 
 /// Indexed membership for one current binding. The archive JSON stays
-/// authoritative: catalog() refreshes a changed archive directory before the
-/// lookup. This can rebuild that index, but never enumerates saved bindings.
+/// authoritative: a selected match verifies its exact native body. Incomplete
+/// catalog coverage stays unavailable and requests background metadata work;
+/// this never enumerates saved bindings or rebuilds inline.
 pub(super) fn contains_selected(record: &Value) -> Result<bool> {
     if !root().join("archives").exists() {
         return Ok(false);
@@ -320,12 +326,32 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
 pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>> {
     let bindings = super::storage::records()?;
     let mut result = Vec::new();
-    let mut catalog=None;
+    let mut catalog = None;
+    let mut archive_unavailable = false;
     for record in bindings {
-        if terminating::pending(&record) { result.push(record); continue; }
+        if terminating::pending(&record) {
+            result.push(record);
+            continue;
+        }
         // A live exact binding cannot be the crash-left copy of a completed run.
-        if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
-        if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
+        if matches(&record, panes_of(snapshot, &record)) || process_alive(&record) {
+            result.push(record);
+            continue;
+        }
+        if archive_unavailable {
+            result.push(record);
+            continue;
+        }
+        if catalog.is_none() {
+            match archive_catalog::catalog() {
+                Ok(db) => catalog = Some(db),
+                Err(_) => {
+                    archive_unavailable = true;
+                    result.push(record);
+                    continue;
+                }
+            }
+        }
         match verified_existing(catalog.as_ref().unwrap(), &record) {
             Ok(Some(_)) => {
                 save(&record)?;
@@ -335,20 +361,34 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
                 // This read-only proof failed before any save. Keep this
                 // binding while allowing unrelated rows to remain available.
                 eprintln!("hgs: cannot reconcile {}: {error}", string(&record, "name"));
+                archive_unavailable = archive_catalog::incomplete(&error);
                 result.push(record);
                 continue;
             }
             Ok(None) => (),
         }
-        if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
-            || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
-            || !string(&record, "expected_id").is_empty() {
-            result.push(record); continue;
+        if terminal_live(snapshot, &record).unwrap_or(true)
+            || process_alive(&record)
+            || record.get("pausing").is_some()
+            || record["paused"].as_bool().unwrap_or(false)
+            || !string(&record, "expected_id").is_empty()
+        {
+            result.push(record);
+            continue;
         }
-        let clean = record["termination_signal"].is_null() && known_exit(&record) &&
-            ((string(&record,"agent")=="claude" && record.get("supervisor").is_none() && string(&record,"error").is_empty()) ||
-             (string(&record,"completion_source")=="supervisor" && string(&record,"completion_reason")=="clean_exit" && record["exit_code"]==0));
-        if clean { save(&record)?; } else { result.push(record); }
+        let clean = record["termination_signal"].is_null()
+            && known_exit(&record)
+            && ((string(&record, "agent") == "claude"
+                && record.get("supervisor").is_none()
+                && string(&record, "error").is_empty())
+                || (string(&record, "completion_source") == "supervisor"
+                    && string(&record, "completion_reason") == "clean_exit"
+                    && record["exit_code"] == 0));
+        if clean {
+            save(&record)?;
+        } else {
+            result.push(record);
+        }
     }
     Ok(result)
 }

@@ -1505,6 +1505,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
         return receipt_index::worker();
     }
+    if args.first().map(String::as_str) == Some("archive-catalog-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected archive catalog worker arguments".into());
+        }
+        return archive_catalog::worker();
+    }
     if args.first().map(String::as_str) == Some("task-binding-index-worker") {
         if args.len() != 1 {
             return Err("Unexpected task routing worker arguments".into());

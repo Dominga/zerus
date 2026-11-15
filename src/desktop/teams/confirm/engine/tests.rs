@@ -82,6 +82,7 @@ impl Ports for Fake {
             member: self.facts.member.clone(),
             binding: self.facts.binding.clone(),
             preview: self.facts.preview,
+            planning_paused: self.facts.planning_paused,
         })
     }
     fn observe(&mut self, _: &Binding) -> Result<Snapshot> {

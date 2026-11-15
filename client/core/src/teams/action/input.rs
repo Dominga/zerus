@@ -57,6 +57,7 @@ impl TeamAction {
     /// The operation: `hgs team <op> --json`.
     pub fn op(&self) -> &'static str {
         match self {
+            Self::StartPlanning { .. } => "start-planning",
             Self::SubmitDraftPhase { .. } => "submit-draft-phase",
             Self::EditDraftPhase { .. } => "edit-draft-phase",
             Self::AddMember { .. } => "add-member",
@@ -90,7 +91,7 @@ impl TeamAction {
 
     /// Whether the call names a team. Only Create does not.
     pub fn names_team(&self) -> bool {
-        !matches!(self, Self::Create { .. })
+        !matches!(self, Self::Create { .. } | Self::StartPlanning { .. })
     }
 
     /// The fields the operation sends besides the envelope's.
@@ -103,6 +104,17 @@ impl TeamAction {
                 draft,
             } => json!({"phase":phase,"generation":generation,"draft":draft}),
             Self::Create {
+                project,
+                name,
+                goal,
+                home,
+                integration_branch,
+                base_commit,
+                expected_template,
+                delegations,
+                ..
+            }
+            | Self::StartPlanning {
                 project,
                 name,
                 goal,
@@ -213,7 +225,7 @@ impl TeamAction {
             | Self::SwapMember { .. }
             | Self::RenameTeam { .. }
             | Self::SetGoal { .. } => super::editing::check(self),
-            Self::Create { .. } => check_create(self),
+            Self::Create { .. } | Self::StartPlanning { .. } => check_create(self),
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
             Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
                 .map_err(|problem| problem.message),
@@ -324,7 +336,7 @@ impl TeamAction {
 }
 
 fn check_create(action: &TeamAction) -> Result<(), String> {
-    let TeamAction::Create {
+    let (TeamAction::Create {
         template,
         project,
         name,
@@ -335,11 +347,26 @@ fn check_create(action: &TeamAction) -> Result<(), String> {
         integration,
         expected_template,
         ..
-    } = action
+    }
+    | TeamAction::StartPlanning {
+        template,
+        project,
+        name,
+        goal,
+        home,
+        integration_branch,
+        base_commit,
+        integration,
+        expected_template,
+        ..
+    }) = action
     else {
         return Err("Not a create.".into());
     };
     word(template, "template")?;
+    if matches!(action, TeamAction::StartPlanning { .. }) && goal.trim().is_empty() {
+        return Err("Name the planning goal.".into());
+    }
     // The digest is opaque: the catalog read gave it and it is sent back as
     // it came; a create never goes without one.
     word(expected_template, "template digest")?;

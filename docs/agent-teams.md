@@ -304,6 +304,28 @@ stop recorded: cancellation, release, key clearing, a refusal and its reason,
 or work not yet reached. An older stop without a recorded identity shows no
 invented outcome.
 
+## Starting from a goal
+
+In **New team**, choose **Plan a goal first**, enter a goal and review the
+template and permissions. **Start planning** starts only the lead, in its own
+worktree. Other members and the integration branch wait for your approval of
+the initial plan. The CLI equivalent is `hgs team start-planning --template ID`
+with the usual creation request on stdin and a nonblank goal.
+
+The lead receives a durable inbox notice and can read the original goal with
+`hgs team current`. It submits drafts that you can inspect in **Layers**.
+Approval and publication are still unavailable in this slice, so the team
+stays in Planning and hands out no tasks.
+
+**Pause planning** stops new launches and automatic messages; the lead's current
+work may continue. **Resume planning** returns to Planning. A lead cannot
+remove your pause. **Stop** ends the team. An uncertain launch remains visible
+and is never automatically launched again after a restart.
+
+Starting a planned team requires the new Teams engine. Older `hgs` versions
+cannot open that computer's Teams store afterward; use the updated CLI and
+desktop service together.
+
 ## Preparing phase drafts
 
 Open **Layers** in the Team tab to read planned phases. **New phase draft**
@@ -680,8 +702,8 @@ tool approvals.
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
 - Queue execution has Board, Graph and Lanes views; draft phases use Layers.
-  Planning from a goal, phase approval/publication and phase acceptance are
-  not yet available.
+  A lead can prepare drafts from a goal. Planned phase approval/publication
+  and phase acceptance are not yet available.
 - DeepSeek can be a lead or member with a host that proves each tool call
   with its per-call token, witnesses task input and reports its lifecycle.
   A host lacking those capabilities stays unavailable; Zerus never reloads

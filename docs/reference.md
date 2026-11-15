@@ -5956,6 +5956,7 @@ hgs team template show|export|remove TEMPLATE
 hgs team template save < template.json
 hgs team template import < bundle.json
 hgs team create --template TEMPLATE < request.json
+hgs team start-planning --template TEMPLATE < request.json
 hgs team list [--limit 1..200] [--after CURSOR]
 hgs team waiting [--limit 1..200] [--after CURSOR]
 hgs team status [--team TEAM] [--bundle]
@@ -6012,6 +6013,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `preview status`, `list` | yes | yes | yes | none |
 | `catalog ...`, `template ...` | yes | | | the catalog, template or bundle JSON |
 | `create --template` | yes | | | `project`, `name`, `goal`, `home`, `integration_branch`, `base_commit`, optional `expected_template` and `delegations` |
+| `start-planning --template` | yes | | | Same confirmed fields as `create`; a nonblank `goal` is required. Starts only the lead in Planning. |
 | `waiting` | yes | | | none |
 | `status` | yes | yes | yes | none |
 | `inbox`, `queue`, `cards`, `journal` | yes | yes | | none |
@@ -6071,6 +6073,27 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+**Planned startup.** `start-planning` is a separate person-only creation intent;
+`create` keeps its queue-team behavior and request shape. It saves the confirmed
+template and permissions, goal, not-created roster and a durable team-wide
+planning inbox notice. Only the lead's own worktree and session may start.
+Other members, the integration branch, task stages and hand-outs wait for initial
+plan approval. The lead reads its original goal through `current` and `inbox`.
+The existing guarded doorbell points to that inbox, including for DeepSeek;
+an unknown delivery is never automatically repeated.
+
+Pause stops new planning launches, standing confirmations and doorbells; it
+does not stop the lead's current native turn. Resume returns to Planning, never
+Running, and a lead cannot remove the person's pause. Stop ends the team.
+Launch refusals and unknown outcomes retain their ordinary notices and listed
+decisions, without granting task or integration authority. Approval and
+publication are unavailable in this slice.
+
+Starting the first planned team atomically raises the private Teams execution
+schema to 3. Queue-only stores remain at 2; this engine reads both. Older
+engines refuse fresh opens of a store marked 3, so all Teams commands and its
+desktop service on that computer need the M2-capable engine thereafter.
 
 **Planned drafts.** The Team tab's Layers view reads bounded draft phases;
 approval is shown unavailable until publication is implemented. `phases`

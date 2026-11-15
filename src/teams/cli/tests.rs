@@ -17,6 +17,7 @@ mod lanes;
 mod member_sessions;
 mod phase_metrics;
 mod phases;
+mod planning;
 mod progress;
 mod progress157;
 mod reads;

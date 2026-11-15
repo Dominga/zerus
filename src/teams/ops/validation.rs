@@ -1,6 +1,6 @@
 use super::*;
 pub(super) fn creation_team(request: &Request, actor: &Actor) -> Result<Team, Problem> {
-    let Operation::Create {
+    let (Operation::Create {
         delegations,
         project,
         name,
@@ -10,7 +10,18 @@ pub(super) fn creation_team(request: &Request, actor: &Actor) -> Result<Team, Pr
         integration_branch,
         base_commit,
         ..
-    } = &request.operation
+    }
+    | Operation::StartPlanning {
+        delegations,
+        project,
+        name,
+        goal,
+        home,
+        bundle,
+        integration_branch,
+        base_commit,
+        ..
+    }) = &request.operation
     else {
         return Err(missing());
     };
@@ -25,7 +36,11 @@ pub(super) fn creation_team(request: &Request, actor: &Actor) -> Result<Team, Pr
         goal: goal.clone(),
         home: home.clone(),
         owner: actor.person().into(),
-        status: TeamStatus::Running,
+        status: if matches!(request.operation, Operation::StartPlanning { .. }) {
+            TeamStatus::Planning
+        } else {
+            TeamStatus::Running
+        },
         lead: LEAD.into(),
         settings,
         bundle: *bundle.clone(),

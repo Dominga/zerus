@@ -8,6 +8,7 @@ import {
   teams, type TeamCall, type TeamCatalog, type TeamCatalogTemplate, type TeamProjectFacts,
 } from "../../store/teams";
 import { NewTeamFooter } from "./NewTeamFooter";
+import { PlanningStart } from "./PlanningStart";
 import { withoutCode } from "../../store/sentences";
 import { NewTeamHowTo, NewTeamIntroSteps } from "./NewTeamGuide";
 import { NewTeamPage } from "./NewTeamPage";
@@ -98,6 +99,7 @@ export function pipelineLines(catalog: TeamCatalog, template: TeamCatalogTemplat
 export const CREATE_DELEGATIONS = ["accept_results", "answer_members", "confirm_trust", "resume_exited", "merge_accepted"] as const;
 
 export interface NewTeamInput {
+  planning: boolean;
   /** The new team's id and the create intent's request id, made here once. */
   team: string;
   request_id: string;
@@ -140,6 +142,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   const [templateId, setTemplateId] = createSignal(props.catalog?.templates[0]?.id ?? "");
   const [name, setName] = createSignal("");
   const [goal, setGoal] = createSignal("");
+  const [planning, setPlanning] = createSignal(false);
   const [project, setProject] = createSignal(props.defaultProject);
   const [folder, setFolder] = createSignal(props.defaultFolder);
   const [branch, setBranch] = createSignal("");
@@ -205,6 +208,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
     if (template()!.unknown_permissions?.length || !sent()) return tr("This version does not know every permission of the template. Update Zerus to create a team.");
     if (template()!.unknown_fields?.length) return tr("This version cannot show everything the template sets. Update Zerus to create a team.");
     if (!name().trim()) return tr("Name the team.");
+    if (planning() && !goal().trim()) return tr("Name the planning goal.");
     if (!project().trim()) return tr("Name the project.");
     if (!checkedFolder()?.git) return tr("Check the project folder: it must be a Git folder.");
     if (locked()) return tr("Wait for the team to be created.");
@@ -250,6 +254,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
     teams.clearFailure("new-team");
     try {
       const outcome = await props.onCreate({
+        planning: planning(),
         team: current.team, request_id: current.request_id, template: chosen.id, expected_template: chosen.digest, delegations: permissions,
         project: project().trim(), name: name().trim(), goal: goal().trim(),
         home: props.machineId, integration_branch: proposed(), base_commit: checked.head, integration: chosen.settings.integration,
@@ -313,6 +318,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           </For>
         </div>
       </fieldset>
+      <PlanningStart planning={planning()} disabled={locked()} change={setPlanning} />
       <section class="nt-section" aria-label={tr("Team")}>
         <h2>{tr("Team")}</h2>
         <div class="nt-pair">
@@ -399,11 +405,11 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       </Show>
       <Show when={saved()}><div class="notice nt-note" role="status"><Icon name="check" size={16} /><span>{saved()}</span></div></Show>
       <section class="nt-section">
-        <NewTeamIntroSteps />
+        <NewTeamIntroSteps planning={planning()} />
         <NewTeamHowTo open={howto()} onToggle={setHowto} />
       </section>
       <NewTeamFooter busy={props.busy || creating() || sendingCreate()} createWhy={createWhy()} error={shownError()} canSave={!!template() && !locked() && !unknownConfirmed()}
-        saving={saving()} showCreate={!intentCall() && !sendingCreate()} onSaveTemplate={() => void save()} onCancel={props.onClose} onCreate={() => void create()} />
+        saving={saving()} showCreate={!intentCall() && !sendingCreate()} planning={planning()} onSaveTemplate={() => void save()} onCancel={props.onClose} onCreate={() => void create()} />
     </div>
   );
 }
@@ -438,7 +444,7 @@ export function NewTeamDialog() {
               const call: TeamCall = {
                 team: input.team, team_name: input.name, request_id: input.request_id,
                 action: {
-                  kind: "create", template: input.template, expected_template: input.expected_template, delegations: input.delegations,
+                  kind: input.planning ? "start_planning" : "create", template: input.template, expected_template: input.expected_template, delegations: input.delegations,
                   project: input.project, name: input.name, goal: input.goal,
                   home: input.home, integration_branch: input.integration_branch, base_commit: input.base_commit,
                   integration: input.integration,

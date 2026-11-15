@@ -19,6 +19,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         .ok_or_else(missing)?
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
+    store::execution_fence(&tx)?;
     let current = rows::team(&tx, &request.team)?;
     let team = current
         .clone()
@@ -123,7 +124,12 @@ fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply>
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
-    if existed && matches!(ctx.op, Operation::Create { .. }) {
+    if existed
+        && matches!(
+            ctx.op,
+            Operation::Create { .. } | Operation::StartPlanning { .. }
+        )
+    {
         return Err(invalid("Team already exists."));
     }
     dispatch(ctx)?;
@@ -176,6 +182,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::RenameTeam { .. } => editing::rename(ctx),
         Operation::SetGoal { .. } => editing::goal(ctx),
         Operation::Create { .. } => team::create(ctx),
+        Operation::StartPlanning { .. } => planning::start(ctx),
         Operation::Pause => team::pause(ctx),
         Operation::Resume => team::resume(ctx),
         Operation::Stop => team::stop(ctx),

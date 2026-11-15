@@ -43,6 +43,19 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
+    StartPlanning {
+        template: String,
+        project: String,
+        name: String,
+        goal: String,
+        home: String,
+        integration_branch: String,
+        base_commit: String,
+        #[serde(default)]
+        integration: Integration,
+        expected_template: String,
+        delegations: CreateDelegations,
+    },
     SubmitDraftPhase {
         phase: u32,
         draft: zerus_team_plan::draft::DraftInput,

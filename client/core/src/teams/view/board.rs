@@ -208,6 +208,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
     let (groups, truncated) = board(array(queue, "rows"));
     let revision = count(team, "revision");
     TeamView {
+        planning: super::planning::project(status),
         plan: None,
         bar: TeamBar {
             id: name(team, "id"),

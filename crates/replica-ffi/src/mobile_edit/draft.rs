@@ -120,6 +120,17 @@ impl TaskEditDraft {
     pub fn view(&self) -> TaskEditView {
         self.view.clone()
     }
+    /// Replace a local validation attempt, never a frozen or submitted request.
+    pub fn reset_edits(&self) -> Result<()> {
+        let mut state = self.state()?;
+        if state.frozen.is_some() || state.pending.is_some() || state.unknown || state.completed {
+            return Err(refused(
+                "The original task draft is frozen or held for review.",
+            ));
+        }
+        state.edits.clear();
+        Ok(())
+    }
     pub fn content(
         &self,
         title: String,

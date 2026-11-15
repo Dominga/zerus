@@ -255,6 +255,7 @@ pub(in crate::teams::store) fn after_fence() -> Result<()> {
 /// writes with: the common batches, the read index conversion and the
 /// transition.
 pub(in crate::teams::store) fn fence(db: &Connection) -> Result<()> {
+    super::super::execution_fence(db)?;
     marked(db).map(|_| ())
 }
 /// The preview-off disposition reader cannot migrate an earlier layout.

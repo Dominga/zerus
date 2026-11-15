@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import ZerusKit
+import ZerusReplica
 
 struct AttachmentRowState: Equatable {
     var loading = false
@@ -56,6 +57,34 @@ final class AttachmentViewer {
             } catch {
                 rows[key] = AttachmentRowState(error: Self.message(error))
             }
+        }
+    }
+
+    /// Replica tokens resolve exact verified bytes; reference strings never trigger network reads.
+    func openTask(key: String, file: TaskMediaInfo, read: @escaping @Sendable () async throws -> TaskMediaContent) {
+        guard tasks[key] == nil, let cache else { return }
+        if rows.count >= 64, let first = rows.keys.first { rows[first] = nil }
+        guard tasks.count < 4 else { rows[key] = AttachmentRowState(error: taskEditText("task_media_open_failed")); return }
+        rows[key] = AttachmentRowState(loading: true)
+        tasks[key] = Task { [weak self] in
+            guard let self else { return }
+            defer { tasks[key] = nil }
+            do {
+                let entry: AttachmentViewCache.Entry
+                if let cached = await Task.detached(operation: { cache.lookup(key) }).value { entry = cached }
+                else {
+                    let content = try await read()
+                    guard content.info == file, content.data.count == file.size else { throw ZerusError.mismatch("Refresh this task to open its media.") }
+                    entry = try await Task.detached {
+                        let pending = try cache.begin(key, name: file.name, mime: file.mime)
+                        defer { pending.abort() }
+                        try pending.write(content.data)
+                        return try pending.commit(file.sha256)
+                    }.value
+                }
+                rows[key] = nil
+                opened = OpenedAttachment(key: key, file: entry.file, name: file.name, mime: file.mime)
+            } catch { rows[key] = AttachmentRowState(error: taskEditText("task_media_open_failed")) }
         }
     }
 

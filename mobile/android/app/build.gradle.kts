@@ -93,6 +93,20 @@ val uniffiBindings by tasks.registering(Exec::class) {
         "--library", hostLibrary.get().asFile.path, "--language", "kotlin", "--no-format",
         "--out-dir", uniffiKotlin.get().asFile.path)
 }
+// The phone contract tests exercise the real admitted native endpoint in a
+// private child. This binary is test-only and is never packaged into the app.
+val taskFixtureCrate = rootProject.file("../../crates/mobile-task-edit")
+val taskFixtureName = if (System.getProperty("os.name").startsWith("Windows")) "phone_fixture.exe" else "phone_fixture"
+val taskFixture = rustBuild.map { it.file("host/debug/examples/$taskFixtureName") }
+val rustTaskFixture by tasks.registering(Exec::class) {
+    dependsOn(uniffiBindings)
+    inputs.files(replicaSources)
+    inputs.file(taskFixtureCrate.resolve("examples/phone_fixture.rs"))
+    outputs.file(taskFixture)
+    workingDir = taskFixtureCrate
+    commandLine("cargo", "+$rustToolchain", "build", "--locked", "--example", "phone_fixture", "-j", "4",
+        "--target-dir", rustBuild.get().dir("host").asFile.path)
+}
 
 android {
     namespace = "app.zerus.mobile"
@@ -214,8 +228,9 @@ val checkReplicaPackaging by tasks.registering {
 tasks.named("preBuild") { dependsOn(uniffiBindings) }
 tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(rustAndroidLibraries) }
 tasks.withType<Test>().configureEach {
-    dependsOn(rustHostLibrary)
+    dependsOn(rustHostLibrary, rustTaskFixture)
     systemProperty("uniffi.component.zerus_replica_ffi.libraryOverride", hostLibrary.get().asFile.path)
+    systemProperty("zerus.taskFixtureBinary", taskFixture.get().asFile.path)
 }
 gradle.taskGraph.whenReady {
     if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })

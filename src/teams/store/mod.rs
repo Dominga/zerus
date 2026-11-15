@@ -10,16 +10,19 @@ mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
 pub(crate) mod dependency_edit;
-mod holder;
-pub(crate) mod editing;
+pub(in crate::teams) mod non_delivery;
 mod disposition;
 pub(crate) mod drafts;
+pub(crate) mod editing;
+mod holder;
+pub(crate) mod planning;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 pub use decision_state::DecisionState;
 pub(crate) mod bases;
 pub(crate) mod pages;
 mod progress;
+mod recorded_timings;
 mod records;
 pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
 pub(crate) mod rows;
@@ -37,7 +40,7 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -117,6 +120,9 @@ impl Store {
     }
     pub(crate) fn active(&self) -> Result<()> {
         if super::enabled(&self.state) {
+            if let Some(db) = &self.db {
+                execution_fence(db)?;
+            }
             Ok(())
         } else {
             Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."))
@@ -314,7 +320,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if version == SCHEMA_VERSION {
+    if matches!(version, 2 | SCHEMA_VERSION) {
         return schema_extensions(db);
     }
     let tx = db
@@ -331,7 +337,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        SCHEMA_VERSION => None,
+        2 | SCHEMA_VERSION => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
@@ -382,8 +388,24 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     key_clear_schema(db)?;
     card_parameters(db)?;
     drafts::extend(db)?;
+    planning::extend(db)?;
     read_indexes(db)?;
     timers::extend(db)
+}
+
+/// Executable planned work fences pre-M2 engines. Queue-only stores stay at
+/// layout 2; starting planning raises it atomically with that team's creation.
+pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
+    let version: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if version > SCHEMA_VERSION {
+        return Err(Problem::new(
+            code::INVALID_STATE,
+            "store schema is newer than this version of Zerus",
+        ));
+    }
+    Ok(())
 }
 
 /// The notes columns beside the member's own words (zerus-63rru.69). They are
@@ -498,11 +520,12 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 4] = [
+const COMMON_SCHEMA: [&str; 5] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
     include_str!("read-indexes.sql"),
     include_str!("base-schema.sql"),
+    include_str!("non-delivery-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied
 /// once per store, when the table is absent, so the ordinary open performs

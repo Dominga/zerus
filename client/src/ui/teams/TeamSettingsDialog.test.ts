@@ -181,3 +181,25 @@ it("preserves a legacy stored resume value without presenting it as editable aut
   expect((f.calls[0].action.settings as ReturnType<typeof written>).timers.resume_limit_per_hour).toBe(7);
   expect(f.input("resume_limit_per_hour").disabled).toBe(true);
 });
+
+it.each(["max_members", "max_open_tasks", "report_timeout_seconds"])("places the synthetic %s refusal next to that exact field with an accessible description", async (key) => {
+  const section = key === "report_timeout_seconds" ? "timers" : "caps";
+  const f = setup({ outcome: "failed", request_id: "result", code: "over_cap", detail: "Synthetic exact field refusal", field: `settings.${section}.${key}` } as TeamOutcome);
+  f.change("routing", "lead"); await f.submit();
+  const input = f.input(key), message = input.closest("label")?.querySelector('[role="alert"]');
+  expect(message?.textContent).toBe("Synthetic exact field refusal");
+  expect(input.getAttribute("aria-invalid")).toBe("true"); expect(input.getAttribute("aria-describedby")).toBe(message?.id);
+  expect(f.host.querySelector("[data-settings-error]")).toBeNull();
+  const other = f.input(key === "max_members" ? "max_open_tasks" : "max_members"); expect(other.getAttribute("aria-invalid")).toBe("false");
+  f.change(key, "5"); expect(input.closest("label")?.querySelector('[role="alert"]')).toBeNull();
+});
+it("puts local blank timer validation beside the timer without submitting an empty success", async () => {
+  const f = setup(); f.change("report_timeout_seconds", ""); await f.submit();
+  expect(f.calls).toHaveLength(0);
+  const input = f.input("report_timeout_seconds"), message = input.closest("label")?.querySelector('[role="alert"]');
+  expect(message?.textContent).toBe("Enter whole numbers within the shown limits."); expect(input.getAttribute("aria-describedby")).toBe(message?.id);
+});
+it("keeps an unknown field path as a visible general refusal", async () => {
+  const f = setup({ outcome: "failed", request_id: "result", code: "over_cap", detail: "Unknown field refusal", field: "settings.future.limit" } as TeamOutcome);
+  f.change("routing", "lead"); await f.submit(); expect(f.host.querySelector("[data-settings-error]")?.textContent).toBe("Unknown field refusal");
+});

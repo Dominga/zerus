@@ -52,8 +52,8 @@ fn unknown_outcome_never_retries_the_same_effect_or_opens_a_second_slot() {
         HandoutOutcome::Uncertain {
             reason: "Lost receipt".into(),
         },
-        HandoutOutcome::CuttingOver {
-            reason: "Cutting over".into(),
+        HandoutOutcome::Uncertain {
+            reason: "Cutting over; the receipt is unknown".into(),
         },
     ] {
         let mut h = Harness::new();

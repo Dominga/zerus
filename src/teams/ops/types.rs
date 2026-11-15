@@ -211,6 +211,19 @@ pub enum Operation {
         generation: u64,
         draft: zerus_team_plan::draft::DraftInput,
     },
+    StartPlanning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_template: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegations: Option<Delegations>,
+        project: String,
+        name: String,
+        goal: String,
+        home: String,
+        bundle: Box<TemplateBundle>,
+        integration_branch: String,
+        base_commit: String,
+    },
     Create {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_template: Option<String>,

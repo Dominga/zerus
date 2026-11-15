@@ -99,17 +99,20 @@ selective salvage, automatic rebase, new root or automatic overwrite of the
 original local files.
 
 Only edits made after that qualified baseline are eligible for this lane. The
-handle retains the exact source, baseline, receipt and nonce with the edited
-bytes. A refresh cannot retarget it to a different project, task, phone store,
-host or seal. Persist the original pending edit identity/bytes before sending
-them. A second explicit edit has its own identity; a lost result does not
-silently repeat an edit or duplicate a comment.
+handle retains the exact source, baseline, receipt and nonce with a frozen
+declarative edit manifest. A refresh cannot retarget it to a different project,
+task, phone store, host or seal. Persist the original pending edit identity and
+bytes before sending them. A second explicit edit has its own identity; a lost
+result does not silently repeat an edit or duplicate a comment.
 
-The handle is a phone projection writer. It never writes a native `.cutover`
-pin, prepares/adopts/exports/settles native custody, starts an executor or
-becomes native authority when its folder is reopened. Plain phone-cache
-handles stay read-only for schema 8. Unknown newer schemas stay read-only.
-Schema-1 reads and the existing schema-1/2 legacy writer boundary are unchanged.
+The handle stages a draft projection and its manifest separately from the
+canonical phone CRDT. The canonical schema-8 cache remains read-only until the
+host's accepted state arrives through document sync. The handle never writes
+a native `.cutover` pin, prepares/adopts/exports/settles native custody, starts
+an executor or becomes native authority when its folder is reopened. Plain
+phone-cache handles stay read-only for schema 8. Unknown newer schemas stay
+read-only. Schema-1 reads and the existing schema-1/2 legacy writer boundary
+are unchanged.
 
 The first writer surface covers requirement text/media, target, board order
 and comments through existing person/stage rules. It grants no new execution
@@ -122,10 +125,40 @@ capabilities to the clients.
 
 The receiver requires the original authenticated source, retained receipt and
 nonce, exact original source/target/store/root/seal and a complete validated
-candidate before canonical import. It rechecks native custody under admission.
+edit manifest before committing. It rechecks native custody under admission.
 A supplied baseline is evidence to compare with retained authority, never a
-new authority. Import must preserve the immutable root/seal and every existing
-cutover/causal-history guard.
+new authority. The native host constructs the permitted CRDT operations itself
+through existing task methods; it does not import arbitrary phone-authored
+schema-8 operations. The manifest is a strict versioned tagged union for
+content/media, target, rank and comment changes, with existing bounds and no
+unknown fields. It cannot encode stage, attempt, Start, report, metadata,
+another task or project operations. A signed raw CRDT candidate is still
+refused, including operations overwritten back to an allowed final projection.
+Comparing final visible values is not an operation whitelist.
+
+Check the edited fields against the retained baseline and current admitted
+task before constructing any operation. A changed field needs fresh review;
+unrelated history may arrive without invalidating a content draft. Save the
+whole allowed edit atomically through native admission, preserving the
+immutable root/seal and every existing cutover/causal-history guard.
+
+The directly callable native entry has its own durable reservation, not just
+the connector's outer guard. Before issuing a qualification or committing an
+edit, reserve the exact original UUID, envelope/body digest, authenticated
+source, receipt/nonce and store binding in private native custody. A duplicate
+exact request returns its retained result or Unknown; changed bytes, a new
+nonce claim, another store or a captured-envelope replay cannot issue another
+qualification or repeat a commit. A cut after reservation and before durable
+completion is Unknown across restart. Do not infer successful delivery or
+repeat an edit from the canonical task's current projection.
+
+The connector also persists a discriminator for this qualified mutation lane
+before starting native work. It marks mutation start and preserves Unknown
+through immediate timeout, process death, native-journal recovery and v2
+restart/flush. Neither the outer Mutation header nor an unproven stdout field
+alone supplies that classification. Missing or wrong native outcome evidence
+keeps the original Unknown. Legacy task-exchange read/recovery classification
+is unchanged.
 
 Keep API v1 framing, existing operation identities and the durable connector
 journal. Carry the new exchange lane through versioned opaque update bytes,
@@ -134,9 +167,11 @@ write qualification. Legacy exchange and media-frame classification is
 unchanged. A serialized frame alone cannot create the authenticated native
 context. No relay operation or server migration is needed.
 
-Large edit bytes use the advertised bounded media-upload path: project/task/
-hash/size/offset binding, one private bounded assembly slot, exact acknowledgements and complete verification before import. No partial task import. A
-missing, changed or unknown acknowledgement cannot advance another draft.
+Large manifest bytes use the advertised bounded media-upload framing:
+project/task/hash/size/offset binding, one private bounded assembly slot, exact
+acknowledgements and complete verification before applying the edit. The
+completed body is parsed as a strict manifest, never as an arbitrary Loro
+update. No partial task import. A missing, changed or unknown acknowledgement cannot advance another draft.
 An interrupted document transfer recovers only through the original document
 sync/status path, never by replaying native input or inventing a new outcome.
 
@@ -177,7 +212,11 @@ route on Arch/Mac, plus an unadmitted relay/serialized producer claim, wrong or
 revoked source/key, wrong connection/route/machine/store/root/seal, a stale
 local extra (including same-peer history), replaced native custody, shallow
 history, missing or unknown receipt, duplicate original request and attempted
-native prepare/export/dispatch from a phone handle. Exercise the existing
+native prepare/export/dispatch from a phone handle. Add direct-native signed
+forbidden-candidate controls (attempt/Start/report/stage/meta/other task/project,
+including transient overwritten operations), kill-after-commit/before-response,
+timeout and restart/flush classification, native UUID consumption, authorization
+lock contention and revocation between lock holders. Exercise the existing
 private large-media framing and byte-complete native-send controls after caller
 integration. Kill a mutant for every new acceptance guard.
 

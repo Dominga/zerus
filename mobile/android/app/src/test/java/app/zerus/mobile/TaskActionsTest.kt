@@ -6,6 +6,11 @@ import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskStore
 import app.zerus.mobile.replica.TaskTarget
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -289,6 +294,41 @@ class TaskActionsTest {
         assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
         assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
         assertEquals(1, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun cancellingAfterTheOriginalPostKeepsItsUnknownHold() = world { computer, connection, _, sync -> coroutineScope {
+        val task = added(computer.store, "Original requirement")
+        val entered = java.util.concurrent.CountDownLatch(1); val release = java.util.concurrent.CountDownLatch(1)
+        computer.receipts["task_send"] = {
+            entered.countDown()
+            check(release.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "The private original-result gate did not settle" }
+            Triple("completed", JSONObject(), JSONObject.NULL)
+        }
+        val original = async { sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") }
+        try {
+            assertTrue(withContext(Dispatchers.IO) { entered.await(10, java.util.concurrent.TimeUnit.SECONDS) })
+            original.cancel(); release.countDown(); original.cancelAndJoin()
+            assertTrue("A posted original stays held after caller cancellation", sync.held(task.uuid))
+            assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+            assertEquals(1, computer.operations().count { it == "task_send" })
+        } finally { release.countDown(); original.cancelAndJoin() }
+    } }
+
+    @Test fun boundedUnknownSettlementAdvancesPastRefusalsWhileNewHoldsArrive() = world { computer, connection, _, sync ->
+        val tasks = (1..65).map { added(computer.store, "Requirement $it") }
+        computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, "Unknown private outcome") }
+        for (task in tasks) assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        val ordered = tasks.map { it.uuid }.sorted(); val refused = ordered.take(64); val last = ordered.last()
+        computer.modifyExchange = { refuse(it, *refused.toTypedArray()) }
+        sync.settleSends(connection) { "orchard" }
+        assertTrue("One bounded page must retain the later original", sync.held(last))
+        val arrival = added(computer.store, "New requirement")
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", arrival.uuid, "codex/api") is TaskOutcome.Uncertain)
+        sync.settleSends(connection) { "orchard" }
+        assertFalse("The cursor must advance beyond the refused page", sync.held(last))
+        sync.settleSends(connection) { "orchard" }
+        assertFalse("An arriving original is visited without dropping older refusals", sync.held(arrival.uuid))
+        assertTrue(refused.all(sync::held)); assertEquals(66, computer.operations().count { it == "task_send" })
     }
 
 }

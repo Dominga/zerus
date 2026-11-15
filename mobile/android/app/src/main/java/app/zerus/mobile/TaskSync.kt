@@ -236,7 +236,10 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                 "uncertain" -> TaskOutcome.Uncertain(reason.ifBlank { "The computer could not confirm it." })
                 else -> TaskOutcome.Uncertain("The computer has not answered yet.")
             }
-        } catch (e: CancellationException) { throw e }
+        } catch (e: CancellationException) {
+            if (operation == "task_send") sends[task] = PendingSend(key, computerId, originalRequestId)
+            throw e
+        }
         // The relay refused the request itself: nothing was queued.
         catch (e: RelayException) {
             if (e.status in 400..499 && e.status != 408) TaskOutcome.Refused(e.message.orEmpty().ifBlank { "The relay refused it." })
@@ -283,7 +286,10 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String, fetch: List<String> = emptyList(),
                                  required: List<String> = emptyList()): TaskExchangeEvidence {
         require(required.size <= SCOPED_TASKS)
-        val exchange = withContext(Dispatchers.IO) { if (fetch.isEmpty()) store.exchange() else store.exchangeFetching(fetch) }
+        val uploads = TaskSyncPlan.UPLOAD_FEATURE in capabilities()[MachineKey(connection.id, computerId)].orEmpty()
+        val exchange = withContext(Dispatchers.IO) {
+            if (uploads) store.exchangeUploading(fetch) else if (fetch.isEmpty()) store.exchange() else store.exchangeFetching(fetch)
+        }
         val evidence = TaskExchangeEvidence(required, mediaUnavailable)
         try {
             while (true) {

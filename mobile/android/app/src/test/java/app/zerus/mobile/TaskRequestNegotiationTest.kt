@@ -135,11 +135,12 @@ class TaskRequestNegotiationTest {
         val media = w.computer.media(w.task, null).single()
         assertArrayEquals(data, w.computer.readMedia(w.task, null, 0u, media.token).data)
     }
-    @Test fun advertisedUploadDeliversEveryByteBeforeTheNativeAction() = world(mapOf(hostKey to setOf("task_media_upload_v1"))) { w ->
+    @Test fun advertisedUploadDeliversEveryByteBeforeTheNativeAction() = world(mapOf(hostKey to setOf("task_media_upload_v1", "task_session_identity_v2"))) { w ->
         val data = largeMedia(w); val before = java.util.concurrent.atomic.AtomicInteger()
         w.beforeSend = { verifyMedia(w, data); before.incrementAndGet() }
         assertEquals(TaskOutcome.Done, send(w)); assertEquals(1, before.get())
         assertTrue(uploadFrames(w).size >= 2); verifyMedia(w, data)
+        assertEquals(2, w.calls.single { it.getString("operation") == "task_send" }.getJSONObject("payload").getInt("schema"))
     }
     @Test fun aDownlevelOrForeignUploadAdvertisementKeepsMediaAndSendsNothing() {
         for (features in listOf(emptyMap(), mapOf(MachineKey("workspace-a", "other") to setOf("task_media_upload_v1")),
@@ -160,7 +161,7 @@ class TaskRequestNegotiationTest {
     }
     @Test fun uploadModeStaysBoundToItsOriginalAdvertisedExchange() {
         val advertised = java.util.concurrent.ConcurrentHashMap<MachineKey, Set<String>>()
-        advertised[hostKey] = setOf("task_media_upload_v1")
+        advertised[hostKey] = setOf("task_media_upload_v1", "task_session_identity_v2")
         world(advertised) { w ->
             val data = largeMedia(w)
             w.modifyExchange = { if (it.has("upload")) advertised.clear() }

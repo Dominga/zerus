@@ -9,8 +9,12 @@ fn asked(kind: DrawerKind) -> DrawerRead {
         team: TEAM.into(),
         kind,
         after: None,
+        recorded_timings: false,
+        timing_seqs: None,
+        timing_next: None,
     }
 }
+
 fn fixture(kind: DrawerKind) -> Value {
     serde_json::from_str(match kind {
         DrawerKind::Feed => {

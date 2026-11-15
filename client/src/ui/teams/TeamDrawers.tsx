@@ -3,6 +3,7 @@
 import { For, Show, Switch, Match, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup } from "solid-js";
 import { tr } from "../../i18n";
 import { teams } from "../../store/teams";
+import { RecordedPageExport, exportRecordedPage, type PageExportPort } from "../../store/teamProfileExport";
 import { Icon } from "../lib/icons";
 import { TextInput } from "../lib/TextField";
 import { TeamDrawerRead, readTeamDrawer, type DrawerKind, type DrawerRow, type TeamDrawer, type DrawerPort } from "../../store/teamDrawers";
@@ -59,27 +60,38 @@ export function TeamInbox(props: { rows: DrawerRow[]; busy: boolean; onAction: D
   </div>;
 }
 
-export function TeamDrawers(props: { kind: TeamDrawer; view: TeamView; busy: boolean; onAction: DrawerAction; onClose: () => void; port?: DrawerPort; visible?: boolean }) {
+export function TeamDrawers(props: { kind: TeamDrawer; view: TeamView; busy: boolean; onAction: DrawerAction; onClose: () => void; port?: DrawerPort; visible?: boolean; exportPort?: PageExportPort }) {
   const [tick, setTick] = createSignal(0);
   const [readRevision, setReadRevision] = createSignal<number>();
   const model = new TeamDrawerRead(props.port ?? readTeamDrawer, () => setTick((n) => n + 1));
   const read = () => (tick(), model);
+  const exporter = new RecordedPageExport(props.exportPort ?? exportRecordedPage, () => setTick((n) => n + 1));
+  const exported = () => (tick(), exporter);
+  const canExport = () => props.kind === "timeline" && !!read().page?.timeline && !read().loading && !read().error && !exported().busy;
   const active = () => props.kind !== "timeline" || (props.visible ?? teams.visible?.() ?? true);
   const target = createMemo(() => JSON.stringify([props.view.bar.id, props.kind, active()]));
   createEffect(on(target, () => {
     setReadRevision(props.view.revision);
+    exporter.retire();
     if (!active() || props.kind === "chat") model.close();
     else model.open(props.view.bar.id, props.kind === "timeline" ? "feed" : props.kind === "reports" ? "inbox" : props.kind as DrawerKind);
   }));
   createEffect(on(() => props.view.revision, (revision) => { setReadRevision(revision); if (active() && props.kind !== "timeline") model.refresh(); }, { defer: true }));
-  onCleanup(() => model.close());
+  onCleanup(() => { model.close(); exporter.retire(); });
   const busy = () => props.busy || read().loading || !!read().error || readRevision() !== props.view.revision;
   const act: DrawerAction = (kind, fields) => { if (!busy()) props.onAction(kind, fields); };
   return <section class="team-drawer" aria-label={drawerLabel(props.kind)} data-team-drawer-panel={props.kind}>
     <header class="team-drawer-head"><b>{drawerLabel(props.kind)}</b><span class="grow" />
+      <Show when={props.kind === "timeline"}>
+        <button type="button" class="btn small" data-timeline-timings disabled={read().loading || !read().page || exported().busy} onClick={() => model.timings(!model.timingsRequested())}>{read().timingsRequested() ? tr("Events only") : tr("Read recorded timings")}</button>
+        <button type="button" class="btn small" data-timeline-export disabled={!canExport()} onClick={() => { const page = model.page; if (canExport() && page) void exporter.save(page); }}>{tr("Export page…")}</button>
+      </Show>
       <Show when={props.kind !== "chat"}><button type="button" class="btn small" disabled={read().loading} data-drawer-refresh onClick={() => model.refresh()}>{tr("Refresh")}</button></Show>
       <button type="button" class="icon-btn small" aria-label={tr("Close")} onClick={props.onClose}><Icon name="x" size={14} /></button>
     </header>
+    <Show when={exported().outcome === "saved"}><p role="status">{tr("Page exported.")}</p></Show>
+    <Show when={exported().outcome === "cancelled"}><p role="status">{tr("Export cancelled.")}</p></Show>
+    <Show when={exported().outcome === "unknown"}><p role="alert">{tr("Export not confirmed: %1. Check the destination before exporting again.", exported().error)}</p></Show>
     <Show when={read().loading}><p role="status">{tr("Reading the team page…")}</p></Show>
     <Show when={read().error}>{(error) => <p class="error-text" role="alert">{error().startsWith("drawer_busy:") ? tr("A team drawer read is still finishing. Use Refresh.") : tr("Teams read failed: %1", error())}</p>}</Show>
     <Show when={props.kind === "chat"}><Suspense fallback={<p>{tr("Loading…")}</p>}><TeamLeadChat view={props.view} /></Suspense></Show>

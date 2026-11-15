@@ -385,7 +385,7 @@ describe("second confirmation", () => {
     store.apply([listPage([summary(1)], "c1")]);
     store.apply([listPage([summary(2)], "c1", "c1")]);
     expect(store.listPages().map((team) => team.id)).toEqual([summary(1).id, summary(2).id]);
-    expect(store.teamOfSession(identity)).toEqual({ state: "unknown" });
+    expect(store.teamOfSession(identity)).toEqual({ state: "unknown", exhausted: true });
     expect(store.summaryOf("00000000-0000-4000-8000-0000000000ff")).toEqual({ state: "unknown" });
     expect(store.listNext()).toBeNull();
     // A longer cycle too.
@@ -393,7 +393,7 @@ describe("second confirmation", () => {
     other.apply([listPage([summary(1)], "c1")]);
     other.apply([listPage([summary(2)], "c2", "c1")]);
     other.apply([listPage([summary(3)], "c1", "c2")]);
-    expect(other.teamOfSession(identity)).toEqual({ state: "unknown" });
+    expect(other.teamOfSession(identity)).toEqual({ state: "unknown", exhausted: true });
     expect(other.listPages()).toHaveLength(3);
   });
 });

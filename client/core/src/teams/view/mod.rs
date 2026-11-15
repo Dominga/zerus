@@ -443,6 +443,10 @@ pub struct StageCard {
     pub state: String,
     /// The member the stage is assigned to: who does the stage.
     pub assignee: String,
+    /// A verified delivered holder already present in the CLI row. Omitted
+    /// for older replies, no holder, or an invalid/unbounded member name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
     /// The member who implemented the task the stage checks (the plan's
     /// binding decision). Never the stage's own worker.
     pub implementer: String,

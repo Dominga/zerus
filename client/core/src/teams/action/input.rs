@@ -185,6 +185,16 @@ impl TeamAction {
         }
     }
 
+    /// Preserve the shared settings validator's structured refusal for the UI.
+    pub(super) fn settings_problem(&self) -> Option<zerus_team_plan::Problem> {
+        match self {
+            Self::Settings { settings } => {
+                zerus_team_plan::settings::validate_settings(settings).err()
+            }
+            _ => None,
+        }
+    }
+
     /// Checks what the call sends before anything runs.
     pub fn check(&self) -> Result<(), String> {
         match self {

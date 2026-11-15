@@ -1,5 +1,7 @@
 //! Bounded no-follow read of the native-selected connector configuration.
-use crate::{fsguard, private_state, EndpointError};
+#[cfg(unix)]
+use crate::fsguard;
+use crate::{private_state, EndpointError};
 use serde_json::{json, Value};
 use std::{fs::File, io::Read, path::Path};
 type Result<T> = std::result::Result<T, EndpointError>;

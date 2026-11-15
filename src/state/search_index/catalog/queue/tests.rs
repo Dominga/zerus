@@ -192,6 +192,7 @@ fn a_record_beyond_this_slice_stays_pending_without_blocking_other_sessions() {
     // Ensure the expensive path is staged before a healthy session.
     record["name"] = json!("codex/example/other");
     record.as_object_mut().unwrap().remove("shell_jobs");
+    record.as_object_mut().unwrap().remove("last_message");
     fs::write(
         state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other"))),
         record.to_string(),
@@ -363,7 +364,7 @@ fn queue_ranges_use_bounded_index_searches_including_retired_references() {
 
 // A saved binding can grow beyond every allowed publication slice.
 #[test]
-fn grown_binding_beyond_the_publication_budget_does_not_fence_later_hits() {
+fn grown_public_snapshot_beyond_the_publication_budget_does_not_fence_later_hits() {
     let (_temp, state, mut store) = fixture(false);
     let path = state.join(format!(
         "{:x}.json",
@@ -407,11 +408,12 @@ fn grown_binding_beyond_the_publication_budget_does_not_fence_later_hits() {
         .unwrap();
     show("indexed, first page", &page);
     let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    record["shell_jobs"] = json!({"big":{"command":"x".repeat(9 << 20)}});
+    record["last_message"] = json!("x".repeat(9 << 20));
     fs::write(&path, record.to_string()).unwrap();
     record["name"] = json!("codex/example/other");
     record["run_id"] = json!("fixture-other-run");
     record.as_object_mut().unwrap().remove("shell_jobs");
+    record.as_object_mut().unwrap().remove("last_message");
     fs::write(
         state.join(format!("{:x}.json", Sha256::digest(b"codex/example/other"))),
         record.to_string(),
@@ -801,4 +803,26 @@ fn a_cancelled_snapshot_put_never_persists_a_cursor_past_rolled_back_rows() {
         store.index.query("needle", 100, None).unwrap().hits.len(),
         7
     );
+}
+
+#[test]
+fn large_private_history_does_not_remain_permanently_pending() {
+    let (_temp, state, mut store) = fixture(false);
+    let path = state.join(format!(
+        "{:x}.json",
+        Sha256::digest(b"codex/example/search")
+    ));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["shell_jobs"] = json!({"job":{"output":"x".repeat(9 << 20)}});
+    fs::write(&path, record.to_string()).unwrap();
+    discover(&store, &state);
+    for _ in 0..32 {
+        store
+            .consume(&state, &Budget::interactive(), &AtomicBool::new(false))
+            .unwrap();
+        if totals(&store).0 == 0 {
+            return;
+        }
+    }
+    panic!("large irrelevant job output permanently fences a healthy transcript");
 }

@@ -7,6 +7,7 @@ pub(in crate::state) struct Sources {
     pub records: Vec<Value>,
     pub bytes: usize,
     pub entries: usize,
+    pub metadata_io: usize,
     pub complete: bool,
 }
 
@@ -21,9 +22,18 @@ pub(in crate::state) fn legacy_sources(state: &Path) -> Result<Sources> {
     discover(state, &budget)
 }
 
+// OpenCode has no content adapter yet. Its live namespace cannot disappear
+// from a supposedly complete answer. Inspect at most one entry per namespace.
+pub(super) fn unsupported_native(state: &Path) -> bool {
+    ["opencode/bindings", "opencode/sessions"].iter().any(|name| match fs::read_dir(state.join(name)) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    })
+}
+
 fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
     let mut streams = VecDeque::new();
-    let mut complete = true;
+    let mut complete = !unsupported_native(state);
     for directory in [
         "",
         "bindings",
@@ -39,7 +49,7 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
         }
     }
     let mut progress = Progress::default();
-    let mut reader = metadata::Reader::default();
+    let mut reader = metadata::Reader::foreground(state);
     let mut records = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     // Round-robin prevents a large current directory from hiding archives or
@@ -70,12 +80,15 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
             .unwrap_or_default()
             .to_owned();
         let by_id = directory.ends_with("sessions");
+        let provider = directory.starts_with("dsh/");
         let archived = directory == "archives";
         if path.extension().is_none_or(|s| s != "json")
             || if by_id {
                 !session_id::canonical(&stem)
             } else if archived {
                 uuid::Uuid::parse_str(&stem).is_err()
+            } else if provider {
+                false // Native provider bindings also have non-hash legacy names.
             } else {
                 stem.len() != 64
                     || !stem
@@ -100,7 +113,7 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
             Ok(metadata::Record::Ready(record)) => record,
             Ok(metadata::Record::Deferred) => {
                 complete = false;
-                break;
+                continue;
             }
             Ok(metadata::Record::OverBudget) | Err(_) => {
                 complete = false;
@@ -116,7 +129,7 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
             continue;
         }
         let name = string(&record, "name");
-        let native = directory.starts_with("dsh/");
+        let native = provider || record["backend"] == "dsh";
         let valid = if native {
             record["backend"] == "dsh"
                 && name.starts_with("dsh/")
@@ -133,7 +146,7 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
                 !storage::is_id_layout_record(&record, &stem)
             } else {
                 storage::in_id_layout(&record)
-                    || format!("{:x}", Sha256::digest(name.as_bytes())) != stem
+                    || (!native && format!("{:x}", Sha256::digest(name.as_bytes())) != stem)
             }
         {
             complete = false;
@@ -164,6 +177,7 @@ fn discover(state: &Path, budget: &Budget) -> Result<Sources> {
     Ok(Sources {
         records,
         bytes: progress.bytes,
+        metadata_io: progress.metadata_io,
         entries: progress.directory_entries,
         complete,
     })
@@ -216,6 +230,60 @@ mod tests {
     }
 
     #[test]
+    fn realistic_two_hundred_session_discovery_covers_large_private_histories() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..200 {
+            let name = format!("codex/example/search-{n}");
+            let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+            let record = json!({"version":1,"name":name,"agent":"codex","run_id":format!("run-{n}"),
+                "conversation_id":format!("conversation-{n}"),"prompt":"public needle",
+                "shell_jobs":{"job":{"output":"private output ".repeat(18_000)}}});
+            save(dir.path(), "", &key, &record);
+        }
+        let mut store = Store::open(&dir.path().join("content-search-v1")).unwrap();
+        for _ in 0..128 {
+            store
+                .discover(
+                    dir.path(),
+                    &DiscoveryBudget::interactive(),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            store
+                .consume(
+                    dir.path(),
+                    &Budget {
+                        deadline: Instant::now() + Duration::from_secs(1),
+                        ..Budget::interactive()
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            if store.catalog_status().unwrap()["pending_paths"] == 0 {
+                break;
+            }
+        }
+        let started = Instant::now();
+        let sources = legacy_sources(dir.path()).unwrap();
+        eprintln!(
+            "200-session discovery: {:?}, records={}, bytes={}, complete={}",
+            started.elapsed(),
+            sources.records.len(),
+            sources.bytes,
+            sources.complete
+        );
+        assert!(
+            sources.complete,
+            "ordinary sized private histories must not hide later sessions"
+        );
+        assert_eq!(sources.records.len(), 200);
+        assert!(sources
+            .records
+            .iter()
+            .all(|r| r.get("shell_jobs").is_none()));
+    }
+
+    #[test]
     fn unrelated_entries_are_charged_before_filtering() {
         let dir = tempfile::tempdir().unwrap();
         for n in 0..20 {
@@ -235,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_record_bytes_are_charged_even_when_private_jobs_are_ignored() {
+    fn private_raw_io_and_retained_metadata_have_independent_limits() {
         let dir = tempfile::tempdir().unwrap();
         let name = "codex/example/large";
         let key = format!("{:x}", Sha256::digest(name.as_bytes()));
@@ -250,12 +318,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(small.records.is_empty());
-        assert_eq!(small.bytes, 0);
-        assert!(!small.complete);
+        assert_eq!(small.records.len(), 1);
+        assert!(small.bytes < 1024);
+        assert!(small.metadata_io > 4096);
+        assert!(small.complete);
         let admitted = discover(dir.path(), &budget()).unwrap();
         assert!(admitted.complete);
-        assert_eq!(admitted.bytes, serde_json::to_vec(&record).unwrap().len());
+        assert_eq!(admitted.metadata_io, serde_json::to_vec(&record).unwrap().len());
+        assert!(admitted.bytes < 1024);
         assert_eq!(admitted.records.len(), 1);
         assert!(admitted.records[0].get("shell_jobs").is_none());
     }
@@ -322,4 +392,20 @@ mod tests {
         assert!(sources.complete);
         assert_eq!(sources.records.len(), 2);
     }
+    #[test]
+    fn native_legacy_names_and_archives_keep_their_metadata_without_host_calls() {
+        let dir=tempfile::tempdir().unwrap();
+        let record=json!({"backend":"dsh","name":"dsh/example/saved","run_id":"native-run",
+            "conversation_id":"session-fixture","created":1});
+        save(dir.path(),"dsh/bindings","session-fixture",&record);
+        let archive="00000000-0000-4000-8000-000000000001";
+        let mut archived=record.clone();archived["archive_id"]=json!(archive);
+        save(dir.path(),"archives",archive,&archived);
+        let sources=legacy_sources(dir.path()).unwrap();
+        assert!(sources.complete);
+        assert_eq!(sources.records.len(),1,"an archive and its abandoned native binding are one source");
+        assert_eq!(sources.records[0]["agent"],"dsh");
+        assert_eq!(sources.records[0]["archive_id"],archive);
+    }
+
 }

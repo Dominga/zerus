@@ -115,7 +115,6 @@
   "%1 m left": "Осталось %1 мин",
   "%1 machines loaded": "загружено компьютеров: %1",
   "%1 machines selected; click to change": "Выбрано %1 машин; нажмите, чтобы изменить",
-  "%1 members": "Участников: %1",
   "%1 messages, %2 sessions": "Сообщений %1, сессий %2",
   "%1 min": "%1 мин",
   "%1 more accounts are not shown.": "Ещё не показано учётных записей: %1.",
@@ -239,6 +238,16 @@
     "%n входящий",
     "%n входящих",
     "%n входящих"
+  ],
+  "%n member": [
+    "%n участник",
+    "%n участника",
+    "%n участников"
+  ],
+  "%n members": [
+    "%n участник",
+    "%n участника",
+    "%n участников"
   ],
   "%n message(s)": [
     "%n сообщение",
@@ -1438,7 +1447,6 @@
   "Fix the Zerus login item": "Исправить объект входа Zerus",
   "Fixed keys": "Фиксированные клавиши",
   "Fixes": "Исправления",
-  "Fold team": "Свернуть команду",
   "Folder": "Папка",
   "Folder / branch": "Папка / ветка",
   "Folder and worktrees": "Папки и рабочие деревья",
@@ -2226,6 +2234,7 @@
   "Open the setting": "Открыть настройку",
   "Open the side panel's Tasks tab and click a card.": "Откройте вкладку «Задачи» на боковой панели и нажмите на карточку.",
   "Open the team": "Открыть команду",
+  "Open the team %1": "Открыть команду «%1»",
   "Open this account's agent once, then refresh to load its models.": "Один раз откройте агента этой учётной записи, затем обновите, чтобы загрузить его модели.",
   "Open this folder from Zerus on %1.": "Откройте эту папку из Zerus на %1.",
   "Open with your default application, or copy the path.": "Откройте в приложении по умолчанию или скопируйте путь.",
@@ -3802,7 +3811,6 @@
   "Unconfirmed process output": "Неподтвержденный результат процесса",
   "Undo": "Отменить",
   "Undo (%1)": "Отменить (%1)",
-  "Unfold team": "Развернуть команду",
   "Unknown": "Неизвестно",
   "Unknown computer (%1)": "Неизвестный компьютер (%1)",
   "Unknown system": "Неизвестная система",

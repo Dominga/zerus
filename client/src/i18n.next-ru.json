@@ -32,7 +32,6 @@
   "%1 is stopped. How should it start before your message is sent?": "Сессия %1 остановлена. Как запустить её перед отправкой сообщения?",
   "%1 m": "%1 мин",
   "%1 m left": "Осталось %1 мин",
-  "%1 members": "Участников: %1",
   "%1 more accounts are not shown.": "Ещё не показано учётных записей: %1.",
   "%1 more in this stage": "Ещё %1 на этом этапе",
   "%1 need attention": "Требуют внимания: %1",
@@ -103,6 +102,16 @@
     "%n входящий",
     "%n входящих",
     "%n входящих"
+  ],
+  "%n member": [
+    "%n участник",
+    "%n участника",
+    "%n участников"
+  ],
+  "%n members": [
+    "%n участник",
+    "%n участника",
+    "%n участников"
   ],
   "%n message(s)": [
     "%n сообщение",
@@ -611,7 +620,6 @@
   "First retry": "Первая попытка",
   "Five actions are waiting. Undo one or wait a moment.": "Ожидают пять действий. Отмените одно или немного подождите.",
   "Fixes": "Исправления",
-  "Fold team": "Свернуть команду",
   "Folder changed.": "Папка изменилась.",
   "Folder filter": "Фильтр по папке",
   "Folder management is unavailable for this computer.": "Управление папками недоступно для этого компьютера.",
@@ -914,6 +922,7 @@
   "Open the setting": "Открыть настройку",
   "Open the side panel's Tasks tab and click a card.": "Откройте вкладку «Задачи» на боковой панели и нажмите на карточку.",
   "Open the team": "Открыть команду",
+  "Open the team %1": "Открыть команду «%1»",
   "OpenAI keeps a 30-minute cache only for GPT-5.6 and later. This model's cache lasts about 5 to 10 minutes.": "OpenAI хранит кэш 30 минут только для GPT-5.6 и новее. Кэш этой модели живёт около 5–10 минут.",
   "OpenCode account rules allow tools without asking.": "Правила аккаунта OpenCode разрешают инструменты без подтверждения.",
   "OpenCode account rules ask before tools run.": "Правила аккаунта OpenCode требуют подтверждения перед запуском инструментов.",
@@ -1713,7 +1722,6 @@
   "Uncommitted files": "Незакоммиченные файлы",
   "Undo": "Отменить",
   "Undo (%1)": "Отменить (%1)",
-  "Unfold team": "Развернуть команду",
   "Unknown system": "Неизвестная система",
   "Unmute notifications": "Включить уведомления",
   "Untitled task": "Задача без названия",

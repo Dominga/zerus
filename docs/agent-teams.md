@@ -174,11 +174,13 @@ conversation keep the usual idle and known-zero work checks.
 The lead's strip shows accepted/total tasks, its team status (highlighting
 **Stuck** when an explicit blocker remains), unanswered member questions as
 **?N**, and live members including the lead. Accepted tasks include archived
-work; internal review/test stage tasks are excluded. Counts stop at 1000 and
+work; cancelled tasks and internal review/test stage tasks are excluded from
+the total. The Team tab bar also excludes cancelled tasks. Counts stop at 1000 and
 show **+** when more exist; an approximate count does not draw a percentage.
 The open queue is a single phase, so it has no phase bar. A team with multiple
-phases also shows completed/total phases. Click the strip or its chevron to
-fold the same member rows; the saved choice also survives a restart.
+phases also shows completed/total phases. Click the strip, or focus it and press
+Enter or Space, to open the lead session on its Team tab. Only the usual
+children chip folds the members; that choice survives a restart.
 
 Questions count only the open member-question inbox items, not cards for the
 person. Stuck comes from explicit launch/hand-out/unreadable-member blockers,

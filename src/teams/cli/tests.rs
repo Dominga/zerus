@@ -12,6 +12,7 @@ mod harness;
 mod hosted;
 mod member_sessions;
 mod progress;
+mod progress157;
 mod reads;
 mod session_groups;
 mod status_items;

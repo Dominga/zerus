@@ -5,8 +5,8 @@ use std::time::Instant;
 fn timed_write(root: &Path, path: &Path, value: &Value, index: bool) -> f64 {
     let started = Instant::now();
     if index {
-        write_at(root, path, value, || {
-            storage::atomic(path, &value.to_string())
+        write_at(root, path, value, |publication| {
+            storage::atomic_observed(path, &value.to_string(), publication)
         })
         .unwrap();
     } else {

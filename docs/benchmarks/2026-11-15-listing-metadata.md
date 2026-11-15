@@ -14,6 +14,16 @@ before that activation guard was added (functional source `eac16cfde`). The PR
 also reports a fresh explicit-opt-in 64/128 smoke check after the guard. Do not
 read the enabled-engine costs as overhead paid by default in this slice.
 
+The subsequent publication-provenance correction (zerus-63r5s.4) adds native
+staging/original-object observations and rejects v1 cache seeds. Its fresh
+64/128-binding regression smoke uses the already compiled touched-suite binary,
+with the same real fsync/rename/SQLite operations: paired added p50 was
+4.857/5.158 ms and p95 9.544/10.268 ms; peak runtime RSS was 58.34 MiB and warm
+canonical reads were zero. The wrapper reported load 43.48 at exit. These small
+shared-load measurements do not replace the original full-size table or qualify
+the later reader switch. The 20k/50k numbers below predate the native-object
+witness as well as the activation guard.
+
 The original full-record bottleneck is recorded in
 [the session scale audit](2026-11-15-session-scale.md). Canonical JSON and all
 existing action, lifecycle, ownership and custody checks remain authoritative.

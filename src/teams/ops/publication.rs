@@ -385,7 +385,9 @@ pub(crate) fn complete(db: &Connection, team: &str, phase: u32) -> Result<bool> 
         return Ok(false);
     }
     for n in &snapshot.nodes {
-        if !matches!(n.state, NodeState::Accepted | NodeState::Cancelled) || n.hold {
+        if !matches!(n.state, NodeState::Accepted | NodeState::Cancelled)
+            && !retired_uncreated_stage(db, team, n)?
+        {
             return Ok(false);
         }
         let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM decisions WHERE team=?1 AND node=?2 AND state<>'settled') OR EXISTS(SELECT 1 FROM effects WHERE team=?1 AND node=?2 AND state IN ('reserved','submitted','uncertain','cutting_over')) OR EXISTS(SELECT 1 FROM stage_tasks WHERE team=?1 AND target=?2 AND state IN ('wanted','reserved'))",params![team,n.id],|r|r.get(0)).map_err(storage)?;
@@ -394,6 +396,16 @@ pub(crate) fn complete(db: &Connection, team: &str, phase: u32) -> Result<bool> 
         }
     }
     Ok(true)
+}
+
+/// A pipeline can retire a wanted stage before any task is bound. Its
+/// archived Waiting row is not a completion fact by itself: require the
+/// positive superseded lifecycle record and no task binding.
+fn retired_uncreated_stage(db: &Connection, team: &str, node: &Node) -> Result<bool> {
+    if node.kind != NodeKind::Stage || node.task.is_some() {
+        return Ok(false);
+    }
+    db.query_row("SELECT EXISTS(SELECT 1 FROM node_archive a JOIN stage_tasks s ON s.team=a.team AND s.node=a.id WHERE a.team=?1 AND a.id=?2 AND s.state='superseded') AND NOT EXISTS(SELECT 1 FROM live_tasks WHERE team=?1 AND node=?2)",params![team,node.id],|r|r.get(0)).map_err(storage)
 }
 
 pub(super) fn reconcile(ctx: &mut Context<'_>) -> Result<()> {

@@ -161,6 +161,11 @@ request; an active command refusal ends creation. Auto-approval failures use
 the existing bounded retry gate, and changed settings or draft generations
 trigger a fresh policy check.
 
+Completion keeps the pipeline's own lifecycle facts: an archived uncreated
+stage is ended only with its positive superseded record and no task binding.
+Archive alone proves nothing. Holds prevent new work; a hold left on an
+already accepted or cancelled task does not prevent phase acceptance.
+
 ## Projection and WhiteWh UI mapping
 
 Add bounded `team phases` and `team phase` reads in new modules: phase summaries

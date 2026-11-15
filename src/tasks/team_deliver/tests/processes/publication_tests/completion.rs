@@ -1,8 +1,15 @@
 use super::*;
 
-#[test]
-fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate() {
+fn reported_stage() -> (
+    Fixture,
+    String,
+    Vec<crate::teams::store::publication::PlannedTaskRequest>,
+    u32,
+) {
     let (mut f, p, requests) = fixture();
+    let home = f.lead.machine.clone();
+    f.bind("m2", &home);
+    f.bind("m3", &home);
     for r in &requests {
         write(&f, r).unwrap();
     }
@@ -10,7 +17,7 @@ fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate()
         &ops::tests::service(),
         Operation::ReconcilePublication {
             phase: 1,
-            publication: p,
+            publication: p.clone(),
         },
     )
     .unwrap();
@@ -20,9 +27,16 @@ fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate()
     let target = requests[0].node.id;
     // Native report/attempt observations are supplied to the real operation
     // writers; this test runs no native agent.
-    f.h.submit(target, "m1");
-    f.h.report(target, "m1");
+    f.h.submit(target, "m2");
+    f.h.report(target, "m2");
     let stage = f.h.store.stage_tasks(TEAM, 1, None).unwrap().rows[0].node;
+    (f, p, requests, stage)
+}
+
+#[test]
+fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate() {
+    let (f, _, requests, stage) = reported_stage();
+    let target = requests[0].node.id;
     let snapshot = f.h.store.phase_draft(TEAM, 1).unwrap().live.unwrap();
     assert!(snapshot.complete);
     assert_eq!(snapshot.nodes.len(), 3);
@@ -37,6 +51,134 @@ fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate()
     assert_eq!(metrics.known_estimates, 2);
     assert!(metrics.critical_path_minutes.is_none());
     assert!(metrics.average_parallelism_tenths.is_none());
+}
+
+#[test]
+fn a_retired_uncreated_stage_is_complete_only_with_its_own_superseded_record() {
+    let (mut f, p, requests, stage) = reported_stage();
+    let mut settings = f.h.store.team(TEAM).unwrap().unwrap().settings;
+    settings.integration = zerus_team_plan::Integration::None;
+    f.h.run(&person(), Operation::ChangeSettings { settings })
+        .unwrap();
+    for r in &requests {
+        f.h.observe(r.node.id, ops::TaskStage::Done);
+    }
+    let snapshot = f.h.store.phase_draft(TEAM, 1).unwrap().live.unwrap();
+    let row = snapshot.nodes.iter().find(|n| n.id == stage).unwrap();
+    assert!(snapshot.complete && row.task.is_none());
+    assert_eq!(row.state, zerus_team_plan::NodeState::Waiting);
+    let state: String =
+        f.h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM stage_tasks WHERE team=?1 AND node=?2",
+                rusqlite::params![TEAM, stage],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(state, "superseded");
+    assert!(ops::publication::complete(f.h.store.db.as_ref().unwrap(), TEAM, 1).unwrap());
+    f.h.run(
+        &ops::tests::service(),
+        Operation::ReconcilePhase {
+            phase: 1,
+            publication: p.clone(),
+        },
+    )
+    .unwrap();
+    // Fault injection removes the positive lifecycle proof; archived alone
+    // must never prove the stage ended. Normal rows above use only writers.
+    f.h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .execute(
+            "UPDATE stage_tasks SET state='refused' WHERE team=?1 AND node=?2",
+            rusqlite::params![TEAM, stage],
+        )
+        .unwrap();
+    assert!(f
+        .h
+        .run(
+            &person(),
+            Operation::AcceptPhase {
+                phase: 1,
+                publication: p.clone()
+            }
+        )
+        .is_err());
+    f.h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .execute(
+            "UPDATE stage_tasks SET state='superseded' WHERE team=?1 AND node=?2",
+            rusqlite::params![TEAM, stage],
+        )
+        .unwrap();
+    f.h.run(
+        &person(),
+        Operation::AcceptPhase {
+            phase: 1,
+            publication: p,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_completed_tasks_old_hold_does_not_trap_phase_acceptance() {
+    let (mut f, p, requests) = fixture();
+    let mut settings = f.h.store.team(TEAM).unwrap().unwrap().settings;
+    settings.integration = zerus_team_plan::Integration::None;
+    f.h.run(&person(), Operation::ChangeSettings { settings })
+        .unwrap();
+    for r in &requests {
+        write(&f, r).unwrap();
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::ReconcilePublication {
+            phase: 1,
+            publication: p.clone(),
+        },
+    )
+    .unwrap();
+    f.h.run(
+        &person(),
+        Operation::Hold {
+            node: requests[0].node.id,
+        },
+    )
+    .unwrap();
+    for r in &requests {
+        ended(&f, r, Stage::Done);
+    }
+    assert!(
+        f.h.store
+            .node(TEAM, requests[0].node.id)
+            .unwrap()
+            .unwrap()
+            .hold
+    );
+    f.h.run(
+        &ops::tests::service(),
+        Operation::ReconcilePhase {
+            phase: 1,
+            publication: p.clone(),
+        },
+    )
+    .unwrap();
+    f.h.run(
+        &person(),
+        Operation::AcceptPhase {
+            phase: 1,
+            publication: p,
+        },
+    )
+    .unwrap();
 }
 
 #[test]

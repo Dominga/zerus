@@ -43,6 +43,8 @@ pub(crate) use team_deliver::{blocked_handout, waiting_handout, Blocked, RealHan
 #[cfg(test)]
 #[allow(unused_imports)] // The Teams actor's isolated CLI fixture supplies native input.
 pub(crate) use team_deliver::FIXTURE_NATIVE_INPUT;
+#[cfg(all(test, unix))]
+pub(crate) use team_deliver::fixture_delivery;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -628,6 +630,15 @@ fn refusal(message: &str) -> Value {
 /// `hgs task list --project PROJECT --json`, for `hgs watch`.
 pub(crate) fn listing(config: &Config, project: &str) -> Result<Value> {
     list(config, &["--project".to_owned(), project.to_owned()])
+}
+
+/// Derived cursor only; a cached row is never cutover/adoption authority.
+pub(crate) fn cutover_candidate(store:&ProjectStore)->Option<String> {
+    let mut index=index::Index::open(store)?;
+    match index.cutover_candidate() {
+        Ok(candidate)=>candidate,
+        Err(error)=>{index.discard(&error);None},
+    }
 }
 
 /// The folder whose files hold a project's tasks: a change below it changes

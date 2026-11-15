@@ -3,6 +3,9 @@
 //! private files. The person acts on the phone. Sends and cancels run on the
 //! session's computer, over the relay exchange. See "The replica crate" in
 //! docs/superpowers/specs/2026-10-18-task-replication-loro-design.md.
+use base64::{engine::general_purpose::STANDARD, Engine};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -167,6 +170,12 @@ pub struct TaskLogEntry {
     pub text: String,
     pub session: Option<SessionRef>,
     pub request_id: Option<String>,
+    /// Immutable history identity, independent of arriving rows and their order.
+    #[uniffi(default = "")]
+    pub entry_id: String,
+    /// Fetch metadata lazily for this entry; rows never carry file bodies.
+    #[uniffi(default = 0)]
+    pub attachment_count: u32,
 }
 
 impl From<replica::LogEntry> for TaskLogEntry {
@@ -178,8 +187,145 @@ impl From<replica::LogEntry> for TaskLogEntry {
             text: entry.text,
             session: entry.session.map(Into::into),
             request_id: entry.request_id,
+            entry_id: String::new(),
+            attachment_count: u32::try_from(entry.attachments.len()).unwrap_or(u32::MAX),
         }
     }
+}
+
+/// A picked file. The app reads bounded private bytes, never passes a path.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TaskMediaInput {
+    pub name: String,
+    pub mime: String,
+    pub data: Vec<u8>,
+    #[uniffi(default = "")]
+    pub reference: String,
+}
+
+/// Bounded file metadata. The token seals its exact task, scope and position.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TaskMediaInfo {
+    pub name: String,
+    pub mime: String,
+    pub reference: String,
+    pub size: u64,
+    pub sha256: String,
+    pub token: String,
+}
+
+/// One explicitly selected file, verified against its original metadata token.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TaskMediaContent {
+    pub info: TaskMediaInfo,
+    pub data: Vec<u8>,
+}
+
+fn digest(value: serde_json::Value) -> String {
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn media_content(
+    project: &str,
+    task: &str,
+    entry: Option<&str>,
+    index: usize,
+    file: &replica::TaskAttachment,
+) -> replica::Result<TaskMediaContent> {
+    let data = file.bytes()?;
+    let size = data.len() as u64;
+    let sha256 = format!("{:x}", Sha256::digest(&data));
+    let token = digest(serde_json::json!([
+        1,
+        project,
+        task,
+        entry,
+        index,
+        file.name,
+        file.mime,
+        file.reference,
+        size,
+        sha256
+    ]));
+    Ok(TaskMediaContent {
+        info: TaskMediaInfo {
+            name: file.name.clone(),
+            mime: file.mime.clone(),
+            reference: file.reference.clone(),
+            size,
+            sha256,
+            token,
+        },
+        data,
+    })
+}
+
+fn media_input(files: Vec<TaskMediaInput>) -> replica::Result<Vec<replica::TaskAttachment>> {
+    if files.len() > replica::MAX_ATTACHMENTS {
+        return Err(replica::Error::new("attach up to 8 files to a task"));
+    }
+    let total = files
+        .iter()
+        .try_fold(0usize, |total, file| total.checked_add(file.data.len()));
+    if files
+        .iter()
+        .any(|file| file.data.is_empty() || file.data.len() > replica::MAX_ATTACHMENT)
+        || total.is_none_or(|total| total > replica::MAX_ATTACHMENT_TOTAL)
+    {
+        return Err(replica::Error::new(
+            "attachments: up to 8 nonempty files, 10 MiB per file, 20 MiB total",
+        ));
+    }
+    let files = files
+        .into_iter()
+        .map(|file| replica::TaskAttachment {
+            name: file.name,
+            mime: file.mime,
+            reference: file.reference,
+            data_base64: STANDARD.encode(file.data),
+        })
+        .collect::<Vec<_>>();
+    replica::validate_attachments(&files)?;
+    Ok(files)
+}
+
+fn immutable_task(reference: &str) -> replica::Result<()> {
+    if !replica::ids::is_uuid(reference) {
+        return Err(replica::Error::new(
+            "The task selection changed. Open the original task again.",
+        ));
+    }
+    Ok(())
+}
+
+fn selected_media<'a>(
+    view: &'a replica::TaskView,
+    ids: &[String],
+    entry: Option<&str>,
+) -> replica::Result<&'a [replica::TaskAttachment]> {
+    match entry {
+        None => Ok(&view.attachments),
+        Some(entry) => ids
+            .iter()
+            .position(|id| id == entry)
+            .and_then(|index| view.log.get(index))
+            .map(|row| row.attachments.as_slice())
+            .ok_or_else(|| replica::Error::new("The task comment changed. Open it again.")),
+    }
+}
+
+fn task_info(task: &replica::TaskDoc) -> replica::Result<TaskInfo> {
+    let (view, ids) = task.view_with_history_ids()?;
+    let mut info = TaskInfo::try_from(view)?;
+    if info.log.len() != ids.len() {
+        return Err(replica::Error::failed(
+            "invalid task history identity projection",
+        ));
+    }
+    for (entry, id) in info.log.iter_mut().zip(ids) {
+        entry.entry_id = id;
+    }
+    Ok(info)
 }
 
 /// A task as the apps read it; times are Unix milliseconds.
@@ -202,10 +348,16 @@ pub struct TaskInfo {
     pub cancel_reason: String,
     pub text: String,
     pub log: Vec<TaskLogEntry>,
+    #[uniffi(default = [])]
+    pub attachments: Vec<TaskMediaInfo>,
+    /// Derived from this task's body and description media, not unrelated history.
+    #[uniffi(default = "")]
+    pub content_revision: String,
 }
 
-impl From<replica::TaskView> for TaskInfo {
-    fn from(view: replica::TaskView) -> Self {
+impl TryFrom<replica::TaskView> for TaskInfo {
+    type Error = replica::Error;
+    fn try_from(view: replica::TaskView) -> replica::Result<Self> {
         let text = if view.title.is_empty() {
             view.text.clone()
         } else if view.text.is_empty() {
@@ -213,14 +365,31 @@ impl From<replica::TaskView> for TaskInfo {
         } else {
             format!("{}\n\n{}", view.title, view.text)
         };
-        Self {
+        let attachments = view
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                media_content(&view.project, &view.uuid, None, index, file).map(|file| file.info)
+            })
+            .collect::<replica::Result<Vec<_>>>()?;
+        let content_revision = digest(serde_json::json!([
+            1,
+            view.project,
+            view.uuid,
+            text,
+            attachments
+                .iter()
+                .map(|file| &file.token)
+                .collect::<Vec<_>>()
+        ]));
+        Ok(Self {
             uuid: view.uuid,
             id: view.id,
             project: view.project,
             schema: view.schema,
-            // The current mobile ABI has no planned executors, worker binding,
-            // or comment media. Keep schema-three tasks read-only until that ABI
-            // exposes them; a fallback caption must never authorize a send.
+            // Previews grant no new writer authority. Planned executors,
+            // worker binding and comment-media writes remain outside this ABI.
             writable: view.writable && view.schema <= 2,
             created_at: view.created_at,
             stage_at: view.stage_at,
@@ -234,7 +403,9 @@ impl From<replica::TaskView> for TaskInfo {
             cancel_reason: view.cancel_reason,
             text,
             log: view.log.into_iter().map(Into::into).collect(),
-        }
+            attachments,
+            content_revision,
+        })
     }
 }
 
@@ -384,7 +555,7 @@ pub struct TaskStore {
 
 impl TaskStore {
     fn store(&self) -> Result<replica::ProjectStore> {
-        replica::ProjectStore::open_within(&self.root, &self.project, LOCK_WAIT)?
+        replica::ProjectStore::open_phone_within(&self.root, &self.project, LOCK_WAIT)?
             .ok_or_else(|| ReplicaError::Failed("the project's tasks are busy; try again".into()))
     }
 
@@ -405,7 +576,7 @@ impl TaskStore {
         }
         change(&store, &mut task)?;
         store.save(&mut task)?;
-        Ok(task.view()?.into())
+        Ok(task_info(&task)?)
     }
 }
 
@@ -427,7 +598,7 @@ impl TaskStore {
         Ok(TaskListing {
             tasks: tasks
                 .iter()
-                .map(|task| task.view().map(TaskInfo::from))
+                .map(task_info)
                 .collect::<replica::Result<_>>()?,
             damaged: damaged.into_iter().map(Into::into).collect(),
         })
@@ -435,7 +606,7 @@ impl TaskStore {
 
     /// The task with this short ID or UUID.
     pub fn get(&self, reference: String) -> Result<TaskInfo> {
-        Ok(self.store()?.find(&reference)?.view()?.into())
+        Ok(task_info(&self.store()?.find(&reference)?)?)
     }
 
     /// Files a task by the person, to To do or Backlog.
@@ -457,7 +628,119 @@ impl TaskStore {
             now(),
         )?;
         store.save(&mut task)?;
-        Ok(task.view()?.into())
+        Ok(task_info(&task)?)
+    }
+
+    /// File text and media together. No task is saved on a validation failure.
+    pub fn add_with_media(
+        &self,
+        text: String,
+        stage: TaskStage,
+        target: TaskTarget,
+        position: TaskPosition,
+        files: Vec<TaskMediaInput>,
+    ) -> Result<TaskInfo> {
+        let files = media_input(files)?;
+        let store = self.store()?;
+        let mut task = store.new_task(
+            &text,
+            stage.into(),
+            target.into(),
+            replica::Actor::Person,
+            &position.into(),
+            &self.project_name,
+            now(),
+        )?;
+        task.set_attachments(&files, &replica::Actor::Person, now())?;
+        store.check_prompt(&task, &self.project_name)?;
+        store.save(&mut task)?;
+        Ok(task_info(&task)?)
+    }
+
+    /// Commit the original content draft while preserving selected existing bytes.
+    /// Unrelated history may arrive; changed body/media requires a fresh review.
+    pub fn edit_content(
+        &self,
+        reference: String,
+        text: String,
+        kept: Vec<String>,
+        files: Vec<TaskMediaInput>,
+        expected_revision: String,
+    ) -> Result<TaskInfo> {
+        immutable_task(&reference)?;
+        let files = media_input(files)?;
+        let name = self.project_name.clone();
+        self.change(&reference, |store, task| {
+            let current = task_info(task)?;
+            if current.content_revision != expected_revision {
+                return Err(replica::Error::new(
+                    "The task content changed. Review the original draft again.",
+                ));
+            }
+            if kept.len().saturating_add(files.len()) > replica::MAX_ATTACHMENTS
+                || kept.iter().collect::<BTreeSet<_>>().len() != kept.len()
+            {
+                return Err(replica::Error::new("invalid retained task attachments"));
+            }
+            let original = task.attachments()?;
+            let mut retained = Vec::with_capacity(kept.len() + files.len());
+            for token in kept {
+                let index = current
+                    .attachments
+                    .iter()
+                    .position(|file| file.token == token)
+                    .ok_or_else(|| replica::Error::new("the original task attachment changed"))?;
+                retained.push(original[index].clone());
+            }
+            retained.extend(files);
+            replica::validate_attachments(&retained)?;
+            store.edit_task(task, &text, &replica::Actor::Person, &name, now())?;
+            task.set_attachments(&retained, &replica::Actor::Person, now())?;
+            store.check_prompt(task, &name)
+        })
+    }
+
+    /// Metadata for one description or one immutable history entry, at most 8 files.
+    pub fn media(&self, reference: String, entry: Option<String>) -> Result<Vec<TaskMediaInfo>> {
+        immutable_task(&reference)?;
+        let store = self.store()?;
+        let task = store.find(&reference)?;
+        let (view, ids) = task.view_with_history_ids()?;
+        Ok(selected_media(&view, &ids, entry.as_deref())?
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                media_content(&view.project, &view.uuid, entry.as_deref(), index, file)
+                    .map(|file| file.info)
+            })
+            .collect::<replica::Result<_>>()?)
+    }
+
+    /// Read only the exact originally selected file; labels and positions cannot rebind it.
+    pub fn read_media(
+        &self,
+        reference: String,
+        entry: Option<String>,
+        index: u32,
+        expected_token: String,
+    ) -> Result<TaskMediaContent> {
+        immutable_task(&reference)?;
+        let store = self.store()?;
+        let task = store.find(&reference)?;
+        let (view, ids) = task.view_with_history_ids()?;
+        let index = index as usize;
+        let file = selected_media(&view, &ids, entry.as_deref())?
+            .get(index)
+            .ok_or_else(|| {
+                replica::Error::new("the original task attachment is no longer available")
+            })?;
+        let selected = media_content(&view.project, &view.uuid, entry.as_deref(), index, file)?;
+        if selected.info.token != expected_token {
+            return Err(ReplicaError::Refused(
+                "The task attachment changed. Review it again.".into(),
+            ));
+        }
+        Ok(selected)
     }
 
     pub fn edit_text(&self, reference: String, text: String) -> Result<TaskInfo> {

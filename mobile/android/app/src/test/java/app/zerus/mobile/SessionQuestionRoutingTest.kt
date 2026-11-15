@@ -11,6 +11,16 @@ class SessionQuestionRoutingTest {
     private fun target(raw: JSONObject, run: String = "run-1", conversation: String = "conversation-1") =
         Target("00000000-0000-4000-8000-000000000001",raw.optString("name","claude/project/child"),run,conversation,"workspace")
 
+    @Test fun qualifiedProvidersKeepThePersonsSwitch() {
+        for(agent in listOf("claude","kimi","dsh")) {
+            val raw = JSONObject().put("cmd",agent).put("parent",JSONObject()).put("state","running")
+            assertTrue(agent,SessionQuestionRouting.applies(target(raw),raw))
+        }
+        for(agent in listOf("opencode","deepseek","codex","unknown")) {
+            val raw = JSONObject().put("cmd",agent).put("parent",JSONObject()).put("state","running")
+            assertFalse(agent,SessionQuestionRouting.applies(target(raw),raw))
+        }
+    }
     @Test fun theOperationAndMarkerAreTheContracts() {
         assertEquals(contract.getString("operation"),SessionQuestionRouting.operation)
         assertTrue(SessionQuestionRouting.operation in SessionActionPolicies.operations)
@@ -26,7 +36,7 @@ class SessionQuestionRoutingTest {
         assertNull("no row",SessionQuestionRouting.parse(null))
     }
 
-    @Test fun theSessionActionsShowItForLiveClaudeChildrenOnly() {
+    @Test fun theSessionActionsShowItForQualifiedChildren() {
         for(case in cases("availability")) {
             val raw = case.getJSONObject("row")
             val t = target(raw)

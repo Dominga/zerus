@@ -960,6 +960,14 @@ fn run(
     }
 }
 
+/// Real task-command writers behind an admitted in-process test transport.
+#[cfg(all(test, unix))]
+pub(crate) fn fixture_delivery(config: &Config, args: &[String], input: &[u8]) -> Value {
+    let body: Input = serde_json::from_slice(input).unwrap();
+    body.validate().unwrap();
+    run(config, args, &body, &Native, Instant::now() + std::time::Duration::from_secs(20)).unwrap()
+}
+
 fn permit_for_reservation(
     store: &Store,
     body: &Input,

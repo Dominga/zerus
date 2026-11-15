@@ -100,8 +100,10 @@ impl Reader {
             .as_object()
             .expect("Metadata deserializes an object")
             .iter()
-            .filter(|(key, value)| {
-                !(matches!(key.as_str(), "prompt" | "last_message") && value.is_string())
+            .filter(|(key, value)| match key.as_str() {
+                "prompt" | "last_message" => !value.is_string(),
+                "keep_warm_quiet" => false, // Only public snapshot strings survive decoding.
+                _ => true,
             })
             .collect();
         if serde_json::to_vec(&bounded_fields)
@@ -150,6 +152,15 @@ impl<'de> Deserialize<'de> for Metadata {
                     if needed(&key) {
                         let mut value = map.next_value::<Value>()?;
                         match key.as_str() {
+                            "keep_warm_quiet" => {
+                                let Some(fields) = value.as_object_mut() else {
+                                    continue;
+                                };
+                                fields.retain(|key, value| {
+                                    matches!(key.as_str(), "prompt" | "last_message")
+                                        && value.is_string()
+                                });
+                            }
                             "legacy_shadow" => retain(&mut value, &["name", "run_id"]),
                             "session_clear" => {
                                 retain(&mut value, &["conversation_id", "previous_conversation_id"])
@@ -179,6 +190,8 @@ fn needed(key: &str) -> bool {
     matches!(
         key,
         "version"
+            | "session_id"
+            | "layout"
             | "name"
             | "run_id"
             | "conversation_id"
@@ -191,6 +204,7 @@ fn needed(key: &str) -> bool {
             | "journal_name"
             | "prompt"
             | "last_message"
+            | "keep_warm_quiet"
             | "turn_started"
             | "last_event_at"
             | "updated"
@@ -234,6 +248,28 @@ mod tests {
             bytes: 4 << 20,
             deadline: Instant::now() + Duration::from_secs(1),
         }
+    }
+
+    #[test]
+    fn quiet_public_snapshots_keep_their_projection_and_raw_byte_charge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("binding.json");
+        let prompt = "p".repeat(RECORD_BYTES + 1);
+        let record = json!({"prompt":"internal prompt","last_message":"internal reply",
+            "keep_warm_quiet":{"prompt":prompt,"last_message":"Earlier public answer",
+                "private_debug":"not public"},"shell_jobs":{"private":"ignored"}})
+        .to_string();
+        fs::write(&path, &record).unwrap();
+        let mut progress = Progress::default();
+        let value = Reader::default()
+            .read(&path, &mut progress, &budget(), 0)
+            .unwrap()
+            .expect_ready();
+        assert_eq!(journal::user_prompt(&value).as_str(), Some(prompt.as_str()));
+        assert_eq!(journal::last_message(&value), "Earlier public answer");
+        assert_eq!(progress.bytes, record.len());
+        assert!(value["keep_warm_quiet"].get("private_debug").is_none());
+        assert!(value.get("shell_jobs").is_none());
     }
 
     #[test]

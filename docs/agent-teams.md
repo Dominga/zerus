@@ -38,7 +38,7 @@ keeps the switch disabled and shows its reason. **Read again** requests a fresh
 answer even when the followed views and their contents have not changed.
 
 Turning it on adds a marker file to this computer's `hgs` state directory and
-makes the desktop show **New team** and **Waiting for you** in the rail, the
+makes the desktop show **Teams** and **Waiting for you** in the rail, the
 **Team** tab on a lead's session, **Send to team** on the task board and a team
 chooser in the New task form. An `hgs task` command that touches a team, with
 `--team` or on a task whose team key guards it, then proves its caller as
@@ -55,7 +55,21 @@ team lives on another computer still refuses agents.
 
 ## Starting a team
 
-Press **New team** in the rail. The dialog starts from a **Template**:
+Open **Teams** in the rail, after Accounts and beside **Waiting for you**.
+This screen lists this computer's teams from the existing followed list read;
+it adds no polling. Each row shows the project, status, lead, accepted-task
+progress, Stuck marker, unanswered questions and member count when available.
+Counts with `+` are lower bounds. **More teams** reads one bounded cursor page;
+**First page** returns to the beginning. Browsing retains one current page and
+does not grow the bounded session lookup cache.
+
+Select a row to open its bound lead session's **Team** tab. The binding uses
+the computer's machine identity and launch or run identity. If the lead is
+missing from the session list or has changed, the screen explains that instead
+of opening a similarly named session.
+
+Press **New team** in the screen header or its empty state. The `team.new`
+command also remains available. The dialog starts from a **Template**:
 
 | Template | Roster besides the lead | Default pipeline | A queued task starts |
 |---|---|---|---|
@@ -149,14 +163,24 @@ when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
 An unknown job count does not establish work; only a positive count prevents
 that waiting label.
+
+Before its first conversation, a member the team launched can take its first task
+when the native first-message gate verifies its empty composer. A pending question
+or known background or subagent work keeps it from taking that task. If its
+terminal cannot be verified as ready, the usual three-minute service card names
+the member as "waiting for its first-message readiness". Members with a
+conversation keep the usual idle and known-zero work checks.
+
 The lead's strip shows accepted/total tasks, its team status (highlighting
 **Stuck** when an explicit blocker remains), unanswered member questions as
 **?N**, and live members including the lead. Accepted tasks include archived
-work; internal review/test stage tasks are excluded. Counts stop at 1000 and
+work; cancelled tasks and internal review/test stage tasks are excluded from
+the total. The Team tab bar also excludes cancelled tasks. Counts stop at 1000 and
 show **+** when more exist; an approximate count does not draw a percentage.
 The open queue is a single phase, so it has no phase bar. A team with multiple
-phases also shows completed/total phases. Click the strip or its chevron to
-fold the same member rows; the saved choice also survives a restart.
+phases also shows completed/total phases. Click the strip, or focus it and press
+Enter or Space, to open the lead session on its Team tab. Only the usual
+children chip folds the members; that choice survives a restart.
 
 Questions count only the open member-question inbox items, not cards for the
 person. Stuck comes from explicit launch/hand-out/unreadable-member blockers,
@@ -198,6 +222,25 @@ The lead's session has a **Team** tab. Its bar shows the team's status, its
 active members, open inbox items and open cards, and the team's actions:
 **Pause** or **Resume**, **Stop**, and **Archive** after a stop. Destructive
 actions ask for confirmation first.
+
+The bar also opens **Feed**, **Inbox**, **Reports**, **Cards** and **Lead chat**.
+The first four read one page at a time, at most 200 rows. **Next page** keeps
+the original page cursor, so later inserts do not move that snapshot;
+**First page** starts a fresh snapshot, and **Refresh** rereads the selected
+page. The feed follows the journal's oldest-first order. Reports are the
+report items on the selected inbox page, not an exhaustive report search.
+Only one page is retained, and closing the drawer drops it.
+
+Reports offer **Accept** or **Reject** (return with a reason), open questions
+offer **Answer**, and cards offer the decisions their writer recorded. A
+changed team revision or an unreadable page blocks these actions until a
+fresh read. An uncertain action remains in the existing Check/Dismiss flow;
+opening or refreshing a drawer never repeats it.
+
+**Lead chat** uses the selected lead's ordinary composer and its saved draft,
+shared with Activity. The bound computer and session must match, and its run
+and conversation must be available. Sends keep the normal guarded delivery
+and durable request identity; an uncertain delivery is never replayed.
 
 **Members** lists each member with its role, what it works on ("Working on
 #%1", "Reviewing #%1", "Testing #%1") and whether its session is linked. A

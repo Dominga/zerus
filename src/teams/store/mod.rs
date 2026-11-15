@@ -18,7 +18,7 @@ pub use decision_state::DecisionState;
 pub(crate) mod pages;
 mod progress;
 mod records;
-pub(crate) use progress::{TeamProgress, STUCK_KINDS};
+pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
 pub(crate) mod rows;
 mod stage;
 pub(crate) mod timers;

@@ -75,7 +75,7 @@ fn task_author_target_executor_and_history_keep_their_recorded_identity() {
     .unwrap();
     task.record_send(&original, "fixture-request", &Actor::Person, 2)
         .unwrap();
-    let view: TaskInfo = task.view().unwrap().into();
+    let view: TaskInfo = task.view().unwrap().try_into().unwrap();
     let TaskActor::Agent { session } = view.author else {
         panic!("author changed kind")
     };

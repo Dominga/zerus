@@ -190,3 +190,158 @@ fn advance_base_cached_writer_cannot_record_integration_facts() {
     );
     assert!(h.store.integration_fact(TEAM, node).unwrap().is_none());
 }
+
+// Full snapshots are bounded by these private fixtures. Every application row
+// was produced by an operation; the capability removal is the old-writer seam.
+type SavedRows = Vec<(String, Vec<Vec<rusqlite::types::Value>>)>;
+
+fn database_rows(h: &Harness) -> SavedRows {
+    let db = h.store.db.as_ref().unwrap();
+    let mut statement = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .unwrap();
+    let mut tables = statement
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    tables.push("sqlite_master".into());
+    tables
+        .into_iter()
+        .map(|table| {
+            let name = table.replace('"', "\"\"");
+            let mut statement = db.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort_by_cached_key(|row| format!("{row:?}"));
+            (table, rows)
+        })
+        .collect()
+}
+
+#[test]
+fn advance_base_cached_writer_cannot_settle_a_pre_advance_handout() {
+    let f = GitFixture::new();
+    let mut h = f.harness();
+    h.bind("m1");
+    let node = h.add(&person(), 1);
+    let effect = h.intent(node, "m1");
+    let advance = f.request(&h, &f.next);
+    f.apply(&mut h, &person(), &advance).unwrap();
+    let request = request(
+        h.store.team(TEAM).unwrap().unwrap().revision,
+        Operation::HandoutOutcome {
+            effect_request_id: effect.clone(),
+            outcome: HandoutOutcome::Submitted {
+                receipt: "receipt-example".into(),
+            },
+        },
+    );
+    h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .remove_function("zerus_teams_base_pins_v13", 0)
+        .unwrap();
+    let before = database_rows(&h);
+    let denied = crate::teams::ops::apply(&mut h.store, &service(), &request, 2000).unwrap_err();
+    assert_eq!(denied.code, code::STORAGE_FAILED);
+    assert!(denied.message.contains("newer Zerus"), "{denied:?}");
+    assert_eq!(
+        database_rows(&h),
+        before,
+        "no partial rows or saved receipt"
+    );
+    crate::teams::store::bases::register_writer(h.store.db.as_ref().unwrap()).unwrap();
+    crate::teams::ops::apply(&mut h.store, &service(), &request, 2001).unwrap();
+    assert_eq!(h.store.effect_base(TEAM, &effect).unwrap(), f.old);
+    let outcome: String = h
+        .store
+        .db
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM effects WHERE request_id=?1",
+            [&effect],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome, "submitted",
+        "the new engine can settle the same request"
+    );
+}
+
+#[test]
+fn advance_base_cached_writer_cannot_insert_a_report_before_any_later_guard() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let f = GitFixture::new();
+    let mut h = f.harness();
+    h.bind("lead");
+    h.bind("m1");
+    let node = h.add(&person(), 1);
+    let effect = h.submit(node, "m1");
+    h.observe(node, TaskStage::InReview);
+    let advance = f.request(&h, &f.next);
+    f.apply(&mut h, &person(), &advance).unwrap();
+    let request = request(
+        h.store.team(TEAM).unwrap().unwrap().revision,
+        Operation::RecordReport {
+            node,
+            generation: h.store.generation(TEAM, node).unwrap().unwrap(),
+            member: "m1".into(),
+            text: "Implemented and checked".into(),
+            commit: f.old.clone(),
+            notes: Vec::new(),
+        },
+    );
+    let inserted = Arc::new(AtomicUsize::new(0));
+    let seen = inserted.clone();
+    // Observe even inserts rolled back by the later effects UPDATE guard.
+    h.store.db.as_ref().unwrap().update_hook(Some(
+        move |action, _db: &str, table: &str, _rowid| {
+            if action == rusqlite::hooks::Action::SQLITE_INSERT && table == "reports" {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        },
+    ));
+    h.store
+        .db
+        .as_ref()
+        .unwrap()
+        .remove_function("zerus_teams_base_pins_v13", 0)
+        .unwrap();
+    let before = database_rows(&h);
+    let denied = crate::teams::ops::apply(&mut h.store, &service(), &request, 2000).unwrap_err();
+    assert_eq!(denied.code, code::STORAGE_FAILED);
+    assert!(denied.message.contains("newer Zerus"), "{denied:?}");
+    assert_eq!(
+        inserted.load(Ordering::SeqCst),
+        0,
+        "the report guard must refuse before INSERT"
+    );
+    assert_eq!(
+        database_rows(&h),
+        before,
+        "no partial rows or saved receipt"
+    );
+    crate::teams::store::bases::register_writer(h.store.db.as_ref().unwrap()).unwrap();
+    crate::teams::ops::apply(&mut h.store, &service(), &request, 2001).unwrap();
+    assert_eq!(
+        inserted.load(Ordering::SeqCst),
+        1,
+        "the observer sees the admitted INSERT"
+    );
+    assert_eq!(h.store.effect_base(TEAM, &effect).unwrap(), f.old);
+}

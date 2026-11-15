@@ -99,6 +99,7 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                private val exchangeTimeoutMs: Long = EXCHANGE_MS,
                private val mediaUnavailable: String = "Update Zerus on this computer to transfer this task's media.",
                private val heldSend: String = "It may have been sent already; its stage arrives with the next sync",
+               private val capabilities: () -> Map<MachineKey, Set<String>> = { emptyMap() },
                private val clock: () -> Long = System::currentTimeMillis) {
     private val locks = ConcurrentHashMap<ProjectKey, Mutex>()
     private val waiting = ConcurrentHashMap<Pair<ProjectKey, String>, Long>()
@@ -146,7 +147,7 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
 
     /** Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back. */
     suspend fun send(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, session: String,
-                     computerName: String = computerId): TaskOutcome =
+                     computerName: String = computerId, sessionId: String = ""): TaskOutcome =
         act(connection, key, name, computerId, computerName, "task_send",
             JSONObject().put("schema", 1).put("project", key.id).put("task", task).put("session", session))
 

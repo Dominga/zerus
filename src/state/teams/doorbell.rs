@@ -296,6 +296,7 @@ pub(crate) fn interrupt(store: &mut Store, team: &Team, member_id: &str, turn: f
                 turn,
                 state: if error.is_empty() { "requested".into() } else { "failed".into() },
                 error: error.clone(),
+                retries: 0,
             });
         }
         events.push(Event::new("urgent_interrupt", json!({"member":role,"count":count,"ok":error.is_empty(),"error":error})));
@@ -307,9 +308,22 @@ pub(crate) fn interrupt(store: &mut Store, team: &Team, member_id: &str, turn: f
 /// Task 277: after the stop, open a new turn that carries the urgent message
 /// on top and says to continue the task; the attempt is untouched. A message
 /// that was read meanwhile is skipped; nothing urgent left clears the record.
+/// Owner, 2026-11-15: the stop went, but the continuation did not start a
+/// turn: its delivery was uncertain (a supervisor that did not answer), or it
+/// was sent while Claude still showed "Interrupted" and was lost. The member
+/// then sat stopped with its urgent message unread. The dispatcher sends the
+/// continuation again, at most `CONTINUE_RETRIES` times, once the member is free
+/// and has started no turn since.
+pub(crate) const CONTINUE_RETRIES: u32 = 3;
+const CONTINUE_GRACE: f64 = 45.0;
+
+pub(crate) fn continuation_lost(record: &UrgentInterrupt, now: f64) -> bool {
+    record.state == "sent" && record.retries < CONTINUE_RETRIES && now - record.at >= CONTINUE_GRACE
+}
+
 pub(crate) fn continue_after_interrupt(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     let Some(member) = team.member(member_id) else { return Ok(()) };
-    let Some(record) = member.urgent.clone().filter(|record| record.state == "requested") else { return Ok(()) };
+    let Some(record) = member.urgent.clone().filter(|record| record.state == "requested" || continuation_lost(record, super::super::now())) else { return Ok(()) };
     let at = super::super::now();
     let list: Vec<Message> = urgent_unread(store, team, member_id, at)?
         .into_iter()
@@ -364,6 +378,9 @@ pub(crate) fn continue_after_interrupt(store: &mut Store, team: &Team, member_id
             found.urgent = Some(UrgentInterrupt {
                 state: if delivered { "sent".into() } else { "failed".into() },
                 error: error.clone(),
+                // A resend counts; `at` is when this continuation went.
+                retries: if record.state == "sent" { record.retries + 1 } else { record.retries },
+                at,
                 ..record.clone()
             });
         }

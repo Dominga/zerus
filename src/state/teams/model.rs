@@ -612,6 +612,14 @@ pub(crate) struct UrgentInterrupt {
     pub state: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// Owner, 2026-11-15: how often the continuation after the stop was sent
+    /// again because the member never started a new turn.
+    #[serde(default, skip_serializing_if = "no_retries")]
+    pub retries: u32,
+}
+
+fn no_retries(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

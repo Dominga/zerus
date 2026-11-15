@@ -686,6 +686,15 @@ fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Opti
             let stopped = found.is_none_or(|found| !found.live || (found.free && can_take_a_message(found)));
             return stopped.then(|| Step::ContinueUrgent { member: member.id.clone() });
         }
+        // The continuation went but no turn started since: send it again.
+        if super::doorbell::continuation_lost(urgent, crate::state::now()) {
+            let idle_since = found.is_some_and(|found| {
+                found.live && found.free && can_take_a_message(found) && found.turn_started.is_none_or(|turn| turn <= urgent.at)
+            });
+            if idle_since {
+                return Some(Step::ContinueUrgent { member: member.id.clone() });
+            }
+        }
         let newer = member.unread.as_ref().is_some_and(|unread| {
             unread.urgent > 0 && !unread.urgent_oldest.is_empty() && unread.urgent_oldest != urgent.oldest
         });

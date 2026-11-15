@@ -1,5 +1,5 @@
-//! Inactive bridge from the original durable row to its actual helper I/O.
-//! The future host still verifies its original request/source and guarded spawn;
+//! Bridge from the original durable row to its actual helper I/O. The dormant
+//! fixed Claude startup host verifies its original request/source and spawn;
 //! no executable, PID, input permission or operation result is selected here.
 //! This does not replace Root's process-group runner or its cleanup semantics.
 //! The host must still retain cross-process inherited crash custody and account
@@ -50,7 +50,7 @@ impl IoAdmission {
     /// stays withheld until the original row and host's native/source check.
     pub(super) fn attach(self, child: Child) -> IoExchange {
         IoExchange {
-            original: Some(self.original),
+            original: Some(Box::new(self.original)),
             exchange: self.admitted.attach(child),
         }
     }
@@ -59,7 +59,7 @@ impl IoAdmission {
     /// constructor is permanently failed and can never release private input.
     pub(super) fn attach_withheld(self, child: Child) -> IoExchange {
         IoExchange {
-            original: Some(self.original),
+            original: Some(Box::new(self.original)),
             exchange: self.admitted.attach_withheld(child),
         }
     }
@@ -69,7 +69,7 @@ impl IoAdmission {
 /// the original Child/pipes/workers AND the same borrowed native lease during
 /// retirement, even when this local owner and its main lease have gone away.
 pub(super) struct IoExchange {
-    original: Option<Reservation>,
+    original: Option<Box<Reservation>>,
     exchange: Exchange,
 }
 impl IoExchange {
@@ -113,7 +113,7 @@ impl IoExchange {
     pub(super) fn poll(&mut self) -> Option<Settled> {
         let report = self.exchange.poll()?;
         Some(Settled {
-            original: self.original.take()?,
+            original: *self.original.take()?,
             report,
         })
     }
@@ -127,6 +127,9 @@ pub(super) struct Settled {
     report: Report,
 }
 impl Settled {
+    pub(super) fn into_report(self) -> Report {
+        self.report
+    }
     pub(super) fn report(&self) -> &Report {
         &self.report
     }

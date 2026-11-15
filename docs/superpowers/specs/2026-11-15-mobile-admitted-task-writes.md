@@ -207,6 +207,54 @@ proof for the selected task and project. An unrelated damaged document may
 remain a partial-exchange result; it does not authorize use of stale selected
 task content.
 
+## Implemented native and FFI boundary
+
+The native marker is `Mobile task edit ABI: task-admitted-edit-v1`. The
+connector publishes `task_admitted_edit_v1` only inside a local encrypted
+snapshot, with native task exchange available and its maintained canonical
+configuration selected. Plain API-v1 snapshots, forwarded routes, custom
+configuration slots and Windows never advertise this lane. Every request
+rechecks its authenticated local route and native marker; a cached capability
+is no permission to fall back to ordinary exchange.
+
+`crates/mobile-task-edit` implements the independently verified native entry;
+`services/mobile/endpoint` shares the connector's private Store/Profile lock
+and source checks. The root CLI selects its own configuration, machine and
+replica root. Request data cannot supply those paths. Exact native request
+records reserve Unknown before an effect and retain the original completion.
+The connector's additive qualified-lane table preserves the API-v1 operation
+and request hash while preventing short-read pruning or read-style recovery.
+A matching native completion can settle a lost process response; missing proof
+stays Unknown. Revocation in the file-guard handoff prevents native admission.
+
+The additive FFI API starts with `TaskStore.qualify_edit` and a route from the
+original connection's pinned membership. `TaskEditQualification.request` fixes
+both qualification and future edit UUIDs before transport. Its `accept` takes
+the original signed request and encrypted result, the same connection's fresh
+private identity/roster and two indexed historical-head lookups. It verifies
+the current enrolled keys, protected route, request digest, retained receipt,
+phone-store incarnation, immutable seal and complete local causal coverage.
+No deserialized producer or receipt opens a writable canonical store.
+
+`TaskEditDraft` retains the view and field revisions captured before the
+qualification network request. A refresh cannot replace that draft. It stages
+content/media, target, rank and one comment separately; `freeze` returns the
+exact manifest for the platform's private durable draft record. The platform
+must retain it with its original connection/project/task and UUID before
+posting the first request. Once frozen, setters refuse changes. The bounded
+sender produces one original request at a time, with exact source/offset
+acknowledgements. Only the retained final edit UUID may commit. A final result
+must bind the exact frozen manifest hash as well as its original envelope.
+
+`TaskEditError` distinguishes verified native Refused from Unknown and local
+failure without changing the existing `ReplicaError` API. A missing or invalid
+result never advances a part. `hold_unknown` closes further sends while keeping
+the original frozen bytes; accepting a later authenticated result may settle
+that same request but never creates a new one. The canonical phone cache stays
+read-only until bounded document exchange receives the host's changed state.
+Platform draft persistence and both-phone presentation are the next wiring
+slice; this FFI API does not enable a UI or task execution controls by itself.
+
 ## Qualification and review
 
 Implement the spec, native/connector verification and FFI lane in one PR where

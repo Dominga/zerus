@@ -366,7 +366,7 @@ impl EditTarget {
             },
         }
     }
-    fn from_target(target: crate::Target) -> Self {
+    pub fn from_target(target: crate::Target) -> Self {
         let key = |key: crate::SessionKey| EditSession {
             machine: key.machine,
             session: key.session,

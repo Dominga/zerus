@@ -273,6 +273,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        Mobile task identity ABI: task-session-identity-v2
        Mobile task media ABI: task-media-upload-v1
+       Mobile task edit ABI: task-admitted-edit-v1
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use

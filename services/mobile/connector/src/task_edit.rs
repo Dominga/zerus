@@ -96,3 +96,44 @@ pub(crate) fn recovered(
     answer["envelope_digest"] = json!(digest);
     Ok(answer)
 }
+
+pub(crate) fn advertise(snapshot: &mut Value, eligible: bool) {
+    let Some(features) = snapshot
+        .pointer_mut("/mobile_capabilities/features")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    features.retain(|feature| feature != crate::capabilities::TASK_EDIT_FEATURE);
+    if eligible {
+        features.push(json!(crate::capabilities::TASK_EDIT_FEATURE));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_a_qualified_local_encrypted_snapshot_advertises_admitted_edits() {
+        let mut local = json!({"mobile_capabilities":{"features":["task_media_upload_v1"]}});
+        advertise(&mut local, true);
+        assert!(local["mobile_capabilities"]["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(crate::capabilities::TASK_EDIT_FEATURE)));
+        let mut forwarded = local.clone();
+        advertise(&mut forwarded, false);
+        assert_eq!(
+            forwarded,
+            json!({"mobile_capabilities":{"features":["task_media_upload_v1"]}})
+        );
+        for mut malformed in [
+            json!({}),
+            json!({"mobile_capabilities":{"features":"invalid"}}),
+        ] {
+            let original = malformed.clone();
+            advertise(&mut malformed, true);
+            assert_eq!(malformed, original);
+        }
+    }
+}

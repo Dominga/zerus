@@ -89,7 +89,7 @@ impl Selection {
             generation: crate::private_state::random_id().ok()?,
         })
     }
-    fn current(&self) -> bool {
+    pub(crate) fn current(&self) -> bool {
         let Ok(Some(store)) = Store::try_lock(&self.directory, false) else {
             return false;
         };

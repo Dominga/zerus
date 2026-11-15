@@ -416,6 +416,12 @@ impl<N: Native + 'static> Engine<'_, N> {
         } else {
             json!({"gateway_id":self.machine.borrow().as_deref().ok_or(Failure::Retry)?,"gateway_name":profile.computer_name})
         };
+        crate::task_edit::advertise(
+            &mut snapshot,
+            route == profile.identity.device.device_id
+                && self.native_edits_slot
+                && self.connector.flags.get().task_admitted_edit,
+        );
         let row = json!({"id":machine,"machine_id":machine,"name":name,"host":snapshot["host"],"online":true,"snapshot":snapshot,"via":via,"encrypted_transport":{"gateway_id":profile.identity.device.device_id,"route_id":route,"machine_id":machine}});
         let plain = encoded(&row)?;
         if plain.len() > 1024 * 1024 {
@@ -1006,6 +1012,7 @@ pub async fn run<N: Native + 'static>(
     connector: &Rc<Connector<N>>,
     relay: &Relay,
     private_dir: &Path,
+    native_edits_slot: bool,
     signals: impl Future<Output = ()>,
 ) -> u8 {
     crate::startup::enter(crate::startup::Stage::EncryptedProfile);
@@ -1031,7 +1038,7 @@ pub async fn run<N: Native + 'static>(
         machine: RefCell::new(None),
         published: RefCell::default(),
         authorization: tokio::sync::Mutex::new(()),
-        native_edits_slot: false,
+        native_edits_slot,
     };
     let requests = async {
         let result = engine.requests().await;
@@ -1090,6 +1097,8 @@ mod tests {
         payloads: RefCell<Vec<Option<Value>>>,
         observation: RefCell<Option<Observation>>,
         task_endpoint: RefCell<Option<zerus_mobile_task_edit::Endpoint>>,
+        before_edit: RefCell<Option<Box<dyn FnOnce()>>>,
+        edit_timeout: std::cell::Cell<bool>,
     }
     struct Observation {
         machine: String,
@@ -1101,14 +1110,22 @@ mod tests {
             self.calls.borrow_mut().push(call.argv.clone());
             self.payloads.borrow_mut().push(call.payload.clone());
             if call.argv == ["--expect-machine", MACHINE, "task", "mobile-edit", "--json"] {
+                if let Some(before) = self.before_edit.borrow_mut().take() {
+                    before();
+                }
                 if let Some(endpoint) = self.task_endpoint.borrow().as_ref() {
                     let envelope: EncryptedEnvelope =
                         serde_json::from_value(call.payload.expect("original envelope")).unwrap();
-                    return Ok(Output::Json(
-                        endpoint
-                            .execute(&envelope, crate::now() as u64)
-                            .unwrap_or_else(|error| json!({"ok":false,"error":error.to_string()})),
-                    ));
+                    let result = endpoint
+                        .execute(&envelope, crate::now() as u64)
+                        .unwrap_or_else(|error| json!({"ok":false,"error":error.to_string()}));
+                    if self.edit_timeout.get() {
+                        return Err(NativeError::Failed(crate::native::TIMED_OUT));
+                    }
+                    return Ok(Output::Json(result));
+                }
+                if self.edit_timeout.get() {
+                    return Err(NativeError::Failed(crate::native::TIMED_OUT));
                 }
             }
             if call.argv
@@ -1277,6 +1294,40 @@ mod tests {
                 _temporary: temporary,
             }
         }
+        fn bind_native_task(&self) -> (std::path::PathBuf, zerus_replica::TaskDoc) {
+            use zerus_replica::{Actor, NewTask, ProjectStore, Stage, Target};
+            let profile = workspace::load_active(&self.private_dir).unwrap();
+            let root = self._temporary.path().join("replica");
+            let task = {
+                let store = ProjectStore::open(&root, "project-1").unwrap();
+                let mut task = zerus_replica::TaskDoc::create(NewTask {
+                    project: "project-1",
+                    id: "T-native",
+                    text: "Original requirement",
+                    stage: Stage::Todo,
+                    target: Target::Any,
+                    author: Actor::Person,
+                    rank: "V",
+                    now: 1,
+                })
+                .unwrap();
+                store.save(&mut task).unwrap();
+                task
+            };
+            let config = self._temporary.path().join("connector.json");
+            crate::workspace_cli::replace_config(
+                &config,
+                "",
+                &json!({"server_url":profile.server_url,"state_dir":profile.state_dir,
+            "encrypted_workspace":{"version":1,"state_dir":self.private_dir}}),
+            )
+            .unwrap();
+            *self.connector.native.task_endpoint.borrow_mut() = Some(
+                zerus_mobile_task_edit::Endpoint::configured(root.clone(), config, MACHINE.into())
+                    .unwrap(),
+            );
+            (root, task)
+        }
         fn engine(&self) -> Engine<'_, NativeFixture> {
             Engine {
                 connector: &self.connector,
@@ -1373,6 +1424,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_timeout_without_native_proof_stays_unknown_and_is_not_replayed() {
+        let f = Fixture::new();
+        let mut flags = f.connector.flags.get();
+        flags.task_exchange = true;
+        flags.task_admitted_edit = true;
+        f.connector.flags.set(flags);
+        f.connector.native.edit_timeout.set(true);
+        f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
+        let engine = f.engine();
+        let profile = workspace::load_active(&f.private_dir).unwrap();
+        let envelope = serde_json::to_value(f.edit_request(&profile)).unwrap();
+        engine.receive(&profile, envelope.clone()).await.unwrap();
+        engine.receive(&profile, envelope).await.unwrap();
+        let receipt: Value = serde_json::from_str(
+            &f.connector
+                .journal
+                .encrypted_native_receipt(REQUEST)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["state"], "uncertain");
+        assert!(receipt["error"]
+            .as_str()
+            .unwrap()
+            .contains("matching durable native result"));
+        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_native_capability_wrong_class_or_a_foreign_configuration_never_starts_an_edit()
+    {
+        for guard in ["capability", "class", "configuration"] {
+            let f = Fixture::new();
+            let mut flags = f.connector.flags.get();
+            flags.task_exchange = true;
+            flags.task_admitted_edit = guard != "capability";
+            f.connector.flags.set(flags);
+            f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
+            let mut engine = f.engine();
+            if guard == "configuration" {
+                engine.native_edits_slot = false;
+            }
+            let profile = workspace::load_active(&f.private_dir).unwrap();
+            let mut envelope = f.edit_request(&profile);
+            if guard == "class" {
+                let identity = crypto::Identity::from_record(&profile.identity).unwrap();
+                let plain =
+                    crypto::open(&identity, f.phone.public(), &envelope.header, &envelope).unwrap();
+                let mut header = envelope.header;
+                header.operation_class = OperationClass::Read;
+                envelope =
+                    crypto::seal(&f.phone, &profile.identity.device, header, &plain).unwrap();
+            }
+            engine
+                .receive(&profile, serde_json::to_value(envelope).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                f.connector.native.calls.borrow().is_empty(),
+                "started without {guard}"
+            );
+            assert!(f
+                .connector
+                .journal
+                .mobile_edit_digest(REQUEST)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revocation_in_the_file_guard_handoff_cannot_issue_a_native_permit() {
+        use base64::Engine as _;
+        use zerus_replica::mobile_edit::wire::{
+            Command as EditCommand, Frame, Header as EditHeader,
+        };
+        let f = Fixture::new();
+        let (root, task) = f.bind_native_task();
+        let mut flags = f.connector.flags.get();
+        flags.task_exchange = true;
+        flags.task_admitted_edit = true;
+        f.connector.flags.set(flags);
+        f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
+        let profile = workspace::load_active(&f.private_dir).unwrap();
+        let mut request = f.edit_request(&profile);
+        let identity = crypto::Identity::from_record(&profile.identity).unwrap();
+        let mut body: Value = serde_json::from_slice(
+            &crypto::open(&identity, f.phone.public(), &request.header, &request).unwrap(),
+        )
+        .unwrap();
+        let frame = Frame {
+            header: EditHeader {
+                project: "project-1".into(),
+                task: task.uuid().into(),
+                command: EditCommand::Qualify {
+                    phone_store: "00000000-0000-4000-8000-000000000032".into(),
+                    edit_id: "00000000-0000-4000-8000-000000000031".into(),
+                    seal: task.cutover_seal().unwrap().unwrap().identity(),
+                    version: task.applied_version().unwrap(),
+                },
+            },
+            body: vec![],
+        };
+        body["payload"]["updates"] = json!([{"task":task.uuid(),"bytes":base64::engine::general_purpose::STANDARD.encode(frame.encode().unwrap())}]);
+        request = crypto::seal(
+            &f.phone,
+            &profile.identity.device,
+            request.header,
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let directory = f.private_dir.clone();
+        let phone = f.phone.public().device_id.clone();
+        *f.connector.native.before_edit.borrow_mut() = Some(Box::new(move || {
+            let guard = Store::lock(&directory, false)
+                .expect("connector must have released only its file guard");
+            let mut current = Profile::load_locked(&guard).unwrap();
+            current.membership.members.remove(&phone);
+            current.membership.revoked_device_ids.insert(phone);
+            let revision = Store::revision(guard.read("active.json").unwrap().as_deref());
+            guard
+                .replace(
+                    "active.json",
+                    &revision,
+                    &serde_json::to_vec(&current).unwrap(),
+                )
+                .unwrap();
+        }));
+        let engine = f.engine();
+        let _result = engine
+            .receive(&profile, serde_json::to_value(request).unwrap())
+            .await;
+        assert_eq!(f.connector.native.calls.borrow().len(), 1);
+        let guard = Store::lock(&f.private_dir, false).unwrap();
+        assert!(guard
+            .read(&format!("mobile-request-{REQUEST}.json"))
+            .unwrap()
+            .is_none());
+        let store = zerus_replica::ProjectStore::open(&root, "project-1").unwrap();
+        assert_eq!(store.load(task.uuid()).unwrap().revision(), task.revision());
+    }
+
+    #[tokio::test]
     async fn qualified_restart_flush_ignores_an_unproven_failed_inner_receipt() {
         let f = Fixture::new();
         let engine = f.engine();
@@ -1430,39 +1625,11 @@ mod tests {
         use base64::Engine as _;
         use zerus_replica::{
             mobile_edit::wire::{Command, Frame, Header as EditHeader},
-            Actor, NewTask, ProjectStore, Stage, Target,
+            ProjectStore,
         };
         let f = Fixture::new();
         let profile = workspace::load_active(&f.private_dir).unwrap();
-        let root = f._temporary.path().join("replica");
-        let task = {
-            let store = ProjectStore::open(&root, "project-1").unwrap();
-            let mut task = zerus_replica::TaskDoc::create(NewTask {
-                project: "project-1",
-                id: "T-native",
-                text: "Original requirement",
-                stage: Stage::Todo,
-                target: Target::Any,
-                author: Actor::Person,
-                rank: "V",
-                now: 1,
-            })
-            .unwrap();
-            store.save(&mut task).unwrap();
-            task
-        };
-        let config = f._temporary.path().join("connector.json");
-        crate::workspace_cli::replace_config(
-            &config,
-            "",
-            &json!({"server_url":profile.server_url,"state_dir":profile.state_dir,
-            "encrypted_workspace":{"version":1,"state_dir":f.private_dir}}),
-        )
-        .unwrap();
-        *f.connector.native.task_endpoint.borrow_mut() = Some(
-            zerus_mobile_task_edit::Endpoint::configured(root.clone(), config, MACHINE.into())
-                .unwrap(),
-        );
+        let (root, task) = f.bind_native_task();
         let mut flags = f.connector.flags.get();
         flags.task_exchange = true;
         flags.task_admitted_edit = true;
@@ -1530,6 +1697,7 @@ mod tests {
             },
         );
         let value = serde_json::to_value(&update).unwrap();
+        f.connector.native.edit_timeout.set(true);
         engine.receive(&profile, value.clone()).await.unwrap();
         engine.receive(&profile, value).await.unwrap();
         let answer: Value = serde_json::from_str(

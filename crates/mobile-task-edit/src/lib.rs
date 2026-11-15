@@ -314,7 +314,7 @@ fn perform(
             admitted.save(&mut candidate).map_err(fail)?;
             #[cfg(test)]
             testing::after_save();
-            let mut result = json!({"task":candidate.uuid(),"edited":true,"version":candidate.applied_version()});
+            let mut result = json!({"task":candidate.uuid(),"edited":true,"manifest_sha256":format!("{:x}",Sha256::digest(&body)),"version":candidate.applied_version()});
             if let Some(ack) = upload {
                 result["upload"] = serde_json::to_value(ack).map_err(fail)?;
             }

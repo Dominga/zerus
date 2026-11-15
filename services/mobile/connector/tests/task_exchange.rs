@@ -834,3 +834,23 @@ fn task_media_uploads_need_the_exact_native_marker_and_an_offered_exchange() {
     }
     assert!(!supports(format!("{MARKER}{UPLOAD}\n"), true));
 }
+
+#[test]
+fn admitted_edit_marker_needs_exchange_and_never_grants_plain_or_windows_advertisement() {
+    const EDIT: &str = "Mobile task edit ABI: task-admitted-edit-v1";
+    let flags = Flags::from_help(&format!("{MARKER}{EDIT}\n"));
+    assert!(flags.task_admitted_edit);
+    assert!(!flags.advertised(true)["features"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("task_admitted_edit_v1")));
+    for help in [
+        MARKER.to_owned(),
+        EDIT.to_owned(),
+        format!("{MARKER}{EDIT}-extra\n"),
+        format!("{MARKER}not {EDIT}\n"),
+    ] {
+        assert!(!Flags::from_help(&help).task_admitted_edit);
+    }
+    assert!(!flags.windows_local().task_admitted_edit);
+}

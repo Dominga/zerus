@@ -249,13 +249,24 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
+        let native_edits_slot = !cfg!(windows)
+            && labels
+                .as_ref()
+                .is_some_and(session_labels::Selection::current);
         let work = async {
             if let Some(private_dir) = config.encrypted_workspace {
                 #[cfg(unix)]
                 let stop = signals(&connector.stopping);
                 #[cfg(windows)]
                 let stop = windows_management::signals(&connector.stopping, stop_state, generation);
-                return encrypted_runtime::run(&connector, &relay, &private_dir, stop).await;
+                return encrypted_runtime::run(
+                    &connector,
+                    &relay,
+                    &private_dir,
+                    native_edits_slot,
+                    stop,
+                )
+                .await;
             }
             #[cfg(unix)]
             let result = serve(&connector, &relay, signals(&connector.stopping)).await;

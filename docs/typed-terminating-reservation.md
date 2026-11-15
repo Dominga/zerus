@@ -37,7 +37,7 @@ the existing original run exclusion **before** the normal state writer, the
 factory rechecks that captured source against the fresh record under that same
 writer. It refuses changed identity, unconfirmed startup/resume transition,
 unsupported provider, damaged source, pending writer rows or an existing
-`terminating` field of any shape. It never adopts a new run, conversation,
+`terminating` or `layout_transition` field of any shape. It never adopts a new run, conversation,
 configuration root or record object. Only its actual new publication can return
 the non-cloneable local reservation resource. Saved data and status lookup
 cannot recreate that resource.

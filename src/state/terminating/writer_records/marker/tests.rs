@@ -94,6 +94,32 @@ fn configured_alias_preserves_id_layout_and_never_adopts_a_new_directory() {
 }
 
 #[test]
+fn every_layout_transition_shape_refuses_original_capture_and_late_admission() {
+    for phase in ["capture", "late"] {
+        for shape in ["null", "false", "number", "text", "array", "object"] {
+            probe(&format!("layout-{phase}-{shape}"));
+        }
+    }
+}
+
+#[test]
+fn a_layout_transition_arriving_behind_the_original_writer_cannot_publish() {
+    probe("layout-wait");
+}
+
+fn transition(case: &str) -> Value {
+    match case.rsplit('-').next().unwrap() {
+        "null" => Value::Null,
+        "false" => false.into(),
+        "number" => 0.into(),
+        "text" => "opaque".into(),
+        "array" => json!([null, false, "unconfirmed"]),
+        "object" => json!({"version":1,"phase":"unconfirmed"}),
+        _ => panic!("unknown layout shape"),
+    }
+}
+
+#[test]
 fn existing_markers_and_changed_originals_cannot_be_adopted() {
     for case in [
         "existing-null",
@@ -238,6 +264,24 @@ fn private_probe() {
         return;
     }
     super::super::initialize(&scope, until).unwrap();
+    if case.starts_with("layout-capture-") {
+        record["layout_transition"] = transition(&case);
+        save(&path, &record);
+        assert!(
+            Original::capture(
+                &writer,
+                &record,
+                REQUEST,
+                &"c".repeat(64),
+                correlation(),
+                until
+            )
+            .is_err(),
+            "layout evidence must refuse capture"
+        );
+        assert_eq!(load(&path), record);
+        return;
+    }
     let mut original = Original::capture(
         &writer,
         &record,
@@ -249,6 +293,49 @@ fn private_probe() {
     .unwrap();
     drop(writer);
     match case.as_str() {
+        value if value.starts_with("layout-late-") => {
+            let writer = storage::lock(None).unwrap();
+            record["layout_transition"] = transition(&case);
+            save(&path, &record);
+            drop(writer);
+            failed(original);
+            assert_eq!(
+                load(&path),
+                record,
+                "no publication after a layout transition"
+            );
+        }
+        "layout-wait" => {
+            let writer = storage::lock(None).unwrap();
+            let mut earlier = super::super::reserve(
+                &scope,
+                "44444444-4444-4444-8444-444444444444",
+                super::super::Kind::Input,
+                &"a".repeat(64),
+                &"b".repeat(64),
+                until,
+            )
+            .unwrap();
+            drop(writer);
+            super::super::gate::CONTENDED.store(false, Ordering::SeqCst);
+            let worker = std::thread::spawn(move || reserve(original));
+            while !super::super::gate::CONTENDED.load(Ordering::SeqCst) {
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let writer = storage::writer_until(Instant::now() + Duration::from_millis(150))
+                .unwrap()
+                .expect("run waiter must leave the state writer available");
+            record["layout_transition"] = json!({"phase":"unconfirmed"});
+            save(&path, &record);
+            earlier.retire(until).unwrap();
+            drop(writer);
+            assert!(
+                worker.join().unwrap().is_err(),
+                "fresh locked admission must refuse the new layout transition"
+            );
+            assert_eq!(load(&path), record);
+        }
         "fresh" | "id-layout" | "drop" | "codec" | "existing-own" | "completion"
         | "state-alias" | "id-alias" => {
             if case == "completion" {

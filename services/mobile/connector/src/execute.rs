@@ -258,7 +258,16 @@ impl<N: Native + 'static> Connector<N> {
             }
             Target::Peer(context) => context.execute_claimed(&request, &request_id).await,
         };
-        let response = sanitize(response, &request_id, is_mutation(&journal_operation));
+        let qualified = self
+            .journal
+            .mobile_edit_digest(&request_id)
+            .map_err(Fatal)?
+            .is_some();
+        let response = sanitize(
+            response,
+            &request_id,
+            is_mutation(&journal_operation) || qualified,
+        );
         self.finish(&request_id, &response)?;
         Ok(Outcome::Finished(response))
     }
@@ -333,7 +342,7 @@ impl<N: Native + 'static> Connector<N> {
         }
         // A mutation that failed once its native write may have begun is
         // uncertain.
-        let mutation_started = Cell::new(false);
+        let mutation_started = Cell::new(crate::task_edit::context().is_some());
         let outcome = async {
             let validated = self
                 .validated(request, request_id)
@@ -981,6 +990,21 @@ impl<N: Native + 'static> Connector<N> {
                 task_answer(self.call(call).await?).map_err(|(failure, _)| failure)
             }
             "task_exchange" => {
+                if crate::task_edit::claims(payload.expect("validated")) {
+                    let context=crate::task_edit::context().ok_or_else(||Failure::text("This task edit needs its original local encrypted route; keep the draft"))?;
+                    mutation_started.set(true);
+                    let call = Call::new(["task", "mobile-edit", "--json"])
+                        .payload(
+                            serde_json::to_value(context.envelope.as_ref())
+                                .map_err(|_| Failure::text(crate::task_edit::NO_PROOF))?,
+                        )
+                        .timeout(TASK_EXCHANGE_TIMEOUT)
+                        .failure_json();
+                    // Completion comes only from the native durable record.
+                    // Timeout/exit/stdout cannot turn missing evidence into success.
+                    let _native = self.call(call).await;
+                    return context.completion().await.map_err(Failure::text);
+                }
                 // hgs refuses on stdout with a failing exit status; the phone
                 // reads why, such as a project another command holds.
                 let call = Call::new(["task", "exchange", "--json"])

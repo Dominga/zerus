@@ -27,6 +27,7 @@ mod cutover;
 mod copy_review;
 mod dispatch;
 mod mobile;
+mod mobile_edits;
 mod phone;
 mod sessions;
 mod messages;
@@ -608,7 +609,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         return controls::dispatch(config, args);
     }
     // The phone's commands refuse in JSON, which the connector passes on.
-    let phone = ["exchange", "mobile-send", "mobile-cancel", "mobile-done"];
+    let phone = [
+        "exchange",
+        "mobile-edit",
+        "mobile-send",
+        "mobile-cancel",
+        "mobile-done",
+    ];
     if args.first().is_some_and(|action| phone.contains(&action.as_str())) && flag(args, "--json") {
         return Ok(match execute(config, args) {
             Ok(out) => {
@@ -709,6 +716,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 phone::exchange(config)
             }
         }
+        "mobile-edit" if args.len() == 1 && args[0] == "--json" => mobile_edits::entry(config),
         // The phone's Send now, Cancel and Done list; each takes exactly --json.
         "mobile-send" | "mobile-cancel" | "mobile-done" if args.len() == 1 && args[0] == "--json" => {
             match action.as_str() {

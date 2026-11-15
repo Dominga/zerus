@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerus_replica as replica;
 
+mod mobile_edit;
+pub use mobile_edit::*;
+
 uniffi::setup_scaffolding!();
 
 /// A rule refused the change and nothing changed (show the message), or

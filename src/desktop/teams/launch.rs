@@ -31,6 +31,7 @@ mod branch;
 mod budget;
 mod card;
 mod effects;
+mod edits;
 mod member;
 mod retry;
 #[cfg(test)]

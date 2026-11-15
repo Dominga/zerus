@@ -5898,6 +5898,7 @@ hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
 hgs team pause-member|resume-member|stop-member|archive-member < request.json
+hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
 
@@ -5961,8 +5962,32 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `reply` | yes | with the delegation | | `item`, `text` |
 | `pause-member`, `resume-member` | yes | yes | | `member` |
 | `stop-member`, `archive-member` | yes | | | `member` |
+| `add-member` | yes | | | `role`, `agent`, optional `model`, `effort`, `account` |
+| `swap-member` | yes | | | `member`, `agent`, optional `model`, `effort`, `account` |
+| `rename-team` | yes | | | `name` |
+| `set-goal` | yes | | | `goal` |
 | `ask` | | | the attempt's holder | `node`, `generation`, `text` |
 | `verdict` | | | the stage's holder | `node`, `generation`, `pass`, `text` |
+
+Live-team edits use the same receipt and revision rules below. `add-member`
+chooses a role from the team's pinned catalog and reserves a new, never reused
+member ID. `account` is `{"mode":"freest"}` (the default) or
+`{"mode":"named","account":"example"}`. Model and effort are optional;
+empty strings use the selected account's defaults. Seat choices leave the
+pinned role and all other members unchanged. The service launches an added
+member through its ordinary launch ledger.
+
+`swap-member` requires a member already stopped by the person, with a known
+completed launch and no open tasks, unsettled attempts or unknown receipts.
+An active member is refused with `Stop the member first; open work: N`.
+Swap does not stop or archive the old session: it loses its team binding and
+stays outside the team. The new agent keeps the member ID, task history,
+owned folder and branch. The old original and receipts remain immutable; a
+new launch original verifies the same checkout before launching. There is no
+active cutover or existing-session adoption. A changed generation fences stale
+launch admission. `rename-team` changes the display name only; already reserved
+session, worktree and branch names stay. `set-goal` accepts an empty string to
+clear the goal. These four edits require a running or paused team.
 
 The envelope of every write is `request_id` (a fresh lowercase UUID), `team`
 (the team's UUID, chosen by the caller for `create`) and `expected_revision`

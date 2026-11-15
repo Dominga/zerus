@@ -301,7 +301,33 @@ sent by a member or by another agent waits until the lead admits it. The queue
 is taken in the order of the board's To do column, and each member works on
 one task at a time.
 
-### Routing
+### Editing a team
+
+In the **Team** tab, **Add member** chooses a role from this team's pinned
+catalog, an agent, model, effort and account. The account can be named or
+**The freest account**; empty model and effort use that account's defaults.
+Launch effort is available for Claude and Codex; DeepSeek keeps its model in
+its native account. The member gets its own readable session and worktree through the usual launch
+service. Existing members keep their sessions and work.
+
+**Rename team** and **Edit goal** change the team's name and goal. Clearing the
+goal is allowed. A rename keeps existing session, folder and branch names.
+All four edits are yours alone and refuse a stale team revision; reopening the
+form after a refresh shows the current values.
+
+The member menu's **Swap…** replaces the agent for a member you have already
+stopped with **Stop**, after its open tasks and attempts settle. The menu shows
+the open-work count when Swap is unavailable. A swap keeps the member ID,
+role, task history, folder and branch. The old session stays outside the team;
+Swap never stops, archives or adopts a session. The new session's readable
+name gains a revision suffix. Unknown launch or delivery receipts refuse a
+swap rather than repeating unfinished work. Active cutover and adoption are
+follow-up work, not choices in this dialog.
+
+Opening a form makes no write. A result that cannot be confirmed stays in the
+existing action list: use **Check**, without submitting another edit.
+
+## Routing
 
 On a `routing: lead` team, admitted tasks wait until the lead chooses their
 role and pipeline with `hgs team route`. Admission waits and routing waits

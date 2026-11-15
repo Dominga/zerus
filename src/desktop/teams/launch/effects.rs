@@ -65,7 +65,8 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| invalid("Launch plan is missing"))?;
         match effects.verify_worktree(plan) {
-            Ok(tree) if !tree.path.is_empty() && !tree.ownership_nonce.is_empty() => {
+            Ok(tree) if !tree.path.is_empty() && !tree.ownership_nonce.is_empty()
+                && row.reuse.as_ref().is_none_or(|reuse| reuse.worktree == tree) => {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 self.ledger
                     .as_mut()

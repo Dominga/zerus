@@ -204,8 +204,12 @@ pub(super) fn change_settings(ctx: &mut Context<'_>) -> Result<()> {
             |r| r.get(0),
         )
         .map_err(storage)?;
-    if settings.caps.max_open_tasks < ctx.count(true)? || settings.caps.max_members < members {
-        return Err(over("Caps are below the admitted live set."));
+    if settings.caps.max_open_tasks < ctx.task_capacity_used()?
+        || settings.caps.max_members < members
+    {
+        return Err(over(
+            "Caps are below admitted tasks, saved drafts or live members.",
+        ));
     }
     if settings == &ctx.team.settings || settings.queue != ctx.team.settings.queue {
         return Err(invalid(

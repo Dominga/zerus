@@ -166,7 +166,12 @@ pub(super) fn check_capacity(ctx: &Context<'_>, admitted: bool) -> Result<()> {
     } else {
         100
     };
-    if ctx.count(admitted)? >= limit {
+    let used = if admitted {
+        ctx.task_capacity_used()?
+    } else {
+        ctx.count(false)?
+    };
+    if used >= limit {
         return Err(over(if admitted {
             "Admitted task cap reached."
         } else {

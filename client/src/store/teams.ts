@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { createRoot, createSignal, batch } from "solid-js";
 import { inTauri } from "../bridge";
 import type { TeamsOut } from "../types";
+import type { PhasePane } from "./team-phases";
 
 // The Teams views the desktop shows (M1): the team list, one followed team
 // and the owner cards. Every value comes from the `teams` key of the per-frame
@@ -74,6 +75,7 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  plan?: PhasePane | null;
   /** Complete bounded goal for the editor, distinct from the bar preview. */
   edit_goal?: string | null;
   member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;

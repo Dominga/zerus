@@ -140,6 +140,15 @@ impl Read {
         help: bool,
         extra: Option<zerus_client_core::desktop::drain::Charge>,
     ) -> Result<Vec<u8>, String> {
+        let reply_limit = if matches!(request, Some(Request::TeamPersonDecide { .. }))
+            || matches!(
+                input["op"].as_str(),
+                Some("team_person_prepare" | "team_person_result")
+            ) {
+            zerus_client_core::desktop::team_person::BYTES
+        } else {
+            wire::REPLY_BYTES
+        };
         if !self.current() {
             return Err(read_refused("exchange_selection_changed"));
         }
@@ -235,7 +244,7 @@ impl Read {
         })?;
         if !self.current()
             || !self.image.current(self.routing.executable()?)
-            || result.len() > if help { 64 << 10 } else { wire::REPLY_BYTES }
+            || result.len() > if help { 64 << 10 } else { reply_limit }
         {
             return Err(read_refused("exchange_result_changed_or_oversize"));
         }

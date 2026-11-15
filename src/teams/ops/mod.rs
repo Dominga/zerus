@@ -36,6 +36,7 @@ use super::store::{self, rows, DecisionState, Store};
 pub(crate) use apply::apply_with_repository;
 #[allow(unused_imports)]
 pub use apply::{apply, apply_with_config};
+pub(crate) use apply::{apply_with_gesture, replay};
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

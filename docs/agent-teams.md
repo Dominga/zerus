@@ -715,7 +715,22 @@ tool approvals.
   A private process namespace also prevents the caller proof from seeing
   the host outside it: the refusal names that limit and the remedy. Run team
   commands outside that sandbox or turn its private process namespace off.
-- A person's command is recognized by an interim rule: no live agent session
+- Owner-card **Decide** requires an explicit native confirmation in the Zerus
+  window. A person's `hgs team decide` command is refused with
+  `person_gesture_required`, including remote commands. Decide the card in the
+  window on the computer which owns the team. Neither a CLI Person claim nor
+  a renderer `confirmed` flag grants this permission. A lost result is checked
+  by its original receipt only; an absent or unreadable receipt never replays
+  the decision.
+- After this first migration slice, all other Person operations remain interim:
+  creating and editing teams, Start planning, draft phase submission/editing,
+  settings (including validation-provider overrides) and membership,
+  dependency changes, advance-base, queue and phase decisions,
+  intake, preview and catalog/template changes. Future phase approval,
+  acceptance operations also remain interim until the
+  following slice explicitly admits them. They move to native
+  gesture admission in the following slices. For these operations, a person's
+  command is still recognized by an interim rule: no live agent session
   may be among its process ancestors. It guards against accidents and against
   an agent that merely drops its session markers, not against one that sets
   out to pass as you. Every reply to such a command carries a note that

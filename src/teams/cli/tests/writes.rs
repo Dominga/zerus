@@ -372,7 +372,7 @@ fn a_member_reads_its_own_work_and_asks_and_the_lead_replies() {
 }
 
 #[test]
-fn the_person_decides_a_card() {
+fn a_cli_person_cannot_decide_an_owner_card() {
     let harness = Harness::new();
     bind_lead_and_m1(&harness);
     let card = harness
@@ -407,10 +407,14 @@ fn the_person_decides_a_card() {
             json!({"card": card, "decision": "acknowledged"}),
         ),
     );
-    assert_eq!(exit, 0, "{reply}");
+    assert_eq!(
+        (code(&reply), exit),
+        ("person_gesture_required", 1),
+        "{reply}"
+    );
     assert_eq!(
         harness.store().cards(TEAM, 10, None).unwrap().rows[0].state,
-        "closed"
+        "open"
     );
 }
 

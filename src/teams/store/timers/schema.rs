@@ -47,6 +47,14 @@ const _: () = {
         i += 1;
     }
 };
+#[cfg(test)]
+pub(in crate::teams::store) fn published_layouts() -> Vec<u32> {
+    STEPS
+        .iter()
+        .map(|(from, _)| *from)
+        .chain([EXTENSION])
+        .collect()
+}
 /// One step from a merged layout to the next, inside the transition.
 type Step = fn(&Connection) -> Result<()>;
 /// Layout 8 to 9: the lead's answers reach their members.

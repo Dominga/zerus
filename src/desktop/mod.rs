@@ -1051,11 +1051,34 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
-                            (Some(authority), _) if authority.operation() == "desktop_ownership_observe" => {
-                                match authority.into_request(&mut frontend_order).and_then(|permit|
-                                    ownership::observation::frontend(&location, &store, &epoch, permit)) {
+                            (Some(authority), _)
+                                if authority.operation() == "team_person_decide" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        teams::person_gesture::frontend(config, &store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
+                            (Some(authority), _)
+                                if authority.operation() == "desktop_ownership_observe" =>
+                            {
+                                match authority.into_request(&mut frontend_order).and_then(
+                                    |permit| {
+                                        ownership::observation::frontend(
+                                            &location, &store, &epoch, permit,
+                                        )
+                                    },
+                                ) {
                                     Ok(observation) => serde_json::to_value(observation)?,
-                                    Err(_) => frontend_refused(hello.request.as_ref(), "ownership_observation_unavailable"),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "ownership_observation_unavailable",
+                                    ),
                                 }
                             }
                             (Some(authority), _)
@@ -1250,7 +1273,18 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
-                        let result = if hello
+                        let result = if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("team_person_prepare" | "team_person_result")
+                            )
+                        }) {
+                            teams::person_gesture::query(
+                                config,
+                                &store,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
                             .request
                             .as_ref()
                             .is_some_and(|v| v["op"] == "termination_outcome_status")

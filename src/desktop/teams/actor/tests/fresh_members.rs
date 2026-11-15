@@ -27,7 +27,22 @@ const RUN: &str = "fresh-member-run";
 const SID: &str = "00000000-0000-4000-8000-000000000152";
 
 fn child(case: &str) {
-    let root = tempfile::tempdir_in(std::env::var_os("CARGO_TARGET_DIR").unwrap()).unwrap();
+    let root = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(target) => tempfile::tempdir_in(target),
+        None => tempfile::tempdir(),
+    }
+    .unwrap();
+    crate::platform::restrict_dir(root.path()).unwrap();
+    // Leave room for tmux's suffix and even a ten-digit UID on both Unix hosts.
+    // macOS has 104 sun_path bytes (including NUL), Linux has 108.
+    let socket = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("tmux")
+        .join(format!("tmux-{}", u32::MAX))
+        .join("default");
+    assert!(socket.as_os_str().len() < 104, "tmux socket path: {socket:?}");
     for dir in ["state", "cfg", "tmux"] {
         crate::platform::private_dir(&root.path().join(dir)).unwrap();
     }

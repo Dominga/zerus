@@ -254,27 +254,26 @@ pub(super) fn catch_up_existing(
     if first.closed().is_some() {
         return Ok(false);
     }
-    let found = first
-        .nodes
-        .values()
+    let readers: Vec<_> = first.nodes.values()
         .filter(|node| node.closed.is_none() && !node.no_replica)
-        .any(|node| {
-            ask(
-                net,
-                &first,
-                node,
-                project,
-                uuid,
-                Request::Export {
-                    seal: String::new(),
-                },
-                deadline,
-            )
-            .is_ok_and(|answer| {
-                answer["kind"] == "admitted"
-                    && answer["seal"].as_str().is_some_and(|seal| seal.len() == 64)
-            })
-        });
+        .collect();
+    let probe_end = probe_pool_end(net, deadline);
+    let mut found = false;
+    for (index, node) in readers.iter().enumerate() {
+        // A slow optional reader gets only its fair share. A healthy source
+        // later in native-ID order must still be asked for its original seal.
+        let share = left(probe_end) / u32::try_from(readers.len() - index).unwrap_or(u32::MAX);
+        let probe_deadline = deadline.min(probe_end).min(Instant::now() + share);
+        if ask(net, &first, node, project, uuid, Request::Export {
+            seal: String::new(),
+        }, probe_deadline).is_ok_and(|answer| {
+            answer["kind"] == "admitted"
+                && answer["seal"].as_str().is_some_and(|seal| seal.len() == 64)
+        }) {
+            found = true;
+            break;
+        }
+    }
     if found {
         upgrade(config, net, &first, project, uuid, deadline)?;
     }

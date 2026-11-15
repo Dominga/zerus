@@ -1201,7 +1201,12 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         // The same root migration as Start, before any ordinary edit. No
         // project/catalog lock spans the network; the task is read afresh.
         let migration_deadline = wait.map_or(deadline, |wait| deadline.min(std::time::Instant::now() + wait));
-        crate::swarm::fence::catch_up_writer(config, &crate::swarm::fence::Ssh(config), project_id, &uuid, migration_deadline).map_err(fail)?;
+        match crate::swarm::fence::prepare_write(config, &crate::swarm::fence::Ssh(config), project_id, &uuid, migration_deadline).map_err(fail)? {
+            crate::swarm::fence::Admission::Reserved { .. } => (),
+            crate::swarm::fence::Admission::Legacy(closed) | crate::swarm::fence::Admission::Refused(closed) =>
+                return Err(fail(format!("The task's migration is pending ({}). The edit was not applied.", closed.reason))),
+            crate::swarm::fence::Admission::Uncertain(reason) => return Err(fail(reason)),
+        }
         store = store_until(config, project_id, migration_deadline)?;
         task = store.load(&uuid).map_err(fail)?;
     }

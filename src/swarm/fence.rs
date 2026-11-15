@@ -149,6 +149,11 @@ pub(crate) struct Route<'a> {
 /// in its tests. Each answer is checked to come from the node, and store,
 /// it is bound to.
 pub(crate) trait Net {
+    /// The effective cutoff shared by every remote phase. Native local
+    /// settlement still uses the operation's original deadline.
+    fn remote_deadline(&self, deadline: Instant) -> Instant {
+        deadline
+    }
     fn call(
         &self,
         swarm: &str,
@@ -170,8 +175,11 @@ impl<'a> WithLocalReserve<'a> {
     }
 }
 impl Net for WithLocalReserve<'_> {
+    fn remote_deadline(&self, deadline: Instant) -> Instant {
+        self.inner.remote_deadline(deadline).min(self.remote).min(deadline)
+    }
     fn call(&self,swarm:&str,route:Route<'_>,command:&str,input:Option<&Value>,deadline:Instant)->Result<Value> {
-        let deadline=deadline.min(self.remote);
+        let deadline=self.remote_deadline(deadline);
         let expired=|| std::io::Error::new(std::io::ErrorKind::TimedOut,"the optional peer budget is reserved for local settlement");
         if left(deadline).is_zero() {return Err(expired().into());}
         let reply=self.inner.call(swarm,route,command,input,deadline)?;
@@ -179,6 +187,12 @@ impl Net for WithLocalReserve<'_> {
         Ok(reply)
     }
 }
+/// One fair probe pool, bounded by the same remote cutoff as later phases.
+fn probe_pool_end(net: &dyn Net, deadline: Instant) -> Instant {
+    Instant::now() + (left(net.remote_deadline(deadline).min(deadline)) / 3)
+        .min(Duration::from_secs(3))
+}
+
 fn probe_expired(error:&anyhow::Error)->bool {
     error.downcast_ref::<std::io::Error>().is_some_and(|error|error.kind()==std::io::ErrorKind::TimedOut)
 }
@@ -454,7 +468,7 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     // Share one bounded discovery pool rather than letting every absent
     // route spend a fresh two seconds. Fair shares leave a later healthy
     // route time even when earlier probes actually wait until their bounds.
-    let probe_end=Instant::now()+(left(deadline)/3).min(Duration::from_secs(3));
+    let probe_end=probe_pool_end(net, deadline);
     while let Some((alias, route, stores)) = queue.pop_front() {
         let node = route[route.len() - 1].clone();
         let share=left(probe_end)/u32::try_from(queue.len()+1).unwrap_or(u32::MAX);
@@ -793,6 +807,10 @@ pub(crate) fn prove(
 /// no task acknowledgement, certificate, attempt or native offer.
 pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str,deadline:Instant)->Result<()> {
     ensure!(ids::is_uuid(uuid),"the cutover candidate is not a canonical task UUID");
+    // Install once, before read-only source lookup or first-floor preparation.
+    // No later phase may renew or consume local settlement's reservation.
+    let reserved=WithLocalReserve::new(net,deadline);
+    let net:&dyn Net=&reserved;
     let needs_floor = {
         let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
             anyhow::bail!("the candidate task store is busy");
@@ -817,10 +835,9 @@ pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str
                 anyhow::bail!("the task's first-floor migration is pending ({})", closed.reason),
         }
     }
-    let reserved=WithLocalReserve::new(net,deadline);
-    let first=universe_with(config,&reserved,deadline)?;
+    let first=universe_with(config,net,deadline)?;
     ensure!(first.closed().is_none(),"the local cutover identity or discovery is unavailable");
-    reachable::upgrade(config,&reserved,&first,project,uuid,deadline)?;
+    reachable::upgrade(config,net,&first,project,uuid,deadline)?;
     Ok(())
 }
 
@@ -1605,6 +1622,19 @@ pub(crate) fn admit_attempt<R>(
     reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
 ) -> Result<Admission<R>> {
     admit_matching(config, net, project, uuid, deadline, None, reserve)
+}
+
+/// Prepare an ordinary write through Start's exact admission entry. The
+/// callback performs no business write, reserves no attempt and sends no input;
+/// the command reloads its task and checks its own authority afterward.
+pub(crate) fn prepare_write(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<Admission<()>> {
+    admit_attempt(config, net, project, uuid, deadline, |_, _| Ok(Ok(())))
 }
 
 #[allow(clippy::too_many_arguments)]

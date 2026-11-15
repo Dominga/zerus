@@ -140,3 +140,315 @@ fn returning_prefloor_writers_adopt_the_original_and_refuse_old_rule_edits() {
         assert!(current.view().unwrap().execution.is_none());
     }
 }
+
+struct G1LegacyTimeouts<'a> {
+    inner: InProcess<'a>,
+    optional: BTreeSet<String>,
+    wait: bool,
+    wait_action: &'static str,
+}
+impl Net for G1LegacyTimeouts<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if command == "replica-task" && self.optional.contains(route.nodes.last().unwrap()) {
+            if self.wait && input.is_some_and(|v| v["cutover"]["action"] == self.wait_action) {
+                std::thread::sleep(left(deadline));
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "private optional reader reached its actual deadline",
+            )
+            .into());
+        }
+        self.inner.call(swarm, route, command, input, deadline)
+    }
+}
+fn g1_legacy_with_optional_readers(wait: bool) {
+    let m = members(
+        &["a", "b", "c", "d", "e", "f", "g", "h", "i", "z"],
+        &[
+            ("a", "b"),
+            ("a", "c"),
+            ("a", "d"),
+            ("a", "e"),
+            ("a", "f"),
+            ("a", "g"),
+            ("a", "h"),
+            ("a", "i"),
+            ("a", "z"),
+        ],
+    );
+    let task = legacy(&m, 4);
+    synced(&m, "a");
+    let net = G1LegacyTimeouts {
+        inner: InProcess::new(&m, Faults::default()),
+        optional: ["b", "c", "d", "e", "f", "g", "h", "i"]
+            .iter()
+            .map(|name| m.ids[*name].clone())
+            .collect(),
+        wait,
+        wait_action: "export",
+    };
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(15);
+    let result = catch_up_writer(&m.configs["a"], &net, "p", task.uuid(), deadline);
+    let current = held(&m, "a", task.uuid()).unwrap();
+    eprintln!(
+        "G1 legacy wait={wait} elapsed={:?}, result={result:?}, floor={:?}, sealed={}",
+        started.elapsed(),
+        current.floor_record(),
+        current.cutover_seal().unwrap().is_some()
+    );
+    assert!(
+        result.is_ok(),
+        "optional read-only timeouts vetoed a genuine legacy task: {result:?}"
+    );
+    assert!(current.cutover_seal().unwrap().is_some());
+    assert!(current.view().unwrap().execution.is_none());
+    assert_eq!(current.stage().unwrap(), Stage::Todo);
+    assert!(
+        !record_path(&m, task.uuid()).exists(),
+        "migration manufactured a certificate"
+    );
+}
+#[test]
+fn g1_legacy_optional_reader_immediate_negative_control() {
+    g1_legacy_with_optional_readers(false);
+}
+#[test]
+fn g1_legacy_optional_readers_keep_the_original_local_budget() {
+    g1_legacy_with_optional_readers(true);
+}
+
+struct G1DeadlineSource<'a>(G1LegacyTimeouts<'a>);
+impl Net for G1DeadlineSource<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if left(deadline).is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "private expired native route",
+            )
+            .into());
+        }
+        let answer = self.0.call(swarm, route, command, input, deadline)?;
+        if left(deadline).is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "private route completed after its bound",
+            )
+            .into());
+        }
+        Ok(answer)
+    }
+}
+fn g1_legacy_existing_admitted_source(
+    wait: bool,
+    last: bool,
+    wait_action: &'static str,
+    writer: bool,
+) {
+    let m = members(
+        &["a", "b", "c", "d", "e", "f", "g", "h", "i", "z"],
+        &[
+            ("a", "b"),
+            ("a", "c"),
+            ("a", "d"),
+            ("a", "e"),
+            ("a", "f"),
+            ("a", "g"),
+            ("a", "h"),
+            ("a", "i"),
+            ("a", "z"),
+        ],
+    );
+    let task = legacy(&m, 4);
+    // Source-query iteration is keyed by actual node identity, not alias.
+    let (healthy, healthy_id) = m
+        .ids
+        .iter()
+        .filter(|(name, _)| name.as_str() != "a")
+        .min_by(|a, b| if last { b.1.cmp(a.1) } else { a.1.cmp(b.1) })
+        .map(|(name, id)| (name.clone(), id.clone()))
+        .unwrap();
+    {
+        let store = ProjectStore::open(&m.configs[&healthy].state.join("replica"), "p").unwrap();
+        assert!(store
+            .import_updates(vec![Update {
+                document: Document::Task(task.uuid().into()),
+                bytes: task.snapshot().unwrap()
+            }])
+            .unwrap()
+            .refused
+            .is_empty());
+    }
+    synced(&m, &healthy);
+    let bootstrap = InProcess::new(
+        &m,
+        Faults {
+            offline: BTreeSet::from([m.ids["a"].clone()]),
+            ..Faults::default()
+        },
+    );
+    catch_up_writer(&m.configs[&healthy], &bootstrap, "p", task.uuid(), soon()).unwrap();
+    let original = held(&m, &healthy, task.uuid()).unwrap();
+    assert!(original.floor_record().is_some() && original.cutover_seal().unwrap().is_some());
+    assert!(held(&m, "a", task.uuid()).unwrap().floor_record().is_none());
+    synced(&m, "a");
+    let net = G1DeadlineSource(G1LegacyTimeouts {
+        inner: InProcess::new(&m, Faults::default()),
+        optional: m
+            .ids
+            .iter()
+            .filter(|(name, id)| name.as_str() != "a" && **id != healthy_id)
+            .map(|(_, id)| id.clone())
+            .collect(),
+        wait,
+        wait_action,
+    });
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(15);
+    let answer = if writer {
+        match prepare_write(&m.configs["a"], &net, "p", task.uuid(), deadline) {
+            Ok(Admission::Reserved { .. }) => Ok(()),
+            other => Err(anyhow::anyhow!("write preparation refused: {other:?}")),
+        }
+    } else {
+        catch_up_writer(&m.configs["a"], &net, "p", task.uuid(), deadline)
+    };
+    let current = held(&m, "a", task.uuid()).unwrap();
+    eprintln!("G1 existing-source wait={wait}, elapsed={:?}, answer={answer:?}, original_floor={:?}, current_floor={:?}",
+        started.elapsed(), original.floor_record(), current.floor_record());
+    assert!(
+        answer.is_ok(),
+        "slow optional reads hid the available admitted source: {answer:?}"
+    );
+    assert_eq!(
+        current.floor_record(),
+        original.floor_record(),
+        "a returning prefix minted F2"
+    );
+    assert_eq!(
+        current.cutover_seal().unwrap().unwrap().identity(),
+        original.cutover_seal().unwrap().unwrap().identity(),
+        "adopt the same immutable original seal"
+    );
+    assert!(current.view().unwrap().execution.is_none());
+}
+#[test]
+fn g1_legacy_source_immediate_negative_adopts_original() {
+    g1_legacy_existing_admitted_source(false, true, "export", false);
+}
+#[test]
+fn g1_legacy_source_real_timeouts_still_adopt_original() {
+    g1_legacy_existing_admitted_source(true, true, "export", false);
+}
+
+// The source is first here: optional Prepare calls happen inside root
+// preparation after it is found. This independently pins the early reserve
+// even when Export lookup itself has a fair, short pool.
+#[test]
+fn legacy_optional_prepare_immediate_control_adopts_original() {
+    g1_legacy_existing_admitted_source(false, false, "prepare", false);
+}
+#[test]
+fn legacy_optional_prepares_keep_the_original_local_reserve() {
+    g1_legacy_existing_admitted_source(true, false, "prepare", false);
+}
+
+#[test]
+fn legacy_write_uses_start_admission_with_a_later_original_source() {
+    g1_legacy_existing_admitted_source(true, true, "export", true);
+}
+
+/// Arch has only its clean pre-upgrade prefix; the Mac holds the admitted
+/// original; va-kids is unreachable. The reachable Mac is slow on Export,
+/// but completes inside the actual per-peer deadline it was given.
+struct SlowMac<'a> {
+    inner: InProcess<'a>,
+    mac: String,
+}
+impl Net for SlowMac<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if command == "replica-task"
+            && route.nodes.last() == Some(&self.mac)
+            && input.is_some_and(|v| v["cutover"]["action"] == "export")
+        {
+            std::thread::sleep(left(deadline) / 2);
+        }
+        self.inner.call(swarm, route, command, input, deadline)
+    }
+}
+#[test]
+fn legacy_write_shares_start_with_slow_mac_and_unreachable_peer() {
+    let m = members(&["a", "b", "c"], &[("a", "b"), ("a", "c")]);
+    let task = legacy(&m, 4);
+    {
+        let store = ProjectStore::open(&m.configs["b"].state.join("replica"), "p").unwrap();
+        assert!(store
+            .import_updates(vec![Update {
+                document: Document::Task(task.uuid().into()),
+                bytes: task.snapshot().unwrap(),
+            }])
+            .unwrap()
+            .refused
+            .is_empty());
+    }
+    synced(&m, "b");
+    let original_net = InProcess::new(
+        &m,
+        Faults {
+            offline: BTreeSet::from([m.ids["a"].clone(), m.ids["c"].clone()]),
+            ..Faults::default()
+        },
+    );
+    catch_up_writer(&m.configs["b"], &original_net, "p", task.uuid(), soon()).unwrap();
+    let original = held(&m, "b", task.uuid()).unwrap();
+    synced(&m, "a");
+    let net = SlowMac {
+        inner: InProcess::new(
+            &m,
+            Faults {
+                offline: BTreeSet::from([m.ids["c"].clone()]),
+                ..Faults::default()
+            },
+        ),
+        mac: m.ids["b"].clone(),
+    };
+    let admission = prepare_write(&m.configs["a"], &net, "p", task.uuid(), soon()).unwrap();
+    assert!(
+        matches!(admission, Admission::Reserved { .. }),
+        "{admission:?}"
+    );
+    let current = held(&m, "a", task.uuid()).unwrap();
+    assert_eq!(current.floor_record(), original.floor_record());
+    assert_eq!(
+        current.cutover_seal().unwrap(),
+        original.cutover_seal().unwrap()
+    );
+    assert_eq!(current.stage().unwrap(), Stage::Todo);
+    assert!(current.view().unwrap().execution.is_none());
+    assert!(
+        record_path(&m, task.uuid()).exists(),
+        "the write must use Start's final admission, not background-only migration"
+    );
+}

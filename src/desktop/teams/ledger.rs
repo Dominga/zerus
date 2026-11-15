@@ -28,7 +28,6 @@ pub(super) struct Reuse {
     pub launch: String,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum State {

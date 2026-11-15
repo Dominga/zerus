@@ -19,7 +19,8 @@ impl Runtime {
             return self.prepare(store, effects, team, member, parent, now);
         };
         self.selected = Some((team.id.clone(), member.id.clone()));
-        if row.member_generation.unwrap_or(0) != member.launch.as_ref().map_or(0, |l| l.generation) {
+        if row.member_generation.unwrap_or(0) != member.launch.as_ref().map_or(0, |l| l.generation)
+        {
             return self.edited_member(team, member, &row, now);
         }
         if member.state == MemberState::Paused {
@@ -136,14 +137,20 @@ impl Runtime {
                 reuse.placement.clone()
             } else {
                 let placement = super::super::ledger::names::placement(
-                    effects.placement(&team.project, &row.original)?, &slug, &member.id,
+                    effects.placement(&team.project, &row.original)?,
+                    &slug,
+                    &member.id,
                 )?;
                 effects.member_branch_available(&placement)?;
                 placement
             };
             row.placement = Some(placement.clone());
             let (choice, model, effort) = if let Some(launch) = &member.launch {
-                (&launch.account, launch.model.as_str(), launch.effort.as_str())
+                (
+                    &launch.account,
+                    launch.model.as_str(),
+                    launch.effort.as_str(),
+                )
             } else {
                 role(team, member)?
             };
@@ -183,9 +190,15 @@ impl Runtime {
             Ok(plan) => {
                 self.close_stale(store, team, row, now)?;
                 row.plan = Some(plan);
-                row.state = if row.reuse.is_some() { State::WorktreeVerify } else { State::WorktreeIntent };
+                row.state = if row.reuse.is_some() {
+                    State::WorktreeVerify
+                } else {
+                    State::WorktreeIntent
+                };
                 self.save(row, now)?;
-                if row.reuse.is_none() { self.admitted = Some((row.team.clone(), row.original.clone())); }
+                if row.reuse.is_none() {
+                    self.admitted = Some((row.team.clone(), row.original.clone()));
+                }
                 Ok(true)
             }
             Err(p) => {

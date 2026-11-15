@@ -228,12 +228,19 @@ pub enum Operation {
     SwapMember {
         member: String,
         agent: String,
-        #[serde(default)] model: String,
-        #[serde(default)] effort: String,
-        #[serde(default)] account: zerus_team_plan::catalog::AccountChoice,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
     },
-    RenameTeam { name: String },
-    SetGoal { goal: String },
+    RenameTeam {
+        name: String,
+    },
+    SetGoal {
+        goal: String,
+    },
     SetMemberSession {
         member: String,
         session: SessionKey,

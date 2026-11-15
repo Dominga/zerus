@@ -14,6 +14,7 @@ mod editing;
 pub mod graph;
 pub use editing::MemberRole;
 pub mod list;
+pub mod phase_metrics;
 pub mod phases;
 pub mod planning;
 

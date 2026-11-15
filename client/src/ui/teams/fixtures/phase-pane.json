@@ -172,6 +172,15 @@
           }
         ]
       },
+      "metrics": {
+        "average_parallelism_tenths": null,
+        "critical_path_minutes": null,
+        "external_dependencies": 0,
+        "known_estimates": 0,
+        "total_nodes": 2,
+        "unavailable": "missing_estimates",
+        "warnings": []
+      },
       "next_node": 3,
       "nodes": [
         {

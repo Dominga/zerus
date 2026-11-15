@@ -155,6 +155,83 @@ class NativeCodexInput(unittest.TestCase):
             child.stdin = None
             child.communicate(timeout=10)
 
+    def test_scrolled_working_composer_page_accepts_send_and_preserves_a_real_draft(self):
+        self.scrolled_working_composer('page')
+
+    def test_scrolled_working_composer_wheel_accepts_send_and_preserves_a_real_draft(self):
+        self.scrolled_working_composer('wheel')
+
+    def scrolled_working_composer(self, method):
+        # Keep an actual native Responses turn open with enough rendered history
+        # for both PageUp and terminal mouse-wheel input to pause the viewport.
+        def busy(handler):
+            body = json.loads(handler.rfile.read(int(handler.headers.get('Content-Length', '0'))))
+            texts = [part.get('text', '') for item in body.get('input', []) if item.get('role') == 'user'
+                     for part in item.get('content', []) if isinstance(part, dict)]
+            handler.server.requests.append(dict(texts=texts))
+            text = '\n'.join(f'Private history row {n:03d}: scroll control.' for n in range(180))
+            item = dict(type='message', id='msg_scroll', role='assistant', status='completed',
+                        content=[dict(type='output_text', text=text, annotations=[])])
+            response = dict(id='resp_scroll', object='response', status='completed', output=[item],
+                            usage=dict(input_tokens=1, output_tokens=5, total_tokens=6))
+            try:
+                handler.send_response(200)
+                handler.send_header('Content-Type', 'text/event-stream')
+                handler.end_headers()
+                handler.emit('response.created', response=dict(response, status='in_progress', output=[]))
+                handler.emit('response.output_item.added', output_index=0, item=dict(item, status='in_progress'))
+                handler.emit('response.output_item.done', output_index=0, item=item)
+                handler.server.release.wait(60)
+                handler.emit('response.completed', response=response)
+            except OSError:
+                pass
+        self.server.RequestHandlerClass.do_POST = busy
+        self.send(self.payload(text='Start the private scroll control'))
+        self.wait_for(lambda: 'Private history row 179' in self.screen())
+        self.record.update(activity='busy', phase='working')
+        self.write_record()
+        def scroll():
+            if method == 'page':
+                self.tmux('send-keys', '-t', self.pane, 'PPage')
+            else:
+                self.tmux('send-keys', '-l', '-t', self.pane, '\x1b[<64;40;10M' * 8)
+            self.wait_for(lambda: 'Back to bottom · esc' in self.screen())
+            self.assertEqual(self.tmux('display-message', '-p', '-t', self.pane, '#{pane_in_mode}').strip(), '0')
+        scroll()
+        draft = 'Retain this private draft'
+        self.tmux('send-keys', '-l', '-t', self.pane, draft)
+        self.wait_for(lambda: draft in self.screen())
+        scroll()
+        refused = 'Must never enter the composer'
+        self.assertIn('draft', self.send(self.payload(text=refused), success=False))
+        self.assertIn(draft, self.screen())
+        self.assertNotIn(refused, self.screen())
+        # A tmux mode is a different input owner. It remains closed, with no
+        # automatic exit, draft edit or message bytes sent through that mode.
+        self.tmux('copy-mode', '-t', self.pane)
+        before = self.screen()
+        self.assertIn('expected agent input mode', self.send(self.payload(text=refused), success=False))
+        self.assertEqual(self.tmux('display-message', '-p', '-t', self.pane, '#{pane_in_mode}').strip(), '1')
+        self.assertEqual(self.screen(), before)
+        self.tmux('send-keys', '-X', '-t', self.pane, 'cancel')
+        # Clear only this fixture's own draft after proving both refusals kept it.
+        self.tmux('send-keys', '-t', self.pane, 'C-a', 'C-k')
+        self.wait_for(lambda: draft not in self.screen())
+        scroll()
+        self.wait_for(lambda: 'enter/esc latest' in self.screen())
+        text = f'Private scrolled {method} message'
+        receipt = self.send(self.payload(text=text))
+        self.assertEqual(receipt['status'], 'submitted')
+        self.assertEqual(receipt['submitted_text'], text)
+        self.server.release.set()
+        self.wait_for(lambda: any(text in part for request in self.server.requests for part in request['texts']))
+        rows = map(json.loads, Path(self.record['transcript']).read_text().splitlines())
+        messages = [row['payload']['message'] for row in rows if row.get('type') == 'event_msg'
+                    and row.get('payload', {}).get('type') == 'user_message']
+        self.assertEqual(messages.count(text), 1)
+        self.assertNotIn(draft, messages)
+        self.assertNotIn(refused, messages)
+
     def test_native_refusal_has_an_opted_in_terminal_outcome(self):
         import native_send_outcome
         native_send_outcome.refused_draft(self, self.name, self.record, self.screen,

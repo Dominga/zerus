@@ -126,6 +126,9 @@ pub enum TeamAction {
     Stop {},
     /// Hides a done or stopped team, keeping its history.
     Archive {},
+    AdvanceBase {
+        commit: String,
+    },
     PauseMember {
         member: String,
     },

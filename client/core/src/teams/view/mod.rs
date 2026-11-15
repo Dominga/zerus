@@ -481,6 +481,8 @@ pub(crate) fn task_ref(node: &Value) -> Option<TaskRefView> {
 /// its stages. A card is never a stage node of another card.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct QueueCard {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_base: Option<String>,
     /// Store-owned pre-start predicate; an older read grants no edit affordance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deps_editable: Option<bool>,

@@ -12,6 +12,9 @@ import type { MemberView, TaskView, TeamView } from "./types";
 export function TeamBarActions(props: { view: TeamView; busy: boolean; onAction: (kind: string) => void }) {
   return (
     <span class="team-bar-actions" data-strip-actions>
+      <Show when={["running", "paused"].includes(props.view.bar.status) && props.view.bar.integration_branch}>
+        <button type="button" class="btn small" disabled={props.busy} data-advance-base data-strip-action="advance_base" onClick={() => props.onAction("advance_base")}>{tr("Advance base…")}</button>
+      </Show>
       <For each={barActions(props.view)}>
         {(action) => (
           <button type="button" class="btn small" classList={{ danger: action.danger }} disabled={props.busy || action.disabled}

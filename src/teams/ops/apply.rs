@@ -12,12 +12,42 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
     apply_with_config(store, actor, request, now, None)
 }
 
+/// Native configuration supplies the placement reader, never a request path.
+/// Repository and provider reads run under the transaction after receipt replay.
 pub fn apply_with_config(
     store: &mut Store,
     actor: &Actor,
     request: &Request,
     now: i64,
     config: Option<&crate::config::Config>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, config, &|team| {
+        let config = config.ok_or_else(|| {
+            invalid("A trusted local repository resolver is required to advance the base.")
+        })?;
+        crate::desktop::teams::repository(config, team)
+    })
+}
+
+/// Tests supply a private repository through the same transaction and guards.
+#[cfg(test)]
+pub(crate) fn apply_with_repository(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, None, repository)
+}
+
+fn apply_with_context(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
 ) -> Result<Reply> {
     validate_request(request, now)?;
     store.refresh()?;
@@ -57,7 +87,7 @@ pub fn apply_with_config(
         event: None,
         superseded: None,
     };
-    let result = run(&mut ctx, request, current.is_some(), config);
+    let result = run(&mut ctx, request, current.is_some(), config, repository);
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
@@ -135,6 +165,7 @@ fn run(
     request: &Request,
     existed: bool,
     config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
 ) -> Result<Reply> {
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
@@ -147,7 +178,11 @@ fn run(
     {
         return Err(invalid("Team already exists."));
     }
-    dispatch(ctx, config)?;
+    if matches!(ctx.op, Operation::AdvanceBase { .. }) {
+        base::advance(ctx, repository)?;
+    } else {
+        dispatch(ctx, config)?;
+    }
     ctx.reply.revision = ctx
         .team
         .revision
@@ -191,6 +226,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
+        Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),

@@ -69,6 +69,7 @@ impl TeamAction {
             Self::Resume {} => "resume",
             Self::Stop {} => "stop",
             Self::Archive {} => "archive",
+            Self::AdvanceBase { .. } => "advance-base",
             Self::PauseMember { .. } => "pause-member",
             Self::ResumeMember { .. } => "resume-member",
             Self::StopMember { .. } => "stop-member",
@@ -160,6 +161,7 @@ impl TeamAction {
             | Self::ArchiveMember { member } => json!({"member": member}),
             Self::ValidationConfig { selection } => json!({"selection":selection}),
             Self::Settings { settings } => json!({"settings": settings}),
+            Self::AdvanceBase { commit } => json!({"commit": commit}),
             Self::Decide { card, decision } => json!({"card": card, "decision": decision}),
             Self::Admit { node } => json!({"node": node}),
             Self::Route {
@@ -228,6 +230,17 @@ impl TeamAction {
             | Self::RenameTeam { .. }
             | Self::SetGoal { .. } => super::editing::check(self),
             Self::Create { .. } | Self::StartPlanning { .. } => check_create(self),
+            Self::AdvanceBase { commit } => {
+                if matches!(commit.len(), 40 | 64)
+                    && commit
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    Ok(())
+                } else {
+                    Err("Name the full lowercase commit hash.".into())
+                }
+            }
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
             Self::ValidationConfig { selection } => selection.check(),
             Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
@@ -295,6 +308,11 @@ impl TeamAction {
             action: action.to_owned(),
         };
         match self {
+            Self::AdvanceBase { commit } => Some(ask(
+                "teamAdvanceBaseConfirm", "Advance base?",
+                format!("Advance the base of {name} to {commit}? Future hand-outs use it. Earlier hand-outs keep their assigned base. Branches are unchanged."),
+                "Advance base",
+            )),
             Self::SwapMember { member, .. } => Some(ask(
                 "teamSwapMemberConfirm", "Swap member?",
                 format!("Replace the agent for {member} of {name}? The old session stays outside the team. The member keeps its ID, task history, folder and branch. Only a person-stopped member with no open or unsettled work can be swapped."), "Swap member",

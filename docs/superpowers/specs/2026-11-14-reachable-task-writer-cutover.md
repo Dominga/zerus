@@ -160,6 +160,14 @@ deadline and final admission checks. Scoped thread-local test accounting is
 available only in tests and `test-support`, with no environment or configuration
 switch in production.
 
+Both certificate and fresh-proof admission recheck the original deadline after
+their expensive reads and immediately before entering the reservation callback.
+The expected-mode load inside that callback is followed by another check before
+reservation entry. Expiry before entry refuses with no attempt. If reservation
+or its save consumes the remaining time, the result is `Uncertain`, retaining
+the original durable UUID and preventing native delivery or replay. A successful
+scan under the resource allowance is never evidence of remaining admission time.
+
 Exhaustion is typed `ErrorKind::Busy`, meaning the proof is incomplete and a
 fresh read can be tried. Invalid historical evidence remains a rule refusal.
 Busy must propagate through native load/save/import, stored-update replay and

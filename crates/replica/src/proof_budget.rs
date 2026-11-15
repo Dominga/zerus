@@ -20,6 +20,8 @@ impl Budget {
         }
     }
     pub fn step(&mut self) -> Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        testing::pause();
         self.work = self.work.saturating_add(1);
         let (elapsed, work) = limits(self.start.elapsed());
         if self.work > work || elapsed >= SAFETY_NET {
@@ -48,6 +50,53 @@ pub mod testing {
         pub(super) work: usize,
     }
     thread_local! { pub(super) static OVERRIDE: std::cell::Cell<Option<Limits>> = const { std::cell::Cell::new(None) }; }
+    #[derive(Clone, Copy)]
+    struct Pause {
+        remaining: usize,
+        delay: Option<Duration>,
+        steps: usize,
+    }
+    thread_local! { static PAUSE: std::cell::Cell<Option<Pause>> = const { std::cell::Cell::new(None) }; }
+    pub(super) fn pause() {
+        let Some(mut pause) = PAUSE.with(|v| v.get()) else {
+            return;
+        };
+        pause.steps += 1;
+        let delay = if pause.remaining == 0 {
+            pause.delay.take()
+        } else {
+            pause.remaining -= 1;
+            None
+        };
+        PAUSE.with(|v| v.set(Some(pause)));
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+    }
+    /// Pause once after `skip` proof steps, without changing evidence or results.
+    /// Returns the closure result and number of visited steps, so a control can
+    /// target a later real scan. Scoped and thread-local, including on unwind.
+    pub fn with_proof_pause_for_test<T>(
+        skip: usize,
+        delay: Duration,
+        run: impl FnOnce() -> T,
+    ) -> (T, usize) {
+        struct Restore(Option<Pause>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PAUSE.with(|v| v.set(self.0));
+            }
+        }
+        let _restore = Restore(PAUSE.with(|v| {
+            v.replace(Some(Pause {
+                remaining: skip,
+                delay: Some(delay),
+                steps: 0,
+            }))
+        }));
+        let result = run();
+        (result, PAUSE.with(|v| v.get().expect("scoped pause").steps))
+    }
     /// Scoped, thread-local test accounting. No environment/configuration knob.
     pub fn with_proof_budget_for_test<T>(
         elapsed: Duration,

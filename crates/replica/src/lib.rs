@@ -13,7 +13,7 @@ pub mod phone;
 mod project;
 mod proof_budget;
 #[cfg(any(test, feature = "test-support"))]
-pub use proof_budget::testing::with_proof_budget_for_test;
+pub use proof_budget::testing::{with_proof_budget_for_test, with_proof_pause_for_test};
 pub mod rank;
 mod render;
 mod schema;

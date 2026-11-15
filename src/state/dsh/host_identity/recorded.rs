@@ -388,6 +388,50 @@ pub(crate) fn for_home(agent_home: &str) -> Result<Vec<Named>, Refusal> {
         .collect())
 }
 
+/// Exact record lookup for refusal-only recognition. The native argv selects
+/// one pinned host folder; it never grants caller authority. Global scan
+/// limits cannot turn this matching PID/birth into an unregistered host.
+pub(super) fn for_patch(tokens: &[Vec<u8>]) -> Vec<Named> {
+    let state = crate::state::storage::root();
+    let Ok(Some(hosts)) = hosts_at(&state) else {
+        return Vec::new();
+    };
+    let Some(pair) = tokens.windows(2).find(|pair| pair[0] == b"--patch") else {
+        return Vec::new();
+    };
+    let Some(patch) = std::str::from_utf8(&pair[1]).ok().map(Path::new) else {
+        return Vec::new();
+    };
+    let Some(folder) = patch.parent() else {
+        return Vec::new();
+    };
+    if folder.parent() != Some(hosts.path.as_path())
+        && folder.parent() != Some(state.join("dsh/hosts").as_path())
+    {
+        return Vec::new();
+    }
+    let Some(key) = folder.file_name().and_then(|key| key.to_str()) else {
+        return Vec::new();
+    };
+    if key.len() != 16
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Vec::new();
+    }
+    let Ok(Some(folder)) = optional_child(&hosts, key) else {
+        return Vec::new();
+    };
+    let Ok(records) = host(&folder, super::boot().ok().as_deref()) else {
+        return Vec::new();
+    };
+    if hosts.verify().is_err() {
+        return Vec::new();
+    }
+    records.into_iter().map(|(named, _)| named).collect()
+}
+
 fn hosts_at(state: &Path) -> Result<Option<Directory>, Refusal> {
     let state_root = match std::fs::canonicalize(state) {
         Ok(root) => root,

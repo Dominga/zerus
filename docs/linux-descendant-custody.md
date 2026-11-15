@@ -1,8 +1,10 @@
 # Dormant Linux descendant custody
 
-`src/state/processes/custody.rs` is an unconnected support resource for the
+`src/state/processes/custody.rs` is a support resource for the
 REV2 graceful-Terminate design in `zerus-jmxyf.7`. It has no installed command,
-supervisor caller, signal operation, archive writer or cleanup consumer. Existing
+enabled supervisor caller, signal operation, archive writer or cleanup consumer. A
+[const-false original-supervisor bridge](original-supervisor-owner.md) is compiled
+separately; generic completion never supplies source attestation. Existing
 Terminate, Pause, Stop, macOS and Windows behavior is unchanged. G1 review is
 required before merging this resource; its presence grants no graceful eligibility.
 
@@ -34,10 +36,12 @@ no signal and supplies no drain proof. Root exit data and counts are diagnostic
 facts, not effect authority. The source does not claim to bound `Command::spawn`
 or own provider pipes; production launch/IO custody remains separate.
 
-This resource qualifies a short-lived original cohort within that window. It
-does not yet provide a long-lived session supervisor or bind a later Terminate
-request to hours of retained ownership. That lifetime and private-channel
-integration must be designed before connecting a production caller.
+The public generic constructor qualifies a short-lived original cohort within
+that window. A crate-private pre-spawn preparation also supports the dormant
+original-supervisor bridge: its live-pin bound and passive lifetime are separate
+from that short request budget. Neither mode binds a future Terminate operation
+or supplies effect authority. The bridge and its remaining activation gates are
+described separately.
 
 The harness-free `linux-custody` test executable creates fresh private owners,
 framed release barriers and real kernel children. It qualifies original exit,

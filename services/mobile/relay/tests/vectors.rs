@@ -403,6 +403,7 @@ fn operation_tables_match_the_python_connector() {
                 "voice_video",
                 "clear_context_dismiss",
                 "session_project_assignment_v1",
+                "task_session_identity_v2",
             ]
             .contains(feature)
         })

@@ -57,6 +57,10 @@ fn an_archive_writer_excludes_other_cache_writers_before_native_publication() {
 fn a_run_lookup_cannot_adopt_another_configured_state_root() {
     isolated("foreign-root");
 }
+#[test]
+fn a_native_forget_keeps_the_next_native_archive_observable() {
+    isolated("forget");
+}
 
 // Input values are synthetic; every canonical archive row is published by the
 // real archive writer, not by handwritten SQLite/cache rows.
@@ -186,6 +190,17 @@ fn probe() {
             .unwrap_err()
             .contains("another state root"));
             assert!(!foreign.join(DATABASE).exists());
+        }
+        "forget" => {
+            let second = input(2);
+            let second_id = save(&second);
+            {
+                let _guard = lock(None).unwrap();
+                archive::remove_synced(&archive::path(&id).unwrap()).unwrap();
+            }
+            assert_eq!(lookup(&record).unwrap(), None);
+            assert_eq!(lookup(&second).unwrap(), Some(second_id));
+            assert!(save(&input(3)).len() > 1);
         }
         _ => panic!("unknown case"),
     }

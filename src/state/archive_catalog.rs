@@ -157,6 +157,24 @@ pub(super) fn published(db: Catalog, path: &Path) {
         refresh::request();
     }
 }
+pub(super) fn before_removal(path: &Path) -> Option<Catalog> {
+    if path.parent() != Some(root().join("archives").as_path())
+        || !fs::symlink_metadata(path).ok()?.is_file()
+    {
+        return None;
+    }
+    let db = writer_catalog().ok()?;
+    if refresh::proof(&db).ok()? != db.directory {
+        return None;
+    }
+    db.complete.set(true);
+    Some(db)
+}
+pub(super) fn removed(db: Catalog, path: &Path) {
+    if refresh::removed(&db, path).is_err() {
+        refresh::request();
+    }
+}
 
 /// Exact run lookup with complete native coverage, never an advisory SQL miss.
 /// The selected body is still read through the caller's original native root.

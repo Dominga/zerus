@@ -97,6 +97,47 @@ pub(in crate::state::archive_catalog) fn published(
         let next = previous.checked_add(increment).ok_or(INCOMPLETE)?;
         put_meta(db, key, &next.to_string())?;
     }
+    seal(db)
+}
+
+pub(in crate::state::archive_catalog) fn removed(db: &Connection, path: &Path) -> Result<()> {
+    let id = path
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .ok_or(INCOMPLETE)?;
+    let (search_ok, reference_ok): (bool, bool) = sql(db.query_row(
+        "SELECT search_ok,reference_ok FROM archive_files WHERE id=?",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ))?;
+    for table in [
+        "archive_rows",
+        "archive_files",
+        "archive_identities",
+        "archive_references",
+        "archive_reference_paths",
+    ] {
+        sql(db.execute(&format!("DELETE FROM {table} WHERE id=?"), [id]))?;
+    }
+    for (key, decrement) in [
+        ("archive_files_v2", 1),
+        ("archive_search_errors_v2", u64::from(!search_ok)),
+        ("archive_reference_errors_v2", u64::from(!reference_ok)),
+    ] {
+        let previous = meta(db, key)?.parse::<u64>().map_err(fail)?;
+        put_meta(
+            db,
+            key,
+            &previous
+                .checked_sub(decrement)
+                .ok_or(INCOMPLETE)?
+                .to_string(),
+        )?;
+    }
+    seal(db)
+}
+
+fn seal(db: &Connection) -> Result<()> {
     #[cfg(all(test, unix))]
     BEFORE_PROOF.with(|slot| {
         if let Some(hook) = slot.take() {

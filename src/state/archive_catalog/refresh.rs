@@ -18,7 +18,7 @@ const BATCH: usize = 64;
 const SLICE: Duration = Duration::from_millis(25);
 
 mod writer;
-pub(super) use writer::{catalog as writer_catalog, published};
+pub(super) use writer::{catalog as writer_catalog, published, removed};
 
 fn fail(error: impl std::fmt::Display) -> String {
     format!("{INCOMPLETE}: {error}")

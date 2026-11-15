@@ -128,11 +128,15 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 
 fn remove_synced_inner(path: &Path) -> Result<()> {
     storage::cut_write()?;
+    let catalog = archive_catalog::before_removal(path);
     match fs::remove_file(path) {
         Ok(()) => {
             crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
                 .map_err(|error| error.to_string())?;
             super::archive_references::forget(path);
+            if let Some(db) = catalog {
+                archive_catalog::removed(db, path);
+            }
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

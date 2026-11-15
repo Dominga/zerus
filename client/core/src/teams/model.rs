@@ -247,7 +247,10 @@ impl TeamsModel {
             (Slot::Status, self.follow.team.is_some()),
             (Slot::Queue, self.follow.team.is_some()),
             (Slot::Phases, self.phases_enabled),
-            (Slot::Draft, self.phases_enabled && self.phase_selected.is_some()),
+            (
+                Slot::Draft,
+                self.phases_enabled && self.phase_selected.is_some(),
+            ),
         ];
         for (slot, on) in wanted {
             if !on {
@@ -311,7 +314,14 @@ impl TeamsModel {
     /// A slot whose read is in flight is marked and read again at once when
     /// that reply lands, so the action never loses its reread.
     pub fn refresh(&mut self, now: Instant) {
-        for slot in [Slot::Status, Slot::Queue, Slot::List, Slot::Waiting, Slot::Phases, Slot::Draft] {
+        for slot in [
+            Slot::Status,
+            Slot::Queue,
+            Slot::List,
+            Slot::Waiting,
+            Slot::Phases,
+            Slot::Draft,
+        ] {
             if self.due.contains_key(&slot) {
                 self.mark(slot, now);
             }
@@ -368,7 +378,10 @@ impl TeamsModel {
         let read = match key {
             "list" => TeamRead::List { after },
             "waiting" => TeamRead::Waiting { after },
-            _ if key.starts_with("phases:") => TeamRead::Phases { team: key[7..].to_owned(), after },
+            _ if key.starts_with("phases:") => TeamRead::Phases {
+                team: key[7..].to_owned(),
+                after,
+            },
             _ => {
                 let Some(team) = key.strip_prefix("team:") else {
                     return false;
@@ -415,8 +428,14 @@ impl TeamsModel {
                 && match read {
                     TeamRead::List { .. } => follow.list,
                     TeamRead::Waiting { .. } => follow.waiting,
-                    TeamRead::Phases { team, .. } => phases_enabled && follow.team.as_deref() == Some(team.as_str()),
-                    TeamRead::Draft { team, phase } => phases_enabled && phase_selected == Some(*phase) && follow.team.as_deref() == Some(team.as_str()),
+                    TeamRead::Phases { team, .. } => {
+                        phases_enabled && follow.team.as_deref() == Some(team.as_str())
+                    }
+                    TeamRead::Draft { team, phase } => {
+                        phases_enabled
+                            && phase_selected == Some(*phase)
+                            && follow.team.as_deref() == Some(team.as_str())
+                    }
                     TeamRead::Status { team } | TeamRead::Queue { team, .. } => {
                         follow.team.as_deref() == Some(team.as_str())
                     }
@@ -440,9 +459,15 @@ impl TeamsModel {
         let read = match slot {
             Slot::Phases => {
                 let team = watched?;
-                TeamRead::Phases { after: self.selected.get(&team_key("phases", &team)).cloned(), team }
+                TeamRead::Phases {
+                    after: self.selected.get(&team_key("phases", &team)).cloned(),
+                    team,
+                }
             }
-            Slot::Draft => TeamRead::Draft { team: watched?, phase: self.phase_selected? },
+            Slot::Draft => TeamRead::Draft {
+                team: watched?,
+                phase: self.phase_selected?,
+            },
             Slot::List => TeamRead::List {
                 after: self.selected.get("list").cloned(),
             },
@@ -516,8 +541,11 @@ impl TeamsModel {
         Some(TeamView {
             plan: self.phases_enabled.then(|| view::phases::PhasePane {
                 epoch: self.phase_epoch,
-                list: parts.phases.clone(), draft: parts.draft.clone(), selected: self.phase_selected,
-                list_failure: parts.phases_failure.clone(), draft_failure: parts.draft_failure.clone(),
+                list: parts.phases.clone(),
+                draft: parts.draft.clone(),
+                selected: self.phase_selected,
+                list_failure: parts.phases_failure.clone(),
+                draft_failure: parts.draft_failure.clone(),
             }),
             after: parts.queue_after.clone(),
             ..view::team(status, queue)
@@ -581,7 +609,7 @@ impl TeamsModel {
         }
         let after = read.after().map(str::to_owned);
         match read {
-            TeamRead::Phases { .. } | TeamRead::Draft { .. } => {},
+            TeamRead::Phases { .. } | TeamRead::Draft { .. } => {}
             TeamRead::List { .. } => self.apply_list(slot, after, reply, now, &mut out),
             TeamRead::Waiting { .. } => self.apply_waiting(slot, after, reply, now, &mut out),
             TeamRead::Status { team } | TeamRead::Queue { team, .. } => {
@@ -733,7 +761,10 @@ fn key_of(read: &TeamRead) -> String {
     match read {
         TeamRead::List { .. } => "list".to_owned(),
         TeamRead::Waiting { .. } => "waiting".to_owned(),
-        TeamRead::Status { team } | TeamRead::Queue { team, .. } | TeamRead::Phases { team, .. } | TeamRead::Draft { team, .. } => team_key("team", team),
+        TeamRead::Status { team }
+        | TeamRead::Queue { team, .. }
+        | TeamRead::Phases { team, .. }
+        | TeamRead::Draft { team, .. } => team_key("team", team),
     }
 }
 

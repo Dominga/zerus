@@ -227,3 +227,16 @@ fn regenerate_phase_pane_fixture() {
         .join("../src/ui/teams/fixtures/phase-pane.json");
     std::fs::write(path, serde_json::to_string_pretty(&wire()).unwrap() + "\n").unwrap();
 }
+
+#[test]
+fn review_probe_empty_complete_draft_is_unavailable() {
+    // Fault injection into the product writer's reply, not a hand-written row.
+    let mut source = context()["draft"].clone();
+    source["draft"]["nodes"] = serde_json::json!([]);
+    assert!(draft(&source, 1).is_err());
+    let read = TeamRead::Draft {
+        team: TEAM.into(),
+        phase: 1,
+    };
+    assert!(decoded(&read, source).is_err());
+}

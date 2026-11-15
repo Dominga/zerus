@@ -28,18 +28,33 @@ const MESSAGE_CHARS: usize = 2000;
 /// One read of the team store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TeamRead {
-    Phases { team: String, after: Option<String> },
-    Draft { team: String, phase: u32 },
+    Phases {
+        team: String,
+        after: Option<String>,
+    },
+    Draft {
+        team: String,
+        phase: u32,
+    },
     /// `team list`: the teams of this computer, newest first.
-    List { after: Option<String> },
+    List {
+        after: Option<String>,
+    },
     /// `team status --team ID`: one team, its members and its counts, without
     /// its bundle.
-    Status { team: String },
+    Status {
+        team: String,
+    },
     /// `team queue --team ID`: one page of the team's queue and plan nodes.
-    Queue { team: String, after: Option<String> },
+    Queue {
+        team: String,
+        after: Option<String>,
+    },
     /// `team waiting`: one page of the open owner cards of every team of this
     /// computer, oldest first.
-    Waiting { after: Option<String> },
+    Waiting {
+        after: Option<String>,
+    },
 }
 
 impl TeamRead {
@@ -58,7 +73,10 @@ impl TeamRead {
     /// The team the read is about, if it is about one.
     pub fn team(&self) -> Option<&str> {
         match self {
-            Self::Status { team } | Self::Queue { team, .. } | Self::Phases { team, .. } | Self::Draft { team, .. } => Some(team),
+            Self::Status { team }
+            | Self::Queue { team, .. }
+            | Self::Phases { team, .. }
+            | Self::Draft { team, .. } => Some(team),
             Self::List { .. } | Self::Waiting { .. } => None,
         }
     }
@@ -66,9 +84,10 @@ impl TeamRead {
     /// The page cursor the read carries, if any.
     pub fn after(&self) -> Option<&str> {
         match self {
-            Self::List { after } | Self::Waiting { after } | Self::Queue { after, .. } | Self::Phases { after, .. } => {
-                after.as_deref()
-            }
+            Self::List { after }
+            | Self::Waiting { after }
+            | Self::Queue { after, .. }
+            | Self::Phases { after, .. } => after.as_deref(),
             Self::Status { .. } | Self::Draft { .. } => None,
         }
     }
@@ -89,7 +108,9 @@ impl TeamRead {
                     });
                 }
                 args.extend(["--team".to_owned(), team.clone()]);
-                if let Self::Draft { phase, .. } = self { args.extend(["--phase".to_owned(), phase.to_string()]); }
+                if let Self::Draft { phase, .. } = self {
+                    args.extend(["--phase".to_owned(), phase.to_string()]);
+                }
             }
             Self::Queue { team, after } | Self::Phases { team, after } => {
                 if !valid_team(team) {
@@ -297,11 +318,15 @@ pub fn decode(read: &TeamRead, exit: Exit) -> Result<Value, TeamError> {
     }
     match read {
         TeamRead::Phases { team, .. } => {
-            if value.get("team").and_then(Value::as_str) != Some(team) { return Err(invalid("phase list gives another team")); }
+            if value.get("team").and_then(Value::as_str) != Some(team) {
+                return Err(invalid("phase list gives another team"));
+            }
             super::view::phases::list(&value).map_err(invalid)?;
         }
         TeamRead::Draft { team, phase } => {
-            if value.get("team").and_then(Value::as_str) != Some(team) { return Err(invalid("phase draft gives another team")); }
+            if value.get("team").and_then(Value::as_str) != Some(team) {
+                return Err(invalid("phase draft gives another team"));
+            }
             super::view::phases::draft(&value, *phase).map_err(invalid)?;
         }
         TeamRead::Status { team } => {

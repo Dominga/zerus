@@ -126,7 +126,7 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
         || ids.len() != out.nodes.len()
         || ids.contains(&0)
         || out.next_node == 0
-        || (out.complete && out.generation.is_none())
+        || (out.complete && (out.generation.is_none() || out.nodes.is_empty()))
         || (out.editable
             && (!out.complete
                 || out.phase.kind != zerus_team_plan::PhaseKind::Plan

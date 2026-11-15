@@ -133,3 +133,43 @@ fn regenerate_phase_draft_fixtures() {
         .unwrap();
     }
 }
+
+#[test]
+fn review_probe_cursor_beyond_ceiling_is_refused() {
+    let h = seed();
+    let (v, exit) = h.cli(
+        &Caller::Person,
+        "submit-draft-phase",
+        &json!({"request_id":uid(700),"team":TEAM,"expected_revision":h.revision(),"phase":1,"draft":input()}).to_string(),
+    );
+    assert_eq!(exit, 0, "{v}");
+    let (first, exit) = h.cli(
+        &Caller::Person,
+        &format!("phases --team {TEAM} --limit 1"),
+        "",
+    );
+    assert_eq!(exit, 0, "{first}");
+    let mut cursor =
+        crate::teams::cli::input::parse_cursor(first["next"].as_str().unwrap()).unwrap();
+    cursor.after = cursor.ceiling + 1;
+    let token = crate::teams::cli::input::cursor_token(&cursor).unwrap();
+    let (v, exit) = h.cli(
+        &Caller::Person,
+        &format!("phases --team {TEAM} --after {token}"),
+        "",
+    );
+    assert_eq!(exit, 1, "cursor beyond its ceiling returned {v}");
+    assert_eq!(v["error"]["code"], "invalid_state");
+
+    // The valid exhausted boundary remains a successful empty page.
+    cursor.after = cursor.ceiling;
+    let token = crate::teams::cli::input::cursor_token(&cursor).unwrap();
+    let (v, exit) = h.cli(
+        &Caller::Person,
+        &format!("phases --team {TEAM} --after {token}"),
+        "",
+    );
+    assert_eq!(exit, 0, "{v}");
+    assert_eq!(v["rows"], json!([]));
+    assert!(v["next"].is_null());
+}

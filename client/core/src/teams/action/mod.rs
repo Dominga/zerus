@@ -34,8 +34,8 @@
 //! the revision the person saw. Only settled entries make room; pending and
 //! uncertain intents are never evicted, and the table refuses a new intent
 //! when every entry is unresolved.
-pub mod input;
 mod drafts;
+pub mod input;
 pub mod intents;
 pub mod types;
 pub mod wire;

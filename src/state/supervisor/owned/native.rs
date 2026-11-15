@@ -64,6 +64,7 @@ pub(super) fn profile() -> bool {
 }
 
 pub(super) struct Source {
+    pid: u32,
     state: Held,
     config: Held,
     image: Held,
@@ -78,6 +79,7 @@ impl Source {
         let birth =
             birth(std::process::id()).ok_or_else(|| io::Error::other("owner birth unavailable"))?;
         Ok(Self {
+            pid: std::process::id(),
             state: Held::new(state, true)?,
             config: Held::new(config, true)?,
             image,
@@ -85,7 +87,8 @@ impl Source {
         })
     }
     pub(super) fn current(&self) -> bool {
-        self.state.current()
+        self.pid == std::process::id()
+            && self.state.current()
             && self.config.current()
             && self.image.current()
             && platform::image_identity() == Some(self.image.identity)
@@ -287,4 +290,17 @@ pub(super) fn birth(pid: u32) -> Option<String> {
 #[cfg(target_os = "macos")]
 pub(super) fn birth(pid: u32) -> Option<String> {
     platform::process_identity(pid).map(|i| i.birth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn an_original_source_needs_its_pid_as_well_as_its_birth() {
+        let state = tempfile::tempdir().unwrap();
+        let mut source = Source::capture(state.path(), state.path()).unwrap();
+        assert!(source.current());
+        source.pid = 0;
+        assert!(!source.current());
+    }
 }

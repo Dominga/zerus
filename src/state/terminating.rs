@@ -2,11 +2,14 @@
 //! This leaf does not create markers, send signals or authorize finalization.
 use serde_json::Value;
 
-// Inactive durable-writer support. No marker/controller/effect entry calls it;
-// saved rows and native locks supply no Terminate or cleanup authority.
+// Dormant durable-writer support. The disabled original supervisor initializes
+// its own domain; no real writer/marker/controller/effect entry is enrolled.
+// Saved rows and native locks supply no Terminate or cleanup authority.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 mod writer_records;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use writer_records::domain::{creation_record, OriginalDomain};
 
 pub(super) const WAIT: &str =
     "Session termination is unfinished; inspect its original result before changing the session";

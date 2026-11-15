@@ -385,7 +385,16 @@ impl Directory {
     /// The same publication, retaining the exact file created by this call.
     /// A later pathname open cannot stand in for that original object.
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
-        self.publish_file(name, bytes, false)
+        self.publish_file(name, bytes, false, None)
+    }
+
+    pub(in crate::state) fn write_new_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        self.publish_file(name, bytes, false, Some(observe))
     }
 
     /// Replace metadata under caller-held exclusion, through this original
@@ -394,10 +403,25 @@ impl Directory {
         self.replace_file_retained(name, bytes).map(drop)
     }
     pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
-        self.publish_file(name, bytes, true)
+        self.publish_file(name, bytes, true, None)
     }
 
-    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
+    pub(in crate::state) fn replace_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        self.publish_file(name, bytes, true, Some(observe))
+    }
+
+    fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        replace: bool,
+        observe: Option<&mut dyn FnMut(&File)>,
+    ) -> Result<File> {
         use std::io::Write;
         use std::os::fd::{AsRawFd, FromRawFd};
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -427,6 +451,9 @@ impl Directory {
             .write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| e.to_string());
+        if let (true, Some(observe)) = (written.is_ok(), observe) {
+            observe(&file);
+        }
         #[cfg(target_os = "linux")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
             libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_NOREPLACE })
@@ -545,6 +572,18 @@ impl Directory {
     /// A later pathname open cannot stand in for that original object.
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
         self.publish_file(name, bytes, false)
+    }
+
+    pub(in crate::state) fn write_new_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        _observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        // Keep the existing Windows handle-sharing/lifetime contract. Until
+        // pre-publication observation is supported here, advisory repair must
+        // read the canonical bytes; a pathname stamp is never a substitute.
+        self.write_new_file(name, bytes)
     }
 
     /// Replace metadata under caller-held exclusion, through this original

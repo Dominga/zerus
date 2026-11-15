@@ -108,14 +108,16 @@ fn admit_with(record: &Value, alive: fn(&Value) -> bool) -> Result<Caller> {
             && old_start
             && record.get("run_identity_version").is_none();
         match dsh::host_check() {
-            dsh::HostCheck::Under => {
-                return Err(refused("a resident DeepSeek host owns this process tree"))
+            dsh::HostCheck::Under | dsh::HostCheck::Unregistered => {
+                return Err(refused("a resident DeepSeek host owns this process tree"));
             }
             dsh::HostCheck::Unverified(reason) if !legacy => return Err(refused(&reason)),
             _ => {}
         }
         if legacy {
-            eprintln!("hgs: legacy Claude hook record has no PID/start pin; retaining existing hook behavior without caller proof");
+            eprintln!(
+                "hgs: legacy Claude hook record has no PID/start pin; retaining existing hook behavior without caller proof"
+            );
             return Ok(Caller {
                 authority: Authority::Legacy,
             });

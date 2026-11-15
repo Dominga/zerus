@@ -9,6 +9,7 @@ mod member_sessions;
 mod paths;
 mod planning;
 mod stage;
+mod timeline;
 
 #[test]
 fn missing_store_is_lazy_and_preview_is_required() {

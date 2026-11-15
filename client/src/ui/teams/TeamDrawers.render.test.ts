@@ -19,10 +19,10 @@ const mount = (child: () => import("solid-js").JSX.Element) => {
 };
 const inbox = pages.inbox as DrawerPage, feed = pages.feed as DrawerPage, cards = pages.cards as DrawerPage;
 
-it("the bar offers all five drawers and marks the selected one", () => {
+it("the bar offers all six drawers and marks the selected one", () => {
   const open = vi.fn();
   const host = mount(() => createComponent(TeamDrawerButtons, { value: "feed", onOpen: open }));
-  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(5);
+  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(6);
   expect(host.querySelector('[data-team-drawer="feed"]')?.getAttribute("aria-expanded")).toBe("true");
   (host.querySelector('[data-team-drawer="cards"]') as HTMLButtonElement).click(); expect(open).toHaveBeenCalledWith("cards");
 });

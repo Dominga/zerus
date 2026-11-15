@@ -265,7 +265,16 @@
         "text_truncated": false
       }
     ],
-    "team": "00000000-0000-4000-8000-00000000beef"
+    "team": "00000000-0000-4000-8000-00000000beef",
+    "timeline": {
+      "clock_reversed": false,
+      "count": 16,
+      "earlier_page": false,
+      "first_seq": 1,
+      "last_seq": 16,
+      "later_page": false,
+      "limit": 200
+    }
   },
   "inbox": {
     "after": null,

@@ -138,11 +138,9 @@ fn every_source_recheck_failure_keeps_partial_state_and_returns_no_resource() {
 fn changed_readback_or_original_expiry_after_publication_keeps_the_original_unknown() {
     for expires in [false, true] {
         let (d, scope, until) = fixture();
-        let end = if expires {
-            Instant::now() + Duration::from_millis(100)
-        } else {
-            until
-        };
+        // Use the fixture's one original budget. Publication must be observed
+        // before consuming its remainder; native fsync need not finish in 100 ms.
+        let end = until;
         let p = path(&d, &scope);
         let altered = Cell::new(false);
         let result = seed(root(d.path()), &scope, end, || {

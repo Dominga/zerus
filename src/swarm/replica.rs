@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zerus_replica::{Damaged, Document, Inventory, ProjectStore, Update, SCHEMA, TASK_SCHEMA};
 
 /// The replica exchange this hgs speaks; members with another one are skipped.
@@ -96,6 +96,31 @@ pub fn hello(config: &Config) -> Result<Value> {
               "omitted": digests.omitted}))
 }
 
+/// Bounded background protocol work, independent of native task Start.
+#[derive(Default)]
+pub(crate) struct CutoverScan { after_project:String }
+impl CutoverScan {
+    pub(crate) fn advance(&mut self,config:&Config)->Result<bool> {
+        self.advance_with(config,&super::fence::Ssh(config))
+    }
+    pub(crate) fn advance_with(&mut self,config:&Config,net:&dyn super::fence::Net)->Result<bool> {
+        let mut projects=ProjectStore::stored(&root(config))?;
+        projects.sort();
+        let Some(project)=projects.iter().find(|project|*project>&self.after_project).or_else(||projects.first()).cloned() else {return Ok(false);};
+        // Advance before inspection or migration: a busy, held, missing or
+        // unprovable task/project cannot starve the following one.
+        self.after_project=project.clone();
+        let candidate={
+            let Some(store)=ProjectStore::open_within(&root(config),&project,PROJECT_WAIT)? else {return Ok(false);};
+            crate::tasks::cutover_candidate(&store)
+        };
+        let Some(uuid)=candidate else {return Ok(false);};
+        // The index and project writer are both gone before any network.
+        super::fence::catch_up_writer(config,net,&project,&uuid,Instant::now()+Duration::from_secs(5))?;
+        Ok(true)
+    }
+}
+
 /// Changes whenever any stored project changes; the worker exchanges at once.
 pub fn fingerprint(config: &Config) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&digests(config)?)?)))
@@ -153,6 +178,9 @@ fn import_answer(store:&ProjectStore, wire:Vec<Wire>, own_node:&str, source_node
             if store.admitted_cutover_identity(&uuid).ok().flatten().as_ref()!=Some(&seal) {
                 let adopted=(|| -> Result<()> {
                     store.settle_cutover(&uuid)?;
+                    if let Some((original,own))=store.original_cutover_proposal(&uuid)?.zip(store.pending_cutover_capture(&uuid)?) {
+                        store.catch_up_cutover(&original,&own,source_node,&source,&seal)?;
+                    }
                     let (capture,local)=store.prepare_cutover(&uuid,own_node)?;
                     let proposal=if let Some(original)=store.original_cutover_proposal(&uuid)? {original} else {
                         let candidate=if local.is_empty() {zerus_replica::TaskDoc::from_bytes(&bytes)?} else {
@@ -753,6 +781,57 @@ mod tests {
         assert_eq!(bootstrap_source(&json!({"store":STORE}),None),None);
         assert_eq!(bootstrap_source(&json!({"store":NODE}),Some(STORE)),None);
         assert_eq!(bootstrap_source(&json!({"store":STORE}),Some(STORE)),Some(STORE));
+    }
+
+    #[test]
+    fn the_protocol_only_worker_rotates_projects_even_when_none_can_advance() {
+        let (_dir,config)=fixture();
+        for project in ["a","b","c"] {add(&config,project);}
+        struct NoCalls;
+        impl super::super::fence::Net for NoCalls {
+            fn call(&self,_:&str,_:super::super::fence::Route<'_>,_:&str,_:Option<&Value>,_:Instant)->Result<Value> {
+                panic!("an index candidate cannot itself authorize networking or task adoption")
+            }
+        }
+        let mut worker=CutoverScan::default();
+        for expected in ["a","b","c","a"] {
+            assert!(!worker.advance_with(&config,&NoCalls).unwrap());
+            assert_eq!(worker.after_project,expected);
+        }
+    }
+
+    #[test]
+    fn a_qualified_sync_resumes_the_original_after_a_pin_before_canonical_cut() {
+        let source_root=tempfile::tempdir().unwrap();
+        let source=ProjectStore::open(source_root.path(),"example").unwrap();
+        let mut task=TaskDoc::create(NewTask {project:"example",id:"T-abcdef",text:"Original",stage:Stage::Todo,
+            target:Target::Any,author:Actor::Person,rank:"V",now:1}).unwrap();
+        source.save(&mut task).unwrap();
+        let source_store=ProjectStore::store_id(source_root.path()).unwrap();
+        let dir=tempfile::tempdir().unwrap();
+        let receiver=ProjectStore::open(dir.path(),"example").unwrap();
+        let own="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let (capture,_)=receiver.prepare_cutover(task.uuid(),own).unwrap();
+        let bytes=task.snapshot().unwrap();
+        receiver.retain_cutover_proposal(&bytes,&capture).unwrap();
+        let tasks=receiver.dir().join("tasks");
+        let prepare=tasks.join(format!("{}.prepare",task.uuid()));
+        let proposal=tasks.join(format!("{}.proposal",task.uuid()));
+        let original=[fs::read(&prepare).unwrap(),fs::read(&proposal).unwrap()];
+        receiver.catch_up_cutover(&bytes,&capture,NODE,&source_store,&task.cutover_seal().unwrap().unwrap().identity()).unwrap();
+        // Recreate the exact partial state using the real pin produced above.
+        for ext in ["loro","updates","managed"] {
+            let path=tasks.join(format!("{}.{ext}",task.uuid()));
+            if path.exists(){fs::remove_file(path).unwrap();}
+        }
+        fs::write(&prepare,&original[0]).unwrap();
+        fs::write(&proposal,&original[1]).unwrap();
+        assert!(receiver.load(task.uuid()).is_err());
+        let wire=encode_admitted(&source,vec![Update{document:Document::Task(task.uuid().into()),bytes}]);
+        let imported=import_answer(&receiver,wire,own,NODE,Some(&source_store),true).unwrap();
+        assert!(imported.refused.is_empty());
+        assert_eq!(receiver.load(task.uuid()).unwrap().version(),task.version());
+        assert!(!prepare.exists() && !proposal.exists());
     }
 
     #[test]

@@ -632,6 +632,15 @@ pub(crate) fn listing(config: &Config, project: &str) -> Result<Value> {
     list(config, &["--project".to_owned(), project.to_owned()])
 }
 
+/// Derived cursor only; a cached row is never cutover/adoption authority.
+pub(crate) fn cutover_candidate(store:&ProjectStore)->Option<String> {
+    let mut index=index::Index::open(store)?;
+    match index.cutover_candidate() {
+        Ok(candidate)=>candidate,
+        Err(error)=>{index.discard(&error);None},
+    }
+}
+
 /// The folder whose files hold a project's tasks: a change below it changes
 /// the project's listing.
 pub(crate) fn store_dir(config: &Config, project_id: &str) -> std::path::PathBuf {

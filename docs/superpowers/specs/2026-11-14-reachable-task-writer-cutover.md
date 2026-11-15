@@ -92,11 +92,25 @@ Fence capability 2 and certificate format 2 bind the immutable seal, exact
 covered node/store identities and negative absent facts. Old certificates
 cannot bypass the new checks. Available participants retain same-version,
 raw-schema, store-identity and final-admission checks. Discovery, bootstrap and
-proof calls share the original deadline; each optional route receives a bounded
-probe so a slow first peer does not consume the healthy later peer's budget.
+proof calls share the original deadline. Discovery uses one aggregate pool,
+shared among queued routes, rather than a fresh timeout for each absent peer.
+A fixed remote cutoff reserves part of the original deadline for local
+settlement and final admission; real timeout sleepers cannot consume it.
 A node lost during confirmation becomes a negative fact, never an invented
 acknowledgement. The remaining exact covered cohort must remain unchanged.
 Membership/store/seal drift still requires re-evaluation.
+
+Existing historical-floor tasks also advance without Start. The existing
+swarm worker and manual sync perform protocol-only cutover work: one project
+and candidate per round, a persistent disposable index cursor over at most
+32 rows, and project rotation even when candidates are held or missing. The
+ordinary index may perform its existing cache rebuild/revalidation; the new
+candidate query does not decode an unbounded queue. All index/project locks
+are released before networking, and the actual task/root/store are re-read
+under native admission before freeze. This creates no acknowledgement,
+certificate, execution attempt, report, or native action. Ordinary task/Teams
+and Person checks remain unchanged. A returning partial save resumes the
+exact retained original; it never replaces the proposal with newer bytes.
 
 Final admission and certificate reuse independently require this store's active
 pin and no pending prepare. Reusing a certificate is schema-barrier evidence,

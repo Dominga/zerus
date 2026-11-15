@@ -1985,3 +1985,28 @@ fn native_cutover_custody_is_settled_cached_and_rechecked_without_a_journal_entr
     assert!(index.page(Stage::Todo,10,&Anchor::Start).unwrap().rows.is_empty());
     assert_eq!(index.damaged().unwrap().1,1,"a changed pin is explicit damage, never a stale healthy row");
 }
+
+#[test]
+fn the_cutover_cursor_is_bounded_and_passes_held_rows_before_wrapping() {
+    let temp=tempfile::tempdir().unwrap();
+    let store=ProjectStore::open(temp.path(),"example").unwrap();
+    for n in 0..35 {
+        let mut task=new_task(&store,&format!("T-aa{n:04}"),Stage::Todo,"V","Historical writer");
+        task.floor().unwrap();
+        aged_save(&store,&mut task);
+    }
+    let mut index=Index::open(&store).unwrap();
+    let ids:Vec<String>=index.db.prepare("SELECT uuid FROM tasks ORDER BY uuid").unwrap()
+        .query_map([],|row|row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    index.db.execute("UPDATE tasks SET error='held fixture',row=NULL WHERE uuid<>?1",[&ids[34]]).unwrap();
+    let (_,decoded,stamped)=counted(||assert!(index.cutover_candidate().unwrap().is_none()));
+    assert_eq!((decoded,stamped),(0,0),"a derived cursor does no document or file scan");
+    assert_eq!(index.meta("cutover_cursor").unwrap().as_deref(),Some(ids[31].as_str()));
+    assert_eq!(index.cutover_candidate().unwrap().as_deref(),Some(ids[34].as_str()));
+    assert!(index.cutover_candidate().unwrap().is_none());
+    assert!(index.meta("cutover_cursor").unwrap().is_none(),"the end wraps rather than starving earlier tasks");
+    // Pending native custody stays eligible even if the ordinary row is
+    // damaged after a pin-before-canonical crash. It remains only a hint.
+    index.db.execute("UPDATE tasks SET files='-|-|-|-|pending' WHERE uuid=?1",[&ids[0]]).unwrap();
+    assert_eq!(index.cutover_candidate().unwrap().as_deref(),Some(ids[0].as_str()));
+}

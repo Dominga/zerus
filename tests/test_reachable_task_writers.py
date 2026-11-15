@@ -70,6 +70,23 @@ class ReachableTaskWriters(unittest.TestCase):
         self.assertIn(ids["c"], proof["nodes"])
         self.assertTrue(self.swarm.task("c", "get", task["ref"], "--project", "a")["task"])
 
+    def test_ordinary_stage_and_comment_do_not_start_or_certify_a_task(self):
+        task = self.swarm.task("a", "add", "--project", "a", text="Ordinary task, no Start")["task"]
+        (self.swarm.root / "offline-b").touch()
+        synced = subprocess.run([str(test_swarm.HGS), "swarm", "sync"], env=self.env,
+                                text=True, capture_output=True, timeout=60)
+        self.assertEqual(synced.returncode, 0, synced.stdout + synced.stderr)
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run)
+        for action, extra, text in [("stage", ["backlog"], None), ("comment", [], "An ordinary comment")]:
+            result = subprocess.run([str(test_swarm.HGS), "task", action, task["ref"], *extra,
+                                     "--project", "a", "--json"], cwd=self.repo, env=env,
+                                    input=text, text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        current = json.loads(result.stdout)["task"]
+        self.assertEqual(current["stage"], "backlog")
+        self.assertFalse(any(entry["kind"] in {"started", "reported", "attempt"} for entry in current["log"]))
+        self.assertFalse(list((self.swarm.root / "a/state/replica").glob(f"*/fence/{task['uuid']}.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

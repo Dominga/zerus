@@ -159,6 +159,30 @@ pub(crate) trait Net {
     ) -> Result<Value>;
 }
 
+/// One fixed remote cutoff for the whole operation, including catch-up and
+/// both discovery passes. Optional peers cannot consume local settlement's
+/// reserved portion of the original deadline.
+struct WithLocalReserve<'a> { inner:&'a dyn Net, remote:Instant }
+impl<'a> WithLocalReserve<'a> {
+    fn new(inner:&'a dyn Net, deadline:Instant)->Self {
+        let reserve=(left(deadline)/3).min(Duration::from_secs(2));
+        Self{inner,remote:deadline.checked_sub(reserve).unwrap_or(deadline)}
+    }
+}
+impl Net for WithLocalReserve<'_> {
+    fn call(&self,swarm:&str,route:Route<'_>,command:&str,input:Option<&Value>,deadline:Instant)->Result<Value> {
+        let deadline=deadline.min(self.remote);
+        let expired=|| std::io::Error::new(std::io::ErrorKind::TimedOut,"the optional peer budget is reserved for local settlement");
+        if left(deadline).is_zero() {return Err(expired().into());}
+        let reply=self.inner.call(swarm,route,command,input,deadline)?;
+        if left(deadline).is_zero() {return Err(expired().into());}
+        Ok(reply)
+    }
+}
+fn probe_expired(error:&anyhow::Error)->bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error|error.kind()==std::io::ErrorKind::TimedOut)
+}
+
 /// The members' own transport.
 pub(crate) struct Ssh<'a>(pub &'a Config);
 
@@ -427,9 +451,14 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
         stopped = Some("too_many_nodes");
         queue.clear();
     }
+    // Share one bounded discovery pool rather than letting every absent
+    // route spend a fresh two seconds. Fair shares leave a later healthy
+    // route time even when earlier probes actually wait until their bounds.
+    let probe_end=Instant::now()+(left(deadline)/3).min(Duration::from_secs(3));
     while let Some((alias, route, stores)) = queue.pop_front() {
         let node = route[route.len() - 1].clone();
-        let probe_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+        let share=left(probe_end)/u32::try_from(queue.len()+1).unwrap_or(u32::MAX);
+        let probe_deadline = deadline.min(probe_end).min(Instant::now()+share.min(Duration::from_secs(2)));
         let (found, peers, writers) =
             observe(net, &swarm, Route { alias: &alias, nodes: &route, stores: &stores }, probe_deadline);
         for writer in writers {
@@ -530,7 +559,7 @@ fn observe(net: &dyn Net, swarm: &str, whole: Route<'_>, deadline: Instant) -> (
             eprintln!("hgs swarm: {node} cannot be reached for the fence: {error:#}");
             found.closed = Some(if error.downcast_ref::<Unverified>().is_some() {
                 "unverified"
-            } else if expired {
+            } else if expired || probe_expired(&error) {
                 "deadline"
             } else {
                 "unreachable"
@@ -748,6 +777,8 @@ pub(crate) fn prove(
     uuid: &str,
     deadline: Instant,
 ) -> Result<(Universe, std::result::Result<Proof, Closed>)> {
+    let reserved=WithLocalReserve::new(net,deadline);
+    let net:&dyn Net=&reserved;
     let first = universe_with(config, net, deadline)?;
     if let Some((node,reason))=first.closed() {
         return Ok((first.clone(),Err(Closed{node:node.map(str::to_owned),reason})));
@@ -755,6 +786,33 @@ pub(crate) fn prove(
     let excluded=reachable::upgrade(config,net,&first,project,uuid,deadline)?;
     let proved = prove_over(config, net, &first, project, uuid, deadline, excluded)?;
     Ok((first, proved))
+}
+
+/// Protocol-only background migration. The index contributes no authority;
+/// canonical full-history evidence is re-read before any prepare. It creates
+/// no task acknowledgement, certificate, attempt or native offer.
+pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str,deadline:Instant)->Result<()> {
+    ensure!(ids::is_uuid(uuid),"the cutover candidate is not a canonical task UUID");
+    {
+        let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
+            anyhow::bail!("the candidate task store is busy");
+        };
+        store.settle_cutover(uuid)?;
+        // A retained native prepare is resumed by the exact-original lane,
+        // even when a pin-before-canonical cut makes the ordinary read fail.
+        if store.pending_cutover_capture(uuid)?.is_none() {
+            let mut admitted=store.admit_until(deadline).ok_or_else(||anyhow::anyhow!("the candidate admission is busy"))?;
+            let task=admitted.load_complete(uuid)?;
+            if task.cutover_seal()?.is_some() {admitted.cutover_ready(&task)?;return Ok(());}
+            ensure!(task.floor_record().is_some(),"the task has no provable historical first floor; no prepare was created");
+            task.validate_cutover_history()?;
+        }
+    }
+    let reserved=WithLocalReserve::new(net,deadline);
+    let first=universe_with(config,&reserved,deadline)?;
+    ensure!(first.closed().is_none(),"the local cutover identity or discovery is unavailable");
+    reachable::upgrade(config,&reserved,&first,project,uuid,deadline)?;
+    Ok(())
 }
 
 fn prove_over(
@@ -804,7 +862,7 @@ fn prove_over(
                 Err(error) => {
                     let reason = if error.downcast_ref::<Unverified>().is_some() {
                         "unverified"
-                    } else if left(deadline).is_zero() {
+                    } else if left(deadline).is_zero() || probe_expired(&error) {
                         "deadline"
                     } else {
                         "unreachable"
@@ -866,6 +924,16 @@ fn prove_over(
         let second = universe_with(config, net, deadline)?;
         if let Some((node, reason)) = second.closed() {
             return closed(node, reason);
+        }
+        // A peer that can no longer be covered within the optional budget
+        // is a negative fact, including during final discovery. Never keep
+        // its earlier acknowledgement in the final covered set.
+        for (node,mut fact) in reachable::negative(&second) {
+            if second.nodes[&node].closed.is_some_and(optional) {
+                fact.store=first.nodes.get(&node).and_then(|known|known.store.clone()).or(fact.store);
+                answered.remove(&node);
+                excluded.insert(node,fact);
+            }
         }
         if covered_incarnation(&second, &excluded) != covered_incarnation(first, &excluded) {
             return closed(None, "membership_changed");
@@ -1500,6 +1568,8 @@ fn admit_matching<R>(
     expected: Option<start_mode::Mode>,
     reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
 ) -> Result<Admission<R>> {
+    let reserved=WithLocalReserve::new(net,deadline);
+    let net:&dyn Net=&reserved;
     let entered = std::cell::Cell::new(false);
     let mut reserve = Some(reserve);
     let mut run = |admitted: &mut Admitted<'_>, task: &mut TaskDoc| {
@@ -2188,6 +2258,113 @@ printf '{{"node_id":"{PEER}"}}'
         let proof=prove(&members.configs["a"],&net,"p",&uuid,soon()).unwrap().1.unwrap();
         assert!(proof.nodes.contains_key(&members.ids["c"]));
         assert!(!proof.nodes.contains_key(&members.ids["b"]));
+    }
+
+    #[test]
+    fn actual_absent_route_waits_leave_a_healthy_later_peer_and_local_admission_time() {
+        let names=["a","b","c","d","e","f","g","h","z"];
+        let links=names[1..].iter().map(|name|("a",*name)).collect::<Vec<_>>();
+        let members=members(&names,&links);
+        let task=floored(&members,"a");
+        struct Sleeping<'a>(InProcess<'a>);
+        impl Net for Sleeping<'_> {
+            fn call(&self,swarm:&str,route:Route<'_>,command:&str,input:Option<&Value>,deadline:Instant)->Result<Value> {
+                if command=="hello" && route.nodes.last()!=Some(&self.0.members.ids["z"]) {
+                    std::thread::sleep(left(deadline));
+                    anyhow::bail!("the absent route actually exhausted its supplied probe deadline");
+                }
+                self.0.call(swarm,route,command,input,deadline)
+            }
+        }
+        let net=Sleeping(InProcess::new(&members,Faults::default()));
+        let deadline=Instant::now()+Duration::from_secs(15);
+        let proof=prove(&members.configs["a"],&net,"p",task.uuid(),deadline).unwrap().1.unwrap();
+        assert!(proof.nodes.contains_key(&members.ids["z"]),"a healthy later peer was starved by absent routes");
+        assert_eq!(proof.not_cut_over.len(),7);
+        let mut admitted=0;
+        assert!(proof.admit(&members.configs["a"],deadline,|_,_|{admitted+=1;Ok(())}).unwrap().is_ok());
+        assert_eq!(admitted,1);
+        assert!(Instant::now()<deadline,"the original deadline was extended or consumed");
+    }
+
+    #[test]
+    fn worker_cutover_allows_an_ordinary_stage_without_any_start_or_certificate() {
+        let (members,uuid)=never_certified_fixture();
+        let config=&members.configs["a"];
+        {
+            let mut catalog=LockedStore::load(config).unwrap();
+            let node=catalog.data.node_id.clone();
+            for (field,value) in [("alive",json!(true)),("name",json!("p")),("color",json!("#123456"))] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::project("p",field),value).unwrap();
+            }
+            catalog.save().unwrap();
+        }
+        let net=InProcess::new(&members,Faults{offline:BTreeSet::from([members.ids["b"].clone()]),..Faults::default()});
+        let mut worker=super::super::replica::CutoverScan::default();
+        assert!(worker.advance_with(config,&net).unwrap(),"an ordinary existing writer has no automatic cutover trigger");
+        assert!(held(&members,"a",&uuid).unwrap().cutover_seal().unwrap().is_some());
+        assert!(!record_path(&members,&uuid).exists());
+        assert_eq!(attempts(&members,&uuid),0);
+        let store=ProjectStore::open(&config.state.join("replica"),"p").unwrap();
+        let mut changed=store.load(&uuid).unwrap();
+        store.change_stage(&mut changed,zerus_replica::Stage::Backlog,&zerus_replica::Actor::Person,30).unwrap();
+        store.save(&mut changed).unwrap();
+        drop(store);
+        let current=held(&members,"a",&uuid).unwrap();
+        assert_eq!(current.stage().unwrap(),zerus_replica::Stage::Backlog);
+        assert_eq!(attempts(&members,&uuid),0);
+        assert!(!record_path(&members,&uuid).exists());
+        assert!(current.view().unwrap().log.iter().all(|entry|!matches!(entry.kind.as_str(),"started"|"reported"|"attempt")));
+        let stale={
+            let store=ProjectStore::open(&members.configs["b"].state.join("replica"),"p").unwrap();
+            let mut stale=store.load(&uuid).unwrap();
+            stale.comment("Uncut-over B's old-rule edit",&zerus_replica::Actor::Person,40).unwrap();
+            store.save_legacy_for_test(&mut stale).unwrap();
+            stale.snapshot().unwrap()
+        };
+        for name in ["a","c"] {
+            let store=ProjectStore::open(&members.configs[name].state.join("replica"),"p").unwrap();
+            let before=store.load(&uuid).unwrap().version();
+            let refused=store.import_updates(vec![Update{document:Document::Task(uuid.clone()),bytes:stale.clone()}]).unwrap();
+            assert_eq!(refused.refused.len(),1,"{name}");
+            assert_eq!(store.load(&uuid).unwrap().version(),before,"a worker's seal cannot admit stale B directly or through current C");
+        }
+        assert_eq!(attempts(&members,&uuid),0);
+    }
+
+    #[test]
+    fn manual_sync_cuts_over_a_historical_writer_before_an_ordinary_change() {
+        let (members,uuid)=never_certified_fixture();
+        let config=&members.configs["a"];
+        {
+            let mut catalog=LockedStore::load(config).unwrap();
+            let node=catalog.data.node_id.clone();
+            for (field,value) in [("alive",json!(true)),("name",json!("p")),("color",json!("#123456"))] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::project("p",field),value).unwrap();
+            }
+            // B/C were genuine prior C2 participants, now without a route.
+            // Keep their exact known identities as negative catalog facts.
+            for name in ["b","c"] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::machine(&members.ids[name],"name"),json!(name)).unwrap();
+            }
+            catalog.data.peers.clear();
+            catalog.save().unwrap();
+        }
+        super::super::transport::sync(config).unwrap();
+        let ready=held(&members,"a",&uuid).unwrap();
+        let seal=ready.cutover_seal().unwrap().expect("manual sync used the protocol-only entry");
+        assert!(seal.not_cut_over.contains_key(&members.ids["b"]));
+        assert_eq!(attempts(&members,&uuid),0);
+        assert!(!record_path(&members,&uuid).exists());
+        let store=ProjectStore::open(&config.state.join("replica"),"p").unwrap();
+        let mut changed=store.load(&uuid).unwrap();
+        store.change_stage(&mut changed,zerus_replica::Stage::Backlog,&zerus_replica::Actor::Person,29).unwrap();
+        changed.comment("Ordinary comment after sync, no Start",&zerus_replica::Actor::Person,30).unwrap();
+        store.save(&mut changed).unwrap();
+        assert_eq!(changed.stage().unwrap(),zerus_replica::Stage::Backlog);
+        assert!(changed.view().unwrap().log.iter().any(|entry|entry.text=="Ordinary comment after sync, no Start"));
+        assert!(changed.view().unwrap().log.iter().all(|entry|!matches!(entry.kind.as_str(),"started"|"reported"|"attempt")));
+        assert!(!record_path(&members,&uuid).exists());
     }
 
     fn never_certified_fixture() -> (Members, String) {

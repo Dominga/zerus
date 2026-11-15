@@ -444,7 +444,11 @@ public actor TaskSync {
     /// One whole exchange with the computer; its live digest after the last answer.
     nonisolated func exchange(_ connection: Connection, _ store: TaskStore, computerId: String, fetch: [String] = [], required: [String] = []) async throws -> TaskExchangeEvidence {
         guard required.count <= Self.scopedTasks else { throw TaskSyncError("Too many task outcomes in one exchange.") }
-        let exchange = try await replicas.run { fetch.isEmpty ? store.exchange() : store.exchangeFetching(tasks: fetch) }
+        let advertised = await capabilities()
+        let uploads = advertised[MachineKey(connectionId: connection.id, computerId: computerId)]?.contains(TaskSyncPlan.uploadFeature) == true
+        let exchange = try await replicas.run {
+            uploads ? store.exchangeUploading(tasks: fetch) : (fetch.isEmpty ? store.exchange() : store.exchangeFetching(tasks: fetch))
+        }
         var evidence = TaskExchangeEvidence(tasks: required, mediaUnavailable: mediaUnavailable)
         while true {
             guard let request = try await replicas.run({ try exchange.nextRequest() }) else { return evidence }

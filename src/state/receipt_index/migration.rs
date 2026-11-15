@@ -77,13 +77,30 @@ pub(super) fn priority(state: &Path, worker: bool) -> Result<Option<Guard>> {
         match FileExt::try_lock_shared(&file) {
             Ok(()) => return Ok(Some(Guard::held(file))),
             Err(error) if crate::platform::lock_contended(&error) && Instant::now() < until => {
-                std::thread::sleep(
-                    Duration::from_millis(1).min(until.saturating_duration_since(Instant::now())),
-                );
+                if admission::remaining().is_some() {
+                    if !admission::pause(Duration::from_millis(1)) {
+                        return Err("Receipt admission lock is unavailable".into());
+                    }
+                } else {
+                    std::thread::sleep(
+                        Duration::from_millis(1)
+                            .min(until.saturating_duration_since(Instant::now())),
+                    );
+                }
             }
             Err(_) => return Err("Receipt admission lock is unavailable".into()),
         }
     }
+}
+
+pub(super) const FOREGROUND: &str = "Receipt index foreground admission is active";
+pub(super) fn advisory_guard(state: &Path) -> Result<Option<Guard>> {
+    if admission::prioritized() {
+        return Ok(None);
+    }
+    priority(state, true)?
+        .map(Some)
+        .ok_or_else(|| FOREGROUND.into())
 }
 
 pub(super) fn request(state: &Path) {
@@ -307,7 +324,10 @@ impl Migration {
         })
     }
     fn background(state: &Path) -> Result<Self> {
-        let mut migration = Self::with_sources(state, Source::ALL.to_vec(), false)?;
+        let mut migration = {
+            let _publication = advisory_guard(state)?;
+            Self::with_sources(state, Source::ALL.to_vec(), false)?
+        };
         migration.background = true;
         migration.incremental = true;
         // Bound the bulk writer cache at 16 MiB. The default 2 MiB cache
@@ -321,7 +341,7 @@ impl Migration {
         // compares file stamps, rather than parsing every unchanged original.
         migration.force = migration.catalog.verification_due();
         if !migration.catalog.witness_current() {
-            migration.catalog.witness()?;
+            migration.catalog.witness_cooperative()?;
         }
         progress::restore(&mut migration)?;
         Ok(migration)
@@ -768,9 +788,18 @@ pub(super) fn advance(state: &Path, budget: Duration) -> Result<bool> {
     if priority(state, true)?.is_none() {
         return Ok(false);
     }
-    let mut migration = Migration::background(state)?;
+    let mut migration = match Migration::background(state) {
+        Err(error) if error == FOREGROUND => return Ok(false),
+        result => result?,
+    };
     loop {
-        if migration.step()? {
+        let done = {
+            let Some(_publication) = priority(state, true)? else {
+                return Ok(false);
+            };
+            migration.step()?
+        };
+        if done {
             return Ok(true);
         }
         if Instant::now() >= deadline {
@@ -803,7 +832,10 @@ fn run_worker(state: &Path) -> Result<i32> {
         }
         match Migration::background(state) {
             Ok(migration) => break migration,
-            Err(error) if error.contains("SQLite DatabaseBusy") && Instant::now() < until => {
+            Err(error)
+                if error == FOREGROUND
+                    || error.contains("SQLite DatabaseBusy") && Instant::now() < until =>
+            {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(error),
@@ -811,12 +843,17 @@ fn run_worker(state: &Path) -> Result<i32> {
     };
     loop {
         // Foreground authority checks announce themselves before opening SQLite.
-        // Never hold this probe while acquiring SQLite, avoiding lock inversion.
-        let allowed = {
-            let probe = priority(state, true)?;
-            probe.is_some()
+        // Every participating writer takes file custody before SQLite. The
+        // answer takes shared custody before any of its SQLite transactions.
+        let done = {
+            let publication = priority(state, true)?;
+            if publication.is_some() {
+                migration.step()?
+            } else {
+                false
+            }
         };
-        if allowed && migration.step()? {
+        if done {
             return Ok(0);
         }
         std::thread::sleep(Duration::from_millis(10));

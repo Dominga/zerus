@@ -1,5 +1,5 @@
-//! A person's answer may wait for a worker batch, within one request budget.
-//! Inspection and ordinary cache writers retain their own short busy timeouts.
+//! An answer has one bounded waiting budget shared by nested receipt checks.
+//! CPU work does not spend that budget; only actual lock waiting does.
 use super::*;
 use std::{
     cell::{Cell, RefCell},
@@ -9,44 +9,30 @@ use std::{
 
 const LIMIT: Duration = Duration::from_millis(750);
 thread_local! {
-    static UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
-    static QUESTIONS: RefCell<Option<(PathBuf, f64)>> = const { RefCell::new(None) };
+    static BUDGET: Cell<Option<Duration>> = const { Cell::new(None) };
+    static HARD_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+    static PRIORITIZED: Cell<usize> = const { Cell::new(0) };
+    static QUESTIONS: RefCell<Option<(PathBuf,f64)>> = const { RefCell::new(None) };
 }
-
 #[must_use]
 pub(crate) struct Wait {
-    previous: Option<Instant>,
+    outer: bool,
     previous_questions: Option<(PathBuf, f64)>,
     _priority: Option<Guard>,
-    // The SQLite callback and restoration both belong to this thread.
     _thread: PhantomData<Rc<()>>,
 }
 impl Wait {
     pub(crate) fn new() -> Self {
-        Self::until(Instant::now() + LIMIT)
-    }
-    #[cfg(test)]
-    pub(crate) fn for_answer(state: &Path) -> Result<Self> {
-        let mut wait = Self::new();
-        wait.prioritize(state)?;
-        Ok(wait)
-    }
-    pub(crate) fn prioritize(&mut self, state: &Path) -> Result<()> {
-        // Keep the worker handed off through all nested receipt checks and
-        // canonical publication, not only one discovery walk. A cached exact
-        // receipt remains readable before acquiring this optimization's lock.
-        self._priority = migration::priority(state, false)?;
-        Ok(())
-    }
-    fn until(deadline: Instant) -> Self {
-        let previous = UNTIL.with(|until| {
-            let previous = until.get();
-            until.set(Some(previous.map_or(deadline, |old| old.min(deadline))));
-            previous
+        let outer = BUDGET.with(|budget| {
+            let outer = budget.get().is_none();
+            if outer {
+                budget.set(Some(LIMIT));
+            }
+            outer
         });
         Self {
-            previous,
-            previous_questions: if previous.is_none() {
+            outer,
+            previous_questions: if outer {
                 QUESTIONS.with(|value| value.borrow_mut().take())
             } else {
                 None
@@ -55,19 +41,74 @@ impl Wait {
             _thread: PhantomData,
         }
     }
+    #[cfg(test)]
+    fn until(deadline: Instant) -> Self {
+        let wait = Self::new();
+        assert!(wait.outer);
+        HARD_UNTIL.with(|until| until.set(Some(deadline)));
+        wait
+    }
+    #[cfg(test)]
+    pub(crate) fn for_answer(state: &Path) -> Result<Self> {
+        let mut wait = Self::new();
+        wait.prioritize(state)?;
+        Ok(wait)
+    }
+    pub(crate) fn prioritize(&mut self, state: &Path) -> Result<()> {
+        // Exact cached receipts return before this optional-index custody.
+        if self._priority.is_none() {
+            self._priority = migration::priority(state, false)?;
+            if self._priority.is_some() {
+                PRIORITIZED.with(|count| count.set(count.get() + 1));
+            }
+        }
+        Ok(())
+    }
 }
 impl Drop for Wait {
     fn drop(&mut self) {
-        UNTIL.with(|until| until.set(self.previous));
-        if self.previous.is_none() {
+        if self._priority.is_some() {
+            PRIORITIZED.with(|count| count.set(count.get() - 1));
+        }
+        if self.outer {
+            BUDGET.with(|budget| budget.set(None));
+            HARD_UNTIL.with(|until| until.set(None));
             QUESTIONS.with(|value| *value.borrow_mut() = self.previous_questions.take());
         }
     }
 }
-
-// One root per native answer, cleared when its outer admission scope ends.
-// This only permits metadata reconciliation after this same request already
-// parsed the family. It never skips discovery, original stamps or coverage.
+pub(super) fn prioritized() -> bool {
+    PRIORITIZED.with(|count| count.get() > 0)
+}
+pub(super) fn remaining() -> Option<Duration> {
+    BUDGET.with(Cell::get).map(|left| {
+        HARD_UNTIL.with(Cell::get).map_or(left, |until| {
+            left.min(until.saturating_duration_since(Instant::now()))
+        })
+    })
+}
+pub(super) fn deadline() -> Option<Instant> {
+    remaining().map(|left| Instant::now() + left)
+}
+pub(super) fn pause(maximum: Duration) -> bool {
+    let Some(left) = remaining().filter(|left| !left.is_zero()) else {
+        return false;
+    };
+    let started = Instant::now();
+    std::thread::sleep(maximum.min(left));
+    BUDGET.with(|budget| {
+        budget.set(
+            budget
+                .get()
+                .map(|left| left.saturating_sub(started.elapsed())),
+        )
+    });
+    // Permit one immediate retry even when this consumed the last slice.
+    // A further busy callback then refuses without another sleep.
+    true
+}
+// This one-root hint only enables metadata reconciliation after this same
+// answer parsed the complete family. It ends with the outer request scope.
 pub(super) fn question_reconciled(state: &Path) -> Option<f64> {
     QUESTIONS.with(|value| {
         value
@@ -78,31 +119,18 @@ pub(super) fn question_reconciled(state: &Path) -> Option<f64> {
     })
 }
 pub(super) fn reconciled_question(state: &Path, at: f64) {
-    if UNTIL.with(Cell::get).is_some() && question_reconciled(state).is_none() {
+    if BUDGET.with(Cell::get).is_some() && question_reconciled(state).is_none() {
         QUESTIONS.with(|value| *value.borrow_mut() = Some((state.to_owned(), at)));
     }
 }
-
-pub(super) fn deadline() -> Option<Instant> {
-    UNTIL.with(Cell::get)
-}
-
 pub(super) fn install(db: &Connection) -> Result<()> {
-    if UNTIL.with(Cell::get).is_some() {
+    if BUDGET.with(Cell::get).is_some() {
         sql(db.busy_handler(Some(busy)))?;
     }
     Ok(())
 }
 fn busy(_attempt: i32) -> bool {
-    let Some(deadline) = UNTIL.with(Cell::get) else {
-        return false;
-    };
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return false;
-    }
-    std::thread::sleep(remaining.min(Duration::from_millis(10)));
-    Instant::now() < deadline
+    pause(Duration::from_millis(10))
 }
 
 #[cfg(test)]
@@ -110,34 +138,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_answer_has_one_fixed_750ms_deadline() {
-        assert!(UNTIL.with(Cell::get).is_none());
-        let before = Instant::now();
-        let wait = Wait::new();
-        let after = Instant::now();
-        let deadline = UNTIL.with(Cell::get).unwrap();
-        assert!(deadline >= before + Duration::from_millis(750));
-        assert!(deadline <= after + Duration::from_millis(750));
-        drop(wait);
-        assert!(UNTIL.with(Cell::get).is_none());
-        assert!(!busy(0));
-    }
-
-    #[test]
-    fn nested_checks_cannot_extend_an_expired_deadline() {
-        let expired = Instant::now() - Duration::from_secs(1);
-        let outer = Wait::until(expired);
+    fn an_answer_shares_one_750ms_waiting_budget_without_charging_cpu_work() {
+        assert_eq!(remaining(), None);
+        let answer = Wait::new();
+        assert_eq!(remaining(), Some(LIMIT));
+        std::thread::sleep(Duration::from_millis(3));
+        assert_eq!(
+            remaining(),
+            Some(LIMIT),
+            "ordinary processing is not SQLite waiting"
+        );
+        let left;
         {
             let _nested = Wait::new();
-            assert_eq!(UNTIL.with(Cell::get), Some(expired));
+            assert!(pause(Duration::from_millis(1)));
+            left = remaining().unwrap();
+            assert!(left < LIMIT);
+        }
+        assert_eq!(
+            remaining(),
+            Some(left),
+            "a nested check must not restore spent waiting time"
+        );
+        drop(answer);
+        assert_eq!(remaining(), None);
+        assert!(!busy(0));
+    }
+    #[test]
+    fn nested_checks_cannot_extend_an_expired_budget() {
+        let outer = Wait::until(Instant::now() - Duration::from_secs(1));
+        {
+            let _nested = Wait::new();
+            assert_eq!(remaining(), Some(Duration::ZERO));
             assert!(!busy(0));
             assert!(!busy(100));
         }
-        assert_eq!(UNTIL.with(Cell::get), Some(expired));
+        assert_eq!(remaining(), Some(Duration::ZERO));
         drop(outer);
-        assert!(UNTIL.with(Cell::get).is_none());
+        assert_eq!(remaining(), None);
     }
-
     #[test]
     fn new_connections_use_the_scope_and_ordinary_writers_keep_their_timeout() {
         let temp = tempfile::tempdir().unwrap();

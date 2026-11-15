@@ -1266,6 +1266,12 @@ impl Catalog {
     /// race: nothing changes and the next run retries. Any mismatch leaves no
     /// token at all, so readers stay unknown until a clean witness.
     pub(super) fn witness(&self) -> Result<Witnessed> {
+        self.witness_with(false)
+    }
+    fn witness_cooperative(&self) -> Result<Witnessed> {
+        self.witness_with(true)
+    }
+    fn witness_with(&self, cooperative: bool) -> Result<Witnessed> {
         let (epoch, schema, watermark, counts) = {
             let read = sql(self.db.unchecked_transaction())?;
             let epoch: String = sql(self.db.query_row(
@@ -1291,6 +1297,17 @@ impl Catalog {
             }
             sql(read.commit())?;
             (epoch, schema, watermark, counts)
+        };
+        // Count without foreground custody; acquire it only for publication.
+        // A newly arrived answer keeps its deadline and this witness stays old.
+        let _publication = if cooperative {
+            match migration::advisory_guard(&self.state) {
+                Ok(guard) => guard,
+                Err(error) if error == migration::FOREGROUND => return Ok(Witnessed::Raced),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
         };
         let write = sql(rusqlite::Transaction::new_unchecked(
             &self.db,
@@ -1861,6 +1878,7 @@ pub(in crate::state) fn remember_committed(
     };
     let remember = (|| -> Result<()> {
         let (state, filename) = receipt_location(path, source)?;
+        let _publication = migration::advisory_guard(&state)?;
         let catalog = Catalog::open(&state, true)?;
         let registered = (|| -> Result<()> {
             let transaction = sql(rusqlite::Transaction::new_unchecked(
@@ -1990,6 +2008,7 @@ fn persist_using(path: &Path, value: &Value, publish: impl FnOnce() -> Result<()
         let remember = (|| -> Result<()> {
             let parent = path.parent().ok_or("Invalid receipt path")?;
             let (state, _) = receipt_location(path, source)?;
+            let _publication = migration::advisory_guard(&state)?;
             let catalog = Catalog::open(&state, true)?;
             catalog.remember(source, path, value)?;
             // Only advance an already reconciled snapshot. A missed/legacy

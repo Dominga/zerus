@@ -1627,3 +1627,40 @@ fn changed_pages_keep_work_bounded_and_honor_the_files_filter() {
         uuid::Uuid::from_u128(40_002).to_string()
     );
 }
+
+#[test]
+fn another_sends_advisory_registration_yields_without_losing_its_original() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(temp.path(), true).unwrap();
+    let answer = admission::Wait::for_answer(temp.path()).unwrap();
+    let value = value(1, "wanted", "run", "", 1.0);
+    let path = temp
+        .path()
+        .join("input_receipts")
+        .join(format!("{}.json", string(&value, "request_id")));
+    let original = path.clone();
+    let contents = value.clone();
+    std::thread::spawn(move || persist(&original, &contents))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_original(&path).unwrap(), value);
+    let indexed: bool = catalog
+        .db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE source='terminal')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !indexed,
+        "an optional publisher must not contend with the active answer"
+    );
+    drop(answer);
+    assert_eq!(migration::worker(temp.path()).unwrap(), 0);
+    assert!(catalog
+        .cached_row(Source::Terminal, string(&value, "request_id"))
+        .unwrap()
+        .is_some());
+}

@@ -31,6 +31,7 @@ uniffi = "=0.32.2"
 zerus-replica = { path = "../replica" }
 
 [dev-dependencies]
+zerus-replica = { path = "../replica", features = ["test-support"] }
 zerus-mobile-endpoint = { path = "../../services/mobile/endpoint" }
 zerus-mobile-task-edit = { path = "../mobile-task-edit" }
 tempfile = "3"

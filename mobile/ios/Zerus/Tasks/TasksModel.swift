@@ -60,14 +60,22 @@ final class TasksModel {
         self.app = app
         self.replicas = replicas
         self.storageError = replicas == nil && storageError.isEmpty ? "The phone keeps no task storage." : storageError
-        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0) }
+        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0, mediaUnavailable: taskEditText("task_media_exchange_update"), heldSend: taskEditText("task_send_unknown_hold"), capabilities: { [weak app] in app?.machineFeatures ?? [:] }) }
     }
 
     private(set) var taskEditor: TaskEditorModel?
-    private func editorIdentity(_ session: Session) -> String {
-        for field in ["launch_id", "run_id"] { if case .string(let value)? = session.raw[field], !value.isEmpty { return field + ":" + value } }
-        return ""
+    private func editorIdentity(_ session: Session) -> String { TasksPresentation.nativeIdentity(session) }
+
+    func taskCurrentSession(_ ref: SessionRef) -> String? {
+        guard let key = tasksKey else { return nil }
+        return TasksPresentation.resolve(ref, machines: app.machines, connectionId: key.connectionId, sessions: projectSessions(key))?.target.session
     }
+    var displayedTaskChosen: ChosenSession? {
+        guard let chosen = tasksChosen else { return nil }
+        let ref = SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId)
+        return ChosenSession(name: taskCurrentSession(ref) ?? chosen.name, computerId: chosen.computerId, machineId: chosen.machineId, sessionId: chosen.sessionId)
+    }
+    func taskSessionLabel(_ task: TaskInfo) -> String { TasksPresentation.sessionLabel(task, chosen: displayedTaskChosen, current: taskCurrentSession) }
     func editorSessions(_ key: ProjectKey) -> [Session] {
         projectSessions(key).filter { session in
             app.machines.filter { $0.connectionId == key.connectionId && $0.id == session.target.computerId && !$0.machineId.isEmpty }.count == 1 && !editorIdentity(session).isEmpty
@@ -247,7 +255,7 @@ final class TasksModel {
     func sendRoute(_ task: TaskInfo) -> RouteState {
         guard let key = tasksKey else { return .blocked("No project") }
         if taskBusy { return .blocked("Another task action is running") }
-        if heldSends.contains(task.uuid) { return .blocked("It may have been sent already; its stage arrives with the next sync") }
+        if heldSends.contains(task.uuid) { return .blocked(taskEditText("task_send_unknown_hold")) }
         return TasksPresentation.route(task, chosen: tasksChosen, machines: app.machines, connectionId: key.connectionId,
                                        operations: taskOperations, sessions: projectSessions(key))
     }
@@ -263,7 +271,7 @@ final class TasksModel {
     func openTasks(_ session: Session) {
         guard let key = taskProject(session) else { return }
         let machine = app.machines.first { $0.connectionId == session.target.connectionId && $0.id == session.target.computerId }
-        showTasks(key, ChosenSession(name: session.target.session, computerId: session.target.computerId, machineId: machine?.machineId ?? ""))
+        showTasks(key, ChosenSession(name: session.target.session, computerId: session.target.computerId, machineId: machine?.machineId ?? "", sessionId: editorIdentity(session)))
     }
 
     /// Another session for Tasks only, keeping the tab; one of another project shows that project's tasks.
@@ -384,7 +392,7 @@ final class TasksModel {
             return
         }
         let stage: TaskStage = taskTab == .backlog ? .backlog : .todo
-        let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name))
+        let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId))
         editTasks { _ = try $0.add(text: text, stage: stage, target: target, position: .end) }
     }
 
@@ -472,7 +480,7 @@ final class TasksModel {
         let name = taskProjectName(key), computer = computerName(key, route.computerId)
         Task {
             let outcome = await taskSync.send(connection, key, name: name, computerId: route.computerId, task: task.uuid,
-                                              session: route.session, computerName: computer)
+                                              session: route.session, computerName: computer, sessionId: route.sessionId)
             taskNotice = switch outcome {
             case .done: "Sent to \(route.session)"
             case .refused(let reason): reason
@@ -531,12 +539,12 @@ final class TasksModel {
         doneExpanded = more || (keepExpanded && doneExpanded)
         var session: SessionRef?
         if tasksOnlyThisSession {
-            let reason = TasksPresentation.addReason(tasksChosen)
-            guard reason.isEmpty, let chosen = tasksChosen else {
+            let reason = TasksPresentation.addReason(displayedTaskChosen)
+            guard reason.isEmpty, let chosen = displayedTaskChosen else {
                 doneError = reason
                 return
             }
-            session = SessionRef(machine: chosen.machineId, session: chosen.name)
+            session = SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId)
         }
         guard let machine = doneComputer(key) else {
             doneError = "No computer of this project lists Done tasks now"

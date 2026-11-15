@@ -70,4 +70,6 @@
     <string name="task_media_files">Attachments</string>
     <string name="task_media_open_failed">The task attachment could not be opened. Refresh this task and try again.</string>
     <string name="task_edit_refresh_failed">Task saved. Refresh its project to see the latest copy.</string>
+    <string name="task_media_exchange_update">Update Zerus on this computer to transfer this task\'s media.</string>
+    <string name="task_send_unknown_hold">It may have been sent already; its stage arrives with the next sync</string>
 </resources>

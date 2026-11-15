@@ -1716,17 +1716,40 @@ pub(crate) fn admit_attempt<R>(
     admit_matching(config, net, project, uuid, deadline, None, reserve)
 }
 
-/// Prepare an ordinary write through Start's exact admission entry. The
-/// callback performs no business write, reserves no attempt and sends no input;
-/// the command reloads its task and checks its own authority afterward.
+/// Preserve protocol-only validation for an already sealed writer. An
+/// unsealed write uses Start's exact admission entry, whose callback makes no
+/// business write, attempt or input. The command reloads and checks authority
+/// afterward; protocol preparation must not replace its business refusals.
 pub(crate) fn prepare_write(
     config: &Config,
     net: &dyn Net,
     project: &str,
     uuid: &str,
     deadline: Instant,
-) -> Result<Admission<()>> {
-    admit_attempt(config, net, project, uuid, deadline, |_, _| Ok(Ok(())))
+) -> Result<std::result::Result<(), Closed>> {
+    {
+        let store =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+                .ok_or_else(|| anyhow::anyhow!("the candidate task store is busy"))?;
+        store.settle_cutover(uuid)?;
+        if store.pending_cutover_capture(uuid)?.is_none() {
+            let mut admitted = store
+                .admit_until(deadline)
+                .ok_or_else(|| anyhow::anyhow!("the candidate admission is busy"))?;
+            let task = admitted.load_complete(uuid)?;
+            if task.cutover_seal()?.is_some() {
+                admitted.cutover_ready(&task)?;
+                return Ok(Ok(()));
+            }
+        }
+    }
+    Ok(
+        match admit_attempt(config, net, project, uuid, deadline, |_, _| Ok(Ok(())))? {
+            Admission::Reserved { .. } => Ok(()),
+            Admission::Legacy(closed) | Admission::Refused(closed) => Err(closed),
+            Admission::Uncertain(reason) => anyhow::bail!(reason),
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

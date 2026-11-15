@@ -322,7 +322,7 @@ fn g1_legacy_existing_admitted_source(
     let deadline = started + Duration::from_secs(15);
     let answer = if writer {
         match prepare_write(&m.configs["a"], &net, "p", task.uuid(), deadline) {
-            Ok(Admission::Reserved { .. }) => Ok(()),
+            Ok(Ok(())) => Ok(()),
             other => Err(anyhow::anyhow!("write preparation refused: {other:?}")),
         }
     } else {
@@ -435,10 +435,7 @@ fn legacy_write_shares_start_with_slow_mac_and_unreachable_peer() {
         mac: m.ids["b"].clone(),
     };
     let admission = prepare_write(&m.configs["a"], &net, "p", task.uuid(), soon()).unwrap();
-    assert!(
-        matches!(admission, Admission::Reserved { .. }),
-        "{admission:?}"
-    );
+    assert!(admission.is_ok(), "{admission:?}");
     let current = held(&m, "a", task.uuid()).unwrap();
     assert_eq!(current.floor_record(), original.floor_record());
     assert_eq!(

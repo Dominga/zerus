@@ -5677,12 +5677,13 @@ as accepted current task writes. See
 `docs/superpowers/specs/2026-11-14-reachable-task-writer-cutover.md` for the exact
 root, native custody, importer/writer census and qualification boundaries.
 
-Ordinary edits and team cancellation use Start's same discovery and admission
-entry before their writer admission, with no business write in its preparation
+Ordinary edits and team cancellation of an unsealed task use Start's same
+discovery and admission entry, with no business write in its preparation
 callback. One original deadline reserves local settlement time before any
 remote preparation. Source lookup divides a bounded probe pool fairly, so slow
 optional readers cannot hide a later healthy original seal and cause a new
-floor to be minted. An older unsealed task with no floor is included in the bounded background pass; it need not be started first.
+floor to be minted. Already sealed tasks retain their native protocol
+validation and ordinary business rules. An older task with no floor is included in the bounded background pass; it need not be started first.
 Returning clean prefixes adopt the existing seal before any first-floor write,
 and extra old-rule writes still require review. A pending team cancellation
 recovers on its next due backoff pass once migration can finish; the person

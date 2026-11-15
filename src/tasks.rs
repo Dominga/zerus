@@ -1241,15 +1241,13 @@ fn change_guarded(
         )
         .map_err(fail)?
         {
-            crate::swarm::fence::Admission::Reserved { .. } => (),
-            crate::swarm::fence::Admission::Legacy(closed)
-            | crate::swarm::fence::Admission::Refused(closed) => {
+            Ok(()) => (),
+            Err(closed) => {
                 return Err(fail(format!(
                     "The task's migration is pending ({}). The edit was not applied.",
                     closed.reason
                 )))
             }
-            crate::swarm::fence::Admission::Uncertain(reason) => return Err(fail(reason)),
         }
         store = store_until(config, project_id, migration_deadline)?;
         task = store.load(&uuid).map_err(fail)?;

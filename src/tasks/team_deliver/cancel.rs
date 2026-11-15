@@ -123,11 +123,8 @@ pub(super) fn write(
     )
     .map_err(fail)?
     {
-        crate::swarm::fence::Admission::Reserved { .. } => (),
-        crate::swarm::fence::Admission::Legacy(_) | crate::swarm::fence::Admission::Refused(_) => {
-            return Err(cutting_over())
-        }
-        crate::swarm::fence::Admission::Uncertain(reason) => return Err(fail(reason)),
+        Ok(()) => (),
+        Err(_) => return Err(cutting_over()),
     }
     let tasks = super::super::store_until(config, &reference.project, deadline)?;
     let mut admitted = tasks.admit_until(deadline).ok_or_else(|| fail(BUSY))?;

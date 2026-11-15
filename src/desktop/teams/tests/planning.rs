@@ -51,6 +51,7 @@ fn planning_launches_only_its_lead_for_every_supported_agent() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn planning_pause_stop_and_final_admission_keep_the_roster_closed() {
     let mut h = harness("claude");
     let mut e = FakeEffects::default();
@@ -102,5 +103,15 @@ fn an_unknown_planning_launch_is_never_repeated_after_restart() {
     let mut replacement = runtime(&h);
     advance(&mut replacement, &mut h, &mut e, 40);
     assert_eq!(e.events, ["worktree:lead", "launch:lead"]);
+    assert_eq!(row(&h, "lead").state, State::LaunchUnknown);
+    assert!(
+        cards(&h).is_empty(),
+        "the original identity wait is still within its budget"
+    );
+    for _ in 0..5 {
+        replacement
+            .tick(&mut h.store, &mut e, TEAM, 301_234)
+            .unwrap();
+    }
     assert_eq!(cards(&h).iter().filter(|c| c.state == "open").count(), 1);
 }

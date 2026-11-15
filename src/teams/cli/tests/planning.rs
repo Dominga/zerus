@@ -19,7 +19,30 @@ fn start(h: &Harness) -> Value {
 }
 fn produced() -> Value {
     let h = Harness::new();
-    start(&h);
+    // Seed the real creation writer at the harness's fixed clock. The CLI
+    // creation/replay path is exercised separately; its wall-clock timestamp
+    // must not make a committed inbox fixture vary on every regeneration.
+    let input = input();
+    let field = |key: &str| input[key].as_str().unwrap().to_owned();
+    let bundle = zerus_team_plan::bundle(
+        &crate::teams::catalog::load(&h.config.dir).unwrap(),
+        "bugfix",
+    )
+    .unwrap();
+    h.apply(
+        &person(),
+        crate::teams::ops::Operation::StartPlanning {
+            expected_template: None,
+            delegations: None,
+            project: field("project"),
+            name: field("name"),
+            goal: field("goal"),
+            home: field("home"),
+            bundle: Box::new(bundle),
+            integration_branch: field("integration_branch"),
+            base_commit: field("base_commit"),
+        },
+    );
     let mut out = serde_json::Map::new();
     for command in ["status", "queue", "inbox"] {
         let (reply, exit) = h.cli(&Caller::Person, &format!("{command} --team {TEAM}"), "");

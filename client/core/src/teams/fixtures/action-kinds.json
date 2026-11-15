@@ -20,6 +20,7 @@
   "route",
   "set_deps",
   "settings",
+  "start_planning",
   "stop",
   "stop_member",
   "submit_draft_phase"

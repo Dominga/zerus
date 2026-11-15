@@ -76,6 +76,9 @@ fn create_roster(ctx: &Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn pause(ctx: &mut Context<'_>) -> Result<()> {
+    if ctx.team.status == TeamStatus::Planning {
+        return planning::pause(ctx, true);
+    }
     if ctx.team.status != TeamStatus::Running {
         return Err(invalid("Only a running team can be paused."));
     }
@@ -92,6 +95,9 @@ pub(super) fn pause(ctx: &mut Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn resume(ctx: &mut Context<'_>) -> Result<()> {
+    if ctx.team.status == TeamStatus::Planning {
+        return planning::pause(ctx, false);
+    }
     if ctx.team.status != TeamStatus::Paused {
         return Err(invalid("Only a paused team can be resumed."));
     }
@@ -115,7 +121,9 @@ pub(super) fn resume(ctx: &mut Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn stop(ctx: &mut Context<'_>) -> Result<()> {
-    ctx.active()?;
+    if ctx.team.status != TeamStatus::Planning {
+        ctx.active()?;
+    }
     // A stop settles older decisions and records cancellation commands; the
     // existing task writer still owns their actual task-state transitions.
     // A hosted delivery whose actor outcome was never recorded is settled

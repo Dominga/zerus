@@ -5,6 +5,7 @@ import { newRequestId, teams, type TeamOutcome, type TeamView } from "../../stor
 import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow } from "../../store/team-phases";
 import { PhaseDraftEditor, type DraftSnapshot } from "./PhaseDraftEditor";
 import { phaseHeader } from "./phaseHeader";
+import { PlanningNotice } from "./PlanningStart";
 import "../styles/team-phases.css";
 
 /** Layers groups the core's layer numbers. It computes no dependency order. */
@@ -78,6 +79,7 @@ export function PhasePane(props: {
     catch (cause) { setPageError(String(cause)); }
   };
   return <section class="phase-pane" data-phase-pane>
+    <PlanningNotice status={props.view.bar.status} goal={props.view.bar.goal} planning={props.view.planning} />
     <header class="phase-toolbar"><h2>{tr("Planned phases")}</h2><span class="grow" />
       <button type="button" class="btn small" disabled={!list()?.drafts_available || !!failed() || props.busy || !active()} onClick={create}>{tr("New phase draft")}</button>
       <button type="button" class="btn small" onClick={() => { setPageError(""); follower.select(selected()); }}>{tr("Read again")}</button>

@@ -15,6 +15,7 @@ mod journal;
 pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
+mod planning;
 mod queue;
 #[cfg(test)]
 pub(crate) use queue::injected;

@@ -198,7 +198,7 @@ impl Ledger {
         s: &Snapshot,
         team: &zerus_team_plan::model::Team,
     ) -> Result<Option<Plan>> {
-        if team.status != zerus_team_plan::model::TeamStatus::Running {
+        if !matches!(team.status, zerus_team_plan::model::TeamStatus::Running | zerus_team_plan::model::TeamStatus::Planning) || b.member != team.lead {
             return Ok(None);
         }
         if let Some(mut plan) = self.pending_brief(b)? {

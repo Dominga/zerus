@@ -26,7 +26,7 @@ pub(super) fn ring(
     let (Some(p), Some(session)) = (seen.filter(|p| p.idle()), lead.session.as_ref()) else {
         return Ok(None);
     };
-    if team.status != TeamStatus::Running || lead.state != MemberState::Active {
+    if !(team.status == TeamStatus::Running || (team.status == TeamStatus::Planning && store.planning(&team.id)?.is_some_and(|p| !p.paused))) || lead.state != MemberState::Active {
         return Ok(None);
     }
     let Some(view) = store.inbox_view(&team.id)? else {

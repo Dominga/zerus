@@ -107,6 +107,16 @@ impl Runtime {
         if team.home != self.machine {
             return Ok(());
         }
+        if team.status == TeamStatus::Planning {
+            // Planning has no task/reopen/stage/integration work. Its durable
+            // goal uses the existing lead inbox and witnessed doorbell route.
+            self.observe(store, ports, &team, now, safety)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if store.planning(id)?.is_some_and(|p| !p.paused) {
+                self.team_entry(store, ports, &team, now)?;
+            }
+            return Ok(());
+        }
         if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
             let settled = self.terminal_deliveries(store, &team, now);
             self.for_row(|_| settled)?;

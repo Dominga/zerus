@@ -46,6 +46,7 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::TellPausedStarted { .. }
         | Operation::ClosePausedStarted { .. } => service,
         Operation::Create { .. }
+        | Operation::StartPlanning { .. }
         | Operation::Stop
         | Operation::Archive
         | Operation::StopMember { .. }

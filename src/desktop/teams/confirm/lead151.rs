@@ -90,6 +90,7 @@ impl Ports for World {
             member: self.h.store.member(TEAM, "lead").unwrap().unwrap(),
             binding: self.b.clone(),
             preview: true,
+            planning_paused: self.h.store.planning(TEAM).unwrap().is_some_and(|p| p.paused),
         })
     }
     fn observe(&mut self, _: &Binding) -> Result<Snapshot> {

@@ -13,6 +13,7 @@ use zerus_team_plan::{
 };
 const MACHINE: &str = "00000000-0000-4000-8000-0000000000aa";
 const EPOCH: &str = "00000000-0000-4000-8000-000000000001";
+mod planning;
 
 struct FakeEffects {
     events: Vec<String>,

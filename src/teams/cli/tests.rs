@@ -13,6 +13,7 @@ mod harness;
 mod hosted;
 mod member_sessions;
 mod phases;
+mod planning;
 mod progress;
 mod progress157;
 mod reads;

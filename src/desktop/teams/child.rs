@@ -237,7 +237,7 @@ pub(super) fn admission(
     bound: bool,
 ) -> super::ports::Result<()> {
     use super::launch::invalid;
-    use zerus_team_plan::model::{MemberState, TeamStatus};
+    use zerus_team_plan::model::MemberState;
     let store = crate::teams::store::Store::open(&config.state)?;
     let team = store
         .team(&plan.team)?
@@ -248,7 +248,7 @@ pub(super) fn admission(
     let session = member.session.as_ref().is_some_and(|key| {
         key.machine == plan.machine && key.session_id == format!("launch_id:{}", plan.launch_id)
     });
-    if team.status != TeamStatus::Running
+    if !store.launch_allowed(&team, &plan.member)?
         || team.home != plan.machine
         || team.project != plan.project
         || team.owner != plan.person

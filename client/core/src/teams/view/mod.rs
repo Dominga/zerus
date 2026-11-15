@@ -13,6 +13,7 @@ pub mod board;
 pub mod graph;
 pub mod list;
 pub mod phases;
+pub mod planning;
 
 pub use board::team;
 pub use list::{list, waiting};
@@ -551,6 +552,8 @@ pub struct TeamBar {
 /// `hgs team status` and `hgs team queue` for the Team tab.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TeamView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning: Option<planning::PlanningState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<phases::PhasePane>,
     pub bar: TeamBar,

@@ -11,7 +11,7 @@ pub(super) fn set_session(ctx: &mut Context<'_>) -> Result<()> {
     else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state == MemberState::Removed || m.session.is_some() {
         return Err(invalid("Member is removed or already bound."));
@@ -65,7 +65,7 @@ pub(super) fn set_handle(ctx: &mut Context<'_>) -> Result<()> {
     else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let m = ctx.member(member)?;
     let Some((machine, launch)) = m
         .session
@@ -114,7 +114,7 @@ pub(super) fn set_state(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::SetMemberState { member, state } = ctx.op else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state == *state
         || m.state == MemberState::Removed
@@ -134,7 +134,7 @@ pub(super) fn pause(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::PauseMember { member } = ctx.op else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state != MemberState::Active {
         return Err(invalid("Only an active member can be paused."));
@@ -146,7 +146,7 @@ pub(super) fn resume(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::ResumeMember { member } = ctx.op else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state != MemberState::Paused
         || m.session.is_none()
@@ -167,7 +167,7 @@ pub(super) fn stop(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::StopMember { member } = ctx.op else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if !matches!(m.state, MemberState::Active | MemberState::Paused)
         || ctx.person_stopped(member)?
@@ -187,7 +187,7 @@ pub(super) fn archive(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::ArchiveMember { member } = ctx.op else {
         unreachable!()
     };
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state == MemberState::Removed || m.id == ctx.team.lead {
         return Err(invalid("The member cannot be removed."));
@@ -426,7 +426,7 @@ pub(super) fn unbind(ctx: &mut Context<'_>) -> Result<()> {
         unreachable!()
     };
     let member = member.as_str();
-    ctx.active()?;
+    planning::member_lifecycle(ctx, member)?;
     let mut m = ctx.member(member)?;
     if m.state != MemberState::Active || m.session.is_none() {
         return Err(invalid("Only an active bound member can be unbound."));

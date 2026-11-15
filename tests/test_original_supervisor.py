@@ -92,6 +92,12 @@ class OwnedProfile(Base):
         self.assertEqual(str(test_pause.HGS), os.environ['HGS_TEST_OWNED_SUPERVISOR_BIN'])
         self.env['TMPDIR'] = str(self.root)
 
+    def tearDown(self):
+        # Release this exact self-bounded fixture before its parent namespaces
+        # can disappear, including an assertion or setup error.
+        (self.root/'release-daemon').touch()
+        Base.tearDown(self)
+
     def test_actual_original_owner_survives_the_old_budget_and_refuses_legacy_termination(self):
         name = self.start('codex')
         self.wait(lambda: self.binding(name).get('activity') == 'idle')
@@ -138,7 +144,7 @@ sys.exit(17)
         self.wait(lambda: (self.root/'daemon-ready').exists())
         original = self.binding(name)
         endpoint = test_pause.Path(original['original_owner']['endpoint'])
-        self.t('send-keys', '-t', '='+name, 'quiet-exit', 'Enter')
+        self.t('send-keys', '-t', original['pane'], 'quiet-exit', 'Enter')
         self.wait(lambda: (self.root/'daemon-adopted').exists())
         self.assertEqual(int((self.root/'daemon-adopted').read_text()), original['supervisor']['pid'])
         self.assertTrue(endpoint.exists())

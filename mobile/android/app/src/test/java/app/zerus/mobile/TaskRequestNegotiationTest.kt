@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import app.zerus.mobile.replica.SessionRef
+import app.zerus.mobile.replica.TaskMediaInput
 import app.zerus.mobile.replica.TaskPosition
 import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskStore
@@ -27,7 +28,9 @@ class TaskRequestNegotiationTest {
     private val roster = WorkspaceMembership.parse(fixture.getJSONObject("final_state"))
     private val hostKey = MachineKey("workspace-a", "computer-1")
     private data class World(val connection: Connection, val project: ProjectKey, val sync: TaskSync, val task: String,
-                             val calls: MutableList<JSONObject>, @Volatile var outcome: String = "completed")
+                             val calls: MutableList<JSONObject>, val computer: TaskStore, val replicas: TaskReplicas,
+                             @Volatile var outcome: String = "completed", @Volatile var beforeSend: () -> Unit = {},
+                             @Volatile var modifyExchange: (JSONObject) -> Unit = {})
     private fun world(features: Map<MachineKey, Set<String>> = mapOf(hostKey to setOf("task_session_identity_v2")),
                       protocol: Int = 2, block: suspend (World) -> Unit) = runBlocking {
         MockWebServer().use { server ->
@@ -43,7 +46,7 @@ class TaskRequestNegotiationTest {
                 val task = computer.add("Private requirement", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
                 val replicas = TaskReplicas(folders.newFolder())
                 val world = World(connection, key, TaskSync({ RelayApi(workspace = journal) }, replicas, capabilities = { features }),
-                    task.uuid, Collections.synchronizedList(mutableListOf()))
+                    task.uuid, Collections.synchronizedList(mutableListOf()), computer, replicas)
                 server.dispatcher = object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         if (request.path!!.startsWith("/v2/membership")) return MockResponse().setBody(JSONObject().put("changes", JSONArray())
@@ -58,9 +61,10 @@ class TaskRequestNegotiationTest {
                         } ?: outer
                         world.calls += clear
                         val operation = clear.getString("operation"); val payload = clear.getJSONObject("payload")
+                        if (operation == "task_send") world.beforeSend()
                         val state = if (operation == "task_send") world.outcome else "completed"
                         val result: Any = when (operation) {
-                            "task_exchange" -> JSONObject(computer.answerExchange(payload.toString()))
+                            "task_exchange" -> JSONObject(computer.answerExchange(payload.toString())).also { world.modifyExchange(it) }
                             "task_done" -> JSONObject().put("schema", 1).put("tasks", JSONArray()).put("next", JSONObject.NULL)
                                 .put("total", 0).put("recent", 0).put("damaged", 0)
                             else -> JSONObject.NULL
@@ -114,4 +118,56 @@ class TaskRequestNegotiationTest {
         val payload = w.calls.single { it.getString("operation") == "task_done" }.getJSONObject("payload")
         assertEquals(2, payload.getInt("schema")); assertEquals("launch_id:original", payload.getJSONObject("session").getString("session_id"))
     }
+    private suspend fun largeMedia(w: World): ByteArray {
+        w.sync.exchangeNow(w.connection, w.project, "Fixture", "computer-1")
+        val data = ByteArray(900 * 1024).also { java.util.Random(7).nextBytes(it) }
+        w.replicas.store(w.project, "Fixture").use { phone ->
+            val original = phone.get(w.task)
+            phone.editContent(w.task, original.text, emptyList(), listOf(TaskMediaInput("fixture.png", "image/png", data)), original.contentRevision)
+        }
+        w.calls.clear()
+        return data
+    }
+    private fun uploadFrames(w: World) = w.calls.filter { it.getString("operation") == "task_exchange" }.flatMap { call ->
+        call.getJSONObject("payload").optJSONArray("updates")?.objects().orEmpty().map { java.util.Base64.getDecoder().decode(it.getString("bytes")) }
+    }.filter { it.size >= 8 && it.copyOfRange(0, 8).contentEquals("ZERUSUP1".toByteArray()) }
+    private fun verifyMedia(w: World, data: ByteArray) {
+        val media = w.computer.media(w.task, null).single()
+        assertArrayEquals(data, w.computer.readMedia(w.task, null, 0u, media.token).data)
+    }
+    @Test fun advertisedUploadDeliversEveryByteBeforeTheNativeAction() = world(mapOf(hostKey to setOf("task_media_upload_v1"))) { w ->
+        val data = largeMedia(w); val before = java.util.concurrent.atomic.AtomicInteger()
+        w.beforeSend = { verifyMedia(w, data); before.incrementAndGet() }
+        assertEquals(TaskOutcome.Done, send(w)); assertEquals(1, before.get())
+        assertTrue(uploadFrames(w).size >= 2); verifyMedia(w, data)
+    }
+    @Test fun aDownlevelOrForeignUploadAdvertisementKeepsMediaAndSendsNothing() {
+        for (features in listOf(emptyMap(), mapOf(MachineKey("workspace-a", "other") to setOf("task_media_upload_v1")),
+            mapOf(MachineKey("other", "computer-1") to setOf("task_media_upload_v1")))) world(features) { w ->
+            largeMedia(w); val result = send(w)
+            assertTrue(result.toString(), result is TaskOutcome.Refused)
+            assertTrue(w.calls.none { it.getString("operation") == "task_send" }); assertTrue(uploadFrames(w).isEmpty())
+            assertTrue(w.computer.media(w.task, null).isEmpty())
+            w.replicas.store(w.project, "Fixture").use { assertEquals(1, it.media(w.task, null).size) }
+        }
+    }
+    @Test fun anUploadAcknowledgementMismatchNeverFallsBackOrRunsAnAction() = world(mapOf(hostKey to setOf("task_media_upload_v1"))) { w ->
+        largeMedia(w)
+        w.modifyExchange = { answer -> answer.optJSONObject("upload")?.let { it.put("offset", it.getLong("offset") + 1) } }
+        assertTrue(send(w) is TaskOutcome.Refused)
+        assertEquals(1, uploadFrames(w).size); assertTrue(w.calls.none { it.getString("operation") == "task_send" })
+        assertTrue(w.computer.media(w.task, null).isEmpty())
+    }
+    @Test fun uploadModeStaysBoundToItsOriginalAdvertisedExchange() {
+        val advertised = java.util.concurrent.ConcurrentHashMap<MachineKey, Set<String>>()
+        advertised[hostKey] = setOf("task_media_upload_v1")
+        world(advertised) { w ->
+            val data = largeMedia(w)
+            w.modifyExchange = { if (it.has("upload")) advertised.clear() }
+            w.beforeSend = { verifyMedia(w, data) }
+            assertEquals(TaskOutcome.Done, send(w)); assertTrue(uploadFrames(w).size >= 2)
+            assertTrue(advertised.isEmpty())
+        }
+    }
+
 }

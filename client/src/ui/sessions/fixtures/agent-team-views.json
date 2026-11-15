@@ -172,13 +172,39 @@
         "state": "cancelled"
       }
     ],
+    "member_roles": [
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "developer",
+        "model": "",
+        "name": "Developer"
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "reviewer",
+        "model": "",
+        "name": "Reviewer"
+      }
+    ],
     "members": [
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
         "id": "lead",
         "lead": true,
         "model": null,
+        "open_work": 0,
         "person_stopped": false,
         "role": "lead",
         "session": {
@@ -189,10 +215,14 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
         "id": "m1",
         "lead": false,
         "model": null,
+        "open_work": 1,
         "person_stopped": false,
         "role": "developer",
         "session": {
@@ -203,10 +233,14 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
         "id": "m2",
         "lead": false,
         "model": null,
+        "open_work": 0,
         "person_stopped": false,
         "role": "developer",
         "session": {
@@ -217,10 +251,14 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
         "id": "m3",
         "lead": false,
         "model": null,
+        "open_work": 0,
         "person_stopped": false,
         "role": "reviewer",
         "session": {

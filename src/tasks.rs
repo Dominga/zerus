@@ -53,7 +53,7 @@ const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not recor
 
 // The Teams actor's measurement of a removed reviewer's stage (zerus-63rru.77).
 #[cfg(all(test, unix))]
-pub(crate) use team_deliver::{removed_stage_cancel, RealCancel};
+pub(crate) use team_deliver::{removed_stage_cancel, with_legacy_cancel, RealCancel};
 
 /// Whether a failed send may have pasted its prompt: it was sent but not
 /// recorded, or its delivery is uncertain (the paste began, Enter or the
@@ -1154,18 +1154,31 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
     change_guarded(config, action, args, wait, None)
 }
 
-fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
+fn change_guarded(
+    config: &Config,
+    action: &str,
+    args: &[String],
+    wait: Option<std::time::Duration>,
+    guard: Option<&cancellation::Guard>,
+) -> Result<Value> {
     let team = teams::target(config, action, args)?;
-    // A send's or handoff's attempt has one budget from here (C3 A3).
-    let deadline = std::time::Instant::now() + attempts::BUDGET;
-    let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
+    let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) {
+        Some(stdin_content(args)?)
+    } else {
+        None
+    };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
-        "comment" => Some(match &content { Some(content) => content.text.clone(), None => stdin_text("comment")? }),
+        "comment" => Some(match &content {
+            Some(content) => content.text.clone(),
+            None => stdin_text("comment")?,
+        }),
         "report" | "report-attempt" => Some(stdin_text("report")?),
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
+    // The immutable command input is read before its one writer budget.
+    let deadline = std::time::Instant::now() + attempts::BUDGET;
     // A send or handoff reads the catalog and waits for the project within
     // its one budget, from here (#1519 review, zerus-9gzdp).
     let attempted = matches!(action, "send" | "handoff");
@@ -1176,13 +1189,26 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         (machines(config)?, None)
     };
     let here = machines.here.as_str();
-    let mut who = teams::actor(config, &machines, args, matches!(action, "send" | "handoff" | "cancel"), team.is_some())?;
+    let mut who = teams::actor(
+        config,
+        &machines,
+        args,
+        matches!(action, "send" | "handoff" | "cancel"),
+        team.is_some(),
+    )?;
     if let Some(text) = &text {
-        if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
+        if action != "edit" || !text.is_empty() {
+            agent_text(text, action, &who)?;
+        }
     }
-    let r = reference_by(config, args, &who, projects.as_deref().map(|p| (p, deadline)))?;
+    let r = reference_by(
+        config,
+        args,
+        &who,
+        projects.as_deref().map(|p| (p, deadline)),
+    )?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
-    let store = match wait {
+    let mut store = match wait {
         None if attempted => store_until(config, project_id, deadline)?,
         None => store(config, project_id)?,
         Some(wait) => {
@@ -1197,7 +1223,46 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     };
     let mut task = find(&store, &r.task)?;
-    if let Some(actor) = teams::actor_for_marked_task(config, &machines, args, matches!(action, "send" | "handoff" | "cancel"), &task)? { who = actor; }
+    if (!attempted || team.is_some())
+        && action != "start"
+        && task.cutover_seal().map_err(fail)?.is_none()
+    {
+        let uuid = task.uuid().to_owned();
+        drop(store);
+        // The same root migration as Start, before any ordinary edit. No
+        // project/catalog lock spans the network; the task is read afresh.
+        let migration_deadline = wait.map_or(deadline, |wait| {
+            deadline.min(std::time::Instant::now() + wait)
+        });
+        match crate::swarm::fence::prepare_write(
+            config,
+            &crate::swarm::fence::Ssh(config),
+            project_id,
+            &uuid,
+            migration_deadline,
+        )
+        .map_err(fail)?
+        {
+            Ok(()) => (),
+            Err(closed) => {
+                return Err(fail(format!(
+                    "The task's migration is pending ({}). The edit was not applied.",
+                    closed.reason
+                )))
+            }
+        }
+        store = store_until(config, project_id, migration_deadline)?;
+        task = store.load(&uuid).map_err(fail)?;
+    }
+    if let Some(actor) = teams::actor_for_marked_task(
+        config,
+        &machines,
+        args,
+        matches!(action, "send" | "handoff" | "cancel"),
+        &task,
+    )? {
+        who = actor;
+    }
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
     // that happened is never reworded. A command another computer forwards
     // (`--agent`) leaves the wording to that computer, where the agent reads it.
@@ -1214,13 +1279,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     };
 
-    if let Some(guard) = guard { guard.check(&task)?; }
+    if let Some(guard) = guard {
+        guard.check(&task)?;
+    }
     {
         let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
         teams::guard(config, &machines, &task, action, args, &mut meeting)?;
     }
     if let Some(team) = &team {
-        let task_ref = zerus_team_plan::model::TaskRef { project:project_id.clone(), uuid:task.uuid().into() };
+        let task_ref = zerus_team_plan::model::TaskRef {
+            project: project_id.clone(),
+            uuid: task.uuid().into(),
+        };
         drop(store);
         let mut reply = teams::send(config, &machines, &task_ref, team, args)?;
         let store = self::store(config, project_id)?;
@@ -1231,38 +1301,58 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     // Explicit worker registration inspects the native roster once, after the
     // team guard under the project lock. Normal task listings never query providers for every row.
     let worker_proof = if action == "worker" {
-        let Actor::Agent(own) = &who else { return Err(fail("worker is for the task's coordinator")); };
+        let Actor::Agent(own) = &who else {
+            return Err(fail("worker is for the task's coordinator"));
+        };
         let id = option(args, "--subagent")?.ok_or_else(|| fail("worker needs --subagent ID"))?;
-        let request = option(args, "--request-id")?.ok_or_else(|| fail("worker needs the current --request-id"))?;
-        let caller = crate::state::session_graph::caller_record().ok_or_else(|| fail("the coordinator run is no longer live"))?;
+        let request = option(args, "--request-id")?
+            .ok_or_else(|| fail("worker needs the current --request-id"))?;
+        let caller = crate::state::session_graph::caller_record()
+            .ok_or_else(|| fail("the coordinator run is no longer live"))?;
         let details = crate::state::reference_details(&own.session, "", "").map_err(fail)?;
         let worker = observed_worker(own, &caller, &details, id, request)?;
         Some(worker)
-    } else { None };
-    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
+    } else {
+        None
+    };
+    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() {
+        agent_text("", action, &who)?;
+    }
     enrich(&mut task, &machines)?;
     if let Some(expected) = option(args, "--expect-new-session-parent")? {
-        if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
-            return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
+        if action != "send"
+            || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected)
+        {
+            return Err(fail(
+                "task assignment changed while the new executor was starting; nothing was sent",
+            ));
         }
     }
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
         "handoff" => {
             handoff_check(&task, &who)?;
-            let name = option(args, "--session")?.ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
+            let name = option(args, "--session")?
+                .ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
             let to = machines.target(machines.node(option(args, "--host")?)?, name, args)?;
-            if task.session().as_ref() == Some(&to) { return Err(fail("choose another session for the handoff")); }
+            if task.session().as_ref() == Some(&to) {
+                return Err(fail("choose another session for the handoff"));
+            }
             Some((to, false))
         }
         "send" => Some(send_session(&task, args, &who, &machines)?),
         // Only a task In progress is cancelled; this computer refuses anything else.
-        "cancel" if task.stage().map_err(fail)? == Stage::Active => {
-            task.view().map_err(fail)?.session.map(|session| (machines.resolve(&session).unwrap_or(session), false))
-        }
+        "cancel" if task.stage().map_err(fail)? == Stage::Active => task
+            .view()
+            .map_err(fail)?
+            .session
+            .map(|session| (machines.resolve(&session).unwrap_or(session), false)),
         _ => None,
     };
-    if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
+    if let Some((session, _)) = session
+        .as_ref()
+        .filter(|(session, _)| session.machine != here)
+    {
         // An agent reads the session with its computer: "codex/api on mac".
         let to = match machines.alias(&session.machine) {
             Some(alias) => format!("{} on {alias}", session.session),
@@ -1277,10 +1367,14 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         drop(store);
         let out = match reach(config, &machines, project_id, session) {
             // That computer words its own refusals (see `forwarded`).
-            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who, guard)?,
+            Ok(alias) => forwarded(
+                config, &machines, &r.project, &uuid, action, args, session, &alias, &who, guard,
+            )?,
             // A cancel goes through while that computer is out of reach: the task
             // moves to In review here and its session is not told.
-            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason, guard)?,
+            Err(reason) if action == "cancel" => cancel_here(
+                config, &machines, &r.project, &uuid, args, &who, reason, guard,
+            )?,
             Err(reason) => return Err(refuse(fail(reason), &to)),
         };
         return Ok(with_answer(&who, action, out, 0, &to));
@@ -1336,37 +1430,72 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let mut destination = String::new();
     let mut minimal_report_reply = false;
     match action {
-        "worker" => { task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now()).map_err(fail)?; task.record_start(&who, now()).map_err(fail)?; },
+        "worker" => {
+            task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now())
+                .map_err(fail)?;
+            task.record_start(&who, now()).map_err(fail)?;
+        }
         "start" => task.record_start(&who, now()).map_err(fail)?,
-        "rename" => { task.set_title(&text, &who, now()).map_err(fail)?; store.check_prompt(&task, project_name).map_err(fail)?; },
+        "rename" => {
+            task.set_title(&text, &who, now()).map_err(fail)?;
+            store.check_prompt(&task, project_name).map_err(fail)?;
+        }
         "edit" => {
             store
                 .edit_task(&mut task, &text, &who, project_name, now())
                 .map_err(fail)?;
-            if let Some(files) = content.and_then(|content| content.attachments) { task.set_attachments(&files, &who, now()).map_err(fail)?; }
+            if let Some(files) = content.and_then(|content| content.attachments) {
+                task.set_attachments(&files, &who, now()).map_err(fail)?;
+            }
         }
-        "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
+        "comment" => task
+            .comment_with_attachments(
+                &text,
+                &content
+                    .and_then(|content| content.attachments)
+                    .unwrap_or_default(),
+                &who,
+                now(),
+            )
+            .map_err(fail)?,
         "report" | "report-attempt" => {
             let progress = flag(args, "--progress");
             if progress && flag(args, "--ready") {
                 return Err(fail("choose --progress or --ready"));
             }
             let considered = option(args, "--considered")?
-                .map(|value| value.parse::<u64>().ok().filter(|n| *n >= 1)
-                    .ok_or_else(|| fail("--considered is a requirement revision from 1")))
+                .map(|value| {
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| fail("--considered is a requirement revision from 1"))
+                })
                 .transpose()?;
-            let kind = if progress { ReportKind::Progress } else { ReportKind::Ready };
-            let origin = if action == "report-attempt" { option(args, "--attempt")? } else { None };
+            let kind = if progress {
+                ReportKind::Progress
+            } else {
+                ReportKind::Ready
+            };
+            let origin = if action == "report-attempt" {
+                option(args, "--attempt")?
+            } else {
+                None
+            };
             let managed_agent = task.execution_managed() && matches!(&who, Actor::Agent(_));
             let decision = match origin {
                 Some(id) => task.report_attempt(id, &text, kind, considered, &who, now()),
                 None => task.report(&text, kind, considered, &who, now()),
-            }.map_err(fail)?;
+            }
+            .map_err(fail)?;
             extra = json!({"moved_to_review": decision.moves, "report": if progress { "progress" } else { "ready" }});
-            if let Some(stale) = decision.stale { extra["stale"] = json!(stale); }
+            if let Some(stale) = decision.stale {
+                extra["stale"] = json!(stale);
+            }
             if managed_agent || origin.is_some() {
                 let applied = decision.stale.is_none()
-                    && (decision.moves || (progress && task.stage().map_err(fail)? == Stage::Active));
+                    && (decision.moves
+                        || (progress && task.stage().map_err(fail)? == Stage::Active));
                 extra["outcome"] = json!(if applied { "applied" } else { "not_applied" });
                 extra["history_saved"] = json!(true);
                 if !applied {
@@ -1392,11 +1521,19 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             } else {
                 return Err(fail(USAGE));
             };
-            placed(&store, |placement| store.reorder_placed(placement, &mut task, &position).map_err(fail))?;
+            placed(&store, |placement| {
+                store
+                    .reorder_placed(placement, &mut task, &position)
+                    .map_err(fail)
+            })?;
         }
         "stage" => {
             let to = Stage::parse(args.get(1).ok_or_else(|| fail(USAGE))?).map_err(fail)?;
-            placed(&store, |placement| store.change_stage_placed(placement, &mut task, to, &who, now()).map_err(fail))?;
+            placed(&store, |placement| {
+                store
+                    .change_stage_placed(placement, &mut task, to, &who, now())
+                    .map_err(fail)
+            })?;
         }
         "target" => {
             let value = args.get(1).ok_or_else(|| fail(USAGE))?;
@@ -1404,13 +1541,23 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
                 return Err(fail("--host needs a --target session"));
             }
             let target = if matches!(value.as_str(), "new-session" | "subagent") {
-                let parent = option(args, "--parent")?.ok_or_else(|| fail("choose --parent SESSION for a new executor"))?;
-                let parent = machines.target(machines.node(option(args, "--host")?)?, parent, args)?;
-                if value == "new-session" { Target::NewSession { parent } } else { Target::Subagent { parent } }
+                let parent = option(args, "--parent")?
+                    .ok_or_else(|| fail("choose --parent SESSION for a new executor"))?;
+                let parent =
+                    machines.target(machines.node(option(args, "--host")?)?, parent, args)?;
+                if value == "new-session" {
+                    Target::NewSession { parent }
+                } else {
+                    Target::Subagent { parent }
+                }
             } else if value == "any" {
                 Target::Any
             } else {
-                Target::Session(machines.target(machines.node(option(args, "--host")?)?, value, args)? )
+                Target::Session(machines.target(
+                    machines.node(option(args, "--host")?)?,
+                    value,
+                    args,
+                )?)
             };
             task.set_target(&target, &who, now()).map_err(fail)?;
             teams::clear(config, here, &mut task, &who)?;
@@ -1430,7 +1577,17 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             )
             .map_err(|e| refuse(e, &destination))?;
         }
-        "cancel" => extra = cancel(&store, &machines, &mut task, project_name, cancellation::reason(args, guard)?, &who, None)?,
+        "cancel" => {
+            extra = cancel(
+                &store,
+                &machines,
+                &mut task,
+                project_name,
+                cancellation::reason(args, guard)?,
+                &who,
+                None,
+            )?
+        }
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(|e| {
@@ -1441,16 +1598,34 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             fail(e)
         }
     })?;
-    let at = if action == "move" { place(&store, &task)? } else { 0 };
+    let at = if action == "move" {
+        place(&store, &task)?
+    } else {
+        0
+    };
     let reply_task = if minimal_report_reply {
         json!({"ref":format!("{project_name}/{}",task.id()),"id":task.id(),"uuid":task.uuid(),"stage":task.stage().map_err(fail)?.as_str()})
-    } else { view(&task, project_name, guard.is_none(), &machines)? };
+    } else {
+        view(&task, project_name, guard.is_none(), &machines)?
+    };
     let mut out = json!({"task": reply_task});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }
-    if action == "start" { reports::started(&mut out, &task, project_name)?; }
-    let out = with_answer(&who, if action == "report-attempt" { "report" } else { action }, out, at, &destination);
+    if action == "start" {
+        reports::started(&mut out, &task, project_name)?;
+    }
+    let out = with_answer(
+        &who,
+        if action == "report-attempt" {
+            "report"
+        } else {
+            action
+        },
+        out,
+        at,
+        &destination,
+    );
     drop(store);
     Ok(out)
 }

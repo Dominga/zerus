@@ -16,6 +16,7 @@ pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS timer_answer_bells (
   WHERE state IN ('reserved','submitted','uncertain');
  CREATE INDEX IF NOT EXISTS timer_answer_counted ON timer_answer_bells(team,member,run,conversation,node,generation,mark)
   WHERE state IN ('reserved','submitted','uncertain');
+ CREATE INDEX IF NOT EXISTS timer_answer_unresolved ON timer_answer_bells(team,member,machine,session) WHERE state IN ('reserved','uncertain');
  CREATE INDEX IF NOT EXISTS timer_answer_open ON timer_answer_bells(team) WHERE state='reserved';";
 pub(in crate::desktop::teams) mod sql {
     pub const MARK: &str = "SELECT COALESCE(MAX(mark),0) FROM timer_answer_bells WHERE team=?1 AND member=?2 AND run=?3 AND conversation=?4 AND state IN ('reserved','submitted','uncertain')";

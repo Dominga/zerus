@@ -91,7 +91,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     // in the native resume recipe, where a later resume could replay it.
     let native_kimi = ["kimi", "kimi.exe", "kimi.cmd"].contains(&Path::new(&base[0])
         .file_name().and_then(|name| name.to_str()).unwrap_or(""));
-    let mut launch_prompt = if agent == "kimi" && native_kimi && base.len() > 1 {
+    let launch_prompt = if agent == "kimi" && native_kimi && base.len() > 1 {
         // Resolve after the account's login shell and environment assignments.
         // Probe and spawn the same absolute path, including PATH-local installs
         // and Windows npm shims. A project run_kimi.sh owns its own argv contract
@@ -195,6 +195,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let mut replaced = None;
         if expected.is_none() && record_path(&name).exists() {
             let previous = read(&name)?;
+            supervisor::check_relaunch(&previous)?;
             if replaces.as_deref().is_some_and(|run| run != string(&previous, "run_id")) {
                 return Err(format!("{name}: saved binding changed before a fresh start"));
             }
@@ -279,6 +280,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         let resumed = expected.is_some();
         if let Some(expected) = expected {
             let previous = read(&name)?;
+            supervisor::check_relaunch(&previous)?;
             refuse_unsettled_clear(&previous)?;
             if string(&previous, "conversation_id") != expected
                 || string(&previous, "agent") != agent
@@ -415,10 +417,23 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         eprintln!("hgs: tracking needs trusted hooks (review /hooks if prompted)");
     }
-    let mut theme = claude_theme::Ticket::new(&agent, &session_id, &token);
+    let theme = claude_theme::Ticket::new(&agent, &session_id, &token);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if supervisor::ORIGINAL_OWNER {
+        return run_agent(supervisor::spawn_owned, first, base, name, token, theme, launch_prompt);
+    }
+    run_agent(spawn_agent, first, base, name, token, theme, launch_prompt)
+}
+
+// Static dispatch preserves the legacy spawn/wait operations when the gate is off.
+fn run_agent<C: supervisor::ChildStatus>(
+    spawn: fn(&[String], &str, &str) -> Result<supervisor::Spawned<C>>,
+    first: Vec<String>, base: Vec<String>, name: String, token: String,
+    mut theme: Option<claude_theme::Ticket>, mut launch_prompt: Option<kimi_launch::Prompt>,
+) -> Result<i32> {
     if !first.is_empty() {
         let started = Instant::now();
-        let mut spawned = spawn_agent(&first, &name, &token)?;
+        let mut spawned = spawn(&first, &name, &token)?;
         let child_id = spawned.child.id();
         let status = if let Some(ticket) = theme.as_mut() {
             claude_theme::wait(&mut spawned, ticket)?
@@ -430,7 +445,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             let current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
             !string(&current, "conversation_id").is_empty() || current.get("pausing").is_some()
-                || terminating::pending(&current)
+                || terminating::pending(&current) || supervisor::owned_pending(&current)
         };
         let fallback = nonempty_env("HGS_FALLBACK_SECS")
             .unwrap_or_else(|| "5".into())
@@ -446,22 +461,31 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             return Ok(ExitInfo::of(status).exit_code());
         }
         eprintln!("hgs: nothing to resume — starting fresh");
-        {
+        let fallback_admitted = {
             let _guard = lock(None)?;
             let mut current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
-            terminating::check_mutation(&current)?;
-            current["pid"] = json!(std::process::id());
-            current["process_start"] = json!(process_start(std::process::id()));
-            current["activity"] = json!("unknown");
-            current["conversation_id"] = Value::Null;
-            current["transcript"] = Value::Null;
-            current.as_object_mut().unwrap().remove("cleared_conversations");
-            current["startup_kind"] = json!("new");
-            write(&mut current)?;
+            if supervisor::owned_pending(&current) {
+                false
+            } else {
+                terminating::check_mutation(&current)?;
+                current["pid"] = json!(std::process::id());
+                current["process_start"] = json!(process_start(std::process::id()));
+                current["activity"] = json!("unknown");
+                current["conversation_id"] = Value::Null;
+                current["transcript"] = Value::Null;
+                current.as_object_mut().unwrap().remove("cleared_conversations");
+                current["startup_kind"] = json!("new");
+                write(&mut current)?;
+                true
+            }
+        };
+        if !fallback_admitted {
+            supervisor::finish(&name, &token, child_id, status)?;
+            return Ok(ExitInfo::of(status).exit_code());
         }
     }
-    let mut spawned = spawn_agent(&base, &name, &token)?;
+    let mut spawned = spawn(&base, &name, &token)?;
     let child_id = spawned.child.id();
     // The same in-memory ticket survives a definite early resume failure. Once
     // a submission is attempted, even a refusal can never authorize a replay.

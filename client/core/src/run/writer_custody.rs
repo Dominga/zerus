@@ -54,6 +54,13 @@ impl Drop for Charge {
     }
 }
 
+/// Read-only physical charge observation for an original supervisor. This
+/// grants no wait/signal authority and never drains or releases a charge.
+/// The caller must also close its fixed startup producers before using it.
+pub fn physically_idle() -> bool {
+    !UNAVAILABLE.load(Ordering::Acquire) && LIVE.load(Ordering::Acquire) == 0
+}
+
 /// One bounded admission, owned before the host's original guarded spawn.
 /// Dropping it without attaching a child sends no input and starts no helper.
 pub struct Admission {

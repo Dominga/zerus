@@ -11,7 +11,7 @@ import { loadProjects } from "./projects";
 // `screen_visible` in step with the page and the window, and pulls a view
 // again when the hub reports it changed.
 
-const SCREEN: Partial<Record<Page, Screen>> = { dashboard: "overview", projects: "projects", machines: "machines", accounts: "accounts" };
+const SCREEN: Partial<Record<Page, Screen>> = { dashboard: "overview", projects: "projects", teams: "projects", machines: "machines", accounts: "accounts" };
 
 /** The screen whose reads run: the page's, while the window shows. */
 export const screenOf = (page: Page, hidden: boolean): Screen | undefined => (hidden ? undefined : SCREEN[page]);
@@ -35,6 +35,8 @@ export function startScreens(page: Accessor<Page>, visibility: PageVisibility): 
     let sent: Promise<void> = Promise.resolve();
     const send = (screen: Screen, visible: boolean) => (sent = sent.then(() => screenVisible(screen, visible)).catch(() => {}));
     createEffect(on(() => screenOf(page(), hidden()), (next, previous) => {
+      // Teams and Projects share one projection and visibility slot.
+      if (next === previous) return;
       // The new screen shows before the old one hides: between Overview and
       // Accounts the hub always has an account screen and keeps its queued inspects.
       if (next) void send(next, true).then(() => reload(next));

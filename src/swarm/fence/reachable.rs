@@ -254,27 +254,37 @@ pub(super) fn catch_up_existing(
     if first.closed().is_some() {
         return Ok(false);
     }
-    let found = first
+    let readers: Vec<_> = first
         .nodes
         .values()
         .filter(|node| node.closed.is_none() && !node.no_replica)
-        .any(|node| {
-            ask(
-                net,
-                &first,
-                node,
-                project,
-                uuid,
-                Request::Export {
-                    seal: String::new(),
-                },
-                deadline,
-            )
-            .is_ok_and(|answer| {
-                answer["kind"] == "admitted"
-                    && answer["seal"].as_str().is_some_and(|seal| seal.len() == 64)
-            })
-        });
+        .collect();
+    let probe_end = probe_pool_end(net, deadline);
+    let mut found = false;
+    for (index, node) in readers.iter().enumerate() {
+        // A slow optional reader gets only its fair share. A healthy source
+        // later in native-ID order must still be asked for its original seal.
+        let share = left(probe_end) / u32::try_from(readers.len() - index).unwrap_or(u32::MAX);
+        let probe_deadline = deadline.min(probe_end).min(Instant::now() + share);
+        if ask(
+            net,
+            &first,
+            node,
+            project,
+            uuid,
+            Request::Export {
+                seal: String::new(),
+            },
+            probe_deadline,
+        )
+        .is_ok_and(|answer| {
+            answer["kind"] == "admitted"
+                && answer["seal"].as_str().is_some_and(|seal| seal.len() == 64)
+        }) {
+            found = true;
+            break;
+        }
+    }
     if found {
         upgrade(config, net, &first, project, uuid, deadline)?;
     }
@@ -353,11 +363,18 @@ pub(super) fn upgrade(
                 .cutover_seal()?
                 .ok_or_else(|| anyhow::anyhow!("the original proposal has no seal"))?;
             let mut source = None;
-            for node in first
+            let readers: Vec<_> = first
                 .nodes
                 .values()
                 .filter(|node| node.closed.is_none() && !node.no_replica)
-            {
+                .collect();
+            let probe_end = probe_pool_end(net, deadline);
+            for (index, node) in readers.iter().enumerate() {
+                // Retained originals still require fresh source verification;
+                // optional readers cannot spend that source's entire turn.
+                let share =
+                    left(probe_end) / u32::try_from(readers.len() - index).unwrap_or(u32::MAX);
+                let source_deadline = deadline.min(probe_end).min(Instant::now() + share);
                 if ask(
                     net,
                     first,
@@ -367,10 +384,11 @@ pub(super) fn upgrade(
                     Request::Export {
                         seal: original.identity(),
                     },
-                    deadline,
+                    source_deadline,
                 )
-                .is_ok()
-                {
+                .is_ok_and(|answer| {
+                    answer["kind"] == "admitted" && answer["seal"] == original.identity()
+                }) {
                     source = Some(node);
                     break;
                 }
@@ -401,13 +419,27 @@ pub(super) fn upgrade(
         bytes,
         admitted,
     }];
-    for node in first
+    let readers: Vec<_> = first
         .nodes
         .values()
         .filter(|node| !node.no_replica && node.closed.is_none())
-    {
+        .collect();
+    let probe_end = probe_pool_end(net, deadline);
+    for (index, node) in readers.iter().enumerate() {
+        // Preparing optional readers must leave a later original source a
+        // fair turn, just like hello and read-only Export discovery.
+        let share = left(probe_end) / u32::try_from(readers.len() - index).unwrap_or(u32::MAX);
+        let prepare_deadline = deadline.min(probe_end).min(Instant::now() + share);
         let frozen = (|| -> Result<Frozen<'_>> {
-            let answer = ask(net, first, node, project, uuid, Request::Prepare, deadline)?;
+            let answer = ask(
+                net,
+                first,
+                node,
+                project,
+                uuid,
+                Request::Prepare,
+                prepare_deadline,
+            )?;
             let capture: Capture = serde_json::from_value(answer["capture"].clone())?;
             ensure!(
                 capture.node == node.node

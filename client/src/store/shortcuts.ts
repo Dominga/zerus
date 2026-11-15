@@ -33,6 +33,7 @@ export const COMMANDS: readonly Command[] = [
   { id: "session.nextAttention", group: trNoop("Sessions"), title: trNoop("Next session that needs attention"), scope: "window" },
   { id: "session.previousAttention", group: trNoop("Sessions"), title: trNoop("Previous session that needs attention"), scope: "window" },
   { id: "session.new", group: trNoop("Sessions"), title: trNoop("New session"), scope: "window" },
+  { id: "team.new", group: trNoop("Teams"), title: trNoop("New team"), scope: "window" },
   { id: "session.rename", group: trNoop("Sessions"), title: trNoop("Rename session"), scope: "window" },
   { id: "session.search", group: trNoop("Sessions"), title: trNoop("Search sessions"), scope: "window" },
   { id: "view.refresh", group: trNoop("Sessions"), title: trNoop("Refresh"), scope: "window" },

@@ -28,7 +28,9 @@ fn cases() -> Value {
         let problem = h
             .run(&person(), Operation::ChangeSettings { settings })
             .unwrap_err();
-        result.insert(name.into(), json!({"ok": false, "error": problem}));
+        let (reply, exit) = crate::teams::refusal(problem);
+        assert_eq!(exit, 1);
+        result.insert(name.into(), reply);
         assert_eq!(h.store.team(TEAM).unwrap().unwrap(), before);
         assert_eq!(h.store.journal(TEAM, 200, None).unwrap().rows, journal);
     }

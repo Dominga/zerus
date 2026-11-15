@@ -286,8 +286,8 @@ it("drops the explicit lead navigation when leaving Sessions, even if the same r
 });
 
 it.each([
-  ["English", "The bounded lookup could not locate this team. Open the session from Teams."],
-  ["Russian", "Команда не найдена в пределах ограниченного поиска. Откройте сессию из раздела «Команды»."],
+  ["English", "Could not find this session's team here. Open it from Teams."],
+  ["Russian", "Здесь не удалось найти команду этой сессии. Откройте её из раздела «Команды»."],
 ])("shows an explicit bounded-lookup notice for a directly selected seventh-page lead in %s", async (_language, message) => {
   f.rows = [session(data.pages[6].teams[0])]; ui.setSelectedKey(f.rows[0].key); ui.setPage("sessions"); ui.setDetailTab("team");
   const { TeamTab } = await import("../teams/TeamTab");
@@ -311,4 +311,30 @@ it("renders the one-member count from the actual product-written first page (rev
 it.each([["planning", "Планирование"], ["paused", "Приостановлено"]])("renders a synthetic %s status over a product row in Russian (review130 X3)", (state, label) => {
   const page = structuredClone(data.running); page.teams[0].status = state;
   publish(page); const host = show(); expect(host.querySelector(".tm-state-badge")?.textContent).toBe(label);
+});
+
+it.each([false, true])("returns from Catalog to an explicitly opened team beyond the lookup while retaining the fresh lead fence (changed=%s)", async (changed) => {
+  const team = changed ? rebind.before_list.teams[0] : data.pages[6].teams[0];
+  const before = changed ? rebind.before_team : data.team;
+  const after = changed ? rebind.after_team : data.team;
+  publish(data.pages[0]); f.rows = [session(team)];
+  createRoot((dispose) => { disposers.push(dispose); nav.watchTeamNavigation(); });
+  expect(nav.openTeamLead(team, f.rows[0])).toBe(true);
+  const { TeamTab } = await import("../teams/TeamTab"); const tab = show(TeamTab);
+  await vi.waitFor(() => expect(store.followed()).toBe(team.id));
+  store.apply([entry(`team:${team.id}`, "team", before)]);
+  await vi.waitFor(() => expect(tab.querySelector("[data-team-tab]")).not.toBeNull());
+  button(tab, "Catalog").click(); expect(ui.page()).toBe("team-catalog");
+  expect(nav.navigationTeamFor(f.rows[0])).toBeUndefined();
+  disposers.pop()!(); tab.remove(); await vi.waitFor(() => expect(store.followed()).toBeUndefined());
+  const { CatalogPage } = await import("../teams/CatalogPage"); const catalog = show(CatalogPage);
+  button(catalog, "Back").click();
+  expect(nav.navigationTeamFor(f.rows[0])).toBe(team.id);
+  disposers.pop()!(); catalog.remove();
+  const again = show(TeamTab); await vi.waitFor(() => expect(store.followed()).toBe(team.id));
+  store.apply([entry(`team:${team.id}`, "team", after)]);
+  if (changed) {
+    await vi.waitFor(() => expect(again.textContent).toContain("The team's lead session has changed"));
+    expect(again.querySelector("[data-team-tab]")).toBeNull();
+  } else await vi.waitFor(() => expect(again.querySelector("[data-team-tab]")).not.toBeNull());
 });

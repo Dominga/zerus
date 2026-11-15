@@ -301,7 +301,7 @@ export function TeamTab() {
     <Show when={scope.failure()}>{(reason) => <div class="notice danger team-notice" role="alert"><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
     <Show when={view()} fallback={
       <div class="team-loading" role="status" data-team-waiting>
-        <span class="dim">{leadChanged() ? tr("The team's lead session has changed. Open it from Teams again.") : binding().state === "none" ? tr("This session is not a team lead.") : binding().exhausted ? tr("The bounded lookup could not locate this team. Open the session from Teams.") : tr("Finding the team of this session…")}</span>
+        <span class="dim">{leadChanged() ? tr("The team's lead session has changed. Open it from Teams again.") : binding().state === "none" ? tr("This session is not a team lead.") : binding().exhausted ? tr("Could not find this session's team here. Open it from Teams.") : tr("Finding the team of this session…")}</span>
       </div>
     }>{(current) => <TeamWorkspace view={current()} busy={teams.busy(current().bar.id)} failure={readFailure()} actionFailure={actionReason(source())}
       onSettingsSave={(call) => teams.run(call, source())}

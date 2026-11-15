@@ -12,6 +12,8 @@ fn planning_and_queue_teams_share_a_bounded_live_index() {
     let mut input = serde_json::to_value(create()).unwrap();
     input["op"] = "start_planning".into();
     input["goal"] = "Prepare the indexed plan.".into();
+    input["name"] = "Planning index control".into();
+    input["integration_branch"] = "teams/planning-index-control".into();
     h.run_for(&plan, &person(), serde_json::from_value(input).unwrap())
         .unwrap();
     let rows = h.store.live_teams(200, None).unwrap().rows;

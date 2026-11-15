@@ -3208,7 +3208,7 @@ fn a_verified_v2_statement_for_an_absent_child_fences_its_latch_before_restore()
 
 #[test]
 fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replays_after_restart() {
-    for agent in ["kimi", "dsh"] {
+    for agent in ["kimi", "dsh", "opencode"] {
         let mut f = Fixture::new();
         let mut row = child_row();
         row["name"] = json!(format!("{agent}/project/child"));
@@ -3216,15 +3216,25 @@ fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replay
         let mut question = card("native-question-1");
         question["source"] = json!(if agent == "kimi" {
             "kimi_wire"
-        } else {
+        } else if agent == "dsh" {
             "dsh_native"
+        } else {
+            "opencode_native"
         });
         question["answer_transport"] = json!(if agent == "kimi" {
             "kimi_tui"
-        } else {
+        } else if agent == "dsh" {
             "native_dsh"
+        } else {
+            "native_opencode"
         });
         question["blocking"] = json!(true);
+        if agent == "opencode" {
+            question["question_id"] = json!("frm_question");
+            question["kind"] = json!("opencode_form");
+            question["status"] = json!("pending");
+            question["native_question"] = json!({"message_id":"msg_question","tool_call_id":"call_question"});
+        }
         let mut inspected = inspect(vec![question]);
         inspected["name"] = row["name"].clone();
         inspected["agent"] = json!(agent);
@@ -3238,7 +3248,7 @@ fn a_qualified_provider_question_uses_the_existing_route_ledger_and_never_replay
             text.contains(&format!("{agent}%2Fproject%2Fchild")),
             "{text}"
         );
-        assert!(text.contains("native-question-1"), "{text}");
+        assert!(text.contains(if agent == "opencode" { "frm_question" } else { "native-question-1" }), "{text}");
         drop(sent);
         f.restart();
         f.snapshot(vec![row, parent_row()]);
@@ -3284,10 +3294,9 @@ fn kimi_person_only_cards_and_unqualified_transports_never_reserve_or_send() {
 }
 
 #[test]
-fn opencode_questions_permissions_and_generic_forms_never_reserve_or_send() {
+fn opencode_unverified_forms_and_permissions_never_reserve_or_send() {
     for (key, value) in [
-        // Even the prior classifier's positive claim grants no authority.
-        ("blocking", json!(true)),
+        ("native_question", Value::Null),
         ("kind", json!("opencode_permission")),
         ("blocking", json!(false)),
         ("blocking", Value::Null),
@@ -3306,6 +3315,7 @@ fn opencode_questions_permissions_and_generic_forms_never_reserve_or_send() {
         question["status"] = json!("pending");
         question["answer_transport"] = json!("native_opencode");
         question["blocking"] = json!(true);
+        question["native_question"] = json!({"message_id":"msg_question","tool_call_id":"call_question"});
         question[key] = value;
         let mut inspected = inspect(vec![question]);
         inspected["name"] = row["name"].clone();
@@ -3315,6 +3325,5 @@ fn opencode_questions_permissions_and_generic_forms_never_reserve_or_send() {
         f.settle();
         assert!(f.routes().is_empty(), "{key}");
         assert_eq!(f.sent(), 0, "{key}");
-        assert_eq!(f.reads(), 0, "{key}");
     }
 }

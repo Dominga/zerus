@@ -51,6 +51,8 @@ pub struct DrawerRow {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DrawerPage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<super::timeline::RecordedCoverage>,
     pub team: String,
     pub kind: DrawerKind,
     pub rows: Vec<DrawerRow>,
@@ -188,7 +190,17 @@ pub fn decode(asked: &DrawerRead, exit: Exit) -> Result<DrawerPage, TeamError> {
             card,
         });
     }
+    let timeline = if asked.kind == DrawerKind::Feed {
+        Some(super::timeline::coverage(
+            &projected,
+            asked.after.as_deref(),
+            next.as_deref(),
+        )?)
+    } else {
+        None
+    };
     Ok(DrawerPage {
+        timeline,
         team: asked.team.clone(),
         kind: asked.kind,
         rows: projected,

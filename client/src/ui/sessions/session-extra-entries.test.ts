@@ -20,10 +20,10 @@ describe("parent actions for native API sessions", () => {
       session_id: "22222222-2222-4222-8222-222222222222", name: "dsh/example/lead",
       conversation_id: "session-lead", run_id: "run-lead", state: "live" } });
     const entries = parentEntries(child);
-    // Main's qualified DeepSeek provider now adds question routing; the
+    // Qualified DeepSeek and OpenCode providers add question routing; the
     // two confirmed parent-link actions keep their order and authority.
-    expect(entries).toHaveLength(agent === "dsh" ? 3 : 2);
-    if (agent === "dsh") expect(entries[2]).toMatchObject({
+    expect(entries).toHaveLength(3);
+    expect(entries[2]).toMatchObject({
       label: "Send questions to lead", icon: "send", disabled: true,
     });
     expect(entries[0]).toMatchObject({ label: "Set parent…", disabled: false });

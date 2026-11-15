@@ -1,6 +1,7 @@
 use super::*;
 use crate::desktop::original_store::{self, Roots};
-use rusqlite::{params, Connection, OpenFlags};
+#[cfg(test)]
+use rusqlite::Connection;
 use std::{io::Read, path::Path};
 
 fn text(v: &Value, key: &str) -> String {
@@ -215,28 +216,10 @@ fn resume_wait(s: &Snapshot, view: &Value, raw: &Value) -> Result<Option<ResumeW
 mod settlement;
 fn archive(state: &Path, roots: &Roots, b: &Binding, name: &str) -> Result<(String, Value)> {
     let state = crate::platform::canonical(state).map_err(|e| e.to_string())?;
-    let db = Connection::open_with_flags(
-        state.join("archive-catalog-v1.sqlite3"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|e| e.to_string())?;
-    db.busy_timeout(Duration::from_millis(100))
-        .map_err(|e| e.to_string())?;
-    let mut q = db
-        .prepare("SELECT id FROM archive_rows WHERE name=?1 AND run=?2 LIMIT 2")
-        .map_err(|e| e.to_string())?;
-    let ids = q
-        .query_map(params![name, b.run], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    if ids.len() != 1
-        || !uuid::Uuid::parse_str(&ids[0]).is_ok_and(|id| !id.is_nil() && id.to_string() == ids[0])
-    {
-        return Err("No exact unique exit archive".into());
-    }
+    let id = crate::state::archive_catalog::find_run(&state, name, &b.run)?
+        .ok_or("No exact unique exit archive")?;
     let file = roots
-        .open_file(&["archives", &format!("{}.json", ids[0])])
+        .open_file(&["archives", &format!("{id}.json")])
         .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take((1 << 20) + 1)
@@ -246,16 +229,15 @@ fn archive(state: &Path, roots: &Roots, b: &Binding, name: &str) -> Result<(Stri
         return Err("Exit archive exceeds one MiB".into());
     }
     let raw: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if raw["archive_id"] != ids[0]
+    if raw["archive_id"] != id
         || raw["name"] != name
         || raw["run_id"] != b.run
         || raw["state"] != "archived"
     {
         return Err("The exact archive identity changed".into());
     }
-    Ok((ids[0].clone(), raw))
+    Ok((id, raw))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,12 +500,37 @@ mod tests {
         let (found, _) = archive(&alias, &roots, &b, "codex/example/member").unwrap();
         assert_eq!(found, id);
         let path = config.state.join("archive-catalog-v1.sqlite3");
+        // Simulate an interrupted build using only the advisory cache. An
+        // indexed row alone must not authorize an exact exit observation.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute(
+            "UPDATE catalog_meta SET value='0' WHERE key='archive_scan_complete_v2'",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        let error = archive(&alias, &roots, &b, "codex/example/member").unwrap_err();
+        assert!(
+            error.starts_with(crate::state::archive_catalog::INCOMPLETE),
+            "{error}"
+        );
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute(
+            "UPDATE catalog_meta SET value='1' WHERE key='archive_scan_complete_v2'",
+            [],
+        )
+        .unwrap();
+        drop(db);
         let saved = path.with_extension("saved");
         std::fs::rename(&path, &saved).unwrap();
+        let error = archive(&alias, &roots, &b, "codex/example/member").unwrap_err();
+        assert!(
+            error.starts_with(crate::state::archive_catalog::INCOMPLETE),
+            "{error}"
+        );
         std::os::unix::fs::symlink(&saved, &path).unwrap();
         assert!(archive(&alias, &roots, &b, "codex/example/member").is_err());
     }
-
     #[test]
     #[ignore = "run by its isolated wrapper"]
     fn pause_fixture() {

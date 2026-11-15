@@ -23,6 +23,8 @@ pub(super) const ORIGINAL_OWNER: bool = false;
 mod owned;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use owned::spawn as spawn_owned;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use owned::CreationSource;
 
 mod sealed {
     pub trait Status {}

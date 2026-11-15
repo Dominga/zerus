@@ -50,6 +50,8 @@ pub(crate) enum HostCheck {
     Outside,
     /// A recorded host is an ancestor.
     Under,
+    /// A native DeepSeek host is above the caller without its native record.
+    Unregistered,
     /// The ancestry or a record could not be verified: refused like `Under`,
     /// with the sentence that names the path and how to clear it.
     Unverified(String),
@@ -60,6 +62,9 @@ pub(crate) enum HostCheck {
 pub(crate) fn host_check() -> HostCheck {
     #[cfg(unix)]
     {
+        if !matches!(host_identity::unregistered::ancestor(), Ok(false)) {
+            return HostCheck::Unregistered;
+        }
         let found: std::result::Result<Option<Host>, Refusal> = hosted_ancestor();
         match found {
             Ok(None) => HostCheck::Outside,
@@ -83,10 +88,13 @@ impl HostCheck {
             HostCheck::Under => Some(host_identity::recorded::UNDER_HOST.to_owned()),
             #[cfg(not(unix))]
             HostCheck::Under => None,
+            HostCheck::Unregistered => Some(UNREGISTERED_HOST.to_owned()),
             HostCheck::Unverified(sentence) => Some(sentence),
         }
     }
 }
+
+pub(crate) const UNREGISTERED_HOST: &str = "This command runs under an unregistered DeepSeek agent host and cannot prove its own session. A hosted tool call never acts as the person or as its launching session. Start a new host with Zerus when convenient; this resident host has been left running.";
 
 /// The sentence that refuses this command as an agent session and as the
 /// person, or `None` outside every recorded host.

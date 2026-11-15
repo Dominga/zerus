@@ -240,8 +240,8 @@ impl Provider {
         let references = worktree_references::Scope::publishing(record)?;
         let before = native_identity::before_write(self);
         if let Some(references) = &references { references.verify()?; }
-        super::listing_metadata::write_at(&root(), &path, record, || {
-            atomic(&path, &record.to_string())
+        super::listing_metadata::write_at(&root(), &path, record, |publication| {
+            storage::atomic_observed(&path, &record.to_string(), publication)
         })?;
         if let Some(references) = &references { references.verify()?; }
         // A write the index could not record stays unaccounted: the next

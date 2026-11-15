@@ -170,7 +170,7 @@ export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary
     // local cards and rows that are no longer eligible for body replacement.
     const owners = events.flatMap((event, index) => requests(event).includes(request) ? [index] : []);
     if (owners.length > 1) continue;
-    const exact = owners.length ? owners : events.flatMap((event, index) => own(event) && !requests(event).length && !event.attachments?.length
+    const exact = owners.length ? owners : events.flatMap((event, index) => own(event) && !ownMessageTruncated(event) && !requests(event).length && !event.attachments?.length
       && ownMessageText(event).trim() === submitted ? [index] : []);
     if (exact.length !== 1 || !own(events[exact[0]])) continue;
     const at = exact[0], event = events[at];
@@ -344,7 +344,7 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       && !!(e.message_id || e.attachment_request_id) && [row.id, row.message_id].some(id => !!id && (e.message_id === id || e.attachment_request_id === id)));
     if (sent && match < 0 && row.attachments.length) {
       source.forEach((e, i) => {
-        if (eligible(e, i) && !e.attachments?.length
+        if (eligible(e, i) && !ownMessageTruncated(e) && !e.attachments?.length
           && submitted && ownMessageText(e).trim() === submitted) exact.push(i);
       });
       const competing = candidates.filter((other) => other.status !== "error" && other.attachments.length && submittedOf(other) === submitted).length;
@@ -352,7 +352,7 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       if (competing === 1 && exact.length === 1) match = exact[0];
     }
     if (sent && match < 0 && !exact.length) {
-      const full = source.flatMap((e, i) => eligible(e, i) && !e.attachments?.length
+      const full = source.flatMap((e, i) => eligible(e, i) && !ownMessageTruncated(e) && !e.attachments?.length
         && !e.message_id && !e.attachment_request_id && submitted && ownMessageText(e).trim() === submitted
         && Math.abs((e.at ?? NaN) - row.submitted_at) <= NEAREST ? [i] : []);
       if (full.length === 1) match = full[0];

@@ -95,3 +95,32 @@ it("complete rows participate in one-to-one native identity ownership", () => {
   const newer = { ...complete, ...shared };
   expect(restoreOwnMessages([event, newer], { user_message_bodies: [{ ...body, ...shared }] })[0]).toEqual(event);
 });
+
+it("literal legacy-preview equality cannot establish a receipt binding", () => {
+  const echo = '[Image #1] (Inspect the attached image at "/example/attachments/message-ab12/01-image.png")';
+  const literal = echo + "x".repeat(1200 - echo.length) + "…";
+  const event = { ...old, detail: literal };
+  const exact = { ...receipt, submitted_text: literal, detail: "Different complete message" };
+  expect(mergeAttachmentMessages([event], { attachment_messages: [exact] })[0]).toEqual(event);
+});
+
+it("explicitly partial text cannot establish a receipt binding, but its exact request can", () => {
+  const echo = '[Image #1] (Inspect the attached image at "/example/attachments/message-ab12/01-image.png")';
+  const literal = echo + "x".repeat(32000 - echo.length) + "…";
+  const event = { ...old, message_text: literal, message_text_truncated: true };
+  const exact = { ...receipt, submitted_text: literal, detail: "Actual complete text" };
+  expect(mergeAttachmentMessages([event], { attachment_messages: [exact] })[0]).toEqual(event);
+  const genericPartial = { ...old, detail: literal, truncated: true };
+  expect(mergeAttachmentMessages([genericPartial], { attachment_messages: [exact] })[0]).toEqual(genericPartial);
+  expect(mergeAttachmentMessages([{ ...event, attachment_request_id: "req-b" }], { attachment_messages: [exact] })[0])
+    .toMatchObject({ message_text: "Actual complete text", message_text_truncated: false });
+});
+
+it("a copied legacy preview remains distinct from its complete local send", () => {
+  const literal = prefix + "…";
+  const local: LocalMessage = { id: "local-b", text: literal, status: "sent", attachments: [], run_id: "run", conversation_id: "cid",
+    submitted_at: 105, error: "", uncertain: false, message_id: "", submitted_text: literal, source: null, voice: null };
+  const shown = buildTranscript([old], {}, [local]) as ActivityItem[];
+  expect(shown).toHaveLength(2);
+  expect(shown[0]).toMatchObject({ body: old.detail, bodyTruncated: true });
+});

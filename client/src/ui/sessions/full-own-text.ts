@@ -6,6 +6,7 @@ const PROMPTS = new Set(["UserPromptSubmit", "UserPromptQueued", "TurnStarted"])
 export const ownMessageText = (event: ActivityEvent): string => typeof event.message_text === "string" ? event.message_text : event.detail ?? "";
 const oldPreview = (text: string) => text.length <= 2401 && text.endsWith("…") && Array.from(text).length === 1201;
 export const ownMessageTruncated = (event: ActivityEvent): boolean => event.message_text_truncated === true
+  || (event.message_text_truncated !== false && event.truncated === true)
   || (event.message_text === undefined && PROMPTS.has(event.type ?? "") && oldPreview(event.detail ?? ""));
 
 function preview(text: string): string {

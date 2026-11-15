@@ -199,7 +199,12 @@ impl Ledger {
         team: &zerus_team_plan::model::Team,
         planning: Option<&crate::teams::store::planning::Planning>,
     ) -> Result<Option<Plan>> {
-        if !matches!(team.status, zerus_team_plan::model::TeamStatus::Running | zerus_team_plan::model::TeamStatus::Planning) || b.member != team.lead {
+        if !matches!(
+            team.status,
+            zerus_team_plan::model::TeamStatus::Running
+                | zerus_team_plan::model::TeamStatus::Planning
+        ) || b.member != team.lead
+        {
             return Ok(None);
         }
         if team.status == zerus_team_plan::model::TeamStatus::Planning

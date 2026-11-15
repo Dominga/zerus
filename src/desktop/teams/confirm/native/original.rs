@@ -167,9 +167,12 @@ fn admission(db: &Connection) -> std::io::Result<Transaction<'_>> {
 fn stored_facts(db: &Connection, b: &Binding) -> Result<Facts> {
     use crate::teams::store::rows;
     crate::teams::store::execution_fence(db).map_err(|e| e.to_string())?;
-    let team = rows::team(db, &b.team).map_err(|e| e.to_string())?.ok_or("Team disappeared")?;
+    let team = rows::team(db, &b.team)
+        .map_err(|e| e.to_string())?
+        .ok_or("Team disappeared")?;
     let planning_paused = team.status == zerus_team_plan::model::TeamStatus::Planning
-        && crate::teams::store::planning::paused(db, &b.team).map_err(|e| e.to_string())? != Some(false);
+        && crate::teams::store::planning::paused(db, &b.team).map_err(|e| e.to_string())?
+            != Some(false);
     Ok(Facts {
         team,
         planning_paused,

@@ -71,7 +71,9 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
     input.insert("expected_revision".into(), json!(revision));
     input.insert("request_id".into(), json!(request_id));
     let mut args = vec!["team".to_owned(), call.action.op().to_owned()];
-    if let TeamAction::Create { template, .. } | TeamAction::StartPlanning { template, .. } = &call.action {
+    if let TeamAction::Create { template, .. } | TeamAction::StartPlanning { template, .. } =
+        &call.action
+    {
         args.push("--template".to_owned());
         args.push(template.clone());
     }

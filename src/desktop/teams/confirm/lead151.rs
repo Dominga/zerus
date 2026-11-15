@@ -93,7 +93,12 @@ impl Ports for World {
             member: self.h.store.member(TEAM, "lead").unwrap().unwrap(),
             binding: self.b.clone(),
             preview: true,
-            planning_paused: self.h.store.planning(TEAM).unwrap().is_some_and(|p| p.paused),
+            planning_paused: self
+                .h
+                .store
+                .planning(TEAM)
+                .unwrap()
+                .is_some_and(|p| p.paused),
         })
     }
     fn observe(&mut self, _: &Binding) -> Result<Snapshot> {
@@ -116,8 +121,12 @@ impl Ports for World {
         if !self.ledger.lead_brief_needed(b)? {
             return Ok(None);
         }
-        self.ledger
-            .pending_lead_brief(b, &self.s, &self.h.store.team(TEAM).unwrap().unwrap(), self.h.store.planning(TEAM).unwrap().as_ref())
+        self.ledger.pending_lead_brief(
+            b,
+            &self.s,
+            &self.h.store.team(TEAM).unwrap().unwrap(),
+            self.h.store.planning(TEAM).unwrap().as_ref(),
+        )
     }
     fn claim(&mut self, p: &Plan, epoch: &str, now: i64) -> Result<Claim> {
         self.ledger.claim(p, epoch, now)

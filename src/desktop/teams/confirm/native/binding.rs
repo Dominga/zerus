@@ -76,7 +76,10 @@ impl Native<'_> {
             .ok_or("Member disappeared")?;
         let binding = self.binding(&b.team, &b.member)?.0;
         let planning_paused = team.status == zerus_team_plan::model::TeamStatus::Planning
-            && store.planning(&team.id).map_err(|e| e.to_string())?.is_none_or(|p| p.paused);
+            && store
+                .planning(&team.id)
+                .map_err(|e| e.to_string())?
+                .is_none_or(|p| p.paused);
         Ok(Facts {
             team,
             member,

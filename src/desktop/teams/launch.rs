@@ -103,7 +103,8 @@ impl Runtime {
         if !self.budget_due(store, &team, now)? {
             return Ok(false);
         }
-        if team.status == TeamStatus::Running && team.settings.integration == Integration::Branch
+        if team.status == TeamStatus::Running
+            && team.settings.integration == Integration::Branch
             && !self.branch(store, effects, &team, now)?
         {
             return Ok(self

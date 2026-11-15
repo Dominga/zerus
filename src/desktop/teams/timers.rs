@@ -77,7 +77,10 @@ impl Timers {
     ) -> Result<()> {
         store.refresh()?;
         let planning = store.planning(id)?;
-        let team = store.team(id)?.filter(|t| t.status == TeamStatus::Running || (t.status == TeamStatus::Planning && planning.is_some_and(|p| !p.paused)));
+        let team = store.team(id)?.filter(|t| {
+            t.status == TeamStatus::Running
+                || (t.status == TeamStatus::Planning && planning.is_some_and(|p| !p.paused))
+        });
         let Some(team) = team else {
             // A pause or a stop restarts every count the service keeps.
             self.memory.forget(id);

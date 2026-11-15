@@ -10,9 +10,17 @@ pub(super) fn creation_team(request: &Request, actor: &Actor) -> Result<Team, Pr
         integration_branch,
         base_commit,
         ..
-    } | Operation::StartPlanning {
-        delegations, project, name, goal, home, bundle,
-        integration_branch, base_commit, ..
+    }
+    | Operation::StartPlanning {
+        delegations,
+        project,
+        name,
+        goal,
+        home,
+        bundle,
+        integration_branch,
+        base_commit,
+        ..
     }) = &request.operation
     else {
         return Err(missing());

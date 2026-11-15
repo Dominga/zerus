@@ -10,9 +10,9 @@ mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
 pub(crate) mod dependency_edit;
-mod holder;
 mod disposition;
 pub(crate) mod drafts;
+mod holder;
 pub(crate) mod planning;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
@@ -389,9 +389,14 @@ fn schema_extensions(db: &Connection) -> Result<()> {
 /// Executable planned work fences pre-M2 engines. Queue-only stores stay at
 /// layout 2; starting planning raises it atomically with that team's creation.
 pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
-    let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(storage)?;
+    let version: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
     if version > SCHEMA_VERSION {
-        return Err(Problem::new(code::INVALID_STATE, "store schema is newer than this version of Zerus"));
+        return Err(Problem::new(
+            code::INVALID_STATE,
+            "store schema is newer than this version of Zerus",
+        ));
     }
     Ok(())
 }

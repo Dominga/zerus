@@ -24,7 +24,11 @@ pub(super) fn run(
     run_kind(config, caller, args, provided, false)
 }
 pub(super) fn run_kind(
-    config: &Config, caller: &Caller, args: &[String], provided: Option<&str>, planning: bool,
+    config: &Config,
+    caller: &Caller,
+    args: &[String],
+    provided: Option<&str>,
+    planning: bool,
 ) -> Result<Value, Problem> {
     let command = if planning { "start-planning" } else { "create" };
     let options = Options::parse(args, &["--template"], &[])?;
@@ -49,7 +53,10 @@ pub(super) fn run_kind(
     }
     complete_delegations(&fields)?;
     let (bundle, replay) = snapshot(&store, config, template, &fields, planning)?;
-    fields.insert("op".into(), json!(if planning { "start_planning" } else { "create" }));
+    fields.insert(
+        "op".into(),
+        json!(if planning { "start_planning" } else { "create" }),
+    );
     fields.insert(
         "bundle".into(),
         serde_json::to_value(bundle).map_err(storage)?,
@@ -72,7 +79,9 @@ fn snapshot(
     if let Some(id) = fields.get("request_id").and_then(Value::as_str) {
         if let Some(saved) = store.creation_request(id)? {
             let same_kind = matches!(saved.operation, Operation::StartPlanning { .. }) == planning;
-            if let Operation::Create { bundle, .. } | Operation::StartPlanning { bundle, .. } = saved.operation {
+            if let Operation::Create { bundle, .. } | Operation::StartPlanning { bundle, .. } =
+                saved.operation
+            {
                 if same_kind && bundle.template.id == template {
                     return Ok((bundle, true));
                 }
@@ -94,7 +103,12 @@ fn check_template(request: &Request) -> Result<(), Problem> {
         bundle,
         expected_template,
         ..
-    } | Operation::StartPlanning { bundle, expected_template, .. }) = &request.operation
+    }
+    | Operation::StartPlanning {
+        bundle,
+        expected_template,
+        ..
+    }) = &request.operation
     else {
         unreachable!()
     };

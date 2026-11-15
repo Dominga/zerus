@@ -121,7 +121,12 @@ fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply>
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
-    if existed && matches!(ctx.op, Operation::Create { .. } | Operation::StartPlanning { .. }) {
+    if existed
+        && matches!(
+            ctx.op,
+            Operation::Create { .. } | Operation::StartPlanning { .. }
+        )
+    {
         return Err(invalid("Team already exists."));
     }
     dispatch(ctx)?;

@@ -109,9 +109,17 @@ impl TeamAction {
                 expected_template,
                 delegations,
                 ..
-            } | Self::StartPlanning {
-                project, name, goal, home, integration_branch, base_commit,
-                expected_template, delegations, ..
+            }
+            | Self::StartPlanning {
+                project,
+                name,
+                goal,
+                home,
+                integration_branch,
+                base_commit,
+                expected_template,
+                delegations,
+                ..
             } => json!({
                 "project": project,
                 "name": name,
@@ -182,10 +190,7 @@ impl TeamAction {
                 super::drafts::check(*phase, draft)
             }
             Self::Create { .. } | Self::StartPlanning { .. } => check_create(self),
-            Self::Pause {}
-            | Self::Resume {}
-            | Self::Stop {}
-            | Self::Archive {} => Ok(()),
+            Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
             Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
                 .map_err(|problem| problem.message),
             Self::PauseMember { member }
@@ -302,9 +307,18 @@ fn check_create(action: &TeamAction) -> Result<(), String> {
         integration,
         expected_template,
         ..
-    } | TeamAction::StartPlanning {
-        template, project, name, goal, home, integration_branch, base_commit,
-        integration, expected_template, ..
+    }
+    | TeamAction::StartPlanning {
+        template,
+        project,
+        name,
+        goal,
+        home,
+        integration_branch,
+        base_commit,
+        integration,
+        expected_template,
+        ..
     }) = action
     else {
         return Err("Not a create.".into());

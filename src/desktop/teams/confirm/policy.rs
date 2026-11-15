@@ -14,7 +14,10 @@ fn need(yes: bool, why: &str) -> Result<(), String> {
 pub(super) fn stored(b: &Binding, f: &Facts) -> Result<(), String> {
     need(f.preview, "Teams preview is off")?;
     need(
-        f.team.status == TeamStatus::Running || (f.team.status == TeamStatus::Planning && b.member == f.team.lead && !f.planning_paused),
+        f.team.status == TeamStatus::Running
+            || (f.team.status == TeamStatus::Planning
+                && b.member == f.team.lead
+                && !f.planning_paused),
         "The team is not running",
     )?;
     need(f.team.id == b.team, "The team changed")?;

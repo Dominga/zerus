@@ -45,13 +45,18 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::UnbindMember { .. }
         | Operation::TellPausedStarted { .. }
         | Operation::ClosePausedStarted { .. } => service,
-        Operation::Create { .. }
+        Operation::SwapMember { .. }
+        | Operation::AddMember { .. }
+        | Operation::RenameTeam { .. }
+        | Operation::SetGoal { .. }
+        | Operation::Create { .. }
         | Operation::Stop
         | Operation::Archive
         | Operation::StopMember { .. }
         | Operation::ArchiveMember { .. }
         | Operation::ChangeSettings { .. }
-        | Operation::DecideCard { .. } => person,
+        | Operation::DecideCard { .. }
+        | Operation::SetDeps { .. } => person,
         Operation::AddTask { .. } => true,
         Operation::Ask { .. } => member || person,
         Operation::Accept { .. } => person || (lead && team.settings.delegations.accept_results),

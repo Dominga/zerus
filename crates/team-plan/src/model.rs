@@ -374,6 +374,11 @@ pub struct Member {
     /// A role ID of the team's bundle, or `"lead"`.
     pub role: String,
     pub agent: String,
+    /// Per-member choices. Absent on an original roster seat: use its role.
+    /// Keeping these in the row also makes older strict readers fail closed
+    /// instead of launching a new seat with another account's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<crate::member::MemberLaunch>,
     /// The account the member was launched with; empty until then.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account: String,

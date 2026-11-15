@@ -429,6 +429,8 @@ mod tests {
             submitted: true,
         };
         let mut a = task();
+        // Native birth is saved before the first execution establishes a floor.
+        store.save(&mut a).unwrap();
         a.comment("plain note", &Actor::Person, 101).unwrap();
         a.reserve_attempt(SEND, Origin::Send, &to, native(), &Actor::Person, 102)
             .unwrap();
@@ -439,8 +441,15 @@ mod tests {
             103,
         )
         .unwrap();
-        a.report_attempt(SEND, "Done", zerus_replica::execution::ReportKind::Ready, None, &Actor::Agent(to.clone()), 104)
-            .unwrap();
+        a.report_attempt(
+            SEND,
+            "Done",
+            zerus_replica::execution::ReportKind::Ready,
+            None,
+            &Actor::Agent(to.clone()),
+            104,
+        )
+        .unwrap();
         let view = a.view().unwrap();
         assert_eq!(view.stage, Stage::Review);
         let note = TaskDelivery {

@@ -118,6 +118,10 @@ fn verified_existing(db: &rusqlite::Connection, record: &Value) -> Result<Option
 }
 
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
+    super::listing_metadata::remove_at(&root(), path, || remove_synced_inner(path))
+}
+
+fn remove_synced_inner(path: &Path) -> Result<()> {
     storage::cut_write()?;
     match fs::remove_file(path) {
         Ok(()) => {
@@ -131,20 +135,27 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
     }
 }
 
+/// Native SessionStart may confirm a conversation during an original launch.
+/// That confirmation cannot release the same run's pending owner reservation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn retirement_fenced(record:&Value,current:&Value) -> bool {
+    current["run_id"]==record["run_id"] && (supervisor::owned_pending(current)
+        || (current["conversation_id"]==record["conversation_id"] && terminating::pending(current)))
+}
+
 /// The caller holds the state writer lock. Write the durable copy before
 /// releasing its old name; a crash between the two operations cannot lose it.
 pub(super) fn save(record: &Value) -> Result<String> {
+    if supervisor::owned_pending(record) {
+        return Err("Original descendant owner requires cohort finalization; binding kept".into());
+    }
     if terminating::pending(record) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
     // A caller's older copy must not retire the same binding after Terminate
     // fenced it. The caller holds the writer lock across both reads and save.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if storage::current_of(record)?.is_some_and(|current| {
-        current["run_id"] == record["run_id"]
-            && current["conversation_id"] == record["conversation_id"]
-            && terminating::pending(&current)
-    }) {
+    if storage::current_of(record)?.is_some_and(|current| retirement_fenced(record,&current)) {
         return Err("Termination is unfinished; retain the session and archive for review".into());
     }
     if clear_context::cleanup_pending(record) {
@@ -221,6 +232,7 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
     // An environment that cannot be read counts as live: never archived.
     !terminating::pending(record)
+        && !supervisor::owned_pending(record)
         && !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()
@@ -496,7 +508,7 @@ pub(super) fn confirm_restore(record: &mut Value) -> Result<()> {
 }
 
 pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
-    if terminating::pending(record) {
+    if terminating::pending(record) || supervisor::owned_pending(record) {
         return Ok(false);
     }
     // An accepted SessionStart already synced the active conversation. Retry

@@ -52,7 +52,8 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": view,
-        "members": super::board::members(&row,members.rows)?,
+        "members": super::board::members(&row,members.rows, &store.member_edit_work(&team)?)?,
+        "member_roles": row.bundle.roles.iter().map(|r|json!({"id":r.id,"name":r.name,"agent":r.agent,"model":r.model,"effort":r.effort,"account":r.account})).collect::<Vec<_>>(),
         "counts": counts(&store, &team)?,
         "service_running": running,
         "health": crate::desktop::teams::health(&config.state),
@@ -134,7 +135,7 @@ pub(super) fn list_teams(
     let blocked = crate::desktop::teams::blocked_service_teams(
         &config.state,
         &ids,
-        crate::teams::store::STUCK_KINDS,
+        crate::teams::store::STUCK_SERVICE_KINDS,
     )
     .unwrap_or_default();
     for (id, summary) in &mut progress {

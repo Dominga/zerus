@@ -21,6 +21,7 @@ pub(super) fn queue(team: &Team, page: Page<QueueRow>) -> Result<Page<Value>, Pr
             value["holder"] = json!(row.holder);
             value["pending_decision"] = json!(row.pending);
             value["pending_replaceable"] = json!(row.pending_replaceable);
+            value["deps_editable"] = json!(row.deps_editable);
             // The lead's open item when no member can take the ready node:
             // its sentence, or null.
             value["unstaffed"] = json!(row.unstaffed);
@@ -114,24 +115,40 @@ pub(super) fn stop_sentence(code: &str, reason: Option<&str>) -> String {
     }
 }
 
-pub(super) fn members(team: &Team, members: Vec<MemberRow>) -> Result<Vec<Value>, Problem> {
+pub(super) fn members(
+    team: &Team,
+    members: Vec<MemberRow>,
+    work: &std::collections::BTreeMap<String, usize>,
+) -> Result<Vec<Value>, Problem> {
     members
         .into_iter()
         .map(|row| {
             let member = row.member;
             let mut value = serde_json::to_value(&member).map_err(storage)?;
             value["person_stopped"] = json!(row.person_stopped);
-            let model = if member.id == team.lead {
-                Some(team.bundle.template.lead.model.as_str())
+            value["open_work"] = json!(work.get(&member.id).copied().unwrap_or(0));
+            let choices = if let Some(launch) = &member.launch {
+                Some((
+                    launch.model.as_str(),
+                    launch.effort.as_str(),
+                    &launch.account,
+                ))
+            } else if member.id == team.lead {
+                let lead = &team.bundle.template.lead;
+                Some((lead.model.as_str(), lead.effort.as_str(), &lead.account))
             } else {
                 team.bundle
                     .roles
                     .iter()
                     .find(|r| r.id == member.role)
-                    .map(|r| r.model.as_str())
+                    .map(|r| (r.model.as_str(), r.effort.as_str(), &r.account))
             };
-            if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
-                value["model"] = json!(model);
+            if let Some((model, effort, account)) = choices {
+                if !model.trim().is_empty() {
+                    value["model"] = json!(model);
+                }
+                value["effort"] = json!(effort);
+                value["account_choice"] = json!(account);
             }
             Ok(value)
         })

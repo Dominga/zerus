@@ -670,16 +670,29 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
     }
     #[cfg(all(test, unix))]
     if let Some(hook) = BEFORE_NEW_ID.with(|hook| hook.borrow_mut().take()) {hook();}
-    state.verify()?; directory.verify()?; label_directory.verify()?;
-    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
-        return Err("The selected state root changed before ID publication".into());
-    }
-    if let Some(protection) = &protection {protection.verify()?;}
-    #[cfg(unix)]
-    if let Some(input) = &fresh_input {input.verify()?;}
-    cut_write()?;
-    directory.write_new(&format!("{id}.json"),bytes.as_bytes())?;
-    crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())?;
+    super::listing_metadata::write_at(
+        &state.path,
+        &directory.path.join(format!("{id}.json")),
+        &published,
+        || {
+            state.verify()?;
+            directory.verify()?;
+            label_directory.verify()?;
+            if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+                return Err("The selected state root changed before ID publication".into());
+            }
+            if let Some(protection) = &protection {
+                protection.verify()?;
+            }
+            #[cfg(unix)]
+            if let Some(input) = &fresh_input {
+                input.verify()?;
+            }
+            cut_write()?;
+            directory.write_new(&format!("{id}.json"), bytes.as_bytes())?;
+            crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())
+        },
+    )?;
     state.verify()?; directory.verify()?; label_directory.verify()?;
     if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
         return Err("The selected state root changed after ID publication".into());
@@ -698,10 +711,14 @@ pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     processes::compact(record);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     super::process_index_writer::write_at(&root(), path, record, |record| {
-        atomic(path, &format!("{record}\n"))
+        super::listing_metadata::write_at(&root(), path, record, || {
+            atomic(path, &format!("{record}\n"))
+        })
     })?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    atomic(path, &format!("{record}\n"))?;
+    super::listing_metadata::write_at(&root(), path, record, || {
+        atomic(path, &format!("{record}\n"))
+    })?;
     super::archive_references::note(path, record);
     Ok(())
 }

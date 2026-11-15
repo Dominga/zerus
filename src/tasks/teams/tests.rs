@@ -969,7 +969,7 @@ fn restore_marker_while_paused(
     ready
 }
 
-fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
+fn guarded_reload_case(reopen: bool, held: bool, forwarded: bool) {
     let mut f = Fixture::new();
     let member = f.bind("m1");
     let task = f.add();
@@ -998,8 +998,11 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
             doc.report("Ready", ReportKind::Ready, None, &Actor::Person, now())
                 .unwrap();
         }
+        if held {
+            doc.floor().unwrap();
+        }
         store.save(&mut doc).unwrap();
-        if legacy {
+        if held {
             let mut project = store.project().unwrap();
             project
                 .set_cutover_hold(true, &Actor::Person, now())
@@ -1039,6 +1042,29 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
             &bound.session_id,
         ]);
     }
+    if held {
+        // The new fence refuses before the obsolete legacy-reload boundary.
+        // A hold must never reopen the old paste or message writer.
+        let before = f.document(&task).revision();
+        let out = f.run(
+            &args,
+            if reopen { "Please revise" } else { "" },
+            Some(&member),
+        );
+        assert_eq!(out["ok"], false, "{out}");
+        assert!(out["error"].as_str().unwrap().contains("held"), "{out}");
+        let after = f.document(&task);
+        assert_eq!(after.revision(), before, "{out}");
+        assert!(after.attempt(&id).unwrap().is_none());
+        assert!(!f
+            .h
+            .temp
+            .path()
+            .join("input_receipts")
+            .join(format!("{id}.json"))
+            .exists());
+        return;
+    }
     let pause = f.h.temp.path().join("reload-pause");
     std::fs::create_dir(&pause).unwrap();
     let (child, reply) = if forwarded {
@@ -1048,14 +1074,7 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
             None,
             &[
                 ("HGS_TEST_ATTEMPT_PAUSE", pause.as_os_str().to_owned()),
-                (
-                    "HGS_TEST_ATTEMPT_PAUSE_AT",
-                    if legacy {
-                        "legacy_reload".into()
-                    } else {
-                        "admission".into()
-                    },
-                ),
+                ("HGS_TEST_ATTEMPT_PAUSE_AT", "admission".into()),
             ],
         )
     } else {
@@ -1064,11 +1083,10 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
             if reopen { "Please revise" } else { "" },
             &member,
             &pause,
-            if legacy { "legacy_reload" } else { "admission" },
+            "admission",
         )
     };
     let ready = restore_marker_while_paused(&child, &f, &task, &pause);
-    let before = f.document(&task).revision();
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
@@ -1087,9 +1105,6 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
             .any(|e| e.request_id.as_deref() == Some(&id)),
         "{out}"
     );
-    if legacy {
-        assert_eq!(doc.revision(), before, "{out}");
-    }
     assert_eq!(
         doc.stage().unwrap(),
         if reopen { Stage::Review } else { Stage::Todo }
@@ -1102,7 +1117,7 @@ fn guarded_reload_case(reopen: bool, legacy: bool, forwarded: bool) {
 }
 
 #[test]
-fn send_legacy_reload_rechecks_a_new_team_marker() {
+fn send_never_falls_back_to_legacy_when_the_cutover_is_held() {
     guarded_reload_case(false, true, false);
 }
 #[test]
@@ -1110,7 +1125,7 @@ fn reopen_admission_rechecks_a_new_team_marker() {
     guarded_reload_case(true, false, false);
 }
 #[test]
-fn reopen_legacy_reload_rechecks_a_new_team_marker() {
+fn reopen_never_falls_back_to_legacy_when_the_cutover_is_held() {
     guarded_reload_case(true, true, false);
 }
 
@@ -1647,15 +1662,6 @@ fn start_recheck_case(phase: &str) {
     let recipient = f.bind("m1");
     let task = f.add();
     let reference = format!("example/{}", task["id"].as_str().unwrap());
-    if phase == "start_legacy" {
-        let store =
-            ProjectStore::open(&f.h.temp.path().join("replica"), "example-project").unwrap();
-        let mut project = store.project().unwrap();
-        project
-            .set_cutover_hold(true, &Actor::Person, now())
-            .unwrap();
-        store.save_project(&project).unwrap();
-    }
     let doc = f.document(&task).view().unwrap();
     let target =
         f.h.store
@@ -1761,8 +1767,60 @@ fn start_managed_rechecks_a_caller_that_became_refused_after_entry() {
     start_recheck_case("start_managed");
 }
 #[test]
-fn start_legacy_rechecks_a_caller_that_became_refused_after_entry() {
-    start_recheck_case("start_legacy");
+fn start_never_falls_back_to_legacy_when_the_cutover_is_held() {
+    let mut f = Fixture::new();
+    let recipient = f.bind("m1");
+    let task = f.add();
+    let reference = format!("example/{}", task["id"].as_str().unwrap());
+    {
+        let store =
+            ProjectStore::open(&f.h.temp.path().join("replica"), "example-project").unwrap();
+        let mut doc = store.load(task["uuid"].as_str().unwrap()).unwrap();
+        doc.floor().unwrap();
+        store.save(&mut doc).unwrap();
+        let mut project = store.project().unwrap();
+        project
+            .set_cutover_hold(true, &Actor::Person, now())
+            .unwrap();
+        store.save_project(&project).unwrap();
+    }
+    let before = f.document(&task).revision();
+    let target =
+        f.h.store
+            .member(TEAM, "m1")
+            .unwrap()
+            .unwrap()
+            .session
+            .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let prepare = json!({"schema":1,"id":id,"stage_at":task["stage_at"],"target":task["target"],"selection":{"host":"","name":recipient,"session_id":target.session_id,"run_id":"run-m1","conversation_id":""}});
+    let plan = f.run(
+        &["start-plan", &reference, "--json"],
+        &prepare.to_string(),
+        None,
+    );
+    assert_eq!(plan["ok"], true, "{plan}");
+    let out = f.run(
+        &["start-deliver", &reference, "--json"],
+        &plan["value"]["plan"].to_string(),
+        None,
+    );
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["value"]["state"], "cutting_over", "{out}");
+    assert!(
+        out["value"]["error"].as_str().unwrap().contains("held"),
+        "{out}"
+    );
+    let after = f.document(&task);
+    assert_eq!(after.revision(), before);
+    assert!(after.attempt(&id).unwrap().is_none());
+    assert!(!f
+        .h
+        .temp
+        .path()
+        .join("input_receipts")
+        .join(format!("{id}.json"))
+        .exists());
 }
 
 /// zerus-63rru.97 F1/F2, end to end: a command whose task is no longer

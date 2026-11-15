@@ -61,6 +61,7 @@ pub(crate) use items::{put as put_service_item, Failure as ServiceFailure};
 mod kept;
 mod launch;
 mod ledger;
+pub(crate) mod member_swap;
 pub(crate) use health::Health;
 /// Last launch-worker fault, read without creating a launch ledger.
 pub(crate) fn health(state: &std::path::Path) -> Option<Health> {

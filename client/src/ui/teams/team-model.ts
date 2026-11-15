@@ -26,16 +26,19 @@ export interface MemberStatus {
   lead: boolean;
 }
 
+const MEMBER_STATUS: Readonly<Record<string, () => string>> = {
+  not_created: () => tr("not created"), active: () => tr("active"),
+  paused: () => tr("paused"), removed: () => tr("removed"),
+};
+
 /** What a member's card says about it. */
 export function memberStatus(member: MemberView): MemberStatus {
   const state = member.state || "not_created";
-  return { state, label: tr(state === "not_created" ? "not created" : state), tone: memberStateColor(state), lead: member.lead };
+  return { state, label: MEMBER_STATUS[state]?.() ?? state, tone: memberStateColor(state), lead: member.lead };
 }
 
-/** The team's own status as a word and a tone. */
-export function stateLabel(state: string): string {
-  return tr(state === "not_created" ? "not created" : state);
-}
+/** One status vocabulary shared with the session strip and Teams list. */
+export { teamStatusLabel as stateLabel } from "./team-status";
 
 export function stateTone(state: string): Tone {
   switch (state) {
@@ -66,7 +69,7 @@ export function progress(view: TeamView): Progress {
     reported: nodes.reported,
     active: nodes.in_progress,
     waiting: nodes.pending + nodes.waiting,
-    total: nodes.waiting + nodes.pending + nodes.in_progress + nodes.reported + nodes.accepted + nodes.cancelled,
+    total: nodes.waiting + nodes.pending + nodes.in_progress + nodes.reported + nodes.accepted,
   };
 }
 

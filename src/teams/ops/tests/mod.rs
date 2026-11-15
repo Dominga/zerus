@@ -4,6 +4,7 @@ mod authority;
 mod cards;
 mod decisions;
 mod delegation;
+mod dependencies;
 mod handout;
 mod integration;
 mod members;
@@ -338,3 +339,5 @@ impl Harness {
     }
 }
 mod names74;
+
+mod editing;

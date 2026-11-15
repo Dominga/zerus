@@ -354,6 +354,10 @@ prevents its removal. Run Terminate from outside the target's own process tree.
 The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
 qualified separately. It has no installed caller and does not enable graceful
 Terminate or change the verified tree and cleanup rules above.
+The [dormant original supervisor bridge](original-supervisor-owner.md) retains
+source-bound ownership behind a const-false gate. Its read-only observations
+grant no graceful, signal or cleanup authority; owned-mode records refuse the
+legacy root-only finalizer.
 
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
@@ -5139,6 +5143,19 @@ page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
 nothing changed, after checking that page's rows against their files.
 
+Task lists check the caller before discovering session bindings. Only session
+references in the selected rows need routing metadata; an empty or unchanged
+page, or one containing only remote references, reads no session bodies for
+routing. The caller's own record is still checked for agent proof.
+The disposable `task-routing-v1` cache keeps routing fields without command
+output and verifies the canonical binding namespaces and file versions on each
+lookup. Cold or changed metadata is refreshed in bounded slices, with a finite
+background helper when needed. While coverage is incomplete, the command
+returns `Task session routing is incomplete` and asks the caller to retry;
+unreadable canonical evidence returns an unavailable error. Neither case
+reports a referenced session as missing. This cache supplies task-list labels
+only; caller proof and task changes still verify canonical session records.
+
 `--session ID` (`launch_id:...` or `run_id:...`, with `--host` for a session on
 another computer) pages one session's view of the stage: the tasks its
 identity owns, the session of a task in progress, in review or done, or the
@@ -5664,6 +5681,21 @@ as accepted current task writes. See
 `docs/superpowers/specs/2026-11-14-reachable-task-writer-cutover.md` for the exact
 root, native custody, importer/writer census and qualification boundaries.
 
+Ordinary edits and team cancellation of an unsealed task use Start's same
+discovery and admission entry, with no business write in its preparation
+callback. One original deadline reserves local settlement time before any
+remote preparation. Source lookup, mandatory original-source verification and Prepare each divide
+their bounded discovery pool fairly within that same cutoff. Slow optional
+readers cannot hide a later healthy original seal or cause a new floor to be
+minted. Already sealed tasks retain their native protocol
+validation and ordinary business rules. An older task with no floor is included in the bounded background pass; it need not be started first.
+Returning clean prefixes adopt the existing seal before any first-floor write,
+and extra old-rule writes still require review. Recovery requires a current
+native source to confirm that exact original seal; a missing or mismatched
+confirmation leaves the original held. A pending team cancellation
+recovers on its next due backoff pass once migration can finish; the person
+need not press Retry. A 60-second service pass does not bypass that backoff.
+
 The check grants no dispatch authority or attempt. Current cutover preparation
 can persist protocol custody/seal metadata; it never offers native input.
 
@@ -5881,6 +5913,7 @@ hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
 hgs team pause-member|resume-member|stop-member|archive-member < request.json
+hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
 
@@ -5937,6 +5970,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `stop`, `archive` | yes | | | none |
 | `decide` | yes | | | `card`, `decision` |
 | `admit`, `hold`, `release` | yes | yes | | `node` |
+| `set-deps` | yes | | | `node`, `deps` (up to 200 `{node, kind?}` entries; `hard` by default, or `soft`) |
 | `route` | yes | yes | | `node`, `role`, `pipeline`, optional `deps`, `writes`, `assignee` |
 | `accept` | yes | with the delegation | | `node` |
 | `return`, `cancel` | yes | yes | | `node`, `reason` |
@@ -5944,8 +5978,32 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `reply` | yes | with the delegation | | `item`, `text` |
 | `pause-member`, `resume-member` | yes | yes | | `member` |
 | `stop-member`, `archive-member` | yes | | | `member` |
+| `add-member` | yes | | | `role`, `agent`, optional `model`, `effort`, `account` |
+| `swap-member` | yes | | | `member`, `agent`, optional `model`, `effort`, `account` |
+| `rename-team` | yes | | | `name` |
+| `set-goal` | yes | | | `goal` |
 | `ask` | | | the attempt's holder | `node`, `generation`, `text` |
 | `verdict` | | | the stage's holder | `node`, `generation`, `pass`, `text` |
+
+Live-team edits use the same receipt and revision rules below. `add-member`
+chooses a role from the team's pinned catalog and reserves a new, never reused
+member ID. `account` is `{"mode":"freest"}` (the default) or
+`{"mode":"named","account":"example"}`. Model and effort are optional;
+empty strings use the selected account's defaults. Seat choices leave the
+pinned role and all other members unchanged. The service launches an added
+member through its ordinary launch ledger.
+
+`swap-member` requires a member already stopped by the person, with a known
+completed launch and no open tasks, unsettled attempts or unknown receipts.
+An active member is refused with `Stop the member first; open work: N`.
+Swap does not stop or archive the old session: it loses its team binding and
+stays outside the team. The new agent keeps the member ID, task history,
+owned folder and branch. The old original and receipts remain immutable; a
+new launch original verifies the same checkout before launching. There is no
+active cutover or existing-session adoption. A changed generation fences stale
+launch admission. `rename-team` changes the display name only; already reserved
+session, worktree and branch names stay. `set-goal` accepts an empty string to
+clear the goal. These four edits require a running or paused team.
 
 The envelope of every write is `request_id` (a fresh lowercase UUID), `team`
 (the team's UUID, chosen by the caller for `create`) and `expected_revision`
@@ -5959,6 +6017,21 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+`set-deps` replaces dependencies only before the dependent task has started,
+without changing its route, holder or pipeline. The store refuses a started,
+reserved, handed-out, submitted or reported dependent, any current or historical
+attempt or effect, and an unsettled decision. These are store facts checked
+inside the writer transaction; a pending task may still depend on a started or
+done prerequisite. The queue exposes `deps_editable` from those same facts;
+an absent value keeps the UI read-only. Refusals keep their request receipt.
+It also refuses a stage, missing or repeated dependencies,
+self-dependencies and cycles (including soft edges). The graph in the Team tab
+shows one bounded queue page; dependencies outside the page stay listed on the
+card. Drag a card's output port onto another card, or select its port and then
+the target port, to add a hard dependency. Select an arrow and press Delete
+to remove it. The task detail also lists every dependency and allows editing an off-page
+endpoint by number. Edits send the revision shown and preserve other edges.
 
 Rules the store enforces beyond the table: a lead's `accept` and `reply` need
 the team's `accept_results` and `answer_members` delegations; a lead accepts
@@ -5987,7 +6060,19 @@ the template as the catalog holds it.
 
 **Replies.** The read shapes are pinned in `crates/team-plan/fixtures/`:
 `cli-list.json` (`list`: `{ok, actor, rows, next}`, each row
-`{id, project, name, status, lead, home, revision, lead_session}`),
+`{id, project, name, status, lead, home, revision, lead_session, members, progress}`),
+where `progress` is a bounded list-page projection: `tasks` (non-cancelled task
+nodes, live and archived), `accepted` (live and archived accepted tasks),
+`questions` (open `question:*` member inbox items), `members` (active/paused
+members plus the lead, counted once even before launch), `phases`,
+`phases_done`, and `stuck`. Internal stage nodes count in neither task count.
+Each count stops at 1000 and has a corresponding `<field>_more` boolean; true
+means a lower bound, displayed as `1000+` without a percentage. Exactly 1000
+keeps the flag false. `stuck` means an open `launch_blocked`, `launch_uncertain`,
+`silent_lead` or `team_actor_blocked` card, or a `project_limit` service item.
+Questions, ordinary approvals, `launch_capacity` cards and delivery-uncertain
+inbox items alone do not establish Stuck. The fields arrive with the bounded
+list read, without extra per-team reads; an older CLI may omit `progress`.
 `cli-waiting.json` (`waiting`: open cards of every team, oldest first, each
 with its `team`), `cli-status.json` (`status`: `{ok, actor, team, members,
 counts, service_running, health, service_items}`; the team without its
@@ -9416,3 +9501,28 @@ clang -Wno-deprecated-declarations tests/test_macos_session_protocol.c \
 Process coverage includes exact call identity, background tasks, stale generations,
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
+
+### Team catalog editor receipts
+
+The desktop Teams catalog edits roles, pipelines and templates from `team-plan`.
+Imports stay in the draft until Save; Revert reads the current personal catalog.
+Built-in entries are inherited, and removing an override reveals the built-in
+entry again. Existing teams keep their launch snapshots.
+
+`hgs team catalog snapshot --json` is a bounded, person-only read of the personal
+catalog, the built-ins and their merged view. Its opaque `revision` fingerprints
+the complete personal catalog and the built-in catalog of that CLI. The editor opts into guarded `catalog import`
+with `{schema:1, request_id, expected_revision, catalog}`. The editor
+limits the exact stored pretty JSON plus its final newline to 240,000 bytes;
+a successful save therefore stays within the next snapshot read bound. Legacy bare-catalog
+imports and template commands keep their existing forms. Catalog writers share
+one lock; a changed revision refuses before publication. A duplicate request
+with identical content returns its stored outcome, while different content
+under that UUID refuses.
+
+A private point journal reserves uncertainty before the catalog is published.
+`hgs team catalog receipt UUID --json` only reads that outcome: an interrupted
+save remains uncertain and is never replayed. The desktop keeps the original
+intent and offers Check result, or an explicit confirmed discard of the draft
+followed by a fresh read. No catalog action launches a team or changes a
+running team's permissions.

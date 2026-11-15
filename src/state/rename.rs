@@ -20,6 +20,10 @@ pub(super) use guarded::{
 };
 
 fn remove(path: &Path) -> Result<()> {
+    super::listing_metadata::remove_at(&root(), path, || remove_inner(path))
+}
+
+fn remove_inner(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid state path")?)
             .map_err(|e| e.to_string()),

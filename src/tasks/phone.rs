@@ -96,7 +96,11 @@ struct Indexed<'a> {
 
 impl<'a> Indexed<'a> {
     fn new(store: &'a ProjectStore) -> Self {
-        Self { store, index: None, tried: false }
+        Self {
+            store,
+            index: None,
+            tried: false,
+        }
     }
 
     fn index(&mut self) -> Option<&mut Index<'a>> {
@@ -163,7 +167,9 @@ mod tests {
         .unwrap();
         assert!(stale.floor().unwrap());
         stale.lower_stored_schema_for_test(5);
-        store.save(&mut stale).unwrap();
+        // Preserve the literal old writer's lowered schema, before a native
+        // birth seal could turn this into an already repaired current task.
+        store.save_legacy_for_test(&mut stale).unwrap();
         let old = stale.inventory_version();
         let digest = Indexed::new(&store).live_digest().unwrap();
         assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());
@@ -174,7 +180,75 @@ mod tests {
         }))
         .unwrap();
         let answered = answer_with(&store, request, &mut Indexed::new(&store)).unwrap();
-        assert!(answered.updates.iter().any(|u| u.task.as_deref() == Some(stale.uuid())));
+        assert!(answered
+            .updates
+            .iter()
+            .any(|u| u.task.as_deref() == Some(stale.uuid())));
         assert_eq!(answered.digest, digest);
+    }
+
+    #[test]
+    fn indexed_exchange_imports_only_complete_phone_media_across_restarts() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use sha2::{Digest, Sha256};
+        use zerus_replica::{phone::Exchange, TaskAttachment};
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let phone = ProjectStore::open_phone(a.path(), "project-1").unwrap();
+        let mut task = TaskDoc::create(NewTask {
+            project: "project-1",
+            id: "T-upload",
+            text: "Inspect the original photo",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        let bytes: Vec<u8> = (0u64..25600)
+            .flat_map(|i| Sha256::digest(i.to_le_bytes()))
+            .collect();
+        task.set_attachments(
+            &[TaskAttachment {
+                name: "fixture.png".into(),
+                mime: "image/png".into(),
+                data_base64: STANDARD.encode(&bytes),
+                reference: "image-1".into(),
+            }],
+            &Actor::Person,
+            2,
+        )
+        .unwrap();
+        phone.save(&mut task).unwrap();
+        let mut exchange = Exchange::with_uploads();
+        let mut parts = 0;
+        while let Some(request) = exchange.next_request(&phone).unwrap() {
+            let host = ProjectStore::open(b.path(), "project-1").unwrap();
+            let answered = answer_with(&host, request, &mut Indexed::new(&host)).unwrap();
+            if let Some(ack) = &answered.upload {
+                parts += 1;
+                if !ack.complete {
+                    assert!(host.load(task.uuid()).is_err());
+                    assert_eq!(answered.imported, 0);
+                }
+            }
+            let progress = exchange.accept(&phone, answered).unwrap();
+            assert!(progress.unsent.is_empty());
+            assert!(progress.refused_there.is_empty());
+            assert!(progress.refused_here.is_empty());
+        }
+        assert!(parts > 1);
+        let host = ProjectStore::open(b.path(), "project-1").unwrap();
+        assert_eq!(
+            host.load(task.uuid()).unwrap().attachments().unwrap()[0]
+                .bytes()
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            Indexed::new(&host).live_digest().unwrap(),
+            host.live_inventory().unwrap().0.digest()
+        );
     }
 }

@@ -37,13 +37,20 @@ export interface TeamMember {
   id: string; role: string; agent: string; account: string; state: string; lead: boolean; session: TeamSession | null; model?: string | null;
   /** The person stopped this member (the store refuses a second Stop). */
   person_stopped?: boolean;
+  effort?: string | null;
+  account_choice?: { mode: string; account?: string } | null;
+  open_work?: number | null;
 }
 export interface TeamMemberCounts { total: number; not_created: number; active: number; paused: number; removed: number }
 export interface TeamNodeCounts { waiting: number; pending: number; in_progress: number; reported: number; accepted: number; cancelled: number }
 export interface TeamCounts { members: TeamMemberCounts; nodes: TeamNodeCounts; inbox: number; cards: number }
 export interface TeamStage { node: number; index: number; role: string; state: string; assignee: string; implementer: string; kind?: "review" | "test" | "land" | null; target?: number | null; round?: number | null }
 export interface TeamTaskRef { project: string; uuid: string }
+export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
+  /** Authoritative store fact; absent on older reads keeps editing disabled. */
+  deps_editable?: boolean | null;
+  deps?: TeamDependency[]; phase?: number | null; origin?: number | null; layer?: number | null;
   node: number; title: string; state: string; task: TeamTaskRef | null; role: string; pipeline: string;
   assignee: string; implementer: string; rank: string; round: number; held: boolean; admitted: boolean;
   integrated: boolean; decided_by: string; stages: TeamStage[];
@@ -67,6 +74,11 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  /** Complete bounded goal for the editor, distinct from the bar preview. */
+  edit_goal?: string | null;
+  member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
+  /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
+  settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */
   after?: string | null;
@@ -313,8 +325,9 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const [confirmation, setConfirmation] = createSignal<{ call: TeamCall; confirmation: TeamConfirmation } | null>(null);
   /** Every call whose result is unknown, bounded and never evicted by another. */
   const [unresolved, setUnresolved] = createSignal<UnresolvedCall[]>([]);
-  /** The request ids whose invoke is in flight: each holds an admitted slot. */
-  const [sending, setSending] = createSignal<readonly string[]>([]);
+  /** Each in-flight request holds a slot and the team whose controls it locks. */
+  const [inFlight, setInFlight] = createSignal<ReadonlyMap<string, string>>(new Map());
+  const sending = () => [...inFlight().keys()];
   const [createIntent, setCreateIntent] = createSignal<CreateIntent | null>(null);
   /** Resolvers by team id, for the decisions that wait for that team's revision. */
   const pendingViews = new Map<string, Set<(view: TeamView | null) => void>>();
@@ -330,7 +343,8 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   let followGeneration = 0;
   let lastFollow: TeamFollow | undefined;
 
-  const busy = () => sending().length > 0;
+  const busy = (teamId?: string) => teamId === undefined
+    ? inFlight().size > 0 : [...inFlight().values()].includes(teamId);
   const unresolvedOf = (requestId: string) => unresolved().find((entry) => entry.call.request_id === requestId);
   function putUnresolved(call: TeamCall, detail: string, state: UnresolvedCall["state"]) {
     setUnresolved([...unresolved().filter((entry) => entry.call.request_id !== call.request_id), { call, detail, state }]);
@@ -771,7 +785,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     return send(call, source, () => transport.actAgain(call));
   }
   async function send(call: TeamCall, source: string, act: () => Promise<TeamOutcome>): Promise<TeamOutcome> {
-    setSending([...sending(), call.request_id]);
+    setInFlight((old) => new Map(old).set(call.request_id, call.team));
     try {
       const outcome = await act();
       return accept(call, outcome, source);
@@ -780,7 +794,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
       putUnresolved(call, detail, "uncertain");
       return { outcome: "uncertain", detail, request_id: call.request_id };
     } finally {
-      setSending(sending().filter((id) => id !== call.request_id));
+      setInFlight((old) => { const next = new Map(old); next.delete(call.request_id); return next; });
     }
   }
   function accept(call: TeamCall, outcome: TeamOutcome, source: string): TeamOutcome {

@@ -18,6 +18,8 @@ pub const REPROBE_SECONDS: f64 = 300.0;
 pub const PROBE_TIMEOUT: f64 = 3.0;
 pub const TASK_IDENTITY_HELP_MARKER: &str = "Mobile task identity ABI: task-session-identity-v2";
 pub const TASK_IDENTITY_FEATURE: &str = "task_session_identity_v2";
+pub const TASK_UPLOAD_HELP_MARKER: &str = "Mobile task media ABI: task-media-upload-v1";
+pub const TASK_UPLOAD_FEATURE: &str = "task_media_upload_v1";
 /// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
 /// providers absent from the host, speech and voice. Same table drives
 /// advertisement and dispatch refusal, after durable duplicate handling.
@@ -392,6 +394,8 @@ pub struct Flags {
     pub task_actions: bool,
     /// Exact native marker for identity-bound task Send and Done requests.
     pub task_session_identity: bool,
+    /// Bounded upload frames inside task exchange, independently negotiated.
+    pub task_media_upload: bool,
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
@@ -474,6 +478,9 @@ impl Flags {
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
             task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
+            task_media_upload: help
+                .lines()
+                .any(|line| line.trim() == TASK_UPLOAD_HELP_MARKER),
             task_session_identity: help
                 .lines()
                 .any(|line| line.trim() == TASK_IDENTITY_HELP_MARKER),
@@ -650,6 +657,9 @@ impl Flags {
             && operations.contains(&"task_done")
         {
             features.push(TASK_IDENTITY_FEATURE);
+        }
+        if self.task_media_upload && operations.contains(&"task_exchange") {
+            features.push(TASK_UPLOAD_FEATURE);
         }
         // Connector-only: the Python connector never advertises it, so apps
         // do not send an OpenCode effort to it.

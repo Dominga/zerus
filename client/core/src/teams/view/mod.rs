@@ -10,6 +10,9 @@
 //! queue as the board's groups in [`board`]) and the open owner cards
 //! ([`waiting`]).
 pub mod board;
+mod editing;
+pub mod graph;
+pub use editing::MemberRole;
 pub mod list;
 
 pub use board::team;
@@ -387,6 +390,12 @@ pub struct MemberCard {
     /// The person stopped it: the store refuses a second Stop (absent on an
     /// older hgs's row: false).
     pub person_stopped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_choice: Option<zerus_team_plan::catalog::AccountChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_work: Option<u64>,
 }
 
 /// The member counts of `team status`'s `counts.members`.
@@ -465,7 +474,21 @@ pub(crate) fn task_ref(node: &Value) -> Option<TaskRefView> {
 /// its stages. A card is never a stage node of another card.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct QueueCard {
+    /// Store-owned pre-start predicate; an older read grants no edit affordance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deps_editable: Option<bool>,
     pub node: u64,
+    /// Dependency facts are kept even when the other endpoint is off-page.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<zerus_team_plan::model::Dep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u32>,
+    /// The longest dependency path within this bounded queue page; absent
+    /// at layer zero, preserving older empty-edge view shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u32>,
     pub title: String,
     pub state: String,
     pub task: Option<TaskRefView>,
@@ -539,7 +562,15 @@ pub struct TeamBar {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TeamView {
     pub bar: TeamBar,
+    /// Complete settings for editing; absent if this version cannot read every field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<zerus_team_plan::Settings>,
     pub members: Vec<MemberCard>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub member_roles: Vec<MemberRole>,
+    /// Complete bounded goal for editing; the bar keeps its display preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_goal: Option<String>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.
     pub truncated: bool,

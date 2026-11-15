@@ -1,13 +1,15 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { orderedRows } from "../../store/catalog";
 import { projectsPage } from "../../store/projects";
+import { setPage } from "../../store/ui";
 import { teams, type TeamFailure, type TeamProgress, type TeamSummary } from "../../store/teams";
 import { Icon } from "../lib/icons";
 import type { Session } from "../sessions/types";
 import { openTeamLead } from "../teams/lead-navigation";
 import { rowIsSession, rowSessionKeys, sessionKey } from "../teams/session-binding";
 import { stateLabel, stateTone } from "../teams/team-model";
+import { TeamsHeader, TeamsRow } from "../teams/TeamsScreenFrame";
 import "../styles/teams.css";
 import "../styles/teams-screen.css";
 
@@ -18,6 +20,11 @@ function TeamMetrics(props: { progress: TeamProgress }) {
   const p = () => props.progress;
   const tasks = () => ratio(p().accepted, p().tasks, p().accepted_more, p().tasks_more);
   const exact = () => !p().accepted_more && !p().tasks_more;
+  const members = () => {
+    const n = p().members;
+    const label = n === 1 ? tr("%n member", n) : tr("%n members", n);
+    return p().members_more ? label.replace(String(n), `${n}+`) : label;
+  };
   return <div class="teams-metrics">
     <span class="teams-task-progress" title={tr("Accepted tasks: %1", tasks())}>
       <span>{tasks()}</span>
@@ -29,12 +36,18 @@ function TeamMetrics(props: { progress: TeamProgress }) {
     <Show when={p().phases > 1 || p().phases_more}><span class="dim">{tr("Phases finished: %1", ratio(p().phases_done, p().phases, p().phases_done_more, p().phases_more))}</span></Show>
     <Show when={p().stuck}><span class="teams-stuck">{tr("Stuck")}</span></Show>
     <Show when={p().questions > 0 || p().questions_more}><span class="teams-questions" title={tr("Unanswered member questions")}>?{count(p().questions, p().questions_more)}</span></Show>
-    <span class="teams-member-count">{tr("%1 members", count(p().members, p().members_more))}</span>
+    <span class="teams-member-count">{members()}</span>
   </div>;
 }
 
 /** One followed list page at a time; no timer and no per-team reads. */
-export function TeamsScreen() {
+export interface TeamsScreenProps {
+  headerActions?: JSX.Element;
+  rowActions?: (team: TeamSummary) => JSX.Element;
+  rowDetails?: (team: TeamSummary) => JSX.Element;
+}
+
+export function TeamsScreen(props: TeamsScreenProps = {}) {
   const [notice, setNotice] = createSignal("");
   const [pending, setPending] = createSignal<{ cursor: string | null; failure: TeamFailure | null }>();
   const view = () => teams.listPage() ?? teams.list();
@@ -58,6 +71,7 @@ export function TeamsScreen() {
   });
   const project = (id: string) => projectsPage().projects.find((candidate) => candidate.id === id)?.name ?? id;
   const open = (team: TeamSummary) => {
+    if (!team.lead_session) { setNotice(tr("The team's lead has no session yet.")); return; }
     const row = orderedRows().find((candidate) => rowIsSession(candidate, team.lead_session));
     if (!row || !openTeamLead(team, row)) setNotice(tr("The team's lead session is not on the session list."));
   };
@@ -68,10 +82,12 @@ export function TeamsScreen() {
     catch (error) { setPending(undefined); setNotice(String(error)); }
   };
   return <section class="teams-screen" aria-label={tr("Teams")} data-teams-page>
-    <header class="teams-screen-head">
-      <div><h1>{tr("Teams")}</h1><p class="dim">{tr("Teams on this computer")}</p></div>
+    <TeamsHeader actions={<>
+      <button type="button" class="btn ghost" disabled={teams.available() !== true} onClick={() => setPage("team-catalog")}>{tr("Catalog")}</button>
+      {props.headerActions}
+    </>}>
       <button type="button" class="btn primary" disabled={teams.available() !== true} onClick={() => void teams.openNewTeam()}><Icon name="plus" size={14} />{tr("New team")}</button>
-    </header>
+    </TeamsHeader>
     <Show when={teams.available() !== false} fallback={<p class="notice team-notice" role="status">{teams.off() === "unavailable" ? tr("Teams are unavailable on this computer.") : tr("Teams are off on this computer.")}</p>}>
       <Show when={notice()}><p class="notice danger team-notice" role="alert">{notice()}</p></Show>
       <Show when={readFailure()}>{(failure) => <p class="notice danger team-notice" role="alert">{tr("Teams could not be read: %1", failure().message)}</p>}</Show>
@@ -85,13 +101,11 @@ export function TeamsScreen() {
             <button type="button" class="btn primary" onClick={() => void teams.openNewTeam()}>{tr("New team")}</button>
           </div>}>
             <ul class="teams-list">
-              <For each={shown().teams}>{(team) => <li>
-                <button type="button" class="teams-row" data-team-row={team.id} aria-label={tr("Open team %1", team.name)} onClick={() => open(team)}>
+              <For each={shown().teams}>{(team) => <TeamsRow team={team} onOpen={() => open(team)} actions={props.rowActions?.(team)} details={props.rowDetails?.(team)}>
                   <span class="teams-row-head"><Icon name="users" size={18} /><b class="teams-row-name">{team.name}</b><span class={`tm-state-badge tone-${stateTone(team.status)}`}>{stateLabel(team.status)}</span></span>
-                  <span class="teams-row-meta"><span title={team.project}><Icon name="folder" size={13} />{project(team.project)}</span><span><span class="dim">{tr("Lead")}</span>{leads().get(sessionKey(team.lead_session))?.name ?? team.lead}</span></span>
+                  <span class="teams-row-meta"><span title={team.project}><Icon name="folder" size={13} />{project(team.project)}</span><span><span class="dim teams-row-label">{tr("Lead")}</span><span class="teams-row-value">{leads().get(sessionKey(team.lead_session))?.name ?? team.lead}</span></span></span>
                   <Show when={team.progress}>{(progress) => <TeamMetrics progress={progress()} />}</Show>
-                </button>
-              </li>}</For>
+              </TeamsRow>}</For>
             </ul>
           </Show>
           <nav class="teams-pages" aria-label={tr("Team list pages")}>

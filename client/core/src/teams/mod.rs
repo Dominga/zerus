@@ -36,10 +36,13 @@
 //! entry point.
 pub mod action;
 pub mod catalog;
+pub mod catalog_edit;
+pub mod drawers;
 pub mod model;
 pub mod poller;
 pub mod read;
 mod refusal;
+pub mod settings;
 pub mod tolerant;
 pub mod view;
 

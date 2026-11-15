@@ -231,7 +231,7 @@ class TaskCommands(Fixture):
                     data_base64=base64.b64encode(b"immutable image bytes").decode())
         task = self.add(json.dumps(dict(text="Look here [Image #1]", attachments=[file])), "--content-json")
         self.assertEqual(task["attachments"], [file])
-        self.assertEqual(task["schema"], 2)
+        self.assertEqual(task["schema"], 8)
         listed = self.hgs("list", "--project", "orchard")["tasks"][0]["attachments"][0]
         self.assertNotIn("data_base64", listed)
         self.assertEqual(listed["sha256"], hashlib.sha256(b"immutable image bytes").hexdigest())
@@ -248,11 +248,11 @@ class TaskCommands(Fixture):
         file = dict(name="screen.png", mime="image/png", reference="[Image #1]",
                     data_base64=base64.b64encode(b"comment image bytes").decode())
         noted = self.hgs("comment", task["ref"], "--content-json", text=json.dumps(dict(text="See [Image #1]", attachments=[file])))["task"]
-        self.assertEqual(noted["schema"], 3)
+        self.assertEqual(noted["schema"], 8)
         self.assertEqual(noted["log"][-1]["attachments"], [file])
         self.hgs("edit", task["ref"], text="Revised description")
         restored = self.hgs("get", task["ref"])["task"]
-        self.assertEqual(restored["schema"], 3)
+        self.assertEqual(restored["schema"], 8)
         self.assertEqual(restored["log"][1]["attachments"], [file])
         self.assertNotIn("log", self.hgs("list", "--project", "orchard")["tasks"][0])
         bad = dict(file, data_base64="%%%")
@@ -460,35 +460,71 @@ class TaskCommands(Fixture):
         self.assertEqual(listing["damaged"][0]["recovery"], "depends_on_incoming_copy")
 
     def test_a_damaged_task_cut_over_here_is_listed_as_kept_for_review(self):
-        # zerus-cg5h.4.2: a copy this computer cut over to execution attempts
-        # (its mark beside the files) is told apart from damage whose
-        # recovery depends on the copy that arrives; torn local updates are
-        # kept too. What is shown is only what is known here.
+        # Native creation admits each schema-8 task under its cutover pin.
+        # The pin keeps damaged data even if an older mark is removed or
+        # the local updates are torn. Legacy unpinned data is tested below.
         project = None
         uuids = {}
         for name in ("Kept", "Ordinary", "Torn"):
             task = self.add(name)
+            self.assertEqual(task["schema"], 8)
             project = project or next(p for p in (self.state / "replica").iterdir() if p.is_dir())
+            self.assertTrue((project / "tasks" / (task["uuid"] + ".cutover")).is_file())
             (project / "tasks" / (task["uuid"] + ".loro")).write_bytes(b"broken")
             uuids[name] = task["uuid"]
         (project / "tasks" / (uuids["Kept"] + ".managed")).write_text('{"snapshot":{}}')
         (project / "tasks" / (uuids["Torn"] + ".updates")).write_bytes(b"\x07")
-        expected = {
-            uuids["Kept"]: {"kept": True, "kept_reason": "marked"},
-            uuids["Ordinary"]: {"recovery": "depends_on_incoming_copy"},
-            uuids["Torn"]: {"kept": True, "kept_reason": "unreadable_local_data"},
-        }
+        expected = {uuid: {"kept": True, "kept_reason": "marked"} for uuid in uuids.values()}
         for listing in (self.hgs("list", "--project", "orchard"),
                         self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")):
             rows = {d["uuid"]: {k: v for k, v in d.items() if k not in ("uuid", "error")}
                     for d in listing["damaged"]}
             self.assertEqual(rows, expected)
-        # Removing the mark is read at once.
+        # Removing an old mark never erases the admitted native cutover.
         (project / "tasks" / (uuids["Kept"] + ".managed")).unlink()
         page = self.hgs("list", "--project", "orchard", "--stage", "todo", "--limit", "5")
         row = next(d for d in page["damaged"] if d["uuid"] == uuids["Kept"])
-        self.assertEqual(row.get("recovery"), "depends_on_incoming_copy")
-        self.assertNotIn("kept", row)
+        self.assertTrue(row["kept"])
+        self.assertEqual(row["kept_reason"], "marked")
+        self.assertNotIn("recovery", row)
+
+    def test_pre_cutover_damage_keeps_legacy_mark_and_torn_update_protection(self):
+        self.add("Initialize the private native project")
+        project = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest()
+        vectors = REPO / "crates/replica/tests/vectors"
+        expected = json.loads((vectors / "task-schema1-loro1.16-merged.json").read_text())
+        uuid = expected["uuid"]
+        snapshot = project / "tasks" / (uuid + ".loro")
+        original = (vectors / "task-schema1-loro1.16.loro").read_bytes()
+        snapshot.write_bytes(original)
+        legacy = self.hgs("get", uuid, "--project", "orchard")["task"]
+        self.assertEqual(legacy["schema"], 1)
+        self.assertEqual(snapshot.read_bytes(), original, "reading legacy data never admits a cutover")
+        self.assertFalse(snapshot.with_suffix(".cutover").exists())
+        self.assertFalse(snapshot.with_suffix(".managed").exists())
+        snapshot.write_bytes(b"broken")
+
+        def damage():
+            for extra in ((), ("--stage", "todo", "--limit", "5")):
+                listing = self.hgs("list", "--project", "orchard", *extra)
+                yield next(row for row in listing["damaged"] if row["uuid"] == uuid)
+
+        for row in damage():
+            self.assertEqual(row.get("recovery"), "depends_on_incoming_copy")
+            self.assertNotIn("kept", row)
+        mark = snapshot.with_suffix(".managed")
+        mark.write_text('{"snapshot":{}}')
+        for row in damage():
+            self.assertTrue(row["kept"])
+            self.assertEqual(row["kept_reason"], "marked")
+        mark.unlink()
+        for row in damage():
+            self.assertEqual(row.get("recovery"), "depends_on_incoming_copy")
+            self.assertNotIn("kept", row)
+        snapshot.with_suffix(".updates").write_bytes(b"\x07")
+        for row in damage():
+            self.assertTrue(row["kept"])
+            self.assertEqual(row["kept_reason"], "unreadable_local_data")
 
 
     def test_the_cutover_status_and_a_person_s_hold(self):

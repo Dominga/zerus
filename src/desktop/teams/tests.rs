@@ -3123,3 +3123,53 @@ pub(super) fn bound151_fixture() -> Harness {
     ));
     h
 }
+
+#[path = "edit_tests.rs"]
+mod edits159;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound159_fixture() -> Harness {
+    edits159::started().0
+}
+
+#[test]
+fn launch_card_writers_establish_list_stuck_for_blocked_and_uncertain_launches() {
+    let stuck = |h: &Harness| {
+        let rows = h.store.teams(1, None).unwrap().rows;
+        h.store.team_progress(&rows).unwrap()[ops::tests::TEAM].stuck
+    };
+    let open = |h: &Harness| {
+        cards(h)
+            .into_iter()
+            .filter(|c| c.state == "open")
+            .map(|c| c.kind)
+            .collect::<Vec<_>>()
+    };
+    let mut h = Harness::new();
+    assert!(!stuck(&h));
+    let mut e = FakeEffects {
+        unknown: true,
+        ..Default::default()
+    };
+    let mut r = runtime(&h);
+    advance(&mut r, &mut h, &mut e, 20);
+    for _ in 0..5 {
+        r.tick(&mut h.store, &mut e, ops::tests::TEAM, 301_234)
+            .unwrap();
+    }
+    assert_eq!(open(&h), ["launch_uncertain"]);
+    assert!(stuck(&h));
+    let mut h = Harness::new();
+    let mut e = FakeEffects {
+        exists: true,
+        ..Default::default()
+    };
+    let mut r = runtime(&h);
+    until(&mut r, &mut h, &mut e, |_, e| !e.plans.is_empty());
+    e.read_error = true;
+    for now in [1234, 61_234, 181_234] {
+        r.tick(&mut h.store, &mut e, ops::tests::TEAM, now).unwrap();
+    }
+    assert_eq!(open(&h), ["launch_blocked"]);
+    assert!(stuck(&h));
+}

@@ -60,6 +60,12 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         _ => format!("{kind} at revision {}", ctx.reply.revision),
     };
     let mut refs = references(request)?;
+    if let Some(member) = &ctx.reply.member {
+        let reference = format!("member:{member}");
+        if !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
     if let Some(earlier) = ctx.superseded {
         let (old, new) = replacement(ctx, earlier)?;
         body.push_str(&format!(

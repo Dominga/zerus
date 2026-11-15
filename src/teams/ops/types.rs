@@ -215,6 +215,32 @@ pub enum Operation {
         integration_branch: String,
         base_commit: String,
     },
+    AddMember {
+        role: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    SwapMember {
+        member: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    RenameTeam {
+        name: String,
+    },
+    SetGoal {
+        goal: String,
+    },
     SetMemberSession {
         member: String,
         session: SessionKey,
@@ -270,6 +296,12 @@ pub enum Operation {
         writes: Vec<String>,
         #[serde(default)]
         assignee: Option<MemberId>,
+    },
+    /// The person edits dependencies before the first attempt or delivery
+    /// reservation, without changing routing or assignment.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
     },
     Hold {
         node: NodeId,
@@ -540,6 +572,8 @@ impl<'de> Deserialize<'de> for Request {
 pub struct Reply {
     pub ok: bool,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

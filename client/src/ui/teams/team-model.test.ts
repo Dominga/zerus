@@ -6,7 +6,7 @@ import { teamView } from "./fixtures";
 // member's state and the bar's counts. No phases or task timings (M2).
 describe("the team's vocabulary", () => {
   it("labels and tones a team's status", () => {
-    expect(stateLabel("running")).toBe("running");
+    expect(stateLabel("running")).toBe("Running");
     expect(stateTone("running")).toBe("active");
     expect(stateTone("paused")).toBe("warn");
     expect(stateTone("stopped")).toBe("danger");
@@ -27,4 +27,10 @@ describe("the team's vocabulary", () => {
   it("counts the bar from the core's counts", () => {
     expect(progress(teamView)).toEqual({ accepted: 0, reported: 1, active: 0, waiting: 1, total: 2 });
   });
+});
+
+it("excludes cancelled nodes from the Team tab total", () => {
+  // Negative UI control over the pinned core counts; no Teams rows are seeded.
+  const view = { ...teamView, bar: { ...teamView.bar, counts: { ...teamView.bar.counts, nodes: { ...teamView.bar.counts.nodes, cancelled: 9 } } } };
+  expect(progress(view)).toEqual(progress(teamView));
 });

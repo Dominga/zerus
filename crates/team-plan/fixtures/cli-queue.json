@@ -10,6 +10,7 @@
   "rows": [
     {
       "admitted": true,
+      "deps_editable": false,
       "hold": true,
       "holder": "m1",
       "id": 1,
@@ -34,6 +35,7 @@
     },
     {
       "admitted": true,
+      "deps_editable": false,
       "holder": "m3",
       "id": 2,
       "implementer": "m1",

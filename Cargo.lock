@@ -3468,6 +3468,7 @@ dependencies = [
  "fs2",
  "libc",
  "loro",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

@@ -309,10 +309,11 @@ impl<'a> View<'a> {
     ) -> Result<()> {
         storage::ensure_session_id(record);
         processes::compact(record);
-        self.atomic(path, format!("{record}\n").as_bytes())
-        // No native companion note or SQLite reconciliation here. JSON is
-        // authoritative. Its changed native version leaves old companion/DB
-        // coverage stale; removal refuses until ordinary reconciliation.
+        super::listing_metadata::write_at(&root(), path, record, || {
+            self.atomic(path, format!("{record}\n").as_bytes())
+        })
+        // No native companion or caller index authority here. Original picker
+        // keepers bypass advisory effects and retain their own lifeline fence.
     }
     pub(in crate::state) fn write_record(&mut self, record: &mut Value) -> Result<()> {
         record["updated"] = json!(now());
@@ -383,6 +384,9 @@ impl<'a> View<'a> {
         self.refresh(path)
     }
     pub(in crate::state) fn remove(&mut self, path: &Path) -> Result<()> {
+        super::listing_metadata::remove_at(&root(), path, || self.remove_inner(path))
+    }
+    fn remove_inner(&mut self, path: &Path) -> Result<()> {
         self.read(path, storage::ID_RECORD_BYTES)?;
         self.check()?;
         self.effects

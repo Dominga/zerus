@@ -478,6 +478,7 @@ impl Admitted<'_> {
 }
 
 pub struct ProjectStore {
+    pub(crate) upload: crate::phone::upload::Directory,
     /// Mobile projection cache: never native pin/admission authority.
     pub(crate) phone: bool,
     dir: PathBuf,
@@ -966,7 +967,9 @@ impl ProjectStore {
         if !name.exists() {
             write_atomic(&name, project.as_bytes())?;
         }
+        let upload = crate::phone::upload::Directory::new(&dir)?;
         Ok(Some(Self {
+            upload,
             phone: false,
             dir,
             project: project.into(),
@@ -1399,6 +1402,19 @@ impl ProjectStore {
     pub(crate) fn save_received(&self, task: &mut TaskDoc) -> Result<()> {
         let _turn = self.admission.enter();
         self.save_checked(task, true)
+    }
+
+    pub(crate) fn save_mobile_received(&self, task: &mut TaskDoc) -> Result<()> {
+        let _turn = self.admission.enter();
+        self.check_mobile_received(task)?;
+        self.save_checked(task, true)
+    }
+
+    pub(crate) fn check_mobile_received(&self, task: &TaskDoc) -> Result<()> {
+        if !self.phone && task.schema() >= crate::task::cutover_schema() {
+            return Err(Error::new("This sealed task needs an authenticated mobile edit receipt; its draft is kept for review on its computer"));
+        }
+        Ok(())
     }
 
     /// Reads a task, saves it when its execution schema needs the repair, and

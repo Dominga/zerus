@@ -14,11 +14,13 @@ pub mod accounts;
 pub mod builtin;
 pub mod catalog;
 pub mod graph;
+pub mod member;
 pub mod model;
 pub mod overlap;
 pub mod pipeline;
 pub mod problem;
 pub mod ready;
+pub mod settings;
 #[cfg(test)]
 mod testkit;
 pub mod validate;

@@ -14,6 +14,8 @@ mod active_app;
 mod analytics;
 #[cfg(feature = "live")]
 mod approvals;
+#[cfg(feature = "live")]
+mod catalog_editor;
 // The path-shared child_environment module must use the linked core gate,
 // never a second copy of unix_spawn.rs and its process-local mutex.
 #[cfg(unix)]
@@ -127,6 +129,8 @@ mod task_forms;
 mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
+#[cfg(feature = "live")]
+mod team_drawers;
 #[cfg(feature = "live")]
 mod teams;
 #[cfg(feature = "live")]
@@ -754,6 +758,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(teams::Teams::new());
+                app.manage(team_drawers::DrawerReader::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -1733,10 +1738,19 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_hidden,
         teams::teams_tasks_changed,
         teams::teams_page,
+        team_drawers::teams_drawer_page,
         teams::team_action,
         teams::team_action_again,
         teams::team_intent_dismiss,
         teams::teams_catalog,
+        catalog_editor::catalog_editor_load,
+        catalog_editor::catalog_editor_validate,
+        catalog_editor::catalog_editor_import,
+        catalog_editor::catalog_editor_import_file,
+        catalog_editor::catalog_editor_export,
+        catalog_editor::catalog_editor_export_template,
+        catalog_editor::catalog_editor_save,
+        catalog_editor::catalog_editor_receipt,
         teams::teams_template_save,
         teams::teams_project,
         teams::teams_preview,

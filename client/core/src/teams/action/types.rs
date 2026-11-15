@@ -68,6 +68,32 @@ pub enum TeamAction {
         /// the team's in place of the template's.
         delegations: CreateDelegations,
     },
+    AddMember {
+        role: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    SwapMember {
+        member: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    RenameTeam {
+        name: String,
+    },
+    SetGoal {
+        goal: String,
+    },
     /// Pauses a team: it hands nothing out until resumed.
     // A variant with no fields is written `{}` so that, like every other
     // variant, it refuses a field this version does not know.
@@ -114,6 +140,11 @@ pub enum TeamAction {
         writes: Vec<String>,
         #[serde(default)]
         assignee: Option<String>,
+    },
+    /// Changes a task's dependencies before its first attempt or hand-out.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
     },
     /// Accepts a node's report.
     Accept {

@@ -2559,6 +2559,16 @@ fn submit_core(
         unknown(format!("delivery uncertain: {error}{shown}; inspect Terminal before retrying"))
     };
     if let Err(error) = result {
+        // Owner, 2026-11-15: a refusal before Enter (Claude's composer never
+        // showed the paste settled) returned before the draft was read, so the
+        // leftover was nobody's and blocked every later message, a whole team
+        // included. The composer was empty before this paste, so a draft now
+        // is this paste: record it, and the next delivery finishes it once.
+        if pasted_draft.is_none() && error.contains("no Enter was pressed") {
+            pasted_draft = super::terminal::read_draft(&record)
+                .ok()
+                .and_then(|(draft, hash)| draft.filter(|draft| !draft.trim().is_empty()).map(|_| hash));
+        }
         if let Some(hash) = &pasted_draft {
             record_unsent_paste(name, &receipt_path, &mut receipt, &request_id, hash);
         }

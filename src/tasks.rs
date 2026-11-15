@@ -709,7 +709,13 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
         return paged(config, args, (&id, &name), stage, limit, &machines);
     }
-    for paging in ["--after", "--before", "--if-revision", "--session", "--query"] {
+    for paging in [
+        "--after",
+        "--before",
+        "--if-revision",
+        "--session",
+        "--query",
+    ] {
         if option(args, paging)?.is_some() {
             return Err(fail(format!("{paging} needs --stage and --limit")));
         }
@@ -742,7 +748,12 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
         .parse::<usize>()
         .ok()
         .filter(|n| (1..=index::MAX_LIMIT).contains(n))
-        .ok_or_else(|| fail(format!("--limit must be between 1 and {}", index::MAX_LIMIT)))?;
+        .ok_or_else(|| {
+            fail(format!(
+                "--limit must be between 1 and {}",
+                index::MAX_LIMIT
+            ))
+        })?;
     let wanted = option(args, "--if-revision")?;
     // One session's view, by its identity (zerus-cg5h.26): never its name.
     let session = match (option(args, "--session")?, option(args, "--host")?) {
@@ -758,12 +769,24 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
         (None, Some(_)) => return Err(fail("--host needs --session")),
         (None, None) => None,
     };
-    let query = option(args, "--query")?.map(str::trim).filter(|q| !q.is_empty());
+    let query = option(args, "--query")?
+        .map(str::trim)
+        .filter(|q| !q.is_empty());
     if query.is_some_and(|q| q.len() > 1024 || q.chars().any(char::is_control)) {
-        return Err(fail("--query must be at most 1024 bytes without control characters"));
+        return Err(fail(
+            "--query must be at most 1024 bytes without control characters",
+        ));
     }
-    let searched = query.map(|query| index::Scope::searched(session.as_ref().map(|(scope, _)| scope.clone()), query, name));
-    let filter = searched.as_ref().or_else(|| session.as_ref().map(|(scope, _)| scope));
+    let searched = query.map(|query| {
+        index::Scope::searched(
+            session.as_ref().map(|(scope, _)| scope.clone()),
+            query,
+            name,
+        )
+    });
+    let filter = searched
+        .as_ref()
+        .or_else(|| session.as_ref().map(|(scope, _)| scope));
     let cursor_project = filter.map_or_else(|| id.to_owned(), |scope| scope.cursor_project(id));
     let anchor = match (option(args, "--after")?, option(args, "--before")?) {
         (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
@@ -856,7 +879,10 @@ fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &ind
 /// `documents_page`, of one session's view when `filter` is set.
 fn documents_page_in(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>, filter: Option<&index::Scope>) -> Result<Value> {
     let docs = documents_in(store, filter)?;
-    let project = filter.map_or_else(|| store.project_id().to_owned(), |s| s.cursor_project(store.project_id()));
+    let project = filter.map_or_else(
+        || store.project_id().to_owned(),
+        |s| s.cursor_project(store.project_id()),
+    );
     Ok(page_of(&docs, &project, stage, limit, anchor, wanted))
 }
 
@@ -886,7 +912,9 @@ fn documents_in(store: &ProjectStore, filter: Option<&index::Scope>) -> Result<D
         let included = filter.is_none_or(|scope| scope.includes(&listed));
         let listed = index::capped(listed);
         hash.update(listed.to_string());
-        if !included { continue; }
+        if !included {
+            continue;
+        }
         *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
         rows.entry(this.as_str()).or_default().push((rank, uuid, listed));
     }

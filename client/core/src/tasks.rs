@@ -392,18 +392,31 @@ mod tests {
 
     #[test]
     fn task_search_is_bounded_forwarded_and_requires_a_matching_echo() {
-        let call = queried_page_call("p1", "todo", 50, None, None, Some(" orchard/T-aaaa01 ")).unwrap();
-        assert_eq!(&call.args[call.args.len() - 2..], ["--query", "orchard/T-aaaa01"]);
+        let call =
+            queried_page_call("p1", "todo", 50, None, None, Some(" orchard/T-aaaa01 ")).unwrap();
+        assert_eq!(
+            &call.args[call.args.len() - 2..],
+            ["--query", "orchard/T-aaaa01"]
+        );
         for query in ["x".repeat(1025), "a\nb".into(), "a\0b".into()] {
             assert!(queried_page_call("p1", "todo", 50, None, None, Some(&query)).is_err());
         }
         let mut reply = json!({"project": {"id": "p1"}, "tasks": [], "counts": {},
-            "page": {"schema": 1, "stage": "todo", "next": null}}).as_object().unwrap().clone();
-        assert_eq!(checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap_err(), UPDATE_FOR_TASK_SEARCH);
+            "page": {"schema": 1, "stage": "todo", "next": null}})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap_err(),
+            UPDATE_FOR_TASK_SEARCH
+        );
         reply.insert("query".into(), json!("other"));
         assert!(checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).is_err());
         reply.insert("query".into(), json!("needle"));
-        assert_eq!(checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap()["query"], "needle");
+        assert_eq!(
+            checked_queried_page(&reply, "p1", "todo", 50, None, Some("needle")).unwrap()["query"],
+            "needle"
+        );
         assert!(checked_queried_page(&reply, "p1", "todo", 50, None, None).is_ok());
     }
 

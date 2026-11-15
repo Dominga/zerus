@@ -219,7 +219,14 @@ pub async fn task_page(
     )?;
     tauri::async_runtime::spawn_blocking(move || {
         let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
-        checked_queried_page(&reply, &project, &stage, limit, page_scope(&session, &host), query.as_deref())
+        checked_queried_page(
+            &reply,
+            &project,
+            &stage,
+            limit,
+            page_scope(&session, &host),
+            query.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?

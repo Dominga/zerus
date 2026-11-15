@@ -1269,11 +1269,15 @@ fn an_older_hgs_index_is_never_touched() {
     let temp = tempfile::tempdir().unwrap();
     let store = project(temp.path());
     let old = ["task-index-v1.sqlite3", "task-index-v2.sqlite3"].map(|name| store.dir().join(name));
-    for path in &old { fs::write(path, b"an older hgs's index").unwrap(); }
+    for path in &old {
+        fs::write(path, b"an older hgs's index").unwrap();
+    }
     let mut index = Index::open(&store).unwrap();
     index.page(Stage::Todo, 2, &Anchor::Start).unwrap();
     drop(index);
-    for path in &old { assert_eq!(fs::read(path).unwrap(), b"an older hgs's index"); }
+    for path in &old {
+        assert_eq!(fs::read(path).unwrap(), b"an older hgs's index");
+    }
     assert!(store.dir().join(FILE).exists());
     assert_ne!(FILE, "task-index-v1.sqlite3");
 }

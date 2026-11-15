@@ -5022,6 +5022,9 @@ well as the project and stage. The session side panel uses these pages, with
 the same stage filters and Show more controls, rather than searching only the
 loaded window. The index keeps full search text separately from the capped
 preview and applies the query before the page limit.
+With **Only this session** on, a session without a stable launch or run identity
+cannot search: no project-wide request is sent, results and counts stay empty,
+and the panel explains how to turn off the session filter explicitly.
 
 Pages come from a local index of task headers in the project's replica folder
 (`task-index-v3.sqlite3`): a disposable cache, never replicated, rebuilt

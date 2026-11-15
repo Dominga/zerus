@@ -37,7 +37,7 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -322,6 +322,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .map_err(storage)?;
     let sql = match current {
         0 => Some(include_str!("schema.sql")),
+        2 => None,
         1 => {
             return Err(Problem::new(
                 code::INVALID_STATE,
@@ -340,6 +341,29 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .map_err(storage)?;
     }
     schema_extensions(&tx)?;
+    if current < 3 {
+        tx.execute_batch(
+            "CREATE TABLE person_gesture_store(
+         id INTEGER PRIMARY KEY CHECK(id=1),
+         nonce TEXT NOT NULL CHECK(length(nonce)=36));
+         CREATE TRIGGER person_gesture_store_immutable BEFORE UPDATE ON person_gesture_store
+         BEGIN SELECT RAISE(ABORT,'Person gesture store identity is immutable'); END;
+         CREATE TRIGGER person_gesture_store_kept BEFORE DELETE ON person_gesture_store
+         BEGIN SELECT RAISE(ABORT,'Person gesture store identity is kept'); END;
+         CREATE TABLE person_gestures(
+         request_id TEXT PRIMARY KEY REFERENCES requests(id),
+         intent TEXT NOT NULL CHECK(length(CAST(intent AS BLOB))<=65536));
+         CREATE TRIGGER person_gestures_immutable BEFORE UPDATE ON person_gestures
+         BEGIN SELECT RAISE(ABORT,'Person gesture evidence is immutable'); END;
+         PRAGMA user_version=3;",
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO person_gesture_store VALUES(1,?1)",
+            [uuid::Uuid::new_v4().to_string()],
+        )
+        .map_err(storage)?;
+    }
     tx.commit().map_err(storage)
 }
 

@@ -41,6 +41,7 @@ pub mod session_resume;
 pub mod startup;
 pub mod task_message;
 pub mod task_start_reconcile;
+pub mod team_person;
 pub mod termination_outcome;
 pub mod ui_requests;
 

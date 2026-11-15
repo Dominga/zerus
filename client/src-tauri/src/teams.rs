@@ -14,8 +14,8 @@
 //! An action carries the request id the person's action made once
 //! ([`TeamCall`]). The intent table remembers each id: a second call while it
 //! is pending sends nothing, a settled intent returns its recorded outcome,
-//! and an uncertain one is only sent again by the person's explicit
-//! `team_action_again`.
+//! and an uncertain owner-card decision is checked by its original receipt
+//! only. Other interim actions retain their explicit `team_action_again`.
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde_json::Value;
@@ -38,6 +38,7 @@ mod settings;
 pub struct Teams {
     poller: Mutex<Option<TeamsPoller>>,
     intents: Mutex<Intents>,
+    decisions: std::sync::Arc<crate::desktop_service::team_person::Decisions>,
 }
 
 impl Teams {
@@ -172,23 +173,30 @@ pub fn teams_phases(
         .ok_or_else(|| "This team is not followed.".into())
 }
 
-/// Runs one team action through `hgs team <op> --json`: exactly once, off the
-/// main thread, with the request id the person's action made. The followed
-/// view is read again after it.
+/// Runs one action off the main thread with its original request ID. Owner
+/// cards use native confirmation and admission; interim actions use the CLI.
+/// The followed view is read again after it.
 #[tauri::command]
-pub async fn team_action(teams: State<'_, Teams>, call: Value) -> Result<TeamOutcome, String> {
+pub async fn team_action(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    teams: State<'_, Teams>,
+    call: Value,
+) -> Result<TeamOutcome, String> {
     let call = match settings::checked_call(call) {
         Ok(call) => call,
         Err(outcome) => return Ok(outcome),
     };
     let admission = teams.intents().admit(&call);
-    run(teams, admission, call).await
+    run(app, state.desktop_service(), teams, admission, call, false).await
 }
 
-/// Sends an uncertain intent again because the person asked to check it: the
-/// same request id and content, which the store answers from its record.
+/// Checks an uncertain owner-card decision read-only. Other interim actions
+/// keep their existing same-request CLI recovery path.
 #[tauri::command]
 pub async fn team_action_again(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
     teams: State<'_, Teams>,
     call: Value,
 ) -> Result<TeamOutcome, String> {
@@ -197,13 +205,16 @@ pub async fn team_action_again(
         Err(outcome) => return Ok(outcome),
     };
     let admission = teams.intents().admit_again(&call);
-    run(teams, admission, call).await
+    run(app, state.desktop_service(), teams, admission, call, true).await
 }
 
 async fn run(
+    app: tauri::AppHandle,
+    service: Option<std::sync::Arc<crate::desktop_service::Service>>,
     teams: State<'_, Teams>,
     admission: Admission,
     call: TeamCall,
+    check_only: bool,
 ) -> Result<TeamOutcome, String> {
     match admission {
         Admission::InFlight => Ok(TeamOutcome::Pending {
@@ -217,16 +228,29 @@ async fn run(
             let pending = Pending::new(&teams.intents, &call);
             let hgs = zerus_client_core::default_hgs();
             let sent = call.clone();
-            let outcome =
-                match tauri::async_runtime::spawn_blocking(move || run_action(&hgs, &sent)).await {
-                    Ok(outcome) => outcome,
-                    Err(error) => TeamOutcome::Uncertain {
-                        detail: format!(
-                            "The action's worker failed: {error}. Read the team before checking it."
-                        ),
-                        request_id: call.request_id.clone(),
-                    },
-                };
+            let decisions = teams.decisions.clone();
+            let outcome = match tauri::async_runtime::spawn_blocking(move || {
+                if matches!(
+                    sent.action,
+                    zerus_client_core::teams::action::TeamAction::Decide { .. }
+                ) {
+                    crate::desktop_service::team_person::run(
+                        app, service, decisions, sent, check_only,
+                    )
+                } else {
+                    run_action(&hgs, &sent)
+                }
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => TeamOutcome::Uncertain {
+                    detail: format!(
+                        "The action's worker failed: {error}. Read the team before checking it."
+                    ),
+                    request_id: call.request_id.clone(),
+                },
+            };
             let recorded = pending.settle(outcome);
             teams.refresh();
             Ok(recorded)
@@ -239,6 +263,7 @@ async fn run(
 #[tauri::command]
 pub fn team_intent_dismiss(teams: State<'_, Teams>, call: TeamCall) -> Result<(), String> {
     if teams.intents().dismiss(&call) {
+        teams.decisions.dismiss(&call.request_id);
         Ok(())
     } else {
         Err("Only an uncertain action can be dismissed.".into())

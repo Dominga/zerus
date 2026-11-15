@@ -7,6 +7,28 @@ const MIGRATE: &str =
     "Teams store needs migration before this attempt can be abandoned; no team data was changed";
 
 impl Store {
+    /// Original-decision evidence is read as-is. An old or incomplete schema
+    /// is unavailable; a receipt lookup never performs a migration.
+    pub(crate) fn person_evidence(state: &Path) -> Result<Self> {
+        if !super::super::enabled(state) {
+            return Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."));
+        }
+        let store = Self::existing_unmigrated(state)?;
+        if let Some(db) = &store.db {
+            as_is(db)?;
+            let present: u32 = db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE (type='table' AND name IN ('person_gesture_store','person_gestures')) OR (type='trigger' AND name IN ('person_gesture_store_immutable','person_gesture_store_kept','person_gestures_immutable'))",
+                [], |r| r.get(0),
+            ).map_err(storage)?;
+            if present != 5 {
+                return Err(Problem::new(
+                    code::INVALID_STATE,
+                    "Native Person evidence is incomplete; no team data was changed.",
+                ));
+            }
+        }
+        Ok(store)
+    }
     pub(super) fn existing_unmigrated(state: &Path) -> Result<Self> {
         let state = crate::platform::canonical(state).map_err(storage)?;
         let path = state.join("teams/teams-v1.sqlite3");

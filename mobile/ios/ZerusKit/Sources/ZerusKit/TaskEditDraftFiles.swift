@@ -148,6 +148,7 @@ public final class TaskEditDraftFiles: @unchecked Sendable {
     } }
     public func edit(_ scope: TaskEditDraftScope, draftId: String, sequence: Int64, changes: String) throws -> TaskEditSavedDraft { try locked {
         var previous = try original(scope, id: draftId)
+        if previous.state == .editing && previous.qualified && sequence == previous.changeSequence && changes == previous.changes { return previous }
         try draftRequire(previous.state == .editing && previous.qualified && sequence > previous.changeSequence)
         previous.changes = changes; previous.changeSequence = sequence; return try write(previous)
     } }

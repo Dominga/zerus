@@ -34,4 +34,38 @@
     <string name="saved_execution_not_started">Not started</string>
     <string name="saved_execution_delivery_unknown">Delivery unknown</string>
     <string name="saved_execution_unconfirmed">Begin unconfirmed</string>
+
+    <!-- Task content edits and private drafts. -->
+    <string name="task_edit_title">Title</string>
+    <string name="task_edit_requirement">Requirement</string>
+    <string name="task_edit_open">Edit task</string>
+    <string name="task_edit_prepare">Verifying this task on its computer…</string>
+    <string name="task_edit_unavailable">This task cannot be edited from this phone yet.</string>
+    <string name="task_edit_update_host">Update Zerus on this task’s computer to change it.</string>
+    <string name="task_edit_keep_target">Keep current session choice</string>
+    <string name="task_edit_target">Session</string>
+    <string name="task_edit_any">Any session</string>
+    <string name="task_edit_top">Move above the current first task</string>
+    <string name="task_edit_comment">Comment</string>
+    <string name="task_edit_save">Save changes</string>
+    <string name="task_edit_saving">Saving on the original computer…</string>
+    <string name="task_edit_saved">Saved on the task’s computer.</string>
+    <string name="task_edit_storage_failed">The private draft could not be saved. No new task request was sent.</string>
+    <string name="task_edit_draft_kept">Your draft was kept for review.</string>
+    <string name="task_edit_saved_draft">Saved draft</string>
+    <string name="task_edit_unknown">Delivery is unconfirmed. Refresh this task to review it; this draft will not be sent again.</string>
+    <string name="task_edit_discard">Discard saved draft</string>
+    <string name="task_edit_discard_question">Discard this unsubmitted or refused draft? Its saved changes will be removed.</string>
+    <string name="task_edit_cancel">Cancel</string>
+    <string name="task_edit_close">Close</string>
+    <string name="task_edit_refresh">Refresh task</string>
+    <string name="task_media_attach">Attach files</string>
+    <string name="task_media_comment_attach">Attach to comment</string>
+    <string name="task_media_remove">Remove attachment</string>
+    <string name="task_media_preview">Preview attachment</string>
+    <string name="task_media_loading">Opening attachment…</string>
+    <string name="task_media_limit">A task accepts up to 8 files, 10 MiB each and 20 MiB in total.</string>
+    <string name="task_media_import_failed">The files could not be attached. The original draft was kept.</string>
+    <string name="task_media_picker_changed">The task editor changed while choosing files. Its original draft was kept.</string>
+    <string name="task_media_files">Attachments</string>
 </resources>

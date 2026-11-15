@@ -229,6 +229,29 @@ class AttachmentViewer(application: Application, private val store: AttachmentSt
         }
     }
 
+    /** A replica token resolves only the captured task's verified bytes; references are never fetched. */
+    internal fun openTask(key: String, file: app.zerus.mobile.replica.TaskMediaInfo,
+                          read: suspend () -> app.zerus.mobile.replica.TaskMediaContent) {
+        if (jobs[key]?.isActive == true) return
+        jobs[key] = scope.launch {
+            try {
+                val entry = withContext(Dispatchers.IO) { cache.lookup(key) } ?: run {
+                    val content = read()
+                    check(content.info == file && content.data.size.toULong() == file.size)
+                    val pending = withContext(Dispatchers.IO) { cache.begin(key, file.name, file.mime) }
+                    try {
+                        withContext(Dispatchers.IO) { pending.write(content.data) }
+                        withContext(Dispatchers.IO) { pending.commit(file.sha256) }
+                    } finally { withContext(NonCancellable + Dispatchers.IO) { pending.abort() } }
+                }
+                val opened = OpenedAttachment(key, entry.file, file.name, file.mime)
+                if (AttachmentViewing.inApp(opened.mime)) preview = opened else external = opened
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { failed(key, "The task attachment could not be opened. Refresh this task and try again.") }
+            finally { jobs.remove(key) }
+        }
+    }
+
     private suspend fun load(key: String, target: Target?, file: DisplayedAttachment): AttachmentViewCache.Entry {
         val local = AttachmentIdentity.local(file)
         if (local != null) {

@@ -63,6 +63,54 @@ final class TasksModel {
         taskSync = replicas.map { TaskSync(client: app.client, replicas: $0) }
     }
 
+    private(set) var taskEditor: TaskEditorModel?
+    private func editorIdentity(_ session: Session) -> String {
+        for field in ["launch_id", "run_id"] { if case .string(let value)? = session.raw[field], !value.isEmpty { return field + ":" + value } }
+        return ""
+    }
+    func editorSessions(_ key: ProjectKey) -> [Session] {
+        projectSessions(key).filter { session in
+            app.machines.filter { $0.connectionId == key.connectionId && $0.id == session.target.computerId && !$0.machineId.isEmpty }.count == 1 && !editorIdentity(session).isEmpty
+        }
+    }
+    func chooseEditorSession(_ token: UUID, _ session: Session) {
+        guard let editor = taskEditor, let state = editor.state, state.id == token, editorSessions(state.context.key).contains(session),
+              let machine = app.machines.first(where: { $0.connectionId == state.context.key.connectionId && $0.id == session.target.computerId }) else { return }
+        let identity = editorIdentity(session)
+        guard !identity.isEmpty else { return }
+        editor.change(token) { $0.target = .session(session: SessionRef(machine: machine.machineId, session: session.target.session, sessionId: identity)) }
+    }
+    func moveEditorTop(_ token: UUID) {
+        guard let editor = taskEditor, let state = editor.state, state.id == token, tasksKey == state.context.key else { return }
+        let first = taskListing.filter { $0.uuid != state.task.uuid && $0.stage == .todo }.map(\.rank).min()
+        do { let rank = try taskEditRankBetween(low: nil, high: first); editor.change(token) { $0.rank = rank } }
+        catch { taskNotice = TaskSyncError.reason(error) }
+    }
+    func openTaskMedia(_ task: TaskInfo, _ file: TaskMediaInfo) {
+        guard let key = tasksKey, let replicas else { return }
+        let name = taskProjectName(key), uuid = task.uuid
+        app.viewer.openTask(key: JSON([key.connectionId, key.swarmId, key.id, uuid, file.token]).compact, file: file) {
+            try await replicas.run {
+                let store = replicas.store(key, name: name), metadata = try store.media(reference: uuid, entry: nil)
+                guard let index = metadata.firstIndex(where: { $0.token == file.token }) else { throw ZerusError.invalid("Refresh this task to open its media.") }
+                return try store.readMedia(reference: uuid, entry: nil, index: UInt32(index), expectedToken: file.token)
+            }
+        }
+    }
+    func openTaskEditor(_ task: TaskInfo) {
+        guard task.schema == 8, let key = tasksKey, let replicas, let assets = app.attachmentStore,
+              let connection = app.connections.first(where: { $0.id == key.connectionId }) else { return }
+        let bound: String? = if case .session(let target) = task.target { target.machine } else { task.session?.machine }
+        let computers = app.machines.filter { $0.connectionId == key.connectionId && (bound != nil ? $0.machineId == bound : $0.id == tasksChosen?.computerId) }
+        guard computers.count == 1 else { taskNotice = taskEditText("task_edit_unavailable"); return }
+        do {
+            if taskEditor == nil { taskEditor = TaskEditorModel(app: app, replicas: replicas, files: try TaskEditDraftFiles.applicationSupport(), assets: assets) { [weak self] context in
+                self?.launchProjectSync(context.key) { [weak self] in if self?.tasksKey == context.key { self?.refreshTasks() } }
+            } }
+            taskEditor?.open(TaskEditContext(connection: connection, key: key, projectName: taskProjectName(key), computer: computers[0], features: app.machineFeatures), task)
+        } catch { taskNotice = TaskSyncError.reason(error) }
+    }
+
     // MARK: Sync
 
     /// Exchanges every project whose computers name a digest other than the phone's; then the held Send nows.

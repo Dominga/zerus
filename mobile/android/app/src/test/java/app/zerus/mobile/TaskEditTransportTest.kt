@@ -4,6 +4,7 @@ import app.zerus.mobile.replica.TaskEditException
 import app.zerus.mobile.replica.TaskEditQualification
 import app.zerus.mobile.replica.TaskMediaInput
 import app.zerus.mobile.replica.TaskStore
+import app.zerus.mobile.replica.taskEditRankBetween
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -66,7 +67,7 @@ class TaskEditTransportTest {
         }
     }
     private data class World(val native: NativeFixture, val server: MockWebServer, val api: RelayApi, val connection: Connection,
-                             val key: ProjectKey, val machine: Machine, val store: TaskStore, val task: String,
+                             val key: ProjectKey, val machine: Machine, val replicas: TaskReplicas, val store: TaskStore, val task: String,
                              val files: TaskEditDraftFiles, val scope: TaskEditDraftScope, var posts: Int = 0, var corruptNextResult: Boolean = false)
     private fun world(block: suspend (World) -> Unit) = runBlocking {
         val publicFixture = folders.newFile("workspace-fixture.json").apply { writeText(fixture.toString()) }
@@ -93,7 +94,7 @@ class TaskEditTransportTest {
                     assertFalse(store.get(task).writable)
                     val secret = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
                     val world = World(native, server, RelayApi(workspace = journal), connection, key,
-                        Machine(connection.id, computer, "Fixture host", true, machineId = computer), store, task,
+                        Machine(connection.id, computer, "Fixture host", true, machineId = computer), replicas, store, task,
                         TaskEditDraftFiles(folders.newFolder(), { secret }), TaskEditDraftScope(connection.id, key.swarmId, key.id, task))
                     server.dispatcher = object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
@@ -141,6 +142,7 @@ class TaskEditTransportTest {
             val (draft, saved) = qualify(w, transport, qualification)
             draft.use {
                 draft.comment("One explicit phone comment", emptyList())
+                draft.rank(taskEditRankBetween(null, "V"))
                 w.files.freeze(w.scope, saved.draftId, draft.freeze())
                 val request = checkNotNull(draft.nextRequest())
                 val proof = transport.proof(request) { w.files.reserve(w.scope, saved.draftId, request.requestId, request.payload) }
@@ -151,6 +153,7 @@ class TaskEditTransportTest {
                 assertNull(draft.nextRequest())
                 assertEquals(2, w.posts)
                 assertEquals(1, w.native.call("inspect").getJSONArray("log").objects().count { it.string("text") == "One explicit phone comment" })
+                assertTrue(w.native.call("inspect").getString("rank") < "V")
                 assertFalse(w.store.get(w.task).writable)
                 assertEquals(TaskEditDraftState.Completed, w.files.read(w.scope)!!.state)
             }
@@ -208,6 +211,31 @@ class TaskEditTransportTest {
                 assertTrue(parts > 1)
                 assertEquals("Original requirement", w.store.get(w.task).text)
             }
+        }
+    }
+    @Test fun theSessionWrapperPersistsTheOriginalFormAndCompletesOnlyItsOwnTask() = world { w ->
+        val transport = transport(w)
+        TaskEditSession.open(w.replicas, "Fixture", transport, w.files).use { session ->
+            assertEquals(w.scope, session.scope)
+            val form = TaskEditForm.initial(session.view).copy(comment = "From the original editor", sequence = 1)
+            session.persist(form.sequence, form.json())
+            session.save(form.sequence, form.json(), TaskEditInput(comment = form.comment))
+            assertEquals(TaskEditDraftState.Completed, w.files.read(w.scope)!!.state)
+            assertEquals(form.comment, TaskEditForm.read(w.files.read(w.scope)!!.changes, 1).comment)
+            assertEquals(1, w.native.call("inspect").getJSONArray("log").objects().count { it.string("text") == form.comment })
+            assertEquals(2, w.posts)
+        }
+    }
+    @Test fun theSessionWrapperKeepsAnUnverifiablePostCommitResultWithoutAnyRetry() = world { w ->
+        TaskEditSession.open(w.replicas, "Fixture", transport(w), w.files).use { session ->
+            val form = TaskEditForm.initial(session.view).copy(comment = "Keep this uncertain edit", sequence = 1)
+            w.corruptNextResult = true
+            val error = runCatching { session.save(1, form.json(), TaskEditInput(comment = form.comment)) }.exceptionOrNull()
+            assertTrue(error.toString(), error is TaskEditException.Unknown)
+            assertEquals(TaskEditDraftState.Unknown, w.files.read(w.scope)!!.state)
+            assertTrue(runCatching { session.save(2, form.json(), TaskEditInput(comment = form.comment)) }.isFailure)
+            assertEquals(2, w.posts)
+            assertEquals(1, w.native.call("inspect").getJSONArray("log").objects().count { it.string("text") == form.comment })
         }
     }
 }

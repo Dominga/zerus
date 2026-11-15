@@ -18,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_path = std::env::args()
         .nth(1)
         .ok_or("the public encrypted fixture is required")?;
-    let data = std::fs::read(fixture_path)?;
+    let mut data = Vec::new();
+    std::fs::File::open(fixture_path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut data)?;
     if data.len() > 1024 * 1024 {
         return Err("the public fixture is too large".into());
     }
@@ -124,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .take(16)
                     .map(|entry| json!({"kind":entry.kind,"text":entry.text}))
                     .collect::<Vec<_>>();
-                json!({"task":task_id,"text":view.text,"title":view.title,"attachments":attachments,"log":log})
+                json!({"task":task_id,"text":view.text,"title":view.title,"rank":view.rank,"attachments":attachments,"log":log})
             }
             _ => return Err("unknown fixture command".into()),
         };

@@ -19,6 +19,8 @@ internal class TaskEditTransport private constructor(
     private val originalRoute: WorkspaceRoute, private val phone: WorkspaceDevice, private val host: WorkspaceDevice,
     val route: TaskEditRoute
 ) {
+    val projectKey: ProjectKey get() = key
+    val scope: TaskEditDraftScope get() = TaskEditDraftScope(key.connectionId, key.swarmId, key.id, task)
     /** [reserve] durably records the original request before the first possible POST. */
     suspend fun proof(request: TaskEditRequest, reserve: () -> Unit): TaskEditProof {
         var posted = false

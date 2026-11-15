@@ -141,6 +141,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun TasksScreen(model: ZerusViewModel) {
     val key = model.tasksKey ?: return
+    TaskEditorSheet(model)
     val chosen = model.tasksChosen
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -362,12 +363,13 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @Composable private fun TaskSettingsSheet(model: ZerusViewModel, key: ProjectKey, task: TaskInfo, onDismiss: () -> Unit, onCancel: () -> Unit) {
     val tab = TasksPresentation.tab(task.stage)
     val editable = task.writable && task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG)
-    var text by remember(task.uuid, task.text) { mutableStateOf(task.text) }
-    var target by remember(task.uuid, task.target) { mutableStateOf(task.target) }
+    val original = remember(key, task.uuid) { task.copy() }
+    var text by remember(key, task.uuid) { mutableStateOf(original.text) }
+    var target by remember(key, task.uuid) { mutableStateOf(original.target) }
     var comment by remember(task.uuid) { mutableStateOf("") }
     var choosing by remember { mutableStateOf(false) }
-    val textChanged = text != task.text
-    val targetChanged = target != task.target
+    val textChanged = text != original.text
+    val targetChanged = target != original.target
     // Send now's reason follows the session chosen here, before it is saved.
     val draft = task.copy(target = target)
     val actions = TasksPresentation.cards(listOf(draft), tab, model.tasksChosen, false, model::sendRoute, model::cancelRoute)
@@ -390,6 +392,12 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             } else Text("Session: ${TasksPresentation.sessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
             if (TasksPresentation.note(task).isNotBlank()) Text(TasksPresentation.note(task), style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
             SavedExecutionSection(SavedExecutionPresentation.section(task, key.id, model.taskExecutionStale, ::time))
+            if (task.schema == 8L) OutlinedButton(onClick = { model.openTaskEditor(key, task); onDismiss() }) {
+                Text(androidx.compose.ui.res.stringResource(R.string.task_edit_open))
+            }
+            task.attachments.forEach { file ->
+                TextButton(onClick = { model.previewTaskMedia(key, task.uuid, file) }) { Text(file.name) }
+            }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 actions.forEach { state ->
                     OutlinedButton(onClick = {

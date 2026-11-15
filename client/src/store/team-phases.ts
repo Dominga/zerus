@@ -20,6 +20,7 @@ export interface PhaseList {
   routes: DraftRoute[]; default_pipeline: string;
 }
 export interface PhaseDraft {
+  metrics?: import("./phase-metrics").PhaseMetricsView;
   phase: PhaseRecord; revision: number; generation: number | null; next_node: number;
   nodes: DraftNode[]; complete: boolean; editable: boolean; unknown_fields: boolean;
   graph: {

@@ -50,10 +50,12 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::RenameTeam { .. }
         | Operation::SetGoal { .. }
         | Operation::Create { .. }
+        | Operation::StartPlanning { .. }
         | Operation::Stop
         | Operation::Archive
         | Operation::StopMember { .. }
         | Operation::ArchiveMember { .. }
+        | Operation::SetValidationConfig { .. }
         | Operation::ChangeSettings { .. }
         | Operation::DecideCard { .. }
         | Operation::SetDeps { .. } => person,

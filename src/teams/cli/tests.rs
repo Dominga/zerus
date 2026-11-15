@@ -13,11 +13,16 @@ mod guides;
 mod harness;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod hosted;
+mod lanes;
 mod member_sessions;
+mod phase_metrics;
 mod phases;
+mod planning;
 mod progress;
 mod progress157;
+mod providers;
 mod reads;
+mod recorded_timings;
 mod session_groups;
 mod status_items;
 mod storage_failure;

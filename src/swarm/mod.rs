@@ -523,3 +523,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set | replica-inventory | replica-exchange"),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "../teams/cli/tests/provider_catalog.rs"]
+pub(crate) mod provider_fixture;

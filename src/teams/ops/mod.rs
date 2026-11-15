@@ -16,6 +16,8 @@ mod journal;
 pub(crate) mod lead_queue;
 mod members;
 mod pipeline;
+mod planning;
+mod provider_settings;
 mod queue;
 #[cfg(test)]
 pub(crate) use queue::injected;
@@ -30,7 +32,7 @@ pub use unstaffed::{unstaffed_changes, unstaffed_of, unstaffed_stages};
 mod validation;
 use super::store::{self, rows, DecisionState, Store};
 #[allow(unused_imports)]
-pub use apply::apply;
+pub use apply::{apply, apply_with_config};
 pub(crate) use apply::{apply_with_gesture, replay};
 pub use authority::authority;
 use common::*;

@@ -43,6 +43,19 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
+    StartPlanning {
+        template: String,
+        project: String,
+        name: String,
+        goal: String,
+        home: String,
+        integration_branch: String,
+        base_commit: String,
+        #[serde(default)]
+        integration: Integration,
+        expected_template: String,
+        delegations: CreateDelegations,
+    },
     SubmitDraftPhase {
         phase: u32,
         draft: zerus_team_plan::draft::DraftInput,
@@ -124,6 +137,10 @@ pub enum TeamAction {
     },
     ArchiveMember {
         member: String,
+    },
+    /// Person-reviewed advisory metadata, without execution policy.
+    ValidationConfig {
+        selection: zerus_team_plan::validation::Selection,
     },
     /// Changes the team's settings; the whole object, with its bounds.
     Settings {
@@ -228,6 +245,8 @@ pub enum TeamOutcome {
         detail: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
         request_id: String,
     },
     /// It may have been applied. Never sent again by the desktop by itself:

@@ -61,6 +61,8 @@ pub enum DeskInput {
     /// This device's attention marks or its pending read marks changed: the
     /// desk reads them again (`FleetState::setReadState`).
     Marks,
+    /// Nonempty composer keys changed; read their bounded projection on this worker.
+    Drafts,
     Updates {
         version: Option<String>,
         restart: bool,
@@ -355,6 +357,14 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAt
     if let Some(attention) = app.try_state::<crate::actions::Attention>() {
         attention.listener.set(marks(&sender));
     }
+    if let Some(composers) = app.try_state::<crate::composer::Composers>() {
+        let drafts = sender.clone();
+        let _ = composers.0.draft_listener.set(Arc::new(move || {
+            let _ = drafts.send(DeskInput::Drafts);
+        }));
+        // Covers drafts loaded before the listener was registered.
+        let _ = sender.send(DeskInput::Drafts);
+    }
     let focused = Arc::new(AtomicBool::new(false));
     app.manage(DeskState {
         sender: Mutex::new(sender),
@@ -579,6 +589,8 @@ pub struct Context<'a> {
     pub optional_questions: &'a mut dyn FnMut() -> bool,
     /// This device's marks, read when they changed.
     pub marks: &'a mut dyn FnMut() -> Option<DeviceMarks>,
+    /// The same bounded native draft keys sent to the window, without consuming them.
+    pub drafts: &'a mut dyn FnMut() -> Vec<String>,
     /// A new notice ID for each banner.
     pub notice_id: &'a mut dyn FnMut() -> String,
 }
@@ -671,6 +683,7 @@ impl DeskLoop {
         let mut outcome = Outcome::default();
         let mut dirty = BTreeSet::new();
         let mut marks = false;
+        let mut drafts = false;
         for input in inputs {
             match input {
                 DeskInput::Change(change) => {
@@ -680,6 +693,7 @@ impl DeskLoop {
                     }
                 }
                 DeskInput::Marks => marks = true,
+                DeskInput::Drafts => drafts = true,
                 DeskInput::Updates { version, restart } => {
                     if self.desk.set_updates(version, restart) {
                         outcome.publish = true;
@@ -785,6 +799,9 @@ impl DeskLoop {
                     dirty.extend(self.desk.computers().keys().cloned());
                 }
             }
+        }
+        if drafts && self.desk.set_draft_keys(&(cx.drafts)()) {
+            outcome.publish = true;
         }
         if outcome.publish {
             (cx.publish)(&self.desk);
@@ -942,6 +959,10 @@ fn run(
                 focused: focused.load(Ordering::Relaxed),
                 optional_questions: &mut || optional_questions(&app),
                 marks: &mut || device_marks(&app, &mut cache),
+                drafts: &mut || {
+                    app.try_state::<crate::composer::Composers>()
+                        .map_or_else(Vec::new, |composers| composers.draft_keys())
+                },
                 notice_id: &mut || uuid::Uuid::new_v4().to_string(),
             },
         );
@@ -1605,6 +1626,8 @@ mod tests {
         focused: bool,
         optional: bool,
         marks: Option<DeviceMarks>,
+        drafts: Vec<String>,
+        drafts_read: usize,
         marks_read: usize,
         optional_read: usize,
         notices: usize,
@@ -1623,6 +1646,8 @@ mod tests {
                 focused: false,
                 optional: false,
                 marks: None,
+                drafts: Vec::new(),
+                drafts_read: 0,
                 marks_read: 0,
                 optional_read: 0,
                 notices: 0,
@@ -1633,6 +1658,8 @@ mod tests {
         /// One round `at` seconds after the start.
         fn round(&mut self, at: f64, inputs: Vec<DeskInput>) -> Outcome {
             let marks = self.marks.clone();
+            let drafts = self.drafts.clone();
+            let mut drafts_read = 0;
             let optional = self.optional;
             let mut read = 0;
             let mut optional_read = 0;
@@ -1654,6 +1681,10 @@ mod tests {
                         optional_read += 1;
                         optional
                     },
+                    drafts: &mut || {
+                        drafts_read += 1;
+                        drafts.clone()
+                    },
                     marks: &mut || {
                         read += 1;
                         marks.clone()
@@ -1665,6 +1696,7 @@ mod tests {
                 },
             );
             self.marks_read += read;
+            self.drafts_read += drafts_read;
             self.optional_read += optional_read;
             self.notices = notices;
             self.steps.extend(steps.into_inner());
@@ -1706,6 +1738,118 @@ mod tests {
             key: format!("run:{}", row.name),
             row,
         })
+    }
+
+    #[test]
+    fn tray_round_publishes_the_shared_active_filter_count() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../mobile/android/app/src/test/resources/session-filter-contract.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            for alias in ["", "peer"] {
+                let mut raw = case["raw"].clone();
+                raw["name"] = serde_json::json!(format!("codex/contract/{name}"));
+                raw["cmd"] = serde_json::json!("codex");
+                let row = zerus_client_core::view::row(&raw);
+                let key = zerus_client_core::marks::attention_key(
+                    alias,
+                    &row.agent,
+                    &row.name,
+                    row.created,
+                    row.conversation_id.as_deref().unwrap_or_default(),
+                );
+                let marks = DeviceMarks::new(
+                    BTreeMap::from([(
+                        key,
+                        Mark {
+                            review: raw["review_later"] == true,
+                            acknowledged: if raw["attention_acknowledged"] == true {
+                                row.attention_fingerprint.clone()
+                            } else {
+                                String::new()
+                            },
+                        },
+                    )]),
+                    BTreeMap::new(),
+                    Vec::new(),
+                );
+                let drafts = if case["draft"] == true {
+                    vec![format!("{alias}\n{}", row.name)]
+                } else {
+                    Vec::new()
+                };
+                let mut state = DeskLoop::new(None, Instant::now());
+                let mut offered = Vec::new();
+                let outcome = state.round(
+                    [
+                        replace(alias, vec![row]),
+                        status(
+                            alias,
+                            if case["online"] == true {
+                                ComputerStatus::Live
+                            } else {
+                                ComputerStatus::Reconnecting { attempt: 1 }
+                            },
+                        ),
+                        DeskInput::Marks,
+                        DeskInput::Drafts,
+                    ],
+                    &mut Context {
+                        publish: &mut |desk| offered.push(desk.face().total),
+                        now: Instant::now(),
+                        unix: 1000,
+                        focused: false,
+                        optional_questions: &mut || panic!("no tracker"),
+                        marks: &mut || Some(marks.clone()),
+                        drafts: &mut || drafts.clone(),
+                        notice_id: &mut || panic!("no tracker"),
+                    },
+                );
+                let expected = usize::from(
+                    case["matches"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|filter| filter == "active"),
+                );
+                assert!(outcome.publish);
+                assert_eq!(state.desk.active(), expected, "{name}, {alias:?}");
+                let face = if alias.is_empty() && case["online"] != true {
+                    "?".to_owned()
+                } else {
+                    expected.to_string()
+                };
+                assert_eq!(offered, [face], "{name}, {alias:?}: the platform receives the count or its existing unknown face");
+            }
+        }
+    }
+
+    #[test]
+    fn draft_changes_update_the_tray_once_without_attention_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut thread = Thread::new(dir.path());
+        thread.state.attention = None;
+        let row = zerus_client_core::view::row(
+            &serde_json::json!({"name":"codex/example/one","activity":"idle"}),
+        );
+        thread.round(0.0, live("peer", vec![row]));
+        thread.round(
+            1.0,
+            vec![status("peer", ComputerStatus::Reconnecting { attempt: 1 })],
+        );
+        thread.drafts = vec!["peer\ncodex/example/one".into()];
+        let changed = thread.round(2.0, vec![DeskInput::Drafts, DeskInput::Drafts]);
+        assert!(changed.publish);
+        assert_eq!(thread.drafts_read, 1, "one bounded read per batch");
+        assert_eq!(thread.state.desk.face().total, "1");
+        assert_eq!(changed.changes, Changes::default());
+        assert!(!thread.round(3.0, vec![DeskInput::Drafts]).publish);
+        thread.drafts.clear();
+        assert!(thread.round(4.0, vec![DeskInput::Drafts]).publish);
+        assert_eq!(thread.state.desk.face().total, "0");
+        assert_eq!(thread.optional_read, 0);
     }
 
     #[test]
@@ -1766,6 +1910,7 @@ mod tests {
                 focused: false,
                 optional_questions: &mut || false,
                 marks: &mut || panic!("no mark changed since the start"),
+                drafts: &mut || panic!("no draft changed"),
                 notice_id: &mut || "notice-1".into(),
             },
         );
@@ -1896,6 +2041,7 @@ mod tests {
                 focused: false,
                 optional_questions: &mut || false,
                 marks: &mut || None,
+                drafts: &mut || panic!("no draft changed"),
                 notice_id: &mut || "notice-x".into(),
             },
         );
@@ -2131,6 +2277,7 @@ mod tests {
             focused: false,
             optional_questions: &mut || panic!("no tracker reads the setting"),
             marks: &mut || Some(marks.clone()),
+            drafts: &mut || panic!("no draft changed"),
             notice_id: &mut || panic!("no tracker posts"),
         };
         state.round(live("", vec![row]), &mut cx);

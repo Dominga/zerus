@@ -22,6 +22,7 @@ pub(super) fn variant(command: &str) -> Option<&'static str> {
         "rename-team" => "rename_team",
         "set-goal" => "set_goal",
         "settings" => "change_settings",
+        "validation-settings" => "set_validation_config",
         "pause" => "pause",
         "resume" => "resume",
         "stop" => "stop",
@@ -67,7 +68,13 @@ pub(super) fn run(
         actor::member_session(&identity, command)?;
     }
     let request = build(variant, &request_input(provided)?)?;
-    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
+    let reply = ops::apply_with_config(
+        &mut store,
+        &identity.actor,
+        &request,
+        input::now_ms(),
+        Some(config),
+    )?;
     reply_view(&identity.actor, &request.team, &reply)
 }
 

@@ -16,6 +16,7 @@ mod readiness;
 mod removed_handout;
 mod replace;
 mod roster;
+mod settings_fields;
 mod storage;
 mod talk;
 mod team;
@@ -367,3 +368,5 @@ pub(crate) fn apply_fixture(
 mod names74;
 
 mod editing;
+
+mod cutover_delivery;

@@ -2,18 +2,16 @@ import { For, Show } from "solid-js";
 import { tr } from "../../i18n";
 import type { DrawerPage } from "../../store/teamDrawers";
 import "../styles/team-timeline.css";
+import { TeamRecordedTimings } from "./TeamRecordedTimings";
 
-export function recordedDate(atMs: number): { iso: string; text: string } | null {
-  if (!Number.isSafeInteger(atMs)) return null;
-  const date = new Date(atMs);
-  if (!Number.isFinite(date.getTime())) return null;
-  return { iso: date.toISOString(), text: date.toLocaleString() };
-}
+import { recordedDate } from "./recorded-time";
+export { recordedDate } from "./recorded-time";
 
 /** Ordinal journal marks, not duration bars. No task actions or transcript reads. */
 export function TeamTimeline(props: { page: DrawerPage }) {
   return <section class="team-timeline" aria-label={tr("Recorded events")}>
     <p class="dim">{tr("Recorded events on this journal page, not measured work time.")}</p>
+    <Show when={props.page.timings}>{(snapshot) => <p class="dim" data-recorded-revision>{tr("Timing facts were read at team revision %1. They describe that read, not historical work intervals.", snapshot().revision)}</p>}</Show>
     <Show when={props.page.timeline} fallback={<p role="alert">{tr("Timeline coverage is unavailable. Read the page again.")}</p>}>
       {(coverage) => <>
         <p class="dim" data-timeline-coverage>{tr("%1 recorded events shown (limit %2).", coverage().count, coverage().limit)} <Show when={coverage().first_seq !== null}>{tr("Sequences %1 to %2.", coverage().first_seq ?? "", coverage().last_seq ?? "")}</Show></p>
@@ -25,6 +23,7 @@ export function TeamTimeline(props: { page: DrawerPage }) {
             return <li data-timeline-seq={row.seq}>
               <header><span class="mono">#{row.seq}</span><Show when={stamp()} fallback={<span>{tr("Recorded time unavailable")}</span>}>{(at) => <time dateTime={at().iso}>{at().text}</time>}</Show><span>{row.by || tr("Unknown actor")}</span><span class="team-pill">{row.kind}</span></header>
               <pre class="team-drawer-text">{row.text || row.kind}</pre>
+              <Show when={row.timing}>{(facts) => <TeamRecordedTimings facts={facts()} />}</Show>
               <Show when={row.text_truncated}><span class="dim">{tr("Only the beginning of this text is shown.")}</span></Show>
             </li>;
           }}</For>

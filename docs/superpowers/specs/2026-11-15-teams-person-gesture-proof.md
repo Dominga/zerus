@@ -5,8 +5,12 @@ review in this change. Tracking: `zerus-63rru.31`, with the
 `zerus-ppd26` audit as supporting evidence.
 
 Slice 1 uses the existing original-child native responder with a closed
-`team_person_decide` intent. It migrates the Teams core schema from 2 to 3,
-so an older CLI refuses to open the upgraded store. The migration creates an
+`team_person_decide` intent. The main integration uses combined Teams core layout 4,
+fencing both legacy queue layout 2 and planning layout 3 engines. An entirely
+absent native leaf is created atomically; a complete leaf from the original
+native layout-3 candidate retains its nonce and original receipts. Partial or
+corrupt native evidence is refused without repair. Timer layouts 8–12 and the
+reserved high-bit pinned-extension namespace are separate from the core mark. The migration creates an
 immutable store nonce and an indexed companion for each native decision's
 exact intent. The nonce, native file object, configuration, computer, service
 epoch, team/card contents, revision and request UUID are checked under the

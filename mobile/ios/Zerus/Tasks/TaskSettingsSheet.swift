@@ -37,6 +37,7 @@ struct TaskSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     let uuid: String
     let onCancel: (TaskInfo) -> Void
+    @State private var original: TaskInfo?
     @State private var edited: String?
     @State private var target: TaskTarget?
     @State private var comment = ""
@@ -46,10 +47,13 @@ struct TaskSettingsSheet: View {
         let tasks = app.tasks!
         NavigationStack {
             if let task = tasks.taskListing.first(where: { $0.uuid == uuid }) {
-                content(tasks, task)
+                content(tasks, task).onAppear { if original == nil { original = task } }
             } else {
                 Text("This task is no longer here.").foregroundStyle(Theme.muted)
             }
+        }
+        .sheet(isPresented: Binding(get: { app.tasks?.taskEditor?.state != nil }, set: { if !$0 { app.tasks?.taskEditor?.dismiss() } })) {
+            if let tasks = app.tasks, let editor = tasks.taskEditor { TaskEditorSheet(model: editor, tasks: tasks) }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
@@ -59,10 +63,11 @@ struct TaskSettingsSheet: View {
     private func content(_ tasks: TasksModel, _ task: TaskInfo) -> some View {
         let tab = TasksPresentation.tab(task.stage)
         let editable = task.writable && [.todo, .backlog].contains(task.stage)
-        let text = edited ?? task.text
-        let chosenTarget = target ?? task.target
-        let textChanged = edited != nil && edited != task.text
-        let targetChanged = target != nil && target != task.target
+        let baseline = original ?? task
+        let text = edited ?? baseline.text
+        let chosenTarget = target ?? baseline.target
+        let textChanged = edited != nil && edited != baseline.text
+        let targetChanged = target != nil && target != baseline.target
         // Send now's reason follows the session chosen here, before it is saved.
         var draft = task
         draft.target = chosenTarget
@@ -109,6 +114,10 @@ struct TaskSettingsSheet: View {
                 SavedExecutionSection(state: SavedExecutionPresentation.section(task, projectId: tasks.tasksKey?.id, stale: tasks.taskExecutionStale) {
                     Date(timeIntervalSince1970: TimeInterval($0) / 1000).formatted(.dateTime.day().month(.abbreviated).hour().minute())
                 })
+                if task.schema == 8 { Button(taskEditText("task_edit_open")) { tasks.openTaskEditor(task) }.buttonStyle(.bordered) }
+                ForEach(task.attachments, id: \.token) { file in
+                    if let key = tasks.tasksKey { TaskMediaButton(key: key, task: task.uuid, file: file) { tasks.openTaskMedia(task, file) } }
+                }
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(actions, id: \.action) { state in
                         Button {

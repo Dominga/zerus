@@ -335,6 +335,51 @@ fn draft_and_queue_capacity_share_the_admitted_limit() {
 }
 
 #[test]
+fn draft_capacity_is_also_charged_when_a_report_wants_a_pipeline_stage() {
+    for reserve_draft in [false, true] {
+        let mut h = Harness::empty();
+        let mut create = create();
+        if let Operation::Create { bundle, .. } = &mut create {
+            let catalog = zerus_team_plan::builtin();
+            bundle.roles = catalog.roles;
+            bundle.pipelines = catalog.pipelines;
+            bundle.template.default_pipeline = "reviewed".into();
+        }
+        h.run(&person(), create).unwrap();
+        h.bind("lead");
+        h.bind("m1");
+        h.bind("m3");
+        let node = h.add(&person(), 1);
+        h.settings(|s| s.caps.max_open_tasks = 2);
+        h.submit(node, "m1");
+        if reserve_draft {
+            let id = h.store.next_draft_node(TEAM).unwrap();
+            submit(&mut h, draft(&[id])).unwrap();
+        }
+        h.report(node, "m1");
+        assert_eq!(h.node(node).state, NodeState::Reported);
+        let stages = h.store.stage_tasks(TEAM, 200, None).unwrap().rows;
+        assert_eq!(stages.len(), usize::from(!reserve_draft));
+        if reserve_draft {
+            assert!(h.store.inbox(TEAM, 200, None).unwrap().rows.iter().any(|i| i.text.contains("cap is reached")));
+            assert_eq!(h.store.queue(TEAM, 200, None).unwrap().rows.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn settings_cannot_reduce_the_admitted_cap_below_saved_drafts() {
+    let mut h = Harness::new();
+    submit(&mut h, draft(&[1, 2])).unwrap();
+    let before = h.store.team(TEAM).unwrap().unwrap();
+    let mut settings = before.settings.clone();
+    settings.caps.max_open_tasks = 1;
+    refused(h.run(&person(), Operation::ChangeSettings { settings }), code::OVER_CAP);
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap(), before);
+    assert_eq!(h.store.phase_draft(TEAM, 1).unwrap().nodes.len(), 2);
+}
+
+#[test]
 fn stopping_or_archiving_a_team_makes_a_draft_read_only() {
     let mut h = Harness::new();
     submit(&mut h, draft(&[1])).unwrap();

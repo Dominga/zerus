@@ -220,8 +220,37 @@ fn active_or_unsettled_members_cannot_be_swapped() {
     let err = h.run(&person(), swap("m1")).unwrap_err();
     assert!(err.message.contains("open work: 1"));
     assert_eq!(h.store.member(TEAM, "m1").unwrap(), before);
-    // An archived node with an unresolved original is still a refusal.
+    // The uncertain original remains unsettled after the person stops its member.
     assert_eq!(h.store.member_edit_work(TEAM).unwrap().get("m1"), Some(&1));
+}
+#[test]
+fn a_reserved_handout_without_a_holder_refuses_swap_and_keeps_the_binding() {
+    let (mut h, _r, _e) = started();
+    let task = h.add(&person(), 91);
+    let effect = h.intent(task, "m1");
+    // No outcome has been written: reserved is deliberately not a holder.
+    assert!(h.store.effect_reserved(TEAM, &effect).unwrap());
+    assert!(h.store.attempt_holder(TEAM, task).unwrap().is_none());
+    assert_eq!(h.node(task).state, zerus_team_plan::NodeState::Pending);
+    assert!(h.node(task).assignee.is_none());
+    stop(&mut h, "m1");
+    let member = h.store.member(TEAM, "m1").unwrap();
+    let handle = h.store.member_handle(TEAM, "m1").unwrap();
+    let original = serde_json::to_string(&row(&h, "m1")).unwrap();
+    let node = h.node(task);
+    let effects = h.store.open_effects(TEAM, 200, None).unwrap().rows;
+    // Only the indexed open-effects read can charge this original to m1.
+    assert_eq!(h.store.member_edit_work(TEAM).unwrap().get("m1"), Some(&1));
+    let err = h.run(&person(), swap("m1")).unwrap_err();
+    assert_eq!(err.code, code::INVALID_STATE);
+    assert!(err.message.contains("open work: 1"), "{err:?}");
+    assert_eq!(h.store.member(TEAM, "m1").unwrap(), member);
+    assert_eq!(h.store.member_handle(TEAM, "m1").unwrap(), handle);
+    assert_eq!(serde_json::to_string(&row(&h, "m1")).unwrap(), original);
+    assert_eq!(h.node(task), node);
+    assert_eq!(h.store.open_effects(TEAM, 200, None).unwrap().rows, effects);
+    assert!(h.store.effect_reserved(TEAM, &effect).unwrap());
+    assert!(h.store.attempt_holder(TEAM, task).unwrap().is_none());
 }
 #[test]
 fn swapping_requires_person_authority_and_preserves_saved_refusals() {

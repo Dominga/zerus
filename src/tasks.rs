@@ -372,7 +372,9 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         if var("HGS_SESSION").is_some() && var("HGS_RUN_ID").is_some()
             || crate::state::session_graph::hosted_agent_call()
         {
-            return Err(fail("--agent is for commands another computer forwards; an agent acts as its own session"));
+            return Err(fail(
+                "--agent is for commands another computer forwards; an agent acts as its own session",
+            ));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {

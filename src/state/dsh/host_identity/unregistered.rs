@@ -11,9 +11,7 @@ const MANIFEST_BYTES: u64 = 64 << 10;
 /// 64-step birth/owner walk and bounded argv reader serve both checks.
 /// An error AFTER observing a host is uncertainty, never an outside answer.
 pub(crate) fn ancestor() -> Result<bool, Refusal> {
-    let Ok(records) = recorded::recorded_hosts() else {
-        return Ok(false); // Keep the existing record error and its diagnostic.
-    };
+    let records = recorded::observable_records();
     let Ok(chain) = recorded::walk(std::process::id(), recorded::inspect) else {
         return Ok(false); // No new evidence about an ordinary sandboxed person.
     };
@@ -36,7 +34,9 @@ fn detect(
         if records.iter().any(|record| {
             record.named.pid == process.pid && record.named.birth.as_deref() == Some(birth)
         }) {
-            continue;
+            // The nearest recorded host is the custodian boundary. Its own
+            // hosted proof, not an older launcher above it, decides the call.
+            return Ok(false);
         }
         let Some(tokens) = read(process.pid) else {
             continue;
@@ -67,10 +67,13 @@ fn native_host(tokens: &[Vec<u8>]) -> bool {
     }) {
         return false;
     }
-    let Some(entry) = tokens.get(1).and_then(|v| std::str::from_utf8(v).ok()) else {
+    let Some(at) = node_entry(tokens) else {
         return false;
     };
-    if !server_options(&tokens[2..]) {
+    let Some(entry) = tokens.get(at).and_then(|v| std::str::from_utf8(v).ok()) else {
+        return false;
+    };
+    if !server_options(&tokens[at + 1..]) {
         return false;
     }
     let path = Path::new(entry);
@@ -82,6 +85,79 @@ fn native_host(tokens: &[Vec<u8>]) -> bool {
         return true;
     }
     manifest_entry(path)
+}
+
+/// Locate Node's first script operand without treating eval/print/test input
+/// or an option value as the DeepSeek entry. Runtime options are bounded;
+/// unknown long flags can only be boolean here, while value options require
+/// their separate operand (or Node's unambiguous --name=value spelling).
+fn node_entry(tokens: &[Vec<u8>]) -> Option<usize> {
+    let mut at = 1;
+    while at <= 32 {
+        let token = tokens.get(at)?.as_slice();
+        if token == b"--" {
+            return tokens.get(at + 1).map(|_| at + 1);
+        }
+        if !token.starts_with(b"-") {
+            return Some(at);
+        }
+        let flag = token.split(|b| *b == b'=').next()?;
+        if matches!(
+            flag,
+            b"--eval"
+                | b"--print"
+                | b"--check"
+                | b"--test"
+                | b"--run"
+                | b"--help"
+                | b"--version"
+                | b"--prof-process"
+        ) {
+            return None;
+        }
+        let value = matches!(
+            flag,
+            b"-r"
+                | b"--require"
+                | b"--import"
+                | b"--loader"
+                | b"--experimental-loader"
+                | b"-C"
+                | b"--conditions"
+                | b"--title"
+                | b"--icu-data-dir"
+                | b"--openssl-config"
+                | b"--redirect-warnings"
+                | b"--diagnostic-dir"
+                | b"--heapsnapshot-signal"
+                | b"--unhandled-rejections"
+                | b"--stack-trace-limit"
+                | b"--max-old-space-size"
+                | b"--max-semi-space-size"
+                | b"--cpu-prof-dir"
+                | b"--cpu-prof-name"
+                | b"--heap-prof-dir"
+                | b"--heap-prof-name"
+                | b"--disable-warning"
+                | b"--snapshot-blob"
+                | b"--env-file"
+                | b"--env-file-if-exists"
+        );
+        if value && flag == token {
+            let operand = tokens.get(at + 1)?;
+            if operand.is_empty() || operand.starts_with(b"-") {
+                return None;
+            }
+            at += 2;
+        } else if token.starts_with(b"--") && token.len() > 2 && token.len() <= 4096
+            || (token.starts_with(b"-r") || token.starts_with(b"-C")) && token.len() > 2
+        {
+            at += 1;
+        } else {
+            return None; // In particular -e, -p and their attached forms.
+        }
+    }
+    None
 }
 
 fn server_options(tokens: &[Vec<u8>]) -> bool {

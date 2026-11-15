@@ -164,3 +164,92 @@ fn special_or_linked_package_evidence_is_never_read() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     assert!(!native_host(&args(entry.to_str().unwrap())));
 }
+
+#[test]
+fn review_registered_inner_host_is_the_nearest_custodian_boundary() {
+    let mut ancestors = chain();
+    ancestors[1].identity.parent = 30;
+    ancestors[1].top = false;
+    ancestors.push(Ancestor {
+        pid: 30,
+        identity: Process {
+            parent: 1,
+            birth: Some("outer-legacy-host".into()),
+        },
+        top: true,
+    });
+    let answer = detect(
+        &record(Some("native-host")),
+        &ancestors,
+        |pid| (pid == 30).then(|| args("/fixture/node_modules/@deepseek-ai/dsh/lib/bin.js")),
+        native_host,
+        || Ok(()),
+    );
+    assert_eq!(
+        answer,
+        Ok(false),
+        "a registered current host must retain its own proof even when an older unregistered host launched it"
+    );
+}
+#[test]
+fn review_node_no_warnings_does_not_hide_the_same_manual_host() {
+    let mut command = args("/fixture/node_modules/@deepseek-ai/dsh/lib/bin.js");
+    assert!(native_host(&command));
+    command.insert(1, b"--no-warnings".to_vec());
+    assert!(
+        native_host(&command),
+        "the same Node CLI entry and server argv should remain observable with a harmless Node runtime flag"
+    );
+}
+
+#[test]
+fn an_unregistered_host_below_a_registered_host_still_refuses() {
+    let mut ancestors = chain();
+    ancestors[1].identity.parent = 30;
+    ancestors[1].top = false;
+    ancestors.push(Ancestor {
+        pid: 30,
+        identity: Process {
+            parent: 1,
+            birth: Some("registered-outer".into()),
+        },
+        top: true,
+    });
+    let mut records = record(Some("registered-outer"));
+    records[0].named.pid = 30;
+    assert_eq!(
+        detect(
+            &records,
+            &ancestors,
+            |pid| (pid == 20).then(|| args("/fixture/node_modules/@deepseek-ai/dsh/lib/bin.js")),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+}
+#[test]
+fn node_option_values_and_eval_modes_cannot_be_the_entry() {
+    let original = args("/fixture/node_modules/@deepseek-ai/dsh/lib/bin.js");
+    for options in [
+        vec!["--trace-warnings"],
+        vec!["--require", "/fixture/preload.cjs"],
+        vec!["--import=/fixture/preload.mjs"],
+        vec!["--"],
+    ] {
+        let mut command = original.clone();
+        command.splice(1..1, options.iter().map(|v| v.as_bytes().to_vec()));
+        assert!(native_host(&command), "{options:?}");
+    }
+    for options in [
+        vec!["--eval", "0"],
+        vec!["--print=0"],
+        vec!["-e0"],
+        vec!["--test"],
+        vec!["--require"],
+    ] {
+        let mut command = original.clone();
+        command.splice(1..1, options.iter().map(|v| v.as_bytes().to_vec()));
+        assert!(!native_host(&command), "{options:?}");
+    }
+}

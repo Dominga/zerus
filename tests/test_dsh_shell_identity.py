@@ -732,7 +732,9 @@ class DirectlyStarted(Hosted):
             env = dict(cls.launcher_env)
             del env['ZERUS_TEST_DSH_MODEL_PATCH']
             cls.log = (cls.root / 'host.log').open('w')
-            cls.proc = subprocess.Popen([DSH, '--profile', 'web', '--patch', str(overlay), '--no-open', '--host',
+            prefix = ([shutil.which('node'), *cls.NODE_OPTIONS_ARGV, str(Path(DSH).resolve())]
+                      if getattr(cls, 'NODE_OPTIONS_ARGV', None) else [DSH])
+            cls.proc = subprocess.Popen([*prefix, '--profile', 'web', '--patch', str(overlay), '--no-open', '--host',
                                          '127.0.0.1', '--port', '0'], env=env, cwd=cls.root / 'ws',
                                         stdin=subprocess.DEVNULL, stdout=cls.log, stderr=cls.log, start_new_session=True)
             until = time.monotonic() + 40

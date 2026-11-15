@@ -6910,6 +6910,12 @@ in an existing host record keeps the ordinary hosted proof path. This check
 neither adopts nor contacts the host. Its refusal asks the person to start a new
 host with Zerus when convenient and leaves the resident host running. A launcher
 record above that unregistered host never supplies the hosted call's identity.
+The nearest healthy PID/birth-matched host record ends this negative scan; a
+legacy host above it cannot override its own hosted proof. Node startup options
+are separated from the CLI entry, and eval/print modes never name that entry.
+An unrelated damaged record cannot conceal an observable unregistered host.
+This refusal-only scan retains bounded healthy records; ordinary positive caller
+proof still uses the existing strict record checks.
 
 The limit: one process serves all hosted sessions, so process ancestry proves
 only that a command runs under the host serving a session, not which hosted

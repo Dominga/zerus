@@ -60,6 +60,10 @@ impl TeamAction {
             Self::StartPlanning { .. } => "start-planning",
             Self::SubmitDraftPhase { .. } => "submit-draft-phase",
             Self::EditDraftPhase { .. } => "edit-draft-phase",
+            Self::AddMember { .. } => "add-member",
+            Self::SwapMember { .. } => "swap-member",
+            Self::RenameTeam { .. } => "rename-team",
+            Self::SetGoal { .. } => "set-goal",
             Self::Create { .. } => "create",
             Self::Pause {} => "pause",
             Self::Resume {} => "resume",
@@ -130,6 +134,24 @@ impl TeamAction {
                 "expected_template": expected_template,
                 "delegations": delegations,
             }),
+            Self::AddMember {
+                role,
+                agent,
+                model,
+                effort,
+                account,
+            } => json!({"role":role,"agent":agent,"model":model,"effort":effort,"account":account}),
+            Self::SwapMember {
+                member,
+                agent,
+                model,
+                effort,
+                account,
+            } => {
+                json!({"member":member,"agent":agent,"model":model,"effort":effort,"account":account})
+            }
+            Self::RenameTeam { name } => json!({"name":name}),
+            Self::SetGoal { goal } => json!({"goal":goal}),
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => json!({}),
             Self::PauseMember { member }
             | Self::ResumeMember { member }
@@ -189,6 +211,10 @@ impl TeamAction {
                 }
                 super::drafts::check(*phase, draft)
             }
+            Self::AddMember { .. }
+            | Self::SwapMember { .. }
+            | Self::RenameTeam { .. }
+            | Self::SetGoal { .. } => super::editing::check(self),
             Self::Create { .. } | Self::StartPlanning { .. } => check_create(self),
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => Ok(()),
             Self::Settings { settings } => zerus_team_plan::settings::validate_settings(settings)
@@ -256,6 +282,10 @@ impl TeamAction {
             action: action.to_owned(),
         };
         match self {
+            Self::SwapMember { member, .. } => Some(ask(
+                "teamSwapMemberConfirm", "Swap member?",
+                format!("Replace the agent for {member} of {name}? The old session stays outside the team. The member keeps its ID, task history, folder and branch. Only a person-stopped member with no open or unsettled work can be swapped."), "Swap member",
+            )),
             Self::Stop {} => Some(ask(
                 "teamStopConfirm",
                 "Stop team?",

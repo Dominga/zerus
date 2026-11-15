@@ -10,7 +10,9 @@
 //! queue as the board's groups in [`board`]) and the open owner cards
 //! ([`waiting`]).
 pub mod board;
+mod editing;
 pub mod graph;
+pub use editing::MemberRole;
 pub mod list;
 pub mod phases;
 pub mod planning;
@@ -390,6 +392,12 @@ pub struct MemberCard {
     /// The person stopped it: the store refuses a second Stop (absent on an
     /// older hgs's row: false).
     pub person_stopped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_choice: Option<zerus_team_plan::catalog::AccountChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_work: Option<u64>,
 }
 
 /// The member counts of `team status`'s `counts.members`.
@@ -564,6 +572,11 @@ pub struct TeamView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<zerus_team_plan::Settings>,
     pub members: Vec<MemberCard>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub member_roles: Vec<MemberRole>,
+    /// Complete bounded goal for editing; the bar keeps its display preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_goal: Option<String>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.
     pub truncated: bool,

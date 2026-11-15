@@ -78,12 +78,13 @@ it("shows a not-created member without a session", () => {
   expect(host.querySelector(".team-member-session")?.textContent).toBe("No linked session");
 });
 
-it("offers only the M1 operations and sends them by member id", () => {
+it("offers member operations and a disabled swap, and sends by member id", () => {
   const { host, onAction } = setup(member());
   (host.querySelector('[aria-label="Member actions"]') as HTMLButtonElement).click();
   const buttons = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter((button) => button.textContent !== "Member details");
-  expect(buttons.map((button) => button.textContent)).toEqual(["Pause", "Stop", "Remove"]);
+  expect(buttons.map((button) => button.textContent)).toEqual(["Pause", "Stop", "Swap…", "Remove"]);
   expect(buttons.filter((button) => button.classList.contains("danger"))).toHaveLength(2);
+  expect(buttons.find((button) => button.textContent === "Swap…")?.getAttribute("aria-disabled")).toBe("true");
   buttons[0].click();
   expect(onAction).toHaveBeenCalledWith("pause_member", "m1");
 });
@@ -92,7 +93,7 @@ it("offers resume only to a paused member", () => {
   const { host } = setup(member({ state: "paused" }));
   (host.querySelector('[aria-label="Member actions"]') as HTMLButtonElement).click();
   const buttons = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter((button) => button.textContent !== "Member details");
-  expect(buttons.map((button) => button.textContent)).toEqual(["Resume", "Stop", "Remove"]);
+  expect(buttons.map((button) => button.textContent)).toEqual(["Resume", "Stop", "Swap…", "Remove"]);
 });
 
 it("shows Stop disabled with its reason for a member the person stopped, and Resume open", () => {
@@ -109,7 +110,7 @@ it("keeps lead Pause/Stop and offers no Remove, which the store refuses for the 
   const { host, onAction } = setup(member({ lead: true }));
   (host.querySelector('[aria-label="Member actions"]') as HTMLButtonElement).click();
   const buttons = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter((button) => button.textContent !== "Member details");
-  expect(buttons.map((button) => button.textContent)).toEqual(["Pause", "Stop"]);
+  expect(buttons.map((button) => button.textContent)).toEqual(["Pause", "Stop", "Swap…"]);
   buttons[1].click(); expect(onAction).toHaveBeenCalledWith("stop_member", "m1");
 });
 

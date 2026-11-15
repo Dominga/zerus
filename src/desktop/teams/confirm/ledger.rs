@@ -26,6 +26,7 @@ impl Ledger {
             key TEXT PRIMARY KEY, team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL,
             run TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, pending INTEGER NOT NULL, body TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS standing_pending ON standing_effects(team,member,launch,pending,key);
+          CREATE INDEX IF NOT EXISTS standing_unresolved ON standing_effects(team,member,launch) WHERE pending=1 OR json_extract(body,'$.state')='unknown';
           CREATE INDEX IF NOT EXISTS standing_quota ON standing_effects(team,member,kind,at DESC);
           CREATE TABLE IF NOT EXISTS standing_bindings (
             team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL, parent TEXT NOT NULL,

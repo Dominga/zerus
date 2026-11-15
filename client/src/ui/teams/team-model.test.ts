@@ -6,7 +6,7 @@ import { teamView } from "./fixtures";
 // member's state and the bar's counts. No phases or task timings (M2).
 describe("the team's vocabulary", () => {
   it("labels and tones a team's status", () => {
-    expect(stateLabel("running")).toBe("running");
+    expect(stateLabel("running")).toBe("Running");
     expect(stateTone("running")).toBe("active");
     expect(stateTone("paused")).toBe("warn");
     expect(stateTone("stopped")).toBe("danger");

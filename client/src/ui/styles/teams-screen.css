@@ -1,15 +1,21 @@
 @layer components {
   .teams-screen { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 20px; overflow: auto; background: var(--z-color-pane); }
   .teams-screen-head { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; flex: none; }
-  .teams-screen-head > div { flex: 1 1 10rem; min-width: 0; }
+  .teams-screen-title { flex: 1 1 10rem; min-width: 0; }
   .teams-screen-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; }
   .teams-screen-head p { margin-top: 4px; font-size: var(--fs-sm); }
-  .teams-screen-head > button { flex: none; }
+  .teams-screen-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+  .teams-screen-actions > button { flex: none; white-space: nowrap; }
   .teams-list { display: flex; flex-direction: column; gap: 8px; list-style: none; margin: 0; padding: 0; }
   .teams-list > li { min-width: 0; }
-  .teams-row { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 9px; padding: 13px; text-align: left; color: var(--z-color-text); background: var(--z-color-card); border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); }
+  .teams-row { width: 100%; min-width: 0; display: flex; flex-wrap: wrap; text-align: left; color: var(--z-color-text); background: var(--z-color-card); border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); }
   .teams-row:hover { background: var(--z-color-card-hover); }
-  .teams-row:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .teams-row-open:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .teams-row-open { flex: 1 1 16rem; min-width: 0; max-width: 100%; display: flex; flex-direction: column; gap: 9px; padding: 13px; color: inherit; text-align: left; border-radius: inherit; }
+  .teams-row-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; }
+  .teams-row-details { min-width: 0; }
+  .teams-row-label { flex: none; white-space: nowrap; overflow-wrap: normal; word-break: normal; }
+  .teams-row-value { min-width: 0; overflow-wrap: anywhere; }
   .teams-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
   .teams-row-head > svg { flex: none; color: var(--z-color-accent); }
   .teams-row-name { flex: 1 1 10rem; min-width: 0; font-size: var(--fs-md); overflow-wrap: anywhere; }

@@ -8,6 +8,7 @@ mod decisions;
 mod delegation;
 mod dependencies;
 mod drafts;
+mod editing;
 pub(super) mod handout;
 pub(crate) use handout::handout_admissible;
 mod integration;

@@ -42,6 +42,9 @@ fn member_cards(status: &Value) -> Vec<MemberCard> {
             session: session(member),
             model: optional_name(member, "model"),
             person_stopped: flag(member, "person_stopped"),
+            effort: optional_name(member, "effort"),
+            account_choice: super::editing::choice(member),
+            open_work: optional_count(member, "open_work"),
         })
         .collect()
 }
@@ -216,6 +219,8 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
         },
         settings: crate::teams::settings::complete(&team["settings"]),
         members: member_cards(status),
+        member_roles: super::editing::roles(status),
+        edit_goal: super::editing::goal(status),
         groups,
         truncated,
         next: next_cursor(queue),

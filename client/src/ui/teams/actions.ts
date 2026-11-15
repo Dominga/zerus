@@ -1,3 +1,4 @@
+import { swapBlocked } from "./member-edit";
 import { tr } from "../../i18n";
 import type { TeamCall } from "../../store/teams";
 import type { MemberView, TaskView, TeamView } from "./types";
@@ -122,6 +123,7 @@ export function memberActions(member: MemberView, teamStatus: string): { id: str
     ...(paused && member.session ? [{ id: "resume_member", text: tr("Resume") }] : []),
     ...(active || paused ? [{ id: "stop_member", text: tr("Stop"), danger: true,
       ...(member.person_stopped ? { disabled: true, reason: tr("You stopped this member. Resume it to let it work again.") } : {}) }] : []),
+    ...(member.state !== "removed" ? [{ id: "swap_member", text: tr("Swap…"), disabled: !!swapBlocked(member), reason: swapBlocked(member) }] : []),
     ...(member.state !== "removed" && !member.lead ? [{ id: "archive_member", text: tr("Remove"), danger: true }] : []),
   ];
 }

@@ -565,7 +565,7 @@ fn reopen_decisions(ctx: &Context<'_>) -> Result<Vec<(u64, u32, String, String)>
     }
     Ok(rows)
 }
-fn save(ctx: &Context<'_>, m: &Member) -> Result<()> {
+pub(super) fn save(ctx: &Context<'_>, m: &Member) -> Result<()> {
     ctx.db
         .execute(
             "UPDATE members SET data=?3,machine=?4,session_id=?5,state=?6 WHERE team=?1 AND id=?2",

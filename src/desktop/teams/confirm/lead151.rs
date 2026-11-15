@@ -353,3 +353,46 @@ fn pausing_the_team_does_not_consume_its_initial_lead_brief() {
     assert_eq!(w.sends.len(), 1);
     assert_eq!(w.records(), 1);
 }
+
+#[test]
+fn swap159_refuses_an_unknown_brief_and_accepts_a_completed_one() {
+    use crate::teams::ops::tests::person;
+    use zerus_team_plan::catalog::AccountChoice;
+    for unknown in [false, true] {
+        let mut w = World::new();
+        w.unknown = unknown;
+        w.pass();
+        let key = w.sends[0].key.clone();
+        let original = w.ledger.get(&key).unwrap().unwrap();
+        w.h.run(
+            &person(),
+            Operation::StopMember {
+                member: "lead".into(),
+            },
+        )
+        .unwrap();
+        let before = w.h.store.member(TEAM, "lead").unwrap();
+        let result = w.h.run(
+            &person(),
+            Operation::SwapMember {
+                member: "lead".into(),
+                agent: "claude".into(),
+                model: "".into(),
+                effort: "".into(),
+                account: AccountChoice::Freest,
+            },
+        );
+        if unknown {
+            let error = result.unwrap_err();
+            assert!(
+                error.message.contains("unknown delivery receipt"),
+                "{error:?}"
+            );
+            assert_eq!(w.h.store.member(TEAM, "lead").unwrap(), before);
+        } else {
+            assert_eq!(result.unwrap().member.as_deref(), Some("lead"));
+        }
+        assert_eq!(w.ledger.get(&key).unwrap().unwrap(), original);
+        assert_eq!(w.sends.len(), 1, "swap replayed the old first send");
+    }
+}

@@ -1,5 +1,6 @@
 [
   "accept",
+  "add_member",
   "admit",
   "archive",
   "archive_member",
@@ -13,15 +14,18 @@
   "pause_member",
   "reassign",
   "release",
+  "rename_team",
   "reply",
   "resume",
   "resume_member",
   "return",
   "route",
   "set_deps",
+  "set_goal",
   "settings",
   "start_planning",
   "stop",
   "stop_member",
-  "submit_draft_phase"
+  "submit_draft_phase",
+  "swap_member"
 ]

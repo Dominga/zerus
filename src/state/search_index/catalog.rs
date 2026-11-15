@@ -5,6 +5,16 @@ use super::*;
 use std::collections::VecDeque;
 
 const BATCH: usize = 256;
+// Only this bounded owner retains native directory iterators. A crash drops the
+// census and a new owner starts incomplete; no serialized offset proves absence.
+pub(super) struct Census {
+    stamp: String,
+    generation: String,
+    streams: VecDeque<(&'static str, fs::ReadDir)>,
+    pending: Option<(&'static str, PathBuf)>,
+    _guard: storage::Guard,
+}
+
 pub(crate) struct DiscoveryBudget {
     pub entries: usize,
     pub path_bytes: usize,
@@ -116,6 +126,18 @@ impl Store {
         } else {
             (paths, paths > 0, false)
         };
+        let decoder_pending: bool = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_queue WHERE reader_version<? LIMIT 1)",
+                [metadata_cache::VERSION],
+                |r| r.get(0),
+            )
+            .unwrap_or(true);
+        let unsupported_native = super::discovery::unsupported_native(
+            self.directory.parent().ok_or("Invalid index directory")?,
+        );
         let overflow: bool = self
             .index
             .connection()
@@ -127,7 +149,7 @@ impl Store {
             .map_err(|e| e.to_string())?;
         Ok(
             json!({"invalidation_overflow":overflow,"discovery":if fresh{"complete"}else if complete{"stale"}else{"incomplete"},"queued_paths":paths,"pending_paths":pending,
-            "fallback_sources":fallback,"unknown_metadata":unknown,"invalid_metadata":invalid}),
+            "fallback_sources":fallback,"unknown_metadata":unknown,"decoder_pending":decoder_pending,"invalid_metadata":invalid,"unsupported_native":unsupported_native}),
         )
     }
 
@@ -169,6 +191,7 @@ impl Store {
             ("fallback", "INTEGER NOT NULL DEFAULT 1"),
             ("updated", "REAL NOT NULL DEFAULT 0"),
             ("skipped", "INTEGER NOT NULL DEFAULT 0"),
+            ("reader_version", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.iter().any(|column| column == name) {
                 self.index
@@ -209,6 +232,13 @@ impl Store {
                 UPDATE catalog_totals SET fallback=fallback+NEW.fallback-OLD.fallback WHERE id=1; END;
             CREATE TRIGGER IF NOT EXISTS fallback_delete AFTER DELETE ON catalog_queue BEGIN
                 UPDATE catalog_totals SET fallback=fallback-OLD.fallback WHERE id=1; END;").map_err(|e|e.to_string())?;
+        metadata_cache::schema(self.index.connection())?;
+        self.index
+            .connection()
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS catalog_decoder ON catalog_queue(reader_version,id)",
+            )
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -270,66 +300,95 @@ impl Store {
                 [],
             )
             .map_err(|e| e.to_string())?;
-        let generation = uuid::Uuid::new_v4().to_string();
-        let mut streams = VecDeque::new();
-        for (kind, path) in &roots {
-            match fs::read_dir(path) {
-                Ok(stream) => streams.push_back((*kind, stream)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => return Err("Search catalog directory is unreadable".into()),
+        let mut owned = self.census.borrow_mut();
+        if owned.as_ref().is_none_or(|census| census.stamp != before) {
+            *owned = None;
+            let mut streams = VecDeque::new();
+            for (kind, path) in &roots {
+                match fs::read_dir(path) {
+                    Ok(stream) => streams.push_back((*kind, stream)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(_) => return Err("Search catalog directory is unreadable".into()),
+                }
             }
+            use fs2::FileExt;
+            let directory =
+                super::super::repositories::directory::Directory::open(&self.directory)?;
+            let file = directory.open_private_lock("discovery.lock")?;
+            file.try_lock_exclusive()
+                .map_err(|_| "Search discovery is already being continued")?;
+            *owned = Some(Census {
+                stamp: before.clone(),
+                generation: uuid::Uuid::new_v4().to_string(),
+                streams,
+                pending: None,
+                _guard: storage::Guard::held(file),
+            });
         }
+        let census = owned.as_mut().expect("census was initialized");
+        let generation = census.generation.clone();
         let mut batch = Vec::with_capacity(BATCH);
         let mut exhausted = true;
-        'walk: while let Some((kind, stream)) = streams.front_mut() {
-            for entry in stream.by_ref() {
-                if cancel.load(Ordering::Relaxed)
-                    || Instant::now() >= budget.deadline
-                    || progress.entries >= budget.entries
-                {
-                    exhausted = false;
-                    break 'walk;
-                }
+        loop {
+            if cancel.load(Ordering::Relaxed)
+                || Instant::now() >= budget.deadline
+                || progress.entries >= budget.entries
+            {
+                exhausted = false;
+                break;
+            }
+            let (kind, path) = if let Some(pending) = census.pending.take() {
+                pending
+            } else {
+                let Some((kind, stream)) = census.streams.front_mut() else {
+                    break;
+                };
+                let Some(entry) = stream.next() else {
+                    census.streams.pop_front();
+                    continue;
+                };
                 progress.entries += 1;
                 let entry = entry.map_err(|_| "Search catalog entry is unreadable")?;
                 let path = entry.path();
-                if !candidate(&path, kind) {
+                if !candidate(state, &path, kind) {
                     continue;
                 }
                 if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
                     continue;
                 }
-                let Some(path_text) = path.to_str() else {
-                    return Err("Search catalog path is not UTF-8".into());
-                };
-                if path_text.len() > 16 << 10
-                    || progress.path_bytes + path_text.len() > budget.path_bytes
-                {
-                    exhausted = false;
-                    break 'walk;
-                }
-                let (identity, metadata) =
-                    crate::platform::FileIdentity::at(&path).map_err(|e| e.to_string())?;
-                if !metadata.is_file() {
-                    return Err("Search catalog entry changed kind".into());
-                }
-                let stamp = format!(
-                    "{}:{}:{}:{}:{}",
-                    identity.device,
-                    identity.inode,
-                    metadata.len(),
-                    identity.modified,
-                    identity.modified_nanos
-                );
-                progress.path_bytes += path_text.len();
-                batch.push((path_text.to_owned(), *kind, stamp));
-                if batch.len() == BATCH {
-                    self.stage(&batch, &generation)?;
-                    progress.staged += batch.len();
-                    batch.clear();
-                }
+                (*kind, path)
+            };
+            let Some(path_text) = path.to_str() else {
+                return Err("Search catalog path is not UTF-8".into());
+            };
+            if path_text.len() > 16 << 10 {
+                return Err("Search catalog path exceeds its limit".into());
             }
-            streams.pop_front();
+            if progress.path_bytes + path_text.len() > budget.path_bytes {
+                census.pending = Some((kind, path));
+                exhausted = false;
+                break;
+            }
+            let (identity, metadata) =
+                crate::platform::FileIdentity::at(&path).map_err(|e| e.to_string())?;
+            if !metadata.is_file() {
+                return Err("Search catalog entry changed kind".into());
+            }
+            let stamp = format!(
+                "{}:{}:{}:{}:{}",
+                identity.device,
+                identity.inode,
+                metadata.len(),
+                identity.modified,
+                identity.modified_nanos
+            );
+            progress.path_bytes += path_text.len();
+            batch.push((path_text.to_owned(), kind, stamp));
+            if batch.len() == BATCH {
+                self.stage(&batch, &generation)?;
+                progress.staged += batch.len();
+                batch.clear();
+            }
         }
         if !batch.is_empty() {
             self.stage(&batch, &generation)?;
@@ -361,6 +420,9 @@ impl Store {
             .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
+        if progress.complete || progress.changed {
+            *owned = None;
+        }
         // Even complete discovery leaves coverage incomplete until the queued
         // sources and their public histories have actually been consumed.
         Ok(progress)
@@ -386,7 +448,7 @@ impl Store {
     }
 }
 
-fn roots(state: &Path) -> [(&'static str, PathBuf); 5] {
+fn roots(state: &Path) -> [(&'static str, PathBuf); 6] {
     [
         ("binding", state.to_owned()),
         ("binding", state.join("bindings")),
@@ -394,9 +456,10 @@ fn roots(state: &Path) -> [(&'static str, PathBuf); 5] {
         ("binding", state.join("sessions")),
         ("archive", state.join("archives")),
         ("native", state.join("dsh/bindings")),
+        ("native", state.join("dsh/sessions")),
     ]
 }
-fn candidate(path: &Path, kind: &str) -> bool {
+fn candidate(state: &Path, path: &Path, kind: &str) -> bool {
     if path.extension().is_none_or(|v| v != "json") {
         return false;
     }
@@ -405,8 +468,12 @@ fn candidate(path: &Path, kind: &str) -> bool {
     };
     if kind == "archive" {
         uuid::Uuid::parse_str(stem).is_ok()
-    } else if path.parent().and_then(|parent| parent.file_name()).is_some_and(|dir| dir == "sessions") {
+    } else if path.parent().is_some_and(|parent| {
+        parent == state.join("sessions") || parent == state.join("dsh/sessions")
+    }) {
         super::super::session_id::canonical(stem)
+    } else if kind == "native" {
+        true // Legacy provider bindings may use their native identifier.
     } else {
         stem.len() == 64
             && stem
@@ -416,6 +483,7 @@ fn candidate(path: &Path, kind: &str) -> bool {
 }
 fn directory_stamp(roots: &[(&str, PathBuf)]) -> Result<String> {
     let mut hash = Sha256::new();
+    hash.update(b"search-census-v2");
     for (kind, path) in roots {
         hash.update(kind);
         hash.update(path.to_string_lossy().as_bytes());

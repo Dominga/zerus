@@ -1520,6 +1520,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         return receipt_index::worker();
     }
+    if args.first().map(String::as_str) == Some("content-search-worker") {
+        if args.len() != 1 {
+            return Err("usage: __state content-search-worker".into());
+        }
+        return search_index::run_worker();
+    }
     if args.first().map(String::as_str) == Some("archive-catalog-worker") {
         if args.len() != 1 {
             return Err("Unexpected archive catalog worker arguments".into());

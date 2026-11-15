@@ -28,19 +28,8 @@ pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) ->
         Err(_) => return Err("Search index unavailable; start a new search".into()),
     };
     let cancel = AtomicBool::new(false);
-    // Work exists only while a first-page caller is asking for search. Cursor
-    // continuations preserve the insertion snapshot and schedule no catch-up.
-    let mut catchup_failed = false;
-    if cursor.is_none() {
-        catchup_failed = store
-            .discover(&state, &DiscoveryBudget::interactive(), &cancel)
-            .is_err();
-        if !catchup_failed {
-            catchup_failed = store
-                .consume(&state, &Budget::interactive(), &cancel)
-                .is_err();
-        }
-    }
+    // One independently owned worker advances discovery and ingestion after
+    // this request ends. A cursor never changes its insertion high-water.
     let budget = Budget {
         files: 128,
         directory_entries: 2000,
@@ -53,7 +42,7 @@ pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) ->
         Err(_) if cursor.is_none() => return fallback_only(query, limit),
         Err(error) => return Err(error),
     };
-    if catchup_failed || reply["index_coverage"]["state"] != "ready" {
+    if reply["index_coverage"]["state"] != "ready" {
         reply["fallback"] = bounded_fallback(query, limit)?;
         reply["truncated"] = json!(true);
     }
@@ -128,7 +117,7 @@ impl Store {
         let mut results = Vec::new();
         let mut scopes = search::ArchiveScopes::new();
         let mut progress = Progress::default();
-        let mut reader = metadata::Reader::default();
+        let mut reader = metadata::Reader::foreground(state);
         let mut verified = BTreeMap::<String, Option<Value>>::new();
         let mut candidates = 0;
         let mut bytes = 2;
@@ -221,6 +210,7 @@ impl Store {
             && !scopes.incomplete
             && status["catalog"]["discovery"] == "complete"
             && status["catalog"]["fallback_sources"] == 0
+            && status["catalog"]["unsupported_native"] == false
             && status["catalog"]["invalidation_overflow"] == false
             && rejected == 0;
         let mut coverage = status["coverage"].clone();

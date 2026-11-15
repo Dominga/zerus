@@ -72,9 +72,12 @@ impl Store {
             return Ok(progress);
         }
         self.catalog_schema()?;
+        // Revisit older decoder refusals and seed the compact cache in bounded
+        // batches. A failed parse in this decoder version remains unavailable.
+        self.index.connection().execute("UPDATE catalog_queue SET done=0,skipped=0,identity=NULL WHERE id IN(SELECT id FROM catalog_queue WHERE reader_version<? ORDER BY reader_version,id LIMIT 32)", [metadata_cache::VERSION]).map_err(|e| e.to_string())?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
-        let mut reader = metadata::Reader::default();
+        let mut reader = metadata::Reader::cached(state);
         self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
         let last:i64=self.index.connection().query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='queue_cursor'),0)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
         let mut rows = self.queue_page(last)?;
@@ -125,10 +128,18 @@ impl Store {
         progress: &mut CatchupProgress,
         reader: &mut metadata::Reader,
     ) -> Result<()> {
+        self.index
+            .connection()
+            .execute(
+                "UPDATE catalog_queue SET reader_version=? WHERE id=?",
+                params![metadata_cache::VERSION, id],
+            )
+            .map_err(|e| e.to_string())?;
         let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
         let mut record = match record {
             Ok(metadata::Record::Ready(record)) => record,
             Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                reader.cache_into(self.index.connection(), &path)?;
                 progress.ingestion.stopped = true;
                 // Leave it pending, but let later bounded slices reach
                 // other paths even when this record needs a larger slice.
@@ -145,6 +156,7 @@ impl Store {
                 return Ok(());
             }
         };
+        reader.cache_into(self.index.connection(), &path)?;
         if kind == "archive" {
             rename::normalize_archive(&mut record)?;
         }
@@ -154,7 +166,8 @@ impl Store {
             progress.visited_paths += 1;
             return Ok(());
         }
-        if kind == "native" {
+        let native = kind == "native" || record["backend"] == "dsh";
+        if native {
             record["agent"] = json!("dsh");
         }
         let target = record_target(&record);
@@ -190,7 +203,7 @@ impl Store {
                 ],
             )
             .map_err(|e| e.to_string())?;
-        if kind == "native" {
+        if native {
             // The native engine remains authoritative; the existing bounded
             // query stays its fallback until an indexed adapter is admitted.
             if self.index.register(&target).is_ok() {
@@ -215,6 +228,7 @@ impl Store {
             progress.ingestion.locator_probes += read.locator_probes;
             progress.ingestion.records += read.records;
             progress.ingestion.bytes += read.bytes;
+            progress.ingestion.metadata_io += read.metadata_io;
             progress.ingestion.targets += read.targets;
             progress.ingestion.stopped |= read.stopped;
             progress.ingestion.errors.extend(read.errors);
@@ -345,17 +359,17 @@ fn queued_record(
     let parents = match kind {
         "binding" => vec![state.to_owned(), state.join("bindings"), state.join("sessions")],
         "archive" => vec![state.join("archives")],
-        "native" => vec![state.join("dsh/bindings")],
+        "native" => vec![state.join("dsh/bindings"), state.join("dsh/sessions")],
         _ => return Err("Unknown queued source kind".into()),
     };
-    if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(path, kind) {
+    if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(state, path, kind) {
         return Err("Queued source is outside this state configuration".into());
     }
     let record = match reader.read(path, progress, budget, 0)? {
         metadata::Record::Ready(record) => record,
         other => return Ok(other),
     };
-    if !record.is_object() || (kind != "native" && record["version"] != 1) {
+    if !record.is_object() || (kind != "native" && record["backend"] != "dsh" && record["version"] != 1) {
         return Err("Queued source is not a binding".into());
     }
     if kind == "native" && record["backend"] != "dsh" {

@@ -5,108 +5,62 @@ worker or service. Qt keeps its existing search contract. Next probes for the
 additive indexed-query capability and retains the existing bounded scan when
 coverage needs it.
 
-The root CLI now provides explicit on-demand ingestion diagnostics:
+The root CLI prepares its private, disposable index after a search request.
+One coalesced helper owns the selected state directory, detaches with all three
+standard streams closed, and stops after draining the queue or a 120-second
+lease. A later search restarts unfinished work. No native agent, provider host,
+canonical session record, consent or action is changed by preparation.
+
 `hgs search --index-status` reports coverage without creating an absent index;
-`hgs search --index-step` accepts at most 16 exact targets on JSON stdin:
+`--index-step`, `--index-discover` and `--index-catchup` remain bounded diagnostic
+operations. Exact-target steps accept the existing `content-search-index-v1`
+request. Public Codex, Claude and Kimi text keeps the existing parser, redaction,
+source fingerprint and exact run/conversation/archive checks. DeepSeek and other
+unsupported histories retain their bounded native/legacy fallback.
 
-```json
-{"abi":"content-search-index-v1","targets":[{"name":"codex/example/search","run_id":"run-one","conversation_id":"conversation-one","archive_id":""}]}
-```
+The helper stages at most 256 directory entries / 1 MiB of paths / 25 ms in a
+slice, then consumes at most 32 file opens / 128 public records / 4 MiB of
+retained metadata and history / 250 ms. Cold metadata preparation has a separate
+64 MiB raw-I/O bound; one record is also capped at 64 MiB. It validates canonical
+JSON and retains only search fields, excluding private job output. Small
+projections (at most 1 MiB each) live in a bounded 32 MiB / 50,000-row cache.
+Every cache reuse opens the canonical file without following its final link and
+checks its native file identity, length and timestamps (including Unix ctime).
+Replacement, deletion or in-place edits invalidate the projection. Larger
+public snapshots retain their original metadata/history limits.
 
-The caller verifies each authoritative binding, reads public Codex/Claude lines
-and exact journal pages with persistent cursors, and retains an incomplete
-coverage state for unsupported native histories or over-limit text. A step has
-32 source-file opens, 128 records, 4 MiB and a 250 ms monotonic deadline; it
-starts no continuation after return. The CLI lowers only its own CPU/I/O
-priority. The exported step accepts cancellation and explicit bounded budgets
-for a later G1 owner.
+A census retains its native directory iterators and at most one deferred path
+between slices, under a private discovery lease. Interrupted/changing censuses
+never prove absence; a crash drops the handles and starts an incomplete pass.
+The persisted queue and message cursors survive independently. An older decoder's
+refusals are revisited in indexed batches of at most 32. `unknown_metadata` means
+unprepared identity, while `invalid_metadata` means a failed metadata or binding
+validation; neither is inferred from a missing search match. A constant-size
+`worker.json` reports running, complete, pending or unavailable preparation.
 
-`hgs search --index-discover` stages candidate filenames and file stamps in the
-same capped database, without reading binding bodies or transcripts. The
-directory iterators live only for this short call. Discovery permits at most
-65,536 directory entries and 8 MiB of paths, with 256-row transactions and a
-500 ms monotonic deadline. A cancelled, interrupted or changing-directory pass
-never establishes complete discovery. Repeated passes reuse staged paths;
-an unchanged directory stamp avoids enumeration. New or changed metadata
-returns that path to pending. Status reads constant-size path/pending counters.
-Complete discovery still leaves history coverage cold or incomplete until
-queued bindings and their histories have actually been consumed.
+Foreground discovery retains its 500-file / 2,000-entry / 4 MiB raw-I/O / 500 ms
+bounds. It uses the compact projections rather than repeatedly reading large
+private histories. Small computers may wait up to 1.5 seconds for their first
+preparation; a catalog above 500 candidates returns bounded partial results
+while the helper continues. No partial inventory establishes absence.
 
-`hgs search --index-catchup` combines that bounded discovery pass with one
-250 ms ingestion pass. The persisted queue uses indexed 16-path keyset pages;
-public history cursors resume on the next explicit call. Metadata reads count
-against the source-file/byte budget. A completed catalog pass also prunes at
-most 16 vanished paths; retirement excludes their text before bounded secure
-cleanup. Constant counters distinguish pending paths from sources that still
-need the legacy search (live, unsupported, invalid, evicted or incomplete).
-Live histories retain the fresh legacy read even after cache ingestion.
+`hgs search --indexed --query TEXT --limit 1..100 [--cursor CURSOR]` keeps the
+`content-search-query-v1` response, exact navigation identities, insertion-bound
+cursor, 512 posting-candidate limit and 2 MiB indexed reply cap. Every result
+still needs fresh binding and transcript/wire fingerprint proof. Live histories
+retain a fresh bounded fallback channel, capped at 5 MiB. A complete fresh
+fallback can establish complete combined coverage even while the advisory live
+index is partial; an incomplete fallback stays visibly limited/unavailable.
+Unsupported, missing, malformed and over-limit sources remain explicit, never
+empty-match evidence. Fresh fallback duplicates take precedence in Next.
 
-`hgs search --indexed --query TEXT --limit 1..100 [--cursor CURSOR]` advertises
-`content-search-query-v1` in help. It publishes at most 100 freshly verified
-public-history hits and 2 MiB per page, with a separate `next_cursor`,
-`index_coverage` and optional `fallback` legacy reply. Each first page performs at most one
-bounded discovery/catch-up call; continuations schedule no indexing. Publication
-visits at most 512 posting candidates with a 500 ms deadline, 128 source opens
-and 8 MiB of metadata/fingerprints. Every distinct returned target needs a fresh
-exact binding and transcript-identity/fingerprint proof. Forgotten or changed
-sources retire before any hit is exposed. If proof or output budgets run out,
-the cursor stays before the unconsumed hit.
-
-Cold, incomplete, live or unsupported coverage retains the existing bounded
-scan in a separate fallback channel. Fallback payloads are capped at 5 MiB
-with explicit truncation, so the whole response stays below Next's 8 MiB child
-output limit. The cursor advances only through index hits, never fallback hits.
-Next validates both channels separately, deduplicates exact run/conversation/
-archive/message identities with the fresh fallback copy preferred, and retains
-its existing 100-hit host bound. The UI keeps one stable row per session and
-names unavailable computers inline, including cold index coverage.
-An unsafe or unavailable cache fails back to the existing search on the first
-page. A stale/mismatched cursor requires a new query. No new UI is introduced.
-Live Codex/Claude histories can also publish indexed hits after the same fresh
-binding and transcript proof. A growing transcript with unchanged identity and
-indexed-prefix fingerprints is left active and queued for the next bounded
-catch-up; it is never permanently retired just for appending. The current query
-uses fresh fallback while that prefix catches up. Existing query cursors retain
-their insertion high-water mark. Unsupported native adapters remain delegated,
-without receiving a retirement fence merely for lacking a fingerprint. Live and
-native queries still retain the existing history scan for freshness; replacing
-that scan completely needs the remaining revision/native adapter work.
-
-Kimi reuses the current search's public `agent.message.appended` parser and
-exact unique-conversation wire path. Each source or publication pass shares a
-2,000-directory-entry budget and at most 2,000 exact locator probes across its
-targets, within its existing file/row/byte/deadline bounds. Workspace names and
-paths count against bytes. Iterators end with the call; a bounded root snapshot
-is reused within that pass only. Its fingerprint includes each child workspace's
-identity/mtime, since a duplicate conversation added under an existing workspace
-does not change the top-level sessions directory mtime.
-
-Only a fully enumerated, unchanged inventory can admit a unique wire locator.
-The input cursor persists that root fingerprint and exact path, never the wire
-body. Publication verifies the current binding/profile, fresh inventory and
-file fingerprints, repeating the bounded exact-path uniqueness probes even when
-workspace stamps match. A changed/incomplete root reschedules and uses fallback;
-linked or ambiguous paths never publish copied text. Main-agent public text is
-indexed; reasoning, system context and other agents' bodies remain excluded by
-the existing parser. No Kimi process or engine is contacted. DSH stays delegated
-until its bounded public-history read contract is admitted.
-
-The adapter refuses copied/restored loose directory, database or auxiliary-file
-permissions and links. New index directories are 0700, database and rollback
-journal files 0600. Configuration identity prevents reusing a copied index
-under another state root. A bounded source sweep retires forgotten targets
-without needing them to appear in the next request, and a persistent purge queue
-drains secure payload cleanup. Indexed publication revalidates the exact target immediately before returning
-a hit; the index never authorizes a session action.
-
-The caller owns a private, disposable database in the selected configuration's
-state directory, with directory mode 0700 and file mode 0600 (owner ACL on
-Windows). It rejects links, creates the private file before opening SQLite and
-disposes/rebuilds a damaged index. Only normalized public messages enter the
-typed API; raw provider JSON, reasoning, attachments and credentials do not.
-The adapter must reuse the current search's parsing/redaction rules. It must
-verify the authoritative exact source both at ingestion and before returning
-a hit, so a forgotten binding cannot remain visible between index passes.
+Kimi still admits only exact, unique main-agent public wire text under the
+existing bounded profile-inventory and locator checks. No engine is contacted.
+Cursor continuations keep their original insertion high-water while background
+work proceeds. Forgotten/replaced sources cannot publish cached text, and the
+index grants no authority to session actions or cleanup. Copied/restored loose
+permissions, links and configuration mismatches still fail back to bounded
+search on a first page; a stale cursor requires a new query.
 
 `Index` uses Unicode simple-case-folded two-character postings, followed by the
 same literal regex match as current search. Queries visit at most 128 posting

@@ -30,7 +30,7 @@ class SearchScale(unittest.TestCase):
         self.env.update(HOME=str(self.root), HGS_STATE_DIR=str(self.state),
                         HGS_CONFIG_DIR=str(self.root / 'config'), HGS_SELF='example', HGS_PEERS='')
         jobs = {str(n): dict(status='unknown', command='printf synthetic', output='x' * (16 << 10)) for n in range(8)}
-        for n in range(320):
+        for n in range(640):
             name = f'codex/example/session-{n}'
             value = dict(version=1, name=name, agent='codex', run_id=f'run-{n}',
                          conversation_id=f'conversation-{n}', updated=n, last_event_at=n,

@@ -257,3 +257,77 @@ fn discovery_never_follows_a_binding_symlink() {
     assert!(fixture.discover(100).complete);
     assert_eq!(fixture.totals(), (2, 2));
 }
+
+#[test]
+fn one_owner_resumes_directory_pages_instead_of_restarting_the_first_page() {
+    let fixture = Fixture::new(40);
+    let mut entries = 0;
+    for _ in 0..32 {
+        let progress = fixture
+            .store
+            .discover(&fixture.state, &Fixture::budget(3), &AtomicBool::new(false))
+            .unwrap();
+        assert!(progress.entries <= 3);
+        entries += progress.entries;
+        if progress.complete {
+            assert_eq!(fixture.totals().0, 40);
+            assert!(entries <= 50, "the same entries were rescanned: {entries}");
+            return;
+        }
+    }
+    panic!("bounded directory pages made no progress");
+}
+
+#[test]
+fn deferred_path_bytes_are_retained_until_a_later_slice() {
+    let fixture = Fixture::new(4);
+    let first = fixture
+        .store
+        .discover(
+            &fixture.state,
+            &DiscoveryBudget {
+                path_bytes: 1,
+                ..Fixture::budget(3)
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(!first.complete);
+    for _ in 0..16 {
+        let page = fixture
+            .store
+            .discover(&fixture.state, &Fixture::budget(3), &AtomicBool::new(false))
+            .unwrap();
+        if page.complete {
+            assert_eq!(fixture.totals().0, 4);
+            return;
+        }
+    }
+    panic!("deferred filename was lost or could not resume");
+}
+
+#[test]
+fn logical_namespaces_do_not_depend_on_the_state_roots_basename() {
+    let state=Path::new("example/sessions");
+    let hash="a".repeat(64);
+    let id="00000000-0000-4000-8000-000000000001";
+    assert!(candidate(state,&state.join(format!("{hash}.json")),"binding"));
+    assert!(!candidate(state,&state.join(format!("{id}.json")),"binding"));
+    assert!(candidate(state,&state.join("sessions").join(format!("{id}.json")),"binding"));
+    assert!(candidate(state,&state.join("dsh/sessions").join(format!("{id}.json")),"native"));
+    assert!(!candidate(state,&state.join("sessions").join(format!("{hash}.json")),"binding"));
+}
+
+#[test]
+fn native_id_records_are_queued_and_unsupported_namespaces_never_mean_absence() {
+    let fixture=Fixture::new(0);
+    let id="00000000-0000-4000-8000-000000000001";
+    let native=fixture.state.join("dsh/sessions");fs::create_dir_all(&native).unwrap();
+    fs::write(native.join(format!("{id}.json")),"{}").unwrap();
+    for _ in 0..16 {if fixture.discover(64).complete {break;}}
+    assert_eq!(fixture.totals().0,1);
+    let other=fixture.state.join("opencode/sessions");fs::create_dir_all(&other).unwrap();
+    fs::write(other.join(format!("{id}.json")),"{}").unwrap();
+    assert_eq!(fixture.store.catalog_status().unwrap()["unsupported_native"],true);
+    assert!(!super::super::legacy_sources(&fixture.state).unwrap().complete);
+}

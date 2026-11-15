@@ -168,4 +168,15 @@ final class TaskEditDraftFilesTests: XCTestCase {
         XCTAssertThrowsError(try store.discardUnsubmitted(scope, draftId: next.draftId))
         XCTAssertEqual(try store.read(scope)?.state, .unknown)
     }
+    func testReplacementCountsOnlyTheNewRecordWithinTheByteBudget() throws {
+        let store = files(), draft = try frozen(store)
+        _ = try store.reserve(scope, draftId: draft.draftId, requestId: edit, payload: "exact retained payload")
+        let size = try Int64(Data(contentsOf: XCTUnwrap(blobs().first)).count)
+        // Replacing this same record with an equally-sized Unknown record must
+        // fit without counting the old encrypted file a second time.
+        let replacement = try files(bytes: size + 32).settle(scope, draftId: draft.draftId, requestId: edit, outcome: .unknown)
+        XCTAssertEqual(replacement.state, .unknown)
+        XCTAssertLessThanOrEqual(try Int64(Data(contentsOf: XCTUnwrap(blobs().first)).count), size + 32)
+    }
+
 }

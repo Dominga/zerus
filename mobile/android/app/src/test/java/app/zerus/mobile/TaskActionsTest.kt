@@ -204,4 +204,32 @@ class TaskActionsTest {
         sync.exchangeNow(connection, key, "orchard", "computer-1")
         assertEquals("Filed on the phone", computer.store.get(task.uuid).text)
     }
+
+    @Test fun doneRowsRetainOpaqueIdentityAndMissingIdentityRemainsLegacy() = world { computer, connection, _, sync ->
+        computer.receipts["task_done"] = {
+            val original = JSONObject().put("machine", "node-1").put("session", "codex/old-label").put("session_id", "launch_id:original")
+            val legacy = JSONObject().put("machine", "node-1").put("session", "codex/legacy")
+            val rows = JSONArray().put(JSONObject().put("uuid", "task-1").put("id", "T-first1").put("text", "Original").put("session", original).put("accepted_at", 2))
+                .put(JSONObject().put("uuid", "task-2").put("id", "T-second").put("text", "Legacy").put("session", legacy).put("accepted_at", 1))
+            Triple("completed", JSONObject().put("schema", 1).put("tasks", rows).put("next", JSONObject.NULL)
+                .put("total", 2).put("recent", 2).put("damaged", 0), JSONObject.NULL)
+        }
+        val rows = sync.donePage(connection, key, "computer-1", null).rows
+        assertEquals("launch_id:original", rows[0].session?.sessionId)
+        assertEquals("", rows[1].session?.sessionId)
+    }
+
+    @Test fun aMalformedDoneIdentityCannotBecomeANameOnlyLegacyKey() = world { computer, connection, _, sync ->
+        computer.receipts["task_done"] = {
+            val session = JSONObject().put("machine", "node-1").put("session", "codex/api").put("session_id", 7)
+            val rows = JSONArray().put(JSONObject().put("uuid", "task-1").put("id", "T-first1").put("text", "Original").put("session", session).put("accepted_at", 2))
+            Triple("completed", JSONObject().put("schema", 1).put("tasks", rows).put("next", JSONObject.NULL)
+                .put("total", 1).put("recent", 1).put("damaged", 0), JSONObject.NULL)
+        }
+        var refused = false
+        try { sync.donePage(connection, key, "computer-1", null) }
+        catch (_: IllegalArgumentException) { refused = true }
+        assertTrue("Malformed identity must stay untrusted", refused)
+    }
+
 }
